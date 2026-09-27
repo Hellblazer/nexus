@@ -268,16 +268,30 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
      * operator).
      */
     private List<String> chunkLiveOwnersFilteredKnn(String collection, float[] vec, int n) {
+        return knn(collection, vec, n, true);
+    }
+
+    private List<String> knn(String collection, float[] vec, int n, boolean liveOnly) {
         Result<Record> rows = tenantScope.withTenant(TENANT, ctx -> ctx.fetch(
             "SELECT encode(c.chash, 'hex') FROM nexus.chunks c"
             + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
-            + " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))"
+            + (liveOnly
+                ? " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))"
+                : "")
             + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
             + " LIMIT ?",
             collection, vectorLiteral(vec), n));
         List<String> ids = new ArrayList<>(rows.size());
         for (var rec : rows) ids.add(rec.get(0, String.class));
         return ids;
+    }
+
+    /** {@link #chunkLiveOwnersFilteredKnn} without any liveness predicate: the
+     *  independent baseline the oracle is cut from and the non-vacuity control for
+     *  the noise fixture. Since RDR-192 Step 5 {@code plain_search_384} itself uses
+     *  live(c), so it can no longer serve as either. */
+    private List<String> unfilteredKnn(String collection, float[] vec, int n) {
+        return knn(collection, vec, n, false);
     }
 
     /** EXPLAIN (ANALYZE, BUFFERS) twin of {@link #chunkLiveOwnersFilteredKnn} --
@@ -298,13 +312,13 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
         });
     }
 
-    /** The live-only oracle top-{@link #K}: {@code plain_search_384} at LIMIT K + the
+    /** The live-only oracle top-{@link #K}: an UNFILTERED KNN at LIMIT K + the
      *  full noise population's headroom, minus EVERY known noise chash (not only a
      *  single query's own -- a query's text can be semantically close enough to
      *  ANOTHER query's noise chunk, drawn from the same shared word bank, to also
      *  intrude on its top-K window), truncated back to K. */
     private List<String> oracleTop10(float[] vec) {
-        List<String> candidates = plainSearch384(vec, K + noiseChashHex.size());
+        List<String> candidates = unfilteredKnn(COLLECTION, vec, K + noiseChashHex.size());
         List<String> oracle = new ArrayList<>(candidates);
         oracle.removeAll(noiseChashHex);
         return oracle.size() > K ? oracle.subList(0, K) : oracle;
@@ -372,44 +386,49 @@ class ChunkLiveOwnersInlineRecallIntegrationTest {
             .contains("Index Scan");
     }
 
-    // ── recall@10: before (plain_search_384, today's shipped shape) vs after (chunk_live_owners) ──
+    // ── recall@10: plain_search_384 now carries live(c) (RDR-192 Step 5, nexus-wbfpw.10) ──
 
     @Test
-    void recall_chunkLiveOwnersExcludesManifestLessNoise_plainSearchDoesNot() throws Exception {
-        List<Double> recallBefore = new ArrayList<>();
-        List<Double> recallAfter = new ArrayList<>();
+    void recall_plainSearchExcludesManifestLessNoise_andMatchesChunkLiveOwners() throws Exception {
+        List<Double> recallUnfiltered = new ArrayList<>();
+        List<Double> recallPlain = new ArrayList<>();
 
         for (int q = 0; q < queries.size(); q++) {
             float[] vec = embedQuery(queries.get(q));
             List<String> oracle = oracleTop10(vec);
-            List<String> before = plainSearch384(vec, K);
-            List<String> after = chunkLiveOwnersFilteredKnn(COLLECTION, vec, K);
+            List<String> unfiltered = unfilteredKnn(COLLECTION, vec, K);
+            List<String> plain = plainSearch384(vec, K);
+            List<String> live = chunkLiveOwnersFilteredKnn(COLLECTION, vec, K);
 
-            assertThat(before)
-                .as("query %d: plain_search_384 (today's shipped predicate) has no"
-                    + " manifest-less guard (Gap 1 item 1) -- its own noise chunk must be"
-                    + " present", q)
+            assertThat(unfiltered)
+                .as("query %d: control -- an unfiltered KNN returns the query's own"
+                    + " manifest-less noise chunk, so the assertions below are not vacuous", q)
                 .contains(noiseChashHex.get(q));
-            assertThat(after)
-                .as("query %d: nexus.chunk_live_owners must exclude the manifest-less noise chunk", q)
+            assertThat(plain)
+                .as("query %d: plain_search_384 carries live(c) since vectors-019-1 and must"
+                    + " exclude the manifest-less noise chunk", q)
                 .doesNotContain(noiseChashHex.get(q));
+            assertThat(plain)
+                .as("query %d: the routed search function returns exactly what the raw"
+                    + " live(c) query returns", q)
+                .containsExactlyInAnyOrderElementsOf(live);
 
-            recallBefore.add(recallAt10(before, oracle));
-            recallAfter.add(recallAt10(after, oracle));
+            recallUnfiltered.add(recallAt10(unfiltered, oracle));
+            recallPlain.add(recallAt10(plain, oracle));
         }
 
-        double avgBefore = recallBefore.stream().mapToDouble(Double::doubleValue).average().orElseThrow();
-        double avgAfter = recallAfter.stream().mapToDouble(Double::doubleValue).average().orElseThrow();
+        double avgUnfiltered = recallUnfiltered.stream().mapToDouble(Double::doubleValue).average().orElseThrow();
+        double avgPlain = recallPlain.stream().mapToDouble(Double::doubleValue).average().orElseThrow();
 
-        System.out.println("[nexus-wbfpw.9 RECALL@10, small fixture] before(plain_search_384)=" + avgBefore
-            + " after(chunk_live_owners)=" + avgAfter + " over " + queries.size() + " queries");
+        System.out.println("[nexus-wbfpw.10 RECALL@10, small fixture] unfiltered=" + avgUnfiltered
+            + " plain_search_384(live(c))=" + avgPlain + " over " + queries.size() + " queries");
 
-        assertThat(avgBefore)
-            .as("sanity: the noise fixture must actually degrade plain_search_384's recall"
-                + " against the live-only oracle, or this test proves nothing")
+        assertThat(avgUnfiltered)
+            .as("sanity: the noise fixture must degrade an unfiltered KNN's recall against"
+                + " the live-only oracle, or this test proves nothing")
             .isLessThan(1.0);
-        assertThat(avgAfter)
-            .as("nexus.chunk_live_owners must recover full recall@10 against the live-only oracle")
+        assertThat(avgPlain)
+            .as("plain_search_384 must reach full recall@10 against the live-only oracle")
             .isEqualTo(1.0);
     }
 

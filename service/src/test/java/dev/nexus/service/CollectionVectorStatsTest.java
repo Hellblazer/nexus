@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -33,14 +34,17 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p><strong>Pinned contract (catalog-005 must honor):</strong>
  * <ul>
- *   <li>Columns: exactly {@code (tenant_id, collection, dim, chunk_count, last_write)}.
+ *   <li>Columns: exactly {@code (tenant_id, collection, dim, chunk_count, last_write,
+ *       stored_count)}; {@code stored_count} counts every stored chunk, live or not
+ *       (RDR-192 Step 5 amendment).
  *       No {@code deleted_at}, no embedding payload — consumers never see tombstone
  *       mechanics (Decision 6 single enforcement point).</li>
  *   <li>Grain: one row per {@code (tenant_id, collection, dim)}. {@code chunk_count} is
  *       {@code bigint}, {@code last_write} is {@code max(created_at)} over LIVE chunks.</li>
- *   <li>TOMBSTONE-FILTERED: built on {@code nexus.live_chunks} semantics — a chunk whose
- *       only manifest rows point to tombstoned documents is NOT counted; manifest-less
- *       chunks (MCP note chunks) ARE counted (live by contract, SoftDeleteTest 90/91).</li>
+ *   <li>LIVE-FILTERED: built on {@code nexus.live_chunks}, which uses live(c) since
+ *       RDR-192 Step 5 (nexus-wbfpw.10): a chunk counts iff it has a live owner in its
+ *       OWN collection. A chunk whose only owners are tombstoned is not counted, and
+ *       neither is a manifest-less chunk.</li>
  *   <li>{@code security_invoker = true} actually set on the view (pg_class reloptions),
  *       not just claimed — caller RLS provides tenant isolation.</li>
  *   <li>A collection with zero (live) chunk rows does NOT appear — the view is
@@ -142,8 +146,8 @@ class CollectionVectorStatsTest {
     //
     // EXPECTED RED: nexus.collection_vector_stats view absent until catalog-005.
     //
-    // Fixture (all manifest-less — live by contract, also pins manifest-less
-    // inclusion in stats):
+    // Fixture (every chunk owned by one live document per collection, so every chunk
+    // is live under live(c)):
     //   COLL_A_384  : 3 chunks_384 rows, created_at T1 < T2 < T3
     //   COLL_A_1024 : 2 chunks_1024 rows, created_at T4 < T5
     //   COLL_A_EMPTY: registered in catalog_collections, ZERO chunk rows
@@ -168,6 +172,9 @@ class CollectionVectorStatsTest {
             insertChunk(su, 384, TENANT_A, COLL_A_384, validChash("cvs-a384-c3"), "a384 three", T3);
             insertChunk(su, 1024, TENANT_A, COLL_A_1024, validChash("cvs-a1024-c1"), "a1024 one", T4);
             insertChunk(su, 1024, TENANT_A, COLL_A_1024, validChash("cvs-a1024-c2"), "a1024 two", T5);
+            ownChunks(su, TENANT_A, COLL_A_384,
+                validChash("cvs-a384-c1"), validChash("cvs-a384-c2"), validChash("cvs-a384-c3"));
+            ownChunks(su, TENANT_A, COLL_A_1024, validChash("cvs-a1024-c1"), validChash("cvs-a1024-c2"));
         }
 
         // CONTROL: raw tables hold exactly what we inserted
@@ -243,9 +250,11 @@ class CollectionVectorStatsTest {
                 DSL.using(su, SQLDialect.POSTGRES), "nexus", "collection_vector_stats");
             assertThat(cols)
                 .as("collection_vector_stats must expose EXACTLY " +
-                    "(tenant_id, collection, dim, chunk_count, last_write) in order — " +
-                    "no deleted_at, no data-plane payload")
-                .containsExactly("tenant_id", "collection", "dim", "chunk_count", "last_write");
+                    "(tenant_id, collection, dim, chunk_count, last_write, stored_count) in order — " +
+                    "no deleted_at, no data-plane payload; stored_count appended by the RDR-192 " +
+                    "Step 5 amendment (vectors-019-5)")
+                .containsExactly("tenant_id", "collection", "dim", "chunk_count", "last_write",
+                                 "stored_count");
         }
     }
 
@@ -282,12 +291,11 @@ class CollectionVectorStatsTest {
     //
     // Fixture: COLL_A_TOMB with 2 chunks:
     //   - chunk_doc : manifest row → doc cvs-tomb-doc-1 (live)
-    //   - chunk_note: manifest-less (MCP note — live by contract)
+    //   - chunk_note: manifest-less (no owner, so never live under live(c))
     //
-    // Direction 1: both live → chunk_count=2.
-    // Direction 2: tombstone the doc → chunk_count drops to exactly 1
-    //              (chunk_doc excluded; manifest-less note chunk STAYS).
-    // Direction 3: restore the doc → chunk_count returns to exactly 2.
+    // Direction 1: doc live → chunk_count=1 (the manifest-less chunk is not counted).
+    // Direction 2: tombstone the doc → chunk_count drops to exactly 0.
+    // Direction 3: restore the doc → chunk_count returns to exactly 1.
     // A vacuous / non-filtering implementation cannot pass all three.
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -310,21 +318,22 @@ class CollectionVectorStatsTest {
             insertManifestRow(su, TENANT_A, docId, 0, chashDoc, COLL_A_TOMB);
         }
 
-        // Direction 1: both live
+        // Direction 1: doc live — only the owned chunk counts
         assertThat(statsCount(TENANT_A, COLL_A_TOMB))
-            .as("both chunks live → chunk_count must be exactly 2")
-            .isEqualTo(2L);
+            .as("doc live → chunk_count must be exactly 1 (the manifest-less chunk has no "
+                + "owner, so live(c) never counts it, RDR-192 Step 5)")
+            .isEqualTo(1L);
 
-        // Direction 2: tombstone the doc — doc-backed chunk excluded, note chunk stays
+        // Direction 2: tombstone the doc — the owned chunk is excluded too
         try (Connection su = pg.createConnection("")) {
             su.createStatement().execute(
                 "UPDATE nexus.catalog_documents SET deleted_at = now() " +
                 " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
         }
         assertThat(statsCount(TENANT_A, COLL_A_TOMB))
-            .as("doc tombstoned → chunk_count must drop to exactly 1 " +
-                "(doc-backed chunk excluded; manifest-less note chunk is LIVE by contract)")
-            .isEqualTo(1L);
+            .as("doc tombstoned → chunk_count must drop to exactly 0 " +
+                "(doc-backed chunk excluded; the manifest-less chunk was never counted)")
+            .isEqualTo(0L);
 
         // Direction 3: restore — count returns
         try (Connection su = pg.createConnection("")) {
@@ -333,8 +342,8 @@ class CollectionVectorStatsTest {
                 " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
         }
         assertThat(statsCount(TENANT_A, COLL_A_TOMB))
-            .as("doc restored → chunk_count must return to exactly 2")
-            .isEqualTo(2L);
+            .as("doc restored → chunk_count must return to exactly 1")
+            .isEqualTo(1L);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -358,6 +367,7 @@ class CollectionVectorStatsTest {
             insertCollection(su, TENANT_B, COLL_B_384);
             insertChunk(su, 384, TENANT_B, COLL_B_384, validChash("cvs-b384-c1"), "b one", T4);
             insertChunk(su, 384, TENANT_B, COLL_B_384, validChash("cvs-b384-c2"), "b two", T5);
+            ownChunks(su, TENANT_B, COLL_B_384, validChash("cvs-b384-c1"), validChash("cvs-b384-c2"));
         }
 
         // CONTROL: superuser (bypasses RLS) sees both tenants underneath the view
@@ -445,7 +455,8 @@ class CollectionVectorStatsTest {
                 .isEqualTo(raw);
         }
 
-        // COLL_A_TOMB with its doc tombstoned: view < raw, by exactly 1.
+        // COLL_A_TOMB with its doc tombstoned: raw 2, view 0 (the owned chunk is
+        // tombstoned and the manifest-less chunk is never live).
         String docId = "cvs-tomb-doc-1";
         try (Connection su = pg.createConnection("")) {
             su.createStatement().execute(
@@ -456,9 +467,9 @@ class CollectionVectorStatsTest {
                 .as("CONTROL: raw count still sees both chunks (chunks tables have no tombstone)")
                 .isEqualTo(2L);
             assertThat(statsCount(TENANT_A, COLL_A_TOMB))
-                .as("tombstoned doc: view must count exactly 1 (live note chunk only) — " +
+                .as("tombstoned doc: view must count exactly 0 — " +
                     "the live-vs-raw divergence is the POINT of the view, pinned here")
-                .isEqualTo(1L);
+                .isEqualTo(0L);
         } finally {
             // restore for any later-ordered assertions
             try (Connection su = pg.createConnection("")) {
@@ -466,6 +477,47 @@ class CollectionVectorStatsTest {
                     "UPDATE nexus.catalog_documents SET deleted_at = NULL " +
                     " WHERE tenant_id = '" + TENANT_A + "' AND tumbler = '" + docId + "'");
             }
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // GROUP 7 — inventory: a collection that physically holds chunks has a row
+    //
+    // RDR-192 Step 5 amendment (nexus-wbfpw.10, Sam 2026-09-27: split inventory
+    // from liveness). collection_vector_stats is the collection inventory
+    // (list_collections, get_collection, census --all, the ghost sweep's dormant
+    // check), so a collection whose chunks are all unowned (a quarantine sibling,
+    // or a first chunk written before its manifest) still has a row; only its
+    // chunk_count reads 0 under live(c).
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(70)
+    void stats_unownedOnlyCollection_hasARowWithZeroCount() throws Exception {
+        String coll = "knowledge__cvs-owner-unowned__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertCollection(su, TENANT_A, coll);
+            insertChunk(su, 384, TENANT_A, coll, validChash("cvs-unowned-c1"), "unowned one", T1);
+            insertChunk(su, 384, TENANT_A, coll, validChash("cvs-unowned-c2"), "unowned two", T2);
+        }
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES)
+                .select(COLLECTION_VECTOR_STATS.DIM, COLLECTION_VECTOR_STATS.CHUNK_COUNT,
+                        COLLECTION_VECTOR_STATS.LAST_WRITE, COLLECTION_VECTOR_STATS.STORED_COUNT)
+                .from(COLLECTION_VECTOR_STATS)
+                .where(COLLECTION_VECTOR_STATS.TENANT_ID.eq(TENANT_A)
+                       .and(COLLECTION_VECTOR_STATS.COLLECTION.eq(coll)))
+                .fetch();
+            assertThat(rows)
+                .as("a collection that physically holds chunks must have exactly one inventory "
+                    + "row even when none of them is live").hasSize(1);
+            assertThat(rows.get(0).value1()).isEqualTo(384);
+            assertThat(rows.get(0).value2())
+                .as("no chunk is live under live(c), so the count is 0").isZero();
+            assertThat(rows.get(0).value3())
+                .as("last_write is max(created_at) over LIVE chunks, so null here").isNull();
+            assertThat(rows.get(0).value4())
+                .as("stored_count is the physical count, live or not: both chunks").isEqualTo(2L);
         }
     }
 
@@ -521,6 +573,21 @@ class CollectionVectorStatsTest {
             "VALUES ('" + tenantId + "', '" + tumbler + "', 'Test Doc " + tumbler + "', '" +
             physicalCollection + "') " +
             "ON CONFLICT (tenant_id, tumbler) DO NOTHING");
+    }
+
+    /**
+     * Give {@code chashes} one live owner in {@code collection}: a catalog document
+     * {@code own-<collection>} whose manifest lists them at positions 0..n-1, so each
+     * counts as live under live(c) (RDR-192 Step 5). The chunk rows must exist first
+     * (fk_catalog_chunks_chunk).
+     */
+    private static void ownChunks(Connection su, String tenantId, String collection, String... chashes)
+            throws Exception {
+        String docId = "own-" + collection;
+        insertCatalogDocument(su, tenantId, docId, collection);
+        for (int i = 0; i < chashes.length; i++) {
+            insertManifestRow(su, tenantId, docId, i, chashes[i], collection);
+        }
     }
 
     /**

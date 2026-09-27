@@ -580,7 +580,7 @@ def run_check_assignments(*, sample: int, collections: tuple[str, ...], seed: in
         names = sorted(n for n, s in listed.items() if n and s > 0)
 
     if not names:
-        click.echo("[✓] Assignment drift: not applicable (no collection holds chunks)")
+        click.echo("[✓] Assignment drift: not applicable (no collection holds live chunks)")
         return
 
     taxo = HttpTaxonomyStore()

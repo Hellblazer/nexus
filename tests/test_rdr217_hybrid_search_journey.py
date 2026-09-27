@@ -45,6 +45,7 @@ import pytest
 
 import nexus.db.http_vector_client as hvc
 from nexus.db.http_vector_client import VectorServiceError
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
 from tests._engine_substrate import ensure_engine, mint_test_tenant
 
 # The substrate's real tier-1 embedding token. A guessed 1024 or 384 width
@@ -77,6 +78,10 @@ def _seed(db: hvc.HttpVectorClient) -> list[str]:
     db.upsert_chunks_with_embeddings(
         _COLLECTION, ids=ids, documents=docs, embeddings=[], metadatas=metas,
     )
+    # RDR-192 Step 5 (nexus-wbfpw.10): hybrid-search and search are now
+    # live-visibility gated reads; a raw upsert with no catalog manifest has
+    # no live owner in its own collection and would be invisible to both.
+    give_chunks_a_live_owner(_COLLECTION, ids, content_type="code")
     return ids
 
 

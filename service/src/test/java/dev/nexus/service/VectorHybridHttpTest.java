@@ -119,6 +119,13 @@ class VectorHybridHttpTest {
                     "tenant isolation policy enforcement in postgres",
                     "quantum entanglement spectroscopy experiment"),
             List.of(Map.of("kind", "hh"), Map.of("kind", "hh"), Map.of("kind", "hh")));
+        // RDR-192 Step 5 (nexus-wbfpw.10): hybridSearch requires a live own-collection
+        // manifest owner; own all three (hh-c3's exclusion is the no-text-signal gate
+        // under test, not a manifest gap).
+        tenantScope.withTenant(TENANT_A, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT_A, COL, HH_C1, HH_C2, HH_C3);
+            return null;
+        });
 
         service = new NexusService(0, TOKEN_A, svcDs, null, pgRepo);
         service.start();

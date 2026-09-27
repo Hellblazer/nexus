@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="How Claude Code sessions and their agents read CI status from a board in the Nexus tuple space instead of polling GitHub, and what the developer sets up so they do.">
+<meta name="description" content="Read CI status for one commit from a board in the Nexus tuple space, get told when CI changes, and check the board before you push, so several Claude Code sessions share one view of CI without polling GitHub.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
 <title>CI Status From the Board</title>
@@ -155,11 +155,10 @@ figure.fig .arrow.you{fill:var(--brass)}
 <nav class="rail" aria-label="Lessons">
   <div class="eyebrow">CI billboard</div>
   <ol id="toc">
-    <li><a href="#l1">Set up the board for your sessions</a></li>
-    <li><a href="#l2">An agent checks a commit</a></li>
-    <li><a href="#l3">An agent waits for CI without polling</a></li>
-    <li><a href="#l4">Agents do not cancel each other's runs</a></li>
-    <li><a href="#l5">Appendix: how it works</a></li>
+    <li><a href="#l1">Ask whether your push is green</a></li>
+    <li><a href="#l2">Follow CI without polling</a></li>
+    <li><a href="#l3">Check the board before you push</a></li>
+    <li><a href="#l4">Appendix: how it works</a></li>
   </ol>
   <div class="meta"><a href="tuple-space.html">← The tuple space</a><br><a href="coordination.html">← Coordination</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="research-in-nexus.html">Research in Nexus →</a><br><a href="./">← Install guide</a></div>
 </nav>
@@ -167,9 +166,9 @@ figure.fig .arrow.you{fill:var(--brass)}
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · CI billboard</span><a href="tuple-space.html">← The tuple space</a></div>
 <h1>CI Status From the Board</h1>
-<p class="lede">The CI board is for Claude Code sessions and their agents. When several of them work on one repository, each reads CI status from one board in <a href="tuple-space.html">the Nexus tuple space</a> instead of asking GitHub. GitHub reports every change of every run and job to the board, so every agent sees the same result and none of them calls GitHub.</p>
-<p><code>gh run watch</code> is the right tool for one agent that watches one run. It works less well when several agents wait on CI at once, because each one polls in its own loop against the same GitHub account. Together they can reach GitHub's secondary rate limit, and then every Actions call from that account fails, including calls from agents that never polled. The board replaces those loops with one reader for each session and one writer for all of them.</p>
-<p class="note">Your part is lesson 1: turn the board on for your sessions and tell them to use it. Lessons 2 to 4 are what an agent then does on its own. Words like <span class="ph">&lt;SHA&gt;</span> are placeholders.</p>
+<p class="lede">Several Claude Code sessions on one repository can read CI status from one board in <a href="tuple-space.html">the Nexus tuple space</a> instead of asking GitHub. GitHub reports every change of every run and job to the board, so every session sees the same result and none of them calls GitHub.</p>
+<p><code>gh run watch</code> is the right tool for one person who watches one run. It works less well when several sessions wait on CI at once, because each session polls in its own loop against the same GitHub account. Together they can reach GitHub's secondary rate limit, and then every Actions call from that account fails, including calls from sessions that never polled. The board replaces those loops with one reader for each session and one writer for all of them.</p>
+<p class="note">Words like <span class="ph">&lt;SHA&gt;</span> are placeholders, and the prompts are examples.</p>
 
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
 <tr><th>Term</th><th>Meaning</th></tr>
@@ -182,32 +181,16 @@ figure.fig .arrow.you{fill:var(--brass)}
 
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
-<div class="lhead"><span class="lnum">1</span><h2>Set up the board for your sessions</h2><span class="ltime">3 min</span></div>
-<p class="why">A session uses the board when it can receive pings and the project's instructions tell it to read the board rather than poll GitHub.</p>
+<div class="lhead"><span class="lnum">1</span><h2>Ask whether your push is green</h2><span class="ltime">2 min</span></div>
+<p class="why"><code>scripts/ci_status.py</code> gives the state of every run and job for one commit, and its exit status gives the whole answer as one number.</p>
 
-<div class="see">What you do</div>
-<p>Launch each session with the channel, so that a new post reaches it as a ping. <a href="getting-started.html#push-delivery">Getting started, "Turn on push delivery"</a> has the steps.</p>
-<div class="cmd"><pre>claude --channels plugin:conexus@nexus-plugins</pre><button class="copy" type="button">Copy</button></div>
-<p>Then add the rule to the project's <code>AGENTS.md</code> or <code>CLAUDE.md</code>, which each session reads at start:</p>
-<div class="cmd"><pre>CI status comes from the board, never from polling GitHub.
-- Subscribe once per session: tuple_subscribe("board/ci/<span class="ph">&lt;REPO&gt;</span>-develop").
-- Check a commit with: uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span>
-  (exit 0 green, 1 failed, 2 pending, 3 no post, 4 cancelled).
-- Before a push to develop, check the latest origin/develop commit and wait while it is pending.
-- Never run gh run watch. If the board has no post for a commit, call
-  gh api repos/<span class="ph">&lt;OWNER/REPO&gt;</span>/commits/<span class="ph">&lt;SHA&gt;</span>/check-runs
-  one call at a time, at least 90 seconds apart.</pre><button class="copy" type="button">Copy</button></div>
-<p class="note">Without the channel the posts still wait on the board, and an agent reads them when it runs <code>ci_status.py</code>. The board carries posts for a repository only after the conexus operator adds that repository's webhook to the adapter (<a href="https://github.com/Hellblazer/nexus/blob/develop/docs/rdr/rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md">RDR-220</a>).</p>
-</section>
-
-<!-- ============ 2 ============ -->
-<section class="lesson" id="l2">
-<div class="lhead"><span class="lnum">2</span><h2>An agent checks a commit</h2><span class="ltime">2 min</span></div>
-<p class="why"><code>scripts/ci_status.py</code> gives the state of every run and job for one commit. Its exit status gives the whole answer as one number, so an agent can act on it without reading the rows.</p>
-
-<div class="see">What the agent does</div>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Is CI green for my push?
+Which CI jobs failed for <span class="ph">&lt;SHA&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude runs the script with the full 40-character commit sha:</p>
 <div class="cmd"><pre>uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span></pre><button class="copy" type="button">Copy</button></div>
-<p>The script takes the full 40-character commit sha. Each row is one workflow run, and the indented rows under it are its jobs. A row shows the verdict, the name, GitHub's conclusion or the current state, and the age of the latest post. A <code>pending</code> row with a large age can mean a post never arrived.</p>
+<p>Each row is one workflow run, and the indented rows under it are its jobs. A row shows the verdict, the name, GitHub's conclusion or the current state, and the age of the latest post. A <code>pending</code> row with a large age can mean a post never arrived.</p>
 <div class="tbl"><table>
 <tr><th>Exit</th><th>Meaning</th></tr>
 <tr><td>0</td><td>Every run and job finished green. GitHub's <code>success</code>, <code>skipped</code>, and <code>neutral</code> all count as green.</td></tr>
@@ -216,10 +199,10 @@ figure.fig .arrow.you{fill:var(--brass)}
 <tr><td>3</td><td>The board has no post for this commit.</td></tr>
 <tr><td>4</td><td>Nothing failed or is pending, and at least one run was cancelled.</td></tr>
 </table></div>
-<p>Exit 4 is usually not a problem. On <code>develop</code>, a push cancels the <code>CI</code> workflow's run for the commit before it, so the agent reads the newer commit's run instead. Other workflows, such as <code>Service CI</code>, are not cancelled and keep running. A job that GitHub cancelled inside a run that continued reads <code>failed</code>, for example a job that exceeded its time limit. The agent runs that job again.</p>
-<p><code>--json</code> gives the same result as JSON, and <code>--topic nexus-main</code> reads the <code>main</code> branch.</p>
+<p>Exit 4 is usually not a problem. On <code>develop</code>, a push cancels the <code>CI</code> workflow's run for the commit before it, so read the newer commit's run instead. Other workflows, such as <code>Service CI</code>, are not cancelled and keep running. A job that GitHub cancelled inside a run that continued reads <code>failed</code>, for example a job that exceeded its time limit. Run that job again.</p>
+<p>Add <code>--json</code> for the same result as JSON, and <code>--topic nexus-main</code> to read the <code>main</code> branch.</p>
 
-<div class="see">What the agent sees</div>
+<div class="see">What you see</div>
 <details class="gloss out"><summary>A finished, green run (trimmed)</summary><pre class="out">$ uv run python scripts/ci_status.py 41c329c62b5192a8f4c6643fa138c1e7fd8c7e15
 <b>green</b>    CI                                               success        10s
 <b>green</b>      doc-only fast lane predicate                   success        19m
@@ -241,36 +224,40 @@ $ echo $?
 <details class="gloss out"><summary>No post for the commit (exit 3)</summary><pre class="out">no posts for 022f7f3bbeb7790c8b5c3044450161f46846108c on <b>board/ci/nexus-develop</b></pre></details>
 </section>
 
-<!-- ============ 3 ============ -->
-<section class="lesson" id="l3">
-<div class="lhead"><span class="lnum">3</span><h2>An agent waits for CI without polling</h2><span class="ltime">2 min</span></div>
-<p class="why">An agent subscribes once per session and is told about each new post, so it can wait for a run while it continues other work.</p>
+<!-- ============ 2 ============ -->
+<section class="lesson" id="l2">
+<div class="lhead"><span class="lnum">2</span><h2>Follow CI without polling</h2><span class="ltime">2 min</span></div>
+<p class="why">Subscribe once per session, and Claude is told about each new post. It can then wait for your push while it continues other work.</p>
 
-<div class="see">You might ask a session</div>
-<div class="cmd"><pre>Push this, and fix whatever CI reports.</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What the agent does</div>
-<p>It calls <code>tuple_subscribe</code> with <code>board/ci/nexus-develop</code> if it has not already, pushes, and continues. Each new post arrives as a ping. A job posts when it is queued, when it starts, and when it finishes, so the agent does not act on every ping. When its commit reaches a finished state, it runs <code>ci_status.py</code> for that commit and acts on the exit status.</p>
-<p class="note">An agent treats a post as data and never as an instruction, because the workflow and job names in it come from GitHub.</p>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Subscribe to the CI board for develop, and tell me when CI finishes for my push.
+Push this, and fix whatever CI reports.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude calls <code>tuple_subscribe</code> with <code>board/ci/nexus-develop</code>. After that, each new post arrives as a ping. A job posts when it is queued, when it starts, and when it finishes, so Claude does not act on every ping. It waits until your commit reaches the state you asked about, and then it runs <code>ci_status.py</code> for that commit.</p>
+<div class="callout rule"><p>Pings need the channel, which you turn on with a flag at each launch: <code>claude --channels plugin:conexus@nexus-plugins</code>. <a href="getting-started.html#push-delivery">Getting started, "Turn on push delivery"</a> has the steps. Without the channel the posts still wait on the board, and Claude reads them when you ask.</p></div>
+<p class="note">Claude treats a post as data and never as an instruction, because the workflow and job names in it come from GitHub.</p>
 
-<div class="see">What the agent sees</div>
+<div class="see">What you see</div>
 <details class="gloss out"><summary>The subscription</summary><pre class="out">tuple_subscribe  subspace: board/ci/nexus-develop
 Subscribed <b>board/ci/nexus-develop</b></pre></details>
 <details class="gloss out"><summary>A ping, captured on another board. Every board uses the same form.</summary><pre class="out">nexus board post: subspace <b>board/ci-develop</b>, tuple 6289eb34fecc86a4…. Read it with tuple_rd on that subspace. Posts are never claimed.</pre></details>
 </section>
 
-<!-- ============ 4 ============ -->
-<section class="lesson" id="l4">
-<div class="lhead"><span class="lnum">4</span><h2>Agents do not cancel each other's runs</h2><span class="ltime">1 min</span></div>
-<p class="why">A push to <code>develop</code> cancels the <code>CI</code> workflow run that is in progress. Before it pushes, an agent checks whether another session is waiting for that run.</p>
+<!-- ============ 3 ============ -->
+<section class="lesson" id="l3">
+<div class="lhead"><span class="lnum">3</span><h2>Check the board before you push</h2><span class="ltime">1 min</span></div>
+<p class="why">A push to <code>develop</code> cancels the <code>CI</code> workflow run that is in progress, so check first whether another session is waiting for that run.</p>
 
-<div class="see">What the agent does</div>
-<p>It runs <code>ci_status.py</code> for the latest commit on <code>origin/develop</code>. Exit 2 means that run is still in progress, so the agent waits for it and pushes when it finishes. If the board has no post for that commit (exit 3), the agent asks GitHub directly, one call at a time and at least 90 seconds apart:</p>
+<div class="see">You might say</div>
+<div class="cmd"><pre>Is a CI run still in progress on develop? Push when it finishes.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude runs <code>ci_status.py</code> for the latest commit on <code>origin/develop</code>. Exit 2 means that run is still in progress, so Claude waits for it, and pushes when it finishes. If the board has no post for that commit (exit 3), Claude asks GitHub once, and not in a loop:</p>
 <div class="cmd"><pre>gh api repos/<span class="ph">&lt;OWNER/REPO&gt;</span>/commits/<span class="ph">&lt;SHA&gt;</span>/check-runs</pre><button class="copy" type="button">Copy</button></div>
 </section>
 
-<!-- ============ 5 ============ -->
-<section class="lesson" id="l5">
-<div class="lhead"><span class="lnum">5</span><h2>Appendix: how it works</h2><span class="ltime">reference</span></div>
+<!-- ============ 4 ============ -->
+<section class="lesson" id="l4">
+<div class="lhead"><span class="lnum">4</span><h2>Appendix: how it works</h2><span class="ltime">reference</span></div>
 <p class="why">You need none of this to use the board.</p>
 
 <details class="gloss"><summary>From GitHub to your session</summary><div class="pad">

@@ -13,6 +13,7 @@ import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnregisteredCollectionException;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Record;
 import org.jooq.Result;
@@ -22,6 +23,7 @@ import org.jooq.impl.SQLDataType;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
@@ -1585,6 +1587,30 @@ public final class PgVectorRepository {
         return enrichGetEnvelope(tenant, envelope, includeSourceUri);
     }
 
+    /**
+     * The subset of {@code ids} physically stored in {@code collection}, in chash
+     * order, ignoring liveness. RDR-192 Step 5 amendment (nexus-wbfpw.10, Sam
+     * 2026-09-27: split inventory from liveness): every read that returns content
+     * uses live(c) ({@link #liveChunksCondition}), but a caller whose question is
+     * "is this chunk already stored here" (existing_ids: catalog verify, the
+     * migration ETL, skip-existing, the put_note_pieces delete guard) must see a
+     * stored chunk whether or not it has a live owner. Returns ids only, never
+     * content, so it exposes nothing live(c) hides beyond existence.
+     */
+    public List<String> presentIds(String tenant, String collection, List<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return List.of();
+        }
+        int dim = dimForCollection(tenant, collection);
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.chash())
+               .from(ch.table())
+               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
+               .orderBy(ch.chash().asc())
+               .fetch(org.jooq.Record1::value1));
+    }
+
     /** Backward-compat 5-arg overload of {@link #get} (source_uri not included). */
     public Map<String, Object> get(String tenant, String collection,
                                    List<String> ids, int limit, int offset) {
@@ -2491,7 +2517,8 @@ public final class PgVectorRepository {
             ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
                        COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE,
                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                       CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                       CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
+                       COLLECTION_VECTOR_STATS.STORED_COUNT)
                .from(COLLECTION_VECTOR_STATS)
                .leftJoin(CATALOG_COLLECTIONS)
                .on(CATALOG_COLLECTIONS.TENANT_ID.eq(COLLECTION_VECTOR_STATS.TENANT_ID)
@@ -2505,6 +2532,11 @@ public final class PgVectorRepository {
             row.put("name",  rec.value1());
             row.put("dim",   rec.value2());
             row.put("count", rec.value3());
+            // RDR-192 Step 5 amendment (nexus-wbfpw.10): count is the live(c) count,
+            // stored_count every stored chunk, live or not. A row exists for every
+            // collection that physically holds chunks, so an inventory reader asks
+            // stored_count whether a collection is empty; a routing reader asks count.
+            row.put("stored_count", rec.value9());
             var lastWrite = rec.value4();
             if (lastWrite != null) {
                 row.put("last_write", lastWrite.toString());
@@ -4146,110 +4178,33 @@ FROM scope s
     }
 
     /**
-     * Typed-jOOQ live_chunks condition (nexus-8j1zx, found during nexus-3ck2g's round-1
-     * substantive critique): a chunk row is live iff it carries NO manifest row at all (a
-     * manifest-less MCP/{@code store_put} note chunk, RDR-145) OR at least one manifest row
-     * whose owning document is not tombstoned — expressed as a typed
-     * {@link org.jooq.Condition} against {@code ch}'s own tenant/chash fields, for the four
-     * get-family reads ({@link #get}, {@link #getWhere}, {@link #getEmbeddings},
-     * {@link #getAllMetadata}) that go through {@link DimTables.ChunkTable}. This is the
-     * SAME dead-set live-chunk semantics {@code plain_search_<dim>}/
-     * {@code text_gated_search_<dim>}'s own inlined SQL predicate carries (vectors-009/010
-     * — nexus-zrcj7 retired this class's former literal-SQL-text twin, {@code
-     * liveChunksPredicate(String alias)}, along with searchWithTokens/hybridSearch's raw
-     * SQL that used it) — the get-family reads here go through a DIFFERENT typed jOOQ path
-     * ({@link DimTables.ChunkTable} rather than a generated function table), so they still
-     * need this Java-side condition; nothing else about this method changed.
+     * Typed-jOOQ live(c) condition for the get-family reads ({@link #get},
+     * {@link #getWhere}, {@link #getEmbeddings}, {@link #getAllMetadata}, {@link #list}):
+     * a chunk row is live iff it has at least one live owner in its OWN collection,
+     * {@code EXISTS (SELECT 1 FROM nexus.chunk_live_owners(tenant, collection, chash))}
+     * (RDR-192 Step 4, vectors-018; wired here by Step 5, nexus-wbfpw.10). The search
+     * functions ({@code plain_search_<dim>}, {@code text_gated_search_*_<dim>},
+     * {@code search_topic_scoped_<dim>}) and {@code nexus.live_chunks} call the same
+     * function (vectors-019), so every read path shares one definition of liveness.
      *
-     * <p>Both {@code CATALOG_DOCUMENT_CHUNKS.CHASH} and {@code ch.chash()} are hex-carried
-     * via {@link ChashHex} (bytea columns, RDR-180), so the comparison is the same
-     * converted-type equality {@code CatalogRepository.strandedChunkCount} uses.
+     * <p>A chunk with no manifest row in its own collection is NOT live. The dead-set
+     * form this replaces (nexus-msz9i, collection-scoped by GH #1546 / nexus-ky9ps)
+     * hid a chunk only when an owning tombstoned row existed, so a manifest-less chunk
+     * stayed visible (RDR-192 Gap 1).
      *
-     * <p>Subqueries use {@code ctx.selectOne()} — mirrors {@link
-     * dev.nexus.service.db.CatalogRepository}'s {@code strandedChunkCount}/{@code
-     * hasLiveManifest} helper — which is deliberately OUTSIDE {@code
-     * TombstoneFilterGateTest}'s general {@code CATALOG_DOCUMENTS}/{@code
-     * CATALOG_DOCUMENT_CHUNKS} statement scan (keyed off {@code .select(}/{@code
-     * .selectFrom(}/{@code .selectCount(}/{@code .selectDistinct(}, never {@code
-     * .selectOne(}). This predicate is instead policed by the gate's dedicated {@code
-     * scanTypedChunksSites} check, which requires every named get-family method to call
-     * this helper by name.
+     * <p>{@code chunk_live_owners} is a set-returning {@code LANGUAGE sql STABLE
+     * SECURITY INVOKER} function, so the planner inlines it into a semi-join with a
+     * per-candidate index probe on {@code catalog_document_chunks}; its changeset
+     * header carries the EXPLAIN evidence. The chash argument is the raw
+     * {@code bytea} column, never its hex rendering, so the probe stays on the index.
      *
-     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): deliberately UNCHANGED</strong> —
-     * the {@code ch} parameter's {@link DimTables.ChunkTable#tenantId()}/
-     * {@link DimTables.ChunkTable#chash()} accessors already resolve against whichever
-     * table {@code ch} was built from ({@code nexus.chunks} post-repoint), so this
-     * condition needed no edit for the unification; only the caller's
-     * {@code DimTables.CHUNKS.get(dim)} lookup (D1's scope) determines which table/columns
-     * {@code ch} carries.
-     *
-     * <p><strong>GH #1546 (nexus-ky9ps):</strong> both manifest matches below are now
-     * scoped to {@code ch}'s OWN collection ({@code
-     * CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection())} on the outer join, {@code
-     * m2.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION)} on the inner {@code
-     * noLiveParent} re-check) — mirroring the identical fix applied to {@code
-     * plain_search_<dim>}/{@code text_gated_search_<dim>}'s own inlined SQL (vectors-
-     * 017-1) and {@code nexus.purge_trash} (vectors-017-3). Before this fix, a chash
-     * shared by a chunk row in THIS collection (whose only manifest row here points at a
-     * tombstoned document) and an identical chash under a LIVE document in a completely
-     * DIFFERENT collection would resolve {@code noLiveParent} to {@code false} — the
-     * live manifest row elsewhere satisfied it regardless of collection — so this
-     * predicate never fired and the tombstoned-in-THIS-collection chunk stayed visible
-     * to the get-family reads forever.
+     * <p>{@code TombstoneFilterGateTest.scanTypedChunksSites} requires every named
+     * get-family method to call this helper by name; keep the name.
      */
     private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
-        // nexus-msz9i: the DEAD-SET form, the typed twin of the same rewrite
-        // plain_search_<dim>/text_gated_search_<dim>'s own inlined SQL predicate
-        // carries (vectors-009/010). See vectors-009's changeset header for the full
-        // derivation and the
-        // FK-dependent equivalence argument (fk_catalog_chunks_catalog_doc, validated,
-        // makes a manifest row with no owning document impossible — the single input on
-        // which this form and the old one disagree).
-        //
-        // WHY THIS PATH MATTERED MORE, NOT LESS, THAN hybridSearch. The old shape
-        // (hasManifest.not().or(hasLiveManifest)) made PostgreSQL build two hashed
-        // SubPlans that seq-scan the ENTIRE catalog_document_chunks manifest — a cost
-        // FIXED per query and independent of how few rows the caller asked for. That tax
-        // is a rounding error on a ~1.4s hybrid query but it IS the whole cost of a cheap
-        // point lookup. Measured on the msz9i fixture (76k chunks / 57k manifest rows) by
-        // EXPLAIN (ANALYZE, BUFFERS) of the jOOQ-RENDERED production SQL — each shape
-        // against its own run's no-filter baseline:
-        //     OLD shape: get()  200 ids  0.270 ms -> 27.329 ms (101x), buffers 723 -> 2,715
-        //                list() 100 rows 0.037 ms -> 27.331 ms (739x), buffers 125 -> 2,121
-        //     THIS form: get()  200 ids  0.080 ms ->  0.917 ms, list() 0.037 ms -> 1.059 ms
-        // i.e. ~30x and ~26x faster than the old shape respectively. The planner drives this
-        // form as a Nested Loop Anti Join with per-candidate index probes (loops = rows
-        // actually fetched, not the manifest) — the per-candidate indexed lookup this filter
-        // was always meant to be.
-        //
-        // The aliases below (lcc_m2 / lcc_d2) exist so the inner NOT EXISTS can correlate on
-        // the OUTER subquery's chash without shadowing it. Their presence is load-bearing:
-        // an earlier probe that spliced an UNALIASED raw-SQL dead-set into the rendered
-        // list() query measured only 27.3 -> 25.1 ms, because the planner built the dead set
-        // with a manifest-wide hash join instead of per-candidate probes. The typed form
-        // below does not reproduce that; do not "simplify" the aliasing without re-running
-        // the plan probe.
-        var m2 = CATALOG_DOCUMENT_CHUNKS.as("lcc_m2");
-        var d2 = CATALOG_DOCUMENTS.as("lcc_d2");
-        org.jooq.Condition noLiveParent = DSL.notExists(
-            ctx.selectOne().from(m2)
-               .join(d2)
-                 .on(d2.TENANT_ID.eq(m2.TENANT_ID)
-                     .and(d2.TUMBLER.eq(m2.DOC_ID)))
-               .where(m2.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                      .and(m2.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
-                      .and(ChashHex.hex(m2.CHASH).eq(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH)))
-                      .and(d2.DELETED_AT.isNull())));
-        return DSL.notExists(
-            ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
-               .join(CATALOG_DOCUMENTS)
-                 .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
-               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
-                      .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
-                      .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))
-                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
-                      .and(noLiveParent)));
+        Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
+        return DSL.exists(ctx.selectOne().from(
+            CHUNK_LIVE_OWNERS.call(ch.tenantId(), ch.collection(), rawChash)));
     }
 
     /** Strip NUL (0x00) — unstorable in Postgres {@code text}/{@code jsonb} (nexus-rvfwj). */

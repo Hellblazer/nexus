@@ -263,7 +263,7 @@ def run_check_embeddings(*, sample: int, collections: tuple[str, ...], seed: int
     else:
         sizes = {n: s for n, s in listed.items() if n and s > 0}
     if not sizes:
-        click.echo("[✓] Embedding drift: not applicable (no collection holds chunks)")
+        click.echo("[✓] Embedding drift: not applicable (no collection holds live chunks)")
         return
 
     results = probe_collections(t3, sizes, sample=sample, seed=run_seed)

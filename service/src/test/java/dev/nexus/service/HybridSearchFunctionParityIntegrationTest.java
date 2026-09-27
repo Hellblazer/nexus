@@ -126,7 +126,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       (RDR-156 Decision 6) every chunk-level function in this schema applies inline
  *       (never a JOIN to the {@code live_chunks} view — that would drop the HNSW/GIN
  *       index binds on the base table, see {@code PgVectorRepository.liveChunksPredicate}
- *       javadoc). A manifest-less note chunk (no catalog row at all) stays live.</li>
+ *       javadoc). A manifest-less chunk (no catalog row at all) is not live (RDR-192 Step 5, live(c)).</li>
  *   <li><strong>RLS/tenant isolation.</strong> {@code SECURITY INVOKER} +
  *       {@code FORCE ROW LEVEL SECURITY} on {@code nexus.chunks} — a caller scoped to
  *       tenant A via {@code nexus.tenant} never sees tenant B's rows, same envelope as
@@ -384,12 +384,14 @@ class HybridSearchFunctionParityIntegrationTest {
             metas.add(Map.of());
         }
         pgRepo.upsertChunks(TENANT_A, COL_NARROW, ids, texts, metas);
+        ownAll(TENANT_A, COL_NARROW, ids);
     }
 
     private void seedCalibrationCollection() throws Exception {
         calibChash = Chash.ofText("hsp-calib-1").toHex();
         pgRepo.upsertChunks(TENANT_A, COL_CALIB,
             List.of(calibChash), List.of(CALIB_TEXT), List.of(Map.of()));
+        ownAll(TENANT_A, COL_CALIB, List.of(calibChash));
     }
 
     /** Second tenant, distinct chash, same collection name -- the (tenant_id, collection,
@@ -398,6 +400,40 @@ class HybridSearchFunctionParityIntegrationTest {
         String chash = Chash.ofText("hsp-tenantb-1").toHex();
         pgRepo.upsertChunks(TENANT_B, COL_MAIN, List.of(chash),
             List.of(queries.get(0) + " tenant-b-only-row"), List.of(Map.of()));
+        ownAll(TENANT_B, COL_MAIN, List.of(chash));
+    }
+
+    /**
+     * One live owning document per (tenant, collection) whose manifest lists
+     * {@code chashes} in order. Since RDR-192 Step 5 (nexus-wbfpw.10) search returns
+     * only chunks with a live own-collection owner, so a fixture chunk with no owner
+     * would be hidden for that reason, not for the reason a test asserts.
+     */
+    private void ownAll(String tenant, String collection, List<String> chashes) throws Exception {
+        String docId = "hsp-own-" + collection;
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.TENANT_ID, tenant)
+                .set(CATALOG_DOCUMENTS.TUMBLER, docId)
+                .set(CATALOG_DOCUMENTS.TITLE, "Owner")
+                .set(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, collection)
+                .onConflict(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER)
+                .doNothing()
+                .execute();
+            for (int i = 0; i < chashes.size(); i++) {
+                ctx.insertInto(CATALOG_DOCUMENT_CHUNKS,
+                        CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                    .values(tenant, docId, i, HexFormat.of().parseHex(chashes.get(i)), collection)
+                    .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION)
+                    .doNothing()
+                    .execute();
+            }
+        }
     }
 
     /**

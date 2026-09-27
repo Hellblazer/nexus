@@ -7959,12 +7959,15 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
 
     Returns ``(source -> chunk count, truncated)``. The source is the
     catalog source URI, or ``"content_hash <prefix>"`` when the engine
-    resolves none: it returns null both for a chunk no manifest names and
-    for a document registered without a URI, so the two cannot be told
-    apart here. The engine filters on ``content_type`` and the literal empty
-    ``title`` the uploader writes; ``extraction_method`` is checked here,
-    because the vector bridge has no absent-key predicate. Raises on a read
-    failure; the caller names it.
+    resolves none. Since RDR-192 Step 5 (nexus-wbfpw.10) every chunk this
+    read returns has a live owner in its own collection -- a chunk with no
+    manifest row at all is invisible here, not merely unnamed -- so a null
+    source means the owning document was registered without a URI, never
+    "no manifest names this chunk"; a manifest-less stub is the RDR-192
+    reaper's business, not this check's. The engine filters on
+    ``content_type`` and the literal empty ``title`` the uploader writes;
+    ``extraction_method`` is checked here, because the vector bridge has no
+    absent-key predicate. Raises on a read failure; the caller names it.
     """
     # Not get_collection(): that re-lists every collection in the tenant to
     # prove existence, one extra stats round trip per collection, and the
@@ -8103,15 +8106,14 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             parts.append(
                 f"{sum(unowned.values())} {'more ' if documents else ''}placeholder PDF chunk(s) resolve "
                 "to no catalog source URI, so they cannot be named for a "
-                "re-index: either no manifest names them, or their document "
-                f"was registered without a URI. {listing}{more}."
+                "re-index: their owning document was registered without one "
+                f"(RDR-192 Step 5, nexus-wbfpw.10: every chunk this check can "
+                f"see has a live owner, so this is never a manifest-less "
+                f"chunk). {listing}{more}."
             )
-            # No verb reclaims manifest-less chunks: purge-trash sweeps
-            # chunks whose documents are tombstoned, and `nx t3 gc`
-            # hard-deletes. RDR-192 is the design for them.
             fixes.append(
-                "no source URI: find the owning document first; if no manifest "
-                "names the chunks, see RDR-192 before any delete"
+                "no source URI: find the owning document (nx catalog show) "
+                "and update it with a file path or source URI"
             )
         return [HealthResult(
             label=label,

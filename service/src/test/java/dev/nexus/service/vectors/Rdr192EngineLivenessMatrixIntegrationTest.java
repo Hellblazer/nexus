@@ -36,26 +36,19 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <ul>
  *   <li><b>P1g</b> — {@code PgVectorRepository.liveChunksCondition}, exercised
- *       through the public {@link PgVectorRepository#get} (get() itself;
- *       {@link PgVectorRepository#list} shares the identical helper
- *       (nexus-msz9i) and is asserted as a second call site of this same
- *       column, Gap 1 item 1).</li>
- *   <li><b>P1s</b> — the SAME Gap-1-item-1 visibility question, but through
- *       the public {@link PgVectorRepository#search}, which does NOT call
- *       {@code liveChunksCondition} — it dispatches to the schema function
- *       {@code plain_search_<dim>} (vectors-009, collection-scoped by
- *       vectors-017), an independently-maintained SQL anti-join. {@code
- *       ConstantEmbedder} makes every stored and query embedding identical,
- *       so {@code search} with a large enough limit returns exactly the
- *       visible set of the collection, the same shape {@code get}/{@code
- *       list} return. P1g and P1s are kept as separate table columns
- *       precisely so a future divergence between the two anti-joins is
- *       caught here rather than assumed away by a shared-helper argument
- *       (including R9's GH #1546 shape, added below);
- *       today (verified by this bead) the two columns agree on every row —
- *       see {@link #EXPECTED_VALUE_TABLE}.</li>
- *   <li><b>P2</b> — {@code nexus.live_chunks} (Gap 1 item 2), read directly
- *       via the generated {@code LIVE_CHUNKS} typed table.</li>
+ *       through the public {@link PgVectorRepository#get} and
+ *       {@link PgVectorRepository#list}, which share the helper.</li>
+ *   <li><b>P1s</b> — {@link PgVectorRepository#search}, which dispatches to the
+ *       schema function {@code plain_search_<dim>}. {@code ConstantEmbedder}
+ *       makes every embedding identical, so a large enough limit returns the
+ *       collection's whole visible set.</li>
+ *   <li><b>P1h</b> — {@link PgVectorRepository#hybridSearch}, through both gate
+ *       branches ({@code text_gated_search_by_chash_<dim>} and
+ *       {@code text_gated_search_hnsw_first_<dim>}).</li>
+ *   <li><b>P1t</b> — {@link PgVectorRepository#searchTopicScoped}
+ *       ({@code search_topic_scoped_<dim>}).</li>
+ *   <li><b>P2</b> — {@code nexus.live_chunks}, read for COLLECTION_A via the
+ *       generated {@code LIVE_CHUNKS} typed table.</li>
  *   <li><b>P3</b> — {@code purge_trash} Step 1 candidacy /
  *       {@code CatalogRepository.strandedChunkCount} (Gap 1 item 3), read via
  *       the public {@link CatalogRepository#purgeTrashPreview}/{@link
@@ -74,15 +67,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li><b>LIVE</b> — RDR-192 Step 4's own {@code EXISTS (SELECT 1 FROM
  *       nexus.chunk_live_owners(tenant, collection, chash))} (bead
  *       nexus-wbfpw.9), called via the generated {@code CHUNK_LIVE_OWNERS}
- *       table-valued function and {@code ctx.fetchExists}. {@code
- *       chunk_live_owners} is a SET-RETURNING function (round-2 fix, T2
- *       nexus/review-wbfpw9-code) — the round-1 scalar {@code RETURNS
- *       boolean} form never inlined and measurably cost a real latency
- *       regression once called; see the changeset's own header. Not yet
- *       wired into any production call site (that is Step 5,
- *       nexus-wbfpw.10) — this column exists to pin what the new predicate
- *       itself returns, independent of P1g/P1s/P2/P9's own existing
- *       bodies.</li>
+ *       table-valued function and {@code ctx.fetchExists}. Step 5
+ *       (nexus-wbfpw.10) wires it into every read-visibility predicate above.</li>
  * </ul>
  *
  * <p>Fixture rows, seeded once per (isolated) tenant by {@link
@@ -439,12 +425,101 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         String tenant = "wbfpw1-ro";
         Fixture fx = seedLivenessFixture(tenant);
 
-        var chashes = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(LIVE_CHUNKS.CHASH).from(LIVE_CHUNKS)
-               .where(LIVE_CHUNKS.TENANT_ID.eq(tenant))
-               .fetch(r -> java.util.HexFormat.of().formatHex(r.value1())));
+        assertVisibility(liveChunksIn(tenant, COLLECTION_A), fx, "P2");
+    }
 
-        assertVisibility(chashes, fx, "P2");
+    private List<String> liveChunksIn(String tenant, String collection) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(LIVE_CHUNKS.CHASH).from(LIVE_CHUNKS)
+               .where(LIVE_CHUNKS.TENANT_ID.eq(tenant).and(LIVE_CHUNKS.COLLECTION.eq(collection)))
+               .fetch(r -> java.util.HexFormat.of().formatHex(r.value1())));
+    }
+
+    /**
+     * RDR-192 Step 5 Test Plan, last scenario (nexus-wbfpw.10): {@code live_chunks}
+     * agrees with live(c) per collection. R6 and R9 are physically in both A and B
+     * with a live owner only in B, so each is a {@code live_chunks} row in B and not
+     * in A. Before Step 5 the view's liveness check was tenant-wide (Gap 5), so B's
+     * live manifest row made the A row visible too.
+     */
+    @Test
+    void p2_liveChunksView_isCollectionScoped_r6AndR9() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+
+        List<String> inA = liveChunksIn(tenant, COLLECTION_A);
+        List<String> inB = liveChunksIn(tenant, COLLECTION_B);
+        assertThat(inA).as("R6 / live_chunks in A").doesNotContain(fx.r6());
+        assertThat(inB).as("R6 / live_chunks in B").contains(fx.r6());
+        assertThat(inA).as("R9 / live_chunks in A").doesNotContain(fx.r9());
+        assertThat(inB).as("R9 / live_chunks in B").contains(fx.r9());
+    }
+
+    // ── presentIds: physical presence, deliberately NOT live(c) ─────────────
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10, Sam 2026-09-27: split inventory
+     * from liveness): {@link PgVectorRepository#presentIds} answers "which of these
+     * chashes are physically stored in this collection", ignoring ownership, for
+     * callers whose question is existence, not visibility (existing_ids: catalog
+     * verify, migration ETL, skip-existing, the put_note_pieces delete guard). Every
+     * fixture row is physically in A, so all nine come back, including the six that
+     * live(c) hides; a chash stored only in B does not.
+     */
+    @Test
+    void presentIds_reportsPhysicalPresence_regardlessOfLiveness() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+        String onlyInB = ch(tenant + "-only-in-b");
+        vecRepo.upsertChunks(tenant, COLLECTION_B, List.of(onlyInB), List.of("only in b"), List.of(Map.of()));
+
+        List<String> asked = new java.util.ArrayList<>(fx.allChashes());
+        asked.add(onlyInB);
+        List<String> present = vecRepo.presentIds(tenant, COLLECTION_A, asked);
+
+        assertThat(present).as("every fixture chash is physically in A, live or not")
+            .containsExactlyInAnyOrderElementsOf(fx.allChashes());
+        assertThat(present).as("a chash stored only in B is not present in A").doesNotContain(onlyInB);
+        assertThat(vecRepo.presentIds(tenant, COLLECTION_A, List.of())).isEmpty();
+    }
+
+    // ── P1h: hybridSearch() visibility (text_gated_search_*_<dim>) ───────────
+
+    @Test
+    void p1h_hybridSearchVisibility() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+
+        // Every fixture chunk's text contains "text", so the lexical gate admits all
+        // of them; ConstantEmbedder makes the dense ranking a tie, and the limit is
+        // above the collection's size. Both gate branches are exercised: the
+        // selective (text-first) branch with the default cutoff, and the HNSW-first
+        // branch forced by a cutoff of 1.
+        for (int selectiveGateMax : new int[] {PgVectorRepository.SELECTIVE_GATE_MAX, 1}) {
+            List<Map<String, Object>> rows = vecRepo.hybridSearch(tenant, "text",
+                List.of(COLLECTION_A), 300, null, selectiveGateMax);
+            List<String> visible = rows.stream().map(r -> (String) r.get("id")).toList();
+            assertVisibility(visible, fx, "P1h");
+        }
+    }
+
+    // ── P1t: searchTopicScoped() visibility (search_topic_scoped_<dim>) ──────
+
+    @Test
+    void p1t_topicScopedSearchVisibility() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+        long topicId = taxRepo.insertTopic(tenant, "wbfpw10-topic", null, COLLECTION_A, 0,
+            "2026-01-01T00:00:00Z", null);
+        for (String chash : fx.allChashes()) {
+            taxRepo.assignTopic(tenant, chash, topicId, "wbfpw10", null, COLLECTION_A,
+                "2026-01-01T00:00:00Z");
+        }
+
+        List<Map<String, Object>> rows = vecRepo.searchTopicScoped(tenant, "rdr-192 liveness probe",
+            "wbfpw10-topic", COLLECTION_A, 300);
+        List<String> visible = rows.stream().map(r -> (String) r.get("id")).toList();
+        assertVisibility(visible, fx, "P1t");
     }
 
     // ── P9: taxonomy_unassigned_chashes_384 ──────────────────────────────────
@@ -669,58 +744,42 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
     private static final List<String> ROWS =
         List.of("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9");
     private static final List<String> PREDICATES =
-        List.of("P1g", "P1s", "P2", "P3", "P4", "P6", "P7", "P9", "LIVE");
+        List.of("P1g", "P1s", "P1h", "P1t", "P2", "P3", "P4", "P6", "P7", "P9", "LIVE");
 
     /**
-     * TODAY's verdict for every (row, predicate) pair. This table is now the
-     * SOURCE the per-predicate {@code @Test} methods assert FROM (via {@link
+     * The verdict for every (row, predicate) pair. This table is the SOURCE the
+     * per-predicate {@code @Test} methods assert FROM (via {@link
      * #assertVisibility}/{@link #assertExistencePredicate}/{@link
-     * #live_chunkIsLiveFunction}), not a human-readable transcription of them, so
-     * the table cannot silently drift from the live checks. "true" means:
-     * P1g/P1s/P2/P9/LIVE visible/live, P3 sweep candidate, P4 swept, P6 deletable,
-     * P7 orphaned/moved. Every LIVE cell here (and every other cell) is scoped to
-     * COLLECTION_A; R6 and R9's own COLLECTION_B verdict is pinned separately by
-     * {@link #live_r6AndR9_falseInA_trueInB}.
+     * #live_chunkIsLiveFunction}), so it cannot silently drift from the live
+     * checks. "true" means: P1g/P1s/P1h/P1t/P2/P9/LIVE visible/live, P3 sweep
+     * candidate, P4 swept, P6 deletable, P7 orphaned/moved. Every cell is scoped
+     * to COLLECTION_A; R6 and R9's COLLECTION_B verdict is pinned separately by
+     * {@link #live_r6AndR9_falseInA_trueInB} and {@link
+     * #p2_liveChunksView_isCollectionScoped_r6AndR9}.
      *
-     * <p>R9 (GH #1546 shape, nexus-wbfpw.1 round-2 critique) is the row that
-     * exercises the compound state no other row can: an own-collection A manifest
-     * row pointing ONLY at a tombstoned document, AND a separate LIVE manifest row
-     * for the SAME chash in collection B. P1g ({@code liveChunksCondition}) and P1s
-     * ({@code plain_search_<dim>}'s inlined anti-join) STILL AGREE on R9 -- both
-     * hidden -- because both were already collection-scoped by vectors-017
-     * (GH #1546, nexus-ky9ps) before this bead. P2 ({@code nexus.live_chunks}) is
-     * the one column that DISAGREES: it is Gap 5, not yet collection-scoped, so its
-     * tenant-wide {@code EXISTS} sees B's live manifest row and marks R9 visible in
-     * A too -- exactly the R9-SHAPED residual Step 5 (nexus-wbfpw.10) closes by
-     * collection-scoping {@code live_chunks} via live(c). LIVE agrees with P1g/P1s
-     * on R9 specifically (all three hidden in A) -- this one row does not
-     * distinguish the NEW predicate from the two EXISTING, already-fixed ones on
-     * THIS shape; it distinguishes both of them from the one predicate (P2) that
-     * is not fixed on this shape yet.
+     * <p>RDR-192 Step 5 (nexus-wbfpw.10) moved every read-visibility predicate
+     * (P1g get/list, P1s plain search, P1h hybrid search, P1t topic-scoped search,
+     * P2 {@code live_chunks}) onto live(c), so those five columns equal LIVE on
+     * every row. Before Step 5 they differed from LIVE on R1, R4, R6 and R8, the
+     * rows with no live own-collection owner that the old dead-set anti-join kept
+     * visible, and P2 differed on R9 as well because its check was tenant-wide.
+     * They always agreed on R3 (tombstoned owner only).
      *
-     * <p>This is narrower than "P1g/P1s need no further Step 5 work" -- do not
-     * over-read it that way. R1 (the base manifest-less case, Gap 1's core
-     * defect) already shows P1g=true, P1s=true, LIVE=false: a chunk with NO
-     * manifest row anywhere is still VISIBLE under today's P1g/P1s (their
-     * dead-set anti-joins require an owning tombstoned row to hide a chunk; a
-     * manifest-less chunk has none, so neither predicate ever flags it), while
-     * live(c) -- a positive existence check -- correctly reports it not live.
-     * The SAME divergence holds for R3, R4, R6-in-A, and R8. Migrating P1g/P1s
-     * to live(c) (Step 5) is still a full behavior change on those rows, not a
-     * no-op confirmation exercise; R9 only proves the migration is SAFE on the
-     * one cross-collection shape that once (pre-vectors-017) split get from
-     * search.
+     * <p>P9 ({@code taxonomy_unassigned_chashes}) keeps its own shape (RDR-192
+     * Migration order, item 3): it asks only whether an own-collection manifest
+     * row exists, with no tombstone check, so it differs from LIVE on R3 and R9.
+     * The destructive columns P3, P4, P6 and P7 are Phase 3 and Phase 4 work.
      */
     private static final Map<String, Map<String, Boolean>> EXPECTED_VALUE_TABLE = Map.ofEntries(
-        Map.entry("R1", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", true,  "P6", true,  "P7", true,  "P9", false, "LIVE", false)),
-        Map.entry("R2", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", false, "P7", false, "P9", true,  "LIVE", true)),
-        Map.entry("R3", Map.of("P1g", false, "P1s", false, "P2", false, "P3", true,  "P4", false, "P6", false, "P7", false, "P9", true,  "LIVE", false)),
-        Map.entry("R4", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", true,  "P7", true,  "P9", false, "LIVE", false)),
-        Map.entry("R5", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", false, "P7", false, "P9", true,  "LIVE", true)),
-        Map.entry("R6", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", true,  "P7", true,  "P9", false, "LIVE", false)),
-        Map.entry("R7", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", false, "P7", false, "P9", true,  "LIVE", true)),
-        Map.entry("R8", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", false, "P6", true,  "P7", true,  "P9", false, "LIVE", false)),
-        Map.entry("R9", Map.of("P1g", false, "P1s", false, "P2", true,  "P3", true,  "P4", false, "P6", false, "P7", false, "P9", true,  "LIVE", false))
+        Map.entry("R1", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", true), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false))),
+        Map.entry("R2", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true))),
+        Map.entry("R3", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false))),
+        Map.entry("R4", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false))),
+        Map.entry("R5", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true))),
+        Map.entry("R6", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false))),
+        Map.entry("R7", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true))),
+        Map.entry("R8", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false))),
+        Map.entry("R9", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false)))
     );
 
     /**
@@ -734,7 +793,7 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
             .as("R1-R9, no more, no fewer").containsExactlyInAnyOrderElementsOf(ROWS);
         for (String row : ROWS) {
             assertThat(EXPECTED_VALUE_TABLE.get(row).keySet())
-                .as("row %s must carry a verdict for every predicate P1g,P1s,P2,P3,P4,P6,P7,P9,LIVE", row)
+                .as("row %s must carry a verdict for every predicate in PREDICATES", row)
                 .containsExactlyInAnyOrderElementsOf(PREDICATES);
         }
     }

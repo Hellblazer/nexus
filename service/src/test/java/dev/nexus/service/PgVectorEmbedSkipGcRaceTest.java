@@ -246,11 +246,15 @@ class PgVectorEmbedSkipGcRaceTest {
                 + "need-embed path, not a silent no-op)")
             .isEqualTo(embedCallsBeforeRace + 1);
 
-        Map<String, Object> got = repo.get(TENANT, COLLECTION, List.of(CHASH_H), 10, 0);
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> metas = (List<Map<String, Object>>) got.get("metadatas");
-        assertThat(metas).hasSize(1);
-        assertThat(metas.get(0).get("v"))
+        // RDR-192 Step 5 (nexus-wbfpw.10): repo.get() now requires a live own-collection
+        // manifest owner, and by DESIGN neither doc's manifest row exists yet at this
+        // point (step 8 below writes them, matching real T3-content-then-manifest
+        // caller ordering -- the whole point this fixture correction exists for). A
+        // superuser read is the right tool here, exactly like superuserCount() above:
+        // this assertion is about the re-inserted row's METADATA CONTENT after the
+        // self-heal, not about read-visibility semantics, so bypassing live(c) via a
+        // direct read is not papering over the gap, it is targeting the right layer.
+        assertThat(superuserMetadataV())
             .as("the re-inserted row carries the racing writer's metadata, not the stale seed value")
             .isEqualTo("2");
 
@@ -292,6 +296,22 @@ class PgVectorEmbedSkipGcRaceTest {
                 rs.next();
                 return rs.getLong(1);
             }
+        }
+    }
+
+    /** Superuser (RLS-bypassing) read of H's {@code metadata->>'v'} — see the call site's comment. */
+    private String superuserMetadataV() throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            var row = DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.jsonbGetAttributeAsText(
+                    DSL.field(DSL.name("metadata"), org.jooq.JSONB.class), "v"))
+                .from(DSL.table(DSL.name("nexus", "chunks")))
+                .where(DSL.field(DSL.name("collection"), String.class).eq(COLLECTION)
+                    .and(DSL.field(DSL.name("chash"), byte[].class)
+                        .eq(java.util.HexFormat.of().parseHex(CHASH_H))))
+                .fetchOne();
+            assertThat(row).as("H must exist for the metadata read").isNotNull();
+            return row.value1();
         }
     }
 

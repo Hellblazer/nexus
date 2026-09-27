@@ -18,6 +18,7 @@ import pytest
 
 from nexus.db import make_t3
 from nexus.metadata_schema import make_chunk_metadata
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
 
 _COLLECTION = "docs__y8xjh-pdf__bge-base-en-v15-768__v1"
 _TEXT = "a chunk of a paper that was first indexed under a degraded extraction"
@@ -76,11 +77,27 @@ def _stored(t3) -> dict:
     return got["metadatas"][0]
 
 
+def _own_the_chunk() -> None:
+    """RDR-192 Step 5 (nexus-wbfpw.10): get()/getWhere is a live-visibility
+    gated read. ``_index_pdf_file`` is called here directly, outside the
+    full ``nx index repo`` flow that would register the source file as a
+    catalog document first (the ``manifest_hook_batch_missing_doc_identity``
+    warning this fixture logs is that gap, not a defect this test is about),
+    so the written chunk has no live owner in its own collection. Give it
+    one, once per test (the chash is stable across both ``_index()`` calls
+    in a test, since ``_TEXT`` never changes)."""
+    import hashlib
+
+    chash = hashlib.sha256(_TEXT.encode()).hexdigest()
+    give_chunks_a_live_owner(_COLLECTION, [chash], content_type="docs")
+
+
 def test_clean_force_reindex_clears_stale_quality_gate_override(
     t2_service_env, tmp_path, monkeypatch,
 ) -> None:
     t3 = make_t3()
     _index(tmp_path, t3, monkeypatch, overridden=True)
+    _own_the_chunk()
     assert _stored(t3).get("quality_gate_overridden") is True  # non-vacuity
 
     _index(tmp_path, t3, monkeypatch, overridden=False)
@@ -100,6 +117,7 @@ def test_without_delete_keys_the_stale_override_survives(
     monkeypatch.setattr("nexus.metadata_schema.rewrite_delete_keys", lambda metadatas: [])
     t3 = make_t3()
     _index(tmp_path, t3, monkeypatch, overridden=True)
+    _own_the_chunk()
     _index(tmp_path, t3, monkeypatch, overridden=False)
 
     assert _stored(t3).get("quality_gate_overridden") is True

@@ -348,6 +348,12 @@ class VectorHandlerEmbeddingModeTest {
             "documents",  List.of("second text", "first text"),
             "metadatas",  List.of(Map.of(), Map.of())));
         assertThat(up.statusCode()).isEqualTo(200);
+        // RDR-192 Step 5 (nexus-wbfpw.10): getEmbeddings requires a live
+        // own-collection manifest owner.
+        new TenantScope(svcDs).withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, "knowledge__pebfx7__minilm-l6-v2-384__v1", embA, embB);
+            return null;
+        });
 
         var resp = post("/v1/vectors/get-embeddings", Map.of(
             "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",

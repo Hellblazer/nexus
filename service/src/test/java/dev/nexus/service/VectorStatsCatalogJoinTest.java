@@ -22,6 +22,8 @@ import java.util.List;
 import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -119,8 +121,10 @@ class VectorStatsCatalogJoinTest {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT, COL_REGISTERED);
             insertChunk1024(ctx, TENANT, COL_REGISTERED, chashBytes("vscj-reg-c1"), vector(1024));
+            ownChunk(ctx, COL_REGISTERED, chashBytes("vscj-reg-c1"));
             PgContainerHelper.insertCollection(ctx, TENANT, COL_QUARANTINE);
             insertChunk1024(ctx, TENANT, COL_QUARANTINE, chashBytes("vscj-qua-c1"), vector(1024));
+            ownChunk(ctx, COL_QUARANTINE, chashBytes("vscj-qua-c1"));
         }
 
         // ── Fixture: COL_ORPHAN — register, write chunk (FK requires the row),
@@ -133,6 +137,13 @@ class VectorStatsCatalogJoinTest {
             var ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT, COL_ORPHAN);
             insertChunk384(ctx, TENANT, COL_ORPHAN, chashBytes("vscj-orphan-c1"), vector(384));
+            // RDR-192 Step 5 (nexus-wbfpw.10): collection_vector_stats now requires
+            // live(c) too -- give the chunk a live manifest owner. Independent of
+            // catalog_collections (deleted below): the manifest FK (fk_catalog_chunks_
+            // chunk) and the registration FK (chunks_collection_fk) are separate
+            // constraints, so this orphan fixture's actual subject (a stats row with
+            // no catalog_collections row) is untouched by also giving it a manifest.
+            ownChunk(ctx, COL_ORPHAN, chashBytes("vscj-orphan-c1"));
         }
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -228,6 +239,29 @@ class VectorStatsCatalogJoinTest {
 
     // ── HELPERS (typed jOOQ DSL — mirrors PgContainerHelper.insertChunk384/1024
     //    and CatalogDeleteCollectionCascadeTest's own chashBytes/vector pair) ───
+
+    /**
+     * Give the chunk at {@code chashBytes} a live owner in {@code collection} for
+     * {@code TENANT} (RDR-192 Step 5, bead nexus-wbfpw.10). This fixture's chashes are
+     * raw 32-byte ASCII labels (see {@link #chashBytes}), not real sha256 digests, so
+     * {@link PgContainerHelper#ownChunks} (which parses a 64-hex string) does not fit —
+     * insert the manifest row directly with the same raw bytes {@link #insertChunk384}/
+     * {@link #insertChunk1024} already wrote to {@code nexus.chunks}.
+     */
+    private static void ownChunk(org.jooq.DSLContext ctx, String collection, byte[] chashBytes) {
+        String docId = "own-" + collection;
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .values(TENANT, docId, "Owner " + docId, collection)
+            .onConflictDoNothing()
+            .execute();
+        ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+            .values(TENANT, docId, 0, chashBytes, collection)
+            .onConflictDoNothing()
+            .execute();
+    }
 
     private static void insertChunk384(org.jooq.DSLContext ctx, String tenant, String collection,
                                         byte[] chashBytes, Vector v) {

@@ -250,8 +250,8 @@ class _FailingT3:
         self.calls = 0
         self.deleted: list[str] = []
 
-    def get_by_id(self, collection: str, doc_id: str) -> dict | None:
-        return {"id": doc_id} if doc_id in self.existing else None
+    def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
+        return {i for i in ids if i in self.existing}
 
     def put(self, *, collection: str, content: str, **kwargs) -> str:
         self.calls += 1
@@ -276,7 +276,7 @@ def test_a_failed_piece_write_removes_only_the_pieces_this_call_wrote() -> None:
 
 def test_one_piece_is_a_single_put_with_no_existence_probe() -> None:
     class _T3:
-        def get_by_id(self, *a, **k):
+        def existing_ids(self, *a, **k):
             raise AssertionError("a one-piece note must not pay an existence probe")
 
         def put(self, *, collection: str, content: str, **kwargs) -> str:

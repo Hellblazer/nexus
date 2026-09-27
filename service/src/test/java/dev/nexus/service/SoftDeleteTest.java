@@ -789,7 +789,7 @@ class SoftDeleteTest {
     }
 
     @Test @Order(91)
-    void liveChunks_includesManifestlessChunk() throws Exception {
+    void liveChunks_excludesManifestlessChunk() throws Exception {
         // Arrange: insert a fresh manifest-less chunk (no catalog_document_chunks row).
         byte[] manifestlessChash = chashBytes("manifestless9191");
         try (Connection su = pg.createConnection("")) {
@@ -799,7 +799,9 @@ class SoftDeleteTest {
             insertChunk384(ctx, TENANT_A, COLLECTION_A, manifestlessChash, "manifest-less live_chunks note");
         }
 
-        // Assert: the chunk appears in live_chunks (NOT EXISTS(manifest) → visible)
+        // Assert: the chunk is absent from live_chunks. Since RDR-192 Step 5
+        // (nexus-wbfpw.10, vectors-019-4) the view uses live(c): a chunk is live iff it
+        // has a live owner in its own collection, and a manifest-less chunk has none.
         // The svc role reads via GUC-scoped RLS; live_chunks is SECURITY INVOKER.
         try (Connection svc = svcDs.getConnection()) {
             PgContainerHelper.setTenant(svc, TenantScope.DEFAULT_TENANT_GUC, TENANT_A, false);
@@ -807,9 +809,9 @@ class SoftDeleteTest {
                 .where(LIVE_CHUNKS.TENANT_ID.eq(TENANT_A)).and(LIVE_CHUNKS.CHASH.eq(manifestlessChash))
                 .fetchOne(0, int.class);
             assertThat(count)
-                .as("manifest-less chunk must appear in live_chunks " +
-                    "(NOT EXISTS(manifest row) → always live)")
-                .isEqualTo(1);
+                .as("manifest-less chunk must not appear in live_chunks " +
+                    "(no live own-collection owner → not live, RDR-192 Step 5)")
+                .isZero();
         }
     }
 

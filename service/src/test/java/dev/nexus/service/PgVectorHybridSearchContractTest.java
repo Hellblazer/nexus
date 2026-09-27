@@ -218,6 +218,7 @@ class PgVectorHybridSearchContractTest {
             List.of(T_C1, T_C2, T_C3, T_C4, T_C5, T_C6),
             List.of(Map.of("kind", "hy"), Map.of("kind", "hy"), Map.of("kind", "hy"),
                     Map.of("kind", "hy"), Map.of("kind", "hy"), Map.of("kind", "hy")));
+        own(TENANT_A, COL_HY, HYB_C1, HYB_C2, HYB_C3, HYB_C4, HYB_C5, HYB_C6);
 
         // Multi-collection union fixture: two 1024 collections, distances interleave.
         embedder1024.register("tenant isolation policy alpha document", 1.0f, 0.0f);
@@ -232,6 +233,8 @@ class PgVectorHybridSearchContractTest {
             List.of(MB_C1),
             List.of("tenant isolation policy beta document"),
             List.of(Map.of()));
+        own(TENANT_A, COL_MA, MA_C1, MA_C2);
+        own(TENANT_A, COL_MB, MB_C1);
 
         // where-filter fixture on the 768 table.
         embedder768.register(Q, 1.0f, 0.0f);
@@ -242,6 +245,7 @@ class PgVectorHybridSearchContractTest {
             List.of("tenant isolation policy for java services",
                     "tenant isolation policy for python services"),
             List.of(Map.of("lang", "java"), Map.of("lang", "py")));
+        own(TENANT_A, COL_WH, WH_C1, WH_C2);
 
         // 384 dispatch fixture (per-dim DDL is byte-identical; the hybrid query must
         // behave identically on every chunks_<dim> table).
@@ -255,6 +259,19 @@ class PgVectorHybridSearchContractTest {
                     "tenant isolation policy variant",
                     "cooking carbonara again"),
             List.of(Map.of(), Map.of(), Map.of()));
+        own(TENANT_A, COL_384H, M384_C1, M384_C2, M384_C3);
+    }
+
+    /**
+     * Give {@code ids} a live owner in {@code col} for {@code tenant} (RDR-192 Step 5,
+     * bead nexus-wbfpw.10): {@code hybridSearch} moved onto live(c) — a chunk with no
+     * live own-collection manifest owner is invisible to it, same as {@code search}.
+     */
+    private void own(String tenant, String col, String... ids) {
+        tenantScope.withTenant(tenant, ctx -> {
+            PgContainerHelper.ownChunks(ctx, tenant, col, ids);
+            return null;
+        });
     }
 
     private static List<String> ids(List<Map<String, Object>> rows) {
@@ -411,6 +428,8 @@ class PgVectorHybridSearchContractTest {
                     "tenant isolation policy hybrid eq typing str"),
             List.of(Map.of("year", 2020),      // JSON number
                     Map.of("year", "2020")));  // JSON string
+        own(TENANT_A, col, "53fee991ee97e4a03d984ac944fc0c3676d3b715ff6e1b9e57eb348569db7d71",
+            "7d3dfe0222b8df3275aa84403d462a577c2a8b11f5f76160923e29bb9f4a8bd4");
 
         List<Map<String, Object>> rows =
             repo1024.hybridSearch(TENANT_A, Q, List.of(col), 10, Map.of("year", 2020));
@@ -437,6 +456,8 @@ class PgVectorHybridSearchContractTest {
                     "tenant isolation policy hybrid ne typing other"),
             List.of(Map.of("year", 2020),      // JSON number, must be excluded
                     Map.of("year", "2021")));  // JSON string, non-matching, must be kept
+        own(TENANT_A, col, "6b721b55e4c4c5508880c4989846c0f6d7349305dae8bf5b4754ba3b9d338baa",
+            "091bfc5c542c33e9a855e7a66d436ddd4142e50291203acd5ced23c701ce89dc");
 
         List<Map<String, Object>> rows = repo1024.hybridSearch(
             TENANT_A, Q, List.of(col), 10, Map.of("year", Map.of("$ne", 2020)));

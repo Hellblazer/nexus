@@ -524,7 +524,10 @@ def collection_gc_cmd(apply: bool) -> None:
 
     for c in t3_collections:
         name = c["name"]
-        count = c.get("count", 0)
+        # RDR-192 Step 5 amendment: "empty" means no stored chunk. A
+        # collection whose chunks have no live owner has live count 0 but is
+        # not empty, and must not be deleted as a zombie.
+        count = c.get("stored_count", c.get("count", 0))
         if name.startswith(_BYPASS_SCHEMA_PREFIXES):
             skipped_bypass += 1
             continue

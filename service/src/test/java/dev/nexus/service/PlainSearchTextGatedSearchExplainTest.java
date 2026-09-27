@@ -159,6 +159,10 @@ class PlainSearchTextGatedSearchExplainTest {
         }
 
         repo.upsertChunks(TENANT, COLL, ids, texts, metas);
+        // RDR-192 Step 5 (nexus-wbfpw.10): text_gated_search_{by_chash,hnsw_first}_1024
+        // moved onto live(c) -- own every row here (filler included: the gate's
+        // exclusion of the filler is the property under test, not a manifest gap).
+        own(COLL, ids);
         seedDenseGateFixture();
         seedOrderParityFixture();
 
@@ -194,6 +198,9 @@ class PlainSearchTextGatedSearchExplainTest {
             repo.upsertChunks(TENANT, DENSE_COLL, ids.subList(from, to), texts.subList(from, to),
                               metas.subList(from, to));
         }
+        // RDR-192 Step 5 (nexus-wbfpw.10): own every row so the dense/HNSW-first
+        // gate's own selectivity, not a manifest gap, governs which rows come back.
+        own(DENSE_COLL, ids);
     }
 
     /**
@@ -228,6 +235,19 @@ class PlainSearchTextGatedSearchExplainTest {
         metas.add(Map.of());
 
         repo.upsertChunks(TENANT, ORDER_COLL, ids, texts, metas);
+        // RDR-192 Step 5 (nexus-wbfpw.10): own every row (filler included).
+        own(ORDER_COLL, ids);
+    }
+
+    /**
+     * Give {@code ids} a live owner in {@code collection} for {@code TENANT}
+     * (RDR-192 Step 5, bead nexus-wbfpw.10).
+     */
+    private void own(String collection, List<String> ids) {
+        tenantScope.withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, collection, ids.toArray(new String[0]));
+            return null;
+        });
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -248,6 +268,12 @@ class PlainSearchTextGatedSearchExplainTest {
                 + "vectors-009 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
                 plan)
             .doesNotContain("Function Scan");
+        assertThat(plan)
+            .as("RDR-192 Step 5 (nexus-wbfpw.10): plain_search_1024's live(c) filter must inline "
+                + "into a semi-join on catalog_document_chunks; the function name in the "
+                + "plan would mean it stayed an opaque per-row call. Plan was:%n%s", plan)
+            .doesNotContain("chunk_live_owners")
+            .contains("catalog_document_chunks");
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -350,6 +376,12 @@ class PlainSearchTextGatedSearchExplainTest {
                 + "vectors-011 must use an inlinable LANGUAGE sql function. Plan was:%n%s",
                 plan)
             .doesNotContain("Function Scan");
+        assertThat(plan)
+            .as("RDR-192 Step 5 (nexus-wbfpw.10): text_gated_search_hnsw_first_1024's live(c) filter must inline "
+                + "into a semi-join on catalog_document_chunks; the function name in the "
+                + "plan would mean it stayed an opaque per-row call. Plan was:%n%s", plan)
+            .doesNotContain("chunk_live_owners")
+            .contains("catalog_document_chunks");
     }
 
     @Test

@@ -445,9 +445,9 @@ def gc_cmd(
 
     # nexus-39upx hazard 2 (RDR-145) + nexus-g6k6b (RUNFENCE precondition):
     # chashes_for_collection only sees chashes with a manifest row. A
-    # store_put / nx store put NOTE never gets one — RDR-145 defers
-    # manifest-backed identity for notes, and catalog-003-soft-delete.xml's
-    # live_chunks view treats a manifest-less chunk as live BY DESIGN — so
+    # legacy store_put / nx store put NOTE (stored before nexus-b6enc) may
+    # have none — reads hide such a chunk since RDR-192 Step 5, but this
+    # deleting sweep keeps the notes guard until RDR-192 Step 11 — so
     # a note's chash is indistinguishable from a chash that fell out of a
     # live document's manifest via re-index; both simply read "not
     # referenced" above. Separately, Hal's 2026-08-02 comment on this bead

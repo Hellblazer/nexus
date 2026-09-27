@@ -33,6 +33,7 @@ import java.util.regex.Pattern;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.EMBEDDING_MODELS;
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
@@ -641,6 +642,65 @@ public final class PgContainerHelper {
             .values(tenantId, tumbler, "Test Doc " + tumbler)
             .onConflictDoNothing()
             .execute();
+    }
+
+    /**
+     * Give {@code chashHex} a live owner in {@code collection} (RDR-192 Step 5,
+     * bead nexus-wbfpw.10): since vectors-019 every read-visibility predicate
+     * requires {@code EXISTS (SELECT 1 FROM nexus.chunk_live_owners(tenant, collection,
+     * chash))}, a chunk with no manifest row at all is no longer visible to search,
+     * hybrid search, get/getWhere/getEmbeddings/getAllMetadata/list, or counted by
+     * {@code nexus.live_chunks}/{@code nexus.collection_vector_stats} — a test fixture
+     * that writes a chunk and expects it to be readable back must also give it an
+     * owner. Inserts one LIVE {@code catalog_documents} row (deterministic tumbler
+     * {@code "own-" + collection}, idempotent) and one {@code catalog_document_chunks}
+     * manifest row per {@code chashHex} entry, appended after whatever positions that
+     * document already owns (a repeat call against the same collection APPENDS rather
+     * than colliding on the {@code (tenant_id, doc_id, position)} PK — callers that
+     * write chunks to the same collection across several calls can call this again
+     * each time). The chunk rows named by {@code chashHex} must already exist
+     * ({@code fk_catalog_chunks_chunk}).
+     *
+     * @param ctx        a {@link DSLContext} over the same connection/role the schema
+     *                   was migrated under (superuser or any role with INSERT on the
+     *                   two catalog tables)
+     * @param tenantId   the tenant id
+     * @param collection the collection the chunks live in; also the owning document's
+     *                   {@code physical_collection}
+     * @param chashHex   the 64-lowercase-hex chashes to grant a live owner, in the
+     *                   order they should occupy successive manifest positions
+     */
+    public static void ownChunks(DSLContext ctx, String tenantId, String collection, String... chashHex) {
+        String docId = "own-" + collection;
+        ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+            .values(tenantId, docId, "Owner " + docId, collection)
+            .onConflictDoNothing()
+            .execute();
+
+        Integer maxPosition = ctx.select(org.jooq.impl.DSL.max(CATALOG_DOCUMENT_CHUNKS.POSITION))
+            .from(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenantId))
+            .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+            .fetchOne(0, Integer.class);
+        int nextPosition = (maxPosition == null) ? 0 : maxPosition + 1;
+        if (chashHex.length == 0) {
+            return;
+        }
+
+        // Single multi-row INSERT (one round trip regardless of chashHex.length) —
+        // a fixture owning thousands of chashes (e.g. a dense-gate-scale fixture)
+        // must not pay one round trip per chash.
+        var step = ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+            .values(tenantId, docId, nextPosition,
+                    dev.nexus.service.db.Chash.fromHex(chashHex[0]).toBytes(), collection);
+        for (int i = 1; i < chashHex.length; i++) {
+            step = step.values(tenantId, docId, nextPosition + i,
+                    dev.nexus.service.db.Chash.fromHex(chashHex[i]).toBytes(), collection);
+        }
+        step.onConflictDoNothing().execute();
     }
 
     /**

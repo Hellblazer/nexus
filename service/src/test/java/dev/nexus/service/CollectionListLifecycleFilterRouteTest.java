@@ -175,6 +175,10 @@ class CollectionListLifecycleFilterRouteTest {
                .values(TENANT, collection, chash, "bc7ps chunk", Vector.of(v))
                .onConflictDoNothing()
                .execute();
+            // RDR-192 Step 5 (nexus-wbfpw.10): collection_vector_stats now requires
+            // live(c) too -- give the chunk a live manifest owner.
+            PgContainerHelper.ownChunks(ctx, TENANT, collection,
+                java.util.HexFormat.of().formatHex(chash));
         }
     }
 

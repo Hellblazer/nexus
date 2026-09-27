@@ -74,6 +74,7 @@ import hashlib
 import pytest
 
 import nexus.db.http_vector_client as hvc
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
 
 _COLLECTION = "code__rdr217-detector__bge-base-en-v15-768__v1"
 
@@ -133,10 +134,20 @@ def detect_hybrid_gate_regression(
     return len(hybrid_rows), len(vector_rows)
 
 
-def _seed(db: hvc.HttpVectorClient, n: int = 6) -> tuple[list[str], list[str]]:
-    """Chunks only, no catalog. Manifest-less chunks pass the gate: the
-    tombstone clause excludes a chunk only when ALL its manifest rows point at
-    deleted documents, so a chunk with no manifest row at all is not excluded.
+def _seed(db: hvc.HttpVectorClient, n: int = 6) -> tuple[list[str], list[str], str]:
+    """Chunks, then a catalog manifest owning them. Returns ``(ids, docs,
+    owner_tumbler)`` — the tumbler lets a test that needs the true degenerate
+    empty-collection case trash the OWNER rather than the chunks (see
+    ``test_the_vector_count_is_a_necessary_conjunct_not_a_decoration``, which
+    needs it because of the paragraph below).
+
+    Before RDR-192 Step 5 a manifest-less chunk still passed the gate (the
+    tombstone clause excluded a chunk only when ALL its manifest rows pointed
+    at deleted documents, so having none was not exclusion). Step 5 moved
+    every read path onto live(c) — a chunk needs a live owner in its OWN
+    collection to be returned at all — so this fixture, whose subject is the
+    hybrid/vector comparator rather than manifest-less visibility itself,
+    now gives its chunks one right after writing them.
     """
     ids, docs, metas = [], [], []
     for i in range(n):
@@ -151,7 +162,8 @@ def _seed(db: hvc.HttpVectorClient, n: int = 6) -> tuple[list[str], list[str]]:
     db.upsert_chunks_with_embeddings(
         _COLLECTION, ids=ids, documents=docs, embeddings=[], metadatas=metas,
     )
-    return ids, docs
+    tumbler = give_chunks_a_live_owner(_COLLECTION, ids, content_type="code")
+    return ids, docs, tumbler
 
 
 def _corpus_carries_literal_tokens(query: str, documents: list[str]) -> bool:
@@ -199,7 +211,7 @@ def test_a_fused_zero_with_the_flag_false_is_the_correct_answer(t2_service_env) 
     which is exactly why a two-input rule cannot work.
     """
     db = hvc.HttpVectorClient(tenant=t2_service_env)
-    _ids, docs = _seed(db)
+    _ids, docs, _tumbler = _seed(db)
 
     # Ground truth asserted from the fixture's own text, not assumed.
     assert not _corpus_carries_literal_tokens(_NO_MATCH_QUERY, docs), (
@@ -232,14 +244,26 @@ def test_the_vector_count_is_a_necessary_conjunct_not_a_decoration(t2_service_en
     it would report a gate regression on a corpus that holds nothing at all.
     """
     db = hvc.HttpVectorClient(tenant=t2_service_env)
-    ids, _docs = _seed(db)
+    _ids, _docs, tumbler = _seed(db)
     # Emptied, not absent. An UNREGISTERED collection 422s rather than
     # returning nothing (measured: "collection ... is not registered for
     # tenant"), so querying a name that was never created would exercise the
     # error path above instead of this one. Registering and then emptying is
     # what reproduces the real degenerate shape: the collection exists, the
     # engine answers, and there is simply nothing in it.
-    assert db.delete_by_chunk_ids(_COLLECTION, ids) == len(ids)
+    #
+    # Trashing the OWNER, not deleting the chunks: RDR-191 F10c's anti-join
+    # scope makes /v1/vectors/store-delete silently skip an id still
+    # referenced by a live catalog_document_chunks row, which _seed's owner
+    # now is, so a raw delete_by_chunk_ids call here would leave the chunks
+    # physically present and (pre-RDR-192) reachable. Trashing the document
+    # instead flips its manifest rows non-live, which is exactly what "empty"
+    # means to a live(c)-gated read — the collection exists, the engine
+    # answers, and nothing SEARCHABLE is in it.
+    from tests._catalog_fixture_ops import ActiveCatalog
+
+    cat = ActiveCatalog()
+    assert cat.delete_document(tumbler)
 
     hybrid_n, vector_n = detect_hybrid_gate_regression(
         db, _LEXICAL_QUERY, [_COLLECTION], ground_truth_lexical_match=True,
@@ -275,7 +299,7 @@ def test_positive_control_the_route_is_alive_on_this_very_collection(
     because A's assertion is not interpretable without it.
     """
     db = hvc.HttpVectorClient(tenant=t2_service_env)
-    _ids, docs = _seed(db)
+    _ids, docs, _tumbler = _seed(db)
 
     assert _corpus_carries_literal_tokens(_LEXICAL_QUERY, docs)
     alive = db.hybrid_search(_LEXICAL_QUERY, [_COLLECTION], n_results=10)
@@ -298,7 +322,7 @@ def test_fixture_b_the_planted_bug_0148_condition_makes_the_detector_fire(
     escaping the detector must not satisfy this.
     """
     db = hvc.HttpVectorClient(tenant=t2_service_env)
-    _ids, docs = _seed(db)
+    _ids, docs, _tumbler = _seed(db)
     assert _corpus_carries_literal_tokens(_LEXICAL_QUERY, docs), (
         "Fixture B's premise is a corpus that DOES carry the query's literal "
         "tokens; without that the flag below would be a lie and the fire "
@@ -341,7 +365,7 @@ def test_the_two_fixtures_are_identical_in_observables_and_differ_in_one_thing(
     text rather than inferred from the outcome.
     """
     db = hvc.HttpVectorClient(tenant=t2_service_env)
-    _ids, docs = _seed(db)
+    _ids, docs, _tumbler = _seed(db)
 
     # A: real gate, flag False.
     a_hybrid, a_vector = detect_hybrid_gate_regression(

@@ -72,6 +72,25 @@ def _own(chashes: list[str], file_path: str) -> None:
     )
 
 
+def _own_without_uri(chashes: list[str], title: str) -> None:
+    """Register a document with NO file path / source URI whose manifest
+    names *chashes* -- RDR-192 Step 5 (nexus-wbfpw.10) makes a manifest-less
+    chunk invisible to every content read, this check's own scan included,
+    so the only way left to reach the "resolves to no catalog source URI"
+    branch is a real, live-owned chunk whose owner just has no URI.
+    """
+    cat = ActiveCatalog()
+    owner = cat.register_owner("rte90-owner", "curator")
+    tumbler = str(cat.register(
+        owner, title, content_type="paper",
+        physical_collection=_COLLECTION, chunk_count=len(chashes),
+    ))
+    cat.write_manifest(
+        tumbler, [{"chash": c, "position": i} for i, c in enumerate(chashes)],
+        collection=_COLLECTION,
+    )
+
+
 def _row(results):
     rows = [r for r in results if r.label == _LABEL]
     assert len(rows) == 1, [r.label for r in results]
@@ -84,7 +103,10 @@ def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
         # Two stub chunks of one document: the w94eo signature.
         ("stub page two text", _meta(title="", content_hash="a" * 64)),
         ("stub page three text", _meta(title="", content_hash="a" * 64)),
-        # A stub chunk no manifest names.
+        # A stub chunk whose OWNING document has no source URI (RDR-192 Step
+        # 5, nexus-wbfpw.10: a manifest-less chunk is invisible to this
+        # check's own scan now, so "resolves to no catalog source URI" can
+        # only mean the owner itself has none).
         ("orphan stub text", _meta(title="", content_hash="b" * 64)),
         # Healthy post-pass chunk.
         ("healthy mineru chunk", _meta(title="FootprintRAG", extraction_method="mineru")),
@@ -95,16 +117,19 @@ def test_stub_pdf_chunks_are_named_and_controls_are_not(t2_service_env) -> None:
     ])
 
     _own(ids[:2], "/tmp/rte90/FootprintRAG.pdf")
+    _own_without_uri([ids[2]], "orphan stub document")
 
     row = _row(health._check_pdf_stub_metadata())
 
     assert not row.ok and row.warn, row.detail
     assert "2 PDF chunk(s) in 1 document(s)" in row.detail, row.detail
     assert "FootprintRAG.pdf (2)" in row.detail, row.detail
-    # The orphan is reported apart, by content hash, with its own remedy.
+    # The unowned-URI chunk is reported apart, by content hash, with its own remedy.
     assert "1 more placeholder PDF chunk(s) resolve to no catalog source URI" in row.detail, row.detail
     assert "content_hash bbbbbbbbbbbb (1)" in row.detail, row.detail
-    assert any("RDR-192" in f for f in row.fix_suggestions), row.fix_suggestions
+    assert any("registered without one" in f or "no source URI" in f for f in row.fix_suggestions), (
+        row.fix_suggestions
+    )
     assert any("--force" in f for f in row.fix_suggestions), row.fix_suggestions
 
 

@@ -186,6 +186,34 @@ class BridgeAddressFieldsTest {
                 + " VALUES ('" + TENANT2 + "', 'g5addr.1', 'G5 Test Note 2', 'markdown',"
                 + " 'file:///vault/tenant2/other.md', now())"
                 + " ON CONFLICT DO NOTHING");
+
+            // RDR-192 Step 5 (nexus-wbfpw.10): live(c) requires a live own-collection
+            // manifest owner for a chunk to be visible at all -- CHASH_WITHOUT_URI used
+            // to have NO manifest row (the "graceful null, no catalog row exists" probe)
+            // and would now simply be invisible to search/get, never reached at all. Give
+            // it a live owner too, via a SEPARATE document that never sets source_uri
+            // (the column defaults to '' NOT NULL, so this is the closest surviving
+            // analogue of "no source_uri to resolve" -- see search_optIn_carriesSourceUri
+            // and get_optIn_carriesSourceUris, which assert "" rather than null now).
+            org.jooq.DSLContext ownCtx = DSL.using(su, SQLDialect.POSTGRES);
+            ownCtx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TENANT_ID, TENANT)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TUMBLER, "g5addr.2")
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.TITLE, "G5 Test Note Without URI")
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.CONTENT_TYPE, "markdown")
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS.INDEXED_AT, DSL.currentOffsetDateTime())
+                .onConflictDoNothing()
+                .execute();
+            ownCtx.insertInto(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID, TENANT)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.DOC_ID, "g5addr.2")
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.POSITION, 0)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHASH,
+                     java.util.HexFormat.of().parseHex(CHASH_WITHOUT_URI))
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, 0)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION, COL)
+                .onConflictDoNothing()
+                .execute();
         }
 
         // RDR-191 Phase 5 (nexus-o8dil.29): fk_catalog_chunks_chunk requires
@@ -314,9 +342,15 @@ class BridgeAddressFieldsTest {
             .orElseThrow(() -> new AssertionError("CHASH_WITHOUT_URI row not found"));
 
         assertThat(withoutUri.get("chash")).isEqualTo(CHASH_WITHOUT_URI);
+        // RDR-192 Step 5 (nexus-wbfpw.10): a manifest-less chunk is no longer visible
+        // at all (live(c)), so "no catalog row exists" can no longer be exercised on a
+        // row this test can even see -- CHASH_WITHOUT_URI's owning document exists but
+        // never sets source_uri, which resolves to the column's own default ('' NOT
+        // NULL), not JSON null.
         assertThat(withoutUri.get("source_uri"))
-            .as("source_uri is null when no catalog row exists")
-            .isNull();
+            .as("source_uri is the catalog column's own default ('') when the owning "
+                + "document never set one")
+            .isEqualTo("");
         assertThat((String) withoutUri.get("span")).isNotBlank();
     }
 
@@ -385,7 +419,10 @@ class BridgeAddressFieldsTest {
 
         int withoutUriIdx = ids.indexOf(CHASH_WITHOUT_URI);
         assertThat(withoutUriIdx).as("CHASH_WITHOUT_URI in results").isGreaterThanOrEqualTo(0);
-        assertThat(uris.get(withoutUriIdx)).isNull();
+        // RDR-192 Step 5 (nexus-wbfpw.10): CHASH_WITHOUT_URI now has a live owner (an
+        // uncatalogued chunk is invisible outright), whose document never sets
+        // source_uri -- that resolves to the column's own default (''), not null.
+        assertThat(uris.get(withoutUriIdx)).isEqualTo("");
     }
 
     /**
@@ -447,6 +484,7 @@ class BridgeAddressFieldsTest {
             "ids",        List.of(c1, c2, c3),
             "documents",  List.of("count fixture one", "count fixture two", "count fixture three"),
             "metadatas",  List.of(Map.of(), Map.of(), Map.of())));
+        own(col, List.of(c1, c2, c3));
 
         // No explicit limit → defaultLimit resolves to ids.size() (3, nexus-hdx2u
         // E1): the whole matched-LIVE set fits in one page, so no truncation is
@@ -506,6 +544,7 @@ class BridgeAddressFieldsTest {
         }
         post("/v1/vectors/upsert-chunks", Map.of(
             "collection", col, "ids", ids, "documents", docs, "metadatas", metas));
+        own(col, ids);
 
         // No "limit" key at all in the request body.
         var resp = post("/v1/vectors/store-get", Map.of("collection", col, "ids", ids));
@@ -581,6 +620,7 @@ class BridgeAddressFieldsTest {
         }
         post("/v1/vectors/upsert-chunks", Map.of(
             "collection", col, "ids", ids, "documents", docs, "metadatas", metas));
+        own(col, ids);
 
         var resp = post("/v1/vectors/store-get", Map.of(
             "collection", col, "ids", ids, "offset", 100));
@@ -619,6 +659,7 @@ class BridgeAddressFieldsTest {
         }
         post("/v1/vectors/upsert-chunks", Map.of(
             "collection", col, "ids", ids, "documents", docs, "metadatas", metas));
+        own(col, ids);
 
         var resp = post("/v1/vectors/store-get", Map.of(
             "collection", col, "ids", ids, "limit", 0));
@@ -750,6 +791,19 @@ class BridgeAddressFieldsTest {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    /**
+     * Give {@code ids} a live owner in {@code col} for {@code TENANT} (RDR-192 Step 5,
+     * bead nexus-wbfpw.10): store-get/search/get now require a live own-collection
+     * manifest owner; these HTTP-upserted fixtures wrote none.
+     */
+    private void own(String col, List<String> ids) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.ownChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, col,
+                ids.toArray(new String[0]));
+        }
+    }
 
     private HttpResponse<String> post(String path, Object body) throws Exception {
         return postAs(TOKEN, path, body);

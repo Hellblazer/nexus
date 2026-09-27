@@ -837,6 +837,31 @@ dead-owner are reaped (T2 `nexus/rdr-192-dispositions-2026-09-27`).
 
 #### Step 5: Migrate predicates 1 and 2 (search/get, `nexus.live_chunks`) to `live(c)`, collection-scoping `live_chunks` in the same change
 
+Amendment (Sam, 2026-09-27, found implementing `nexus-wbfpw.10`): split
+inventory from liveness. `nexus.collection_vector_stats` is also the
+collection inventory (`list_collections`, `get_collection`, `census --all`,
+the ghost sweep's dormant check), and some callers ask whether a chunk is
+stored rather than whether it is visible (`existing_ids`, the
+`put_note_pieces` delete guard). Moving those onto `live(c)` made a
+quarantine sibling vanish from the inventory, made a collection whose first
+chunk is not yet manifested read as missing, and let the delete guard treat
+a stored shared chunk as absent. So:
+
+- Content reads (search, hybrid, topic-scoped search, the get family,
+  `store-list`, `live_chunks`) use `live(c)`.
+- `collection_vector_stats` keeps one row per collection that physically
+  holds chunks. `chunk_count` and `last_write` count live chunks; a new
+  `stored_count` counts every stored chunk. Inventory readers decide
+  emptiness on `stored_count`, routing readers use the live count, and the
+  ghost sweep still marks a collection dormant only when it has no row.
+- `store-get` with `include_non_live` returns the ids physically stored,
+  ids only. `existing_ids` sends it, and `put_note_pieces` uses
+  `existing_ids`.
+
+An old client against this engine loses the presence probe and the
+emptiness check, so the pairing is not additive: the client release carrying
+these halves, and `nexus-wbfpw.31`, ships before this engine deploys.
+
 #### Step 6: Close the silent skip (Gap 3) — log `kept`/`kept_notes` at every client site named above, **and** add an unconditional log line to the engine's `runSweepTransaction` (`CatalogRepository.java:5740-5742`), which has the same gate-on-`swept>0` gap
 
 ### Phase 3: `reapable(c)` and the state-derived reaper (destructive; gated on Phase 1)
@@ -989,3 +1014,9 @@ To be completed at gate (Layer 3 AI critique).
   the census, the census is a route plus a verb, a failed `store_put` write
   rolls back. Defaults recorded: 30-day grace window, hourly reaper at 300
   chunks per collection per pass, the narrow Step 14 reading.
+- 2026-09-27: Step 5 amended during `nexus-wbfpw.10` (Sam): inventory is
+  split from liveness. `collection_vector_stats` keeps a row per stored
+  collection with a live `chunk_count` and a physical `stored_count`, and
+  `store-get` gains an `include_non_live` presence probe used by
+  `existing_ids`. `.nxexp` imports register an owner first
+  (`nexus-wbfpw.31`).

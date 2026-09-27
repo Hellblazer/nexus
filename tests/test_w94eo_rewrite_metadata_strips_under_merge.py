@@ -15,6 +15,7 @@ import hashlib
 from nexus.db import make_t3
 from nexus.db.t3 import _rewrite_collection_metadata
 from nexus.metadata_schema import make_chunk_metadata
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
 
 _COLLECTION = "docs__w94eo-rewrite__bge-base-en-v15-768__v1"
 _TEXT = "a chunk indexed before the canonical metadata schema existed"
@@ -33,6 +34,9 @@ def _seed(t3) -> str:
     t3.upsert_chunks(_COLLECTION, [chash], [_TEXT], [meta])
     # A pre-canonical key, written the way an old client wrote it.
     t3.update_chunks(_COLLECTION, [chash], [{_LEGACY: "markdown"}])
+    # RDR-192 Step 5 (nexus-wbfpw.10): get()/getWhere is a live-visibility
+    # gated read; a raw upsert with no catalog manifest has no live owner.
+    give_chunks_a_live_owner(_COLLECTION, [chash])
     return chash
 
 

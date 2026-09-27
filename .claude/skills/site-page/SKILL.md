@@ -13,14 +13,12 @@ Two genres exist. Never mix them in one document.
 
 | Genre | Lives at | Shape | Reader wants |
 |---|---|---|---|
-| How-to | `web/<name>.html` | Numbered lessons with action titles. Each lesson: `You might say` block (or, where an agent is the actor, `What the agent does`), `What happens` / `What you see`, rendered output in a dropdown. Mechanism in a collapsed appendix at the end. | To use it now. |
+| How-to | `web/<name>.html` | Numbered lessons with action titles. Each lesson: `You might say` block, `What happens` / `What you see`, rendered output in a dropdown. Mechanism in a collapsed appendix at the end. | To use it now. |
 | Exploration essay | `docs/exploration/<idea>-in-nexus.md` | Lineage named in sentence one, the practical problem, how the suite leverages it, what we borrowed, what we left out, what it changes for you, further reading. Model: `docs/exploration/xanadu-in-nexus.md`. | To understand the thinking and what it means for them. |
 
 History, earlier attempts, and design rationale belong in the essay, once. A how-to that narrates them was rejected by a reader ("a project development history lesson"); the same material in the essay genre was praised.
 
-**A how-to's numbered lessons are things the reader does.** Every lesson before the appendix has an action: the reader's, with a `You might say` block, or an agent's (see "Name the actor"), with a `What the agent does` block. A lesson in which nobody acts would carry `reading only`; that is mechanism, and mechanism goes in the collapsed appendix. Count the lessons before review: one reading-only lesson ahead of an actionable one sends the page back. The first ci-board page (2026-09-26) opened with two reading-only lessons (the data path, then template capacity) and put the one command a reader runs fourth; Sam found the whole page hard to read.
-
-**Name the actor.** The reader of a page and the actor in it can differ. When sessions and agents are the ones who use a feature (the CI board, mailboxes, the tuple space), the page says what the developer sets up, usually one lesson, and then what an agent does on its own, written in the third person ("the agent runs"), never "you". A how-to that addresses the developer as the one who runs every step misdescribes who does the work. Sam, 2026-09-27, on the ci-board page.
+**A how-to's numbered lessons are things the reader does.** Every lesson before the appendix has a `You might say` block and an action the reader takes. A lesson that would carry `reading only` is mechanism, and mechanism goes in the collapsed appendix. Count the lessons before review: one reading-only lesson ahead of an actionable one sends the page back. The first ci-board page (2026-09-26) opened with two reading-only lessons (the data path, then template capacity) and put the one command a reader runs fourth; Sam found the whole page hard to read.
 
 **One reader per page.** A `web/` page serves the person using the feature. Operator material (hosting, signature checks, tokens, duplicate handling, wire formats a reader never types) stays in the RDR or an operator page, and the how-to links to it in one sentence.
 

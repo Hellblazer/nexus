@@ -105,10 +105,17 @@ class VectorHandlerTokenUsageTest {
         }
         // Seed one chunk so /search returns a non-empty result (header is set regardless
         // of result count, but seeding gives a deterministic happy-path).
+        String tokc1 = dev.nexus.service.db.Chash.ofText("tokc1").toHex();
         pgRepo.upsertChunks(TENANT, COL,
-            List.of(dev.nexus.service.db.Chash.ofText("tokc1").toHex()),
+            List.of(tokc1),
             List.of("hello world"),
             List.of(Map.of()));
+        // RDR-192 Step 5 (nexus-wbfpw.10): search requires a live own-collection
+        // manifest owner.
+        new TenantScope(svcDs).withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, COL, tokc1);
+            return null;
+        });
 
         service = new NexusService(0, TOKEN, svcDs, null, pgRepo);
         service.start();

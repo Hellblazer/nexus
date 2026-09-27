@@ -431,7 +431,9 @@ def _find_dimension_mismatched_collections(
                 "declared_model": token,
                 "declared_dim": declared_dim,
                 "active_dim": active_dim,
-                "count": c.get("count", 0),
+                # RDR-192 Step 5 amendment: prune deletes every stored chunk,
+                # so the count shown before it is the stored count.
+                "count": c.get("stored_count", c.get("count", 0)),
             })
     return mismatches, skipped, active_label
 

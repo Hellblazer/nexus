@@ -2624,8 +2624,9 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     NOTE GUARD (nexus-39upx hazard 2 / RDR-145): ``docs_for_chashes`` only
     sees MANIFESTED references, so it cannot tell a chash that fell out of
     THIS document's manifest from a chash that never had one at all — a
-    manifest-less ``store_put`` / ``nx store put`` note, live by design
-    (``catalog-003-soft-delete.xml``'s ``live_chunks`` contract). Surviving
+    manifest-less legacy ``store_put`` / ``nx store put`` note (reads hide
+    it since RDR-192 Step 5, but deleting sweeps keep it until Step 11
+    removes this guard). Surviving
     union-guard candidates are additionally checked against
     ``notes_provider()`` (typically ``nexus.indexer_utils.live_note_chashes``
     over a ``CollectionDocumentsCache``-memoized document list — round 2

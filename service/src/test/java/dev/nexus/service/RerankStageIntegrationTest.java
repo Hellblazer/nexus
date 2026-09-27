@@ -174,6 +174,14 @@ class RerankStageIntegrationTest {
             "documents",  List.of(DOC_NEAR, DOC_MID, DOC_FAR),
             "metadatas",  List.of(Map.of(), Map.of(), Map.of())));
         assertThat(((Number) up.get("upserted")).intValue()).isEqualTo(3);
+
+        // RDR-192 Step 5 (nexus-wbfpw.10): search/hybrid-search now require a live
+        // own-collection manifest owner (live(c)) -- these chunks were written via the
+        // HTTP upsert-chunks path with no manifest row at all, so give them one.
+        new TenantScope(svcDs).withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, COL, C1, C2, C3);
+            return null;
+        });
     }
 
     @AfterAll

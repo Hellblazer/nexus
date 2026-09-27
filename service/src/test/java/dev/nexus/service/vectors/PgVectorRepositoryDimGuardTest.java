@@ -140,6 +140,11 @@ class PgVectorRepositoryDimGuardTest {
             ps.setString(5, zeroVectorLiteral(768));
             ps.execute();
         }
+        // RDR-192 Step 5 (nexus-wbfpw.10): getEmbeddings/list now require a live
+        // own-collection manifest owner -- own BOTH rows (list() is dim-agnostic and
+        // must surface both; getEmbeddings' exclusion of the foreign-dim row is the
+        // dim guard under test, not a manifest gap).
+        own(COLLECTION, CHASH_OWN_DIM, CHASH_FOREIGN_DIM);
 
         // nexus-74zvm fixture: a SECOND mixed-dim collection, with well-defined
         // (unit, non-zero-norm) vectors so search/hybridSearch's <=> cosine-distance
@@ -169,6 +174,22 @@ class PgVectorRepositoryDimGuardTest {
             ps.setString(5, unitVectorLiteral(768));
             ps.execute();
         }
+        // RDR-192 Step 5 (nexus-wbfpw.10): search/hybridSearch require a live
+        // own-collection manifest owner too -- own the own-dim row search must
+        // return; the foreign-dim row's exclusion is the dim guard under test, so
+        // it deliberately stays unowned (excluded on both grounds).
+        own(COLLECTION_NULLGUARD, CHASH_NULLGUARD_OWN);
+    }
+
+    /**
+     * Give {@code ids} a live owner in {@code collection} for {@code TENANT}
+     * (RDR-192 Step 5, bead nexus-wbfpw.10).
+     */
+    private void own(String collection, String... ids) {
+        tenantScope.withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, collection, ids);
+            return null;
+        });
     }
 
     @AfterAll

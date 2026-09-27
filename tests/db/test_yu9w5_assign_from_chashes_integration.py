@@ -30,6 +30,8 @@ import hashlib
 
 import pytest
 
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
+
 _COLL = "knowledge__yu9w5test__bge-base-en-v15-768__v1"
 
 
@@ -58,6 +60,9 @@ def test_assign_from_chashes_route_persists_real_assignment(t2_service_env) -> N
         collection_name=_COLL, ids=ids, documents=docs,
         embeddings=[[] for _ in ids], metadatas=[{}, {}],
     )
+    # RDR-192 Step 5 (nexus-wbfpw.10): get_embeddings is a live-visibility
+    # gated read; a raw upsert with no catalog manifest has no live owner.
+    give_chunks_a_live_owner(_COLL, ids)
     real_embs = t3.get_embeddings(_COLL, ids)
     assert real_embs.shape[0] == 2, "both chunks must have real server-side vectors"
 
@@ -141,6 +146,8 @@ def test_hook_reaches_route_and_persists_without_embeddings_fetch(t2_service_env
         collection_name=_COLL, ids=ids, documents=["gamma content about glaciers"],
         embeddings=[[]], metadatas=[{}],
     )
+    # RDR-192 Step 5 (nexus-wbfpw.10): see the sibling test above.
+    give_chunks_a_live_owner(_COLL, ids)
     real_embs = t3.get_embeddings(_COLL, ids)
 
     tax = HttpTaxonomyStore()

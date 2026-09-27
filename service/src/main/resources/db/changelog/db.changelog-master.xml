@@ -1574,6 +1574,16 @@
     -->
 
     <!--
+        RDR-192 Step 5 (bead nexus-wbfpw.10): every read-visibility predicate
+        (plain/text-gated/hybrid/topic-scoped search functions and
+        nexus.live_chunks) moves onto live(c) from vectors-018. Generated from
+        the previous bodies; see the included file's header. Non-destructive.
+        Placed after vectors-018 (current tail) and before the
+        grants-nexus-svc.xml runAlways block (D0.1 late-append convention).
+    -->
+    <include file="db/changelog/vectors-019-live-c-read-visibility.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

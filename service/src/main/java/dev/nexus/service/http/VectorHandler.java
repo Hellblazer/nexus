@@ -41,7 +41,8 @@ import java.util.Map;
  *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
  *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check)
  *   POST /v1/vectors/get-all-metadata  ids+metadata for an ENTIRE collection in one round trip (nexus-duoak)
- *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many)
+ *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many);
+ *                                    include_non_live=true returns only the ids physically stored
  *   POST /v1/vectors/get-embeddings  fetch stored vectors by IDs (migration/audit)
  *   POST /v1/vectors/store-list      list collection (MCP store_list)
  *   POST /v1/vectors/store-delete    delete by IDs (MCP store_delete)
@@ -854,6 +855,18 @@ public final class VectorHandler implements HttpHandler {
 
         if (ids != null && ids.size() > MAX_BATCH_IDS) {
             HttpUtil.send(ex, 400, "{\"error\":\"too many ids (max " + MAX_BATCH_IDS + ")\"}");
+            return;
+        }
+
+        // RDR-192 Step 5 amendment (nexus-wbfpw.10): include_non_live asks which ids
+        // are physically stored, ignoring live(c). Ids only, never content, and only
+        // for an explicit ids list.
+        if (optBool(body, "include_non_live", false)) {
+            if (ids == null) {
+                HttpUtil.send(ex, 400, "{\"error\":\"include_non_live requires ids\"}");
+                return;
+            }
+            HttpUtil.send(ex, 200, json(Map.of("ids", repo.presentIds(tenant, collection, ids))));
             return;
         }
 

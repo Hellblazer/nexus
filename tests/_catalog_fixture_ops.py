@@ -36,6 +36,7 @@ __all__ = [
     "documents_by_file_path",
     "documents_by_title",
     "fk_dropped_for_dangling_seed",
+    "give_chunks_a_live_owner",
     "only_document",
     "register_real_doc_id",
     "restore_fk_after_dangling_seeds",
@@ -78,6 +79,55 @@ def register_real_doc_id(
             owner, title,
             content_type="paper",
             physical_collection=physical_collection,
+        )
+    return str(tumbler)
+
+
+def give_chunks_a_live_owner(
+    collection: str,
+    chashes: Iterable[str],
+    *,
+    title: str = "",
+    content_type: str = "knowledge",
+    owner_name: str = "test-live-owner-fixture",
+) -> str:
+    """Register a real catalog document owning *chashes* in *collection*
+    and write their manifest rows, so chunks a fixture already wrote through
+    a raw T3 write (``upsert_chunks``/``upsert_chunks_with_embeddings``, no
+    catalog manifest) have a live owner in their OWN collection.
+
+    RDR-192 Step 5 (bead nexus-wbfpw.10): every content read (search, get,
+    getWhere, getEmbeddings, getAllMetadata, list, store-get) now returns
+    only chunks with a live own-collection manifest owner — a chunk written
+    with no manifest is invisible to those reads. A fixture whose SUBJECT is
+    something other than manifest-less visibility itself (embedding drift,
+    assignment audit, split-note recovery, ...) calls this right after
+    writing its probe chunks so a later read can see them at all.
+
+    Mints a fresh document each call (like :func:`register_real_doc_id`) —
+    calling this twice for the same chashes creates two owners rather than
+    reusing one, which is fine for a test that seeds once. Returns the new
+    document's tumbler as a string.
+    """
+    ids = [c for c in chashes if c]
+    if not ids:
+        return ""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    with HttpCatalogClient() as cat:
+        owner = cat.register_owner(
+            owner_name, "repo", repo_hash="test-live-owner-fixture-hash",
+        )
+        tumbler = cat.register(
+            owner, title or f"live-owner fixture for {collection}",
+            content_type=content_type,
+            physical_collection=collection,
+            chunk_count=len(ids),
+        )
+        cat.write_manifest(
+            str(tumbler),
+            [{"chash": chash, "position": i} for i, chash in enumerate(ids)],
+            collection=collection,
         )
     return str(tumbler)
 

@@ -309,14 +309,17 @@ def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: A
     with no manifest, searchable and unlinked, so this deletes the pieces
     the call newly wrote and re-raises. A piece that existed before the
     call is identical text another note holds, and is left alone.
+
+    "Existed" means physically stored, whether or not it has a live owner, so
+    the probe is ``existing_ids`` rather than ``get_by_id``: since RDR-192
+    Step 5 a read returns only chunks with a live own-collection owner, and a
+    stored chunk without one (a superseded piece not yet reaped, a legacy
+    note) would otherwise read as absent and be deleted here.
     """
     if len(pieces) == 1:
         return [t3.put(collection=collection, content=pieces[0], **put_kwargs)]
-    preexisting = {
-        chash
-        for chash in (hashlib.sha256(p.encode()).hexdigest() for p in pieces)
-        if t3.get_by_id(collection, chash) is not None
-    }
+    chashes = [hashlib.sha256(p.encode()).hexdigest() for p in pieces]
+    preexisting = set(t3.existing_ids(collection, chashes))
     written: list[str] = []
     try:
         for piece in pieces:
@@ -366,9 +369,8 @@ def manifest_doc_index(
     for the whole collection: one ``list_by_collection``, one batched
     ``get_manifests``. A document with no manifest rows contributes nothing
     and its chunks fall through to per-chunk keying at the call site — which
-    is right for both a manifest-less note (live by design, the
-    ``catalog-003-soft-delete.xml`` ``live_chunks`` contract) and a
-    superseded chunk no sweep has reaped.
+    is right for both a manifest-less legacy note and a superseded chunk
+    no sweep has reaped.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
 
