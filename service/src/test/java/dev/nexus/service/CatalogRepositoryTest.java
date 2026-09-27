@@ -4786,4 +4786,83 @@ class CatalogRepositoryTest {
         assertThat(b).isPresent();
         assertThat(b.get().get("deactivated_at")).isNull();
     }
+
+    // ── nexus-l46pu (follow-up to nexus-kk4ut): catalog_collections.aspects_enabled ──
+
+    @Test @Order(330)
+    void collection_aspectsEnabled_defaultsFalseForANewRegistration() {
+        // catalog-040: NOT NULL DEFAULT FALSE reproduces "not opted in" -- the
+        // exact behaviour a docs__ collection had before this column existed
+        // (aspects.docs_collections defaults to [], nexus-kk4ut) -- for every
+        // row, new or pre-existing. A brand-new upsertCollection() call never
+        // sets ASPECTS_ENABLED explicitly (see upsertCollection's INSERT
+        // column list), so this is exactly the "row never touched this
+        // column" case the column default must cover.
+        String name = "docs__aspects-default__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-default", "embedding_model", "voyage-context-3"));
+        var coll = repo.getCollection(TENANT_A, name);
+        assertThat(coll.get("aspects_enabled")).isEqualTo(false);
+    }
+
+    @Test @Order(331)
+    void collection_aspectsEnabled_carriedByGetCollectionAndListCollections() {
+        String name = "docs__aspects-shape__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-shape", "embedding_model", "voyage-context-3"));
+        repo.setCollectionAspectsEnabled(TENANT_A, name, true);
+
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
+        var listed = repo.listCollections(TENANT_A).stream()
+            .filter(c -> name.equals(c.get("name"))).findFirst();
+        assertThat(listed).isPresent();
+        assertThat(listed.get().get("aspects_enabled")).isEqualTo(true);
+    }
+
+    @Test @Order(332)
+    void collection_setAspectsEnabled_updatesTheRow() {
+        String name = "docs__aspects-set__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-set", "embedding_model", "voyage-context-3"));
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(false);
+
+        int updated = repo.setCollectionAspectsEnabled(TENANT_A, name, true);
+        assertThat(updated).isEqualTo(1);
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
+
+        // Flip back -- a plain boolean flag, not an append-only chain like
+        // superseded_by, so re-setting to the opposite value is a normal op.
+        updated = repo.setCollectionAspectsEnabled(TENANT_A, name, false);
+        assertThat(updated).isEqualTo(1);
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(false);
+    }
+
+    @Test @Order(333)
+    void collection_setAspectsEnabled_noMatchingRowUpdatesNothing() {
+        int updated = repo.setCollectionAspectsEnabled(
+            TENANT_A, "docs__does-not-exist-l46pu__voyage-context-3__v1", true);
+        assertThat(updated).isEqualTo(0);
+    }
+
+    @Test @Order(334)
+    void collection_setAspectsEnabled_rlsIsolation_cannotSetAnotherTenantsCollection() {
+        final String TA = "cat-tenant-l46pu-rls-a";
+        final String TB = "cat-tenant-l46pu-rls-b";
+        String name = "docs__aspects-rls__voyage-context-3__v1";
+        repo.upsertCollection(TB, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-rls", "embedding_model", "voyage-context-3"));
+
+        // TENANT A attempting to set TENANT B's collection must affect nothing --
+        // FORCE ROW LEVEL SECURITY scopes the UPDATE's WHERE to tenant A's own
+        // rows, so the cross-tenant name simply matches no row.
+        int updated = repo.setCollectionAspectsEnabled(TA, name, true);
+        assertThat(updated).isEqualTo(0);
+
+        // Tenant B's row is untouched.
+        assertThat(repo.getCollection(TB, name).get("aspects_enabled")).isEqualTo(false);
+    }
 }

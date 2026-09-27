@@ -1602,6 +1602,17 @@
     <include file="db/changelog/telemetry-015-install-ping-source.xml"/>
 
     <!--
+        Bead nexus-l46pu (follow-up to nexus-kk4ut): nexus.catalog_collections
+        gains aspects_enabled BOOLEAN NOT NULL DEFAULT FALSE, the tenant-wide
+        home for the docs__ aspect-extraction opt-in, replacing per-machine
+        config.yml as the durable source of truth. See the included file's own
+        header for the default-preservation reasoning. Placed after catalog-039
+        (the tail when it landed) and before the grants-nexus-svc.xml runAlways
+        block, matching the established late-append convention.
+    -->
+    <include file="db/changelog/catalog-040-collection-aspects-enabled.xml"/>
+
+    <!--
         nexus-1vc0n: partial (tenant_id, file_path) index for the new bulk
         owner-agnostic file_path lookup (documentsByFilePaths,
         POST /v1/catalog/list_by_file_paths) — see the included file's own

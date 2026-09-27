@@ -236,6 +236,56 @@ def info_cmd(name: str) -> None:
     click.echo(f"Indexed:     {last_indexed}")
 
 
+@collection.command("aspects")
+@click.argument("name")
+@click.option(
+    "--enable/--disable", "enable", default=None,
+    help="Opt this docs__ collection in to (or out of) engine-side aspect "
+         "extraction, tenant-wide. Omit to show the current value.",
+)
+def aspects_cmd(name: str, enable: bool | None) -> None:
+    """Show or set a collection's engine-side ``aspects_enabled`` attribute.
+
+    nexus-l46pu (follow-up to nexus-kk4ut): the tenant-wide, engine-hosted
+    home for the docs__ aspect-extraction opt-in, read by every machine
+    indexing this collection — replaces each machine's local
+    ``aspects.docs_collections`` config.yml list as the durable source of
+    truth. A local config.yml entry still LOCAL-OVERRIDES and wins when it
+    names the collection (see
+    ``nexus.aspect_extractor.docs_collection_opted_in``); this verb only
+    ever changes the engine's row.
+
+    Bare ``nx collection aspects NAME`` shows the current value;
+    ``--enable``/``--disable`` sets it.
+    """
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reader = make_catalog_reader()
+    row = reader.get_collection(name) if reader is not None else None
+    if row is None:
+        raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
+
+    if enable is None:
+        current = row.get("aspects_enabled")
+        if current is None:
+            click.echo(
+                f"{name}: aspects_enabled not reported by this engine "
+                "(pre-nexus-l46pu floor) — falling back to local config.yml"
+            )
+        else:
+            click.echo(f"{name}: aspects_enabled={bool(current)}")
+        return
+
+    writer = make_catalog_writer()
+    updated = writer.set_collection_aspects_enabled(name, enable)
+    if not updated:
+        raise click.ClickException(f"collection not found: {name!r}")
+
+    from nexus.aspect_extractor import invalidate_engine_aspects_enabled_cache  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    invalidate_engine_aspects_enabled_cache(name)
+    click.echo(f"{name}: aspects_enabled={enable}")
+
+
 @collection.command("delete")
 @click.argument("name")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")

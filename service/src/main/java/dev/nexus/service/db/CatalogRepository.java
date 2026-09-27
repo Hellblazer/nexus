@@ -7276,14 +7276,23 @@ public final class CatalogRepository {
         });
     }
 
-    /** Get a collection by name. Returns null if not found. */
+    /**
+     * Get a collection by name. Returns null if not found.
+     *
+     * <p>Carries {@code aspects_enabled} (RDR bead nexus-l46pu, follow-up to
+     * nexus-kk4ut) since this is exactly the caller-facing single-row read
+     * the client's opt-in decision consults; see {@link #collRowWithAspects}.
+     * {@link #collectionForTuple} is a routing lookup, not a caller-facing
+     * row read, and keeps {@link #collRow}'s original 10-key shape.
+     */
     public Map<String, Object> getCollection(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
-                               CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT)
+                               CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
+                               CATALOG_COLLECTIONS.ASPECTS_ENABLED)
                        .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).fetchOne();
-            return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
-                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
+            return r != null ? collRowWithAspects(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
+                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10(), r.value11()) : null;
         });
     }
 
@@ -7376,9 +7385,11 @@ public final class CatalogRepository {
      *
      * <p>Each row also now carries {@code dimension} and {@code lifecycle_state} —
      * columns that did not exist when {@link #collRow} was first written — via
-     * {@link #collRowWithLifecycle}. {@link #getCollection} and {@link
-     * #collectionForTuple} are NOT touched by this bead and keep {@link #collRow}'s
-     * original 10-key shape.
+     * {@link #collRowWithLifecycle}, which also carries {@code aspects_enabled}
+     * (RDR bead nexus-l46pu). {@link #collectionForTuple} is NOT touched by
+     * either bead and keeps {@link #collRow}'s original 10-key shape; {@link
+     * #getCollection} carries {@code aspects_enabled} too (see its own javadoc)
+     * but not {@code dimension}/{@code lifecycle_state}.
      *
      * @param contentType    exact-match filter on {@code catalog_collections.content_type},
      *                       or {@code null}/blank for no filter
@@ -7397,11 +7408,11 @@ public final class CatalogRepository {
             }
             return ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                            CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
-                           CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                           CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.ASPECTS_ENABLED)
                        .from(CATALOG_COLLECTIONS).where(cond).orderBy(CATALOG_COLLECTIONS.NAME).fetch()
                        .map(r -> collRowWithLifecycle(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10(),
-                                                       r.value11(), r.value12()));
+                                                       r.value11(), r.value12(), r.value13()));
         });
     }
 
@@ -7657,6 +7668,32 @@ public final class CatalogRepository {
                    // THIRD value underneath an observed read once this CAS is in place.
                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
                        .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
+               .execute()
+        );
+    }
+
+    /**
+     * Set {@code catalog_collections.aspects_enabled} for one row (RDR bead
+     * nexus-l46pu, follow-up to nexus-kk4ut): the tenant-wide, engine-hosted
+     * home for the docs__ aspect-extraction opt-in previously local-only per
+     * machine (T2 critique nexus/critique-nexus-kk4ut-docs-opt-in-substantive
+     * item 1). A pure UPDATE by {@code (tenant, name)} — same shape as {@link
+     * #supersedeCollection}, minus that method's CAS conjunct (there is no
+     * concurrent-writer race to guard here: two concurrent sets simply leave
+     * the LAST writer's value, which is the correct outcome for a plain
+     * boolean flag, unlike supersede's append-only chain). The handler's own
+     * guard (row must exist) lives in {@code CatalogHandler
+     * .handleCollectionSetAspectsEnabled}, matching the sibling verb {@code
+     * handleCollectionSupersede}'s guard-in-the-handler placement.
+     *
+     * @return the number of rows updated (0 means no matching {@code (tenant, name)} row)
+     */
+    public int setCollectionAspectsEnabled(String tenant, String name, boolean enabled) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.update(CATALOG_COLLECTIONS)
+               .set(CATALOG_COLLECTIONS.ASPECTS_ENABLED, enabled)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_COLLECTIONS.NAME.eq(name)))
                .execute()
         );
     }
@@ -10366,11 +10403,14 @@ public final class CatalogRepository {
 
     /**
      * {@link #collRow} plus {@code dimension} and {@code lifecycle_state} (RDR-204
-     * Phase 2, bead nexus-ft04v.24) — used ONLY by {@link #listCollections(String,
-     * String, String)}. {@link #getCollection} and {@link #collectionForTuple} are
-     * out of this bead's scope and keep {@link #collRow}'s original 10-key shape;
-     * every key {@link #collRow} already sets is untouched here, this only appends
-     * two new keys at the end.
+     * Phase 2, bead nexus-ft04v.24) plus {@code aspects_enabled} (RDR bead
+     * nexus-l46pu) — used ONLY by {@link #listCollections(String, String,
+     * String)}. {@link #collectionForTuple} is out of both beads' scope and
+     * keeps {@link #collRow}'s original 10-key shape; every key {@link #collRow}
+     * already sets is untouched here, this only appends three keys at the end.
+     * {@link #getCollection} carries {@code aspects_enabled} too, via the
+     * sibling helper {@link #collRowWithAspects}, but not {@code dimension}/
+     * {@code lifecycle_state}.
      *
      * @param dimension      {@code catalog_collections.dimension} — nullable (a
      *                       collection can be registered before its stats dimension
@@ -10379,14 +10419,38 @@ public final class CatalogRepository {
      * @param lifecycleState {@code catalog_collections.lifecycle_state} — NOT NULL
      *                       on any real row since hygiene-002, but {@code nne()}'d
      *                       for defensive consistency with every other string field here
+     * @param aspectsEnabled {@code catalog_collections.aspects_enabled} — NOT NULL
+     *                       DEFAULT FALSE since catalog-040; defensively coerced to
+     *                       {@code false} on a {@code null} read (should not occur)
      */
     private static Map<String, Object> collRowWithLifecycle(String name, String ctype, String owner,
                                                  String embd, String mver, String dname,
                                                  Boolean legcy, String supBy, String supAt, String crAt,
-                                                 Integer dimension, String lifecycleState) {
+                                                 Integer dimension, String lifecycleState,
+                                                 Boolean aspectsEnabled) {
         Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
         m.put("dimension",       dimension);
         m.put("lifecycle_state", nne(lifecycleState));
+        m.put("aspects_enabled", aspectsEnabled != null ? aspectsEnabled : Boolean.FALSE);
+        return m;
+    }
+
+    /**
+     * {@link #collRow} plus {@code aspects_enabled} (RDR bead nexus-l46pu,
+     * follow-up to nexus-kk4ut: the tenant-wide docs__ aspect-extraction
+     * opt-in) — used by {@link #getCollection}. Kept as its own helper rather
+     * than folded into {@link #collRowWithLifecycle} because {@code
+     * getCollection} deliberately does NOT carry {@code dimension}/{@code
+     * lifecycle_state} (those stay {@link #listCollections(String, String,
+     * String)}-only, per that method's own javadoc) — {@code aspects_enabled}
+     * is the one field both single-row and list reads now share.
+     */
+    private static Map<String, Object> collRowWithAspects(String name, String ctype, String owner,
+                                                 String embd, String mver, String dname,
+                                                 Boolean legcy, String supBy, String supAt, String crAt,
+                                                 Boolean aspectsEnabled) {
+        Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
+        m.put("aspects_enabled", aspectsEnabled != null ? aspectsEnabled : Boolean.FALSE);
         return m;
     }
 

@@ -1824,6 +1824,148 @@ class TestDocsOptIn:
         assert seen == [], "a .jsonl file in an opted-in docs__ collection must not reach enqueue"
 
 
+class _FakeCatalogReader:
+    """A minimal ``make_catalog_reader()`` stand-in for
+    ``TestDocsOptInEngineAttribute`` — carries one collection row (or none)
+    and counts ``get_collection`` calls so a test can assert the cache
+    actually short-circuits a repeat read."""
+
+    def __init__(self, row: dict | None) -> None:
+        self._row = row
+        self.calls = 0
+
+    def get_collection(self, name: str) -> dict | None:
+        self.calls += 1
+        return self._row
+
+
+class TestDocsOptInEngineAttribute:
+    """nexus-l46pu (follow-up to nexus-kk4ut): the tenant-wide engine
+    ``catalog_collections.aspects_enabled`` attribute is the fallback a
+    machine with no matching local ``aspects.docs_collections`` entry now
+    consults, cached once per process per collection. Local config still
+    wins outright when it matches (nexus-kk4ut's original per-machine
+    override, unchanged)."""
+
+    @staticmethod
+    def _local_config(monkeypatch, value) -> None:
+        monkeypatch.setattr(
+            "nexus.config.load_config",
+            lambda *a, **k: {"aspects": {"docs_collections": value}},
+        )
+
+    @pytest.fixture(autouse=True)
+    def _clear_engine_cache(self):
+        from nexus.aspect_extractor import invalidate_engine_aspects_enabled_cache
+
+        invalidate_engine_aspects_enabled_cache()
+        yield
+        invalidate_engine_aspects_enabled_cache()
+
+    def test_engine_row_opts_in_when_local_config_is_silent(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import select_config
+
+        self._local_config(monkeypatch, [])
+        reader = _FakeCatalogReader({"name": "docs__l46pu-a", "aspects_enabled": True})
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+
+        config = select_config("docs__l46pu-a")
+        assert config is not None and config.extractor_name == "general-prose-v1"
+
+    def test_engine_row_false_and_no_local_match_means_not_opted_in(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import select_config
+
+        self._local_config(monkeypatch, [])
+        reader = _FakeCatalogReader({"name": "docs__l46pu-b", "aspects_enabled": False})
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+
+        assert select_config("docs__l46pu-b") is None
+
+    def test_local_config_wins_and_the_engine_is_never_consulted(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import select_config
+
+        self._local_config(monkeypatch, ["docs__l46pu-c*"])
+
+        def _boom():
+            raise AssertionError("the engine must not be consulted when the local list already matched")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", _boom)
+        config = select_config("docs__l46pu-c")
+        assert config is not None and config.extractor_name == "general-prose-v1"
+
+    def test_an_old_engine_row_with_no_aspects_enabled_key_falls_back_to_local_config(
+        self, monkeypatch,
+    ) -> None:
+        """A pre-nexus-l46pu engine's ``get_collection`` response carries no
+        ``aspects_enabled`` key at all (the column did not exist). This must
+        read as "the engine has no opinion," never crash and never be
+        mistaken for an explicit ``False`` -- the two are different facts
+        even though both currently resolve to "not opted in" (docstring on
+        ``_engine_aspects_enabled``)."""
+        from nexus.aspect_extractor import select_config
+
+        self._local_config(monkeypatch, [])
+        reader = _FakeCatalogReader({"name": "docs__l46pu-d"})  # no aspects_enabled key
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+
+        assert select_config("docs__l46pu-d") is None
+
+        # ...and local config still wins on an old engine exactly as it did
+        # before this bead -- the fallback never disables the override.
+        self._local_config(monkeypatch, ["docs__l46pu-d*"])
+        config = select_config("docs__l46pu-d")
+        assert config is not None and config.extractor_name == "general-prose-v1"
+
+    def test_an_unregistered_collection_falls_back_to_false(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import select_config
+
+        self._local_config(monkeypatch, [])
+        reader = _FakeCatalogReader(None)  # get_collection(name) -> None, unregistered
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+
+        assert select_config("docs__l46pu-e") is None
+
+    def test_a_catalog_read_failure_never_raises_and_reads_as_not_opted_in(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import select_config
+
+        self._local_config(monkeypatch, [])
+
+        class _Boom:
+            def get_collection(self, name: str) -> dict:
+                raise RuntimeError("connection refused")
+
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Boom())
+        assert select_config("docs__l46pu-f") is None
+
+    def test_the_engine_read_is_cached_per_collection_not_per_call(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import docs_collection_opted_in
+
+        self._local_config(monkeypatch, [])
+        reader = _FakeCatalogReader({"name": "docs__l46pu-g", "aspects_enabled": True})
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+
+        assert docs_collection_opted_in("docs__l46pu-g") is True
+        assert docs_collection_opted_in("docs__l46pu-g") is True
+        assert reader.calls == 1, "a second read of the same collection must hit the cache, not the engine"
+
+    def test_invalidate_cache_forces_a_fresh_engine_read(self, monkeypatch) -> None:
+        from nexus.aspect_extractor import (
+            docs_collection_opted_in,
+            invalidate_engine_aspects_enabled_cache,
+        )
+
+        self._local_config(monkeypatch, [])
+        reader = _FakeCatalogReader({"name": "docs__l46pu-h", "aspects_enabled": False})
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: reader)
+        assert docs_collection_opted_in("docs__l46pu-h") is False
+
+        reader._row = {"name": "docs__l46pu-h", "aspects_enabled": True}
+        assert docs_collection_opted_in("docs__l46pu-h") is False, "still cached"
+
+        invalidate_engine_aspects_enabled_cache("docs__l46pu-h")
+        assert docs_collection_opted_in("docs__l46pu-h") is True, "cache cleared -- reads the new value"
+
+
 def test_an_unreadable_config_means_not_opted_in_and_never_raises(monkeypatch) -> None:
     """nexus-kk4ut code review: select_config runs on the aspect worker's
     batch path outside any row handler, so a malformed config.yml must not

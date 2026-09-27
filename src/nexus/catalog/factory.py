@@ -409,9 +409,17 @@ def make_catalog_writer(
 #: caller could compute client-side, so it belongs on the writer even for
 #: its read-only mode. No SQLite/daemon-mode equivalent ever existed for
 #: it either.
+#:
+#: nexus-l46pu: ``set_collection_aspects_enabled`` joins this set for the
+#: same reason — a service-only op introduced long after the local catalog
+#: died (RDR-158 P4), with no canonical ``Catalog`` counterpart to mirror
+#: on ``CatalogWriter``/``CATALOG_WRITE_OPS`` (the tenant-wide docs__
+#: aspect-extraction opt-in on ``catalog_collections`` did not exist before
+#: this bead).
 _SERVICE_ONLY_WRITE_OPS: frozenset[str] = frozenset({
     "update_many", "delete_many", "purge_trash", "record_gc_audit",
     "delete_collection", "restore_document", "ghost_sweep",
+    "set_collection_aspects_enabled",
 })
 
 

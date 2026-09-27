@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-l46pu, follow-up to nexus-kk4ut (T2 critique
+    nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1): moves the
+    docs__ aspect-extraction opt-in off each machine's local config.yml
+    (``aspects.docs_collections``) onto this tenant-wide row, so two
+    machines indexing the same shared collection make the same decision
+    instead of giving partial document_aspects coverage.
+
+    Single-step ADD COLUMN, no walk (unlike catalog-036-4's nullable
+    dimension/lifecycle_state columns, which needed a separate backfill
+    walk because those two columns encode a fact every EXISTING row
+    already had but nobody had computed yet): the opted-in-today set is
+    empty by construction — aspects.docs_collections defaults to `[]`
+    (aspect_extractor.py's _docs_opt_in_patterns), so no docs__ collection
+    is extracted today unless a machine's local config names it. `NOT NULL
+    DEFAULT FALSE` reproduces that exact default for every existing row —
+    "not opted in" — in one statement; no DATA EFFECT line, since no
+    existing row's observable behaviour changes (a row this column
+    defaults FALSE on is a row nothing reads as opted-in today either).
+    A machine's local config.yml list keeps working as a LOCAL OVERRIDE
+    that wins when it names the collection (client half, aspect_extractor
+    .docs_collection_opted_in) — this column is the new tenant-wide
+    fallback a config-silent machine now also consults, not a replacement.
+
+    Changeset id: catalog-040 is the next unused number in the catalog
+    family (family maximum at HEAD: catalog-039-gc-restore-audit.xml).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-040-1" author="nexus-l46pu">
+        <comment>catalog_collections.aspects_enabled: tenant-wide docs__ aspect-extraction opt-in (nexus-l46pu, engine half of the nexus-kk4ut follow-up). NOT NULL DEFAULT FALSE preserves today's "nothing opted in" default for every existing row -- no backfill walk needed, no DATA EFFECT.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_collections
+    ADD COLUMN aspects_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.catalog_collections DROP COLUMN IF EXISTS aspects_enabled;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

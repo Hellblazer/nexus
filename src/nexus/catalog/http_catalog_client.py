@@ -3011,6 +3011,26 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         coll = self.get_collection(name)
         return bool(coll.get("legacy_grandfathered", False)) if coll else False
 
+    def set_collection_aspects_enabled(self, name: str, enabled: bool) -> int:
+        """POST ``/v1/catalog/collections/set_aspects_enabled`` — set the
+        engine's tenant-wide ``catalog_collections.aspects_enabled``
+        attribute for ``name`` (nexus-l46pu, follow-up to nexus-kk4ut: moves
+        the docs__ aspect-extraction opt-in off each machine's local
+        ``aspects.docs_collections`` config.yml list onto the collection
+        row, so every machine indexing the same shared collection makes the
+        same decision — T2 critique
+        nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1).
+
+        Returns the row-updated count (always ``1`` on success). The engine
+        404s on an unregistered ``name``, which raises
+        ``httpx.HTTPStatusError`` here like any other catalog call; a
+        caller that wants a soft "not found" catches it itself.
+        """
+        result = self._post("/collections/set_aspects_enabled", {
+            "name": name, "aspects_enabled": bool(enabled),
+        })
+        return int((result or {}).get("updated", 0))
+
     def embedding_profile(self) -> list[dict[str, Any]]:
         """The calling tenant's install-scoped embedding profile, one row per
         content type: ``{content_type, embedding_model, dimension}``.

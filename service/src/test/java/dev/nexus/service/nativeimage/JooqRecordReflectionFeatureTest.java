@@ -231,6 +231,11 @@ class JooqRecordReflectionFeatureTest {
     // added nexus.gc_restore_rereferenced_bounded, a RETURNS TABLE(restored,
     // remaining) function, one generated Record type
     // (GcRestoreRereferencedBoundedRecord), +1.
+    // 106 -> 106: nexus-l46pu (follow-up to nexus-kk4ut), catalog-040-
+    // collection-aspects-enabled.xml added the aspects_enabled column to
+    // the pre-existing nexus.catalog_collections table -- a column-count
+    // change only, no new Record type (same shape as telemetry-012's and
+    // memory-004's column-only bumps above). No delta.
     private static final int EXPECTED_RECORD_TYPES = 106;
 
     @Test

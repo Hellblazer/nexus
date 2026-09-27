@@ -222,6 +222,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/collections/upsert"    -> handleCollectionUpsert(exchange, tenant, method);
                 case "/collections/list"      -> handleCollectionList(exchange, tenant, method);
                 case "/collections/get"       -> handleCollectionGet(exchange, tenant, method);
+                case "/collections/set_aspects_enabled" -> handleCollectionSetAspectsEnabled(exchange, tenant, method);
                 case "/collections/supersede" -> handleCollectionSupersede(exchange, tenant, method);
                 case "/collections/rename"    -> handleCollectionRename(exchange, tenant, method);
                 case "/collections/rehome"    -> handleCollectionRehome(exchange, tenant, method);
@@ -1845,6 +1846,32 @@ public final class CatalogHandler implements HttpHandler {
         var coll = repo.getCollection(tenant, name);
         if (coll == null) { HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return; }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(coll));
+    }
+
+    /**
+     * {@code POST /v1/catalog/collections/set_aspects_enabled} (RDR bead
+     * nexus-l46pu, follow-up to nexus-kk4ut): set {@code catalog_collections
+     * .aspects_enabled} for one row. Body: {@code {name, aspects_enabled}}.
+     * 400 on a missing/blank name or a non-boolean {@code aspects_enabled};
+     * 404 when the collection is not registered (same guard-in-the-handler
+     * shape as the sibling verb {@link #handleCollectionSupersede}, whose
+     * 404 comment nexus-hz785 this mirrors) — a set on a typo'd name must
+     * fail loud, not silently update zero rows.
+     */
+    private void handleCollectionSetAspectsEnabled(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String name = (String) body.get("name");
+        Object enabledObj = body.get("aspects_enabled");
+        if (name == null || name.isBlank() || !(enabledObj instanceof Boolean enabled)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"name and aspects_enabled (boolean) required\"}"); return;
+        }
+        if (repo.getCollection(tenant, name) == null) {
+            HttpUtil.send(exchange, 404,
+                "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
+        }
+        int updated = repo.setCollectionAspectsEnabled(tenant, name, enabled);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("updated", updated)));
     }
 
     private void handleCollectionSupersede(HttpExchange exchange, String tenant, String method) throws IOException {

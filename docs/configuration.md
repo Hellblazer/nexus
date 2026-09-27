@@ -150,7 +150,7 @@ taxonomy:
 
 ## Aspects
 
-Which `docs__` collections get aspect extraction (nexus-kk4ut). `knowledge__` and `rdr__` collections are always extracted; `docs__` collections are extracted only when named here, because every document costs an LLM call each time it changes.
+Which `docs__` collections get aspect extraction (nexus-kk4ut). `knowledge__` and `rdr__` collections are always extracted; `docs__` collections are extracted only when opted in, because every document costs an LLM call each time it changes.
 
 ```yaml
 aspects:
@@ -159,7 +159,9 @@ aspects:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `docs_collections` | `[]` | Glob patterns naming the `docs__` collections to extract. A matching collection's prose files (`.md`, `.markdown`, `.mdx`, `.rst`, `.adoc`, `.asciidoc`, `.org`, `.txt`) get `general-prose-v1` (summary, key decisions, entities, open questions); its other files (fixtures, word lists, graphs) are skipped. Also accepts a comma-separated string, so `nx config set aspects.docs_collections "docs__1-29__*,docs__1-41__*"` works. Documents already indexed are not queued retroactively: run `nx enrich aspects <collection>` after opting in. Opting a collection back OUT stops new extraction but does not delete aspect rows already written; `nx enrich delete <collection> <source_path>` removes one row, and `nx enrich delete <collection> --all` (nexus-3foc9) removes every row in the collection (dry-run by default; pass `--no-dry-run --yes` to actually delete). The setting is per machine (this config file), while aspect rows are shared by the tenant, so opt in on every machine that indexes the collection. |
+| `docs_collections` | `[]` | Glob patterns naming the `docs__` collections to extract. A matching collection's prose files (`.md`, `.markdown`, `.mdx`, `.rst`, `.adoc`, `.asciidoc`, `.org`, `.txt`) get `general-prose-v1` (summary, key decisions, entities, open questions); its other files (fixtures, word lists, graphs) are skipped. Also accepts a comma-separated string, so `nx config set aspects.docs_collections "docs__1-29__*,docs__1-41__*"` works. Documents already indexed are not queued retroactively: run `nx enrich aspects <collection>` after opting in. Opting a collection back OUT stops new extraction but does not delete aspect rows already written; `nx enrich delete <collection> <source_path>` removes one row, and `nx enrich delete <collection> --all` (nexus-3foc9) removes every row in the collection (dry-run by default; pass `--no-dry-run --yes` to actually delete). |
+
+**Two homes for the same decision (nexus-l46pu, follow-up to nexus-kk4ut).** `docs_collections` above is per MACHINE — this config file — while `document_aspects` rows and the aspect queue are tenant-wide in the engine, so two machines indexing the same shared `docs__` collection with different local config used to give partial, machine-dependent coverage. `nx collection aspects <name> --enable`/`--disable` (see [`docs/cli-reference.md`](cli-reference.md#nx-collection)) sets the SAME opt-in on the engine's `catalog_collections.aspects_enabled` row instead — tenant-wide, read by every machine indexing the collection. The local `docs_collections` list still LOCAL-OVERRIDES and wins outright when it names the collection (a deliberate per-machine experiment); a machine with no matching local entry falls through to the engine's attribute. Until a collection's engine attribute is explicitly enabled, it defaults to `false` (unchanged from before this bead), so nothing about today's per-machine-only behaviour changes until an operator runs the new verb. Prefer the engine attribute for anything shared across machines; keep `docs_collections` for a one-off local experiment.
 
 ## Daemon environment variables
 

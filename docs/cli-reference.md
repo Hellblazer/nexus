@@ -2447,6 +2447,7 @@ nx collection list
 |------------|-------------|
 | `list` | All T3 collections with live chunk counts and the catalog's columns: `CONTENT_TYPE`, `OWNER`, `MODEL`, `DIM`, `STATE` (`live`, `quarantine`, `dormant`, `disputed`). Every column is read from the collection's catalog row, never parsed from its name (RDR-204 Day 2, nexus-ft04v.32), so a row whose name disagrees with its columns shows the columns. A collection with no catalog row prints `-` in each column; a registered row with no chunks (dormant) prints `0`. If the catalog cannot be read the listing says so and prints names and counts only |
 | `info NAME` | Details for one collection |
+| `aspects NAME [--enable\|--disable]` | Show or set the engine's tenant-wide `catalog_collections.aspects_enabled` attribute — the docs__ aspect-extraction opt-in (nexus-l46pu, follow-up to nexus-kk4ut). Bare invocation shows the current value; `--enable`/`--disable` sets it. A machine's local `aspects.docs_collections` config.yml entry still overrides and wins when it names the collection — this verb only changes the durable, cross-machine engine row |
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
 | `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn) |
