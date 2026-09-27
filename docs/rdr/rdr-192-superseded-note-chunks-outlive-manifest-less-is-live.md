@@ -361,16 +361,17 @@ Five changes, ordered so the non-destructive ones land first, the shared
 predicate lands before anything depends on it, and the destructive step
 lands last, behind a completed backfill:
 
-1. **Define `live(c)` once, in the engine, and use it everywhere search or
-   get answers "is this chunk visible"** (Gap 1, Gap 2, part of Gap 5).
+1. **One engine `live(c)`**: define it once, in the engine, and use it
+   everywhere search or get answers "is this chunk visible" (Gap 1, Gap 2,
+   part of Gap 5).
    Replaces predicates 1 and 2 above and collection-scopes `live_chunks`
    (predicate 2) at the same time.
-2. **Define `reapable(c)` once, in the engine, and use it for every
-   candidate-selection predicate** (part of Gap 1, feeds Gap 4). Replaces
+2. **One engine `reapable(c)`**: define it once, in the engine, and use it
+   for every candidate-selection predicate (part of Gap 1, feeds Gap 4). Replaces
    predicates 7, 8, and 9's manifest-less handling with one rule, and backs
    a new state-derived reaper described below.
-3. **Replace the post-commit sweep's persisted drop set with a
-   state-derived engine reaper for `knowledge__*`** (Gap 4; this is
+3. **State-derived reaper**: replace the post-commit sweep's persisted
+   drop set with a state-derived engine reaper for `knowledge__*` (Gap 4; this is
    `nexus-2x9xa`'s content — see that bead for the day-to-day tracking).
    Instead of trying harder to retry a specific failed sweep, recompute
    "manifest-less and `reapable`" from state at each reaper run, following
@@ -756,7 +757,14 @@ by this census — they are the no-owner and dead-owner buckets respectively.
 
 Gate: a follow-up census of the same class reads zero before Step 5 ships.
 The census is an engine route plus an `nx` verb, not a one-off SQL script,
-because it is re-run before Steps 5, 8, 9 and 11 (Sam, 2026-09-26).
+because it is re-run before Steps 5, 8, 9 and 11 (Sam, 2026-09-26). The
+route runs one standalone statement, `scripts/sql/manifest_less_census.sql`,
+byte-identical to the route's text. Sam decided (2026-09-26, option 1) that
+the production census and every pre-merge re-check run that statement
+directly, in psql as `nexus_svc`, until the final RDR-192 engine tag
+deploys; the route shipped in `engine-service-v0.1.133` and the verb
+(`nx t3 census-manifest-less`) is on `develop`, so later re-checks may use
+either.
 
 #### Step 3a: `store_put` leaves no manifest-less chunk on a failed catalog or manifest write
 
@@ -768,7 +776,10 @@ cataloged" with the chunk left behind. Each of these writes a new current
 note with no manifest row, which Step 5 would hide from search and Step 9
 would later reap. On a failed catalog or manifest write, `store_put`
 deletes the chunk it just wrote and returns an error (Sam, 2026-09-26:
-rollback, not a marker column).
+rollback, not a marker column). As implemented (`nexus-wbfpw.28`,
+`nexus-k54nk`), the rollback deletes only when a read-back confirms the
+write did not land; an unknown outcome never deletes; and it keeps any
+chunk another live document or a legacy note still owns.
 
 #### Step 3b: A failed indexer manifest hook fails the `nx index` run
 
@@ -777,6 +788,19 @@ chunks without a manifest row and the run still succeeds. The run fails
 instead. Steps 3a and 3b ship in a client release before the engine tag
 carrying Step 5 is deployed, and the census covers every collection except
 `quarantine-*`, not only `knowledge__*`.
+
+#### Phase 1 result (2026-09-27)
+
+Census on the live tenant, all 95 non-quarantine collections (not only
+`knowledge__*`): 542 manifest-less chunks of 337,499; superseded 139,
+no-owner 395, dead-owner 7, legacy-unmanifested 1, unclassified 0 (T2
+`nexus/rdr-192-census-2026-09-27`). The 147 of 2026-09-24 are the
+superseded, dead-owner and legacy rows; the 395 no-owner rows are two
+indexed run logs whose manifest writes were lost in the 2026-09-24
+embed incident. The backfill closed the legacy row; a full re-run reads
+legacy-unmanifested 0 and unclassified 0 everywhere (T2
+`nexus/rdr-192-census-zero-2026-09-27`). Sam's dispositions: no-owner and
+dead-owner are reaped (T2 `nexus/rdr-192-dispositions-2026-09-27`).
 
 ### Phase 2: `live(c)` and search-side migration (non-destructive)
 
