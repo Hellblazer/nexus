@@ -513,9 +513,15 @@ def _is_old_engine_since_refusal(exc: "SchemaViolationError", specs: list[WaitSp
        OUR OWN code sent a `since` it should not have: a bug to surface by
        re-raising, never a shape this fallback should silently swallow and
        misattribute to engine age.
+    3. At least one spec in THIS batch actually carries `since`. Without
+       it, check 2 is vacuously true, and an unrelated refusal whose text
+       happens to name both words would permanently disable the watermark
+       for a batch that never asked for it (fix-check finding).
     """
     msg = str(exc)
     if "since" not in msg or "announce" not in msg:
+        return False
+    if not any(spec.since is not None for spec in specs):
         return False
     return all(
         spec.since is None or (spec.announce is not None and spec.announce.subscriber is not None)

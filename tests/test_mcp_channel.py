@@ -2423,6 +2423,21 @@ class TestBoardStartAtNowAndFold:
             "the flag must not flip on a refusal outside the per-subscriber invariant"
         )
 
+    def test_a_since_free_batch_never_reads_as_an_old_engine_refusal(self) -> None:
+        """Fix-check finding, bead nexus-n36sw: with no spec carrying
+        `since`, the per-subscriber check is vacuously true, so a refusal
+        whose text names both words must still not be taken for the
+        old-engine refusal, or it would disable the watermark for a batch
+        that never asked for it."""
+        exc = SchemaViolationError("field 'since': must not be set together with announce")
+        no_since = [WaitSpec(subspace="mailbox/x", n=1, announce=Announce(interval_s=0, max=5))]
+        assert channel._is_old_engine_since_refusal(exc, no_since) is False  # noqa: SLF001
+        with_since = [WaitSpec(
+            subspace="board/ci/x", n=1, since=("2026-01-01T00:00:00+00:00", ""),
+            announce=Announce(interval_s=0, max=5, subscriber="s"),
+        )]
+        assert channel._is_old_engine_since_refusal(exc, with_since) is True  # noqa: SLF001
+
     @pytest.mark.asyncio
     async def test_backlog_older_than_the_subscribe_time_is_dropped_not_pushed(self) -> None:
         """The 2026-09-27 incident: 282 backlog posts pushed one by one to
