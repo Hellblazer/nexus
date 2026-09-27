@@ -12,11 +12,14 @@ nexus-u2mlh.
 Assumptions and scope, read before changing the pass criterion or the
 network layer:
 
-* **PASS criterion (fix round, substantive critique [27132] C1/C2):**
-  ``admission_refusals_total`` (voyage-context-3) must move AND this
-  driver must have observed at least one of ITS OWN raw 503 responses
-  carrying ``X-Nexus-Deadline-Outcome: refused`` in the SAME step. Both
-  are required — see :func:`evaluate_step`. ``deadline_aborts_total`` is
+* **PASS criterion (nexus-u2mlh.10, 2026-09-27; was fix round [27132]
+  C1/C2):** a step whose OWN raw responses include at least one 503
+  carrying ``X-Nexus-Deadline-Outcome: refused`` and no proxy timeout
+  (:data:`TIMEOUT_STATUSES`); any timeout in the ramp fails the run. The
+  engine counter no longer has to move: since conexus-vtlr the edge
+  refuses on saturation with the same header, often before the engine
+  does, and each step reports the engine/edge split. See
+  :func:`evaluate_step`. ``deadline_aborts_total`` is
   a genuinely distinct counter at a genuinely distinct call site
   (``CceEmbedder.deadlineAbort`` vs. ``CceEmbedder.admit``'s ``refuse``)
   and is nexus-u2mlh.3's mechanism, already closed; it is reported
@@ -393,6 +396,13 @@ def is_step_valid(responses: Sequence[RawResponse]) -> bool:
     return (errors / len(responses)) <= MAX_TRANSPORT_ERROR_FRACTION
 
 
+#: Statuses that mean a proxy cut the request on a timeout instead of the
+#: system shedding it with a refusal: the 2026-09-24 incident shape. The
+#: 2026-09-26 run's five 504s came from the ALB's 60 s idle timeout
+#: (nexus-u2mlh.10). Any of these in a step fails the gate.
+TIMEOUT_STATUSES: frozenset[int] = frozenset({502, 504})
+
+
 @dataclass(frozen=True)
 class StepVerdict:
     admission_moved: bool
@@ -400,6 +410,10 @@ class StepVerdict:
     observed_refused: bool
     passes: bool
     unattributable: bool
+    refused_count: int = 0
+    engine_refusals: int = 0
+    edge_refusals: int = 0
+    timeouts: int = 0
 
 
 #: The verdict an INVALID step is forced to — never contributes a pass, an
@@ -411,9 +425,21 @@ INVALID_STEP_VERDICT = StepVerdict(
 
 
 def evaluate_step(before: EmbedderCounters, after: EmbedderCounters, responses: Sequence[RawResponse]) -> StepVerdict:
-    """The pass criterion (fix round, substantive [27132] C1/C2):
-    ``admission_refusals_total`` must move AND this step's own responses
-    must carry at least one ``X-Nexus-Deadline-Outcome: refused``.
+    """The pass criterion: this step's own responses carry at least one
+    ``X-Nexus-Deadline-Outcome: refused`` AND no proxy timeout
+    (:data:`TIMEOUT_STATUSES`). The system must shed load with fast
+    refusals, never with cuts.
+
+    nexus-u2mlh.10 (2026-09-27): the edge now refuses on its own when
+    saturated (conexus-vtlr), with the same header, so at many
+    concurrencies the edge refuses before the engine ever does and
+    ``admission_refusals_total`` does not move. Requiring engine movement
+    would make the gate unpassable. Refusals are therefore split for the
+    report, not required: ``engine_refusals`` is the counter delta and
+    ``edge_refusals`` the observed refusals the engine did not count.
+    Attribution rests on the refusals being this run's own responses.
+
+    Kept from fix round [27132] C1/C2:
     ``deadline_aborts_total`` moving is reported (``deadline_moved``) but
     never sufficient on its own — that is nexus-u2mlh.3's mechanism, a
     different call site in ``CceEmbedder`` (``deadlineAbort`` vs.
@@ -424,10 +450,18 @@ def evaluate_step(before: EmbedderCounters, after: EmbedderCounters, responses: 
     than let a later step's evidence paper over it."""
     admission_moved = after.admission_refusals_total > before.admission_refusals_total
     deadline_moved = after.deadline_aborts_total > before.deadline_aborts_total
-    observed_refused = any(r.deadline_outcome == "refused" for r in responses)
-    passes = admission_moved and observed_refused
+    refused_count = sum(1 for r in responses if r.deadline_outcome == "refused")
+    observed_refused = refused_count > 0
+    timeouts = sum(1 for r in responses if r.status_code in TIMEOUT_STATUSES)
+    engine_refusals = max(0, after.admission_refusals_total - before.admission_refusals_total)
+    edge_refusals = max(0, refused_count - engine_refusals)
+    passes = observed_refused and timeouts == 0
     unattributable = admission_moved and not observed_refused
-    return StepVerdict(admission_moved, deadline_moved, observed_refused, passes, unattributable)
+    return StepVerdict(
+        admission_moved, deadline_moved, observed_refused, passes, unattributable,
+        refused_count=refused_count, engine_refusals=engine_refusals,
+        edge_refusals=edge_refusals, timeouts=timeouts,
+    )
 
 
 @dataclass(frozen=True)
@@ -437,6 +471,7 @@ class RampOutcome:
     stopped_at_index: int | None
     unattributable_at_step: int | None
     deadline_only_steps: tuple[int, ...]
+    timeout_steps: tuple[int, ...] = ()
 
 
 def decide_ramp_outcome(steps: Sequence[int], verdicts: Sequence[StepVerdict]) -> RampOutcome:
@@ -452,14 +487,17 @@ def decide_ramp_outcome(steps: Sequence[int], verdicts: Sequence[StepVerdict]) -
     if len(steps) != len(verdicts):
         raise ValueError(f"steps/verdicts length mismatch: {len(steps)} vs {len(verdicts)}")
     deadline_only: list[int] = []
+    timeout_steps: list[int] = []
     for index, (step, verdict) in enumerate(zip(steps, verdicts)):
+        if verdict.timeouts:
+            timeout_steps.append(step)
         if verdict.unattributable:
-            return RampOutcome(tuple(steps), None, None, step, tuple(deadline_only))
-        if verdict.passes:
-            return RampOutcome(tuple(steps), step, index, None, tuple(deadline_only))
+            return RampOutcome(tuple(steps), None, None, step, tuple(deadline_only), tuple(timeout_steps))
+        if verdict.passes and not timeout_steps:
+            return RampOutcome(tuple(steps), step, index, None, tuple(deadline_only), tuple(timeout_steps))
         if verdict.deadline_moved and not verdict.admission_moved:
             deadline_only.append(step)
-    return RampOutcome(tuple(steps), None, None, None, tuple(deadline_only))
+    return RampOutcome(tuple(steps), None, None, None, tuple(deadline_only), tuple(timeout_steps))
 
 
 def require_pass(outcome: RampOutcome) -> None:
@@ -478,6 +516,11 @@ def require_pass(outcome: RampOutcome) -> None:
             "step -- the movement is not attributable to this load (possible concurrent activity on the "
             "shared tenant)"
         )
+    if outcome.timeout_steps:
+        raise AdmissionLoadVacuousError(
+            f"proxy timeouts ({sorted(TIMEOUT_STATUSES)}) at concurrency={list(outcome.timeout_steps)}: "
+            "load was cut instead of refused -- the 2026-09-24 shape (nexus-u2mlh.10)"
+        )
     if outcome.stopped_at_step is None:
         note = ""
         if outcome.deadline_only_steps:
@@ -486,7 +529,7 @@ def require_pass(outcome: RampOutcome) -> None:
                 "that is nexus-u2mlh.3's mechanism, already closed, and never satisfies this gate on its own)"
             )
         raise AdmissionLoadVacuousError(
-            "no admission_refusals_total movement corroborated by an observed refused 503 at any "
+            "no refused 503 (X-Nexus-Deadline-Outcome=refused) observed at any "
             f"concurrency step tried: {list(outcome.tried)}{note}"
         )
 
@@ -934,6 +977,10 @@ def run_gate(
                     "admission_moved": verdict.admission_moved,
                     "deadline_moved": verdict.deadline_moved,
                     "observed_refused": verdict.observed_refused,
+                    "refused_count": verdict.refused_count,
+                    "engine_refusals": verdict.engine_refusals,
+                    "edge_refusals": verdict.edge_refusals,
+                    "timeouts": verdict.timeouts,
                     "responses": summarize_responses(responses),
                     "elapsed_s": round(elapsed, 2),
                 }
@@ -1012,9 +1059,13 @@ def run_gate(
 
     result["passed"] = True
     result["stopped_at_step"] = outcome.stopped_at_step
+    passing = verdicts[outcome.stopped_at_index] if outcome.stopped_at_index is not None else None
+    split = (
+        f" ({passing.engine_refusals} engine, {passing.edge_refusals} edge)" if passing is not None else ""
+    )
     result["reason"] = (
-        f"admission_refusals_total moved at concurrency={outcome.stopped_at_step}, "
-        "corroborated by an observed refused 503 in this run's own responses"
+        f"load shed by fast refusals at concurrency={outcome.stopped_at_step}: "
+        f"{passing.refused_count if passing is not None else '?'} refused 503s{split}, zero proxy timeouts"
     )
     return result
 

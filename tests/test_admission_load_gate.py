@@ -204,6 +204,49 @@ def test_evaluate_step_neither_moved() -> None:
     assert verdict.deadline_moved is False
 
 
+def test_evaluate_step_edge_only_refusals_pass() -> None:
+    # nexus-u2mlh.10: after conexus-vtlr the edge refuses before the engine
+    # saturates, so the engine counter stays put while refused 503s come back.
+    # The 2026-09-27 run: 11 x 200, 53 x 503 refused, counter 104 -> 104.
+    before = admission_load.EmbedderCounters(admission_refusals_total=104)
+    after = admission_load.EmbedderCounters(admission_refusals_total=104)
+    verdict = admission_load.evaluate_step(before, after, [_rr(200)] * 11 + [_rr(503, "refused")] * 53)
+    assert verdict.admission_moved is False
+    assert verdict.passes is True
+    assert verdict.unattributable is False
+    assert (verdict.refused_count, verdict.engine_refusals, verdict.edge_refusals) == (53, 0, 53)
+    assert verdict.timeouts == 0
+
+
+def test_evaluate_step_splits_engine_and_edge_refusals() -> None:
+    before = admission_load.EmbedderCounters(admission_refusals_total=10)
+    after = admission_load.EmbedderCounters(admission_refusals_total=14)
+    verdict = admission_load.evaluate_step(before, after, [_rr(503, "refused")] * 9 + [_rr(200)])
+    assert (verdict.refused_count, verdict.engine_refusals, verdict.edge_refusals) == (9, 4, 5)
+
+
+@pytest.mark.parametrize("cut_status", [504, 502])
+def test_evaluate_step_refusals_with_a_proxy_timeout_do_not_pass(cut_status: int) -> None:
+    # The 2026-09-26 64-way step: refusals elsewhere in the ramp do not excuse
+    # requests the ALB cut at 60 s (nexus-u2mlh.10).
+    before = admission_load.EmbedderCounters(admission_refusals_total=0)
+    after = admission_load.EmbedderCounters(admission_refusals_total=5)
+    verdict = admission_load.evaluate_step(before, after, [_rr(503, "refused")] * 5 + [_rr(cut_status)])
+    assert verdict.observed_refused is True
+    assert verdict.timeouts == 1
+    assert verdict.passes is False
+
+
+def test_decide_ramp_outcome_a_timeout_step_blocks_a_later_pass() -> None:
+    cut = admission_load.StepVerdict(False, False, False, False, False, timeouts=5)
+    passing = admission_load.StepVerdict(True, False, True, True, False, refused_count=104, engine_refusals=104)
+    outcome = admission_load.decide_ramp_outcome([64, 128], [cut, passing])
+    assert outcome.stopped_at_step is None
+    assert outcome.timeout_steps == (64,)
+    with pytest.raises(admission_load.AdmissionLoadVacuousError, match="proxy timeouts"):
+        admission_load.require_pass(outcome)
+
+
 def test_is_step_valid_below_threshold() -> None:
     responses = [_rr(200)] * 9 + [_rr(503, "refused")] * 5 + [_rr(0, error="boom")]  # 1/15 transport errors
     assert admission_load.is_step_valid(responses) is True

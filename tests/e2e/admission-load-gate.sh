@@ -37,15 +37,16 @@ export NX_ALLOW_PROD_WRITE="admission-load-gate: deliberate concurrent embed loa
 # self-minted data token when configured, else the static service
 # token) rather than always sending the static token.
 #
-# PASS CRITERION: admission_refusals_total (voyage-context-3) must move
-# AND this driver must have observed at least one of its OWN raw 503
-# responses in that same step carrying X-Nexus-Deadline-Outcome=refused.
-# deadline_aborts_total is a genuinely distinct counter at a distinct
-# call site (nexus-u2mlh.3's mechanism, already closed) -- reported per
-# step for corroboration only, never sufficient on its own. A step where
-# admission moved but no refused 503 was observed fails the whole run
-# immediately as UNATTRIBUTABLE (the movement cannot be pinned on this
-# run's own load).
+# PASS CRITERION: a step whose OWN raw responses include at least one
+# 503 carrying X-Nexus-Deadline-Outcome=refused and no proxy timeout
+# (502/504): load is shed by fast refusals, never cut. Refusals may come
+# from the engine (admission_refusals_total moves) or from the edge
+# (conexus-vtlr, 2026-09-27: a saturated edge refuses with the same
+# header and the engine counter does not move); each step reports the
+# engine/edge split. Any 502/504 anywhere in the ramp fails the run
+# (nexus-u2mlh.10: the ALB's 60 s cut). deadline_aborts_total
+# (nexus-u2mlh.3) is reported only. A step where the engine counter moved
+# but no refused 503 was observed fails as UNATTRIBUTABLE.
 #
 # WHAT IT DOES: before any write, confirms GET /v1/status is readable
 # with these credentials and that voyage-context-3 is idle
