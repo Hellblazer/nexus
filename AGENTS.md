@@ -382,10 +382,13 @@ things to avoid carefully; they are impossible.
    attempt the most advanced state wins, so a late `queued` copy cannot
    hide a finished job; across reruns the newest attempt wins. A commit
    whose run has no `completed` post and no newer commit posting behind it
-   is live. A `cancelled` conclusion on an older commit while a newer one
-   posts is a superseded run, since the concurrency group cancels it;
-   `cancelled` with no newer commit can be a job past its time limit, so
-   rerun. Subscribe once per session with
+   is live. Exit 1 covers `cancelled` as well as `failure`, so on an older
+   commit read the rows before calling it red: a superseded run (the
+   concurrency group cancelled it when a newer commit pushed) shows
+   `cancelled` on its jobs, with `pytest-gate` alone reading `failure`
+   because its shards never reported; a `cancelled` job with no newer
+   commit on the board can be one past its time limit, so rerun.
+   Subscribe once per session with
    `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
    each post arrives as a ping naming the tuple, so wait for the state you
    care about or read the board for your sha rather than acting on every
