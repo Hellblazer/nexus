@@ -47,8 +47,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
-- `conexus/skills/orchestration/SKILL.md` — new "Resuming a Worktree Agent
-  After a /clear" section (nexus-xxvv3): a SendMessage-resumed agent runs in
+- `conexus/skills/orchestration/SKILL.md` — nexus-xxvv3: new "Resuming a
+  Worktree Agent After a /clear" section. A SendMessage-resumed agent runs in
   the primary checkout, so the subagent git guard refuses its commits and its
   own hand-back must use `git -C <worktree>`; the ledger credits it as
   RESUMED. Deferred because the bead's ledger half is wheel content
