@@ -411,6 +411,21 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                 }
                 self._json(200, {"ok": True})
 
+            elif path == "/v1/taxonomy/meta/last_discover_batch":
+                # nexus-l3dg2: mirrors TaxonomyRepository.getLastDiscoverStamps —
+                # one row per collection that HAS a _META entry, unknown
+                # collections simply omitted (never a null placeholder).
+                collections = body.get("collections", [])
+                rows = [
+                    {
+                        "collection": c,
+                        "last_discover_at": _META[c].get("last_discover_at"),
+                        "last_discover_doc_count": _META[c].get("last_discover_doc_count", 0),
+                    }
+                    for c in collections if c in _META
+                ]
+                self._json(200, rows)
+
             elif path == "/v1/taxonomy/import/topic":
                 tid = int(body["id"])
                 # Keep the autoincrement ahead of explicitly-imported ids so a
@@ -1099,6 +1114,26 @@ class TestMetaAndRebalance:
     def test_needs_rebalance_stable(self, client: HttpTaxonomyStore) -> None:
         client.record_discover_count("coll", 100)
         assert not client.needs_rebalance("coll", 103)  # 3% growth
+
+    def test_get_last_discover_stamps_omits_unknown_collections(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        """nexus-l3dg2: known collections come back keyed by name; a
+        collection never discovered is simply absent, never a null/zero
+        placeholder entry."""
+        client.record_discover_count("knowledge__stamps-a", 7)
+        client.record_discover_count("knowledge__stamps-b", 13)
+        result = client.get_last_discover_stamps(
+            ["knowledge__stamps-a", "knowledge__stamps-b", "knowledge__stamps-unknown"],
+        )
+        assert set(result) == {"knowledge__stamps-a", "knowledge__stamps-b"}
+        assert result["knowledge__stamps-a"]["last_discover_doc_count"] == 7
+        assert result["knowledge__stamps-b"]["last_discover_doc_count"] == 13
+
+    def test_get_last_discover_stamps_empty_input_short_circuits(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        assert client.get_last_discover_stamps([]) == {}
 
 
 class TestImportFidelity:

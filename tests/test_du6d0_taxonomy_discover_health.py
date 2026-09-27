@@ -185,13 +185,23 @@ class TestCheckTaxonomyDiscoverHealth:
         self, monkeypatch, store, *,
         live_collections: set[str] | None = None,
         list_collections_exc: Exception | None = None,
+        tax_store: object | None = None,
     ):
         """*live_collections*, when omitted, defaults to every title in
         *store*'s own entries -- i.e. "everything the fixture names is
         live" -- so every PRE-EXISTING test (written before the
         review-round-2 stale-row filter) keeps its exact prior semantics
         without having to know the filter exists. Tests exercising
-        staleness pass an explicit, narrower set."""
+        staleness pass an explicit, narrower set.
+
+        *tax_store* (nexus-l3dg2): the engine-reconcile collaborator.
+        Omitted, it defaults to a fake that RAISES -- "engine reconcile
+        unavailable" -- so every PRE-EXISTING test (written before the
+        engine-reconcile step existed) keeps its exact prior semantics
+        (every recorded failure still warns) deterministically, regardless
+        of whether a real service happens to be reachable in this test
+        environment. Tests exercising reconciliation pass a fake
+        ``get_last_discover_stamps`` double instead."""
         import nexus.health as h
         monkeypatch.setattr(
             "nexus.db.t2.http_memory_store.HttpMemoryStore",
@@ -209,6 +219,18 @@ class TestCheckTaxonomyDiscoverHealth:
                 return [{"name": n} for n in names]
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _T3(), raising=False)
+
+        if tax_store is None:
+            def _raise(*a, **k):
+                raise RuntimeError("no service registered")
+            monkeypatch.setattr(
+                "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore", _raise, raising=False,
+            )
+        else:
+            monkeypatch.setattr(
+                "nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore",
+                lambda *a, **k: tax_store, raising=False,
+            )
         return h._check_taxonomy_discover_health()[0]
 
     def test_no_entries_is_not_applicable(self, monkeypatch) -> None:
@@ -368,6 +390,150 @@ class TestCheckTaxonomyDiscoverHealth:
         allowlist_regex = match.group(1)
         assert "taxonomy.discover" not in allowlist_regex
         assert "taxonomy_discover_health" not in allowlist_regex
+
+
+# ── nexus-l3dg2: engine reconcile against taxonomy_meta.last_discover_at ─────
+
+
+class _FakeTaxonomyStore:
+    """Minimal stand-in for ``HttpTaxonomyStore`` (only
+    ``get_last_discover_stamps``/``close`` are used by the reconcile step)."""
+
+    def __init__(self, stamps: dict[str, dict] | None = None, *, exc: Exception | None = None) -> None:
+        self._stamps = stamps or {}
+        self._exc = exc
+        self.closed = False
+        self.calls: list[list[str]] = []
+
+    def get_last_discover_stamps(self, collections: list[str]) -> dict[str, dict]:
+        self.calls.append(list(collections))
+        if self._exc is not None:
+            raise self._exc
+        return {c: self._stamps[c] for c in collections if c in self._stamps}
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class TestEngineReconcile:
+    """nexus-l3dg2 (du6d0 residual, item 3): a T2-write failure right after
+    a REAL engine-side discover success must not keep this row warning
+    forever — the engine's own ``last_discover_at`` reconciles it."""
+
+    def _content(self, *, outcome: str, at: str, error: str = "Boom") -> str:
+        return (
+            f'{{"last_outcome": "{outcome}", "last_attempt_at": "{at}", '
+            f'"error_class": "{error if outcome == "failure" else ""}"}}'
+        )
+
+    def _store(self, entries: list[dict]):
+        return TestCheckTaxonomyDiscoverHealth()._store(entries)
+
+    def _run(self, monkeypatch, store, tax_store):
+        return TestCheckTaxonomyDiscoverHealth()._run(monkeypatch, store, tax_store=tax_store)
+
+    def test_engine_stamp_newer_than_failure_reads_ok(self, monkeypatch) -> None:
+        content = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        store = self._store([{"title": "code__nexus", "content": content}])
+        tax = _FakeTaxonomyStore({
+            "code__nexus": {"last_discover_at": "2026-09-21T00:00:00Z", "last_discover_doc_count": 5},
+        })
+        r = self._run(monkeypatch, store, tax)
+        assert r.ok is True
+        assert r.warn is False
+        assert "reconciled" in r.detail
+        assert tax.closed is True
+
+    def test_engine_stamp_older_than_failure_still_warns(self, monkeypatch) -> None:
+        content = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        store = self._store([{"title": "code__nexus", "content": content}])
+        tax = _FakeTaxonomyStore({
+            "code__nexus": {"last_discover_at": "2026-09-19T00:00:00Z", "last_discover_doc_count": 5},
+        })
+        r = self._run(monkeypatch, store, tax)
+        assert r.ok is False
+        assert r.warn is True
+        assert "code__nexus" in r.detail
+
+    def test_no_engine_stamp_at_all_still_warns(self, monkeypatch) -> None:
+        """A collection the engine has never discovered (absent from the
+        batch response) is unreconciled -- absence is not evidence of a
+        newer success."""
+        content = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        store = self._store([{"title": "code__nexus", "content": content}])
+        tax = _FakeTaxonomyStore({})  # nothing known to the engine
+        r = self._run(monkeypatch, store, tax)
+        assert r.ok is False and r.warn is True
+        assert "code__nexus" in r.detail
+
+    def test_one_engine_call_covers_every_failed_collection(self, monkeypatch) -> None:
+        entries = [
+            {"title": f"code__{i}", "content": self._content(outcome="failure", at=f"2026-09-{10+i:02d}T00:00:00Z")}
+            for i in range(5)
+        ]
+        store = self._store(entries)
+        tax = _FakeTaxonomyStore({})
+        self._run(monkeypatch, store, tax)
+        assert len(tax.calls) == 1
+        assert sorted(tax.calls[0]) == sorted(f"code__{i}" for i in range(5))
+
+    def test_reconcile_skips_succeeded_collections_entirely(self, monkeypatch) -> None:
+        """Only FAILED collections are sent to the engine -- reconciling a
+        collection that already reads ok would be wasted work."""
+        ok = self._content(outcome="success", at="t1")
+        bad = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        store = self._store([
+            {"title": "docs__ok", "content": ok},
+            {"title": "code__bad", "content": bad},
+        ])
+        tax = _FakeTaxonomyStore({})
+        self._run(monkeypatch, store, tax)
+        assert tax.calls == [["code__bad"]]
+
+    def test_engine_404_falls_back_to_prior_behavior_with_a_note(self, monkeypatch) -> None:
+        """An engine that predates the route answers 404 (TaxonomyHandler's
+        generic route-miss response) -- the row degrades to the
+        pre-nexus-l3dg2 behavior (every recorded failure still warns) and
+        names the reconcile as unavailable, once."""
+        import httpx
+
+        content = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        store = self._store([{"title": "code__nexus", "content": content}])
+        request = httpx.Request("POST", "http://svc/v1/taxonomy/meta/last_discover_batch")
+        response = httpx.Response(404, request=request)
+        tax = _FakeTaxonomyStore(exc=httpx.HTTPStatusError("not found", request=request, response=response))
+        r = self._run(monkeypatch, store, tax)
+        assert r.ok is False and r.warn is True
+        assert "code__nexus" in r.detail
+        assert "engine reconcile unavailable" in r.detail
+
+    def test_default_fake_construction_failure_also_notes_unavailable(self, monkeypatch) -> None:
+        """The default ``_run`` fixture (no ``tax_store`` passed) simulates
+        a construction-time failure (no service registered at all) --
+        every PRE-EXISTING test relies on this degrading exactly like the
+        404 case."""
+        content = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        store = self._store([{"title": "code__nexus", "content": content}])
+        r = TestCheckTaxonomyDiscoverHealth()._run(monkeypatch, store)
+        assert r.ok is False and r.warn is True
+        assert "engine reconcile unavailable" in r.detail
+
+    def test_mixed_reconciled_and_still_failed_names_only_the_latter(self, monkeypatch) -> None:
+        bad_recent = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        bad_older_stamp = self._content(outcome="failure", at="2026-09-20T00:00:00Z")
+        store = self._store([
+            {"title": "code__reconciled", "content": bad_recent},
+            {"title": "code__still_bad", "content": bad_older_stamp},
+        ])
+        tax = _FakeTaxonomyStore({
+            "code__reconciled": {"last_discover_at": "2026-09-21T00:00:00Z", "last_discover_doc_count": 1},
+            "code__still_bad": {"last_discover_at": "2026-09-19T00:00:00Z", "last_discover_doc_count": 1},
+        })
+        r = self._run(monkeypatch, store, tax)
+        assert r.ok is False and r.warn is True
+        assert "code__still_bad" in r.detail
+        assert "code__reconciled" not in r.detail
+        assert "1 other collection(s) reconciled" in r.detail
 
 
 # ── 4: the "no files changed — skipping discovery" line ─────────────────────

@@ -8528,22 +8528,23 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
     fails OPEN — no filtering is applied rather than risk swallowing a
     genuine, still-live warning because liveness could not be checked.
 
-    DIVERGENCE WITH THE ENGINE (review round 2, nexus-du6d0, item 3):
-    NOT implemented. ``taxonomy_meta.last_discover_at`` — the engine's
-    own success stamp, which would let a T2-write failure following a
-    real engine-side success read as ok instead of a false warning — has
-    no batched read for arbitrary collections: ``HttpTaxonomyStore``
-    exposes only ``needs_rebalance``/``get_doc_count_drift`` (routed
-    through ``/meta/last_count``, doc_count only, no timestamp, and
-    per-collection, not batched) and ``detect_hubs(warn_stale=True)``
-    (``max_last_discover_at`` via ``/hubs``, aggregated over HUB topics
-    only — a small cross-collection subset, not every collection this
-    check tracks). Adding a batched route is an engine change, out of
-    scope here per the no-new-engine-schema/route decision boundary;
-    reconciling one collection at a time here would trade the "ONE round
-    trip" property item 1 depends on for a per-entry N+1 read on every
-    `nx doctor` run. Left as a residual, named rather than silently
-    absorbed into "not implemented" scope creep.
+    DIVERGENCE WITH THE ENGINE — CLOSED (nexus-l3dg2, the du6d0 residual
+    review round 2 named): a T2-write failure right after a REAL
+    engine-side discover success (following a recorded failure) used to
+    keep warning forever, because this check only ever read the
+    client-recorded outcome. ``TaxonomyRepository.getLastDiscoverStamps``
+    / ``POST /meta/last_discover_batch`` (engine, Sam's decision) now
+    give a batched ``taxonomy_meta.last_discover_at`` read for the exact
+    set of FAILED collections in ONE round trip — see
+    :meth:`nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore.get_last_discover_stamps`.
+    A collection whose engine stamp is newer than its recorded failure
+    is RECONCILED (dropped from the warning): the engine's own success
+    stamp is authoritative over the client-recorded outcome it exists to
+    corroborate. Best-effort: an engine that predates the route (404), or
+    any other reconcile failure, degrades to the PRE-nexus-l3dg2
+    behaviour (every recorded failure still warns) with one
+    "(engine reconcile unavailable)" note — never a crash, never a
+    swallowed warning.
     """
     label = "taxonomy.discover health"
     try:
@@ -8631,15 +8632,70 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
         err = record.get("error_class") or "unknown error"
         return f"{collection} (failed {when}, {err})"
 
-    names = "; ".join(_pretty(item) for item in failed[:10])
-    if len(failed) > 10:
-        names += f"; … {len(failed) - 10} more"
+    # nexus-l3dg2 (du6d0 residual, item 3): reconcile against the engine's own
+    # taxonomy_meta.last_discover_at, ONE round trip for every failed
+    # collection, before warning. A best-effort T2 write failure right after
+    # a REAL engine-side discover success (that followed a recorded failure)
+    # must not keep this row warning indefinitely — the engine's own success
+    # stamp is authoritative over the client-recorded outcome it exists to
+    # corroborate. Best-effort: any reconcile failure (older engine
+    # predating the route -> 404, or any other transport error) degrades to
+    # the pre-nexus-l3dg2 behavior (every recorded failure still warns),
+    # named once rather than silently absorbed.
+    reconciled: set[str] = set()
+    reconcile_unavailable = False
+    try:
+        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred: CLI startup cost
+
+        tax_store = HttpTaxonomyStore()
+        try:
+            stamps = tax_store.get_last_discover_stamps([c for c, _ in failed])
+        finally:
+            tax_store.close()
+        for collection, record in failed:
+            stamp = stamps.get(collection)
+            if not stamp:
+                continue
+            engine_at = stamp.get("last_discover_at")
+            failure_at = record.get("last_attempt_at")
+            # Lexicographic compare is sound: both sides are stamped
+            # "%Y-%m-%dT%H:%M:%SZ" (UTC, explicit seconds) — the engine's
+            # TaxonomyRepository.utcIso and mcp_infra.record_taxonomy_discover_attempt
+            # use the identical format, deliberately (avoids the
+            # elided-zero-seconds trap nexus-onjvy documents elsewhere).
+            if engine_at and (not failure_at or engine_at > failure_at):
+                reconciled.add(collection)
+    except Exception as exc:  # noqa: BLE001 — best-effort reconcile; must not crash `nx doctor`
+        _log.debug("doctor_taxonomy_discover_health_check_failed", stage="engine_reconcile", error=str(exc))
+        reconcile_unavailable = True
+
+    still_failed = [item for item in failed if item[0] not in reconciled]
+    reconcile_note = " (engine reconcile unavailable)" if reconcile_unavailable else ""
+
+    if not still_failed:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                f"{tracked} collection(s) tracked; {len(reconciled)} reported a failed "
+                f"discover but the engine's last_discover_at is newer than the recorded "
+                f"failure, so the T2 write failure that followed a real success is "
+                f"reconciled{stale_note}"
+            ),
+        )]
+
+    reconciled_note = (
+        f" ({len(reconciled)} other collection(s) reconciled against a newer engine "
+        f"last_discover_at)" if reconciled else ""
+    )
+    names = "; ".join(_pretty(item) for item in still_failed[:10])
+    if len(still_failed) > 10:
+        names += f"; … {len(still_failed) - 10} more"
     return [HealthResult(
         label=label, ok=False, warn=True,
         detail=(
-            f"{len(failed)} collection(s) whose last taxonomy-discover attempt failed "
+            f"{len(still_failed)} collection(s) whose last taxonomy-discover attempt failed "
             f"more recently than it last succeeded: {names}. Run `nx taxonomy discover "
-            f"--collection <name>` to retry.{stale_note}"
+            f"--collection <name>` to retry.{stale_note}{reconciled_note}{reconcile_note}"
         ),
         fix_suggestions=["nx taxonomy discover --collection <name>"],
     )]

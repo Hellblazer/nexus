@@ -64,6 +64,8 @@ import java.util.Optional;
  *   POST  /v1/taxonomy/rename_collection   rename collection
  *   POST  /v1/taxonomy/meta/record         record discover count
  *   GET   /v1/taxonomy/meta/last_count     last discover doc_count for collection=
+ *   POST  /v1/taxonomy/meta/last_discover_batch batched discover stamps for a
+ *         list of collections, one round trip (nexus-l3dg2)
  *   POST  /v1/taxonomy/links/upsert        upsert topic link
  *   POST  /v1/taxonomy/links/pairs         get link pairs for topic_id list
  *   GET   /v1/taxonomy/icf/source_count    count distinct source collections
@@ -164,6 +166,7 @@ public final class TaxonomyHandler implements HttpHandler {
                 // Meta
                 case "/meta/record"               -> handleRecordDiscoverCount(exchange, tenant, method);
                 case "/meta/last_count"           -> handleLastDiscoverCount(exchange, tenant, method);
+                case "/meta/last_discover_batch"  -> handleLastDiscoverBatch(exchange, tenant, method);
                 // Links
                 case "/links/upsert"              -> handleUpsertLink(exchange, tenant, method);
                 case "/links/pairs"               -> handleGetLinkPairs(exchange, tenant, method);
@@ -784,6 +787,41 @@ public final class TaxonomyHandler implements HttpHandler {
         } else {
             HttpUtil.send(ex, 200, json(Map.of("count", count.get())));
         }
+    }
+
+    /**
+     * POST /v1/taxonomy/meta/last_discover_batch (nexus-l3dg2, du6d0
+     * residual): batched {@code taxonomy_meta} discover-stamp read for a LIST
+     * of collections in ONE round trip — replaces the per-collection N+1
+     * {@code /meta/last_count} would otherwise force on a caller reconciling
+     * several collections at once (the {@code nx doctor}
+     * {@code taxonomy.discover health} row). Body
+     * {@code {"collections": [str, ...]}}, cap
+     * {@value TaxonomyRepository#MAX_LAST_DISCOVER_BATCH}. Response 200: a
+     * JSON array, one row per collection that HAS a {@code taxonomy_meta}
+     * row — see {@link TaxonomyRepository#getLastDiscoverStamps} for the
+     * full "absent means never discovered" contract this never deviates
+     * from.
+     */
+    private void handleLastDiscoverBatch(HttpExchange ex, String tenant, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        Map<String, Object> body = readBody(ex);
+        Object raw = body.get("collections");
+        if (!(raw instanceof List<?> rawList) || rawList.isEmpty()) {
+            throw new IllegalArgumentException("field 'collections' must be a non-empty JSON array");
+        }
+        if (rawList.size() > TaxonomyRepository.MAX_LAST_DISCOVER_BATCH) {
+            throw new IllegalArgumentException("too many collections (max "
+                + TaxonomyRepository.MAX_LAST_DISCOVER_BATCH + ")");
+        }
+        List<String> collections = new ArrayList<>(rawList.size());
+        for (Object o : rawList) {
+            if (o == null || o.toString().isBlank()) {
+                throw new IllegalArgumentException("each element of 'collections' must be a non-blank string");
+            }
+            collections.add(o.toString());
+        }
+        HttpUtil.send(ex, 200, json(repo.getLastDiscoverStamps(tenant, collections)));
     }
 
     // ── Links ──────────────────────────────────────────────────────────────────
