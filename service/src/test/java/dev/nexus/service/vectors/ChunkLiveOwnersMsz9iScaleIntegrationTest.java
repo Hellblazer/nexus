@@ -153,6 +153,9 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     /** Chunk index by chash hex, to map a search result back to its owning document. */
     final Map<String, Integer> chunkIndexByHex = new HashMap<>(NUM_CHUNKS * 2);
 
+    /** Every chunk's embedding, by chunk index. */
+    final List<float[]> chunkVectors = new ArrayList<>(NUM_CHUNKS);
+
     /** Document indices currently tombstoned (mirrors deleted_at). */
     final Set<Integer> deadDocs = new HashSet<>();
 
@@ -201,6 +204,7 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             chunkIndexByHex.put(chashHex.get(i), i);
             float[] v = fixtureVector(rnd);
             vectors.add(v);
+            chunkVectors.add(v);
             double dot = 0;
             for (int d = 0; d < DIM; d++) dot += v[d] * anchor[d];
             anchorSimilarity[i] = dot;
@@ -563,9 +567,31 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
      *  query it grades"). */
     private List<Double> recallSeries(String approxSql, String oracleSql, long seed) {
         Random rnd = new Random(seed);
-        List<Double> recalls = new ArrayList<>(RECALL_QUERY_COUNT);
+        List<float[]> queries = new ArrayList<>(RECALL_QUERY_COUNT);
+        for (int q = 0; q < RECALL_QUERY_COUNT; q++) queries.add(fixtureVector(rnd));
+        return recallSeries(approxSql, oracleSql, queries);
+    }
+
+    /** Queries aimed INTO the deleted region: the embeddings of {@link #RECALL_QUERY_COUNT}
+     *  seeded-random chunks owned by tombstoned documents -- a user searching for the text
+     *  of a retracted note. Uniform queries rarely land in a small deleted cap. */
+    private List<float[]> deadRegionQueries(long seed) {
+        List<Integer> dead = new ArrayList<>();
+        for (int i = 0; i < NUM_CHUNKS; i++) {
+            if (chunkDoc[i] >= 0 && deadDocs.contains(chunkDoc[i])) dead.add(i);
+        }
+        assertThat(dead).as("no tombstone-owned chunks to aim queries at").isNotEmpty();
+        Random rnd = new Random(seed);
+        List<float[]> queries = new ArrayList<>(RECALL_QUERY_COUNT);
         for (int q = 0; q < RECALL_QUERY_COUNT; q++) {
-            float[] vec = fixtureVector(rnd);
+            queries.add(chunkVectors.get(dead.get(rnd.nextInt(dead.size()))));
+        }
+        return queries;
+    }
+
+    private List<Double> recallSeries(String approxSql, String oracleSql, List<float[]> queries) {
+        List<Double> recalls = new ArrayList<>(queries.size());
+        for (float[] vec : queries) {
             List<String> oracle = runExact(oracleSql, vec, K);
             List<String> approx = runProd(approxSql, vec, K);
             recalls.add(recallAt(approx, oracle, K));
@@ -827,6 +853,18 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
                 "c-corr", pct, avg(afterCorr), afterCorr, scatteredDead, correlatedDead);
             assertThat(avg(beforeCorr)).isBetween(0.0, 1.0);
             assertThat(avg(afterCorr)).isBetween(0.0, 1.0);
+
+            // Same deletion, every query aimed at the deleted region (critique-wbfpw9-r3
+            // round-4 Observation: uniform queries put 0 of 20 in the cap at 3% and 10%).
+            List<float[]> inRegion = deadRegionQueries(20260927600L + pct);
+            List<Double> beforeIn = recallSeries(BEFORE_DEAD_SET_ANTI_JOIN, BEFORE_DEAD_SET_ANTI_JOIN, inRegion);
+            List<Double> afterIn = recallSeries(AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, inRegion);
+            System.out.printf("%-8s | %10d | %13.3f | %-30s | queries inside the deleted cap%n",
+                "b-inCap", pct, avg(beforeIn), beforeIn);
+            System.out.printf("%-8s | %10d | %13.3f | %-30s | queries inside the deleted cap%n",
+                "c-inCap", pct, avg(afterIn), afterIn);
+            assertThat(avg(beforeIn)).isBetween(0.0, 1.0);
+            assertThat(avg(afterIn)).isBetween(0.0, 1.0);
 
             if (pct == 60) {
                 assertThat(correlatedDead)
