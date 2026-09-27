@@ -211,14 +211,14 @@ def test_registers_once_then_caches(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_a_quarantine_sibling_is_never_registered_by_the_client(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, cloud_mode: None,
 ) -> None:
     """nexus-ny7j4: ``nx collection re-embed`` on a quarantine sibling died
     in this funnel deriving registration fields from a name whose first
     segment is ``quarantine-code``, not a content type. The engine's GC
     function registers the sibling from the origin's row; the client
-    skips it and never calls the registrar."""
-    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+    skips it and never calls the registrar. cloud_mode because the names
+    carry voyage tokens (the RDR-109 mode lint)."""
     writer = _fake_writer()
     name = "quarantine-code__1-41__voyage-code-3__v1"
 
@@ -230,7 +230,7 @@ def test_a_quarantine_sibling_is_never_registered_by_the_client(
     assert name not in corpus._REGISTERED_COLLECTIONS
 
 
-def test_a_quarantine_sibling_write_that_422s_names_the_reason_instead_of_retrying() -> None:
+def test_a_quarantine_sibling_write_that_422s_names_the_reason_instead_of_retrying(cloud_mode: None) -> None:
     """A stale-registration 422 on a quarantine sibling is not retried:
     the client cannot register a sibling, so the retry could only fail
     the same way. The error names that, with the engine's 422 chained."""
