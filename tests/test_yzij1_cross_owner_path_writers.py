@@ -603,7 +603,19 @@ class TestTheMintSitesActuallyCallIt:
                 missing.append(
                     f"{label}: no conflict check ({conflict_marker!r}) before the register",
                 )
-            a = src.find(announce_marker, r)
+            # Bound the announce search at the NEXT mint site's register
+            # call in this same function (code review, batch 3): both
+            # indexer sites call announce_cross_owner_mint( by the same
+            # name, so an unbounded forward search from the batched site
+            # found the fallback's announce and passed with the batched
+            # site's own call deleted.
+            later = [
+                pos for other_mod, other_fname, _, other_marker in sites
+                if other_mod is mod and other_fname == fname
+                and other_marker != register_marker
+                and (pos := src.find(other_marker, r + 1)) != -1
+            ]
+            a = src.find(announce_marker, r, min(later) if later else len(src))
             if a == -1:
                 missing.append(
                     f"{label}: announce ({announce_marker!r}) missing, or comes BEFORE "
