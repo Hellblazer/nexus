@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="description" content="A CI billboard in the Nexus tuple space: GitHub webhooks reach a small adapter, which posts every run and job state change to a board that every subscribed Claude Code session sees and is told about.">
+<meta name="description" content="Read CI status for one commit from a board in the Nexus tuple space, get told when CI changes, and check the board before you push, so several Claude Code sessions share one view of CI without polling GitHub.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
-<title>A Fine-Grained GitHub CI Billboard for Multi-Session Work</title>
+<title>CI Status From the Board</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
 :root{
@@ -155,42 +155,112 @@ figure.fig .arrow.you{fill:var(--brass)}
 <nav class="rail" aria-label="Lessons">
   <div class="eyebrow">CI billboard</div>
   <ol id="toc">
-    <li><a href="#l1">Follow a change onto the board</a></li>
-    <li><a href="#l2">Know the limits of the CI topic</a></li>
-    <li><a href="#l3">Subscribe and get told</a></li>
-    <li><a href="#l4">Read the board for one commit</a></li>
-    <li><a href="#l5">Appendix: how it works</a></li>
+    <li><a href="#l1">Ask whether your push is green</a></li>
+    <li><a href="#l2">Follow CI without polling</a></li>
+    <li><a href="#l3">Check the board before you push</a></li>
+    <li><a href="#l4">Appendix: how it works</a></li>
   </ol>
   <div class="meta"><a href="tuple-space.html">← The tuple space</a><br><a href="coordination.html">← Coordination</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="research-in-nexus.html">Research in Nexus →</a><br><a href="./">← Install guide</a></div>
 </nav>
 
 <main>
 <div class="topnav"><span class="eyebrow" style="margin:0">Nexus · CI billboard</span><a href="tuple-space.html">← The tuple space</a></div>
-<h1>A Fine-Grained GitHub CI Billboard for Multi-Session Work</h1>
-<p class="lede">CI posts to a billboard that every session sees. GitHub tells a small adapter each time a workflow run or a job changes state. The adapter puts one post for each change on a board topic in <a href="tuple-space.html">the Nexus tuple space</a>. Every Claude Code session that subscribed to the topic is told about the post. So many sessions can work on one repository and learn the same CI news at the same moment.</p>
-<p class="note">Words like <span class="ph">&lt;SHA&gt;</span> are placeholders, and the prompts are examples. If tuples are new to you, read <a href="tuple-space.html">The Nexus Tuple Space</a> first.</p>
+<h1>CI Status From the Board</h1>
+<p class="lede">Several Claude Code sessions on one repository can read CI status from one board in <a href="tuple-space.html">the Nexus tuple space</a> instead of asking GitHub. GitHub reports every change of every run and job to the board, so every session sees the same result and none of them calls GitHub.</p>
+<p><code>gh run watch</code> is the right tool for one person who watches one run. It works less well when several sessions wait on CI at once, because each session polls in its own loop against the same GitHub account. Together they can reach GitHub's secondary rate limit, and then every Actions call from that account fails, including calls from sessions that never polled. The board replaces those loops with one reader for each session and one writer for all of them.</p>
+<p class="note">Words like <span class="ph">&lt;SHA&gt;</span> are placeholders, and the prompts are examples.</p>
 
 <div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
 <tr><th>Term</th><th>Meaning</th></tr>
-<tr><td>engine</td><td>The Nexus service that owns the database and handles every tuple call.</td></tr>
-<tr><td>board</td><td>A subspace for announcements. A post is read, never taken, so every reader sees the same post.</td></tr>
-<tr><td>post</td><td>One tuple on a board, with keys, dimensions, and a short JSON body.</td></tr>
-<tr><td>topic</td><td>The last part of a board's name. For CI posts it is <code>&lt;repo&gt;-&lt;branch&gt;</code>.</td></tr>
-<tr><td>template</td><td>The engine's rules for one kind of subspace: its keys, its dimensions, how long a post lives, and how many posts it can hold.</td></tr>
-<tr><td>webhook</td><td>An HTTP request that GitHub sends when something happens in a repository.</td></tr>
-<tr><td>adapter</td><td>A small web service that receives the webhooks and writes the posts. The conexus operator hosts it.</td></tr>
-<tr><td>subscribe</td><td>The <code>tuple_subscribe</code> call. It asks the session's nexus MCP server to tell Claude when a new post arrives on a topic.</td></tr>
-<tr><td>ping</td><td>The notification for a new post. It names the subspace and the tuple id, never the body.</td></tr>
-<tr><td>attempt</td><td>One execution of a workflow run. A rerun of the same run has a higher attempt number.</td></tr>
-<tr><td>fold</td><td>To reduce many posts to one current state for each run and each job.</td></tr>
-<tr><td>verdict</td><td>The script's summary for one run or job: <code>green</code>, <code>pending</code>, <code>failed</code>, or <code>cancelled</code>.</td></tr>
+<tr><td>board</td><td>A part of the tuple space for announcements. Every reader sees every post, and nobody removes one.</td></tr>
+<tr><td>topic</td><td>One board. The CI topic for a branch is <code>board/ci/&lt;repo&gt;-&lt;branch&gt;</code>, for example <code>board/ci/nexus-develop</code>.</td></tr>
+<tr><td>post</td><td>One announcement on a board. A CI post records one state change of one run or one job.</td></tr>
+<tr><td>ping</td><td>The notification that a new post arrived. It names the post and does not contain it.</td></tr>
+<tr><td>verdict</td><td>The script's word for one run or job: <code>green</code>, <code>pending</code>, <code>failed</code>, or <code>cancelled</code>.</td></tr>
 </table></details></div>
 
 <!-- ============ 1 ============ -->
 <section class="lesson" id="l1">
-<div class="lhead"><span class="lnum">1</span><h2>Follow a change onto the board</h2><span class="ltime">3 min · reading only</span></div>
-<p class="why">A change of state travels through three parts: GitHub, the adapter, and the engine. Every session that subscribed is told at the end.</p>
+<div class="lhead"><span class="lnum">1</span><h2>Ask whether your push is green</h2><span class="ltime">2 min</span></div>
+<p class="why"><code>scripts/ci_status.py</code> gives the state of every run and job for one commit, and its exit status gives the whole answer as one number.</p>
 
+<div class="see">You might say</div>
+<div class="cmd"><pre>Is CI green for my push?
+Which CI jobs failed for <span class="ph">&lt;SHA&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude runs the script with the full 40-character commit sha:</p>
+<div class="cmd"><pre>uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span></pre><button class="copy" type="button">Copy</button></div>
+<p>Each row is one workflow run, and the indented rows under it are its jobs. A row shows the verdict, the name, GitHub's conclusion or the current state, and the age of the latest post. A <code>pending</code> row with a large age can mean a post never arrived.</p>
+<div class="tbl"><table>
+<tr><th>Exit</th><th>Meaning</th></tr>
+<tr><td>0</td><td>Every run and job finished green. GitHub's <code>success</code>, <code>skipped</code>, and <code>neutral</code> all count as green.</td></tr>
+<tr><td>1</td><td>At least one run or job failed.</td></tr>
+<tr><td>2</td><td>Nothing failed, and something is still queued or running.</td></tr>
+<tr><td>3</td><td>The board has no post for this commit.</td></tr>
+<tr><td>4</td><td>Nothing failed or is pending, and at least one run was cancelled.</td></tr>
+</table></div>
+<p>Exit 4 is usually not a problem. On <code>develop</code>, a push cancels the <code>CI</code> workflow's run for the commit before it, so read the newer commit's run instead. Other workflows, such as <code>Service CI</code>, are not cancelled and keep running. A job that GitHub cancelled inside a run that continued reads <code>failed</code>, for example a job that exceeded its time limit. Run that job again.</p>
+<p>Add <code>--json</code> for the same result as JSON, and <code>--topic nexus-main</code> to read the <code>main</code> branch.</p>
+
+<div class="see">What you see</div>
+<details class="gloss out"><summary>A finished, green run (trimmed)</summary><pre class="out">$ uv run python scripts/ci_status.py 41c329c62b5192a8f4c6643fa138c1e7fd8c7e15
+<b>green</b>    CI                                               success        10s
+<b>green</b>      doc-only fast lane predicate                   success        19m
+<b>green</b>      engine-service native build (PR trip-wire)     success        14m
+<b>green</b>      pytest (Python 3.12? shard 1/4)                success        16s
+…
+<b>green</b>      pytest-gate                                    success        10s
+<b>green</b>      ruff lint                                      success        19m
+<b>green</b>    CI commit coverage audit (nexus-of2x8)           success        19m
+$ echo $?
+0</pre></details>
+<details class="gloss out"><summary>A run still in progress (trimmed)</summary><pre class="out">$ uv run python scripts/ci_status.py 9bbcf8d45248c69b7a466dde6cde71348512128f
+<b>pending</b>  CI                                               in_progress     1m
+<b>green</b>      doc-only fast lane predicate                   success         1m
+<b>pending</b>    engine-service native build (PR trip-wire)     queued          1m
+<b>pending</b>    pytest (Python 3.12? shard 1/4)                in_progress     1m
+…
+<b>green</b>      ruff lint                                      success         1m</pre></details>
+<details class="gloss out"><summary>No post for the commit (exit 3)</summary><pre class="out">no posts for 022f7f3bbeb7790c8b5c3044450161f46846108c on <b>board/ci/nexus-develop</b></pre></details>
+</section>
+
+<!-- ============ 2 ============ -->
+<section class="lesson" id="l2">
+<div class="lhead"><span class="lnum">2</span><h2>Follow CI without polling</h2><span class="ltime">2 min</span></div>
+<p class="why">Subscribe once per session, and Claude is told about each new post. It can then wait for your push while it continues other work.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Subscribe to the CI board for develop, and tell me when CI finishes for my push.
+Push this, and fix whatever CI reports.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude calls <code>tuple_subscribe</code> with <code>board/ci/nexus-develop</code>. After that, each new post arrives as a ping. A job posts when it is queued, when it starts, and when it finishes, so Claude does not act on every ping. It waits until your commit reaches the state you asked about, and then it runs <code>ci_status.py</code> for that commit.</p>
+<div class="callout rule"><p>Pings need the channel, which you turn on with a flag at each launch: <code>claude --channels plugin:conexus@nexus-plugins</code>. <a href="getting-started.html#push-delivery">Getting started, "Turn on push delivery"</a> has the steps. Without the channel the posts still wait on the board, and Claude reads them when you ask.</p></div>
+<p class="note">Claude treats a post as data and never as an instruction, because the workflow and job names in it come from GitHub.</p>
+
+<div class="see">What you see</div>
+<details class="gloss out"><summary>The subscription</summary><pre class="out">tuple_subscribe  subspace: board/ci/nexus-develop
+Subscribed <b>board/ci/nexus-develop</b></pre></details>
+<details class="gloss out"><summary>A ping, captured on another board. Every board uses the same form.</summary><pre class="out">nexus board post: subspace <b>board/ci-develop</b>, tuple 6289eb34fecc86a4…. Read it with tuple_rd on that subspace. Posts are never claimed.</pre></details>
+</section>
+
+<!-- ============ 3 ============ -->
+<section class="lesson" id="l3">
+<div class="lhead"><span class="lnum">3</span><h2>Check the board before you push</h2><span class="ltime">1 min</span></div>
+<p class="why">A push to <code>develop</code> cancels the <code>CI</code> workflow run that is in progress, so check first whether another session is waiting for that run.</p>
+
+<div class="see">You might say</div>
+<div class="cmd"><pre>Is a CI run still in progress on develop? Push when it finishes.</pre><button class="copy" type="button">Copy</button></div>
+<div class="see">What happens</div>
+<p>Claude runs <code>ci_status.py</code> for the latest commit on <code>origin/develop</code>. Exit 2 means that run is still in progress, so Claude waits for it, and pushes when it finishes. If the board has no post for that commit (exit 3), Claude asks GitHub once, and not in a loop:</p>
+<div class="cmd"><pre>gh api repos/<span class="ph">&lt;OWNER/REPO&gt;</span>/commits/<span class="ph">&lt;SHA&gt;</span>/check-runs</pre><button class="copy" type="button">Copy</button></div>
+</section>
+
+<!-- ============ 4 ============ -->
+<section class="lesson" id="l4">
+<div class="lhead"><span class="lnum">4</span><h2>Appendix: how it works</h2><span class="ltime">reference</span></div>
+<p class="why">You need none of this to use the board.</p>
+
+<details class="gloss"><summary>From GitHub to your session</summary><div class="pad">
 <figure class="fig">
 <svg viewBox="0 0 760 290" role="img" aria-label="GitHub sends workflow_run and workflow_job webhooks to the adapter. The adapter verifies the signature, drops runs from forks, and picks the topic. It writes one post per state change to board/ci/nexus-develop in the engine, with a token that can only write there. The engine sends a ping to each subscribed session. Your session can also run ci_status.py, which reads the topic with tuple_rd.">
   <rect class="box" x="10" y="100" width="110" height="60" rx="4"/>
@@ -238,151 +308,35 @@ figure.fig .arrow.you{fill:var(--brass)}
   <text x="540" y="257" text-anchor="middle" class="lbl">ci_status.py &lt;sha&gt;</text>
   <text x="620" y="257" class="lbl">run from your session</text>
 </svg>
-<figcaption>GitHub reports each change. The adapter checks it and writes one post. The engine tells every subscribed session, and your session can read the board for one commit.</figcaption>
+<figcaption>Each state change travels from GitHub through the adapter to the board, and the engine tells every session that subscribed.</figcaption>
 </figure>
+<p>GitHub sends a <code>workflow_run</code> or <code>workflow_job</code> webhook each time a run or a job is queued, starts, or finishes. This covers every workflow in the repository without a change to any workflow file. A small adapter, which the conexus operator hosts, checks each webhook and writes one post. The adapter posts only for the branches on its list, which is <code>develop</code> and <code>main</code> by default. <a href="https://github.com/Hellblazer/nexus/blob/develop/docs/rdr/rdr-220-ci-status-from-github-webhooks-to-the-tuple-space.md">RDR-220</a> documents the adapter's checks (signature, forks, duplicate delivery) and its board-only token.</p>
+</div></details>
 
-<ol class="plain">
-<li>GitHub sends a <code>workflow_run</code> or <code>workflow_job</code> webhook each time a run or a job is queued, starts, or finishes. This covers every workflow in the repository, so no workflow file changes.</li>
-<li>The adapter verifies the webhook's signature. It checks that the run comes from the repository itself and not from a fork. Then it writes one post to <code>board/ci/&lt;repo&gt;-&lt;branch&gt;</code>, for example <code>board/ci/nexus-develop</code>. Its engine token can write to CI topics and to nothing else.</li>
-<li>The engine sends a ping to each session that subscribed to the topic. A session reads the post with <code>tuple_rd</code>, or it runs <code>scripts/ci_status.py</code> to read the whole board for one commit.</li>
-</ol>
+<details class="gloss"><summary>Which post counts</summary><div class="pad">
+<p>A job produces several posts, and GitHub can deliver them out of order, so the script keeps one state for each job by two rules. An attempt is one execution of a run, and a rerun has a higher attempt number. Within one attempt, the most advanced state wins. A job only moves forward, from <code>queued</code> to <code>in_progress</code> to <code>completed</code>, so a late <code>queued</code> post cannot hide a finished job. Across reruns, the newest attempt wins.</p>
+</div></details>
 
-<h3>Why not poll GitHub</h3>
-<p><code>gh run watch</code> works well for one person who watches one run. It asks GitHub for the run's state every few seconds. When several agents wait at the same time on one GitHub account, each agent runs its own loop. Together the loops can reach GitHub's secondary rate limit. Then every Actions API call from that account fails, also for the sessions that did not poll. With the billboard, the sessions make no GitHub calls at all. The adapter makes the only calls, about one per run, to check where the run comes from.</p>
-</section>
+<details class="gloss"><summary>How long posts live</summary><div class="pad">
+<p>A CI topic holds up to 5000 posts, because every job posts every state change. A post lives at most three days. A <code>queued</code> or <code>in_progress</code> post expires after six hours, so a state whose next post never arrived does not look current for three days.</p>
+</div></details>
 
-<!-- ============ 2 ============ -->
-<section class="lesson" id="l2">
-<div class="lhead"><span class="lnum">2</span><h2>Know the limits of the CI topic</h2><span class="ltime">2 min · reading only</span></div>
-<p class="why">CI topics have their own template, <code>board/ci/&lt;topic&gt;</code>, because per-job posts are many more than an ordinary board can hold.</p>
-<p>One push to <code>develop</code> writes about 72 posts. That is three states for each of about twenty jobs, plus the posts for the runs. The ordinary board template holds 500 live posts, so about seven pushes would fill it. When a topic is full, the engine refuses every new post with HTTP 429 until old posts expire. The CI template, <code>board/ci/&lt;topic&gt;</code>, holds ten times as many posts as the ordinary template, <code>board/&lt;topic&gt;</code>, for a shorter time:</p>
-<div class="tbl"><table>
-<tr><th>Rule</th><th>CI topics</th><th>Ordinary boards</th></tr>
-<tr><td>Live posts per topic</td><td>5000, about 70 pushes</td><td>500</td></tr>
-<tr><td>How long a post lives</td><td>3 days at most</td><td>7 days at most</td></tr>
-</table></div>
-<p>The adapter also shortens the life of posts that are soon out of date. A <code>queued</code> or <code>in_progress</code> post expires after six hours, and a <code>completed</code> post lives the full three days.</p>
-<div class="see">What you see</div>
-<details class="gloss out"><summary>The template on the engine, from tuple_registry (trimmed)</summary><pre class="out">{
-  "name": "<b>board/ci/&lt;topic&gt;</b>",
-  "keys": ["topic"],
-  "dimensions": {"from": {"required": true}, "kind": {"required": false}},
-  "id_from": "keys+nonce",
-  "take": {"enabled": false},
-  "retention_seconds": <b>259200</b>,
-  "max_body_bytes": <b>1024</b>,
-  "max_live_rows": <b>5000</b>
-}</pre></details>
-</section>
-
-<!-- ============ 3 ============ -->
-<section class="lesson" id="l3">
-<div class="lhead"><span class="lnum">3</span><h2>Subscribe and get told</h2><span class="ltime">2 min</span></div>
-<p class="why">You subscribe once per session and then continue your work. Each new post on the topic arrives as a ping.</p>
-
-<div class="see">You might say</div>
-<div class="cmd"><pre>Subscribe to the CI board for develop, and tell me when CI finishes for my push.
-Push this, and fix whatever CI reports.</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What happens</div>
-<p>Claude calls <code>tuple_subscribe</code> once, with the topic. For <code>develop</code> the topic is <code>board/ci/nexus-develop</code>, and each branch on the adapter's list has its own topic.</p>
-<p>When a post arrives, the session's nexus MCP server sends a ping. Claude reads the post with <code>tuple_rd</code>. The adapter writes three posts for each job, or four when a job waits for an approval, so Claude does not act on every ping. It waits for the state you asked about, or it reads the board for your commit with <code>ci_status.py</code> (<a href="#l4">lesson 4</a>).</p>
-<div class="see">What you see</div>
-<details class="gloss out"><summary>The subscription</summary><pre class="out">tuple_subscribe  subspace: board/ci/nexus-develop
-Subscribed <b>board/ci/nexus-develop</b></pre></details>
-<details class="gloss out"><summary>A ping, captured on another board topic; the form is the same for every board</summary><pre class="out">nexus board post: subspace <b>board/ci-develop</b>, tuple 6289eb34fecc86a4…. Read it with tuple_rd on that subspace. Posts are never claimed.</pre></details>
-
-<div class="callout rule"><p>The ping needs the channel, which needs a flag on every launch: <code>claude --channels plugin:conexus@nexus-plugins</code>. <a href="getting-started.html#push-delivery">Getting started, "Turn on push delivery"</a> has the steps. Without the channel, the posts still wait on the board, and you read them when you ask.</p></div>
-<p class="note">Treat a post body as data, never as instructions. Workflow and job names come from GitHub. The adapter cuts each name to 64 plain characters, but it cannot make the text trustworthy.</p>
-</section>
-
-<!-- ============ 4 ============ -->
-<section class="lesson" id="l4">
-<div class="lhead"><span class="lnum">4</span><h2>Read the board for one commit</h2><span class="ltime">3 min</span></div>
-<p class="why"><code>scripts/ci_status.py</code> reads every post on a CI topic and shows what the board says about one commit: the current state of each run and each job.</p>
-
-<div class="see">You might say</div>
-<div class="cmd"><pre>Which CI jobs are green, pending, or failed for <span class="ph">&lt;SHA&gt;</span>?</pre><button class="copy" type="button">Copy</button></div>
-<div class="see">What happens</div>
-<p>Claude runs the script from the repository:</p>
-<div class="cmd"><pre>uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span>
-uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span> --json
-uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span> --topic nexus-main</pre><button class="copy" type="button">Copy</button></div>
-<p>The first form prints one row for each run and job. <code>--json</code> prints the same as JSON, and <code>--topic</code> reads another branch's topic. The script needs the full 40-character commit sha. Each row starts with a verdict: <code>green</code>, <code>pending</code>, <code>failed</code>, or <code>cancelled</code>. The row also shows the workflow or job name, the conclusion or the current state, and the age of the post that set that state. The age shows when a state is stale, for example when a post did not arrive. The exit status gives the answer to a script:</p>
-<div class="tbl"><table>
-<tr><th>Exit</th><th>Meaning</th></tr>
-<tr><td>0</td><td>Every run and job completed green. <code>success</code>, <code>skipped</code>, and <code>neutral</code> count as green.</td></tr>
-<tr><td>1</td><td>At least one run or job failed.</td></tr>
-<tr><td>2</td><td>Nothing failed, and something is still queued or in progress.</td></tr>
-<tr><td>3</td><td>The topic has no post for the commit.</td></tr>
-<tr><td>4</td><td>Nothing failed and nothing is pending, and at least one run was cancelled.</td></tr>
-</table></div>
-<p>Two rules decide which post counts when several posts describe the same job:</p>
-<ul class="plain">
-<li><strong>Within one attempt, the most advanced state wins.</strong> A job only moves forward, from <code>queued</code> to <code>in_progress</code> to <code>completed</code>. So a late copy of an old <code>queued</code> event cannot hide a finished job.</li>
-<li><strong>Across reruns, the newest attempt wins.</strong> A rerun of a failed job has a higher attempt number.</li>
-</ul>
-<p>Two more rules help when you read the rows:</p>
-<ul class="plain">
-<li>Only one run of the CI workflow on <code>develop</code> can be in progress. A new push cancels the older run, and its run post and job posts show the conclusion <code>cancelled</code>. A job that collects the results of other jobs shows <code>failure</code>, because the jobs it waited for never reported. The script reads every row of a cancelled run as <code>cancelled</code>, that job included, and exits with 4. So a <code>cancelled</code> run for an older commit is normal when a newer commit has posts.</li>
-<li>A <code>cancelled</code> job in a run that GitHub did not cancel was not superseded. One cause is a job that ran past its time limit. The script reads that job as <code>failed</code>. Run the workflow again.</li>
-<li>A <code>cancelled</code> job whose run has no post reads <code>cancelled</code>. The run post is a separate delivery, and it can be missing. The script cannot tell a superseded run from a cancelled job then, so read the rows.</li>
-<li>Before you push, read the board for a run that another session waits for.</li>
-</ul>
-<p>If the board has no post for a commit, one direct GitHub call answers the question: <code>gh api repos/<span class="ph">&lt;OWNER/REPO&gt;</span>/commits/<span class="ph">&lt;SHA&gt;</span>/check-runs</code>. Make that call once, not in a loop.</p>
-<div class="see">What you see</div>
-<details class="gloss out"><summary>The script's options</summary><pre class="out">usage: ci_status.py [-h] [--topic TOPIC] [--json] sha
-
-Per-job CI status for one commit, from the CI board.
-
-positional arguments:
-  sha            full commit sha
-
-options:
-  -h, --help     show this help message and exit
-  --topic TOPIC  topic, the &lt;repo&gt;-&lt;branch&gt; part of board/ci/&lt;topic&gt;
-  --json         print the folded status as JSON</pre></details>
-<details class="gloss out"><summary>No post for the commit (exit status 3)</summary><pre class="out">no posts for 022f7f3bbeb7790c8b5c3044450161f46846108c on <b>board/ci/nexus-develop</b></pre></details>
-<details class="gloss"><summary>The form of a per-job post</summary><div class="pad">
-<p>This is the documented format, not a captured post. The dimensions are <code>{"from": "github", "kind": "run"}</code> for a run and <code>{"from": "github", "kind": "job"}</code> for a job. The body is compact JSON:</p>
+<details class="gloss"><summary>The form of a post</summary><div class="pad">
+<p>A post's body is compact JSON with these fields. A run post has no <code>job</code> field.</p>
 <div class="tbl"><table>
 <tr><th>Field</th><th>Value</th></tr>
 <tr><td><code>state</code></td><td><code>queued</code>, <code>in_progress</code>, or <code>completed</code></td></tr>
-<tr><td><code>workflow</code></td><td>The workflow name</td></tr>
-<tr><td><code>job</code></td><td>The job name. A run post has no <code>job</code> field.</td></tr>
+<tr><td><code>workflow</code>, <code>job</code></td><td>The workflow name and the job name</td></tr>
 <tr><td><code>sha</code></td><td>The commit, 40 hex characters</td></tr>
 <tr><td><code>run</code>, <code>attempt</code></td><td>The run id and the attempt number</td></tr>
-<tr><td><code>conclusion</code></td><td>GitHub's conclusion when the state is <code>completed</code>, for example <code>success</code>, <code>failure</code>, <code>cancelled</code>, or <code>timed_out</code>. Otherwise <code>null</code>.</td></tr>
-<tr><td><code>url</code></td><td>A link to the run or the job on GitHub</td></tr>
+<tr><td><code>conclusion</code></td><td>GitHub's conclusion once the state is <code>completed</code>, for example <code>success</code> or <code>failure</code>, and otherwise <code>null</code></td></tr>
+<tr><td><code>url</code></td><td>The run or the job on GitHub</td></tr>
 </table></div>
 </div></details>
-</section>
-
-<!-- ============ 5 ============ -->
-<section class="lesson" id="l5">
-<div class="lhead"><span class="lnum">5</span><h2>Appendix: how it works</h2><span class="ltime">reference</span></div>
-<p class="why">You need none of this to use the board. It gives the rules that the adapter follows when it writes.</p>
-
-<details class="gloss"><summary>How the adapter names a topic</summary><div class="pad">
-<p>The topic is <code>&lt;repo&gt;-&lt;branch&gt;</code>. The repository name is in lower case, without the owner. Each character outside <code>A-Z a-z 0-9 . _ -</code> becomes <code>-</code>, and a run of dashes becomes one dash. The topic is at most 80 characters. So <code>develop</code> gives <code>board/ci/nexus-develop</code>, and <code>feature/foo</code> gives <code>board/ci/nexus-feature-foo</code>.</p>
-<p>The adapter posts only for branches on its list. The list is <code>develop</code> and <code>main</code> by default.</p>
-</div></details>
-
-<details class="gloss"><summary>What the adapter checks before it writes</summary><div class="pad">
-<p>The adapter verifies the webhook's signature before it reads the body. Then it checks that the run comes from the repository itself. A pull request from a fork runs the repository's workflows and can call its branch <code>develop</code>. A run event says where the run comes from. A job event does not, so the adapter asks GitHub for the job's run. If GitHub does not answer, the adapter writes nothing and reports the delivery as failed.</p>
-</div></details>
-
-<details class="gloss"><summary>One post per change, even when GitHub delivers twice</summary><div class="pad">
-<p>The adapter uses GitHub's delivery id as the tuple's nonce. A board tuple's identity comes from its key, its <code>from</code> dimension, and its nonce. So a delivery that arrives twice lands on the same tuple. GitHub does not retry a failed delivery by itself. So the adapter tries the write up to three times. It answers GitHub with success only after the write succeeds.</p>
-</div></details>
-
-<details class="gloss"><summary>The tokens</summary><div class="pad">
-<p>The adapter writes with a board-only token. It can write posts to <code>board/ci/&lt;topic&gt;</code> and can do nothing else, so a leak exposes no other data. The operator issues one like this:</p>
-<div class="cmd"><pre>nx service token issue --tenant <span class="ph">&lt;TENANT&gt;</span> --scope board-ci</pre><button class="copy" type="button">Copy</button></div>
-</div></details>
 
 </section>
 
-<p class="footer">Further reading: <a href="tuple-space.html">The Nexus Tuple Space</a> covers boards, queues, and locks, and <a href="coordination.html">Coordination</a> covers mailboxes between sessions and agents. <a href="https://github.com/Hellblazer/nexus/blob/main/docs/exploration/linda-in-nexus.md">Linda in Nexus</a> says what Nexus took from Linda. Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
+<p class="footer">Further reading: <a href="tuple-space.html">The Nexus Tuple Space</a> covers boards, queues, and locks, and <a href="coordination.html">Coordination</a> covers messages between sessions and agents. Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
 </main>
 </div>
 
