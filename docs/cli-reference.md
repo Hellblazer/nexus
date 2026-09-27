@@ -2761,6 +2761,26 @@ also resolves every `[display](chash:<hex>)` span and appends a `## Citations`
 footnote block containing the chunk text (truncated at 500 chars). Unresolvable
 chash values render as `[unresolved chash: <first8>…]` rather than crashing.
 
+Unconditionally (no flag) also resolves every `[display](nx://catalog/<tumbler>)`
+link (GH #896 render/validate half — the in-place `nx catalog footnotes`
+converter GH #896 also asks for is a separate, not-yet-built surface: nexus-sxiay)
+against the catalog and appends a `## Catalog References` footnote block naming
+the title, content type, owner, and a working link. The link is never a
+`file://` URI or an absolute path — `nx index repo` derives `source_uri` as
+`file://<abspath>` for every registration, so a bare preference would leak the
+indexing machine's own path layout; a non-`file://` `source_uri` (`https://`,
+`x-devonthink-item://`, ...) is preferred, a relative `file_path` is the
+fallback, and neither being safe omits the link segment entirely (title/type/
+owner only). A tumbler that has been MERGED into another (a duplicate whose
+`alias_of` points at a canonical tumbler — the row survives the merge, it is
+never tombstoned) resolves to the canonical entry's data, with a
+`merged into` \`nx://catalog/<canonical>\` note — never the stale duplicate's
+own fields. A tumbler that no longer resolves at all renders
+`[unresolved tumbler: <tumbler>]` rather than crashing; a doc with no such
+links opens no catalog client at all. A catalog service outage aborts the
+whole render (exit 1) rather than silently reporting every citation as
+unresolved (the same nexus-ib6uy precedent `--expand-citations` follows).
+
 ```
 nx doc render docs/paper.md
 nx doc render docs/paper.md --expand-citations
@@ -2771,7 +2791,15 @@ nx doc render docs/paper.md --project-root /path/to/repo  # resolver context (be
 
 ### nx doc validate
 
-Parse-and-resolve without emission. Exits non-zero on any unresolved token.
+Parse-and-resolve without emission. Exits non-zero on any unresolved token, and
+on any `nx://catalog/<tumbler>` link (GH #896 render/validate half; nexus-sxiay
+tracks the in-place converter) that no longer resolves — reported as
+`file:line: unresolved tumbler <tumbler> (nx://catalog/<tumbler>)` ONCE PER
+CITING LINE (a tumbler cited twice is reported twice; deduplication is correct
+for the render footnote, wrong for an error report a reader must act on line
+by line). Exit 2 (distinct from exit 1's "this tumbler genuinely does not
+resolve") means the catalog service itself was unreachable while checking —
+an environment failure, not a content finding; fix the service and re-run.
 
 ```
 nx doc validate docs/paper.md

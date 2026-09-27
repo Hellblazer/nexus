@@ -14,10 +14,19 @@ Exit contract::
     0  — all tokens resolved (or ``--allow-unresolved`` and nothing
          structural went wrong)
     1  — one or more tokens unresolved (validate mode or strict render)
-    2  — argument / IO error (no file, bad flag, etc.)
+    2  — argument / IO error (no file, bad flag, etc.); ALSO the
+         catalog service being unreachable while resolving a
+         ``nx://catalog/<tumbler>`` link (GH #896) in ``nx doc
+         validate`` — an environment failure, distinct from the exit-1
+         "this tumbler genuinely does not resolve" signal. ``nx doc
+         render`` treats the same failure as a hard abort
+         (``click.ClickException``, exit 1) rather than exit 2 — see
+         ``_append_catalog_link_footnotes``.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +36,12 @@ from nexus.commands._helpers import default_db_path
 from nexus.config import load_config
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.db.t2 import T2Database
+from nexus.doc.catalog_links import (
+    CatalogLinkResolutionError,
+    format_footnote,
+    format_unresolved_footnote,
+    scan_and_resolve_catalog_links,
+)
 from nexus.doc.citations import (
     extensions_report,
     grounding_report,
@@ -123,6 +138,10 @@ def render_cmd(
 
     total_resolved = 0
     total_misses = 0
+    # GH #896: nx://catalog/<tumbler> link resolver, opened lazily (only
+    # once any input actually carries a link) and shared across paths so
+    # a multi-file render pays one catalog client construction, not N.
+    link_reader_holder: list[Any] = []
     try:
         registry = _default_registry(root, db=db)
         try:
@@ -147,6 +166,22 @@ def render_cmd(
                     _append_chash_footnotes(
                         path, out_dir, phase4_trio,
                     )
+
+                try:
+                    _append_catalog_link_footnotes(
+                        path, out_dir, partial(_lazy_link_reader, link_reader_holder),
+                    )
+                except CatalogLinkResolutionError as exc:
+                    # nexus-ib6uy precedent: a degraded catalog service
+                    # must ABORT the render rather than render every
+                    # nx://catalog link on this file as "unresolved" —
+                    # that would bake a false dangling-reference verdict
+                    # into the doc.
+                    raise click.ClickException(
+                        f"doc render aborted: catalog service degraded while "
+                        f"resolving nx://catalog links — fix the service and "
+                        f"re-render ({exc})"
+                    ) from exc
         except RenderError as exc:
             click.echo(f"render error: {exc}", err=True)
             raise click.exceptions.Exit(1)
@@ -236,6 +271,102 @@ def _append_chash_footnotes(
         fh.write(block)
 
 
+def _open_catalog_link_reader() -> Any:
+    """Open the catalog reader for ``nx://catalog/<tumbler>`` link
+    resolution (GH #896).
+
+    Reuses ``make_catalog_reader()`` — the same read-facing client
+    ``_phase4_catalog_t3_chash`` constructs for chash resolution — no
+    new catalog route. Failures are normalized into
+    :class:`CatalogLinkResolutionError` so callers have one exception
+    type to catch regardless of whether opening or resolving failed.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    try:
+        return make_catalog_reader()
+    except Exception as exc:  # noqa: BLE001 — boundary catch, normalized below
+        raise CatalogLinkResolutionError(
+            f"cannot open catalog reader: {exc}"
+        ) from exc
+
+
+def _lazy_link_reader(holder: list[Any]) -> Any:
+    """Return the cached catalog reader in *holder*, opening it via
+    :func:`_open_catalog_link_reader` on first use.
+
+    *holder* is a 0-or-1-element list acting as the lazy,
+    command-invocation-scoped cache for the catalog reader — shared
+    across every path a single ``render``/``validate`` call touches, so
+    a multi-file invocation pays one client construction, not N. Both
+    ``render_cmd`` and ``validate_cmd`` pass ``partial(_lazy_link_reader,
+    holder)`` as the ``get_reader`` callable
+    ``scan_and_resolve_catalog_links`` calls only when a file actually
+    carries a link.
+    """
+    if not holder:
+        holder.append(_open_catalog_link_reader())
+    return holder[0]
+
+
+def _append_catalog_link_footnotes(
+    src_path: Path,
+    out_dir: Path | None,
+    get_reader: Callable[[], Any],
+) -> None:
+    """GH #896: append a footnote block resolving every
+    ``nx://catalog/<tumbler>`` link to its catalog entry (title,
+    content type, owner, and a working link — see
+    ``nexus.doc.catalog_links._safe_link_target`` for the never-a-
+    machine-local-path rule).
+
+    Mirrors ``_append_chash_footnotes``'s sibling-lookup and dedup-by-
+    key shape; a tumbler that no longer resolves renders a marker
+    instead of crashing, exactly like an unresolved chash. Does
+    nothing (opens no reader) when the source carries no such link.
+    """
+    if out_dir is not None:
+        rendered = out_dir / f"{src_path.stem}.rendered.md"
+    else:
+        rendered = src_path.with_name(f"{src_path.stem}.rendered.md")
+    if not rendered.exists():
+        return
+
+    source_text = src_path.read_text(errors="replace")
+    resolved = scan_and_resolve_catalog_links(source_text, get_reader)
+    if not resolved.links:
+        return
+
+    # Footnotes are one-per-unique-tumbler (dedup is CORRECT here — see
+    # scan_catalog_links's own docstring on why validate must not do the
+    # same dedup for its error reporting).
+    seen: set[str] = set()
+    unique_links = []
+    for link in resolved.links:
+        if link.tumbler in seen:
+            continue
+        seen.add(link.tumbler)
+        unique_links.append(link)
+
+    footnotes = []
+    for link in unique_links:
+        entry = resolved.entries.get(link.tumbler)
+        if entry is None:
+            footnotes.append(format_unresolved_footnote(link))
+        else:
+            footnotes.append(format_footnote(
+                link, entry, resolved.owner_names,
+                merged_into=resolved.merged_into.get(link.tumbler),
+            ))
+
+    if not footnotes:
+        return
+
+    block = "\n\n## Catalog References\n\n" + "\n".join(footnotes) + "\n"
+    with rendered.open("a", encoding="utf-8") as fh:
+        fh.write(block)
+
+
 @doc.command("validate")
 @click.argument("paths", nargs=-1, required=True, type=click.Path(exists=True, dir_okay=False, path_type=Path))
 @click.option(
@@ -254,6 +385,9 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
 
     total_misses = 0
     total_ok = 0
+    # GH #896: lazy, validate-invocation-scoped catalog reader cache —
+    # only opened once some path actually carries an nx://catalog link.
+    link_reader_holder: list[Any] = []
     try:
         registry = _default_registry(root, db=db)
         for path in paths:
@@ -271,6 +405,31 @@ def validate_cmd(paths: tuple[Path, ...], project_root: Path | None) -> None:
                 )
                 total_misses += 1
             total_ok += result.resolved
+
+            try:
+                resolved = scan_and_resolve_catalog_links(
+                    path.read_text(errors="replace"),
+                    partial(_lazy_link_reader, link_reader_holder),
+                )
+            except CatalogLinkResolutionError as exc:
+                click.echo(
+                    f"catalog link validation aborted — catalog service "
+                    f"unreachable: {exc}", err=True,
+                )
+                raise click.exceptions.Exit(2)
+            # nexus-sevlu review item 3: report EVERY citing occurrence,
+            # not one per unique tumbler — dedup is correct for a
+            # footnote block (one entry per reference) but wrong for an
+            # error report (a reader fixing line 40 needs to know line
+            # 87 cites the same dangling tumbler too).
+            for link in resolved.links:
+                if link.tumbler not in resolved.entries:
+                    click.echo(
+                        f"{path}:{link.lineno}: unresolved tumbler "
+                        f"{link.tumbler} (nx://catalog/{link.tumbler})",
+                        err=True,
+                    )
+                    total_misses += 1
     finally:
         if db is not None:
             db.close()
