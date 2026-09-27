@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # ADMISSION LOAD GATE (nexus-u2mlh.9) — deliberately WRITES to the
 # operator's live engine through the public edge: drives concurrent CCE
-# embed load into a throwaway knowledge collection until the engine's
-# admission control (admission_refusals_total) or its request-deadline
-# abort (deadline_aborts_total) fires. This is the close check for
-# nexus-u2mlh.2 (`bd show nexus-u2mlh.2`) and its epic nexus-u2mlh.
+# embed load into a throwaway knowledge collection and asserts the stack
+# sheds it with fast refused 503s (edge or engine) and never with a cut.
+# Since conexus-vtlr (2026-09-27) the edge refuses first, so this no
+# longer exercises the ENGINE's admission control; see the driver's
+# docstring. Close check for nexus-u2mlh.10 and its epic nexus-u2mlh.
 export NX_ALLOW_PROD_WRITE="admission-load-gate: deliberate concurrent embed load against the live engine to exercise admission control (nexus-u2mlh.9)"
 #
 # WHY THIS EXISTS (2026-09-26): nexus-u2mlh.2 added per-request admission

@@ -243,7 +243,35 @@ def test_decide_ramp_outcome_a_timeout_step_blocks_a_later_pass() -> None:
     outcome = admission_load.decide_ramp_outcome([64, 128], [cut, passing])
     assert outcome.stopped_at_step is None
     assert outcome.timeout_steps == (64,)
-    with pytest.raises(admission_load.AdmissionLoadVacuousError, match="proxy timeouts"):
+    with pytest.raises(admission_load.AdmissionLoadCutError, match="cut instead of refused"):
+        admission_load.require_pass(outcome)
+
+
+def test_evaluate_step_clamps_the_engine_share_to_observed_refusals() -> None:
+    # Another tenant's refusals can move the engine-global counter past this
+    # run's own; the split must still sum to refused_count (code review 27174).
+    before = admission_load.EmbedderCounters(admission_refusals_total=0)
+    after = admission_load.EmbedderCounters(admission_refusals_total=10)
+    verdict = admission_load.evaluate_step(before, after, [_rr(503, "refused")] * 9)
+    assert (verdict.refused_count, verdict.engine_refusals, verdict.edge_refusals) == (9, 9, 0)
+    assert verdict.counter_delta == 10
+
+
+def test_evaluate_step_a_transport_failure_is_a_cut() -> None:
+    # An ALB idle cut on a reused keep-alive connection surfaces as a reset,
+    # not a 504 (code review 27174).
+    before = admission_load.EmbedderCounters()
+    after = admission_load.EmbedderCounters()
+    verdict = admission_load.evaluate_step(
+        before, after, [_rr(503, "refused")] * 20 + [_rr(0, error="RemoteProtocolError")],
+    )
+    assert verdict.timeouts == 1
+    assert verdict.passes is False
+
+
+def test_require_pass_reports_a_cut_before_an_unattributable_step() -> None:
+    outcome = admission_load.RampOutcome((64,), None, None, 64, (), (64,))
+    with pytest.raises(admission_load.AdmissionLoadCutError):
         admission_load.require_pass(outcome)
 
 
@@ -703,6 +731,38 @@ def test_run_gate_passes_when_admission_moves_and_refused_is_observed(monkeypatc
     assert register_calls == ["knowledge__u2mlh-load-passnonce__voyage-context-3__v1"]
     assert delete_calls == ["knowledge__u2mlh-load-passnonce__voyage-context-3__v1"]
     assert result["cleanup"]["ok"] is True
+
+
+def test_run_gate_passes_on_edge_only_refusals(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The post-conexus-vtlr shape: refused 503s come back, the engine counter
+    # stays put (2026-09-27: 50 refused, counter 104 -> 104, zero cuts).
+    _patch_lifecycle(monkeypatch)
+    factory = _client_factory_for(
+        [IDLE_STATUS, IDLE_STATUS, _status(admission=104), _status(admission=104)],
+        lambda request: httpx.Response(503, headers={"Retry-After": "2", "X-Nexus-Deadline-Outcome": "refused"}),
+    )
+    result = admission_load.run_gate(dry_run=False, ramp_steps=(2,), client_factory=factory, idle_sleep=lambda s: None)
+    assert result["passed"] is True, result["reason"]
+    assert "0 engine, 2 edge" in result["reason"]
+
+
+def test_run_gate_fails_when_a_mostly_cut_step_is_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A step whose responses are mostly transport failures is INVALID, but its
+    # cuts still fail the run rather than vanish from the verdict, and the
+    # ramp does not go on to a later, clean-looking step.
+    _patch_lifecycle(monkeypatch)
+
+    def responder(request: httpx.Request) -> httpx.Response:
+        raise httpx.RemoteProtocolError("peer closed connection", request=request)
+
+    factory = _client_factory_for(
+        [IDLE_STATUS, IDLE_STATUS, _status(admission=0), _status(admission=0), _status(admission=0), _status(admission=0)],
+        responder,
+    )
+    result = admission_load.run_gate(dry_run=False, ramp_steps=(2, 4), client_factory=factory, idle_sleep=lambda s: None)
+    assert result["passed"] is False
+    assert "cut instead of refused" in result["reason"]
+    assert len(result["steps"]) == 1
 
 
 def test_run_gate_fails_unattributable_when_counter_moves_with_no_refused_observed(monkeypatch: pytest.MonkeyPatch) -> None:
