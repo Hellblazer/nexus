@@ -2294,6 +2294,7 @@ nexus-c3rer
 nexus-c3w
 nexus-c3w.1
 nexus-c4143
+nexus-c41d9
 nexus-c4nq
 nexus-c53hy
 nexus-c590
