@@ -111,7 +111,7 @@ class TestListItemContinuationNotTreatedAsCode:
             "    - **Too many hub matches**: enable --use-icf before lowering.\n"
             "    - **Ranking feels right**: stop.\n"
         )
-        lines = dict(iter_plain_lines(text))
+        lines = dict(iter_plain_lines(text, skip_indented_code=True))
         assert "Too few matches" in lines[4]
         assert "Too many hub matches" in lines[5]
         assert "Ranking feels right" in lines[6]
@@ -130,7 +130,7 @@ class TestListItemContinuationNotTreatedAsCode:
             "      A third paragraph too.\n"
             "- [x] A sibling checklist item.\n"
         )
-        lines = dict(iter_plain_lines(text))
+        lines = dict(iter_plain_lines(text, skip_indented_code=True))
         assert "SECOND paragraph" in lines[4]
         assert "third paragraph" in lines[7]
         assert "sibling checklist item" in lines[8]
@@ -153,7 +153,7 @@ class TestListItemContinuationNotTreatedAsCode:
             "    trailing prose after the table.\n"
             "  - **R3** -- another item.\n"
         )
-        lines = dict(iter_plain_lines(text))
+        lines = dict(iter_plain_lines(text, skip_indented_code=True))
         assert "dispatch shape" in lines[6]
         assert "trailing prose after" in lines[10]
         assert "another item" in lines[11]
@@ -170,7 +170,7 @@ class TestListItemContinuationNotTreatedAsCode:
             "\n"
             "    this IS genuine indented code\n"
         )
-        lines = dict(iter_plain_lines(text))
+        lines = dict(iter_plain_lines(text, skip_indented_code=True))
         assert 6 not in lines  # the genuine code line is correctly skipped
         assert "not part of the list" in lines[4]
 
@@ -185,7 +185,7 @@ class TestListItemContinuationNotTreatedAsCode:
             "\n"
             "more prose\n"
         )
-        lines = dict(iter_plain_lines(text))
+        lines = dict(iter_plain_lines(text, skip_indented_code=True))
         assert 3 not in lines
         assert 4 not in lines
         assert "more prose" in lines[6]
@@ -235,3 +235,20 @@ class TestInlineCodeMaskingIsOptIn:
         p.write_text("- `docs__alpha`: 10 chunks\n")
         refs = scan_markdown(p, ["docs"])
         assert [r.collection for r in refs] == ["docs__alpha"]
+
+    def test_ref_scanner_still_sees_a_collection_in_an_indented_paragraph(
+        self, tmp_path,
+    ) -> None:
+        """Indented-code skipping is opt-in too: a 4-space-indented,
+        blank-line-preceded paragraph outside any list is still a real
+        reference for ref_scanner, as it was before nexus-3ioz2."""
+        from nexus.doc.ref_scanner import scan_markdown
+
+        p = tmp_path / "doc.md"
+        p.write_text("Intro.\n\n    See docs__legacy: 12 chunks.\n")
+        refs = scan_markdown(p, ["docs"])
+        assert [r.collection for r in refs] == ["docs__legacy"]
+
+    def test_default_yields_an_indented_line(self) -> None:
+        text = "Intro.\n\n    indented line\n"
+        assert dict(iter_plain_lines(text))[3] == "    indented line"

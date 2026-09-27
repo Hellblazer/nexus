@@ -13,9 +13,12 @@ a scanner keyed only on triple-fenced blocks misses TWO other markdown
 likely to demonstrate the syntax being scanned for — a docs page
 explaining ``[label](nx://catalog/<tumbler>)`` almost certainly quotes
 that literal syntax inside inline backticks, and this very repo's own
-``docs/cli-reference.md`` does. Both are handled HERE, once, so every
-consumer of :func:`iter_plain_lines` benefits without its own fix
-(inline-code masking is opt-in; see :func:`iter_plain_lines`):
+``docs/cli-reference.md`` does. Both are handled HERE, once, and BOTH
+are opt-in keyword arguments of :func:`iter_plain_lines`
+(``mask_inline_code``, ``skip_indented_code``): a consumer scanning for
+link syntax wants them, a consumer scanning for names (ref_scanner,
+citations) does not, since a name in backticks or in an indented
+paragraph is still a real reference. When enabled:
 
 * **Inline code spans** — `` `...` `` or `` ``...`` `` (CommonMark:
   closing delimiter must be the SAME backtick-run length as the
@@ -142,25 +145,26 @@ def _leading_indent_and_rest(line: str) -> tuple[int, str]:
 
 
 def iter_plain_lines(
-    text: str, *, mask_inline_code: bool = False
+    text: str, *, mask_inline_code: bool = False, skip_indented_code: bool = False
 ) -> Iterator[tuple[int, str]]:
-    """Yield ``(1-based lineno, line)`` for every non-fenced,
-    non-indented-code line, with inline code spans masked out when
-    *mask_inline_code* is set.
+    """Yield ``(1-based lineno, line)`` for every non-fenced line.
 
-    Masking is OPT-IN. :mod:`nexus.doc.ref_scanner` finds collection
-    names precisely inside backticks (`` `docs__x` ``), so masking for
-    every consumer erased every reference it looks for; the catalog-link
-    and footnote scanners, which must not match link syntax quoted as an
-    example, pass ``mask_inline_code=True``.
+    Content inside ```` ``` ```` / ``~~~`` fences is always skipped so
+    a tutorial snippet doesn't false-positive.
 
-    Content inside ```` ``` ```` / ``~~~`` fences, and inside a
-    4-space-indented code block, is skipped entirely (yielded to no
-    one) so a tutorial snippet or an indented example doesn't
-    false-positive. An inline code span WITHIN an otherwise-plain line
-    is masked (see the module docstring) rather than dropping the
-    whole line, since the rest of that line is still real prose a
-    caller should scan.
+    The two other "not prose" shapes are OPT-IN, because they are right
+    for a scanner of link syntax and wrong for a scanner of names:
+
+    * *mask_inline_code* masks each inline code span (see the module
+      docstring) rather than dropping the whole line.
+    * *skip_indented_code* also skips a 4-space-indented code block,
+      using the list-context rules in the module docstring.
+
+    :mod:`nexus.doc.ref_scanner` finds collection names precisely inside
+    backticks (`` `docs__x` ``) and in indented paragraphs, so applying
+    either to every consumer silently dropped references it reports on.
+    The catalog-link and footnote scanners, which must not match link
+    syntax quoted as an example, pass both.
 
     Line numbers preserve original file positions — callers reporting
     errors can report ``file:line:col`` against the real source; the
@@ -189,6 +193,9 @@ def iter_plain_lines(
             prev_line_blank = False
             continue
         if in_fence:
+            continue
+        if not skip_indented_code:
+            yield lineno, emit(line)
             continue
 
         stripped = line.strip()
