@@ -1539,7 +1539,7 @@ HTTPS_STAT_MAX_ATTEMPTS: int = 3
 #: is fine for a maintenance sweep and wrong per result on a search path.
 HTTPS_STAT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
 
-#: Write-path ETag capture budget (nexus-0ne1m critique, 6908c29b5 Critical):
+#: Write-path ETag capture budget (nexus-0ne1m critique, 9727a80cc Critical):
 #: :func:`capture_https_etag` runs SYNCHRONOUSLY inside `nx catalog register`/
 #: `update` and the `register` MCP tool — a caller waiting on a register call
 #: must never be exposed to HTTPS_STAT_TIMEOUT_S's ~61.5s read-time worst
@@ -1766,7 +1766,7 @@ def capture_https_etag(source_uri: str, *, http_client: Any = None) -> str:
     ONE HEAD request, no retry, bounded to
     ``httpx.Timeout(HTTPS_ETAG_CAPTURE_TIMEOUT_S,
     connect=HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S)`` (nexus-0ne1m critique,
-    6908c29b5 Critical) — this runs SYNCHRONOUSLY on a WRITE path
+    9727a80cc Critical) — this runs SYNCHRONOUSLY on a WRITE path
     (register/update/the MCP ``register`` tool), never a maintenance sweep,
     so a slow or unreachable upstream must never stall the caller's
     register/update call for anywhere near :data:`HTTPS_STAT_TIMEOUT_S`'s
@@ -1841,7 +1841,7 @@ def record_https_etag(
     best-effort (nexus-0ne1m).
 
     **Side effect callers must know about** (nexus-0ne1m critique,
-    6908c29b5 Critical): for an ``https://`` *source_uri* this makes ONE
+    9727a80cc Critical): for an ``https://`` *source_uri* this makes ONE
     real outbound HEAD request, bounded to
     ``HTTPS_ETAG_CAPTURE_TIMEOUT_S``/``HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S``
     (connect and read/write/pool are independent phase budgets — ~5s
