@@ -584,13 +584,81 @@ class TupleAnnounceTest {
                 .hasMessageContaining("subscriber");
     }
 
+    // ── since alongside a PER-SUBSCRIBER announce: honoured, not refused ──────
+    //
+    // Bead nexus-n36sw (follow-up to nexus-zxthy): unlike a row-level announce
+    // (mailboxAnnounce_sinceWithAnnounce_isRefused above), a per-subscriber
+    // announce's due state lives in nexus.tuple_deliveries, never on the tuple
+    // row, so a since watermark narrows the candidate set instead of colliding
+    // with the engine's own per-subscriber position tracking. This used to be
+    // subscriberAnnounce_sinceTogetherWithAnnounce_isStillRefused; the three
+    // tests below replace it: a row at/before the watermark is excluded before
+    // the SELECT ever runs (never stamped, not merely filtered after stamping),
+    // a row after it is announced normally, and the row-level refusal above is
+    // untouched.
+
     @Test
-    void subscriberAnnounce_sinceTogetherWithAnnounce_isStillRefused() {
-        String topic = "sub-since-" + UUID.randomUUID();
-        var cursor = new TupleRepository.ReadCursor(OffsetDateTime.now(ZoneOffset.UTC), new byte[32]);
-        TupleRepository.WaitSpec both = new TupleRepository.WaitSpec("board/" + topic, null, 10, cursor,
+    void subscriberAnnounce_sinceExcludesARowAtOrBeforeTheWatermark_neverStampsIt() {
+        String topic = "sub-since-watermark-" + UUID.randomUUID();
+        post(topic, "writer-1", "before", "nonce-before");
+
+        List<TupleRepository.TupleRow> seeded = repo.rd(TENANT_A, "board/" + topic, null, 10, null, 0);
+        assertThat(seeded).hasSize(1);
+        byte[] beforeId = seeded.get(0).id();
+
+        OffsetDateTime watermark = tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class));
+        var since = new TupleRepository.ReadCursor(watermark, new byte[0]);
+        TupleRepository.WaitSpec spec = new TupleRepository.WaitSpec("board/" + topic, null, 10, since,
                 new TupleRepository.WaitSpec.Announce(0, 1, "session-a"));
-        assertThatThrownBy(() -> repo.waitAny(TENANT_A, List.of(both), 0))
+
+        assertThat(repo.waitAny(TENANT_A, List.of(spec), 0))
+                .as("a post created at or before the watermark is not a due candidate at all -- "
+                        + "the subspace reports nothing, per WaitResult's own contract")
+                .isEmpty();
+
+        Integer deliveryCount = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchCount(TUPLE_DELIVERIES,
+                TUPLE_DELIVERIES.TUPLE_ID.eq(beforeId)));
+        assertThat(deliveryCount)
+                .as("never stamped -- excluded from the locking SELECT, not merely filtered from the result after")
+                .isEqualTo(0);
+    }
+
+    @Test
+    void subscriberAnnounce_sinceAllowsARowAfterTheWatermark_returnedOnce() {
+        String topic = "sub-since-after-" + UUID.randomUUID();
+        post(topic, "writer-1", "before", "nonce-before");
+
+        OffsetDateTime watermark = tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class));
+
+        post(topic, "writer-2", "after", "nonce-after");
+
+        var since = new TupleRepository.ReadCursor(watermark, new byte[0]);
+        TupleRepository.WaitSpec spec = new TupleRepository.WaitSpec("board/" + topic, null, 10, since,
+                new TupleRepository.WaitSpec.Announce(0, 1, "session-a"));
+
+        List<TupleRepository.WaitResult> result = repo.waitAny(TENANT_A, List.of(spec), 0);
+        assertThat(result.get(0).tuples())
+                .as("only the post created after the watermark is a due candidate")
+                .hasSize(1);
+        assertThat(result.get(0).tuples().get(0).body())
+                .as("the pre-watermark post is excluded, the post-watermark one is not")
+                .isEqualTo("after");
+        assertThat(result.get(0).tuples().get(0).announceCount()).isEqualTo(1);
+    }
+
+    @Test
+    void mailboxAnnounce_sinceWithAnnounce_isStillRefused_rowLevelUnaffectedByTheSubscriberException() {
+        String to = "announce-since-refused-row-level-" + UUID.randomUUID();
+        var cursor = new TupleRepository.ReadCursor(OffsetDateTime.now(ZoneOffset.UTC), new byte[32]);
+        // No subscriber: the mailbox/row-level shape, which keeps the original
+        // refusal (waitAny_sinceWithAnnounce_isRefused above covers the same
+        // contract from the mailbox side; this one is scoped explicitly to the
+        // board/subspace shape so the two are not confused after nexus-n36sw).
+        TupleRepository.WaitSpec rowLevel = new TupleRepository.WaitSpec("board/" + to, null, 10, cursor,
+                new TupleRepository.WaitSpec.Announce(0, 1));
+        assertThatThrownBy(() -> repo.waitAny(TENANT_A, List.of(rowLevel), 0))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("since");
     }

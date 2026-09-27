@@ -843,10 +843,16 @@ public final class TupleRepository {
      * {@code announce} (bead nexus-vsipz, RDR-213 engine half) is {@code null} for
      * every {@code rd}/{@code rdp} call and for a {@link WaitSpec} that does not
      * carry one -- exactly the 5-arg overload's prior behaviour, unchanged. When
-     * non-null, the match and the stamp both move into {@link #queryOnceAnnounce};
-     * {@code since} is ignored on that path ({@link #waitAny}'s validation pass
-     * refuses a spec that sets both, so this method never has to choose between
-     * them).
+     * non-null and row-level ({@code !announce.perSubscriber()}), the match and the
+     * stamp both move into {@link #queryOnceAnnounce}; {@code since} is ignored on
+     * that path ({@link #waitAny}'s validation pass refuses a row-level-announce
+     * spec that also sets {@code since}, so this method never has to choose between
+     * them there). Per-subscriber announce ({@code announce.perSubscriber()},
+     * bead nexus-n36sw) is the one case where BOTH are honoured: {@code since} rides
+     * along into {@link #queryOnceAnnounceSubscriber} as the subscriber's start
+     * watermark. See that method's javadoc for why per-subscriber announce -- and
+     * only it -- can accept a client-supplied position alongside the engine's own
+     * per-row due tracking.
      */
     private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
                                       int n, ReadCursor since, WaitSpec.Announce announce) {
@@ -869,7 +875,7 @@ public final class TupleRepository {
                 cond = cond.and(DSL.jsonbGetAttributeAsText(TUPLES.KEYS, e.getKey()).eq(e.getValue()));
             }
             if (announce != null && announce.perSubscriber()) {
-                return queryOnceAnnounceSubscriber(ctx, cond, limit, announce, tenant, subspace);
+                return queryOnceAnnounceSubscriber(ctx, cond, limit, announce, tenant, subspace, since);
             }
             if (announce != null) {
                 return queryOnceAnnounce(ctx, cond, limit, announce);
@@ -1005,10 +1011,34 @@ public final class TupleRepository {
      * returned carry the POST-stamp per-subscriber values in {@code announcedAt}/
      * {@code announceCount} (the row's own columns are neither read for this
      * decision nor written by it).
+     *
+     * <p>{@code since} (bead nexus-n36sw, follow-up to nexus-zxthy): a fresh board
+     * subscriber has no delivery row for any post already on the topic, so every
+     * retained post reads as due and gets stamped-and-returned one wait at a time
+     * -- the client's own subscribe-time watermark cannot be applied client-side,
+     * because the engine still stamps (and so exhausts) every row it returns
+     * regardless of what the client keeps or drops afterward. Folding the
+     * watermark into THIS predicate closes that: a candidate row is additionally
+     * required to have {@code created_at > since}, so a row at or before the
+     * subscriber's watermark is excluded from the SELECT above and therefore never
+     * locked, never stamped, and never returned -- not "returned but ignored." The
+     * bound is a bare {@code created_at > since} timestamp compare, NOT {@link
+     * #queryOnce}'s general {@code (created_at, id) > (since.createdAt, since.id)}
+     * ROW compare: that finer-grained tuple compare exists to give an exact
+     * resumption point inside a single busy microsecond for a client that is
+     * itself tracking discrete rows (a cursor advanced one tuple at a time,
+     * {@code rd}/{@code rdp}'s own contract). A board subscriber's watermark is
+     * never that -- {@code SubscriptionSet} records only the wall-clock instant a
+     * topic was subscribed to (nothing before that instant has an id worth
+     * comparing against), so {@code since.id()} would be a value with no meaning
+     * to compare against and a bare timestamp bound is the correct -- and
+     * sufficient -- shape for it. {@code null} (an announce.perSubscriber() spec
+     * with no since) is today's unchanged behaviour: no watermark, every due row
+     * eligible, exactly the pre-nexus-n36sw predicate.
      */
     private List<TupleRow> queryOnceAnnounceSubscriber(DSLContext ctx, Condition baseCond, int limit,
                                                         WaitSpec.Announce announce, String tenant,
-                                                        String subspace) {
+                                                        String subspace, ReadCursor since) {
         String subscriber = announce.subscriber();
         Condition claimable = TUPLES.CLAIM_STATE.isDistinctFrom(CLAIM_STATE_DEAD)
                 .and(TUPLES.CLAIM_STATE.isNull().or(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())));
@@ -1023,6 +1053,9 @@ public final class TupleRepository {
                         .or(TUPLE_DELIVERIES.ANNOUNCE_COUNT.ge(announce.max())));
         Condition due = DSL.notExists(ctx.selectOne().from(TUPLE_DELIVERIES).where(blocked));
         Condition cond = baseCond.and(claimable).and(due);
+        if (since != null) {
+            cond = cond.and(TUPLES.CREATED_AT.gt(since.createdAt()));
+        }
 
         TEST_ONLY_ANNOUNCE_TXN_HOLD.run();
         var rows = ctx.selectFrom(TUPLES)
@@ -1072,11 +1105,22 @@ public final class TupleRepository {
      *  {@code n <= 0} clamps to 1, {@code since == null} reads from the start.
      *  {@code announce} (bead nexus-vsipz, RDR-213 engine half) is an ADDITIVE field:
      *  {@code null} (the 4-arg constructor below) is today's unchanged behaviour for
-     *  every existing caller. {@code since} and {@code announce} together are refused
-     *  ({@link #waitAny}'s own validation pass) -- announce mode tracks position on
-     *  the ROW itself via {@code announced_at}/{@code announce_count}, never via a
-     *  client-supplied cursor, so combining the two would silently do nothing with
-     *  the cursor rather than fail loud if it were merely ignored. */
+     *  every existing caller. {@code since} and a ROW-LEVEL {@code announce} (no
+     *  subscriber, the mailbox shape) together are refused ({@link #waitAny}'s own
+     *  validation pass) -- that mode tracks position on the ROW itself via {@code
+     *  announced_at}/{@code announce_count}, never via a client-supplied cursor, so
+     *  combining the two would silently do nothing with the cursor rather than fail
+     *  loud if it were merely ignored. {@code since} together with a PER-SUBSCRIBER
+     *  {@code announce} (bead nexus-n36sw, follow-up to nexus-zxthy) is the one
+     *  exception, and is honoured, not refused: a board post is due-per-subscriber
+     *  regardless of {@code since} (that arithmetic is unchanged), but {@code since}
+     *  additionally excludes any candidate at or before the watermark from ever
+     *  being selected, stamped, or returned -- see {@link
+     *  #queryOnceAnnounceSubscriber}'s javadoc for why this is safe where the
+     *  row-level case is not: the delivery state lives per-{@code (subspace,
+     *  subscriber, tuple_id)} in {@code nexus.tuple_deliveries}, never on the tuple
+     *  row itself, so a client-supplied watermark narrows the CANDIDATE SET rather
+     *  than substituting for the engine's own per-subscriber due tracking. */
     public record WaitSpec(String subspace, Map<String, String> pattern, int n, ReadCursor since,
                             Announce announce) {
 
@@ -1275,12 +1319,18 @@ public final class TupleRepository {
             checkFieldSize("subspace", spec.subspace(), TupleLimits.MAX_SUBSPACE_BYTES);
             resolveOrThrow(spec.subspace());
             checkPatternSizes(spec.pattern() == null ? Map.of() : spec.pattern());
-            // nexus-vsipz (RDR-213 engine half): announce mode tracks position on the
-            // ROW itself (announced_at/announce_count), never via a client-supplied
-            // cursor -- a spec naming both would have the cursor silently do nothing,
-            // so the combination is refused loud here rather than tolerated quietly.
-            if (spec.announce() != null && spec.since() != null) {
-                throw new SchemaViolationException("since", "must not be set together with announce");
+            // nexus-vsipz (RDR-213 engine half): row-level announce mode tracks
+            // position on the ROW itself (announced_at/announce_count), never via a
+            // client-supplied cursor -- a spec naming both would have the cursor
+            // silently do nothing, so the combination is refused loud here rather
+            // than tolerated quietly. Per-subscriber announce (bead nexus-n36sw) is
+            // the one exception: its due state lives per-subscriber in
+            // nexus.tuple_deliveries, never on the row, so a since watermark narrows
+            // the candidate set instead of colliding with the engine's own position
+            // tracking -- queryOnceAnnounceSubscriber honours it. See WaitSpec's own
+            // javadoc for the full contrast.
+            if (spec.since() != null && spec.announce() != null && !spec.announce().perSubscriber()) {
+                throw new SchemaViolationException("since", "must not be set together with a row-level announce");
             }
             subspaces.add(spec.subspace());
         }
