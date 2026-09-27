@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import fnmatch
 import hashlib
 import sys
 from collections.abc import Callable
@@ -373,8 +374,6 @@ def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
     local list already opted in"), not N independent ones. Never prompts
     under ``--dry-run`` (nothing is written) or when nothing would change.
     """
-    import fnmatch
-
     from nexus.aspect_extractor import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         _docs_opt_in_patterns,
         invalidate_engine_aspects_enabled_cache,

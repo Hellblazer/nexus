@@ -2,6 +2,7 @@
 """nx doctor — health check for all required services."""
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -2288,8 +2289,6 @@ def _run_check_docs_aspects_config() -> None:
     after reading the config, never allowlisted up front) -- nothing to
     warn about, no engine call made.
     """
-    import fnmatch as _fnmatch
-
     from nexus.aspect_extractor import _docs_opt_in_patterns  # noqa: PLC0415 — deferred to keep CLI startup fast
 
     patterns = _docs_opt_in_patterns()
@@ -2309,7 +2308,7 @@ def _run_check_docs_aspects_config() -> None:
     drifted = [
         r["name"] for r in rows
         if r.get("content_type") == "docs"
-        and any(_fnmatch.fnmatchcase(r["name"], p) for p in patterns)
+        and any(fnmatch.fnmatchcase(r["name"], p) for p in patterns)
         and r.get("aspects_enabled") is not True
     ]
     if not drifted:
