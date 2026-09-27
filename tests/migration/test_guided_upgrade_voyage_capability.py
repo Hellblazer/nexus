@@ -53,9 +53,9 @@ class TestVerifyVoyageCapability:
         # nexus-03wze mode-lint burn-down: the predicate under test is
         # `m.startswith("voyage")` over the /version embedding_models
         # list -- any voyage-prefixed model satisfies it, so "voyage-3"
-        # alone proves the capable path without spelling a
-        # voyage-context-3/voyage-code-3 literal this lint's regex
-        # would otherwise flag as a cloud-mode assertion it is not.
+        # alone proves the capable path without spelling one of the two
+        # model names the mode-declaration lint's regex treats as a
+        # cloud-mode assertion, which this test is not.
         out = verify_voyage_capability(
             _URL, http_get=_get_returning(_Resp(200, _vbody(["voyage-3"]))))
         assert isinstance(out, VoyageCapabilityOutcome)
