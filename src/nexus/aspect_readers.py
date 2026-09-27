@@ -1545,17 +1545,30 @@ HTTPS_STAT_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.0)
 #: case. ``httpx.Timeout(HTTPS_ETAG_CAPTURE_TIMEOUT_S,
 #: connect=HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S)`` applies the default to
 #: read/write/pool and the (tighter) connect value only to the connect
-#: phase, one attempt, no retry — worst case for the whole capture is
-#: bounded near HTTPS_ETAG_CAPTURE_TIMEOUT_S, not per-phase.
+#: phase, one attempt, no retry — round-2 correction (nexus-0ne1m critique,
+#: minor #3): connect and read/write/pool are INDEPENDENT phase budgets, not
+#: one shared bound, so the pathological worst case is their SUM (~2s slow
+#: connect + ~3s slow read ≈ 5s), not ``HTTPS_ETAG_CAPTURE_TIMEOUT_S`` alone.
+#: Still a vast improvement over HTTPS_STAT_TIMEOUT_S's ~61.5s read-time
+#: worst case; the ~5s figure is the one to cite, not ~3s.
 HTTPS_ETAG_CAPTURE_TIMEOUT_S: float = 3.0
 HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S: float = 2.0
 
-#: Opt-out for the write-path ETag capture entirely (nexus-0ne1m critique):
-#: ``NX_REFERENCE_ETAG_CAPTURE=0`` makes :func:`record_https_etag` a pure
-#: no-op with NO network attempt at all — for a caller that cannot tolerate
-#: ANY added register/update latency, or that runs somewhere the outbound
-#: HEAD itself is undesirable (an offline/sandboxed install, a firewalled
-#: CI runner). Any other value (including unset) keeps capture enabled.
+#: Opt-out for ETag capture entirely (nexus-0ne1m critique; round-2 critique
+#: nexus-0ne1m/nexus-tb2yj: widened from "the write-path" to EVERY outbound
+#: capture path). ``NX_REFERENCE_ETAG_CAPTURE=0`` is checked by
+#: :func:`capture_https_etag` itself — the single low-level function every
+#: capture path funnels through — so it makes a pure no-op with NO network
+#: attempt at all, REGARDLESS of caller: :func:`record_https_etag` (the
+#: `nx catalog register`/`update` write path and the `register` MCP tool)
+#: AND `nx catalog backfill-etags` (the bulk sweep, which calls
+#: :func:`capture_https_etag` directly) both inherit the same guarantee from
+#: this one choke point. For a caller that cannot tolerate ANY added
+#: register/update latency, or that runs somewhere the outbound HEAD itself
+#: is undesirable (an offline/sandboxed install, a firewalled CI runner, a
+#: bulk backfill run against a network-restricted host) — set this and
+#: EVERY capture call becomes a no-op. Any other value (including unset)
+#: keeps capture enabled.
 NX_REFERENCE_ETAG_CAPTURE_ENV = "NX_REFERENCE_ETAG_CAPTURE"
 
 
@@ -1777,7 +1790,22 @@ def capture_https_etag(source_uri: str, *, http_client: Any = None) -> str:
     that captures many ETags in one run (``nx catalog backfill-etags``)
     should pass the SAME client across calls rather than let each call
     build and close its own.
+
+    **Single choke point for the opt-out** (round-2 critique, nexus-0ne1m/
+    nexus-tb2yj): checks :func:`_https_etag_capture_enabled` FIRST, before
+    constructing or touching any client, and returns ``""`` with NO network
+    attempt at all when ``NX_REFERENCE_ETAG_CAPTURE=0`` — this is the ONE
+    place that check lives, so every caller inherits the same "no outbound
+    HTTP from capture" guarantee: :func:`record_https_etag` (the
+    register/update write path) AND ``nx catalog backfill-etags`` (which
+    calls this function directly, sharing one client across a whole sweep)
+    alike. A round-1 fix gated only ``record_https_etag``, leaving
+    ``backfill-etags`` able to make real HEAD requests even with the
+    opt-out set — moving the check here closes that gap for every current
+    and future caller, not just the two known today.
     """
+    if not _https_etag_capture_enabled():
+        return ""
     own_client = False
     if http_client is None:
         import httpx  # noqa: PLC0415  — optional/heavy dependency deferred (httpx)
@@ -1814,15 +1842,19 @@ def record_https_etag(
     **Side effect callers must know about** (nexus-0ne1m critique,
     40c235f69 Critical): for an ``https://`` *source_uri* this makes ONE
     real outbound HEAD request, bounded to
-    ``HTTPS_ETAG_CAPTURE_TIMEOUT_S`` (~3s, one attempt, no retry — see
-    :func:`capture_https_etag`), BEFORE returning.  Every call site
-    (`nx catalog register`, `nx catalog update --source-uri`, the MCP
-    ``register`` tool) accepts this added latency as the cost of capturing
-    the ETag at the moment the reference is known-fresh; set
-    ``NX_REFERENCE_ETAG_CAPTURE=0`` to disable the network attempt
-    entirely (a pure no-op then, zero latency added). No-op already for a
-    non-``https://`` *source_uri*, or when the HEAD request yields no
-    ETag.
+    ``HTTPS_ETAG_CAPTURE_TIMEOUT_S``/``HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S``
+    (connect and read/write/pool are independent phase budgets — ~5s
+    worst case, not ~3s; see :func:`capture_https_etag`), BEFORE
+    returning.  Every call site (`nx catalog register`, `nx catalog
+    update --source-uri`, the MCP ``register`` tool) accepts this added
+    latency as the cost of capturing the ETag at the moment the reference
+    is known-fresh; set ``NX_REFERENCE_ETAG_CAPTURE=0`` to disable the
+    network attempt entirely (a pure no-op then, zero latency added) — the
+    check lives in :func:`capture_https_etag` itself (the single choke
+    point every capture path shares, ``nx catalog backfill-etags``
+    included), not here, so there is nothing to duplicate or fall out of
+    sync. No-op already for a non-``https://`` *source_uri*, or when the
+    HEAD request yields no ETag.
 
     Otherwise calls ``writer.update(tumbler, meta={HTTPS_ETAG_META_KEY:
     etag})`` — the engine's meta MERGE semantics (jsonb_concat, never a
@@ -1840,8 +1872,6 @@ def record_https_etag(
     time records nothing and never fails the index."
     """
     if not source_uri.startswith("https://"):
-        return
-    if not _https_etag_capture_enabled():
         return
     try:
         etag = capture_https_etag(source_uri, http_client=http_client)

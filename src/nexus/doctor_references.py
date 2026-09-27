@@ -28,9 +28,15 @@ to connect/read/write/pool separately), plus
 ``aspect_readers.HTTPS_STAT_RETRY_DELAYS_S`` backoff between attempts —
 about 61.5s worst case per document. Sampled documents are stat'd with up
 to :data:`MAX_CONCURRENCY` (nexus-0ne1m critique, significant #1) concurrent
-threads sharing ONE ``httpx.Client`` (thread-safe for concurrent requests),
-so worst case for the whole run, if every sampled document were ``https://``
-and every one exhausted its retries, is
+threads sharing ONE ``httpx.Client`` — the shared sync ``Client`` is used
+from worker threads here; httpx's own docs make an explicit sharing claim
+only for ``AsyncClient``, but the underlying connection pool is built for
+concurrent use and sharing one sync ``Client`` across threads is a common,
+well-tested pattern in the httpx ecosystem (round-2 critique, nexus-0ne1m/
+nexus-tb2yj: softened from "documented thread-safe", which overclaimed an
+httpx doc citation that doesn't exist for the sync client) — so worst case
+for the whole run, if every sampled document were ``https://`` and every
+one exhausted its retries, is
 ``ceil(sample / min(MAX_CONCURRENCY, sample)) * that per-call bound`` — see
 :func:`estimated_worst_case_s`. ``nx doctor --check-references --help``
 states the number at the default sample size, and a run prints its own
@@ -43,6 +49,18 @@ nexus-7zhag doctrine). Otherwise exit 1 when any sampled document reads
 'stale' or 'dangling'; 'unknown' NEVER fails this check on its own — an
 indeterminate check (a timeout, a permissions error, a deferred scheme) is
 not evidence of a real problem, only of an inconclusive one.
+
+**Residual limitation, user-facing** (round-2 critique, nexus-0ne1m/
+nexus-tb2yj, significant #S2): a server that mints a FRESH ``ETag`` on
+every response, with no stable ``Last-Modified`` either, makes the
+``https://`` comparison read 'stale' on EVERY run regardless of whether
+the underlying content ever changed. ``nx catalog backfill-etags`` does
+NOT fix this case — it only records another fresh ``ETag`` that will
+mismatch again on the very next check. There is no way from here to
+distinguish that host shape from a real content change; the operator's
+only recourse is to treat a document that reads 'stale' on every run
+against the SAME host as effectively 'unknown' rather than a real
+staleness signal.
 """
 from __future__ import annotations
 
@@ -76,9 +94,12 @@ _log = structlog.get_logger(__name__)
 #: minutes, even before --references-sample is narrowed for a specific need).
 DEFAULT_SAMPLE = 10
 #: Concurrent https:// stats in flight at once, sharing ONE httpx.Client
-#: (nexus-0ne1m critique, significant #1). httpx.Client is documented
-#: thread-safe for concurrent requests, so N workers sharing one client is
-#: the intended usage, not a foot-gun.
+#: (nexus-0ne1m critique, significant #1). The shared client is a SYNC
+#: httpx.Client used from worker threads: httpx's docs make an explicit
+#: sharing claim only for AsyncClient, but the underlying connection pool
+#: is built for concurrent use and sharing one sync Client across threads
+#: is a common, well-tested pattern in the httpx ecosystem — N workers
+#: sharing one client is the intended usage here, not a foot-gun.
 MAX_CONCURRENCY = 8
 #: Stale/dangling rows named per run.
 _MAX_NAMED = 10

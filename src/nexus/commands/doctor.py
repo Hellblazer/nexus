@@ -2680,7 +2680,11 @@ def _run_supplementary_checks() -> None:
          "'stale' or 'dangling'; 'unknown' never fails this check alone. "
          "Not applicable (exit 0) on a box with no reference-only "
          "documents. Remedy for a document stuck at 'unknown' because it "
-         "predates ETag capture: `nx catalog backfill-etags`.",
+         "predates ETag capture: `nx catalog backfill-etags`. Residual "
+         "limitation backfill-etags does NOT fix: a host that mints a "
+         "fresh ETag on every response reads 'stale' on every run "
+         "regardless of real content change -- treat repeated stale "
+         "against the same host as unknown, not a real signal.",
 )
 @click.option(
     "--references-sample",

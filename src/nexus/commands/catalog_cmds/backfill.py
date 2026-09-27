@@ -22,6 +22,12 @@ shipped has no recorded ``ETag`` and reads 'unknown' forever under
 form, following this file's own ``backfill-source-uri`` shape: a plain
 report first, ``--dry-run`` for a preview with zero network calls, and
 ``--limit`` to keep one run bounded rather than an unbounded fan-out.
+``NX_REFERENCE_ETAG_CAPTURE=0`` (round-2 critique, nexus-0ne1m/nexus-tb2yj)
+governs this sweep too, not only the register/update write path: the check
+lives in ``aspect_readers.capture_https_etag`` itself, the single function
+this command's loop calls, so setting it makes every candidate here read
+'no ETag to capture' with zero outbound HEAD requests, exactly like
+``--dry-run``'s zero-network guarantee.
 """
 from __future__ import annotations
 
@@ -209,6 +215,14 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
     returns no ``ETag`` header is reported, not retried; a document whose
     catalog write fails is reported and counted as a failure (exit 1),
     without aborting the rest of the run.
+
+    ``NX_REFERENCE_ETAG_CAPTURE=0`` (round-2 critique, nexus-0ne1m/
+    nexus-tb2yj) disables capture here too: ``capture_https_etag`` checks
+    it before ever touching the shared ``httpx.Client``, so every
+    candidate comes back with no ETag and this run makes ZERO outbound
+    HEAD requests — the same "no outbound HTTP from capture" promise the
+    register/update write path makes, honored here without a second,
+    separately-maintained check.
     """
     from nexus.aspect_readers import (  # noqa: PLC0415 — command-local
         HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S,

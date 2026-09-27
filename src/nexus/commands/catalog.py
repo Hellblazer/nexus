@@ -606,7 +606,16 @@ def register_cmd(
     title: str, owner: str, author: str, year: int,
     content_type: str, file_path: str, source_uri: str, corpus: str,
 ) -> None:
-    """Register a document in the catalog."""
+    """Register a document in the catalog.
+
+    For an https:// --source-uri, this also makes ONE real outbound HEAD
+    request afterward to capture the resource's ETag for later staleness
+    checks (nx doctor --check-references): a few seconds at most, one
+    attempt, best-effort -- a slow, failed, or ETag-less response never
+    fails this call and records nothing. Every other scheme makes no
+    network call at all. Set NX_REFERENCE_ETAG_CAPTURE=0 to disable this
+    HEAD entirely.
+    """
     from nexus.catalog.types import make_relative  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat = _get_catalog()
@@ -690,7 +699,10 @@ def register_cmd(
     default="",
     help="Catalog source identity URI (e.g. x-devonthink-item://<UUID>). "
          "Recovery path for entries whose DT-URI stamp failed during "
-         "nx dt index, or for manual reassignment of catalog identity.",
+         "nx dt index, or for manual reassignment of catalog identity. "
+         "For an https:// URI, also makes ONE real outbound HEAD request "
+         "afterward to capture its ETag (same best-effort budget as "
+         "register; NX_REFERENCE_ETAG_CAPTURE=0 disables it).",
 )
 @click.option(
     "--file-path",
@@ -730,7 +742,10 @@ def update_cmd(
     recover an entry whose DT-URI stamp failed during 'nx dt index'
     (the entry will carry source_uri=file://… instead of x-devonthink-
     item://<UUID>). The URI is validated against the same scheme allowlist
-    as register-time.
+    as register-time. For an https:// URI, this also makes ONE real
+    outbound HEAD request afterward to capture the resource's ETag (same
+    best-effort, few-seconds-at-most budget as `register`; set
+    NX_REFERENCE_ETAG_CAPTURE=0 to disable it).
 
     --file-path sets or replaces the catalog file_path column. Use this to
     repoint an entry whose recorded path is dead (moved/renamed on disk)

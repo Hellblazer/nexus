@@ -168,6 +168,46 @@ def test_limit_bounds_candidates_processed(monkeypatch) -> None:
     assert "processes up to --limit 2: 2" in result.output
 
 
+def test_env_opt_out_makes_no_head_request(monkeypatch) -> None:
+    """Round-2 critique (nexus-0ne1m/nexus-tb2yj): NX_REFERENCE_ETAG_CAPTURE=0
+    must govern this command too, not only the register/update write path.
+    The check lives in the REAL nexus.aspect_readers.capture_https_etag
+    (not patched away here via the `capture=` kwarg, unlike the other
+    tests in this file) -- so this proves the actual production check,
+    not a stand-in. Patch httpx.Client.head at the CLASS level: the
+    tightest possible proof that no HEAD request reaches the network at
+    all, regardless of which client instance backfill_etags_cmd builds.
+    """
+    import httpx
+
+    from nexus import aspect_readers as ar_mod
+
+    monkeypatch.setenv(ar_mod.NX_REFERENCE_ETAG_CAPTURE_ENV, "0")
+
+    head_calls: list[str] = []
+
+    def _boom_head(self, uri, *args, **kwargs):
+        # Record the call BEFORE raising: capture_https_etag's own
+        # except-Exception-return-"" would otherwise swallow the raise and
+        # let this test pass vacuously even if the opt-out check were
+        # deleted (the exact round-2 critique finding against the
+        # sibling test in test_aspect_readers_staleness.py) -- asserting
+        # on this counter, not on the AssertionError propagating or on
+        # the reported counts, is what makes this test falsifiable.
+        head_calls.append(uri)
+        raise AssertionError("HEAD must not be attempted when opted out")
+
+    monkeypatch.setattr(httpx.Client, "head", _boom_head)
+
+    writer = _FakeWriter()
+    result = _invoke(monkeypatch, _docs_mixed(), [], writer=writer)
+
+    assert head_calls == []
+    assert result.exit_code == 0, result.output
+    assert writer.update_calls == []
+    assert "Recorded 0 ETag(s); 2 had none to capture" in result.output
+
+
 def test_idempotent_when_nothing_is_missing(monkeypatch) -> None:
     docs = [_FakeDoc("1.1.1", "https://example.com/a", meta={HTTPS_ETAG_META_KEY: '"already"'})]
 

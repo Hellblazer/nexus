@@ -530,9 +530,11 @@ class TestStatHttpsUri:
         assert staleness_signal(mtime - 10, result) == "stale"
 
     def test_etag_only_returns_statfail_naming_no_last_modified(self, https_stat_server) -> None:
-        """ETag with no Last-Modified: nexus does not yet record an ETag at
-        index time to compare a fresh one against, so this is a named
-        StatFail, not a best-effort ETag comparison."""
+        """ETag with no Last-Modified and no recorded_etag passed to THIS
+        call: record_https_etag does capture an ETag at index time now
+        (nexus-0ne1m), but this call passes no recorded_etag baseline, so
+        there is nothing here to compare the current one against -- a
+        named StatFail, not a best-effort ETag comparison."""
         base_url, handler = https_stat_server
         handler.response_headers = {"ETag": '"abc123"'}
         client = httpx.Client(base_url=base_url, timeout=5.0)
@@ -985,11 +987,24 @@ class TestRecordHttpsEtag:
         """nexus-0ne1m critique (Critical): NX_REFERENCE_ETAG_CAPTURE=0
         makes record_https_etag a pure no-op with NO network attempt at
         all -- even a client injected by the caller must never be
-        touched."""
+        touched.
+
+        Round-2 critique strengthening (nexus-0ne1m/nexus-tb2yj): the
+        original version of this test asserted only ``writer.calls ==
+        []``, which stays green even with the opt-out check deleted --
+        capture_https_etag's own except-and-return-"" swallows the
+        _ExplodingClient's AssertionError, so no etag is ever recorded
+        either way, coincidentally. Assert directly on a call counter set
+        INSIDE head() itself, before it raises, so this test can only
+        pass when head() was never invoked at all.
+        """
         monkeypatch.setenv(ar_mod.NX_REFERENCE_ETAG_CAPTURE_ENV, "0")
+
+        head_calls: list[str] = []
 
         class _ExplodingClient:
             def head(self, uri: str):
+                head_calls.append(uri)
                 raise AssertionError("HEAD must not be attempted when opted out")
 
         writer = self._RecordingWriter()
@@ -997,6 +1012,7 @@ class TestRecordHttpsEtag:
             writer, "1.2.3", "https://example.invalid/doc", http_client=_ExplodingClient(),
         )
 
+        assert head_calls == []
         assert writer.calls == []
 
     @pytest.mark.parametrize("value", ["1", "true", "", "no"])
