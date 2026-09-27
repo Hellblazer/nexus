@@ -1654,9 +1654,13 @@ def _backfill_per_file_from_t3(
             if not _created:
                 # nexus-r1tnx round 2: no same-owner reconcile branch exists
                 # in this function to mirror (a fresh owner-scoped miss has
-                # no prior row of its own), but the resolve can still land
-                # on another owner's document with a stale
-                # physical_collection — same nexus-2t63u exposure, same fix.
+                # no prior row of its own). round 4: the resolve usually
+                # lands on ANOTHER owner's document (the engine's source_uri
+                # idempotency leg is not owner-scoped) — reconcile_stale_
+                # physical_collection's own owner gate now refuses to write
+                # in that case and only logs; it repoints only in the rare
+                # same-owner shape (this owner's own row, reached via a
+                # source_uri/file_path match plain by_file_path missed).
                 announce_cross_owner_resolve(
                     _conflict, file_path=rel, owner=owner,
                     context="backfill_per_file_from_t3", created=_created,
@@ -1665,6 +1669,7 @@ def _backfill_per_file_from_t3(
                     cat, w,
                     tumbler=tumbler_from_register_result(_write_result),
                     target_collection=collection, file_path=rel,
+                    owner=owner,
                 )
             registered += 1
         except ValueError as exc:

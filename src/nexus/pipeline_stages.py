@@ -867,6 +867,7 @@ def _catalog_pdf_hook(
                     reader, writer,
                     tumbler=tumbler_from_register_result(_write_result),
                     target_collection=collection_name, file_path=file_path_str,
+                    owner=owner,
                 )
     except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
         # nexus-ou4tb: an indexed PDF that never reached the catalog is

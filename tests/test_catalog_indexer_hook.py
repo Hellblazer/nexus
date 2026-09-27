@@ -707,11 +707,17 @@ class TestCatalogHookBatchedServiceMode:
 
         priority = "interactive"
 
-        def __init__(self, *, update_many_raises: bool = False):
+        def __init__(self, *, update_many_raises: bool = False, reconcile_tumbler: str = "1.10.41"):
             self.register_calls: list[dict] = []
             self.update_calls: list[dict] = []
             self.update_many_calls: list[list[dict]] = []
             self._update_many_raises = update_many_raises
+            # nexus-r1tnx round 4: parametrized so a test can choose a
+            # SAME-owner tumbler (e.g. "1.1.55", under this fixture's own
+            # owner "1.1") instead of the default "1.10.41", which belongs
+            # to a DIFFERENT owner ("1.10") -- the two shapes now exercise
+            # reconcile_stale_physical_collection's owner gate differently.
+            self._reconcile_tumbler = reconcile_tumbler
 
         def register(self, *args, **kw):
             from nexus.catalog.tumbler import Tumbler
@@ -719,7 +725,7 @@ class TestCatalogHookBatchedServiceMode:
             with_created = kw.pop("with_created", False)
             self.register_calls.append(kw)
             if kw.get("file_path") in getattr(self, "reconcile_paths", ()):
-                pair = (Tumbler.parse("1.10.41"), False)
+                pair = (Tumbler.parse(self._reconcile_tumbler), False)
             else:
                 pair = (Tumbler.parse("1.1.99"), True)
             return pair if with_created else pair[0]
@@ -733,7 +739,7 @@ class TestCatalogHookBatchedServiceMode:
                 # holds" under another owner (nexus-53cae) -- reconciled, not
                 # created, and handed back under that owner's tumbler.
                 if d.get("file_path") in getattr(self, "reconcile_paths", ()):
-                    out.append((Tumbler.parse("1.10.41"), False))
+                    out.append((Tumbler.parse(self._reconcile_tumbler), False))
                 else:
                     out.append((Tumbler.parse("1.1.99"), True))
             if with_created:
@@ -1629,16 +1635,17 @@ class TestCatalogHookReconciledIsNotNew:
         events = [e for e in logs if e["event"] == "catalog_register_reconciled_onto_existing_row"]
         assert len(events) == 1 and events[0]["tumbler"] == "1.10.41" and events[0]["rel_path"] == "b.py"
 
-    def test_a_reconciled_rows_stale_physical_collection_is_repointed(
+    def test_a_foreign_owners_reconciled_row_is_never_repointed(
         self, tmp_path, monkeypatch,
     ) -> None:
-        """nexus-r1tnx round 3: the BATCHED ``register_many`` fast path's own
-        ``created=False`` branch must reconcile ``physical_collection`` too,
-        exactly like the per-file fallback and the same-owner branches
-        already do (nexus-2t63u) — b.py resolves onto 1.10.41, a row still
-        stamped with an OLD collection; this run's target is ``code__nexus``
-        (the ``indexed_files`` collection arg threaded through to
-        ``register_many``'s ``page_docs``)."""
+        """nexus-r1tnx round 4 (fix-check CRITICAL): b.py resolves onto
+        1.10.41, which belongs to owner ``1.10`` -- a DIFFERENT owner than
+        this fixture's own (``1.1``, from the ``by_repo`` mock). The
+        engine's source_uri idempotency leg that produces this resolve is
+        NOT owner-scoped, so this is the REAL shape a cross-owner
+        ``created=False`` batched resolve takes: repointing 1.10.41's
+        physical_collection to THIS run's target would reassign owner
+        1.10's document based on owner 1.1's intent. Must not write."""
         from nexus.mcp_infra import (
             get_reconciled_collections_count,
             reset_reconciled_collections_count,
@@ -1652,16 +1659,60 @@ class TestCatalogHookReconciledIsNotNew:
         writer = t._StubWriter()
         writer.reconcile_paths = {"b.py"}
 
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _, writer, _ = t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+                show_responses={
+                    "1.10.41": {"tumbler": "1.10.41", "physical_collection": "code__OLD"},
+                },
+            )
+
+        assert writer.update_calls == [], (
+            f"a foreign owner's document must not be repointed: {writer.update_calls}"
+        )
+        assert get_reconciled_collections_count() == 0
+        events = [
+            e for e in logs
+            if e["event"] == "catalog_physical_collection_reconcile_skipped_foreign_owner"
+        ]
+        assert len(events) == 1, f"expected exactly one divergence log, got {logs}"
+        assert events[0]["resolved_tumbler"] == "1.10.41"
+        assert events[0]["owner"] == "1.1"
+
+    def test_a_same_owners_reconciled_rows_stale_physical_collection_is_repointed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The genuine nexus-2t63u case: b.py resolves onto 1.1.55, a
+        document under THIS fixture's own owner (1.1) -- reached via a
+        source_uri/file_path match plain-owner-scoped lookup missed, not a
+        cross-owner collision. The BATCHED ``register_many`` fast path's
+        own ``created=False`` branch must still reconcile
+        ``physical_collection`` here, exactly like the per-file fallback
+        and the same-owner branches already do."""
+        from nexus.mcp_infra import (
+            get_reconciled_collections_count,
+            reset_reconciled_collections_count,
+        )
+        reset_reconciled_collections_count()
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter(reconcile_tumbler="1.1.55")
+        writer.reconcile_paths = {"b.py"}
+
         _, writer, _ = t._run_hook(
             tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
             show_responses={
-                "1.10.41": {"tumbler": "1.10.41", "physical_collection": "code__OLD"},
+                "1.1.55": {"tumbler": "1.1.55", "physical_collection": "code__OLD"},
             },
         )
 
-        assert {"tumbler": "1.10.41", "physical_collection": "code__nexus"} in writer.update_calls, (
-            f"the reconciled row's stale physical_collection was never repointed: "
-            f"update_calls={writer.update_calls}"
+        assert {"tumbler": "1.1.55", "physical_collection": "code__nexus"} in writer.update_calls, (
+            f"the same-owner reconciled row's stale physical_collection was "
+            f"never repointed: update_calls={writer.update_calls}"
         )
         assert get_reconciled_collections_count() == 1
 

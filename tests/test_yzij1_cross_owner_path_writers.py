@@ -589,6 +589,46 @@ class TestTheMintSitesActuallyCallIt:
             "it registers: " + "; ".join(missing)
         )
 
+    def test_every_mint_site_calls_reconcile_stale_physical_collection(self) -> None:
+        """Sibling to ``test_every_mint_site_is_wired`` (nexus-r1tnx round 4,
+        fix-check finding): that test only pins
+        find_cross_owner_conflict/announce_cross_owner_mint/register()
+        ORDERING — nothing checked whether
+        ``reconcile_stale_physical_collection`` itself was ever called, so
+        round 3 skipped ``indexer._catalog_hook``'s per-file fallback
+        entirely and nothing here noticed.
+
+        ``indexer._catalog_hook`` carries TWO independent call sites (the
+        batched ``register_many`` success path and its per-file fallback,
+        reached only when the batch call itself raised) — each closes the
+        SAME nexus-2t63u exposure for a different failure mode of the same
+        register attempt, so both must be present.
+        """
+        import inspect
+
+        from nexus import doc_indexer as di
+        from nexus import pipeline_stages as ps
+        from nexus.commands import catalog as cat_cmd
+
+        sites = [
+            (ps, "_catalog_pdf_hook", 1),
+            (di, "_register_or_lookup_doc_id", 1),
+            (di, "_catalog_markdown_hook", 1),
+            (cat_cmd, "_backfill_per_file_from_t3", 1),
+            (indexer_mod, "_catalog_hook", 2),
+        ]
+        missing = []
+        for mod, fname, expected in sites:
+            raw = inspect.getsource(getattr(mod, fname))
+            src = "\n".join(line.split("#", 1)[0] for line in raw.splitlines())
+            count = src.count("reconcile_stale_physical_collection(")
+            if count < expected:
+                missing.append(
+                    f"{mod.__name__}.{fname}: expected >= {expected} "
+                    f"reconcile_stale_physical_collection call(s), found {count}",
+                )
+        assert not missing, "; ".join(missing)
+
 
 # ── the collector, and the run summary that reads it ────────────────────────
 
@@ -791,8 +831,10 @@ class TestReconcileStalePhysicalCollection:
 
     def test_a_stale_collection_is_repointed_and_logged(self) -> None:
         """The stale-physical_collection reproduction the critique asked
-        for: a cross-owner resolve onto a row still stamped with its OLD
-        collection must repoint it, exactly like the same-owner branch."""
+        for: a SAME-owner resolve onto a row still stamped with its OLD
+        collection must repoint it, exactly like the same-owner branch.
+        Tumbler ``1.12.25`` belongs to owner ``1.12`` (its own prefix) —
+        the caller here IS that owner."""
         from nexus.mcp_infra import get_reconciled_collections_count
 
         reader = _ReconcileReader(_entry("1.12.25", physical_collection="docs__old"))
@@ -802,6 +844,7 @@ class TestReconcileStalePhysicalCollection:
             result = reconcile_stale_physical_collection(
                 reader, writer, tumbler="1.12.25",
                 target_collection="docs__new", file_path="a/b.pdf",
+                owner="1.12",
             )
 
         assert result is True
@@ -822,6 +865,7 @@ class TestReconcileStalePhysicalCollection:
             result = reconcile_stale_physical_collection(
                 reader, writer, tumbler="1.12.25",
                 target_collection="docs__new", file_path="a/b.pdf",
+                owner="1.12",
             )
 
         assert result is False
@@ -837,6 +881,7 @@ class TestReconcileStalePhysicalCollection:
         result = reconcile_stale_physical_collection(
             reader, writer, tumbler="1.12.25",
             target_collection="docs__new", file_path="a/b.pdf",
+            owner="1.12",
         )
 
         assert result is False
@@ -849,6 +894,7 @@ class TestReconcileStalePhysicalCollection:
         result = reconcile_stale_physical_collection(
             reader, writer, tumbler="1.12.25",
             target_collection="docs__new", file_path="a/b.pdf",
+            owner="1.12",
         )
 
         assert result is False
@@ -864,6 +910,7 @@ class TestReconcileStalePhysicalCollection:
         result = reconcile_stale_physical_collection(
             reader, writer, tumbler="1.12.25",
             target_collection="docs__new", file_path="a/b.pdf",
+            owner="1.12",
         )
 
         assert result is False
@@ -879,6 +926,7 @@ class TestReconcileStalePhysicalCollection:
             result = reconcile_stale_physical_collection(
                 reader, writer, tumbler="1.12.25",
                 target_collection="docs__new", file_path="a/b.pdf",
+                owner="1.12",
             )
 
         assert result is False
@@ -889,3 +937,50 @@ class TestReconcileStalePhysicalCollection:
         assert len(events) == 1
         assert events[0]["old_collection"] == "docs__old"
         assert events[0]["new_collection"] == "docs__new"
+
+    def test_a_foreign_owners_document_is_left_alone_and_logged(self) -> None:
+        """nexus-r1tnx round 4 (fix-check CRITICAL): the resolved document
+        ``1.12.25`` belongs to owner ``1.12`` -- a DIFFERENT owner than
+        this caller (``9.9``). Repointing its physical_collection to this
+        unrelated caller's own target would reassign owner 1.12's storage
+        based on owner 9.9's intent; must not write, only log the
+        divergence."""
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection="docs__old"))
+        writer = _ReconcileWriter()
+
+        with capture_logs() as logs:
+            result = reconcile_stale_physical_collection(
+                reader, writer, tumbler="1.12.25",
+                target_collection="docs__new", file_path="a/b.pdf",
+                owner="9.9",
+            )
+
+        assert result is False, "must never write to a document another owner holds"
+        assert writer.updates == [], (
+            f"a foreign owner's document must not be repointed: {writer.updates}"
+        )
+        events = [
+            e for e in logs
+            if e.get("event") == "catalog_physical_collection_reconcile_skipped_foreign_owner"
+        ]
+        assert len(events) == 1, f"expected exactly one divergence log, got {logs}"
+        assert events[0]["owner"] == "9.9"
+        assert events[0]["resolved_tumbler"] == "1.12.25"
+        assert events[0]["existing_collection"] == "docs__old"
+        assert events[0]["target_collection"] == "docs__new"
+
+    def test_a_same_owner_child_tumbler_still_repoints(self) -> None:
+        """The owner-gate boundary: a resolved document under a DEEPER
+        tumbler than the bare owner prefix (a real document, not the
+        owner row itself) still counts as same-owner and repoints."""
+        reader = _ReconcileReader(_entry("1.12.99", physical_collection="docs__old"))
+        writer = _ReconcileWriter()
+
+        result = reconcile_stale_physical_collection(
+            reader, writer, tumbler="1.12.99",
+            target_collection="docs__new", file_path="a/b.pdf",
+            owner="1.12",
+        )
+
+        assert result is True
+        assert writer.updates == [("1.12.99", {"physical_collection": "docs__new"})]

@@ -1199,6 +1199,7 @@ def _register_or_lookup_doc_id(
             reconcile_stale_physical_collection(
                 reader, writer, tumbler=tumbler,
                 target_collection=physical_collection, file_path=fp,
+                owner=owner,
             )
         if with_created:
             return str(tumbler), created
@@ -3552,6 +3553,7 @@ def _catalog_markdown_hook(
                     reader, writer,
                     tumbler=tumbler_from_register_result(_write_result),
                     target_collection=collection_name, file_path=fp,
+                    owner=owner,
                 )
     except Exception as exc:  # noqa: BLE001 — best-effort catalog markdown hook; logged + audited, cleanup in finally
         # nexus-ou4tb (site from the e9ru2 review): an indexed markdown doc

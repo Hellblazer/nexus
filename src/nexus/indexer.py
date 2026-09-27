@@ -1770,6 +1770,7 @@ def _catalog_hook(
                         reader, writer, tumbler=tum,
                         target_collection=doc.get("physical_collection", ""),
                         file_path=doc.get("file_path", ""),
+                        owner=owner,
                     )
             except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
                 _log.warning(
@@ -1788,6 +1789,7 @@ def _catalog_hook(
                             announce_cross_owner_mint,
                             announce_cross_owner_resolve,
                             find_cross_owner_conflict,
+                            reconcile_stale_physical_collection,
                         )
                         _conflict = find_cross_owner_conflict(reader, doc.get("file_path", ""))
                         # with_created here too, or this fallback re-opens the
@@ -1822,6 +1824,16 @@ def _catalog_hook(
                                 _conflict, file_path=doc.get("file_path", ""),
                                 owner=owner, context="catalog_hook_per_file_fallback",
                                 created=created,
+                            )
+                            # nexus-r1tnx round 4: this per-file fallback
+                            # never got the reconcile call in round 2 or 3
+                            # (fix-check finding) — wired now, with the
+                            # same owner gate the batched path above uses.
+                            reconcile_stale_physical_collection(
+                                reader, writer, tumbler=tum,
+                                target_collection=doc.get("physical_collection", ""),
+                                file_path=doc.get("file_path", ""),
+                                owner=owner,
                             )
                     except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
                         skipped_files.append((path, str(exc)))

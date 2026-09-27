@@ -65,11 +65,24 @@ collection reconcile. Two more pieces close that:
   cross-owner path collision is never TOTALLY silent, whichever way
   ``register()`` went.
 * :func:`reconcile_stale_physical_collection` — the same compare-and-repoint
-  the same-owner branches already do, extracted so the cross-owner mint
-  paths can call it too instead of copying it a fourth time. Runs whenever
-  ``created`` is ``False`` (register() resolved onto an existing row),
-  regardless of whether a conflict was pre-detected, mirroring the
-  same-owner branches' own unconditional-on-resolve behavior.
+  the same-owner branches already do, extracted so the mint-fallback paths
+  can call it too instead of copying it again at each one. Runs whenever
+  ``created`` is ``False`` (register() resolved onto an existing row), but
+  ONLY writes when the resolved document belongs to the SAME owner as this
+  call (round 4 below) — a cross-owner resolve is reported, never written.
+
+nexus-r1tnx round 4 (fix-check CRITICAL): round 2's ``reconcile_stale_
+physical_collection`` repointed a resolved row's ``physical_collection``
+unconditionally, without checking whose document it actually was. The
+engine's ``source_uri`` idempotency leg that produces a cross-owner
+``created=False`` resolve is NOT owner-scoped (unlike its ``file_path``
+leg), so the resolved row can belong to a DIFFERENT owner — repointing it
+reassigned that owner's document's storage based on an unrelated caller's
+own target, reproducing the nexus-2t63u RUNFENCE class against the WRONG
+owner. The helper now resolves the row and compares its own tumbler
+against the caller's *owner* before ever writing; see its docstring for
+the full argument, including why a same-owner divergence still reconciles
+(matching the same-owner branches) while a cross-owner one only logs.
 """
 
 from __future__ import annotations
@@ -265,25 +278,56 @@ def reconcile_stale_physical_collection(
     tumbler: Any,
     target_collection: str,
     file_path: str,
+    owner: Any,
 ) -> bool:
     """Repoint *tumbler*'s ``physical_collection`` to *target_collection*
-    if the resolved row's is stale.
+    if the resolved row's is stale — but ONLY when *tumbler* belongs to
+    *owner*.
 
-    Call this whenever a register call resolved onto an existing document
-    rather than minting one (``created=False``), regardless of whether a
-    conflict was pre-detected — mirrors what the SAME-owner resolve
-    branches (``doc_indexer._register_or_lookup_doc_id``,
+    nexus-r1tnx round 4 (fix-check CRITICAL): a resolve reaching a
+    cross-owner mint-fallback branch (``created=False`` with a non-empty
+    :func:`find_cross_owner_conflict` answer) can ONLY have happened via
+    the engine's ``source_uri`` idempotency leg
+    (``CatalogRepository.registerDocumentWithOutcome``), which matches
+    ``(tenant, source_uri)`` GLOBALLY — no ``owner_prefix`` scoping. So
+    that resolved document can belong to a DIFFERENT owner than *owner*,
+    with its ``physical_collection`` set by THAT owner's own run. Silently
+    repointing it to *this* caller's target would reassign another
+    owner's document's storage out from under them — reproducing the
+    nexus-2t63u RUNFENCE-refusal class AGAINST THE WRONG OWNER, a new blast
+    radius rather than one this fix closes. It also contradicts the
+    design principle the ``source_uri`` branch immediately above the mint
+    fallback in ``doc_indexer._register_or_lookup_doc_id`` already states:
+    a ``source_uri`` + collection divergence is "a move, not a re-index"
+    and should be refused (``SourceUriCollectionMismatchError``), never
+    silently reconciled. A cross-owner divergence found here is logged
+    instead, at WARNING, with a distinct event, and left untouched.
+
+    A SAME-owner resolve (*tumbler* found under *owner*'s own prefix) is
+    the genuine nexus-2t63u case this helper was written for: mirrors what
+    the same-owner resolve branches (``doc_indexer._register_or_lookup_doc_id``,
     ``doc_indexer._catalog_markdown_hook``, ``pipeline_stages.
-    _catalog_pdf_hook``) already do on their own owner-scoped hit, extracted
-    here so the cross-owner mint-fallback branches can reuse it instead of
-    each copying the compare-and-repoint block a fourth time.
+    _catalog_pdf_hook``) already do on their own owner-scoped hit — that
+    the SAME owner's document diverged into a different ``source_uri``/
+    ``file_path`` match than plain ``by_file_path`` found (a genuinely
+    ambiguous identity RESOLVING to a live row this owner already holds)
+    is exactly the "not an explicit --source-uri move" case those branches
+    reconcile rather than raise on, so this helper reconciles too, extracted
+    here so the mint-fallback branches can reuse it instead of each
+    copying the compare-and-repoint block again.
 
-    Without this, the engine's ``writeManifestRows``/``appendManifestChunks``
-    stamp every manifest row from ``catalog_documents.physical_collection``
-    at write time (read unconditionally), so a stale value there makes
-    ``manifest_verify`` join against the WRONG collection and report live,
-    present chunks as missing — the nexus-2t63u RUNFENCE-refusal class,
-    previously closed only for the same-owner resolve path.
+    The owner check compares the RESOLVED row's own tumbler prefix (via
+    ``reader.resolve``) against *owner* — never the pre-register
+    :func:`find_cross_owner_conflict` answer, which only ever named OTHER
+    owners' tumblers and could never confirm same-owner-ness on its own.
+
+    Without a repoint, the engine's ``writeManifestRows``/
+    ``appendManifestChunks`` stamp every manifest row from
+    ``catalog_documents.physical_collection`` at write time (read
+    unconditionally), so a stale value there makes ``manifest_verify``
+    join against the WRONG collection and report live, present chunks as
+    missing — the nexus-2t63u RUNFENCE-refusal class, only ever safe to
+    close on the resolved document's OWN owner's say-so.
 
     Best-effort / advisory by construction, mirroring the same-owner
     branches' own fail-open contract (nexus-ir68m): a register call that
@@ -292,10 +336,18 @@ def reconcile_stale_physical_collection(
     caller still has a perfectly good ``doc_id`` either way.
 
     Returns ``True`` iff a repoint was written. ``False`` covers: the
-    resolve probe failed, the row wasn't found, it has no
-    ``physical_collection`` yet (a ghost/never-indexed row — nothing to
-    compare against, mirrors the same-owner branches' identical ghost
-    exemption), or it already matches *target_collection*.
+    resolve probe failed, the row wasn't found, the row belongs to a
+    DIFFERENT owner (logged, not silent), it has no ``physical_collection``
+    yet (a ghost/never-indexed row — nothing to compare against; NOTE this
+    is NOT "the same exemption" the cited same-owner branch
+    (``_register_or_lookup_doc_id``'s own early reconcile, doc_indexer.py)
+    uses — that branch repoints unconditionally on any inequality,
+    including from an empty ``physical_collection``; only the OTHER two
+    same-owner branches, which fold the repoint into a broader
+    ``update()`` call with several other fields, incidentally skip
+    LOGGING on a ghost row while still writing. This helper's ghost-skip
+    is a deliberate, narrower choice, not parity with either), or it
+    already matches *target_collection*.
     """
     try:
         entry = reader.resolve(tumbler)
@@ -306,6 +358,23 @@ def reconcile_stale_physical_collection(
         )
         return False
     if entry is None:
+        return False
+    resolved_tumbler = getattr(entry, "tumbler", None)
+    if resolved_tumbler is None or not str(resolved_tumbler).startswith(f"{owner}."):
+        old_collection = getattr(entry, "physical_collection", "")
+        _log.warning(
+            "catalog_physical_collection_reconcile_skipped_foreign_owner",
+            tumbler=str(tumbler), file_path=file_path, owner=str(owner),
+            resolved_tumbler=str(resolved_tumbler),
+            existing_collection=old_collection,
+            target_collection=target_collection,
+            detail="the resolved document belongs to a DIFFERENT owner "
+                   "than this run's — repointing its physical_collection "
+                   "to this caller's target would reassign another "
+                   "owner's storage. Left untouched; see "
+                   "announce_cross_owner_resolve for the informational "
+                   "signal.",
+        )
         return False
     old_collection = getattr(entry, "physical_collection", "")
     if not old_collection or old_collection == target_collection:
