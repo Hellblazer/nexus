@@ -674,7 +674,74 @@ the published-bytes counterpart.
 
 Dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both — a hook that never runs in one deployment mode (e.g. the tuple-ledger projector, dead on every cloud box at 7.41.0) ships green through every gate that only ever tests a consistent pair or a fixture.
 
-**Where the session id comes from (nexus-7m6uc):** run the script with NO argument first. It auto-discovers the session id from ledgers under `~/.local/state/nexus/orchestration/` with recent agent-dispatch activity, and uses it automatically when exactly one such ledger exists — which is the common case right after a single dispatch. It refuses (exit 2, naming every candidate) rather than guess when the box has more than one recent ledger (a peer session's dispatch, a prior release's leftover), so pass a session id explicitly only then. Do NOT reach for the harness's own session id (the one in its task/output paths) — JDR-001 names three distinct T1 scopes on this box, and the ledger is written under the id leased at MCP-server spawn, which is routinely a different string. If a NAMED session id turns up no ledger, the script lists every ledger that DOES exist, newest first with mtime and START/REPORTED counts, as its own exit-2 diagnostic — read that listing before re-guessing.
+**Managed-cloud box class:** dispatch and check by hand as described above,
+in whichever live Claude Code session is running on a cloud-mode box for
+this release.
+
+**Local-supervisor box class is MECHANIZED (nexus-u0mcx), run from this Mac
+— ONE command passes even when the box carries other recent activity,
+because it never uses auto-discovery for its own dispatch:**
+
+```bash
+uv run python scripts/qwentescence_local_supervisor_gate.py X.Y.Z
+```
+
+Omit the version to use the currently-published PyPI version instead. This
+one command holds the qwentescence WSL2 distro open for the run (its idle
+shutdown ~15s after the last `wsl` session is the historical cause of a
+~30s restart loop that reads as an outage — never retry through it, see the
+script's own module docstring), confirms the `nexus-service` systemd
+`--user` unit is active with `Linger=yes`, asserts the storage-service
+lease port is stable across two reads, confirms the installed `conexus`
+matches X.Y.Z, MINTS its own session id and FORCES it into a real,
+interactive Claude Code session on the box (`claude --session-id`, driven
+through the repo's own `tests/e2e/lib.sh` tmux harness — never `claude -p`,
+which both nexus-xii3o's bead and the check script's own docstring exclude
+by name), then runs `tests/e2e/post-publish-dispatch-check.sh` on the box
+with that SAME id passed explicitly. Because the id is minted and forced
+rather than discovered, a concurrent session's ledger on the shared box can
+never make the result ambiguous — this is what makes "one command passes"
+true even when qwentescence is not exclusively this run's. It ends
+`QWENTESCENCE LOCAL-SUPERVISOR 11d GATE PASSED` (exit 0), `... FAILED`
+(exit 1, a real dispatch or check-script miss), or `... FAILED
+(prerequisite absent)` (exit 2, nothing was checkable — box unreachable,
+an unsafe argument value, unit wouldn't activate, version wouldn't
+converge, lease port unstable). Manual per-box-class dispatch (the
+paragraph above) remains the fallback if the box is unreachable from this
+Mac.
+
+**Live-provisioning actions are gated behind explicit flags, off by
+default** (Sam has not authorized an unattended reinstall or unit-enable
+on qwentescence): `--allow-reinstall` (required whenever the installed
+version does not already match X.Y.Z — without it the gate refuses rather
+than running `uv tool install`), `--allow-downgrade` (required IN ADDITION
+whenever X.Y.Z is older than what is installed), `--allow-enable-unit`
+(required whenever the systemd unit is found inactive — without it the
+gate refuses rather than running `systemctl --user enable --now
+nexus-service`). On a box already converged to X.Y.Z with the unit active
+(the common case), none of the three is needed.
+
+**Manual rerun (`--skip-dispatch --session-id <SID>`), used together, never
+apart:** reuses an already-completed dispatch's evidence without issuing a
+new one — `--skip-dispatch` alone is refused (it requires a session id to
+check), and `--session-id` alone without `--skip-dispatch` is ALSO refused
+(the live-dispatch path always mints and forces its own id; accepting a
+caller-supplied one there would reopen exactly the ambiguity minting
+exists to close). Find the id to pass from a prior run's own report line
+(`session id: <SID> (minted)`), or, for a genuinely manual dispatch
+(nexus-7m6uc): run `tests/e2e/post-publish-dispatch-check.sh` on the box
+with NO argument first — it auto-discovers the session id from ledgers
+under `~/.local/state/nexus/orchestration/` with recent agent-dispatch
+activity, and uses it automatically when exactly one such ledger exists.
+It refuses (exit 2, naming every candidate) rather than guess when the box
+has more than one recent ledger, so pass a session id explicitly only
+then. Do NOT reach for the harness's own session id (the one in its
+task/output paths) — JDR-001 names three distinct T1 scopes on this box,
+and the ledger is written under the id leased at MCP-server spawn, which
+is routinely a different string. If a NAMED session id turns up no ledger,
+the script lists every ledger that DOES exist, newest first with mtime and
+START/REPORTED counts, as its own exit-2 diagnostic — read that listing
+before re-guessing.
 
 ### 12. Reinstall local tool and verify
 
