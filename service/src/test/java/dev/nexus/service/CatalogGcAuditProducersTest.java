@@ -19,6 +19,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
@@ -404,6 +406,85 @@ class CatalogGcAuditProducersTest {
         @SuppressWarnings("unchecked")
         var details = (Map<String, Object>) row.get("details");
         assertThat(details.get("origin_collection")).isEqualTo(collection);
+    }
+
+    /**
+     * nexus-e8h5x review round 2 (code-review CONFIRMED LIVE DEFECT):
+     * catalog-039-1's copy-INSERT omits {@code created_at}, so the column
+     * default restamps every restored row to restore time -- the same
+     * class of generation-history loss nexus-a6mon found and fixed for
+     * {@code gc_quarantine_orphans}'s unbounded form (catalog-037), here
+     * for the opposite direction. Fixed by catalog-042-2 (this changeset
+     * lands in the SAME file as the bounded sibling, catalog-042-1).
+     * BACKDATES the quarantine-side chunk to a fixed past instant so a
+     * restamp is distinguishable from carry-through -- asserting merely
+     * "created_at is set" would pass either way, same non-vacuity
+     * reasoning as {@code GcRestoreRereferencedBoundedTest
+     * #createdAtIsCarriedThrough_notRestampedToRestoreTime}.
+     */
+    @Test @Order(45)
+    void restoreRereferenced_unbounded_carriesCreatedAtThrough_notRestampedToRestoreTime() throws Exception {
+        String collection = "code__gcaudit-restore-ts__minilm-l6-v2-384__v1";
+        String quarantineCollection = "quarantine-code__gcaudit-restore-ts__minilm-l6-v2-384__v1";
+        String docId = "gc-audit-restore-ts-doc";
+        String chash = ch("gc-audit-restore-ts-chunk");
+        OffsetDateTime past = OffsetDateTime.of(2026, 7, 16, 0, 8, 44, 0, ZoneOffset.UTC);
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, collection);
+            PgContainerHelper.insertCollection(dsl, TENANT, quarantineCollection);
+        }
+
+        vecRepo.upsertChunks(TENANT, quarantineCollection, List.of(chash),
+            List.of("gc audit restore ts text"), List.of(Map.of()));
+        repo.upsertDocument(TENANT, Map.of(
+            "tumbler", docId, "title", "gc-audit-restore-ts-" + docId,
+            "content_type", "code", "corpus", "code",
+            "physical_collection", collection, "chunk_count", 0));
+        vecRepo.upsertChunks(TENANT, collection, List.of(chash),
+            List.of("gc audit restore ts stub text"), List.of(Map.of()));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            insertManifestRow(su, TENANT, docId, chash, collection);
+        }
+
+        try (Connection su = pg.createConnection("")) {
+            int n = DSL.using(su, SQLDialect.POSTGRES)
+               .update(DSL.table(DSL.name("nexus", "chunks")))
+               .set(DSL.field("created_at", OffsetDateTime.class), past)
+               .where(DSL.field("tenant_id", String.class).eq(TENANT))
+               .and(DSL.field("collection", String.class).eq(quarantineCollection))
+               .execute();
+            assertThat(n).as("guard: the quarantine-side row exists to backdate").isEqualTo(1);
+        }
+        // NON-VACUITY: the backdate must have landed before asserting carry-through.
+        assertThat(chunkCreatedAt(quarantineCollection, chash))
+            .as("guard: quarantine-side row is backdated").isEqualTo(past);
+
+        long restored = vecRepo.restoreRereferenced(TENANT, quarantineCollection, collection);
+        assertThat(restored).isEqualTo(1L);
+
+        assertThat(chunkCreatedAt(collection, chash))
+            .as("restored row keeps its ORIGINAL (quarantine) created_at -- before catalog-042-2, "
+                + "the column default restamped it to restore time and erased the collection's "
+                + "generation history across the quarantine round trip")
+            .isEqualTo(past);
+    }
+
+    private OffsetDateTime chunkCreatedAt(String collection, String chashHex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var r = DSL.using(su, SQLDialect.POSTGRES)
+               .select(DSL.field("created_at", OffsetDateTime.class))
+               .from(DSL.table(DSL.name("nexus", "chunks")))
+               .where(DSL.field("tenant_id", String.class).eq(TENANT))
+               .and(DSL.field("collection", String.class).eq(collection))
+               .and(DSL.field("chash", byte[].class).eq(Chash.fromHex(chashHex).toBytes()))
+               .fetchOne(0, OffsetDateTime.class);
+            assertThat(r).as("chunks row for %s/%s", collection, chashHex).isNotNull();
+            return r.withOffsetSameInstant(ZoneOffset.UTC);
+        }
     }
 
     /**
