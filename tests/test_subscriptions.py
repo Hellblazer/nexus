@@ -497,3 +497,55 @@ class TestPersistenceAcrossResumeAndClear:
             assert fresh_b.entries() == [{"subspace": f"mailbox/{session_b}"}]
         finally:
             fresh_b.shutdown()
+
+
+# ── bead nexus-zxthy: a board topic's start position ─────────────────────
+
+
+class TestBoardStartPosition:
+    """A fresh board subscription records its subscribe time and pushes
+    only what is created after it (T2 nexus/zxthy-board-subscription-
+    design-2026-09-27): the shape every mature system defaults to (Kafka
+    `latest`, Redis Streams `$`, NATS `DeliverNew`)."""
+
+    def test_subscribe_records_a_utc_start_position_that_entries_expose(self) -> None:
+        from datetime import UTC, datetime
+
+        from nexus.mcp.subscriptions import SubscriptionSet
+
+        before = datetime.now(UTC)
+        s = SubscriptionSet(session_id="sess-a")
+        s.subscribe("board/ci/nexus-develop", templates=[], store_factory=lambda: None, state_dir=None)
+        [_mailbox, board] = s.entries()
+        assert board["subspace"] == "board/ci/nexus-develop"
+        since = datetime.fromisoformat(board["since"])
+        assert since.tzinfo is not None
+        assert before <= since <= datetime.now(UTC)
+
+    def test_start_position_survives_the_json_round_trip_a_resume_makes(self) -> None:
+        from nexus.mcp.subscriptions import SubscriptionSet
+
+        s = SubscriptionSet(session_id="sess-a")
+        s.subscribe("board/ci/nexus-develop", templates=[], store_factory=lambda: None, state_dir=None)
+        [_m, board] = s.entries()
+        data = s.to_json()
+        assert data["board"] == ["board/ci/nexus-develop"]  # the older list shape is kept
+        assert data["board_since"] == {"board/ci/nexus-develop": board["since"]}
+
+        restored = SubscriptionSet.from_json(data)
+        assert restored.entries() == s.entries()
+
+    def test_a_record_written_before_the_start_position_delivers_everything(self) -> None:
+        from nexus.mcp.subscriptions import SubscriptionSet
+
+        restored = SubscriptionSet.from_json({"session_id": "sess-a", "board": ["board/x"]})
+        assert restored.entries() == [{"subspace": "mailbox/sess-a"}, {"subspace": "board/x"}]
+
+    def test_resubscribing_keeps_the_original_start_position(self) -> None:
+        from nexus.mcp.subscriptions import SubscriptionSet
+
+        s = SubscriptionSet(session_id="sess-a")
+        s.subscribe("board/x", templates=[], store_factory=lambda: None, state_dir=None)
+        first = s.entries()[1]["since"]
+        s.subscribe("board/x", templates=[], store_factory=lambda: None, state_dir=None)
+        assert s.entries()[1]["since"] == first

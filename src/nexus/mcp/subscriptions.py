@@ -57,6 +57,7 @@ import re
 import threading
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -279,9 +280,16 @@ class SubscriptionSet:
     lease so peers can resolve it via ``mailbox_send``, but (RDR-208 Phase
     3, bead nexus-galkv.20) it is never a delivered mailbox: it never
     appears in :meth:`entries`. ``_board`` is the subscribed ``board/<topic>``
-    subspaces in subscription order (a dict used as an ordered set: the
-    value is always ``None``; the per-topic cursor it once held moved to
-    the engine, bead nexus-q82tk).
+    subspaces in subscription order, each mapped to the UTC ISO-8601
+    time it was subscribed (bead nexus-zxthy) or ``None`` for a record
+    written before that. The value is a START POSITION, not a delivery
+    cursor: the per-topic cursor this dict once held moved to the engine
+    (bead nexus-q82tk), and the engine's per-subscriber stamp still
+    decides what was delivered. A fresh subscriber starts at now, the
+    way a new Kafka group, Redis Streams ``$`` consumer or NATS
+    ``DeliverNew`` consumer does; posts older than that are read with
+    ``tuple_rd``, never pushed (T2 nexus/zxthy-board-subscription-design-
+    2026-09-27).
     """
 
     session_id: str
@@ -289,7 +297,7 @@ class SubscriptionSet:
     #: session, or None. NOT a mailbox subspace and NOT listed by
     #: :meth:`entries` -- see the class docstring.
     leased_name: str | None = None
-    _board: dict[str, None] = field(default_factory=dict)
+    _board: dict[str, str | None] = field(default_factory=dict)
     version: int = 0
     _listeners: list[Callable[["SubscriptionSet"], None]] = field(default_factory=list, repr=False)
     _lease_thread: threading.Thread | None = field(default=None, repr=False, compare=False)
@@ -396,7 +404,7 @@ class SubscriptionSet:
                 f"at most {MAX_BOARD_TOPICS} board topics may be subscribed at once; "
                 f"refused before adding {topic!r}"
             )
-        self._board[topic] = None
+        self._board[topic] = datetime.now(UTC).isoformat()
         self._bump()
 
     def _arm_name_lease(
@@ -448,7 +456,9 @@ class SubscriptionSet:
         """This set's DELIVERED subspaces, in the order
         ``tuple_subscriptions`` renders them: the session mailbox first,
         then board topics. No cursor: delivery position lives in the
-        engine for every shape (beads nexus-vsipz, nexus-q82tk).
+        engine for every shape (beads nexus-vsipz, nexus-q82tk). A board
+        entry carries ``since``, the topic's subscribe time (bead
+        nexus-zxthy): the waiter pushes only posts created after it.
 
         Deliberately never includes :attr:`leased_name` (RDR-208 Phase 3,
         bead nexus-galkv.20): a leased name arms a `directory/<name>` lease
@@ -458,8 +468,11 @@ class SubscriptionSet:
         wait on (:meth:`~nexus.mcp.channel.ChannelWaiter._build_specs`),
         so leaving it out here is what stops push delivery for it."""
         out: list[dict[str, Any]] = [{"subspace": self.session_mailbox}]
-        for topic in self._board:
-            out.append({"subspace": topic})
+        for topic, since in self._board.items():
+            entry: dict[str, Any] = {"subspace": topic}
+            if since:
+                entry["since"] = since
+            out.append(entry)
         return out
 
     # ── Lease thread lifecycle ───────────────────────────────────────────
@@ -527,6 +540,9 @@ class SubscriptionSet:
             "session_id": self.session_id,
             "leased_name": self.leased_name,
             "board": list(self._board),
+            # bead nexus-zxthy: the start position per topic, kept apart
+            # from "board" so a reader of the older list shape still works.
+            "board_since": {t: s for t, s in self._board.items() if s},
         }
 
     @classmethod
@@ -543,7 +559,11 @@ class SubscriptionSet:
         # sufficient.
         board = data.get("board") or []
         topics = list(board.keys()) if isinstance(board, dict) else list(board)
-        obj._board = dict.fromkeys(topics)
+        since = data.get("board_since") or {}
+        # A record written before bead nexus-zxthy has no start position:
+        # None delivers everything, the behaviour that record was written
+        # under, rather than inventing a position at load time.
+        obj._board = {t: (since.get(t) or None) for t in topics}
         return obj
 
 

@@ -1361,7 +1361,13 @@ class TestChannelWaiterRealEngine:
         t1.join()
         t2.join()
         assert len(written_ids) == 2 * rows_per_writer, "sanity: both writers must have completed all their writes"
-        seen = [m.get("tuple_id") for _c, m in sender.calls if m.get("subspace") == board]
+        # bead nexus-zxthy: a wait's rows fold into one notification whose
+        # meta lists every id it covers; a single post keeps `tuple_id`.
+        seen: list[str] = []
+        for _c, m in sender.calls:
+            if m.get("subspace") != board:
+                continue
+            seen.extend(m["tuple_ids"].split(",") if m.get("tuple_ids") else [m["tuple_id"]])
         missing = written_ids - set(seen)
         assert not missing, (
             f"STOP RULE VIOLATED: {len(missing)} of {len(written_ids)} posts were never announced to the "
@@ -2223,3 +2229,194 @@ def t2_ctx_factory():
     from nexus.mcp_infra import t2_ctx
 
     return t2_ctx
+
+
+# ── bead nexus-zxthy: start at now, cap, fold, coalesce ──────────────────
+
+
+def _iso(seconds_from_epoch: int) -> str:
+    return datetime.fromtimestamp(seconds_from_epoch, tz=UTC).isoformat()
+
+
+def _board_subs(session_id: str, topic: str, *, since: str | None):
+    """A subscription set whose board entry carries *since* (or none,
+    the pre-zxthy record shape), without waiting on a real clock."""
+    subs = _subs(session_id)
+    subs.subscribe(
+        topic, templates=[],
+        store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
+        state_dir=None,
+    )
+    subs._board[topic] = since  # noqa: SLF001 -- pin the start position for the test
+    return subs
+
+
+class TestBoardStartAtNowAndFold:
+    @pytest.mark.asyncio
+    async def test_a_board_spec_asks_for_a_bounded_batch(self) -> None:
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=None)
+        fake = _FakeTupleStore()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=_FakeSender())
+        await waiter.tick()
+        specs, _t = fake.wait_calls[-1]
+        board_spec = next(sp for sp in specs if sp.subspace == "board/ci/x")
+        assert board_spec.n == channel.DEFAULT_BOARD_WAIT_ROWS
+        assert board_spec.since is None, "the start position never rides the wire: the engine refuses since+announce"
+
+    @pytest.mark.asyncio
+    async def test_backlog_older_than_the_subscribe_time_is_dropped_not_pushed(self) -> None:
+        """The 2026-09-27 incident: 282 backlog posts pushed one by one to
+        a fresh subscriber. Rows created before the topic's subscribe
+        time are dropped; the engine has stamped them, so they never
+        return; nothing is sent for them."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        for i in range(5):
+            fake.seed("board/ci/x", f"old{i}", "backlog", dims={"from": "github", "kind": "job"})
+            fake._mutate("board/ci/x", f"old{i}", created_at=_iso(999_000 + i))  # 1000 s before subscribe, past the skew margin  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+
+        await waiter.tick()
+
+        assert sender.calls == []
+        assert waiter.status()["board_backlog_dropped"] == 5
+        assert waiter.status()["board_batches"] == 0
+        await waiter.tick()
+        assert sender.calls == [], "stamped once per subscriber: the backlog never comes back"
+
+    @pytest.mark.asyncio
+    async def test_one_new_post_keeps_the_single_post_shape(self) -> None:
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "new1", "post", dims={"from": "github", "kind": "run"})
+        fake._mutate("board/ci/x", "new1", created_at=_iso(1_000_001))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+
+        await waiter.tick()
+
+        assert sender.calls == [(
+            channel._board_notification_content("board/ci/x", "new1"),  # noqa: SLF001
+            {"subspace": "board/ci/x", "tuple_id": "new1", "from": "github", "kind": "run"},
+        )]
+
+    @pytest.mark.asyncio
+    async def test_a_burst_in_one_wait_is_one_notification_with_identifiers_only(self) -> None:
+        """A develop push posts ~70 rows; a cluster that lands in one wait
+        is ONE notification carrying the subspace, the count, the first
+        and last tuple id and the read hint -- never a body, never a
+        `from` or `kind` in the content (Sam 2026-09-17, reference only)."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        for i in range(20):
+            kind = "run" if i % 10 == 0 else "job"
+            fake.seed("board/ci/x", f"p{i:02d}", f"secret body {i}", dims={"from": "github", "kind": kind})
+            fake._mutate("board/ci/x", f"p{i:02d}", created_at=_iso(1_000_001 + i))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+
+        await waiter.tick()
+
+        assert len(sender.calls) == 1
+        content, meta = sender.calls[0]
+        assert content == channel._board_batch_notification_content(  # noqa: SLF001
+            "board/ci/x", 20, "p00", "p19", None,
+        )
+        assert "secret body" not in content and "github" not in content and "job" not in content
+        assert 'tuple_rd("board/ci/x", n=20)' in content
+        assert meta == {
+            "subspace": "board/ci/x", "tuple_id": "p19", "first_tuple_id": "p00",
+            "count": "20", "kinds": "job=18,run=2", "from": "github",
+            "tuple_ids": ",".join(f"p{i:02d}" for i in range(20)),
+        }
+        assert waiter.status()["board_batches"] == 1
+        assert waiter._board_activity is True  # noqa: SLF001 -- run() settles before the next wait
+
+    @pytest.mark.asyncio
+    async def test_the_next_batch_carries_the_read_cursor_of_the_last_delivered_post(self) -> None:
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "a1", "x")
+        fake._mutate("board/ci/x", "a1", created_at=_iso(1_000_001))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        await waiter.tick()
+        for i in range(3):
+            fake.seed("board/ci/x", f"b{i}", "y")
+            fake._mutate("board/ci/x", f"b{i}", created_at=_iso(1_000_010 + i))  # noqa: SLF001
+        await waiter.tick()
+
+        content, _meta = sender.calls[-1]
+        assert content == channel._board_batch_notification_content(  # noqa: SLF001
+            "board/ci/x", 3, "b0", "b2", (_iso(1_000_001), "a1"),
+        )
+        assert f'since_created_at="{_iso(1_000_001)}", since_id="a1"' in content
+
+    @pytest.mark.asyncio
+    async def test_a_record_without_a_start_position_still_delivers_old_posts(self) -> None:
+        """A subscription persisted before this bead has no `since`; it
+        keeps the behaviour it was written under rather than a position
+        invented at load time."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=None)
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "old", "x")
+        fake._mutate("board/ci/x", "old", created_at=_iso(1))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        await waiter.tick()
+        assert [m["tuple_id"] for _c, m in sender.calls] == ["old"]
+
+    @pytest.mark.asyncio
+    async def test_a_row_whose_created_at_cannot_be_parsed_is_kept(self) -> None:
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "odd", "x")  # the fake's zero-padded sequence is not ISO-8601
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        await waiter.tick()
+        assert [m["tuple_id"] for _c, m in sender.calls] == ["odd"]
+        assert waiter.status()["board_backlog_dropped"] == 0
+
+    @pytest.mark.asyncio
+    async def test_run_settles_after_board_activity_so_a_cluster_folds(self) -> None:
+        """Posts that arrive a moment apart: without the settle the first
+        wait returns one row and the second the rest, two notifications;
+        with it the loop sleeps `board_coalesce_s` and the next wait
+        scoops the cluster."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "c0", "x")
+        fake._mutate("board/ci/x", "c0", created_at=_iso(1_000_001))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), subs, sender=sender,
+            board_coalesce_s=0.3, min_tick_interval_s=0.0, engine_version_probe=lambda: None,
+        )
+        waiter._catchup_mailbox_rows = _noop_coroutine  # type: ignore[method-assign]  # noqa: SLF001
+        task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: len(sender.calls) == 1)
+            for i in range(1, 4):  # land during the settle window
+                fake.seed("board/ci/x", f"c{i}", "x")
+                fake._mutate("board/ci/x", f"c{i}", created_at=_iso(1_000_001 + i))  # noqa: SLF001
+            await _poll_until(lambda: len(sender.calls) == 2)
+            await asyncio.sleep(0.5)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        assert len(sender.calls) == 2
+        assert sender.calls[1][1]["count"] == "3"
+
+
+async def _noop_coroutine(*_a, **_k) -> None:
+    return None

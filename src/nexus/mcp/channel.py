@@ -103,7 +103,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -142,6 +142,24 @@ DEFAULT_MAX_ANNOUNCES = 5
 #: and a re-announce budget would only wake the session again for a post
 #: it already saw. The old cursor announced a post once too.
 DEFAULT_BOARD_MAX_ANNOUNCES = 1
+#: Bead nexus-zxthy: rows one board spec asks for per wait. The engine's
+#: own default is 1, which turned a backlog into one notification per
+#: tick (282 in 80 s on 2026-09-27). Bounded like a consumer's in-flight
+#: cap (Reactive Streams demand, MQTT Receive Maximum, NATS
+#: max_ack_pending); the rows of one wait fold into ONE notification.
+DEFAULT_BOARD_WAIT_ROWS: int = 100
+#: Bead nexus-zxthy: seconds `run()` settles after a tick that returned
+#: board rows before the next wait, so a cluster of posts (a CI push
+#: starts ~20 jobs together) lands in one wait and one notification
+#: instead of one per tick. Also the bound on how much a mailbox
+#: reference can be delayed behind a board burst.
+DEFAULT_BOARD_COALESCE_S: float = 3.0
+#: Bead nexus-zxthy: the start-position filter compares the ENGINE's
+#: `created_at` with the CLIENT's subscribe time, two clocks. A post made
+#: just after subscribing on an engine whose clock runs behind this box
+#: would otherwise read as backlog and be dropped; a margin this wide
+#: costs at most one folded notification of recent posts on subscribe.
+DEFAULT_BOARD_START_SKEW_S: float = 30.0
 #: Seconds `run()` sleeps after a tick fails for a reason other than
 #: "engine without wait" (a transient HTTP or store error) before the next
 #: tick. The loop never dies on one bad round-trip.
@@ -364,6 +382,42 @@ def _board_notification_content(subspace: str, tuple_id: str) -> str:
     )
 
 
+def _board_batch_notification_content(
+    subspace: str, count: int, first_id: str, last_id: str, since: tuple[str, str] | None,
+) -> str:
+    """Bead nexus-zxthy: ONE notification for *count* posts of one wait.
+    Identifiers only, as the single-post shape (Sam, 2026-09-17, T2
+    nexus_rdr/211-decision-push-reference-2026-09-17): the subspace, the
+    count, the first and last tuple id, and how to read them. *since* is
+    the ``(created_at, id)`` of the last post this waiter delivered for
+    the topic before this batch, when it knows one, so the read hint is
+    exact; otherwise the hint is the newest *count* rows."""
+    if since is not None:
+        read = (
+            f'tuple_rd("{subspace}", n={count}, since_created_at="{since[0]}", '
+            f'since_id="{since[1]}")'
+        )
+    else:
+        read = f'tuple_rd("{subspace}", n={count})'
+    return (
+        f"nexus board posts: subspace {subspace}, {count} new posts, tuples {first_id} "
+        f"to {last_id}. Read them with {read}. Posts are never claimed."
+    )
+
+
+def _parse_created_at(value: str | None) -> datetime | None:
+    """ISO-8601 as the wire renders ``created_at``, or ``None`` when absent
+    or not parseable (a row the start-position filter then keeps: an
+    unknown age is delivered, never silently dropped)."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _parse_announced_at(value: str | None) -> datetime | None:
     """``TupleRow.announced_at`` as the wire actually sends it -- an
     ISO-8601 timestamp string, or ``None`` for a row nothing has ever
@@ -525,6 +579,9 @@ class ChannelWaiter:
         tick_error_backoff_s: float = DEFAULT_TICK_ERROR_BACKOFF_S,
         min_tick_interval_s: float = DEFAULT_MIN_TICK_INTERVAL_S,
         engine_version_probe: Callable[[], tuple[int, int, int] | None] = _probe_serving_engine_version,
+        board_wait_rows: int = DEFAULT_BOARD_WAIT_ROWS,
+        board_coalesce_s: float = DEFAULT_BOARD_COALESCE_S,
+        board_start_skew_s: float = DEFAULT_BOARD_START_SKEW_S,
     ) -> None:
         self.session_id = session_id
         self.store_factory = store_factory
@@ -546,6 +603,21 @@ class ChannelWaiter:
         self.max_announces = max_announces
         self.tick_error_backoff_s = tick_error_backoff_s
         self.min_tick_interval_s = min_tick_interval_s
+        self.board_wait_rows = board_wait_rows
+        self.board_coalesce_s = board_coalesce_s
+        self.board_start_skew_s = board_start_skew_s
+        #: Bead nexus-zxthy: subspace -> `(created_at, id)` of the LAST
+        #: board post this waiter delivered for it, the read hint the next
+        #: batch notification carries. Memory only: the engine's stamp is
+        #: the delivery record, this is a rendering aid.
+        self._board_last_delivered: dict[str, tuple[str, str]] = {}
+        #: Bead nexus-zxthy: set by `_process_results` when a tick returned
+        #: board rows (kept or dropped), read and cleared by `run()` to
+        #: settle `board_coalesce_s` before the next wait.
+        self._board_activity = False
+        #: Cumulative counts for `status()` (bead nexus-zxthy).
+        self._board_batches = 0
+        self._board_backlog_dropped = 0
         #: Consecutive ticks in `run()`'s loop faster than
         #: `min_tick_interval_s` -- the floor's own bookkeeping, not the
         #: fix (see `DEFAULT_MIN_TICK_INTERVAL_S`).
@@ -641,6 +713,11 @@ class ChannelWaiter:
             "announced": self._announced_total,
             "pending": len(active),
             "oldest_pending_age_s": oldest_pending_age_s,
+            # bead nexus-zxthy: board notifications sent (one per topic per
+            # wait with new posts) and backlog rows dropped as older than
+            # their topic's subscribe time.
+            "board_batches": self._board_batches,
+            "board_backlog_dropped": self._board_backlog_dropped,
         }
 
     def _publish_status(self) -> None:
@@ -702,6 +779,12 @@ class ChannelWaiter:
                     )
                     await asyncio.sleep(self.tick_error_backoff_s)
                     continue  # the backoff above already paces this tick; the floor below is redundant for it
+                if self._board_activity:
+                    # bead nexus-zxthy: settle so a cluster of posts folds
+                    # into the next wait instead of one notification per tick.
+                    self._board_activity = False
+                    await asyncio.sleep(self.board_coalesce_s)
+                    continue
                 elapsed = time.monotonic() - tick_started
                 if elapsed < self.min_tick_interval_s:
                     self._fast_tick_streak += 1
@@ -963,7 +1046,9 @@ class ChannelWaiter:
         nexus-q82tk) carries `announce` with `subscriber` set to this
         session's id and `max=DEFAULT_BOARD_MAX_ANNOUNCES`, so the engine
         returns each post to this session once, from a per-subscriber
-        stamp, with no client cursor to skip a late commit. A mailbox's
+        stamp, with no client cursor to skip a late commit, and asks for
+        up to `board_wait_rows` rows per wait (bead nexus-zxthy) that
+        `_process_results` folds into one notification. A mailbox's
         spec (bead nexus-vsipz, RDR-213 engine half) asks for `n=1` and
         an `announce` field carrying this waiter's `reannounce_interval_s`/
         `max_announces` -- the engine, not this waiter, decides whether
@@ -973,7 +1058,7 @@ class ChannelWaiter:
             subspace = entry["subspace"]
             if subspace.startswith("board/"):
                 specs.append(WaitSpec(
-                    subspace=subspace,
+                    subspace=subspace, n=self.board_wait_rows,
                     announce=Announce(
                         interval_s=int(self.reannounce_interval_s), max=DEFAULT_BOARD_MAX_ANNOUNCES,
                         subscriber=self.session_id, waiter=self.waiter_token,
@@ -1001,20 +1086,79 @@ class ChannelWaiter:
         ever sees it. Every returned mailbox row is referenced, claimed
         or not (the notification text already covers an empty
         `tuple_in`)."""
+        skew = timedelta(seconds=self.board_start_skew_s)
+        since_by_topic: dict[str, datetime | None] = {}
+        for e in self.subs.entries():
+            start = _parse_created_at(e.get("since"))
+            since_by_topic[e["subspace"]] = (start - skew) if start is not None else None
         for result in results:
             if result.subspace.startswith("board/"):
-                for row in result.tuples:
-                    await self._deliver_board_post(result.subspace, row)
+                await self._deliver_board_rows(
+                    result.subspace, result.tuples, since_by_topic.get(result.subspace),
+                )
                 continue
             for row in result.tuples:  # n=1 caps this to at most one row
                 await self._reference_mailbox_row(result.subspace, row)
 
-    async def _deliver_board_post(self, subspace: str, row: TupleRow) -> None:
-        meta = {"subspace": subspace, "tuple_id": row.id}
-        for key in ("from", "kind"):
-            if row.dims.get(key):
-                meta[key] = row.dims[key]
-        await self.sender(_board_notification_content(subspace, row.id), meta)
+    async def _deliver_board_rows(
+        self, subspace: str, rows: list[TupleRow], since: datetime | None,
+    ) -> None:
+        """Bead nexus-zxthy. Drop rows created before the topic's subscribe
+        time (*since*, already widened by `board_start_skew_s`; a row
+        whose `created_at` cannot be parsed is kept),
+        then send ONE notification for what is left: the unchanged single-
+        post shape for one row, the batch shape for more. The engine has
+        already stamped every row here for this subscriber, dropped or
+        not, so a dropped backlog row is never returned again; the start
+        position only decides what is pushed, never what `tuple_rd` can
+        read."""
+        if not rows:
+            return
+        self._board_activity = True
+        kept: list[TupleRow] = []
+        for row in rows:
+            created = _parse_created_at(row.created_at)
+            if since is not None and created is not None and created < since:
+                self._board_backlog_dropped += 1
+                continue
+            kept.append(row)
+        if not kept:
+            return
+        if len(kept) == 1:
+            row = kept[0]
+            meta = {"subspace": subspace, "tuple_id": row.id}
+            for key in ("from", "kind"):
+                if row.dims.get(key):
+                    meta[key] = row.dims[key]
+            await self.sender(_board_notification_content(subspace, row.id), meta)
+        else:
+            first, last = kept[0], kept[-1]
+            kinds: dict[str, int] = {}
+            senders: set[str] = set()
+            for row in kept:
+                if row.dims.get("kind"):
+                    kinds[row.dims["kind"]] = kinds.get(row.dims["kind"], 0) + 1
+                if row.dims.get("from"):
+                    senders.add(row.dims["from"])
+            meta = {
+                "subspace": subspace, "tuple_id": last.id, "first_tuple_id": first.id,
+                "count": str(len(kept)),
+                # every id this one notification covers, so a reader can
+                # account for each post without a second read
+                "tuple_ids": ",".join(row.id for row in kept),
+            }
+            if kinds:
+                meta["kinds"] = ",".join(f"{k}={n}" for k, n in sorted(kinds.items()))
+            if senders:
+                meta["from"] = ",".join(sorted(senders))
+            content = _board_batch_notification_content(
+                subspace, len(kept), first.id, last.id, self._board_last_delivered.get(subspace),
+            )
+            await self.sender(content, meta)
+        self._board_batches += 1
+        last = kept[-1]
+        if last.created_at:
+            self._board_last_delivered[subspace] = (last.created_at, last.id)
 
     async def _reference_mailbox_row(self, subspace: str, row: TupleRow) -> None:
         """Send ONE reference for *row* (claimed or not -- the

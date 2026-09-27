@@ -7368,11 +7368,13 @@ def tuple_subscribe(
     the session claims for itself only when that rendering did not
     already happen. `tuple_subscriptions` lists the current set.
     Only board topics and the session's own mailbox are ever delivered: a
-    queue or a lock is refused naming `in`, since those are never
-    delivered, and any other `mailbox/<name>` is refused if this session
-    already leases a different name, since only one name is accepted.
-    At most 32 board topics may be subscribed at once, beyond the
-    session's own mailbox.
+    queue or a lock is refused naming `in`; a second `mailbox/<name>` is
+    refused once this session leases a name. At most 32 board topics.
+
+    A board subscription starts at now: only posts created after the
+    subscribe call are pushed, one notification per wait naming the
+    count, the first and last tuple id and the `tuple_rd` call that
+    reads them. Older posts are read with `tuple_rd`, never pushed.
 
     Subscribing `mailbox/<name>` arms the RDR-208 `directory/<name>`
     lease so `mailbox_send` resolves that name to this session. It is NOT
@@ -7442,7 +7444,8 @@ def tuple_subscriptions() -> list[dict]:
     a `directory/<name>` lease for `mailbox_send` resolution (RDR-208
     Phase 3). There is no cursor: the engine keeps
     every subspace's delivery position (a row stamp for a mailbox, a
-    per-subscriber stamp for a board).
+    per-subscriber stamp for a board). A board entry carries `since`,
+    the subscribe time push delivery starts from.
     """
     try:
         session_id = _current_subscription_session_id()
