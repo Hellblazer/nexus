@@ -56,9 +56,8 @@
     "README.md". A unique index would refuse the exact normal steady state
     nexus-yzij1 exists to accommodate.
 
-    catalog-040 is reserved for a different, already-in-flight bead; this is
-    catalog-041, the first genuinely untouched number past it, matching
-    catalog-039's own precedent for numbering past a reserved/skipped id.
+    catalog-040 is nexus-l46pu's (catalog_collections.aspects_enabled); the
+    two touch different tables and do not depend on each other.
 
     DATA EFFECT: none — CREATE INDEX only, no row is read, written, or
     otherwise touched. No FORCE-RLS toggle needed: unlike catalog-016-1's
