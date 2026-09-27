@@ -45,6 +45,12 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- `conexus/skills/tumbler-footnotes/SKILL.md` — nexus-sxiay: new standalone
+  skill wrapping `nx catalog footnotes` (GH #896 ask 4, the in-place
+  `nx://catalog/<tumbler>` -> GFM-footnote converter, including `--check` and
+  `--to-links`). Inert until the next release/cut ships it — until then,
+  `/conexus:tumbler-footnotes` resolves to nothing installed.
+
 ## Deferred to the next client release
 
 - nexus-5l8i8: `conexus/hooks/hooks.json` rewires the RDR-184 ledger's two

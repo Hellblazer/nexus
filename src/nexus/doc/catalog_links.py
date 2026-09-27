@@ -32,21 +32,31 @@ dangling-reference verdict into the rendered/validated doc.
 """
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+# nexus-w715w round 2: single source of truth for which source_uri
+# schemes the catalog recognizes at all (register-boundary validation,
+# `_normalize_source_uri`). Reused here — never re-typed — to derive the
+# narrower "safe to emit as a clickable link" subset below.
+from nexus.catalog.types import _KNOWN_URI_SCHEMES
 from nexus.doc._common import iter_plain_lines
 
 __all__ = [
     "CatalogLink",
     "CatalogLinkResolutionError",
     "ResolvedCatalogLinks",
+    "SafeLinkTarget",
     "scan_catalog_links",
     "scan_and_resolve_catalog_links",
     "resolve_catalog_links",
+    "owner_repo_roots_for",
+    "safe_link_target",
     "format_footnote",
     "format_unresolved_footnote",
 ]
@@ -184,6 +194,37 @@ def _resolve_many_or_raise(reader: Any, tumblers: list[str]) -> dict[str, Any]:
         ) from exc
 
 
+def owner_repo_roots_for(entries: dict[str, Any], reader: Any) -> dict[str, str]:
+    """Best-effort ``owner_prefix -> repo_root`` for every resolved
+    entry's owner (nexus-w715w round 2).
+
+    Needed to turn a safe, repo-relative ``file_path`` into a WORKING
+    relative link (:func:`safe_link_target`) rather than emitting the
+    repo-relative string as a link that only happens to resolve when the
+    citing file sits at the repo root. Deliberately a SEPARATE pass
+    rather than folded into :func:`resolve_catalog_links`'s own
+    owner-name loop: that function's 3-tuple return is depended on by
+    several existing callers/tests, and repo_root is only needed by a
+    caller that renders a link, not by every consumer of
+    entries/owner_names. One extra ``get_owner_by_prefix`` per unique
+    owner — cheap, and best-effort like the owner-name lookup it mirrors.
+    """
+    repo_roots: dict[str, str] = {}
+    seen: set[str] = set()
+    for entry in entries.values():
+        owner_prefix = str(entry.tumbler.owner_address())
+        if owner_prefix in seen:
+            continue
+        seen.add(owner_prefix)
+        try:
+            owner = reader.get_owner_by_prefix(owner_prefix)
+        except Exception:  # noqa: BLE001 — owner lookup is cosmetic; best-effort only
+            owner = None
+        if owner and owner.get("repo_root"):
+            repo_roots[owner_prefix] = owner["repo_root"]
+    return repo_roots
+
+
 @dataclass(slots=True)
 class ResolvedCatalogLinks:
     """Everything ``nx doc render``/``nx doc validate`` need from one
@@ -229,32 +270,134 @@ def scan_and_resolve_catalog_links(
     )
 
 
-def _safe_link_target(entry: Any) -> str | None:
-    """Return a link string safe to embed in rendered output, or ``None``.
+#: Schemes safe to emit as a clickable link target. A strict SUBSET of
+#: `_KNOWN_URI_SCHEMES` (the catalog's full register-boundary allowlist):
+#: excludes ``file`` (a host-local path — the very thing this helper
+#: exists to never leak), ``chroma`` (retired substrate, RDR-155 P4b —
+#: nothing resolves it), and ``nx-orphan-backfill`` (an internal marker
+#: with nothing to follow — see `_KNOWN_URI_SCHEMES`'s own comment).
+_LINK_SAFE_SCHEMES: frozenset[str] = _KNOWN_URI_SCHEMES - {
+    "file", "chroma", "nx-orphan-backfill",
+}
 
-    nexus-w715w / GH #896 review item 2: NEVER emit a ``file://`` URI or
-    an absolute filesystem path — ``nx index repo`` derives
-    ``source_uri`` as ``file://<abspath>`` for every registration
+#: A Windows drive-letter absolute path (``C:\...`` or ``C:/...``).
+_DRIVE_LETTER_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _looks_unsafe_relative_path(raw: str) -> bool:
+    """True when *raw* is NOT safely repo-relative.
+
+    nexus-w715w round 2: catches everything ``Path(raw).is_absolute()``
+    misses because that call is HOST-OS-NATIVE — a Windows drive-letter
+    path or a UNC path reads as "relative" on a POSIX host, and a
+    ``~``-relative or upward-escaping (``../..``) path reads as
+    "relative" everywhere despite not staying inside the repo. This
+    classifier is purely CONTENT-based (string patterns), so it catches
+    all four regardless of the host OS running the check:
+
+    * POSIX absolute (``/...``) or ``~``-relative.
+    * UNC (``\\\\server\\share`` or ``//server/share``).
+    * Windows drive-letter absolute (``C:\\...`` / ``C:/...``).
+    * Any path whose ``..`` segments, once normalized across both ``/``
+      and ``\\`` separators, would climb above the path's own start.
+    """
+    if not raw:
+        return True
+    if raw.startswith(("/", "~")):
+        return True
+    if raw.startswith("\\\\") or raw.startswith("//"):
+        return True
+    if _DRIVE_LETTER_RE.match(raw):
+        return True
+    depth = 0
+    for part in re.split(r"[\\/]+", raw):
+        if part in ("", "."):
+            continue
+        if part == "..":
+            depth -= 1
+            if depth < 0:
+                return True
+        else:
+            depth += 1
+    return False
+
+
+@dataclass(slots=True)
+class SafeLinkTarget:
+    """The result of :func:`safe_link_target`: either a working,
+    clickable link (``is_link=True``, render as ``[text](text)``) or a
+    repo-relative path that is safe to SHOW but not confirmed to
+    resolve (``is_link=False`` — a repo_root/base_dir was not supplied,
+    so render *text* as plain, non-clickable text, e.g. labelled
+    ``(repo-relative)``)."""
+
+    text: str
+    is_link: bool
+
+
+def safe_link_target(
+    entry: Any, *, base_dir: Path | None = None, repo_root: str | None = None,
+) -> SafeLinkTarget | None:
+    """Return the link/text safe to embed in rendered output, or
+    ``None`` when nothing qualifies (render title/type/owner only).
+
+    THE ONE PLACE in this codebase that composes a link from
+    ``entry.source_uri`` / ``entry.file_path`` — every caller (currently
+    :func:`format_footnote` and ``nexus.doc.footnote_converter``) MUST
+    route through this function rather than reading those fields
+    itself; ``tests/test_catalog_link_safety_single_source_lint.py``
+    enforces that mechanically.
+
+    nexus-w715w / GH #896 review item 2 (plus round 2 hardening): NEVER
+    emit a ``file://`` URI or an absolute/UNC/``~``/upward-escaping
+    filesystem path — ``nx index repo`` derives ``source_uri`` as
+    ``file://<abspath>`` for every registration
     (``CatalogRepository.deriveSourceUri``), so preferring it
     unconditionally leaked the indexing machine's own ``/Users/...``
     layout into rendered/shared output. Preference order:
 
-    1. ``source_uri``, when its scheme is NOT ``file://`` (``https://``,
-       ``x-devonthink-item://``, ...) — those are portable by
-       construction.
-    2. ``file_path``, when it is a RELATIVE path — repo-relative and
-       therefore portable.
+    1. ``source_uri``, when its scheme (parsed case-insensitively via
+       ``urlsplit`` — never a bare ``.startswith("file://")`` string
+       check, which a differently-cased or slashless ``file:`` URI slips
+       past) is in :data:`_LINK_SAFE_SCHEMES` — an explicit ALLOWLIST,
+       not "anything that isn't file://". Emitted verbatim (``https://``
+       and ``x-devonthink-item://`` URIs are portable by construction).
+    2. ``file_path``, when :func:`_looks_unsafe_relative_path` clears it
+       (repo-relative, not absolute/UNC/``~``/escaping):
 
-    Neither candidate qualifies -> ``None`` (render title/type/owner
-    only, no link segment).
+       * *repo_root* and *base_dir* both supplied — resolved to the
+         real on-disk location and re-expressed as
+         ``os.path.relpath(repo_root/file_path, base_dir)``: a WORKING
+         relative link from the citing/rendered file's own directory,
+         never an absolute path (``is_link=True``).
+       * either is missing — the repo-relative string is shown as
+         plain, non-clickable text (``is_link=False``): honest that it
+         has not been confirmed to resolve from wherever the reader is.
+
+    Neither candidate qualifies -> ``None``.
     """
     source_uri = entry.source_uri or ""
-    if source_uri and not source_uri.startswith("file://"):
-        return source_uri
+    if source_uri:
+        scheme = urlsplit(source_uri).scheme.lower()
+        is_file_like = scheme == "file" or source_uri.lower().startswith("file:")
+        if not is_file_like and scheme in _LINK_SAFE_SCHEMES:
+            return SafeLinkTarget(text=source_uri, is_link=True)
+        # Any other scheme (file://, chroma://, unknown/unparseable) —
+        # never emitted as a link; fall through to the file_path leg.
+
     file_path = entry.file_path or ""
-    if file_path and not Path(file_path).is_absolute():
-        return file_path
-    return None
+    if not file_path or _looks_unsafe_relative_path(file_path):
+        return None
+
+    if repo_root and base_dir is not None:
+        try:
+            abs_target = (Path(repo_root) / file_path).resolve()
+            rel = os.path.relpath(abs_target, Path(base_dir).resolve())
+        except (OSError, ValueError):
+            rel = None
+        if rel is not None:
+            return SafeLinkTarget(text=rel, is_link=True)
+    return SafeLinkTarget(text=file_path, is_link=False)
 
 
 def format_footnote(
@@ -263,17 +406,24 @@ def format_footnote(
     owner_names: dict[str, str],
     *,
     merged_into: str | None = None,
+    base_dir: Path | None = None,
+    repo_root: str | None = None,
 ) -> str:
     """Render one resolved catalog entry as a footnote line.
 
     ``- \\`nx://catalog/<tumbler>\\` — **<title>** (<content_type>,
     owner: <owner>) — [<link>](<link>)`` where ``<link>`` is chosen by
-    :func:`_safe_link_target` (never a ``file://`` URI or an absolute
+    :func:`safe_link_target` (never a ``file://`` URI or an absolute
     path — see its docstring) and omitted entirely when neither
-    candidate qualifies. When *merged_into* is set (the cited tumbler
-    is a merged duplicate — see :func:`resolve_catalog_links`), an
-    additional ``— merged into \\`nx://catalog/<canonical>\\``` segment
-    is inserted before the link.
+    candidate qualifies; a safe-but-unresolvable repo-relative path
+    renders as plain ``(repo-relative) \\`<path>\\``` text instead of a
+    link. When *merged_into* is set (the cited tumbler is a merged
+    duplicate — see :func:`resolve_catalog_links`), an additional
+    ``— merged into \\`nx://catalog/<canonical>\\``` segment is inserted
+    before the link. Pass *base_dir* (the rendered/citing file's own
+    directory) and *repo_root* (the entry's owner's repo root, e.g. from
+    :func:`owner_repo_roots_for`) to get a WORKING relative link rather
+    than an unresolvable repo-relative label.
     """
     owner_prefix = str(entry.tumbler.owner_address())
     owner_label = owner_names.get(owner_prefix, owner_prefix)
@@ -285,9 +435,12 @@ def format_footnote(
     )
     if merged_into:
         head += f" — merged into `nx://catalog/{merged_into}`"
-    target = _safe_link_target(entry)
-    if target:
-        head += f" — [{target}]({target})"
+    target = safe_link_target(entry, base_dir=base_dir, repo_root=repo_root)
+    if target is not None:
+        if target.is_link:
+            head += f" — [{target.text}]({target.text})"
+        else:
+            head += f" — (repo-relative) `{target.text}`"
     return head
 
 

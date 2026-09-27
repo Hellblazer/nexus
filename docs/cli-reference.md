@@ -1173,6 +1173,61 @@ Show linked RDRs for recently git-modified files. Default: last 24 hours. Useful
 
 A file path can name more than one catalog document — one file catalogued under two owners is a normal steady state — and every such document is reported, each labelled with its tumbler. Before 7.57.0 only the first was consulted, so this could print "No linked RDRs found" while the links sat on a sibling row.
 
+### nx catalog footnotes
+
+```
+nx catalog footnotes FILE.md [FILE2.md ...] [--check] [--dry-run] [--to-links]
+```
+
+GH #896 (nexus-sxiay) — the in-place converter the issue actually asked for
+(`nx doc render`/`nx doc validate`'s catalog-link resolution, nexus-sevlu,
+covers a `.rendered.md` sidecar only; GitHub/GitLab/VS Code preview render
+the *source* file, which that half never touches). Converts every
+`[label](nx://catalog/<tumbler>)` markdown link IN PLACE in the source file
+into a stable GFM footnote marker `label[^tumbler-<slug>]`, and appends or
+refreshes a `## Footnotes` section at the bottom with one definition per
+unique tumbler: title, content type, indexed date (when available), a
+working link or `(repo-relative)` label (see `nx doc render`'s note on
+link safety — the same `safe_link_target` helper, same rules), any merge
+note, and outbound links.
+
+Idempotent: re-running an already-converted file with an unchanged catalog
+state is a byte-for-byte no-op. Once a tumbler has a marker, that marker
+NEVER moves or changes on a later run — only the footnote section's
+DEFINITION bodies are rewritten when the cited catalog entries have
+drifted (a title edit, a merge). Slugs are derived deterministically from
+the entry's title (`tumbler-<slugified-title>`, falling back to the
+tumbler itself when there is no title), with a numeric suffix on collision
+(`tumbler-x`, `tumbler-x-2`, ...). Fenced code blocks are never touched.
+
+A tumbler that does not resolve is left as a plain markdown link — never
+silently dropped — and reported as `file:line: unresolved tumbler
+<tumbler>` on stderr; the command still converts everything else and exits
+1 to say the conversion is incomplete.
+
+```
+--check      Exit non-zero if the file is not already in current,
+             converted form (a dangling reference also counts). Writes
+             nothing — for CI / pre-commit.
+--dry-run    Print a unified diff of what would change; write nothing.
+--to-links   Reverse conversion: expand every footnote marker back into
+             its nx://catalog/<tumbler> link and drop the Footnotes
+             section. No catalog access needed — the tumbler is read
+             back out of the footnote body itself.
+```
+
+`## Footnotes` is recognized and managed ONLY when every line under it
+matches this command's own definition format; a file that already has an
+unrelated `## Footnotes` section (hand-written, or from another tool) is
+refused outright (exit 2) rather than risked.
+
+```
+nx catalog footnotes docs/rdr/rdr-200-example.md
+nx catalog footnotes docs/rdr/*.md --check     # CI gate
+nx catalog footnotes docs/rdr/rdr-200.md --dry-run
+nx catalog footnotes docs/rdr/rdr-200.md --to-links   # reverse
+```
+
 ### nx catalog link-generate
 
 ```
@@ -2763,15 +2818,25 @@ chash values render as `[unresolved chash: <first8>…]` rather than crashing.
 
 Unconditionally (no flag) also resolves every `[display](nx://catalog/<tumbler>)`
 link (GH #896 render/validate half — the in-place `nx catalog footnotes`
-converter GH #896 also asks for is a separate, not-yet-built surface: nexus-sxiay)
+converter GH #896 also asks for is `nx catalog footnotes`, nexus-sxiay)
 against the catalog and appends a `## Catalog References` footnote block naming
-the title, content type, owner, and a working link. The link is never a
-`file://` URI or an absolute path — `nx index repo` derives `source_uri` as
-`file://<abspath>` for every registration, so a bare preference would leak the
-indexing machine's own path layout; a non-`file://` `source_uri` (`https://`,
-`x-devonthink-item://`, ...) is preferred, a relative `file_path` is the
-fallback, and neither being safe omits the link segment entirely (title/type/
-owner only). A tumbler that has been MERGED into another (a duplicate whose
+the title, content type, owner, and a link. The link is never a `file://` URI
+or an absolute/UNC/`~`/upward-escaping path — `nx index repo` derives
+`source_uri` as `file://<abspath>` for every registration, so a bare
+preference would leak the indexing machine's own path layout, and a
+filesystem-native "is this absolute" check misses a Windows or UNC path on a
+POSIX host. `source_uri` is preferred only when its scheme (parsed
+case-insensitively) is on an explicit allowlist (`https`, `x-devonthink-item`,
+`nx-scratch` — never "anything that isn't `file://`"); a `file_path` is the
+fallback only after a content-based classifier clears it of every unsafe
+shape (POSIX-absolute, Windows drive-letter, UNC, `~`, or a `..` sequence that
+climbs above its own root). A cleared `file_path` becomes a WORKING relative
+link — re-expressed relative to the rendered file's own directory via the
+entry's owner's `repo_root` — when that repo_root is known; otherwise it is
+shown as plain, non-clickable `(repo-relative)` text rather than a link that
+has never been confirmed to resolve. Neither candidate being safe omits the
+link segment entirely (title/type/owner only). A tumbler that has been
+MERGED into another (a duplicate whose
 `alias_of` points at a canonical tumbler — the row survives the merge, it is
 never tombstoned) resolves to the canonical entry's data, with a
 `merged into` \`nx://catalog/<canonical>\` note — never the stale duplicate's
@@ -2792,8 +2857,9 @@ nx doc render docs/paper.md --project-root /path/to/repo  # resolver context (be
 ### nx doc validate
 
 Parse-and-resolve without emission. Exits non-zero on any unresolved token, and
-on any `nx://catalog/<tumbler>` link (GH #896 render/validate half; nexus-sxiay
-tracks the in-place converter) that no longer resolves — reported as
+on any `nx://catalog/<tumbler>` link (GH #896 render/validate half; see
+`nx catalog footnotes` for the in-place converter) that no longer resolves —
+reported as
 `file:line: unresolved tumbler <tumbler> (nx://catalog/<tumbler>)` ONCE PER
 CITING LINE (a tumbler cited twice is reported twice; deduplication is correct
 for the render footnote, wrong for an error report a reader must act on line

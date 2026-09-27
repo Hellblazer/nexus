@@ -79,6 +79,10 @@ _STANDALONE_SKILLS = {
     # 2026-08-05 compression arc — reference card for nexus test-suite layer
     # routing + authoring directives. No agent dispatch, no relay structure.
     "test-authoring",
+    # GH #896 / nexus-sxiay — thin CLI wrapper over `nx catalog footnotes`.
+    # No agent dispatch, no relay structure; same shape as "catalog"/"upgrade"
+    # above.
+    "tumbler-footnotes",
 }
 
 

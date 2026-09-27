@@ -40,6 +40,7 @@ from nexus.doc.catalog_links import (
     CatalogLinkResolutionError,
     format_footnote,
     format_unresolved_footnote,
+    owner_repo_roots_for,
     scan_and_resolve_catalog_links,
 )
 from nexus.doc.citations import (
@@ -348,15 +349,27 @@ def _append_catalog_link_footnotes(
         seen.add(link.tumbler)
         unique_links.append(link)
 
+    # nexus-w715w round 2: a safe repo-relative file_path is only a
+    # WORKING link when it's re-expressed relative to where THIS
+    # footnote block is actually being written — the rendered sibling's
+    # own directory, not wherever the source doc or the indexing
+    # machine happened to sit. owner_repo_roots_for reuses the same
+    # get_reader() (already opened, cached by _lazy_link_reader) rather
+    # than a fresh catalog client.
+    owner_repo_roots = owner_repo_roots_for(resolved.entries, get_reader())
+
     footnotes = []
     for link in unique_links:
         entry = resolved.entries.get(link.tumbler)
         if entry is None:
             footnotes.append(format_unresolved_footnote(link))
         else:
+            owner_prefix = str(entry.tumbler.owner_address())
             footnotes.append(format_footnote(
                 link, entry, resolved.owner_names,
                 merged_into=resolved.merged_into.get(link.tumbler),
+                base_dir=rendered.parent,
+                repo_root=owner_repo_roots.get(owner_prefix, ""),
             ))
 
     if not footnotes:
