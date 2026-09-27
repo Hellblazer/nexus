@@ -694,7 +694,7 @@ def _write_owner_group(
     else:
         doc_tumbler = writer.register(
             owner=owner_tumbler,
-            title=group["title"] or source_uri,
+            title=group["title"] or group["source_uri"],
             content_type=group["content_type"] or "knowledge",
             physical_collection=collection_name,
             source_uri=source_uri,
