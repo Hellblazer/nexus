@@ -583,7 +583,7 @@ Which files deal with <span class="ph">&lt;A CONCEPT&gt;</span>, and how are the
 <div class="see">You might say</div>
 <div class="cmd"><pre>/conexus:rdr-create             <span class="c"># create the document, status Draft</span>
 /conexus:rdr-research add 12    <span class="c"># add a finding, with a tag that says how sure you are</span>
-/conexus:rdr-gate 12            <span class="c"># optional: automatic checks and a critique</span>
+/conexus:rdr-gate 12            <span class="c"># automatic checks and a critique; accept needs it passed</span>
 /conexus:rdr-accept 12          <span class="c"># lock the decision</span></pre><button class="copy" type="button">Copy</button></div>
 <p class="note">Replace <code>12</code> with the number that <code>rdr-create</code> gives you. Make the RDR as long as the decision needs. For a bug fix, three sections are enough: Problem, Root Cause, Fix. The full template is for large design decisions with real options.</p>
 <div class="callout rule"><p>Accepting locks the record. While the RDR is a draft, change it as often as you want. After you accept it, it says what was decided, and if the code later shows that the decision was wrong, you do not edit the accepted RDR. You mark it as abandoned and write a new one with what you learned.</p></div>
