@@ -179,7 +179,7 @@ For complex investigations, `/conexus:rdr-research` can delegate to specialized 
 
 ## Gate (`/conexus:rdr-gate`)
 
-Three-layer validation. Optional but recommended before committing to irreversible decisions.
+Three-layer validation. Required before acceptance: `/conexus:rdr-accept` refuses an RDR whose latest gate record is not PASSED (`accept` row of `src/nexus/tables/rdr-lifecycle.toml`).
 
 **Layer 1, Structural**: Required sections filled, metadata complete, at least one research finding present.
 
