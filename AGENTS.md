@@ -400,8 +400,14 @@ things to avoid carefully; they are impossible.
    delivery starts at the subscribe time, and the posts of one wait
    arrive as one ping naming the count, the first and last tuple id and
    the `tuple_rd` call that reads them (nexus-zxthy; before it, a fresh
-   subscription replayed the topic's whole backlog one ping per post),
-   so wait for the state you care about or read the board for your sha
+   subscription replayed the topic's whole backlog one ping per post).
+   The engine itself now owns that start position (nexus-n36sw,
+   follow-up): a per-subscriber `announce` spec carries `since`, and the
+   engine excludes a backlog row before it is ever selected or stamped,
+   not just before it is pushed; an engine predating that bead falls
+   back to the client-side drop the parenthetical above describes,
+   automatically, for the life of the session's waiter. Either way,
+   wait for the state you care about or read the board for your sha
    rather than acting on every ping. From a shell, `nx tuple rd board/ci/nexus-develop -n 300 --json`.
    Never `gh run watch`: several concurrent watch loops on one token
    tripped GitHub's secondary rate limit on 2026-09-26 and every Actions
