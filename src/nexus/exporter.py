@@ -10,6 +10,23 @@ Each record is a dict:
     {"id": str, "document": str, "metadata": dict, "embedding": bytes}
 
 Embeddings are stored as little-endian float32 bytes (numpy tobytes).
+
+nexus-wbfpw.31 (RDR-192 Step 5, client): each record MAY also carry an
+``owner`` key -- ``{"source_uri": str, "title": str, "content_type": str,
+"position": int}`` -- naming the chunk's LIVE, own-collection catalog
+document at export time and its manifest position within it. This is an
+UNKNOWN key to every importer predating this change (older importers
+ignore unrecognized record fields), so ``FORMAT_VERSION`` is not bumped.
+Without it, an imported chunk has no catalog document or manifest row at
+all: since RDR-192 Step 5 (nexus-wbfpw.10) a content read returns only
+chunks with a live owner, so a manifest-less imported chunk is invisible
+to search once its liveness grace window lapses, and the RDR-192 reaper
+deletes it outright. ``import_collection`` registers (or reconciles onto
+an existing) catalog document per distinct owner identity in the file and
+writes its manifest explicitly, once, after every one of its chunks has
+been upserted -- see that function's docstring for why a per-upsert-batch
+manifest write cannot be trusted for a document spanning more than one
+300-chunk batch.
 """
 from __future__ import annotations
 
@@ -20,15 +37,19 @@ import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import msgpack
 import numpy as np
 import structlog
 
+from nexus.aspect_readers import uri_for
+from nexus.catalog.collection_name import CollectionName
+from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import (
     embedding_model_for_collection_name,
     index_model_for_collection,
+    is_conformant_collection_name,
 )
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
@@ -237,6 +258,80 @@ def _fire_store_chains_grouped_by_doc(
         )
 
 
+def _owners_apply(db: object) -> bool:
+    """True when *db* stores chunks in the same engine as the catalog
+    (nexus-wbfpw.31), so a catalog manifest can reference them. The same
+    instance-based capability guard ``mcp/core.py`` uses for its
+    catalog-routed query path.
+    """
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred to avoid import cycle
+
+    return is_service_backed(db)
+
+
+def _resolve_export_owners(
+    reader: Any, chashes: list[str], collection_name: str,
+) -> dict[str, dict]:
+    """Best-effort per-chash owner resolution for one export page
+    (nexus-wbfpw.31): ``{chash: {"source_uri", "title", "content_type",
+    "position"}}`` for every *chashes* entry that has a LIVE catalog
+    document in *collection_name* whose manifest names it.
+
+    Three batched catalog round trips total, regardless of page size:
+    ``docs_for_chashes`` (reverse lookup), ``get_manifests`` (positions),
+    ``resolve_many`` (document attributes) — never one call per chash.
+
+    A chash with NO manifested document is not a failure: export already
+    reads through the live-filtered content read (RDR-192 Step 5), so
+    every chash here is LIVE, but liveness during the grace window does
+    not require a manifest row yet (a raw T3 write that bypasses the
+    catalog is live and unowned for exactly that window). Such a chash
+    is simply absent from the returned dict; only a genuinely unreachable
+    catalog propagates, and the caller converts that into a loud export
+    failure rather than silently emitting owner-less records.
+
+    Identical chunk text manifested by more than one live document in
+    THIS collection (RDR-108's collapsing-by-design) picks the lowest
+    tumbler deterministically and logs the rest at DEBUG.
+    """
+    if not chashes:
+        return {}
+    by_chash = reader.docs_for_chashes(chashes)
+    all_tumblers = sorted({t for ts in by_chash.values() for t in ts})
+    if not all_tumblers:
+        return {}
+    manifests = reader.get_manifests(all_tumblers)
+    entries = reader.resolve_many(all_tumblers)
+    owners: dict[str, dict] = {}
+    for chash in chashes:
+        candidates = [
+            t for t in by_chash.get(chash, [])
+            if t in entries
+            and entries[t].physical_collection == collection_name
+            and any(row.chash == chash for row in manifests.get(t, []))
+        ]
+        if not candidates:
+            continue
+        if len(candidates) > 1:
+            _log.debug(
+                "export_owner_ambiguous",
+                chash=chash, collection=collection_name, candidates=len(candidates),
+            )
+        chosen = min(candidates, key=lambda t: Tumbler.parse(t).segments)
+        entry = entries[chosen]
+        position = next(
+            (row.position for row in manifests.get(chosen, []) if row.chash == chash),
+            0,
+        )
+        owners[chash] = {
+            "source_uri": entry.source_uri,
+            "title": entry.title,
+            "content_type": entry.content_type,
+            "position": position,
+        }
+    return owners
+
+
 def export_collection(
     db: "T3Database | HttpVectorClient",
     collection_name: str,
@@ -324,6 +419,18 @@ def export_collection(
     exported_count = 0
     embedding_dim = 0
 
+    # nexus-wbfpw.31: one shared catalog reader for the whole export — the
+    # shared-slot handle's own close() is a deliberate no-op (see
+    # nexus.catalog.factory._SharedServiceCatalogHandle), so there is no
+    # per-call teardown to manage here. Owner resolution needs the catalog
+    # and the chunks in the SAME engine, so it runs only for a
+    # service-backed handle (_owners_apply); production's make_t3() always
+    # returns one.
+    reader = None
+    if _owners_apply(db):
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
+        reader = make_catalog_reader()
+
     with open(output_path, "wb") as f:
         f.write(header_line)
         with gzip.GzipFile(fileobj=f, mode="wb") as gz:
@@ -359,6 +466,23 @@ def export_collection(
                         "before exporting."
                     )
 
+                # nexus-wbfpw.31: resolve owners for the WHOLE page's chashes
+                # in one batched round trip (never per-chunk) -- see
+                # _resolve_export_owners. A catalog failure here fails the
+                # export loudly rather than silently writing owner-less
+                # records for every remaining chunk.
+                try:
+                    owners_by_chash = (
+                        _resolve_export_owners(reader, list(page_ids), collection_name)
+                        if reader is not None else {}
+                    )
+                except Exception as exc:
+                    raise NexusError(
+                        f"Export failed: could not resolve chunk owners for "
+                        f"collection {collection_name!r} at offset {offset} "
+                        f"-- the catalog is unreachable: {exc}"
+                    ) from exc
+
                 for rec_id, doc, meta, emb in zip(
                     page_ids,
                     result["documents"],
@@ -371,15 +495,16 @@ def export_collection(
                     emb_bytes: bytes = np.asarray(emb, dtype=np.float32).tobytes()
                     if embedding_dim == 0 and emb_bytes:
                         embedding_dim = len(emb_bytes) // 4
-                    gz.write(msgpack.packb(
-                        {
-                            "id": rec_id,
-                            "document": doc,
-                            "metadata": meta or {},
-                            "embedding": emb_bytes,
-                        },
-                        use_bin_type=True,
-                    ))
+                    record: dict = {
+                        "id": rec_id,
+                        "document": doc,
+                        "metadata": meta or {},
+                        "embedding": emb_bytes,
+                    }
+                    owner = owners_by_chash.get(rec_id)
+                    if owner is not None:
+                        record["owner"] = owner
+                    gz.write(msgpack.packb(record, use_bin_type=True))
                     exported_count += 1
 
                 offset += len(page_ids)
@@ -405,6 +530,127 @@ def export_collection(
         "elapsed_seconds": round(elapsed, 2),
         "output_path": str(output_path),
     }
+
+
+def _resolve_import_owner_tumbler(collection_name: str, reader: Any, writer: Any) -> Tumbler:
+    """The owner an import-minted document is registered under
+    (nexus-wbfpw.31) -- mirrors the SAME choice the live write path
+    already makes for a document going into *collection_name*, never a
+    fresh convention. The split is by CONTENT_TYPE, not by name
+    conformance -- a ``knowledge`` collection's four-segment name is
+    routinely conformant too (``knowledge__<subject>__<model>__v<n>``),
+    but its owner_id segment is an arbitrary subject slug, never a
+    tumbler-derived one, because every knowledge document is owned by
+    the ONE ``knowledge`` curator regardless of which subject collection
+    it lives in (``catalog_store_hook_tracked``'s own owner lookup):
+
+    * A conformant, NON-knowledge collection name (code/docs/rdr) embeds
+      its owner segment in the name itself (``CollectionName.owner_id``)
+      -- the identical field the indexer's own catalog hook registers
+      those documents under (``owner_segment_for_tumbler``'s forward
+      direction). This reverses it: hyphens back to dots reconstruct the
+      owner's own tumbler prefix directly, no catalog round trip needed.
+    * Every other case -- a ``knowledge`` collection (conformant or not),
+      or a legacy / non-conformant name (2-segment, or simply
+      unregistered, the same fallback ``export_collection`` already
+      applies when no catalog row backs it) -- is owned by the
+      ``knowledge`` curator, the identical owner
+      ``catalog_store_hook_tracked`` registers every note under.
+
+    Raises :class:`NexusError` naming *collection_name* when a conformant
+    non-knowledge name's owner segment does not parse to a tumbler -- a
+    malformed collection name is a data-correctness problem, not
+    something to paper over with a guessed owner.
+    """
+    if is_conformant_collection_name(collection_name):
+        cn = CollectionName.parse(collection_name)
+        if cn.content_type != "knowledge":
+            owner_str = cn.owner_id.replace("-", ".")
+            try:
+                return Tumbler.parse(owner_str)
+            except Exception as exc:
+                raise NexusError(
+                    f"Import into {collection_name!r} cannot resolve an "
+                    f"owner tumbler from the collection's owner segment "
+                    f"{cn.owner_id!r}: {exc}"
+                ) from exc
+    owner_t = reader.curator_owner_tumbler_by_name("knowledge")
+    if owner_t is not None:
+        return owner_t
+    return writer.register_owner("knowledge", "curator")
+
+
+def _accumulate_owner_group(
+    owner_groups: dict[str, dict],
+    owner_meta: Any,
+    chash: str,
+    *,
+    fallback_source_uri: str,
+    fallback_title: str,
+    fallback_content_type: str,
+    target_collection: str,
+) -> None:
+    """Assign *chash* to the owner-manifest group it belongs to
+    (nexus-wbfpw.31), accumulated across the WHOLE import file rather
+    than per upsert-batch.
+
+    A document's chunks can span several 300-record upsert batches, and
+    ``manifest_write_batch_hook``'s own per-batch position enumeration
+    (``int(m.get("chunk_index", i))`` where ``i`` is the LOCAL index
+    within that one hook call) restarts at 0 on every batch/group -- see
+    that function's docstring. Grouping every chash for one owner
+    identity here, across every batch, and writing ONE
+    ``write_manifest`` (a replace, not an append) after the whole file
+    has streamed is the only way to get correct positions for a
+    multi-batch document; see ``import_collection``'s own docstring.
+
+    Two identity sources, in order:
+
+    * *owner_meta* -- the export-time ``owner`` record field
+      (``{"source_uri", "title", "content_type", "position"}``,
+      nexus-wbfpw.31). ``source_uri`` is the group key; an owner with no
+      ``source_uri`` (title-only identity, RDR-192 design) synthesizes
+      one via the SAME ``chroma://<collection>/<title>`` convention
+      ``catalog_store_hook_tracked`` already uses for a title-only
+      knowledge note, so a later re-import (or re-put through the
+      ordinary knowledge write path) converges onto the same document
+      rather than minting a sibling.
+    * *fallback_source_uri* / *fallback_title* -- used for a record with
+      no ``owner`` field at all (a legacy post-RDR-108 export, or an
+      owner-less live chunk :func:`_resolve_export_owners` could not
+      resolve): every such record in ONE import file lands under one
+      document, keyed by a source_uri derived from the target collection
+      and the input file name, so re-importing the same file twice never
+      mints a second document.
+
+    An explicit ``position`` from *owner_meta* is honored verbatim
+    (preserving the chunk's original manifest order); its absence (the
+    fallback path, or a legacy owner record with no position) falls back
+    to this group's own running count -- stable file-order enumeration,
+    exactly like :func:`_fire_store_chains_grouped_by_doc`'s legacy path.
+    """
+    position: int | None = None
+    if isinstance(owner_meta, dict) and (owner_meta.get("source_uri") or owner_meta.get("title")):
+        source_uri = owner_meta.get("source_uri") or ""
+        title = owner_meta.get("title") or ""
+        content_type = owner_meta.get("content_type") or fallback_content_type
+        if not source_uri:
+            source_uri = uri_for(target_collection, title)
+        raw_position = owner_meta.get("position")
+        if isinstance(raw_position, int) and not isinstance(raw_position, bool):
+            position = raw_position
+    else:
+        source_uri = fallback_source_uri
+        title = fallback_title
+        content_type = fallback_content_type
+
+    group = owner_groups.setdefault(
+        source_uri,
+        {"source_uri": source_uri, "title": title, "content_type": content_type, "rows": []},
+    )
+    if position is None:
+        position = len(group["rows"])
+    group["rows"].append((position, chash))
 
 
 def import_collection(
@@ -444,7 +690,33 @@ def import_collection(
     Returns
     -------
     dict with keys: collection_name, imported_count, skipped_count,
-    rehashed_count, elapsed_seconds.
+    rehashed_count, owned_count, elapsed_seconds. ``owned_count``
+    (nexus-wbfpw.31) is the number of chunks that got an explicit
+    catalog-manifest row written by THIS call (owner-grouped or
+    file-fallback records only -- a legacy record carrying ``meta.doc_id``
+    is manifested by the existing per-batch hook path and is not counted
+    here).
+
+    Every chunk this function upserts that is NOT keyed by a legacy
+    ``meta.doc_id`` (see :func:`_fire_store_chains_grouped_by_doc`) is
+    grouped by owner identity (:func:`_accumulate_owner_group`) as it
+    streams, and — once every batch has been flushed — each group's
+    document is registered (or reconciled onto an existing one) and its
+    manifest is written EXPLICITLY, once, with the group's full,
+    correctly-ordered row list (:func:`_resolve_import_owner_tumbler`
+    picks the owner). This is deliberately NOT routed through
+    ``manifest_write_batch_hook`` (the per-batch hook every OTHER T3 write
+    path uses): that hook's position numbering is local to one
+    ``fire_store_chains`` call and restarts at 0 per batch, which is
+    wrong the moment a document's chunks span more than one 300-record
+    upsert batch (exactly the shape RDR-192 Step 5 needs this fix to
+    close for a large import). The hook already naturally NO-OPS for
+    these records regardless -- ``_fire_store_chains_grouped_by_doc``
+    groups by ``meta.get("doc_id", "")``, and every non-legacy record's
+    key is the empty string, which the hook's own ``if not by_doc:
+    return`` guard skips -- so no hook-side change was needed to keep the
+    two write paths from producing conflicting manifest rows for the same
+    chunk.
 
     Raises
     ------
@@ -550,6 +822,18 @@ def import_collection(
     documents: list[str] = []
     embeddings: list[list[float]] = []
     metadatas: list[dict] = []
+
+    # nexus-wbfpw.31: owner-manifest grouping, accumulated across the
+    # WHOLE file (see _accumulate_owner_group / this function's own
+    # docstring for why a per-batch write cannot be trusted). Identity
+    # for a record with no ``owner`` field and no legacy ``meta.doc_id``
+    # is one document per IMPORT FILE, keyed by a source_uri derived from
+    # the target collection and the input file's name -- stable across
+    # repeated imports of the same file.
+    owner_groups: dict[str, dict] = {}
+    file_fallback_source_uri = f"nxexp://{collection_name}/{input_path.name}"
+    file_fallback_title = input_path.name
+    default_content_type: str = header.get("database_type") or "knowledge"
 
     # GH #1370 D1: legacy (pre-migration) exports carry non-conformant
     # chunk ids that fail the Postgres ``chash`` length constraint on
@@ -665,6 +949,22 @@ def import_collection(
                 embeddings.append(emb)
                 metadatas.append(meta)
 
+                # nexus-wbfpw.31: group every non-legacy record for the
+                # explicit end-of-import manifest write. Uses the FINAL
+                # (possibly rehashed) rec_id -- the id that will actually
+                # be written to T3. Unconditional (before --skip-existing
+                # filtering below): a record dropped as a duplicate at
+                # flush time was already written by a prior run and must
+                # still end up owned by this one.
+                if not meta.get("doc_id"):
+                    _accumulate_owner_group(
+                        owner_groups, record.get("owner"), rec_id,
+                        fallback_source_uri=file_fallback_source_uri,
+                        fallback_title=file_fallback_title,
+                        fallback_content_type=default_content_type,
+                        target_collection=collection_name,
+                    )
+
                 # Flush batch when page_size reached.
                 if len(ids) >= page_size:
                     f_ids, f_docs, f_embs, f_metas, skipped = _filter_existing(
@@ -689,6 +989,73 @@ def import_collection(
             _upsert_with_hint(db, collection_name, f_ids, f_docs, f_embs, f_metas, hooks)
         imported_count += len(f_ids)
 
+    # nexus-wbfpw.31: register (or reconcile onto) one document per owner
+    # group and write its manifest EXPLICITLY, once, now that every batch
+    # has been upserted -- see this function's docstring for why this
+    # cannot be the per-batch manifest_write_batch_hook.
+    owned_count = 0
+    if owner_groups and not _owners_apply(db):
+        # A non-service handle (the InMemoryVectorClient unit-test
+        # substrate) holds its chunks outside the engine, so the catalog
+        # manifest cannot reference them (the manifest's chunk FK refuses
+        # it). Capability, not configuration: production never takes this.
+        _log.info(
+            "import_owners_skipped_non_service_handle",
+            collection=collection_name, document_groups=len(owner_groups),
+        )
+        owner_groups = {}
+    if owner_groups:
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle
+        reader = make_catalog_reader()
+        writer = make_catalog_writer(priority="interactive")
+        try:
+            owner_tumbler = _resolve_import_owner_tumbler(collection_name, reader, writer)
+            for group in owner_groups.values():
+                existing = reader.by_source_uri(group["source_uri"]) if group["source_uri"] else None
+                if existing is not None:
+                    doc_tumbler = existing.tumbler
+                    # nexus-wbfpw.31: source_uri is a tenant-wide unique
+                    # identity, so importing into a DIFFERENT collection
+                    # than the one this document was exported from (a
+                    # rename/migration import, e.g. ``--collection
+                    # code__newname``) finds the SAME row here -- register()
+                    # would just hand back this tumbler unchanged (RDR-108's
+                    # idempotent leg-1 SELECT), never moving
+                    # physical_collection. Explicit update, the same
+                    # reconcile step catalog_store_hook_tracked's own
+                    # by_source_uri branch performs on a knowledge re-put.
+                    if existing.physical_collection != collection_name:
+                        writer.update(
+                            doc_tumbler,
+                            physical_collection=collection_name,
+                            source_uri=group["source_uri"],
+                        )
+                else:
+                    doc_tumbler = writer.register(
+                        owner=owner_tumbler,
+                        title=group["title"] or group["source_uri"],
+                        content_type=group["content_type"] or "knowledge",
+                        physical_collection=collection_name,
+                        source_uri=group["source_uri"],
+                    )
+                rows = sorted(group["rows"], key=lambda pr: pr[0])
+                writer.write_manifest(
+                    str(doc_tumbler),
+                    [{"chash": chash, "position": pos} for pos, chash in rows],
+                    collection=collection_name,
+                )
+                owned_count += len(rows)
+        finally:
+            _close = getattr(writer, "close", None)
+            if callable(_close):
+                _close()
+        _log.info(
+            "import_owners_reconciled",
+            collection=collection_name,
+            document_groups=len(owner_groups),
+            owned_count=owned_count,
+        )
+
     elapsed = time.monotonic() - t0
 
     if rehashed_count:
@@ -712,5 +1079,6 @@ def import_collection(
         "imported_count": imported_count,
         "skipped_count": skipped_count,
         "rehashed_count": rehashed_count,
+        "owned_count": owned_count,
         "elapsed_seconds": round(elapsed, 2),
     }
