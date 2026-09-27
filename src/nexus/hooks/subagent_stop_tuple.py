@@ -49,27 +49,19 @@ docstring); this module carries no code for it, but the fix is why THIS
 move actually reaches ``verify=present`` end to end rather than trading one
 missing-field bug for another.
 
-**ACCEPTED RESIDUAL, not reopened by this bead (review round, nexus-egm7p):
-``claude -p`` kills a still-running ``"async": true`` command hook at
-session teardown, no grace** -- see
-:mod:`nexus.hooks.subagent_start_tuple`'s own docstring for the full
-citation (RDR-205, ``docs/rdr/rdr-205-linda-tuple-space-over-postgres.md``
-line 231 and lines 1136-1137) and why this is a restored, already-researched
-shape rather than a newly-introduced one. It matters MORE on this side
-than on the start side: a SubagentStop firing as the last act of a
-short-lived ``claude -p`` invocation is an ordinary shape for this
-project's own automation (CCR, GitHub Actions, owned-mode subprocess
-dispatch -- see this repo's ``AGENTS.md``), not an edge case, so this
-REPORT projection is the one more likely to race the teardown kill. The
-RDR-184 ``.expectations`` TSV ledger -- written synchronously by a
-different hook (``nexus.hooks.subagent_stop``) on the same event -- stays
-the authoritative record of whether an agent reported; this projection is
-a best-effort secondary view for the RDR-205 tuple space, never the thing
-anything correctness-sensitive (including ``scripts/check_agent_verify_claims.py``,
-whose own docstring names this) reads as ground truth for "did the agent
-report at all." Nothing in ``hooks.json`` bounds this entry's own runtime
-with a manifest ``"timeout"`` -- see the sibling module's docstring for
-why the key is absent rather than vestigial.
+**Synchronous by decision (Sam, 2026-09-27, nexus-wgalh).** This side is
+the one the change was for. nexus-egm7p first wired it ``"async": true``, and
+Claude Code kills a still-running async command hook at ``claude -p``
+teardown, so a SubagentStop at the end of a short ``-p`` run (an ordinary
+shape for this project's CCR, GitHub Actions and owned-mode dispatch) could
+lose its REPORT tuple. Run synchronously, the POST finishes, or times out at
+``project()``'s ``_POST_TIMEOUT_S = 5``, before Claude Code moves on. See
+:mod:`nexus.hooks.subagent_start_tuple` for the cost (about 0.14 s per event)
+and the RDR-205 citation. The ``hooks.json`` ``"timeout": 10`` is enforced
+for a synchronous hook. The RDR-184 ``.expectations`` TSV ledger, written by
+:mod:`nexus.hooks.subagent_stop` on the same event, stays the authoritative
+record of whether an agent reported, including for
+``scripts/check_agent_verify_claims.py``.
 """
 from __future__ import annotations
 

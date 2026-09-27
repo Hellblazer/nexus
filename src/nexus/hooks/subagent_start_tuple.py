@@ -22,12 +22,11 @@ scheduling, dropping it far more often than the mcp_tool path did.
 So this module calls :func:`~nexus.hooks.tuple_ledger_project.project`
 DIRECTLY and SYNCHRONOUSLY -- the analysis this bead is built from names
 this explicitly: "the verb calls project() synchronously. Do NOT call
-run_start/run_stop... a naive port drops every row." There is nothing to
-detach from: the whole point of wiring this on the command tier with
-``"async": true`` in ``hooks.json`` (the pre-9b1081514 shape, restored
-here) is that CLAUDE CODE runs the *process* in the background and does
-not wait on it -- the in-process daemon-thread trick this module's sibling
-needs for the mcp_tool tier is redundant one layer up.
+run_start/run_stop... a naive port drops every row."
+
+The hook itself is SYNCHRONOUS in ``hooks.json`` (no ``"async"`` key,
+nexus-wgalh): Claude Code waits for this process before the subagent
+starts, so the POST completes or times out inside the hook's own lifetime.
 
 **Why command tier at all, when the mcp_tool registration still works.**
 Analysis (T2 ``nexus/analysis-nexus-egm7p-rdr205-projection``): no RDR-205
@@ -47,33 +46,19 @@ Keeps the ``hook_subagent_start_tuple`` MCP tool registration in
 ``nexus.mcp.hooks.HOOK_TOOLS`` for diagnosis; only which tier ``hooks.json``
 WIRES moved.
 
-**ACCEPTED RESIDUAL, not reopened by this bead (review round, nexus-egm7p):
-``claude -p`` kills a still-running ``"async": true`` command hook at
-session teardown, no grace.** Claude Code's own hooks docs, "Run hooks in
-the background > Configure an async hook", state this explicitly for
-non-interactive mode. So a SubagentStart that fires as the LAST act of a
-short-lived ``-p`` invocation can have its START projection killed
-mid-flight, same as any other async hook. This is not new to this move:
-RDR-205 already researched and priced in exactly this loss mode for
-these two projections specifically (``docs/rdr/rdr-205-linda-tuple-space-
-over-postgres.md`` line 231, "``async: true`` hooks are never read, never
-timed out, and killed without grace at session end", and lines 1136-1137,
-"Silent, recorded: an async projection hook is killed without trace at
-session end, so the space can be behind the TSV") -- this bead restores
-the SAME shape the RDR's own research covered (the pre-9b1081514 async
-wiring), not a new one. The RDR-184 ``.expectations`` TSV ledger, written
-synchronously by a different hook on a different event, stays the
-authoritative record either way; this projection is a best-effort
-secondary view, never the thing anything correctness-sensitive reads.
-
-``project()``'s own ``_POST_TIMEOUT_S = 5`` bound is the number that
-actually matters here. This entry's ``hooks.json`` shape carries no
-``"timeout"`` key at all (dropped from the mcp_tool-tier entry's carried-
-over value, review round, nexus-egm7p): Claude Code does not enforce a
-timeout on an ``"async": true`` command hook (same docs section as
-above), so the key would have bounded nothing while reading as if it
-did. Nothing in ``tests/test_hooks_json_shape_lint.py`` requires one
-either.
+**Synchronous by decision (Sam, 2026-09-27, nexus-wgalh).** nexus-egm7p
+first wired this ``"async": true``, the pre-9b1081514 shape RDR-205 CA 4
+chose so projection never delays dispatch. Claude Code kills a still-running
+async command hook at ``claude -p`` teardown ("Run hooks in the background >
+Configure an async hook"), which RDR-205 had accepted as a silent, recorded
+loss (``docs/rdr/rdr-205-linda-tuple-space-over-postgres.md`` ~231,
+~1136-1137). Running it synchronously removes that loss: a SubagentStart at
+the end of a short ``-p`` run still gets its START row. The cost is this
+process's wall time on every SubagentStart, measured at about 0.14 s, and at
+most ``project()``'s ``_POST_TIMEOUT_S = 5`` plus interpreter start when the
+engine is unreachable. The ``hooks.json`` ``"timeout": 10`` is enforced for a
+synchronous command hook and sits above that bound. The RDR-184
+``.expectations`` TSV ledger stays the authoritative record either way.
 """
 from __future__ import annotations
 

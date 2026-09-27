@@ -164,7 +164,7 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "subagent-start-tuple"
             ],
-            "async": true
+            "timeout": 10
           }
         ]
       }
@@ -189,7 +189,7 @@
               "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py",
               "subagent-stop-tuple"
             ],
-            "async": true
+            "timeout": 10
           }
         ]
       }

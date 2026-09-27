@@ -97,8 +97,8 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   agreeing on the same hardcoded set.
 - nexus-egm7p: `conexus/hooks/hooks.json` rewires the RDR-205 ledger's two
   projectors (`hook_subagent_start_tuple`, `hook_subagent_stop_tuple`) from
-  `mcp_tool` to the command tier (`"async": true`, the pre-9b1081514 shape,
-  through two new `nx-hook` verbs — `subagent-start-tuple`,
+  `mcp_tool` to the command tier (synchronous since nexus-wgalh, so
+  `claude -p` teardown cannot kill a projection mid-write), through two new `nx-hook` verbs — `subagent-start-tuple`,
   `subagent-stop-tuple` — added to `src/nexus/_hook_runtime/entry.py`'s
   `VERB_TABLE`), for the same MCP-disconnect hazard nexus-5l8i8 fixed for the
   RDR-184 ledger's writers: an `mcp_tool` hook's invocation depends on this

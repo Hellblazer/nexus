@@ -20,18 +20,13 @@ to the command tier removes that dependency: the harness spawns the
    the mock engine's captured request body -- subspace/keys/dims -- rather
    than on a local file's content.
 2. The RDR-184 writers' command-tier verb calls straight through with no
-   detachment concern (they were always synchronous). These two are
-   DELIBERATELY wired ``"async": true`` (the pre-9b1081514 shape, restored
-   by this bead) so a POST's network latency never lengthens the
-   SubagentStart/SubagentStop dispatch itself. The verb module
-   (``nexus.hooks.subagent_start_tuple`` / ``subagent_stop_tuple``) still
-   calls ``tuple_ledger_project.project()`` SYNCHRONOUSLY inside that
-   backgrounded process -- see those modules' own docstrings for why a
-   naive port reusing ``tuple_projection.run_start``/``run_stop``'s
-   in-process daemon-thread detachment would drop the row instead (that
-   trick exists for a long-lived nx-mcp SERVER process; a command-tier
-   verb's process IS the unit of work, and hooks.json's own ``"async"``
-   field is what makes it non-blocking here).
+   detachment concern (they were always synchronous). These two run
+   SYNCHRONOUSLY too (nexus-wgalh, Sam 2026-09-27): nexus-egm7p first wired
+   them ``"async": true``, and Claude Code kills async hooks at ``claude -p``
+   teardown, so a last-act SubagentStop could lose its REPORT tuple. The
+   verb module calls ``tuple_ledger_project.project()`` directly, never
+   ``tuple_projection.run_start``/``run_stop``'s in-process daemon thread,
+   which would die with this short-lived process.
 """
 from __future__ import annotations
 
@@ -137,15 +132,23 @@ def test_both_projectors_are_wired_on_the_command_tier_not_mcp_tool() -> None:
                 )
                 if command_verb(hook) == "subagent-start-tuple":
                     found_start = True
-                    assert hook.get("async") is True, (
-                        "subagent-start-tuple must be wired async: true so its "
-                        "network POST never lengthens the SubagentStart dispatch"
+                    assert "async" not in hook, (
+                        "subagent-start-tuple must run synchronously (nexus-wgalh): "
+                        "an async hook is killed at claude -p teardown"
+                    )
+                    assert hook.get("timeout", 0) > 5, (
+                        "subagent-start-tuple needs a timeout above project()'s "
+                        "5 s POST bound"
                     )
                 if command_verb(hook) == "subagent-stop-tuple":
                     found_stop = True
-                    assert hook.get("async") is True, (
-                        "subagent-stop-tuple must be wired async: true so its "
-                        "network POST never lengthens the SubagentStop dispatch"
+                    assert "async" not in hook, (
+                        "subagent-stop-tuple must run synchronously (nexus-wgalh): "
+                        "an async hook is killed at claude -p teardown"
+                    )
+                    assert hook.get("timeout", 0) > 5, (
+                        "subagent-stop-tuple needs a timeout above project()'s "
+                        "5 s POST bound"
                     )
     assert found_start, "subagent-start-tuple is not wired as a command-tier verb anywhere"
     assert found_stop, "subagent-stop-tuple is not wired as a command-tier verb anywhere"
@@ -238,9 +241,8 @@ def test_subagent_start_tuple_posts_the_start_row_with_no_mcp_server_reachable(
         service_url=engine.base_url,
     )
     elapsed = time.monotonic() - t0
-    # Informational only (the entry runs "async": true in the real
-    # harness, so this number never gates a dispatch) -- printed so a CI
-    # log carries it for the wall-time measurement the dispatch asked for.
+    # Printed so a CI log carries the wall time: since nexus-wgalh the entry
+    # runs synchronously, so this is added latency on every SubagentStart.
     print(f"[nexus-egm7p] subagent-start-tuple wall time: {elapsed:.3f}s")
 
     assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"

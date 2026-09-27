@@ -146,8 +146,9 @@ depends on this session's own MCP connection, and a disconnect was
 silently dropping the RDR-184/RDR-205 ledger rows they write while the
 event they observe fired regardless. All seven stay registered here for
 diagnosis — hooks.json instead runs the equivalent `nx-hook` verb
-(directly, or through `nx_hook_shim.py`, with `"async": true` for the two
-RDR-205 projectors so dispatch latency is unchanged) on the command tier.
+(directly, or through `nx_hook_shim.py`) on the command tier. All of them run
+synchronously, including the two RDR-205 projectors, so `claude -p` teardown
+cannot kill a projection mid-write (nexus-wgalh).
 The table's "Fires on" column still names the real event either way;
 there is no reason to call any of these twelve by hand, and their own
 tool descriptions say so ("not meant to be invoked directly"). Listed
