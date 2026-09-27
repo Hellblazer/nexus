@@ -1000,11 +1000,12 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
     db.gc_quarantine_orphans = None
     db.gc_restore_rereferenced = None
     # nexus-e8h5x: same reasoning as gc_restore_rereferenced above, one
-    # level down — restore_rereferenced_bounded_serverside is tried FIRST
-    # now, so it too must read as "no HTTP GC capability" or this fake
+    # level down — both bounded_serverside wrappers are tried FIRST now,
+    # so they too must read as "no HTTP GC capability" or this fake
     # `db`'s MagicMock auto-attrs would short-circuit the client-side
-    # algorithm under test exactly like the unbounded route would have.
+    # algorithm under test exactly like the unbounded routes would have.
     db.gc_restore_rereferenced_bounded = None
+    db.gc_quarantine_orphans_bounded = None
     db.gc_expire_quarantine = None
     return db, cols
 

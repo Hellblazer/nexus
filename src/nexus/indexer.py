@@ -3896,6 +3896,7 @@ def _prune_collection_serverside(
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
         expire_quarantine_serverside,
         quarantine_days,
+        quarantine_orphans_bounded_serverside,
         quarantine_orphans_serverside,
         restore_rereferenced_bounded_serverside,
         restore_rereferenced_serverside,
@@ -3929,9 +3930,20 @@ def _prune_collection_serverside(
     if restored is None:
         return False  # route unavailable — client-side path handles restore too
 
-    quarantined = quarantine_orphans_serverside(
+    # nexus-e8h5x review round 2: same bounded-then-fallback shape as
+    # restore above, for the direction catalog-037/nexus-a6mon's engine
+    # route was ORIGINALLY added for. The engine route shipped in
+    # v0.1.124/125 with no client caller anywhere in this tree until this
+    # line -- the 41,032-row code__1-1 quarantine call that ran 58s past
+    # the ~30s edge deadline (the a6mon incident this route exists to fix)
+    # was still fully reproducible end-to-end before this change.
+    quarantined = quarantine_orphans_bounded_serverside(
         db, collection_name, quarantine_name, quarantined_at, sample_limit=20,
     )
+    if quarantined is None:
+        quarantined = quarantine_orphans_serverside(
+            db, collection_name, quarantine_name, quarantined_at, sample_limit=20,
+        )
     if quarantined is None:
         return False  # route unavailable
     moved, sample = quarantined

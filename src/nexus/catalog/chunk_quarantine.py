@@ -196,13 +196,63 @@ def restore_rereferenced_serverside(db: Any, quarantine_name: str, origin_name: 
     return fn(quarantine_name, origin_name)
 
 
-#: Batch size for :func:`restore_rereferenced_bounded_serverside`'s loop
-#: (nexus-e8h5x). No production measurement exists yet for the RESTORE
-#: direction the way nexus-a6mon's 41,032-row/58s incident measured the
-#: QUARANTINE direction — this mirrors that fix's own row_limit example
-#: (VectorHandler's route docstring) as a reasonable starting batch, well
-#: under the ~30s edge deadline for typical chunk sizes.
+#: Absolute ceiling on drain-loop iterations for BOTH bounded GC loops
+#: (nexus-e8h5x review round 2, code-review SIGNIFICANT finding): a
+#: server-side bug, or a collection under enough concurrent write pressure
+#: that ``remaining`` never genuinely reaches zero, must not spin either
+#: loop forever. See :func:`_gc_loop_max_iterations` for the derivation.
+GC_LOOP_MAX_ITERATIONS_CEILING = 200
+
+#: Floor on drain-loop iterations, independent of row_limit (nexus-e8h5x
+#: review round 2): a caller passing a small row_limit against a
+#: genuinely small collection (e.g. a test) must not be refused
+#: prematurely.
+GC_LOOP_MIN_ITERATIONS_FLOOR = 20
+
+
+def _gc_loop_max_iterations(row_limit: int) -> int:
+    """How many bounded-batch calls a drain loop may make before it gives
+    up and logs a WARNING instead of looping forever (nexus-e8h5x review
+    round 2).
+
+    Derived from ``row_limit``, not one bare constant: a caller with a
+    SMALLER ``row_limit`` needs proportionally MORE, smaller batches to
+    drain the same population, so a cap independent of ``row_limit`` would
+    refuse a legitimately large drain using a conservative ``row_limit``
+    long before it finishes. At catalog-037's own measured throughput
+    (``knowledge__1-1``, 5,831 rows in 22.3s -- about 261 rows/s; see
+    :data:`GC_RESTORE_ROW_LIMIT_DEFAULT`'s docstring), 200 batches of the
+    2,000-row default drains up to 400,000 rows -- about 9.75x the largest
+    population ever observed in either direction (``code__1-1``, 41,032
+    rows, 2026-09-16 owner-1.1 incident) -- in about 26 minutes worst case
+    (400,000 rows / 261 rows/s). Floored at
+    :data:`GC_LOOP_MIN_ITERATIONS_FLOOR` so a small ``row_limit`` is never
+    cut off early, and capped at :data:`GC_LOOP_MAX_ITERATIONS_CEILING` so
+    no ``row_limit``, however small, makes either loop's worst-case
+    wall-clock time unbounded.
+    """
+    return min(
+        GC_LOOP_MAX_ITERATIONS_CEILING,
+        max(GC_LOOP_MIN_ITERATIONS_FLOOR, 400_000 // max(row_limit, 1)),
+    )
+
+
+#: Batch size for both bounded drain loops (nexus-e8h5x; review round 2
+#: adds the measurement this lacked at first cut, and shares one default
+#: between the two directions -- see below). catalog-037's own changeset
+#: header measured ``knowledge__1-1``: 5,831 rows in 22.3s, about 261
+#: rows/s. At that rate 2,000 rows/batch takes about 7.7s, well inside the
+#: ~30s edge deadline and comfortably under both
+#: ``DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS`` and
+#: ``DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS``'s 25s bound
+#: (``PgSession``). No restore-direction production measurement exists
+#: independently of the quarantine one; the two SQL functions share a
+#: schema, an N7 collision guard, and an audit-row shape, so there is no
+#: reason to expect a materially different per-row cost, and one shared
+#: default keeps the two loops' worst-case behaviour easy to reason about
+#: together (see :func:`_gc_loop_max_iterations`).
 GC_RESTORE_ROW_LIMIT_DEFAULT = 2000
+GC_QUARANTINE_ROW_LIMIT_DEFAULT = 2000
 
 
 def restore_rereferenced_bounded_serverside(
@@ -216,13 +266,10 @@ def restore_rereferenced_bounded_serverside(
     object's capability, e.g. the in-memory unit-test double, never about
     whether there was anything to restore).
 
-    Mirrors :func:`quarantine_orphans_serverside`'s bounded sibling that
-    catalog-037/nexus-a6mon added for the quarantine direction — except no
-    such client-side loop exists yet for quarantine to mirror; this is
-    designed directly from the engine's ``gc_restore_rereferenced_bounded``
-    wire contract (``VectorHandler.handleGcRestoreRereferenced``), which is
-    the same additive ``row_limit``-selects-bounded shape catalog-037
-    established for quarantine.
+    Mirrors :func:`quarantine_orphans_bounded_serverside`'s identical loop
+    shape for the opposite direction (nexus-e8h5x review round 2 wired
+    that sibling — the engine's bounded quarantine route, catalog-037/
+    nexus-a6mon, had shipped with no client caller at all until then).
 
     One call's response omitting ``remaining`` means an OLDER engine that
     already has the ``/gc/restore-rereferenced`` route but does not
@@ -232,12 +279,22 @@ def restore_rereferenced_bounded_serverside(
     stops after that one call; this is detected from the response SHAPE,
     never inferred from an engine-version comparison, so it needs no
     ``REQUIRED_ENGINE_VERSION`` floor bump to stay correct.
+
+    The loop gives up after :func:`_gc_loop_max_iterations` batches
+    (nexus-e8h5x review round 2): a server-side bug or persistent
+    concurrent-write pressure that keeps ``remaining`` positive forever
+    must not spin this loop forever either. That path logs a structured
+    WARNING naming the collection and the still-outstanding ``remaining``
+    and returns the partial total — never raises, since a partial drain is
+    still real, useful progress.
     """
     fn = getattr(db, "gc_restore_rereferenced_bounded", None)
     if fn is None:
         return None
     total = 0
-    while True:
+    max_iterations = _gc_loop_max_iterations(row_limit)
+    remaining = None
+    for _ in range(max_iterations):
         result = fn(quarantine_name, origin_name, row_limit)
         total += int(result.get("restored", 0))
         remaining = result.get("remaining")
@@ -246,6 +303,65 @@ def restore_rereferenced_bounded_serverside(
             return total
         if int(remaining) <= 0:
             return total
+    _log.warning(
+        "gc_restore_bounded_loop_iteration_cap_reached",
+        quarantine_collection=quarantine_name, collection=origin_name,
+        iterations=max_iterations, remaining=remaining, row_limit=row_limit,
+    )
+    return total
+
+
+def quarantine_orphans_bounded_serverside(
+    db: Any, collection_name: str, quarantine_name: str, quarantined_at: str,
+    sample_limit: int = 20, row_limit: int = GC_QUARANTINE_ROW_LIMIT_DEFAULT,
+) -> tuple[int, list[dict]] | None:
+    """Try the server-side BOUNDED quarantine sweep (nexus-e8h5x review
+    round 2). The engine route (catalog-037/nexus-a6mon,
+    ``gc_quarantine_orphans_bounded``, shipped in engine-service-v0.1.124/
+    125) had NO client caller anywhere in this tree until this function —
+    :func:`quarantine_orphans_serverside`'s unbounded call was the only
+    path the indexer ever drove, so the original a6mon incident (a
+    41,032-row ``code__1-1`` quarantine call cut mid-transaction at the
+    ~30s edge deadline) was still fully reproducible end-to-end. Same loop
+    shape as :func:`restore_rereferenced_bounded_serverside` for the
+    opposite direction: loops on ``remaining`` until drained, detects an
+    older engine that has the route but ignores ``row_limit`` from the
+    response SHAPE (an absent ``remaining`` key), and gives up after
+    :func:`_gc_loop_max_iterations` batches with a structured WARNING
+    (never a raise) naming the collection and the still-outstanding
+    ``remaining``.
+
+    Returns the total ``(moved, sample)`` across every batch (``sample``
+    accumulated up to ``sample_limit`` total, not just the first batch's),
+    or ``None`` if the bounded route is unavailable at the client-capability
+    level (caller falls back to :func:`quarantine_orphans_serverside`'s
+    unbounded call).
+    """
+    fn = getattr(db, "gc_quarantine_orphans_bounded", None)
+    if fn is None:
+        return None
+    total_moved = 0
+    sample: list[dict] = []
+    max_iterations = _gc_loop_max_iterations(row_limit)
+    remaining = None
+    for _ in range(max_iterations):
+        result = fn(collection_name, quarantine_name, quarantined_at, sample_limit, row_limit)
+        total_moved += int(result.get("moved", 0))
+        if len(sample) < sample_limit:
+            batch_sample = list(result.get("sample") or [])
+            sample.extend(batch_sample[: sample_limit - len(sample)])
+        remaining = result.get("remaining")
+        if remaining is None:
+            # Older engine: ignored row_limit, already did the whole thing.
+            return total_moved, sample
+        if int(remaining) <= 0:
+            return total_moved, sample
+    _log.warning(
+        "gc_quarantine_bounded_loop_iteration_cap_reached",
+        collection=collection_name, quarantine_collection=quarantine_name,
+        iterations=max_iterations, remaining=remaining, row_limit=row_limit,
+    )
+    return total_moved, sample
 
 
 def expire_quarantine_serverside(

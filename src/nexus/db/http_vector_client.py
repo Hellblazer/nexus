@@ -3707,6 +3707,38 @@ class HttpVectorClient:
             tenant=self._tenant,
         )
 
+    def gc_quarantine_orphans_bounded(
+        self, collection: str, quarantine_collection: str,
+        quarantined_at: str, sample_limit: int, row_limit: int,
+    ) -> dict:
+        """POST /v1/vectors/gc/quarantine-orphans with ``row_limit`` (catalog-037/
+        nexus-a6mon's engine route; wired client-side at nexus-e8h5x review
+        round 2 — the engine route shipped in v0.1.124/125 with no caller,
+        so the original a6mon incident (a 41,032-row code__1-1 quarantine
+        call cut mid-transaction at the ~30s edge deadline) was still
+        reproducible end-to-end until this method existed). Same additive
+        per-route toggle as :meth:`gc_restore_rereferenced_bounded`.
+
+        Returns ``{"moved": N, "sample": [...], "remaining": R, "row_limit": L}``
+        from an engine that recognizes ``row_limit``, or ``{"moved": N,
+        "sample": [...]}`` from an OLDER engine that already has this route
+        but silently ignores an unrecognized request-body field — it
+        performs the UNBOUNDED quarantine regardless of what this call
+        asked for. Callers detect that by the absent ``remaining`` key,
+        never by inferring engine version.
+        """
+        return _post(
+            "/v1/vectors/gc/quarantine-orphans",
+            {
+                "collection": collection,
+                "quarantine_collection": quarantine_collection,
+                "quarantined_at": quarantined_at,
+                "sample_limit": sample_limit,
+                "row_limit": row_limit,
+            },
+            tenant=self._tenant,
+        )
+
     def gc_restore_rereferenced(self, quarantine_collection: str, origin_collection: str) -> int:
         """POST /v1/vectors/gc/restore-rereferenced. Returns the restored count."""
         result = _post(

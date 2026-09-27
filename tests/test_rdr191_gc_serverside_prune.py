@@ -388,6 +388,7 @@ def test_route_unavailable_prunes_nothing_and_crosses_no_wire(t2_service_env) ->
 
     with capture_logs() as cap, \
          patch.object(hvc.HttpVectorClient, "gc_quarantine_orphans", None), \
+         patch.object(hvc.HttpVectorClient, "gc_quarantine_orphans_bounded", None), \
          patch.object(hvc.HttpVectorClient, "gc_restore_rereferenced", None), \
          patch.object(hvc.HttpVectorClient, "gc_restore_rereferenced_bounded", None), \
          patch.object(hvc.HttpVectorClient, "gc_expire_quarantine", None), \
