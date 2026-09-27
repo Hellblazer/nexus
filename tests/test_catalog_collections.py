@@ -57,7 +57,7 @@ from tests._catalog_fixture_ops import ActiveCatalog
 # request's content_type from the ENGINE's own configured embedder (bead
 # nexus-ft04v.6/.8) BEFORE checking for a conflict — so the FIRST real
 # registration for a content_type already carries the box's real model, and a
-# hardcoded "voyage-code-3" literal here 422s against it. Resolve the real
+# hardcoded "model-code" literal here 422s against it. Resolve the real
 # write-time model instead of hardcoding a foreign token.
 #
 # RDR-204 Phase 3 item 3 (nexus-ft04v.26): _write_intent_embedding_model, not
@@ -85,10 +85,10 @@ def active_catalog() -> ActiveCatalog:
 @pytest.mark.parametrize(
     "name",
     [
-        "code__1-1__voyage-code-3__v1",
-        "docs__1-1__voyage-context-3__v2",
-        "rdr__1-2-3__voyage-context-3__v1",
-        "knowledge__1-1__voyage-context-3__v1",
+        "code__1-1__model-code__v1",
+        "docs__1-1__model-ctx__v2",
+        "rdr__1-2-3__model-ctx__v1",
+        "knowledge__1-1__model-ctx__v1",
     ],
 )
 def test_conformant_names_accepted(name):
@@ -104,9 +104,9 @@ def test_conformant_names_accepted(name):
         "knowledge__delos",
         "docs__default",
         "taxonomy__nexus-571b8edd-knowledge",
-        "code__1-1__voyage-code-3",  # missing v<n> segment
-        "code__1-1__voyage-code-3__1",  # missing 'v' prefix
-        "weird__1-1__voyage-code-3__v1",  # unknown content_type
+        "code__1-1__model-code",  # missing v<n> segment
+        "code__1-1__model-code__1",  # missing 'v' prefix
+        "weird__1-1__model-code__v1",  # unknown content_type
     ],
 )
 def test_legacy_names_rejected(name):
@@ -255,6 +255,6 @@ def test_update_document_collection_returns_false_on_unknown_tumbler(active_cata
     found no direct test.
     """
     assert active_catalog.update_document_collection(
-        "1.99.99", "knowledge__1-1__voyage-context-3__v1",
+        "1.99.99", "knowledge__1-1__model-ctx__v1",
     ) is False
 

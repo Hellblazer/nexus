@@ -75,7 +75,7 @@ class TestCorpusKnowledgeWriteThenRead:
         # used to do via reg.update(path, docs_collection=...).
         adapter.update(
             repo,
-            docs_collection="knowledge__myrepo-1-1__voyage-context-3__v1",
+            docs_collection=f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
         )
 
         # Catalog now has the knowledge collection registered.
@@ -84,7 +84,7 @@ class TestCorpusKnowledgeWriteThenRead:
         # substrates (tests/catalog/test_shape_parity_tripwire.py).
         names = [c["name"] for c in cat.list_collections()]
         knowledge = [n for n in names if n.startswith("knowledge__")]
-        assert "knowledge__myrepo-1-1__voyage-context-3__v1" in knowledge, knowledge
+        assert f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1" in knowledge, knowledge
 
     def test_subsequent_read_returns_knowledge_in_docs_slot_oq5(
         self, cat: Catalog, repo: Path, tmp_path: Path,
@@ -98,7 +98,7 @@ class TestCorpusKnowledgeWriteThenRead:
         adapter.add(repo)
         adapter.update(
             repo,
-            docs_collection="knowledge__myrepo-1-1__voyage-context-3__v1",
+            docs_collection=f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
         )
 
         rec = read_dual(
@@ -119,7 +119,7 @@ class TestCorpusKnowledgeWriteThenRead:
         adapter.add(repo)
         adapter.update(
             repo,
-            docs_collection="knowledge__myrepo-1-1__voyage-context-3__v1",
+            docs_collection=f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
         )
         adapter.update(repo, head_hash="abc123def456")  # no-op
         adapter.update(repo, status="ready")  # no-op

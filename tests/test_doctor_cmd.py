@@ -2024,7 +2024,7 @@ def test_doctor_renders_the_embedding_profile_row(runner, mock_reg):
     findings, and the rendered detail carries no credential."""
     class _Reader:
         def embedding_profile(self):
-            return [{"content_type": ct, "embedding_model": "voyage-context-3" if ct != "code" else "voyage-code-3", "dimension": 1024}
+            return [{"content_type": ct, "embedding_model": "model-ctx" if ct != "code" else "model-code", "dimension": 1024}
                     for ct in ("code", "docs", "rdr", "knowledge")]
 
         def list_collections(self):
@@ -2037,7 +2037,7 @@ def test_doctor_renders_the_embedding_profile_row(runner, mock_reg):
         patch("nexus.catalog.factory.make_catalog_reader", return_value=_Reader()),
     ])
     assert "Embedding profile" in result.output
-    assert "code=voyage-code-3" in result.output
+    assert "code=model-code" in result.output
     assert "Embedding profile vs client intent" in result.output
     mine = [ln for ln in result.output.splitlines() if "Embedding profile" in ln or "Collections " in ln]
     assert len(mine) >= 6, mine

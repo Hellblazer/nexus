@@ -109,20 +109,20 @@ class TestWriteModelForCollection:
         import nexus.mcp_infra as mi
         from nexus.db import http_vector_client as hvc
 
-        # The NAME says voyage-code-3; the ROW (the exact drift class
+        # The NAME says model-code; the ROW (the exact drift class
         # GH #667 came from) disagrees and must win.
         monkeypatch.setattr(
             mi, "get_collection_row",
-            lambda name: {"embedding_model": "voyage-context-3"},
+            lambda name: {"embedding_model": "model-ctx"},
         )
-        assert hvc._write_model_for_collection("code__nexus__voyage-code-3__v1") == "voyage-context-3"
+        assert hvc._write_model_for_collection("code__nexus__model-code__v1") == "model-ctx"
 
     def test_falls_to_the_conformant_name_when_no_row(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import nexus.mcp_infra as mi
         from nexus.db import http_vector_client as hvc
 
         monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
-        assert hvc._write_model_for_collection("code__nexus__voyage-code-3__v1") == "voyage-code-3"
+        assert hvc._write_model_for_collection("code__nexus__model-code__v1") == "model-code"
 
     def test_none_when_no_row_and_not_conformant(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import nexus.mcp_infra as mi
@@ -150,21 +150,21 @@ class TestUpsertByteBudget:
         monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: None)
         # CCE prefixes (docs/knowledge/rdr) -> no byte budget (CCE issues
         # one API call per text; cannot exceed a batch token ceiling).
-        assert hvc._upsert_byte_budget("docs__proj__voyage-context-3__v1") is None
-        assert hvc._upsert_byte_budget("knowledge__notes__voyage-context-3__v1") is None
-        assert hvc._upsert_byte_budget("rdr__nexus__voyage-context-3__v1") is None
+        assert hvc._upsert_byte_budget("docs__proj__model-ctx__v1") is None
+        assert hvc._upsert_byte_budget("knowledge__notes__model-ctx__v1") is None
+        assert hvc._upsert_byte_budget("rdr__nexus__model-ctx__v1") is None
         # code__ and anything else (including a quarantine- sibling, a
         # two-segment legacy name, and an underscored-owner name) -> the
         # fixed code byte budget.
-        assert hvc._upsert_byte_budget("code__nexus__voyage-code-3__v1") == hvc._CODE_UPSERT_BYTE_BUDGET
-        assert hvc._upsert_byte_budget("quarantine-code__nexus__voyage-code-3__v1") == hvc._CODE_UPSERT_BYTE_BUDGET
-        assert hvc._upsert_byte_budget("code__my_repo__voyage-code-3__v1") == hvc._CODE_UPSERT_BYTE_BUDGET
+        assert hvc._upsert_byte_budget("code__nexus__model-code__v1") == hvc._CODE_UPSERT_BYTE_BUDGET
+        assert hvc._upsert_byte_budget("quarantine-code__nexus__model-code__v1") == hvc._CODE_UPSERT_BYTE_BUDGET
+        assert hvc._upsert_byte_budget("code__my_repo__model-code__v1") == hvc._CODE_UPSERT_BYTE_BUDGET
         assert hvc._upsert_byte_budget("weird-no-prefix") == hvc._CODE_UPSERT_BYTE_BUDGET
         assert hvc._CODE_UPSERT_BYTE_BUDGET == 180_000
 
         monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "voyage")
-        assert hvc._upsert_byte_budget("docs__proj__voyage-context-3__v1") is None
-        assert hvc._upsert_byte_budget("code__nexus__voyage-code-3__v1") == 180_000
+        assert hvc._upsert_byte_budget("docs__proj__model-ctx__v1") is None
+        assert hvc._upsert_byte_budget("code__nexus__model-code__v1") == 180_000
 
     def test_two_segment_legacy_name_prefix_only(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A two-segment legacy name (no model/version) is still classified
@@ -183,8 +183,8 @@ class TestUpsertByteBudget:
         from nexus.db import http_vector_client as hvc
 
         monkeypatch.setattr(hvc, "_serving_embedding_mode", lambda: "onnx-local")
-        assert hvc._upsert_byte_budget("code__nexus__voyage-code-3__v1") is None
-        assert hvc._upsert_byte_budget("docs__proj__voyage-context-3__v1") is None
+        assert hvc._upsert_byte_budget("code__nexus__model-code__v1") is None
+        assert hvc._upsert_byte_budget("docs__proj__model-ctx__v1") is None
         assert hvc._upsert_byte_budget("weird-no-prefix") is None
 
 
@@ -332,15 +332,15 @@ class TestDimForCollection:
         """No-row override: the file's autouse row fixture always assigns
         the canonical CCE/code model by content_type, which would silently
         replace the literal bge-base-en-v15-768 token in the second name
-        below with voyage-context-3 -- a different (and here, still valid,
-        but NOT what this test is pinning) dim. See the comment on
+        below with a fixture-derived model -- a different (and here, still
+        valid, but NOT what this test is pinning) dim. See the comment on
         TestIsSameModelPassthrough.test_same_name_unwired_model_is_not_passthrough."""
         import nexus.mcp_infra as mi
         from nexus.db.reconcile import _dim_for_collection
 
         monkeypatch.setattr(mi, "get_collection_row", lambda name: None)
-        dim, reason = _dim_for_collection("code__nexus__voyage-code-3__v1")
-        assert dim == 1024
+        dim, reason = _dim_for_collection("code__nexus__minilm-l6-v2-384__v1")
+        assert dim == 384
         assert reason == ""
 
         dim, reason = _dim_for_collection("docs__proj__bge-base-en-v15-768__v1")
@@ -367,7 +367,7 @@ class TestDimForCollection:
         assert "unknown-model-xyz" in reason
 
     def test_row_wins_over_a_disagreeing_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The NAME says voyage-code-3 (1024-dim); the ROW disagrees (768)
+        """The NAME says minilm-l6-v2-384 (384-dim); the ROW disagrees (768)
         and must win (RDR-204 Gap 1)."""
         import nexus.mcp_infra as mi
         from nexus.db.reconcile import _dim_for_collection
@@ -376,7 +376,7 @@ class TestDimForCollection:
             mi, "get_collection_row",
             lambda name: {"embedding_model": "bge-base-en-v15-768"},
         )
-        dim, reason = _dim_for_collection("code__nexus__voyage-code-3__v1")
+        dim, reason = _dim_for_collection("code__nexus__minilm-l6-v2-384__v1")
         assert dim == 768
         assert reason == ""
 
@@ -385,7 +385,7 @@ class TestDimForCollection:
         from nexus.db.reconcile import _dim_for_collection
 
         monkeypatch.setattr(mi, "get_collection_row", lambda name: {"embedding_model": ""})
-        dim, reason = _dim_for_collection("code__nexus__voyage-code-3__v1")
+        dim, reason = _dim_for_collection("code__nexus__model-code__v1")
         assert dim is None
         assert "no embedding_model recorded" in reason
 
@@ -397,7 +397,7 @@ class TestDimForCollection:
             mi, "get_collection_row",
             lambda name: {"embedding_model": "unknown-model-xyz"},
         )
-        dim, reason = _dim_for_collection("code__nexus__voyage-code-3__v1")
+        dim, reason = _dim_for_collection("code__nexus__model-code__v1")
         assert dim is None
         assert "unknown embedding-model" in reason
         assert "unknown-model-xyz" in reason
@@ -521,13 +521,13 @@ class TestQuarantineCollectionName:
             mi, "get_collection_row",
             lambda name: {
                 "content_type": "code", "owner_id": "nexus-1-1",
-                "embedding_model": "voyage-code-3", "lifecycle_state": "live",
+                "embedding_model": "model-code", "lifecycle_state": "live",
             },
         )
         from nexus.catalog.chunk_quarantine import quarantine_collection_name
 
-        assert quarantine_collection_name("code__nexus-1-1__voyage-code-3__v1") == (
-            "quarantine-code__nexus-1-1__voyage-code-3__v1"
+        assert quarantine_collection_name("code__nexus-1-1__model-code__v1") == (
+            "quarantine-code__nexus-1-1__model-code__v1"
         )
 
     def test_row_wins_over_a_disagreeing_name(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -544,7 +544,7 @@ class TestQuarantineCollectionName:
         )
         from nexus.catalog.chunk_quarantine import quarantine_collection_name
 
-        assert quarantine_collection_name("code__nexus-1-1__voyage-code-3__v1") == (
+        assert quarantine_collection_name("code__nexus-1-1__model-code__v1") == (
             "quarantine-docs__proj__bge-base-en-v15-768__v1"
         )
 
@@ -605,5 +605,5 @@ class TestTargetCollectionForSplitIsolated:
             "nexus.corpus.t3_collection_name",
             lambda name, t3=None, for_write=False, allow_placeholder=False: seen.append(name) or name,
         )
-        rb.target_collection_for("code__nexus__voyage-code-3__v1", t3=None)
+        rb.target_collection_for("code__nexus__model-code__v1", t3=None)
         assert seen == ["code__nexus"]

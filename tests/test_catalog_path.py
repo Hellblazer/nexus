@@ -232,7 +232,7 @@ class TestMarkdownChunksRelativePath:
 
         md = tmp_path / "doc.md"
         md.write_text("# Hello\n\nSome content here for chunking.")
-        result = _markdown_chunks(md, "abc123", "voyage-context-3", "2026-01-01", "corp")
+        result = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "corp")
         assert result  # non-empty
         assert "source_path" not in result[0][2]
 
@@ -246,7 +246,7 @@ class TestMarkdownChunksRelativePath:
         md = repo / "docs" / "rdr" / "rdr-001.md"
         md.parent.mkdir(parents=True)
         md.write_text("# RDR-001\n\nSome research content for chunking.")
-        result = _markdown_chunks(md, "abc123", "voyage-context-3", "2026-01-01", "corp", base_path=repo)
+        result = _markdown_chunks(md, "abc123", "model-ctx", "2026-01-01", "corp", base_path=repo)
         assert result
         assert "source_path" not in result[0][2]
 

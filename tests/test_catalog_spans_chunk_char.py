@@ -78,7 +78,7 @@ def test_chunk_char_span_resolves_via_manifest(t3_db, catalog) -> None:
     # Seed: one Document with two chunks. Phase-3 metadata: only
     # chunk_text_hash (no chunk_index, no doc_id). The chunks are
     # written with the full chash as the chroma natural id (RDR-180).
-    coll_name = "docs__hjd6-test__voyage-context-3__v1"
+    coll_name = "docs__hjd6-test__model-ctx__v1"
     chunk_a_text = "alpha alpha alpha alpha alpha alpha"
     chunk_b_text = "beta beta beta beta beta beta beta beta"
     chash_a = _hl.sha256(chunk_a_text.encode()).hexdigest()
@@ -151,7 +151,7 @@ def test_chunk_char_span_returns_none_when_position_out_of_range(
     import hashlib as _hl
     from unittest.mock import patch
 
-    coll_name = "docs__hjd6-oob__voyage-context-3__v1"
+    coll_name = "docs__hjd6-oob__model-ctx__v1"
     chunk_text = "the only chunk"
     chash = _hl.sha256(chunk_text.encode()).hexdigest()
     col = t3_db._client.get_or_create_collection(coll_name)

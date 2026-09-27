@@ -529,10 +529,10 @@ async def test_default_dispatcher_raises_on_embedding_profile_mismatch() -> None
     mismatch_text = (
         "Error: this install's current query-side embedding mode "
         "(onnx-local) cannot serve 1 of the targeted collection(s): "
-        "'knowledge__seam-b-test__voyage-context-3__v1': this install's "
+        "'knowledge__seam-b-test__model-ctx__v1': this install's "
         "profile names a model this mode cannot serve — collection "
-        "'knowledge__seam-b-test__voyage-context-3__v1' resolves to model "
-        "'voyage-context-3', which embedding mode onnx-local has no "
+        "'knowledge__seam-b-test__model-ctx__v1' resolves to model "
+        "'model-ctx', which embedding mode onnx-local has no "
         "embedder for."
     )
 
@@ -550,7 +550,7 @@ async def test_default_dispatcher_raises_on_embedding_profile_mismatch() -> None
         mcp_core.search = original  # type: ignore[assignment]
 
     assert excinfo.value.tool == "search"
-    assert "voyage-context-3" in str(excinfo.value)
+    assert "model-ctx" in str(excinfo.value)
     assert "onnx-local" in str(excinfo.value)
 
 
@@ -703,7 +703,7 @@ async def test_run_step_ref_to_missing_step_raises() -> None:
 @pytest.mark.asyncio
 async def test_run_rejects_cross_embedding_dispatch() -> None:
     """``scope.taxonomy_domain=code`` cannot dispatch to a ``docs__``
-    collection (whose embedding model is ``voyage-context-3``)."""
+    collection (a different embedding domain)."""
     from nexus.plans.runner import PlanRunEmbeddingDomainError, plan_run
 
     plan = {
@@ -1982,13 +1982,13 @@ class TestTumblerAwareHydration:
         manifests = {
             "1.1.5": [
                 ManifestRow(position=0, chash="a" * 64,
-                            collection="knowledge__x__voyage-context-3__v1"),
+                            collection="knowledge__x__model-ctx__v1"),
                 ManifestRow(position=1, chash="b" * 64,
-                            collection="knowledge__x__voyage-context-3__v1"),
+                            collection="knowledge__x__model-ctx__v1"),
             ],
             "1.1.6": [
                 ManifestRow(position=0, chash="c" * 64,
-                            collection="knowledge__x__voyage-context-3__v1"),
+                            collection="knowledge__x__model-ctx__v1"),
             ],
         }
         fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
@@ -2013,7 +2013,7 @@ class TestTumblerAwareHydration:
         call_kwargs = mock_hydrate.call_args.kwargs
         assert call_kwargs["ids"] == ["a" * 64, "b" * 64, "c" * 64]
         assert call_kwargs["collections"] == [
-            "knowledge__x__voyage-context-3__v1",
+            "knowledge__x__model-ctx__v1",
         ] * 3
 
     def test_chash_shaped_ids_bypass_tumbler_route(self):
@@ -2149,7 +2149,7 @@ class TestTumblerAwareHydration:
             "1.1.5": [
                 ManifestRow(position=0, chash="a" * 64, collection=None),
                 ManifestRow(position=1, chash="b" * 64,
-                            collection="knowledge__x__voyage-context-3__v1"),
+                            collection="knowledge__x__model-ctx__v1"),
             ],
         }
         fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
@@ -2198,7 +2198,7 @@ class TestStoreGetManyExplicitStepTumblerRouting:
         manifests = {
             "1.1.5": [
                 ManifestRow(position=0, chash="a" * 64,
-                            collection="knowledge__x__voyage-context-3__v1"),
+                            collection="knowledge__x__model-ctx__v1"),
             ],
         }
         fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
@@ -2216,7 +2216,7 @@ class TestStoreGetManyExplicitStepTumblerRouting:
         call_kwargs = mock_hydrate.call_args.kwargs
         assert call_kwargs["ids"] == ["a" * 64]
         assert call_kwargs["collections"] == [
-            "knowledge__x__voyage-context-3__v1",
+            "knowledge__x__model-ctx__v1",
         ]
 
     @pytest.mark.asyncio
@@ -2543,11 +2543,11 @@ class TestNonEvidentiaryStamp:
         manifests = {
             "1.1.5": [ManifestRow(
                 position=0, chash="a" * 64,
-                collection="code__x__voyage-code-3__v1",
+                collection="code__x__model-code__v1",
             )],
             "1.1.6": [ManifestRow(
                 position=0, chash="b" * 64,
-                collection="code__x__voyage-code-3__v1",
+                collection="code__x__model-code__v1",
             )],
         }
         entries = {
@@ -2590,7 +2590,7 @@ class TestNonEvidentiaryStamp:
         manifests = {
             "1.1.5": [ManifestRow(
                 position=0, chash="a" * 64,
-                collection="code__x__voyage-code-3__v1",
+                collection="code__x__model-code__v1",
             )],
         }
 
@@ -2922,9 +2922,9 @@ class TestImportOnlySectionTypeExclusion:
         manifests = {
             "1.1.5": [
                 ManifestRow(position=0, chash="a" * 64,
-                            collection="code__x__voyage-code-3__v1"),
+                            collection="code__x__model-code__v1"),
                 ManifestRow(position=1, chash="b" * 64,
-                            collection="code__x__voyage-code-3__v1"),
+                            collection="code__x__model-code__v1"),
             ],
         }
         fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
@@ -2959,7 +2959,7 @@ class TestImportOnlySectionTypeExclusion:
 
         manifests = {
             "1.1.5": [ManifestRow(position=0, chash="a" * 64,
-                                   collection="code__x__voyage-code-3__v1")],
+                                   collection="code__x__model-code__v1")],
         }
         fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
         fake_hydrated = {
@@ -2988,7 +2988,7 @@ class TestImportOnlySectionTypeExclusion:
 
         manifests = {
             "1.1.5": [ManifestRow(position=0, chash="a" * 64,
-                                   collection="code__x__voyage-code-3__v1")],
+                                   collection="code__x__model-code__v1")],
         }
         fake_catalog = SimpleNamespace(get_manifests=lambda ids: manifests)
         fake_hydrated = {"contents": ["some content"], "missing": []}

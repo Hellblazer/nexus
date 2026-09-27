@@ -283,7 +283,7 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # continuation (the remaining entries mostly carry MANY tests per file,
 # or a scattered literal across dozens of call sites, and were left for
 # a future batch).
-_MODE_LINT_EXCLUDE_FILES_CEILING = 45
+_MODE_LINT_EXCLUDE_FILES_CEILING = 3
 # 44 -> 45 (nexus-vnz3d, 2026-09-20): +test_aspect_uri_repair.py. The
 # aspect source_uri backfill planner is a pure function whose only use of
 # the collection is a PREFIX test (FILE_ROUTED_PREFIXES); its voyage
@@ -446,6 +446,28 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 45
 # covers all 7 parametrize cases): voyage tokens are parametrize-data
 # collection-name/is_code_like pairs. Rationale in conftest.py beside
 # each entry.
+# 45 -> 3 (nexus-03wze, 2026-09-27, continuation of nexus-0y4c6): -42.
+# Every file removed here was fixed per-test rather than exempted
+# whole: a genuine cloud-mode test promoted to declare `cloud_mode`
+# (test_store_cmd.py's shared `env_creds` fixture now depends on
+# `cloud_mode` directly, covering all 8 of its offenders in one edit);
+# an inert literal swapped for a neutral `model-code`/`model-ctx`
+# token (the majority of files); a real-value assertion (a canonical-
+# set membership check, a MODEL_DIMS/dim-routing-table lookup, or a
+# mode-independent-but-real prefix-dispatch fallback) moved to its own
+# `_MODE_LINT_EXCLUDE_NODEIDS` entry with a per-test rationale (see
+# that ceiling's own +30 entry below). The 3 remaining files are
+# test_mode_declarations_are_explicit.py itself (never a real
+# offender) and two deliberately deferred: test_rdr_109_phase2_
+# dispatch.py (a genuine (mode, model-token) 4-cell dispatch matrix
+# needing per-test judgment across 15 offenders) and test_exporter.py
+# (11 offenders interlocking EmbeddingModelMismatch and
+# EmbeddingDimensionMismatch's real MODEL_DIMS-keyed checks, where a
+# careless swap would silently make the safety test vacuous). Full
+# rationale for each removed file lives beside the corresponding
+# `_MODE_LINT_EXCLUDE_NODEIDS` entry in conftest.py; T2
+# nexus/mode-lint-burndown-nexus-03wze-2026-09-27 has the round's
+# summary.
 # 82 -> 62 (nexus-0y4c6 burn-down batch 1, 2026-09-09): -20 nodeid
 # entries. 19 were PROMOTED, not merely retargeted: each test's
 # voyage-token literal was hoisted out of the flagged function's own
@@ -591,7 +613,34 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 45
 # -- so reason class "string-literal-as-name" (mirrors
 # test_h1zu0_dim_routing.py). Rationale in conftest.py beside the
 # entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 17
+# 17 -> 47 (nexus-03wze, 2026-09-27, continuation of nexus-0y4c6): +30,
+# every one PROMOTED from a file-level `_MODE_LINT_EXCLUDE_FILES` entry
+# the same round (see that ceiling's matching -42 shrink), never a
+# fresh hoist. Ten source files each contributed 1-7 entries: test_t3.py
+# (1, legacy-fallback string-literal-as-name), test_h1zu0_dim_
+# routing.py (2, the canonical dim-routing table's own identity check),
+# test_store_put_cli_parity.py (1, the .nxexp header/target-name
+# EmbeddingModelMismatch gate), test_local_mode.py (1, same legacy-
+# fallback class), test_o5x2c_write_chokepoint_repros.py (6, mode-self-
+# test -- every test in that file pins LOCAL mode explicitly), test_
+# catalog_doctor_name_vs_embed_dim.py (7, canonical-set-dependent dim-
+# mismatch detector), test_doctor_cmd.py (5, 2 hardcoded-quotas-table
+# renders plus 3 judgment-deferred collection-shape-rule tests), test_
+# catalog_collection_name.py (2, CANONICAL_EMBEDDING_MODELS's own
+# membership identity), test_collection_parse_funnel_slice2.py (1,
+# _PASSTHROUGH_MODELS's own membership identity), test_local_daemon_
+# client_embed.py (4, same legacy-fallback class as test_t3.py). Full
+# per-entry rationale is beside each entry in conftest.py.
+# 47 -> 48 (nexus-03wze fix round, 2026-09-27): +1,
+# tests/test_catalog_path.py::TestIndexDocumentSourceKey::test_
+# staleness_check_uses_content_hash_when_catalog_absent. The first
+# swap attempt broke this test (proven by A/B, not assumed): the
+# mocked metadata's embedding_model is read by a REAL staleness
+# comparison that changes which code path `_index_document` takes,
+# contradicting an older stale comment that called it unused fixture
+# noise. Reverted to the real literal. Rationale in conftest.py beside
+# the entry.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 48
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

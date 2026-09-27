@@ -312,7 +312,7 @@ class TestChunkerLoop:
             MC.return_value.chunk.return_value = ci
             chunker_loop("h1", db, threading.Event(), embed_fn=_embed,
                          extraction_done=done_event, pdf_path="/a.pdf",
-                         corpus="test", target_model="voyage-context-3")
+                         corpus="test", target_model="model-ctx")
         out = db.read_ready_chunks("h1")
         assert len(out) == 2
         meta = json.loads(out[0]["metadata_json"])
@@ -322,7 +322,7 @@ class TestChunkerLoop:
         # time identity / routing fields.
         for k, v in [("content_type", "pdf"),
                      ("content_hash", "h1"),
-                     ("embedding_model", "voyage-context-3"),
+                     ("embedding_model", "model-ctx"),
                      ("page_number", 1)]:
             assert meta[k] == v
         for dropped in ("source_path", "store_type", "corpus", "git_meta"):
@@ -1444,7 +1444,7 @@ def test_streaming_metadata_has_all_batch_fields(db, done_event) -> None:
                                "chunk_start_char": 0, "chunk_end_char": 10}))
         chunker_loop("h1", db, threading.Event(), embed_fn=_embed,
                      extraction_done=done_event, pdf_path="/doc.pdf",
-                     corpus="mycorpus", target_model="voyage-context-3")
+                     corpus="mycorpus", target_model="model-ctx")
     meta = json.loads(db.read_ready_chunks("h1")[0]["metadata_json"])
     assert _REQUIRED_META - set(meta.keys()) == set()
     # nexus-w94eo: title/source_author must be ABSENT, not present as "".
@@ -1478,7 +1478,7 @@ def test_streaming_metadata_omits_title_and_source_author(db, done_event) -> Non
                                "chunk_start_char": 0, "chunk_end_char": 10}))
         chunker_loop("h1", db, threading.Event(), embed_fn=_embed,
                      extraction_done=done_event, pdf_path="/doc.pdf",
-                     corpus="mycorpus", target_model="voyage-context-3")
+                     corpus="mycorpus", target_model="model-ctx")
     meta = json.loads(db.read_ready_chunks("h1")[0]["metadata_json"])
     assert "title" not in meta, (
         f"streaming chunk-time metadata must omit title, not stamp it \"\"; got {meta!r}"

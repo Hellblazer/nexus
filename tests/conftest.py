@@ -2848,375 +2848,51 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # embedding is retired (Hal determination 2026-07-28: "we do no
     # embedding on the client"). See _MODE_LINT_EXCLUDE_FILES_CEILING's
     # matching decrement in test_mode_declarations_are_explicit.py.
-    # Cloud-behavior files — Phase 1 ships the lint mechanism with these
-    # excluded; subsequent PRs promote each to module-level
-    # ``pytestmark = pytest.mark.usefixtures("cloud_mode")``. Promotion is
-    # per-file so each can be validated against the suite independently.
-    # The lint test itself contains the regex.
+    #
+    # nexus-03wze burn-down (2026-09-27, continuation of nexus-0y4c6):
+    # 44 -> 3. Every file below this comment except the two named next
+    # was fixed per-test (a genuine cloud-mode test promoted to declare
+    # `cloud_mode`; an inert literal swapped in place for a neutral
+    # token `model-code`/`model-ctx`; a real-value assertion moved to a
+    # `_MODE_LINT_EXCLUDE_NODEIDS` entry) and dropped from this set
+    # entirely. Full per-test disposition is recorded in the
+    # corresponding `_MODE_LINT_EXCLUDE_NODEIDS` entries added the same
+    # round and in T2 (nexus/mode-lint-burndown-nexus-03wze-2026-09-27).
+    #
+    # This file itself stays (it contains the regex/exclusion-set
+    # definitions this lint tests against, never a real offender).
     "test_mode_declarations_are_explicit.py",
-    # RDR-109 Phase 2 dispatch tests intentionally name voyage tokens
-    # to exercise the (mode, name) matrix. Voyage names here are the
-    # subject under test, not assertions of cloud-mode behavior.
+    #
+    # test_rdr_109_phase2_dispatch.py: LEFT EXCLUDED, judgment deferred.
+    # The whole file is a deliberate (mode, embedded-model-token) 4-cell
+    # dispatch matrix (module docstring) -- each of its 15 offending
+    # tests needs its own determination of which cell it pins (real
+    # cloud-mode behavior needing `cloud_mode`, a local-mode-pinned
+    # self-test needing a nodeid exclusion, or a genuinely inert
+    # fixture), and several test names ("test_dispatch_local_mode_
+    # voyage_name_raises", "test_dispatch_cloud_mode_voyage_conformant_
+    # name") suggest the literal IS the (mode, name) pairing under test,
+    # not swappable at all. Deferred to a dedicated follow-up round
+    # rather than rushed here.
     "test_rdr_109_phase2_dispatch.py",
-    # Local-daemon client-side embedding tests: voyage tokens are
-    # collection-NAME fixtures / Fix-4 display-dispatch subjects; every
-    # test pins mode explicitly via T3Database(local_mode=...), not the
-    # ambient cloud_mode fixture.
-    "test_local_daemon_client_embed.py",
-    # RDR-169 G5 bridge address-field tests: voyage tokens appear only as
-    # collection-NAME fixtures (knowledge__test__voyage-context-3__v1) in fully
-    # mocked HttpVectorClient / _ServiceCollectionStub unit tests. The server
-    # embeds, not these tests — they assert additive /v1 response shape and the
-    # include_source_uri opt-in, never cloud-mode embedding behavior.
-    "test_bridge_address_fields.py",
-    # nexus-8o9pm voyage-capability gate: voyage tokens are collection-NAME
-    # fixtures (footprint detection) and embedding_models inside a FAKE /version
-    # response body; the gate is a pure data/HTTP predicate that never embeds, so
-    # there is no ambient cloud_mode behavior to assert.
-    "test_guided_upgrade_voyage_capability.py",
-    # nexus-3l6gz multi-model combined-query grouping: voyage tokens are
-    # collection-NAME fixtures driving _group_collections_by_model against a
-    # fully-fake model-aware T3 stub — no embedder ever runs (the fake resolves
-    # "embedding" by parsing the collection name), so the tests are
-    # deployment-mode-agnostic; nothing asserts cloud-mode behavior.
-    "test_combined_query_multimodel_bug.py",
-    # RDR-001 managed-endpoint probe: voyage tokens appear only as
-    # embedding_models inside a FAKE /version response body (injected
-    # http_get) — the managed service's reported models, not cloud-mode
-    # behavior. The test touches no credentials and pins nothing on
-    # is_local_mode; the probe targets the unauthenticated /version handshake.
-    "test_managed_endpoint.py",
-    # nexus-vgq89 burn-down (2026-07-15): the Phase 1 "ships excluded,
-    # subsequent PRs promote each" batch above (test_mode_declarations_are_
-    # explicit.py .. test_managed_endpoint.py) predates this comment and is
-    # left as-is. The 19 files below were that batch's un-promoted remainder
-    # (conftest.py:530-548 in the pre-burn-down revision) — the promotion
-    # was promised but never done. Each is now resolved one of two ways:
-    # actually promoted (cloud_mode fixture added to the genuinely
-    # cloud-behavior tests; file removed from this set — see
-    # test_collection_cmd.py / test_doc_indexer.py / test_indexer_e2e.py /
-    # test_integration.py / test_pdf_e2e.py / test_voyage_retry.py, now
-    # living only as individual ``_MODE_LINT_EXCLUDE_NODEIDS`` entries
-    # below plus their cloud_mode promotions), or kept here with an
-    # honest per-file rationale (the remainder, below) matching the
-    # documented-rationale pattern already used throughout the rest of
-    # this set.
     #
-    # Substantive-critic correction (2026-07-15, same-day follow-up): the
-    # first pass of this burn-down wrote rationale for 5 files
-    # (test_index_cmd.py, test_index_pdf_batch.py, test_index_rdr_cmd.py,
-    # test_indexer.py, test_mcp_server.py) WITHOUT checking each file's
-    # HEADER first — all 5 already carry a pre-existing module-level
-    # ``pytestmark = pytest.mark.usefixtures("cloud_mode")`` (RDR-109
-    # Phase 2), which means every test in them already satisfies the
-    # lint's fixturenames check regardless of this exclusion set; the
-    # "no is_local_mode() branch under test" rationale written for them
-    # was simply false. All 5 are removed here as free wins. The
-    # correction sweep also caught 9 MORE files with the same pre-existing
-    # module mark sitting unnecessarily in the older "Schema /
-    # canonical-set" block further below (test_catalog_cli.py,
-    # test_catalog_collection_for.py, test_catalog_consolidation.py,
-    # test_collection_name_migration.py, test_commands_dt.py,
-    # test_corpus.py, test_indexer_conformant_names.py, test_rdr_hook.py,
-    # test_registry.py) — removed there for the same reason. The sweep
-    # also surfaced one rationale that was substantively wrong despite no
-    # module mark: test_indexer_e2e.py's ``_pin_fake_voyage_key`` autouse
-    # fixture makes its embedding-model assertions genuinely
-    # credential-routing-dependent, not literal test data — promoted to
-    # ``cloud_mode`` alongside the other 4 promotions above instead of
-    # staying here.
-    #
-    # "chunker-param" class: the voyage token is passed as an explicit
-    # ``target_model`` / collection-name string argument to a pure chunking
-    # or CLI-normalization function (``_pdf_chunks``, ``_markdown_chunks``,
-    # ``_collections_from_registry_info``-style name synthesis); no embedder
-    # ever runs and no ``is_local_mode()`` branch is exercised by the
-    # assertions. Equivalent to the "string-literal-as-name" class used
-    # elsewhere in this set. No autouse fixture in this file's header sets
-    # Voyage/Chroma credentials. Caveat:
-    # ``test_staleness_check_uses_content_hash_when_catalog_absent`` DOES
-    # call ``set_credentials(monkeypatch)`` directly in its body — but its
-    # assertions (``where == {"content_hash": expected_hash}``, ``result
-    # == 0``) only check the staleness query's WHERE clause and short-
-    # circuit outcome, never the stored/resolved ``embedding_model`` value
-    # (the mocked existing metadata's ``"voyage-context-3"`` is unused
-    # test-fixture noise, per the test's own docstring: staleness falls
-    # back to content_hash "which uniquely identifies an unchanged file
-    # just as well as the legacy source_path key"). cloud_mode would be a
-    # no-op declaration here too.
-    "test_catalog_path.py",
-    # nexus-0y4c6 burn-down, batch 5 (corrected): test_vector_retry.py
-    # removed — its one voyage-token occurrence
-    # (test_index_code_file_retries_on_connect_error's `target_model`
-    # argument) is case (b), swapped in place for the neutral token
-    # "model-code" (never a hoisted constant — see the
-    # _MODE_LINT_EXCLUDE_NODEIDS_CEILING changelog in
-    # test_mode_declarations_are_explicit.py for why hoisting was
-    # rejected).
-    #
-    # Whole-file "nxexp export/import format" class: every flagged test
-    # constructs or reads a ``.nxexp`` header/record by hand (or via
-    # ``export_collection``/``import_collection`` against a local
-    # ``ephemeral_db``); ``embedding_model`` is header/record metadata being
-    # validated, compared, or round-tripped — never an actual embedder
-    # invocation. No test in this file reads ``is_local_mode()``. The two
-    # flagged tests that DO call ``monkeypatch.setenv`` for Chroma/Voyage
-    # credentials (``TestImportFlagsCLI`` and one other) do so only to
-    # route the CLI's ``_t3()`` handle through the mocked/ephemeral db
-    # argument, not to select an embedder — no header-level autouse
-    # fixture is involved.
+    # test_exporter.py: LEFT EXCLUDED, judgment deferred. Its 11
+    # offending tests interlock TWO real-value-dependent gates at once
+    # -- import_collection's EmbeddingModelMismatch (real prefix-based
+    # `voyage_model_for_collection` fallback for legacy 2-segment
+    # targets; name-embedded token for conformant 4-segment targets) and
+    # EmbeddingDimensionMismatch (MODEL_DIMS-keyed dimension sanity,
+    # requiring the header's declared model to be a REAL canonical/local
+    # token whose implied dimension deliberately DISAGREES with the
+    # seeded vector dimension). A swap here is not a single substitution
+    # per test: it requires re-deriving the intended dim relationship
+    # for each of the ~8 mismatch-class tests to avoid silently making
+    # the safety check vacuous (passing without exercising the mismatch
+    # it exists to catch) -- exactly the failure mode
+    # _MODE_LINT_EXCLUDE_NODEIDS_CEILING's changelog already documents
+    # once (nexus-0y4c6 fix round, 2026-09-10). Deferred to a dedicated
+    # follow-up round rather than rushed here.
     "test_exporter.py",
-    # "chunker-param" class (same as test_catalog_path.py): both flagged
-    # tests call ``_pdf_chunks(..., target_model="voyage-context-3", ...)``
-    # directly with a mocked ``PDFExtractor``/``PDFChunker`` — the model is
-    # an opaque label passed through to chunk metadata, not something an
-    # embedder produced. No module-level fixtures/marks in this file's
-    # header.
-    "test_pdf_chunks_no_silent_zero.py",
-    # nexus-0y4c6 burn-down, batch 5 (corrected): test_pdf_extractor.py
-    # removed — its one voyage-token occurrence
-    # (test_pdf_chunks_extracts_without_error_on_any_formula_count's
-    # `target_model` argument) is case (b), swapped in place for the
-    # neutral token "model-ctx".
-    #
-    # Same class. This file's one autouse fixture (``_legacy_vector_backend``)
-    # only pins ``NX_STORAGE_BACKEND_VECTORS=local`` (a vector-STORAGE-backend
-    # axis, Chroma-direct vs service) — orthogonal to embedder mode. The
-    # module docstring states outright: "prove that the pipeline stitches
-    # together correctly without requiring API keys or network access."
-    "test_pdf_subsystem.py",
-    # nexus-vgq89 correction (2026-07-15, code-review-expert delta):
-    # test_pdf_e2e.py's 4 flagged tests are NOT here. First-draft
-    # rationale claimed "cloud_mode would be actively misleading" on the
-    # theory that the module has no credentials and embeds purely
-    # locally — WRONG. Every flagged test does
-    # ``patch("nexus.config.get_credential", side_effect=lambda k:
-    # "test-key")``, which makes ``is_local_mode()`` (it calls
-    # ``get_credential("chroma_api_key")`` / ``get_credential(
-    # "voyage_api_key")``) resolve to CLOUD unconditionally — so
-    # ``effective_embedding_model_for_writes`` genuinely takes the cloud
-    # branch and synthesizes the ``voyage-context-3`` collection-name
-    # segment for real, not as a hardcoded label. The ACTUAL embedding
-    # is separately forced local via a distinct
-    # ``_embed_with_fallback`` override — two independent axes, and the
-    # naming axis is the one this lint cares about. Promoted to
-    # ``cloud_mode`` (replacing the fragile incidental get_credential
-    # side-effect with the explicit, robust fixture — no behavior
-    # change, since ``cloud_mode`` patches ``is_local_mode`` directly
-    # and the embed override is untouched).
-    #
-    # "chunker-param / mocked-embed" class: all three flagged tests pass
-    # ``target_model="voyage-context-3"`` directly into ``chunker_loop`` /
-    # ``pipeline_index_pdf`` with ``_embed_with_fallback`` fully mocked
-    # (return value hardcoded); no real embedder call, no
-    # ``is_local_mode()`` branch under test. ``test_embed_fn_none_
-    # resolves_credentials`` patches ``nexus.config.get_credential``
-    # directly (not the ambient env) and only asserts the fallback got
-    # CALLED, never which model it resolved to — the credential-resolution
-    # WIRING is under test, not cloud-mode embedding behavior.
-    "test_pipeline_stages.py",
-    # Whole-file "mocked-store / collection-name" class: every flagged
-    # test drives a mocked ``mock_store`` or a faked-transport
-    # ``real_http_vector_client`` and asserts on the RDR-103-normalized
-    # collection name a CLI flag was translated to — never a real embedder
-    # call. Two flagged tests depend (via ``mock_store``) on the file's
-    # ``env_creds`` fixture, which sets Chroma/Voyage credentials so
-    # ``mock_store`` specs as ``HttpVectorClient`` rather than a local
-    # ``T3Database`` — but the assertion under test is
-    # ``t3_collection_name``'s auto-promotion, a pure function of the
-    # collection-name PREFIX (``voyage_model_for_collection`` in
-    # src/nexus/corpus.py never calls ``is_local_mode()``), so the
-    # env_creds-driven handle TYPE is irrelevant to what's asserted.
-    "test_store_cmd.py",
-    # Schema / canonical-set / collection-name shape — mode-independent.
-    #
-    # nexus-vgq89 correction sweep (2026-07-15): test_catalog_cli.py,
-    # test_catalog_collection_for.py, and test_catalog_consolidation.py
-    # (previously listed between test_catalog_backfill_collections.py and
-    # test_catalog_db.py) were removed here as free wins — each already
-    # carries a pre-existing module-level ``pytestmark = pytest.mark.
-    # usefixtures("cloud_mode")`` (RDR-109 Phase 2), making the blanket
-    # file exclusion redundant. See the correction note above
-    # test_catalog_path.py for the full sweep methodology.
-    #
-    # nexus-0y4c6 burn-down, batch 5 (2026-09-09): test_backfill_hash.py,
-    # test_catalog_backfill_collections.py, and
-    # test_catalog_doctor_collections_drift.py removed as DEAD entries —
-    # each file's one voyage-token occurrence is prose in a module-level
-    # comment/docstring, never inside any test function's own source, so
-    # none of their tests were ever real offenders. A clean shrink, no
-    # test-file change.
-    # Five entries removed (nexus-i711w terminal deletion): test_catalog_
-    # collections_rebuild / concurrent_writer_lock / db / incremental_rebuild
-    # / collections_owner_backfill died with the local catalog. DOWNWARD-only.
-    "test_catalog_collection_name.py",
-    "test_catalog_collections.py",
-    # test_catalog_etl.py entry removed (nexus-i711w Stage 2 sub-stage A):
-    # the file died with the SQLite->PG ETL readers. DOWNWARD-only edit.
-    #
-    # RDR-103 / nexus-j9ey + b03o advisor: voyage tokens appear in
-    # synthetic collection names being asserted against, not as
-    # cloud-mode behaviour under test.
-    "test_catalog_doctor_name_vs_embed_dim.py",
-    # test_upgrade_name_vs_embed_dim_advisory.py entry removed (RDR-158 P4
-    # Stage 4, nexus-i711w): the file died with _run_upgrade's local leg.
-    # DOWNWARD-only edit.
-    # test_catalog_manifest_backfill.py entry removed (nexus-i711w terminal
-    # deletion): the file's raw-Catalog harness died with the local catalog.
-    # test_catalog_migrate_fallback.py entry removed (nexus-i711w terminal
-    # deletion, DIE batch-b rm). DOWNWARD-only edit.
-    #
-    # nexus-0y4c6 burn-down, batch 5: test_catalog_rename_collection.py
-    # removed as a DEAD entry — same class as the three above (its one
-    # voyage-token occurrence is prose in a module-level comment).
-    "test_catalog_papers_curator_isolation.py",
-    "test_catalog_spans_chunk_char.py",
-    "test_checkpoint.py",
-    "test_collection_gc.py",
-    # nexus-vgq89 correction sweep: test_collection_name_migration.py
-    # removed here (same free-win reason as above — pre-existing module
-    # cloud_mode mark).
-    # RDR-137 P2a (nexus-tts0d.4): same voyage-token-in-fixture pattern
-    # — the catalog-backed reader tests register synthetic conformant
-    # collection names and read them back; no Voyage call.
-    "test_repos_reader.py",
-    # RDR-137 P4.3 (nexus-tts0d.17): same pattern — knowledge__ /
-    # docs__ collection names used as fixtures for the catalog
-    # writer+reader cycle; no Voyage call.
-    "test_index_corpus_knowledge_e2e.py",
-    # RDR-137 followup CRITICAL-3/4/5 (nexus-43qgm.3-5): voyage tokens
-    # appear in synthetic conformant collection names used as
-    # adapter-test fixtures; no Voyage call is ever made.
-    "test_rdr137_followup_critical_345.py",
-    # nexus-0y4c6 burn-down, batch 5: test_rdr137_followup_reader_sigs.py
-    # removed as a DEAD entry — same class as the batch-5 removals above
-    # (its one voyage-token occurrence is prose in a module-level
-    # comment, never inside a test function's own source).
-    #
-    # RDR-137 followup SIG-10/13/14/17 (nexus-43qgm.10,13,14,17):
-    # voyage tokens in adapter / context / collection synthetic
-    # fixtures; no Voyage call.
-    "test_rdr137_followup_batch_sigs.py",
-    # RDR-137 followup IMP-18..27 (nexus-43qgm.18-27): voyage tokens
-    # in list_sibling_collections + adapter fixtures; no Voyage call.
-    "test_rdr137_followup_p2_batch.py",
-    # RDR-137 P3.5 (nexus-tts0d.10): same pattern — phantom
-    # docs__1-2188 in the regression fixture for nexus-9iw41.
-    "test_context_catalog_cutover.py",
-    # nexus-vgq89 correction sweep: test_commands_dt.py, test_corpus.py,
-    # and test_indexer_conformant_names.py removed here (same free-win
-    # reason — pre-existing module cloud_mode mark).
-    "test_doc_indexer_hash_sync.py",
-    "test_doctor_cmd.py",
-    # nexus-0y4c6 burn-down, batch 5: test_doctor_integrity.py removed as
-    # a DEAD entry — its one voyage-token occurrence is inside a shared
-    # helper METHOD (`_write_ckpt`, not a `test_*` function), which
-    # `_scan_offenders`'s per-test source scan never sees either way.
-    "test_doctor_search.py",
-    # nexus-0y4c6 burn-down, batch 5 (corrected): test_indexer_duplicate_
-    # content.py removed — its one voyage-token occurrence (the pinned
-    # destination collection name in
-    # test_pdf_indexer_handles_duplicate_chunks_within_document) is case
-    # (b), swapped in place for the neutral "docs__dupdocs__model-ctx__v1".
-    "test_indexer_modules.py",
-    "test_indexer_utils_repo.py",
-    # nexus-0y4c6 burn-down, batch 5 (corrected): test_memory.py removed —
-    # its one voyage-token occurrence (test_promote_calls_t3_put's
-    # asserted auto-promoted collection name) is case (a): genuinely
-    # cloud-mode (t3_collection_name's auto-promotion resolves the model
-    # segment via effective_embedding_model_for_writes, which really
-    # branches on is_local_mode()). The test now declares `cloud_mode`
-    # directly; the literal stays inline.
-    "test_metadata_consistency.py",
-    "test_metadata_extraction_source.py",  # RDR-139 Layer D: pure schema unit
-    "test_metadata_schema.py",
-    # RDR-139 Phase 2/3 (Layers C/D/E): pure metadata-schema / CLI-routing /
-    # T2-store unit tests; the voyage-context-3 literal is an incidental
-    # placeholder embedding_model / collection-name segment, not cloud-mode
-    # behavior.
-    "test_dt_content_layer_d.py",
-    # nexus-0y4c6 burn-down, batch 5 (corrected): test_dt_mcp_fallback.py
-    # removed — its one voyage-token occurrence
-    # (TestLayerDFallback.test_file_backed_chunk_has_no_extraction_source's
-    # embedding_model argument) is case (b), swapped in place for
-    # "model-ctx".
-    # test_document_highlights.py entry removed (nexus-i711w Stage 2
-    # sub-stage A): the file died with the SQLite store. DOWNWARD-only edit.
-    #
-    # nexus-0y4c6 burn-down, batch 5 (corrected): test_dt_highlights_
-    # layer_e.py and test_dt_capture_cmd.py removed — their one-
-    # occurrence-each literals are case (b), swapped in place for
-    # neutral collection-name tokens.
-    # test_migrations_rdr108_phase1c.py entry removed (RDR-158 P4 Stage 4,
-    # nexus-i711w): the file died with db/migrations.py. DOWNWARD-only edit.
-    "test_plan_run.py",
-    # nexus-vgq89 correction sweep: test_rdr_hook.py (tests/hooks/) and
-    # test_registry.py removed here (same free-win reason — pre-existing
-    # module cloud_mode mark).
-    #
-    # nexus-0y4c6 burn-down, batch 5: test_source_uri_home_key.py removed
-    # as a DEAD entry — its one voyage-token occurrence is prose in a
-    # module-level docstring. test_store_enrich_doc_id.py removed the
-    # same batch (corrected) — its one occurrence (a pre-existing
-    # chunk-metadata literal) is case (b), swapped in place for
-    # "model-ctx".
-    "test_store_put_cli_parity.py",
-    # nexus-0y4c6 burn-down, batch 5 (corrected): test_t3_strict_
-    # collection_naming.py removed — its one occurrence (a conformant
-    # collection-NAME string) is case (b), swapped in place for
-    # "knowledge__1-1__model-ctx__v1".
-    "test_t3.py",
-    "test_tuning_config.py",
-    # Mode-self-tests — these assert local-mode behavior; cloud_mode
-    # would invert what they test.
-    "test_local_mode.py",
-    # nexus-duoak.3 bench teardown-scope: voyage tokens appear only in
-    # synthetic collection-name fixtures (REAL / after lists) exercising pure
-    # set-difference logic in bench_tumblers/plan_teardown; no Voyage call is
-    # ever made and no embedder mode is asserted.
-    "test_teardown_scope.py",
-    # nexus-h1zu0: dim_for_model_token(token) -> int|None is a pure dict
-    # lookup (nexus.db.reconcile._MODEL_DIMS, mirroring the Java
-    # PgVectorRepository.MODEL_DIMS authority). "voyage-code-3"/
-    # "voyage-context-3" are passed as literal ARGUMENTS asserting the
-    # routing TABLE's contents, not a behavior assertion about which
-    # embedder ran — no Voyage call, no credential, no embedder mode
-    # involved anywhere in the file. Reason class "string-literal-as-name".
-    "test_h1zu0_dim_routing.py",
-    # nexus-35ok4 / nexus-o5x2c (GH #1461, local-mode voyage resolution):
-    # every test in this file pins LOCAL mode explicitly
-    # (monkeypatch.setattr("nexus.config.is_local_mode", lambda: True))
-    # and references voyage-code-3/voyage-context-3 DELIBERATELY — the
-    # whole point of the file is the local-install-can-use-Voyage
-    # write/read chokepoint (resolve_write_embedding_model,
-    # docs_leaf_fallback_collection_name, HttpCatalogClient.
-    # collection_for_repo) and its keyless-grandfather / keyed-mint truth
-    # table. ``cloud_mode`` would be the WRONG declaration here: it forces
-    # ``is_local_mode()`` False, which is the exact condition these tests
-    # exist to exercise as True. Reason class "mode-self-test" (mirrors
-    # ``test_local_mode.py`` above).
-    "test_o5x2c_write_chokepoint_repros.py",
-    # RDR-204 Phase 3 fixture-seam round (nexus-ft04v.26, 2026-09-09):
-    # every test in this file exercises the funnel helpers'
-    # row-then-name resolution order (_write_model_for_collection,
-    # _upsert_byte_budget, _is_same_model_passthrough, _dim_for_
-    # collection, quarantine_collection_name, target_collection_for_
-    # split) against FAKE catalog rows / collection-NAME fixtures --
-    # voyage-code-3/voyage-context-3 tokens are fixture data the parse
-    # logic reads back, never a real embedder call or credential-gated
-    # path. Reason class "string-literal-as-name".
-    "test_collection_parse_funnel_slice2.py",
-    # nexus-vnz3d aspect source_uri backfill planner (2026-09-20): every
-    # test in this file drives plan_source_uri_backfill, a pure function
-    # whose only use of the collection is
-    # ``collection.startswith(FILE_ROUTED_PREFIXES)`` — a PREFIX test. The
-    # voyage tokens are the tail of conformant collection-NAME fixtures
-    # (knowledge__delos__voyage-context-3__v1,
-    # docs__nexus__voyage-context-3__v1), chosen so the fixture carries the
-    # RDR-103 shape real rows have. Nothing in the file embeds, reads a
-    # credential, or branches on is_local_mode, and no test in it could.
-    # Reason class "string-literal-as-name".
-    "test_aspect_uri_repair.py",
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
@@ -3360,6 +3036,150 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # this literal in the parametrize table is visible to the scanner
     # even though it names one case among several.
     "tests/test_collection_cmd.py::test_info_shows_embedding_model",
+    #
+    # nexus-03wze burn-down (2026-09-27, continuation of nexus-0y4c6):
+    # +30 nodeids, all promoted from a file-level exclusion the same
+    # round (see _MODE_LINT_EXCLUDE_FILES's matching -42 shrink). Every
+    # entry below reason-classes per the (a)-(d) scheme above; none is a
+    # hoist -- every literal stays inline in the flagged test's own body.
+    #
+    # Reason class "string-literal-as-name": embedding_model_for_
+    # collection/index_model_for_collection auto-promote a legacy
+    # 2-segment collection name via the real, mode-independent
+    # voyage_model_for_collection prefix dispatch table (never consults
+    # is_local_mode()); the assertion is on that table's real output, so
+    # `cloud_mode` would be a no-op and a neutral token would assert
+    # something false.
+    "tests/test_t3.py::test_collection_metadata_returns_correct_fields",
+    #
+    # Reason class "string-literal-as-name": dim_for_model_token's own
+    # canonical routing-table identity check (same class as
+    # test_h1zu0_dim_routing.py's file-level docstring) -- the ONE
+    # canonical model-token -> pgvector-dim table, asserting its real
+    # keys/values.
+    "tests/db/test_h1zu0_dim_routing.py::TestDimForModelToken::test_voyage_code_3_routes_to_1024",
+    "tests/db/test_h1zu0_dim_routing.py::TestDimForModelToken::test_voyage_context_3_routes_to_1024",
+    #
+    # Reason class "string-literal-as-name": the .nxexp header's
+    # declared embedding_model must equal voyage_model_for_collection's
+    # real prefix-dispatch output for the 2-segment "knowledge__" import
+    # target or import_collection raises EmbeddingModelMismatch; not
+    # swappable, and cloud_mode is a no-op since the dispatch table never
+    # reads is_local_mode().
+    "tests/test_store_put_cli_parity.py::TestStoreImportCli::test_fires_chains_with_full_batch",
+    #
+    # Reason class "string-literal-as-name": same real prefix-dispatch
+    # table as test_h1zu0_dim_routing.py / test_collection_cmd.py's
+    # legacy-fallback entry above -- the test's own name says
+    # "returns_cloud_names" and asserts the fallback's real output for a
+    # legacy 2-segment name, mode-independent and non-swappable.
+    "tests/test_local_mode.py::TestCorpusLocalModels::test_corpus_functions_return_cloud_names",
+    #
+    # Reason class "mode-self-test" (same class as test_local_mode.py's
+    # file-level entry above): every test in this file pins LOCAL mode
+    # explicitly (module docstring: nexus-35ok4/nexus-o5x2c local-install-
+    # can-use-Voyage write/read chokepoint) and asserts real voyage-
+    # string-driven dispatch; `cloud_mode` would invert the point these
+    # tests exist to prove. Promoted from the file-level entry to
+    # per-test nodeids (nexus-03wze), same six tests, same rationale.
+    "tests/test_o5x2c_write_chokepoint_repros.py::test_chokepoint_raises_when_probe_finds_nothing",
+    "tests/test_o5x2c_write_chokepoint_repros.py::test_collection_for_repo_grandfathers_onto_registered_bge",
+    "tests/test_o5x2c_write_chokepoint_repros.py::test_collection_for_repo_raises_when_nothing_registered",
+    "tests/test_o5x2c_write_chokepoint_repros.py::test_collection_for_repo_mints_voyage_when_key_present",
+    "tests/test_o5x2c_write_chokepoint_repros.py::test_docs_leaf_fallback_grandfathers_onto_bge",
+    "tests/test_o5x2c_write_chokepoint_repros.py::test_docs_leaf_fallback_raises_when_nothing_preexisting",
+    #
+    # Reason class "string-literal-as-name" / canonical-set: every test
+    # in this file exercises the doctor's name-vs-embed-dim mismatch
+    # detector, which resolves the collection name's claimed model
+    # through `_expected_dim_for_model_token`'s real
+    # CANONICAL_EMBEDDING_MODELS/LOCAL_EMBEDDING_MODELS membership check
+    # (module docstring: the 4.28-era write-side bug this file's whole
+    # subject is). A neutral token is not a member of either set, so
+    # swapping would silently disable the mismatch detection the test
+    # exists to exercise rather than assert something false -- worse,
+    # not merely wrong. Promoted from the file-level entry to per-test
+    # nodeids (nexus-03wze), same seven tests, same rationale.
+    "tests/test_catalog_doctor_name_vs_embed_dim.py::TestNameVsEmbedDim::test_fail_when_voyage_name_holds_minilm_vectors",
+    "tests/test_catalog_doctor_name_vs_embed_dim.py::TestNameVsEmbedDim::test_fail_when_voyage_context_name_holds_minilm_vectors",
+    "tests/test_catalog_doctor_name_vs_embed_dim.py::TestNameVsEmbedDim::test_empty_collection_skipped_with_note",
+    "tests/test_catalog_doctor_name_vs_embed_dim.py::TestNameVsEmbedDim::test_service_mode_mismatch_still_detected",
+    "tests/test_catalog_doctor_name_vs_embed_dim.py::TestNameVsEmbedDim::test_text_output_includes_remediation_hint",
+    "tests/test_catalog_doctor_name_vs_embed_dim.py::TestNameVsEmbedDimRealHttpVectorClient::test_real_client_pass_when_dim_matches",
+    "tests/test_catalog_doctor_name_vs_embed_dim.py::TestNameVsEmbedDimRealHttpVectorClient::test_real_client_fail_when_dim_mismatches",
+    #
+    # Reason class "string-literal-as-name": `nx doctor`'s --check-quotas
+    # section renders a HARDCODED, mode-independent Voyage model/limits
+    # table (MODEL_MAX_TOKENS's real keys "voyage-3"/"voyage-code-3"/
+    # "voyage-context-3"), never gated on is_local_mode() -- the
+    # assertion is on that real static text, not swappable.
+    "tests/test_doctor_cmd.py::TestCheckQuotas::test_reachable_cloud_exits_zero_and_reports_all_sections",
+    "tests/test_doctor_cmd.py::TestCheckQuotas::test_json_output_has_structured_schema",
+    #
+    # Reason class "judgment / re-verification deferred": these three
+    # monkeypatch collection_shape.py's write_model_for + a seeded T3
+    # stats dict with a real voyage token; collection_shape.py's own
+    # Rule 3 (MODEL_DIMS canonical-set dim check, line ~109) may change
+    # verdict on an unrecognized model token, and none of the three
+    # assertions here targets that rule specifically (they check the
+    # examined count / placeholder-subject rule / unreadable-tenant
+    # path) -- swapping risks silently changing which doctor rule fires
+    # without the swap being wrong on its face. Left as nodeid
+    # exclusions rather than risk a silent behavior change.
+    "tests/test_doctor_cmd.py::TestCheckCollectionShape::test_findings_render_rows_and_exit_zero",
+    "tests/test_doctor_cmd.py::TestCheckCollectionShape::test_clean_tenant_is_a_check_with_an_examined_count",
+    "tests/test_doctor_cmd.py::TestCheckCollectionShape::test_unreadable_tenant_exits_one",
+    #
+    # Reason class "string-literal-as-name": CollectionName.parse REJECTS
+    # a non-canonical embedding_model segment (module docstring), so
+    # every OTHER test in this file that needed a merely-valid model
+    # token was swapped to a real LOCAL token (bge-base-en-v15-768 /
+    # minilm-l6-v2-384, neither matching this lint's voyage-only regex)
+    # with no loss of precision. These two are different in kind: they
+    # assert CANONICAL_EMBEDDING_MODELS's own membership identity for
+    # the voyage tokens specifically -- there is no other value that
+    # could stand in for "voyage-context-3" here without asserting a
+    # falsehood.
+    "tests/test_catalog_collection_name.py::test_canonical_embedding_models_includes_voyage_context_3",
+    "tests/test_catalog_collection_name.py::test_canonical_embedding_models_includes_voyage_code_3",
+    #
+    # Reason class "string-literal-as-name": _is_same_model_passthrough
+    # checks membership in the real _PASSTHROUGH_MODELS set
+    # ({"bge-base-en-v15-768"} | _VOYAGE_MODELS); this test's SECOND
+    # assertion specifically proves a voyage model is ALSO wired
+    # passthrough (complementing the sibling bge case in the same file,
+    # already covered with no voyage token) -- swapping to a neutral
+    # token would move it out of the real set and invert the assertion.
+    "tests/db/test_collection_parse_funnel_slice2.py::TestIsSameModelPassthrough::test_same_name_wired_model_is_passthrough",
+    #
+    # Reason class "string-literal-as-name": embedding_model_for_
+    # collection's real legacy-2-segment fallback (voyage_model_for_
+    # collection, mode-independent prefix dispatch) -- same class as
+    # test_h1zu0_dim_routing.py and test_collection_cmd.py's entry
+    # above. The sibling test in the same class
+    # (test_conformant_bge_name_displays_bge_token) needed only a
+    # docstring reword (no functional voyage literal) and is not here.
+    "tests/test_local_daemon_client_embed.py::TestFix4DisplayAlias::test_conformant_voyage_name_still_returns_voyage",
+    "tests/test_local_daemon_client_embed.py::TestFix4DisplayAlias::test_legacy_two_segment_code_collection_falls_back_to_voyage",
+    "tests/test_local_daemon_client_embed.py::TestFix4DisplayAlias::test_legacy_two_segment_knowledge_collection_falls_back_to_voyage",
+    "tests/test_local_daemon_client_embed.py::TestFix4DisplayAlias::test_index_model_for_collection_legacy_code",
+    #
+    # Reason class "verified against the production dispatch code, not a
+    # comment" (nexus-03wze fix round, 2026-09-27): the first swap
+    # attempt on this test replaced the mocked existing-metadata
+    # `embedding_model` with a neutral token on the theory (matching an
+    # older, now-stale caveat this same entry used to carry under this
+    # file's PRE-burn-down file-level exclusion) that it is unused
+    # fixture noise. EMPIRICALLY FALSE: `_index_document`'s staleness
+    # check compares this value against the real resolved target model
+    # under this test's `set_credentials`-driven posture; a neutral
+    # token disagrees where "voyage-context-3" agrees, flipping the
+    # fresh/stale branch and routing into the real write+fence path
+    # (`complete_index_run`) against a fully-mocked T3 handle, which the
+    # real catalog engine then refuses with a 409 (referenced=0). Proven
+    # by A/B: swapped -> FAILED, reverted -> passes. Not swappable;
+    # reverted to the real literal.
+    "tests/test_catalog_path.py::TestIndexDocumentSourceKey::test_staleness_check_uses_content_hash_when_catalog_absent",
 })
 
 

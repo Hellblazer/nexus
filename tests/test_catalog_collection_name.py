@@ -49,7 +49,7 @@ def test_collection_name_is_frozen_dataclass() -> None:
     name = CollectionName(
         content_type="code",
         owner_id="nexus-abc12345",
-        embedding_model="voyage-code-3",
+        embedding_model="bge-base-en-v15-768",
         model_version=1,
     )
     with pytest.raises(Exception):
@@ -57,16 +57,16 @@ def test_collection_name_is_frozen_dataclass() -> None:
 
 
 def test_collection_name_is_hashable() -> None:
-    a = CollectionName("code", "nexus-abc12345", "voyage-code-3", 1)
-    b = CollectionName("code", "nexus-abc12345", "voyage-code-3", 1)
+    a = CollectionName("code", "nexus-abc12345", "bge-base-en-v15-768", 1)
+    b = CollectionName("code", "nexus-abc12345", "bge-base-en-v15-768", 1)
     assert hash(a) == hash(b)
     assert {a, b} == {a}
 
 
 def test_collection_name_equality_by_value() -> None:
-    a = CollectionName("code", "nexus-abc12345", "voyage-code-3", 1)
-    b = CollectionName("code", "nexus-abc12345", "voyage-code-3", 1)
-    c = CollectionName("code", "nexus-abc12345", "voyage-code-3", 2)
+    a = CollectionName("code", "nexus-abc12345", "bge-base-en-v15-768", 1)
+    b = CollectionName("code", "nexus-abc12345", "bge-base-en-v15-768", 1)
+    c = CollectionName("code", "nexus-abc12345", "bge-base-en-v15-768", 2)
     assert a == b
     assert a != c
 
@@ -74,52 +74,52 @@ def test_collection_name_equality_by_value() -> None:
 # ── render() ─────────────────────────────────────────────────────────────
 
 def test_render_produces_four_segment_name() -> None:
-    name = CollectionName("code", "nexus-abc12345", "voyage-code-3", 1)
-    assert name.render() == "code__nexus-abc12345__voyage-code-3__v1"
+    name = CollectionName("code", "nexus-abc12345", "bge-base-en-v15-768", 1)
+    assert name.render() == "code__nexus-abc12345__bge-base-en-v15-768__v1"
 
 
 def test_render_higher_version() -> None:
-    name = CollectionName("docs", "nexus-abc12345", "voyage-context-3", 7)
-    assert name.render() == "docs__nexus-abc12345__voyage-context-3__v7"
+    name = CollectionName("docs", "nexus-abc12345", "minilm-l6-v2-384", 7)
+    assert name.render() == "docs__nexus-abc12345__minilm-l6-v2-384__v7"
 
 
 def test_render_for_each_content_type() -> None:
     for ct in ("code", "docs", "rdr", "knowledge"):
-        name = CollectionName(ct, "owner1", "voyage-code-3", 1)
-        assert name.render() == f"{ct}__owner1__voyage-code-3__v1"
+        name = CollectionName(ct, "owner1", "bge-base-en-v15-768", 1)
+        assert name.render() == f"{ct}__owner1__bge-base-en-v15-768__v1"
 
 
 def test_render_for_tumbler_owner_id() -> None:
     """Tumbler-style owner IDs (e.g. ``1.1``) must arrive with dots
     replaced by hyphens; render() does not transform the segment.
     """
-    name = CollectionName("knowledge", "1-1", "voyage-context-3", 1)
-    assert name.render() == "knowledge__1-1__voyage-context-3__v1"
+    name = CollectionName("knowledge", "1-1", "minilm-l6-v2-384", 1)
+    assert name.render() == "knowledge__1-1__minilm-l6-v2-384__v1"
 
 
 # ── parse() ──────────────────────────────────────────────────────────────
 
 def test_parse_round_trip_each_content_type() -> None:
     for ct in ("code", "docs", "rdr", "knowledge"):
-        original = CollectionName(ct, "nexus-abc12345", "voyage-code-3", 1)
+        original = CollectionName(ct, "nexus-abc12345", "bge-base-en-v15-768", 1)
         parsed = CollectionName.parse(original.render())
         assert parsed == original
 
 
-def test_parse_round_trip_voyage_context_3() -> None:
-    original = CollectionName("docs", "nexus-abc12345", "voyage-context-3", 3)
+def test_parse_round_trip_higher_model_version() -> None:
+    original = CollectionName("docs", "nexus-abc12345", "minilm-l6-v2-384", 3)
     parsed = CollectionName.parse(original.render())
     assert parsed == original
 
 
 def test_parse_returns_int_model_version() -> None:
-    parsed = CollectionName.parse("code__nexus-abc12345__voyage-code-3__v1")
+    parsed = CollectionName.parse("code__nexus-abc12345__bge-base-en-v15-768__v1")
     assert parsed.model_version == 1
     assert isinstance(parsed.model_version, int)
 
 
 def test_parse_higher_version() -> None:
-    parsed = CollectionName.parse("docs__owner1__voyage-context-3__v42")
+    parsed = CollectionName.parse("docs__owner1__minilm-l6-v2-384__v42")
     assert parsed.model_version == 42
 
 
@@ -156,16 +156,16 @@ def test_parse_rejects_invented_model_name() -> None:
 
 
 def test_parse_rejects_invalid_content_type() -> None:
-    """``other__owner__voyage-code-3__v1`` is not a known content type;
+    """``other__owner__bge-base-en-v15-768__v1`` is not a known content type;
     the underlying regex already restricts content_type to the closed set.
     """
     with pytest.raises(ValueError):
-        CollectionName.parse("other__owner1__voyage-code-3__v1")
+        CollectionName.parse("other__owner1__bge-base-en-v15-768__v1")
 
 
 def test_parse_rejects_missing_version() -> None:
     with pytest.raises(ValueError):
-        CollectionName.parse("code__owner1__voyage-code-3")
+        CollectionName.parse("code__owner1__bge-base-en-v15-768")
 
 
 def test_parse_rejects_empty_string() -> None:

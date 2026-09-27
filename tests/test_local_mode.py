@@ -530,7 +530,7 @@ class TestLocalStaleness:
         [
             ("abc123", "all-MiniLM-L6-v2", True),
             ("def456", "all-MiniLM-L6-v2", False),
-            ("abc123", "voyage-code-3", False),
+            ("abc123", "model-code", False),
         ],
         ids=["same-skip", "changed-hash", "changed-model"],
     )
@@ -686,9 +686,9 @@ class TestFrecencyOnlyLocalMode:
         # get_or_create_collection which rejects legacy 2-segment.
         registry = MagicMock()
         registry.get.return_value = {
-            "collection": "code__repo__voyage-code-3__v1",
-            "code_collection": "code__repo__voyage-code-3__v1",
-            "docs_collection": "docs__repo__voyage-context-3__v1",
+            "collection": "code__repo__model-code__v1",
+            "code_collection": "code__repo__model-code__v1",
+            "docs_collection": "docs__repo__model-ctx__v1",
         }
         with patch("nexus.frecency.batch_frecency", return_value={}):
             _run_index_frecency_only(tmp_path, registry)

@@ -68,7 +68,7 @@ def _version_body(
     body: dict = {
         "app_version": app_version,
         "embedding_mode": mode,
-        "embedding_models": ["voyage-context-3", "voyage-code-3"],
+        "embedding_models": ["model-ctx", "model-code"],
         "schema_latest_id": "vectors-002",
         "schema_changeset_count": 64,
     }
@@ -286,7 +286,7 @@ def test_probe_compatible_returns_capabilities():
     assert caps.app_version == "1.0-SNAPSHOT"
     assert caps.release_version == _FLOOR_STR
     assert caps.embedding_mode == "voyage"
-    assert caps.embedding_models == ["voyage-context-3", "voyage-code-3"]
+    assert caps.embedding_models == ["model-ctx", "model-code"]
     assert caps.schema_latest_id == "vectors-002"
     assert caps.schema_changeset_count == 64
     assert caps.base_url == "https://api.conexus-nexus.com"

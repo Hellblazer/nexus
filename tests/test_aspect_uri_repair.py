@@ -19,7 +19,7 @@ from nexus.db.t2.records import AspectRecord
 
 def _row(
     *,
-    collection: str = "knowledge__delos__voyage-context-3__v1",
+    collection: str = "knowledge__delos__model-ctx__v1",
     source_path: str = "a" * 64,
     source_uri: str = "",
     confidence: float | None = 0.9,
@@ -77,7 +77,7 @@ class TestPlanSourceUriBackfill:
 
     def test_a_row_that_already_has_a_uri_is_left_alone(self) -> None:
         """Idempotency: a second run must be a no-op, not a rewrite."""
-        row = _row(source_uri="chroma://knowledge__delos__voyage-context-3__v1/" + "a" * 64)
+        row = _row(source_uri="chroma://knowledge__delos__model-ctx__v1/" + "a" * 64)
         plan = plan_source_uri_backfill([row])
         assert not plan.updates
         assert plan.already_attributed == 1
@@ -100,7 +100,7 @@ class TestPlanSourceUriBackfill:
         a repo_root it cannot know at repair time.
         """
         plan = plan_source_uri_backfill([
-            _row(collection="docs__nexus__voyage-context-3__v1", source_path="docs/rdr/x.md"),
+            _row(collection="docs__nexus__model-ctx__v1", source_path="docs/rdr/x.md"),
         ])
         assert not plan.updates
         assert len(plan.refusals) == 1

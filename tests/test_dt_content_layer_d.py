@@ -34,12 +34,12 @@ def test_index_dt_content_happy_path(
 
     with patch("nexus.config.catalog_path", return_value=tmp_path):
         ok = _index_dt_content_record(
-            "U1", collection="docs__dt__voyage-context-3__v1", corpus="dt",
+            "U1", collection="docs__dt__model-ctx__v1", corpus="dt",
         )
     assert ok is True
     # index_markdown stamped extraction_source=dt_content on the write path
     assert mock_index.call_args.kwargs["extraction_source"] == "dt_content"
-    assert mock_index.call_args.kwargs["collection_name"] == "docs__dt__voyage-context-3__v1"
+    assert mock_index.call_args.kwargs["collection_name"] == "docs__dt__model-ctx__v1"
     mock_stamp.assert_called_once()
     # text cached at a STABLE per-uuid path (re-index idempotency, HIGH-1)
     cached = mock_index.call_args.args[0]

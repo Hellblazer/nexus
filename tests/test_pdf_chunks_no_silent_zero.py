@@ -59,7 +59,7 @@ def test_pdf_chunks_raises_when_text_present_but_chunker_empty(tmp_path: Path):
             _pdf_chunks(
                 pdf,
                 content_hash="deadbeef" * 8,
-                target_model="voyage-context-3",
+                target_model="model-ctx",
                 now_iso="2026-04-30T00:00:00+00:00",
                 corpus="default",
             )
@@ -101,7 +101,7 @@ def test_pdf_chunks_returns_empty_when_extraction_empty(tmp_path: Path):
         result = _pdf_chunks(
             pdf,
             content_hash="deadbeef" * 8,
-            target_model="voyage-context-3",
+            target_model="model-ctx",
             now_iso="2026-04-30T00:00:00+00:00",
             corpus="default",
         )

@@ -273,13 +273,13 @@ class TestStalenessCache:
                     "doc_id": "1.1.1",
                     "source_path": "src/a.py",
                     "content_hash": "hash-a",
-                    "embedding_model": "voyage-code-3",
+                    "embedding_model": "model-code",
                 },
                 {
                     "doc_id": "1.1.1",
                     "source_path": "src/a.py",
                     "content_hash": "hash-a",
-                    "embedding_model": "voyage-code-3",
+                    "embedding_model": "model-code",
                 },
                 # Legacy-shaped chunk: source_path only, no doc_id. Real
                 # writers never emit this post-RDR-102-D2, but the cache
@@ -288,14 +288,14 @@ class TestStalenessCache:
                     "doc_id": "",
                     "source_path": "legacy/old.py",
                     "content_hash": "hash-l",
-                    "embedding_model": "voyage-code-3",
+                    "embedding_model": "model-code",
                 },
             ],
         }
 
         cache = build_staleness_cache(col)
 
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
         assert not hasattr(cache, "by_source_path")
 
     def test_build_resolves_phase3_chunks_via_catalog_manifest(self) -> None:
@@ -315,7 +315,7 @@ class TestStalenessCache:
                 # Phase-3: chunk_text_hash but no doc_id.
                 "chunk_text_hash": chash,
                 "content_hash": "hash-a",
-                "embedding_model": "voyage-code-3",
+                "embedding_model": "model-code",
             }],
         }
 
@@ -331,7 +331,7 @@ class TestStalenessCache:
             cache = build_staleness_cache(col)
 
         # by_doc_id resolved from the manifest, NOT from absent metadata.
-        assert cache.by_doc_id == {"1.1.42": ("hash-a", "voyage-code-3")}
+        assert cache.by_doc_id == {"1.1.42": ("hash-a", "model-code")}
         fake_cat.docs_for_chashes.assert_called_once()
 
     def test_build_skips_chunks_missing_required_fields(self) -> None:
@@ -346,7 +346,7 @@ class TestStalenessCache:
                 {
                     "doc_id": "1.1.1",
                     "content_hash": "hash-a",
-                    "embedding_model": "voyage-code-3",
+                    "embedding_model": "model-code",
                 },
                 {"doc_id": "1.1.2", "content_hash": "", "embedding_model": "x"},
                 {"doc_id": "1.1.3", "content_hash": "h", "embedding_model": ""},
@@ -354,7 +354,7 @@ class TestStalenessCache:
         }
 
         cache = build_staleness_cache(col)
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
 
     def test_build_returns_empty_on_chroma_error(self) -> None:
         """A failure inside the paginated sweep yields an empty cache
@@ -379,13 +379,13 @@ class TestStalenessCache:
             "metadatas": [{
                 "doc_id": "1.1.1",
                 "content_hash": "hash-a",
-                "embedding_model": "voyage-code-3",
+                "embedding_model": "model-code",
             }],
         }
 
         cache = build_staleness_cache(col)
 
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
         col.get_all_metadata.assert_called_once()
         col.get.assert_not_called()
 
@@ -401,7 +401,7 @@ class TestStalenessCache:
         from nexus.db.http_vector_client import VectorServiceError
 
         col = MagicMock(spec=["get", "get_all_metadata", "name"])
-        col.name = "code__x__voyage-code-3__v1"
+        col.name = "code__x__model-code__v1"
         col.get_all_metadata.side_effect = VectorServiceError(
             "POST /v1/vectors/get-all-metadata → HTTP 404: not found", code=404
         )
@@ -410,13 +410,13 @@ class TestStalenessCache:
             "metadatas": [{
                 "doc_id": "1.1.1",
                 "content_hash": "hash-a",
-                "embedding_model": "voyage-code-3",
+                "embedding_model": "model-code",
             }],
         }
 
         cache = build_staleness_cache(col)
 
-        assert cache.by_doc_id == {"1.1.1": ("hash-a", "voyage-code-3")}
+        assert cache.by_doc_id == {"1.1.1": ("hash-a", "model-code")}
         col.get_all_metadata.assert_called_once()
         col.get.assert_called()
 
@@ -450,7 +450,7 @@ class TestStalenessCache:
         from nexus.db.http_vector_client import VectorServiceError
 
         col = MagicMock(spec=["get", "get_all_metadata", "name"])
-        col.name = "code__x__voyage-code-3__v1"
+        col.name = "code__x__model-code__v1"
         col.get_all_metadata.side_effect = VectorServiceError(
             "POST /v1/vectors/get-all-metadata → HTTP 404: not found", code=404
         )
@@ -483,7 +483,7 @@ class TestStalenessCache:
         from nexus.db.http_vector_client import VectorServiceError
 
         col = MagicMock(spec=["get", "get_all_metadata", "name"])
-        col.name = "code__x__voyage-code-3__v1"
+        col.name = "code__x__model-code__v1"
         col.get_all_metadata.side_effect = VectorServiceError(
             "POST /v1/vectors/get-all-metadata → HTTP 404: not found", code=404
         )
@@ -517,7 +517,7 @@ class TestStalenessCache:
         for local_mode in (True, False):
             caplog.clear()
             col = MagicMock(spec=["get", "get_all_metadata", "name"])
-            col.name = "code__x__voyage-code-3__v1"
+            col.name = "code__x__model-code__v1"
             col.get_all_metadata.side_effect = RuntimeError("422 too many rows")
             col.get.return_value = {"ids": [], "documents": [], "metadatas": []}
 
@@ -565,7 +565,7 @@ class TestStalenessCache:
         from nexus.db.http_vector_client import VectorServiceError
 
         col = MagicMock(spec=["get", "get_all_metadata", "name"])
-        col.name = "code__x__voyage-code-3__v1"
+        col.name = "code__x__model-code__v1"
         col.get_all_metadata.side_effect = VectorServiceError(
             "POST /v1/vectors/get-all-metadata → HTTP 404: not found", code=404
         )
@@ -621,13 +621,13 @@ class TestStalenessCache:
     def test_check_staleness_with_cache_hit_returns_true(self) -> None:
         """Cache hit + matching hash + matching model = stale (skip)."""
         cache = StalenessCache(
-            by_doc_id={"1.1.1": ("hash-a", "voyage-code-3")},
+            by_doc_id={"1.1.1": ("hash-a", "model-code")},
         )
         result = check_staleness(
             col=MagicMock(),
             source_file="src/a.py",
             content_hash="hash-a",
-            embedding_model="voyage-code-3",
+            embedding_model="model-code",
             doc_id="1.1.1",
             cache=cache,
         )
@@ -636,13 +636,13 @@ class TestStalenessCache:
     def test_check_staleness_with_cache_hit_wrong_hash_returns_false(self) -> None:
         """Cache hit but content has changed = NOT stale (re-index)."""
         cache = StalenessCache(
-            by_doc_id={"1.1.1": ("hash-OLD", "voyage-code-3")},
+            by_doc_id={"1.1.1": ("hash-OLD", "model-code")},
         )
         result = check_staleness(
             col=MagicMock(),
             source_file="src/a.py",
             content_hash="hash-NEW",
-            embedding_model="voyage-code-3",
+            embedding_model="model-code",
             doc_id="1.1.1",
             cache=cache,
         )
@@ -656,7 +656,7 @@ class TestStalenessCache:
             col=MagicMock(),
             source_file="src/a.py",
             content_hash="hash-a",
-            embedding_model="voyage-code-3",
+            embedding_model="model-code",
             doc_id="1.1.1",
             cache=cache,
         )
@@ -670,19 +670,19 @@ class TestStalenessCache:
         """
         col = MagicMock(spec=["get", "name"])
         cache = StalenessCache(
-            by_doc_id={"1.1.1": ("hash-a", "voyage-code-3")},
+            by_doc_id={"1.1.1": ("hash-a", "model-code")},
         )
 
         # Hit
         check_staleness(
             col=col, source_file="src/a.py",
-            content_hash="hash-a", embedding_model="voyage-code-3",
+            content_hash="hash-a", embedding_model="model-code",
             doc_id="1.1.1", cache=cache,
         )
         # Miss
         check_staleness(
             col=col, source_file="src/b.py",
-            content_hash="hash-b", embedding_model="voyage-code-3",
+            content_hash="hash-b", embedding_model="model-code",
             doc_id="1.1.99", cache=cache,
         )
 
@@ -702,7 +702,7 @@ class TestStalenessCache:
                 {
                     "doc_id": "1.1.1",
                     "content_hash": "hash-a",
-                    "embedding_model": "voyage-code-3",
+                    "embedding_model": "model-code",
                 },
             ],
         }
@@ -713,7 +713,7 @@ class TestStalenessCache:
         ):
             result = check_staleness(
                 col=col, source_file="src/a.py",
-                content_hash="hash-a", embedding_model="voyage-code-3",
+                content_hash="hash-a", embedding_model="model-code",
                 doc_id="1.1.1",
                 # no cache=
             )
@@ -738,14 +738,14 @@ class TestStalenessCache:
         (``check_staleness`` returns False / "stale") regardless of
         what the cache otherwise contains.
         """
-        cache = StalenessCache(by_doc_id={"1.1.1": ("hash-a", "voyage-code-3")})
+        cache = StalenessCache(by_doc_id={"1.1.1": ("hash-a", "model-code")})
 
         with pytest.raises(TypeError):
-            StalenessCache(by_source_path={"legacy/old.py": ("hash-l", "voyage-code-3")})  # type: ignore[call-arg]
+            StalenessCache(by_source_path={"legacy/old.py": ("hash-l", "model-code")})  # type: ignore[call-arg]
 
         assert check_staleness(
             col=MagicMock(), source_file="legacy/old.py",
-            content_hash="hash-l", embedding_model="voyage-code-3",
+            content_hash="hash-l", embedding_model="model-code",
             doc_id="", cache=cache,
         ) is False
 
@@ -759,14 +759,14 @@ class TestStalenessCache:
         ``never_fresh`` didn't exist and this returned True (skipped
         forever)."""
         cache = StalenessCache(
-            by_doc_id={"1.2.4432": ("hash-a", "voyage-context-3")},
+            by_doc_id={"1.2.4432": ("hash-a", "model-ctx")},
             never_fresh=frozenset({"1.2.4432"}),
         )
         result = check_staleness(
             col=MagicMock(),
             source_file="docs/stranded.md",
             content_hash="hash-a",
-            embedding_model="voyage-context-3",
+            embedding_model="model-ctx",
             doc_id="1.2.4432",
             cache=cache,
         )
@@ -778,13 +778,13 @@ class TestStalenessCache:
         hot path (unchanged + fence 'complete' or unreported) must not
         regress."""
         cache = StalenessCache(
-            by_doc_id={"1.2.9999": ("hash-b", "voyage-context-3")},
+            by_doc_id={"1.2.9999": ("hash-b", "model-ctx")},
         )
         result = check_staleness(
             col=MagicMock(),
             source_file="docs/healthy.md",
             content_hash="hash-b",
-            embedding_model="voyage-context-3",
+            embedding_model="model-ctx",
             doc_id="1.2.9999",
             cache=cache,
         )

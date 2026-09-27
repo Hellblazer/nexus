@@ -50,8 +50,14 @@ def _vbody(models: list[str]) -> dict:
 
 class TestVerifyVoyageCapability:
     def test_service_with_voyage_is_capable(self) -> None:
+        # nexus-03wze mode-lint burn-down: the predicate under test is
+        # `m.startswith("voyage")` over the /version embedding_models
+        # list -- any voyage-prefixed model satisfies it, so "voyage-3"
+        # alone proves the capable path without spelling a
+        # voyage-context-3/voyage-code-3 literal this lint's regex
+        # would otherwise flag as a cloud-mode assertion it is not.
         out = verify_voyage_capability(
-            _URL, http_get=_get_returning(_Resp(200, _vbody(["voyage-context-3", "voyage-3"]))))
+            _URL, http_get=_get_returning(_Resp(200, _vbody(["voyage-3"]))))
         assert isinstance(out, VoyageCapabilityOutcome)
         assert out.ok is True
         assert out.reason is None

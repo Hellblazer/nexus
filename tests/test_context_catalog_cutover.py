@@ -123,8 +123,8 @@ class TestPhantomCollectionRegression:
         # phantom name the catalog disagrees with.
         reg.update(
             repo,
-            collection="code__nexus-1-2188__voyage-code-3__v1",
-            code_collection="code__nexus-1-2188__voyage-code-3__v1",
+            collection="code__nexus-1-2188__model-code__v1",
+            code_collection="code__nexus-1-2188__model-code__v1",
             docs_collection="docs__1-2188",
         )
 
