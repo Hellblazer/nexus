@@ -367,31 +367,35 @@ things to avoid carefully; they are impossible.
    are clear, it is the jar. Measured 2026-09-19: 20673 setup errors in a
    fresh worktree, zero shared-memory segments, missing jar.
 
-7. **Before pushing, check the `board/ci-develop` topic, not GitHub.** Ask
-   whether a verdict someone is waiting on is in flight — not whether the
+7. **Before pushing, check the `board/ci/nexus-develop` topic, not GitHub.**
+   Ask whether a run someone is waiting on is in flight — not whether the
    slot is free. Worktrees split the tree; CI remains one shared resource
-   with one queue, and a push destroys a running verdict. CI posts a
-   `ci-pending` tuple when a develop run starts and a `ci-verdict` tuple
-   (`success`/`failure`/`cancelled`, failed job names, run URL) when it ends
-   (nexus-dotwy, `scripts/ci_board_post.py`). A sha with a `ci-pending` and
-   no `ci-verdict` is a live run ONLY while that `ci-pending` is younger
-   than about 35 minutes (the 25-minute shard timeout plus setup). Two
-   things leave a pending with no verdict that is NOT live: a newer push
-   whose `ci-pending` supersedes it (the concurrency group cancels the older
-   run, and its verdict job may never start), and a verdict post that
-   failed even after its retries (the job log shows a `::warning::`).
-   Past 35 minutes, or once a newer sha is pending, treat it as dead and use
-   the fallback below. After `gh run rerun`, one sha can carry a verdict per
-   attempt: the highest `attempt` in the body is the current one.
-   Subscribe once per session with
-   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci-develop")` and the
-   verdict for your push arrives over the channel; from a shell,
-   `nx tuple rd board/ci-develop -n 300 --json` lists the week's rows. Never
-   `gh run watch`: several concurrent watch loops on one token tripped
-   GitHub's secondary rate limit on 2026-09-26 and every Actions call 403'd
-   (T2 `nexus/github-api-usage-research-2026-09-26`). If the board is
-   silent, fall back to ONE `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs`
-   call at a time, 90s apart.
+   with one queue, and a push cancels the run in progress. GitHub's
+   `workflow_run` and `workflow_job` webhooks reach the conexus-hosted
+   adapter (RDR-220; `infra/terraform/ci-board-adapter` in the conexus
+   repo), which posts one tuple per state change — `queued`,
+   `in_progress`, `completed` with GitHub's conclusion — for every run and
+   every job of every workflow, about 70 posts per develop push; nothing in
+   this repo's workflows posts anything. Read the board for one commit with
+   `uv run python scripts/ci_status.py <full 40-char sha>` (exit 0 green,
+   1 failed, 2 pending, 3 no posts for that sha). Its fold: within one
+   attempt the most advanced state wins, so a late `queued` copy cannot
+   hide a finished job; across reruns the newest attempt wins. A commit
+   whose run has no `completed` post and no newer commit posting behind it
+   is live. A `cancelled` conclusion on an older commit while a newer one
+   posts is a superseded run, since the concurrency group cancels it;
+   `cancelled` with no newer commit can be a job past its time limit, so
+   rerun. Subscribe once per session with
+   `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
+   each post arrives as a ping naming the tuple, so wait for the state you
+   care about or read the board for your sha rather than acting on every
+   ping. From a shell, `nx tuple rd board/ci/nexus-develop -n 300 --json`.
+   Never `gh run watch`: several concurrent watch loops on one token
+   tripped GitHub's secondary rate limit on 2026-09-26 and every Actions
+   call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). If the
+   board has no post for your sha, fall back to ONE
+   `gh api repos/Hellblazer/nexus/commits/<sha>/check-runs` call at a time,
+   90s apart.
 
 8. **Push unchanged**: `NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh <sha>...`
    from INSIDE the worktree. It reads HEAD from the shell's cwd, so `cd`
