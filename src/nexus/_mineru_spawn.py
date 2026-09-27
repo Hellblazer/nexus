@@ -189,10 +189,13 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
         # stopped by a LATER, separate ``nx mineru stop`` invocation reading
         # this pid from the pid file (see _write_pid_file below), not by
         # this process. A Windows job-object handle lives only in the
-        # process that created it, so containment here would need a NAMED
-        # job (CreateJobObjectW with a name a later ``stop`` process opens
-        # by that same name) -- a bigger design than "assign at spawn",
-        # deliberately left for a follow-up rather than forced in.
+        # process that created it, so containment here needs a NAMED job
+        # (CreateJobObjectW with a name a later ``stop`` process opens by
+        # that same name) -- part of nexus-6y4e0's remaining Windows scope
+        # (see its comments), not forced in here, and not verifiable until
+        # qwentescence has a native Windows Python (nexus-6y4e0's own
+        # closing report: only a broken uv trampoline and the Microsoft
+        # Store install-alias stub are present there today).
         proc = subprocess.Popen(
             cmd,
             env=_server_env(output_root),
