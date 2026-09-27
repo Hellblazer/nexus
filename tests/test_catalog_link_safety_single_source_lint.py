@@ -46,12 +46,23 @@ _SCANNED_FILES: tuple[Path, ...] = (
 )
 
 
-def _find_forbidden_attr_reads(path: Path) -> list[str]:
+def _find_forbidden_attr_reads_in_tree(tree: ast.AST) -> list[str]:
     """Return ``"line:attr"`` for every ``<expr>.source_uri`` /
-    ``<expr>.file_path`` attribute READ in *path* — an assignment
-    target (``Attribute`` inside a ``Store`` context, e.g. setting a
-    field on a dataclass) is not a read and is excluded."""
-    tree = ast.parse(path.read_text(), filename=str(path))
+    ``<expr>.file_path`` attribute READ, in TWO forms:
+
+    * ``ast.Attribute`` in ``Load`` context (``entry.source_uri``) — an
+      assignment target (``Store`` context, e.g. setting a field on a
+      dataclass) is not a read and is excluded.
+    * ``getattr(x, "source_uri", ...)`` / ``getattr(x, "file_path",
+      ...)`` — code-review round: the AST-``Attribute`` check alone is
+      blind to this equally-live bypass, since ``getattr`` with a
+      STRING LITERAL attribute name reads the identical field without
+      ever producing an ``ast.Attribute`` node. A dynamic attribute
+      name (anything other than an ``ast.Constant`` string) is not
+      flagged — it can't be resolved statically either way, and
+      ``alias_of``/other non-link fields via ``getattr`` are
+      unaffected (not in :data:`_FORBIDDEN_ATTRS`).
+    """
     hits: list[str] = []
     for node in ast.walk(tree):
         if (
@@ -60,7 +71,22 @@ def _find_forbidden_attr_reads(path: Path) -> list[str]:
             and isinstance(node.ctx, ast.Load)
         ):
             hits.append(f"{node.lineno}:{node.attr}")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in _FORBIDDEN_ATTRS
+        ):
+            hits.append(f"{node.lineno}:{node.args[1].value}")
     return hits
+
+
+def _find_forbidden_attr_reads(path: Path) -> list[str]:
+    """:func:`_find_forbidden_attr_reads_in_tree` over a file on disk."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    return _find_forbidden_attr_reads_in_tree(tree)
 
 
 @pytest.mark.parametrize(
@@ -96,3 +122,42 @@ def test_exempt_file_actually_reads_the_fields() -> None:
         f"but no read of source_uri/file_path was found there any more — "
         f"the exemption may be stale."
     )
+
+
+class TestGetattrBypassDetection:
+    """Code-review round: a synthetic positive proving the detector
+    actually catches the ``getattr`` bypass form, not just the plain
+    ``ast.Attribute`` one — a lint that only exercises its true-negative
+    path (the real repo files, which are clean) never proves it can
+    fire at all."""
+
+    def test_getattr_source_uri_literal_is_caught(self) -> None:
+        tree = ast.parse('getattr(entry, "source_uri", "")\n')
+        hits = _find_forbidden_attr_reads_in_tree(tree)
+        assert hits == ["1:source_uri"]
+
+    def test_getattr_file_path_literal_is_caught(self) -> None:
+        tree = ast.parse('x = getattr(some_entry, "file_path", None)\n')
+        hits = _find_forbidden_attr_reads_in_tree(tree)
+        assert hits == ["1:file_path"]
+
+    def test_getattr_alias_of_is_not_flagged(self) -> None:
+        """``alias_of`` is not a link field — the in-file
+        ``resolve_catalog_links`` read of it must stay unflagged."""
+        tree = ast.parse('getattr(entry, "alias_of", "")\n')
+        assert _find_forbidden_attr_reads_in_tree(tree) == []
+
+    def test_getattr_with_dynamic_attr_name_is_not_flagged(self) -> None:
+        """Can't resolve a non-literal attribute name statically —
+        this is a acknowledged blind spot, not a false negative to chase."""
+        tree = ast.parse('getattr(entry, field_name, "")\n')
+        assert _find_forbidden_attr_reads_in_tree(tree) == []
+
+    def test_a_real_scanned_file_has_no_getattr_bypass(self) -> None:
+        """The actual repo files pass the getattr form too, not just
+        the plain-attribute form."""
+        for path in _SCANNED_FILES:
+            if path == _EXEMPT_FILE:
+                continue
+            hits = _find_forbidden_attr_reads(path)
+            assert not hits, f"{path}: {hits}"

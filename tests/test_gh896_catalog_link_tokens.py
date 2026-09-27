@@ -219,7 +219,6 @@ class TestSafeLinkTarget:
     @pytest.mark.parametrize("safe_uri", [
         "https://arxiv.org/abs/1706.03762",
         "x-devonthink-item://ABCD-1234",
-        "nx-scratch://session/note",
     ])
     def test_allowlisted_schemes_pass(self, safe_uri: str) -> None:
         from nexus.doc.catalog_links import safe_link_target
@@ -230,6 +229,29 @@ class TestSafeLinkTarget:
         assert result.is_link is True
         assert result.text == safe_uri
 
+    def test_nx_scratch_scheme_is_rejected(self) -> None:
+        """Code-review round: T1 scratch is SESSION-scoped, so a
+        ``nx-scratch://`` URI is unresolvable by any later reader —
+        removed from the link-safe allowlist. A file_path fallback (or
+        no link at all) is used instead, same as any other unsafe
+        source_uri."""
+        from nexus.doc.catalog_links import safe_link_target
+
+        entry = _FakeEntry(
+            tumbler=_FakeTumbler((1, 1, 1)),
+            source_uri="nx-scratch://session/note",
+            file_path="docs/x.md",
+        )
+        result = safe_link_target(entry)
+        assert result is not None
+        assert result.is_link is False
+        assert result.text == "docs/x.md"
+
+        entry_no_fallback = _FakeEntry(
+            tumbler=_FakeTumbler((1, 1, 1)), source_uri="nx-scratch://session/note",
+        )
+        assert safe_link_target(entry_no_fallback) is None
+
     @pytest.mark.parametrize("unsafe_path", [
         "/abs/path.md",
         "C:\\Users\\bob\\x.md",
@@ -239,6 +261,12 @@ class TestSafeLinkTarget:
         "~/x.md",
         "../../escape.md",
         "../ok/../../escape2.md",
+        # Code-review round: percent-encoded traversal must be decoded
+        # before classification, not compared literally.
+        "%2e%2e%2f%2e%2e%2fescape.md",
+        "%2e%2e/%2e%2e/escape.md",
+        "%2Fabs%2Fpath.md",
+        "%7E/x.md",
     ])
     def test_unsafe_relative_path_shapes_are_rejected(self, unsafe_path: str) -> None:
         """nexus-w715w round 2, code-review-expert finding 4:
@@ -305,20 +333,22 @@ class TestSafeLinkTarget:
             "(repo-relative) `docs/a-paper.md`"
         )
 
-    def test_relative_file_path_becomes_a_working_link_with_repo_root_and_base_dir(
+    def test_relative_file_path_becomes_a_working_link_when_base_dir_is_inside_repo_root(
         self, tmp_path: Path,
     ) -> None:
         """nexus-w715w round 2, substantive-critic finding 2: a
         markdown renderer resolves a relative link against the CITING
         file's own directory, not the repo root — so the emitted link
         must be re-expressed relative to *base_dir*, and must actually
-        reach the real file."""
+        reach the real file. *base_dir* here is a DIFFERENT directory
+        inside the SAME repo as repo_root (not repo_root itself, and
+        not outside it) — the case this working-link path exists for."""
         from nexus.doc.catalog_links import CatalogLink, format_footnote
 
         repo_root = tmp_path / "repo"
         (repo_root / "docs").mkdir(parents=True)
         (repo_root / "docs" / "a-paper.md").write_text("x")
-        citing_dir = tmp_path / "elsewhere"
+        citing_dir = repo_root / "notes"  # inside repo_root, different subdir
         citing_dir.mkdir()
 
         link = CatalogLink(display="d", tumbler="1.1.5", lineno=1, col=1)
@@ -339,6 +369,38 @@ class TestSafeLinkTarget:
         assert resolved == (repo_root / "docs" / "a-paper.md").resolve()
         assert "file://" not in line
         assert str(repo_root) not in line
+
+    def test_cross_repo_base_dir_falls_back_to_plain_text(self, tmp_path: Path) -> None:
+        """Code-review round, substantive-critic finding 3: when *base_dir*
+        is NOT inside *repo_root* at all (a citing file in a completely
+        different repository/tree), a working relative link would be a
+        ``../../..`` traversal into an unrelated repo's filesystem layout
+        — refused; falls back to the plain, non-clickable
+        ``(repo-relative)`` label instead, same as when repo_root/base_dir
+        are simply unknown."""
+        from nexus.doc.catalog_links import CatalogLink, format_footnote
+
+        repo_root = tmp_path / "repo"
+        (repo_root / "docs").mkdir(parents=True)
+        (repo_root / "docs" / "a-paper.md").write_text("x")
+        other_repo_dir = tmp_path / "a-completely-different-repo"
+        other_repo_dir.mkdir()
+
+        link = CatalogLink(display="d", tumbler="1.1.6", lineno=1, col=1)
+        entry = _FakeEntry(
+            tumbler=_FakeTumbler((1, 1, 6)), title="Cross Repo Paper", content_type="paper",
+            file_path="docs/a-paper.md",
+        )
+        line = format_footnote(
+            link, entry, {}, base_dir=other_repo_dir, repo_root=str(repo_root),
+        )
+        assert line == (
+            "- `nx://catalog/1.1.6` — **Cross Repo Paper** (paper, owner: 1.1) — "
+            "(repo-relative) `docs/a-paper.md`"
+        )
+        assert "file://" not in line
+        assert str(repo_root) not in line
+        assert ".." not in line
 
     def test_no_link_when_neither_target_present(self) -> None:
         from nexus.doc.catalog_links import CatalogLink, format_footnote
@@ -631,7 +693,10 @@ class TestRenderResolvesCatalogLinks:
         neither the URI nor any absolute path reaches rendered output,
         AND (round 2, substantive-critic finding 2) that the emitted
         relative link, resolved against the RENDERED file's own
-        directory, reaches the real registered file.
+        directory, reaches the real registered file. The citing doc
+        lives INSIDE repo_root (a different subdirectory) — code-review
+        round: a working link is only emitted when base_dir is inside
+        repo_root at all, so this is the case that must produce one.
         """
         repo_root = tmp_path / "repo"
         rel_path = "docs/paper.md"
@@ -648,14 +713,16 @@ class TestRenderResolvesCatalogLinks:
 
         from nexus.commands.doc import render_cmd
 
-        doc = tmp_path / "src.md"
+        src_dir = repo_root / "notes"
+        src_dir.mkdir()
+        doc = src_dir / "src.md"
         doc.write_text(f"See [x](nx://catalog/{tumbler}).\n")
 
         runner = CliRunner()
         result = runner.invoke(render_cmd, [str(doc), "--allow-unresolved"])
         assert result.exit_code == 0, result.output
 
-        rendered = tmp_path / "src.rendered.md"
+        rendered = src_dir / "src.rendered.md"
         body = rendered.read_text()
         assert "Leaky Paper" in body
         assert "file://" not in body
@@ -669,11 +736,13 @@ class TestRenderResolvesCatalogLinks:
     def test_source_uri_with_file_scheme_out_of_repo_root_and_out_dir(
         self, tmp_path: Path,
     ) -> None:
-        """Same as above but the citing doc lives OUTSIDE repo_root and
-        the render targets ``--out-dir`` elsewhere again — the emitted
-        relative path must still resolve to the real file from wherever
-        the RENDERED sibling actually lands, walking back out through
-        both directories via ``..`` if that's what it takes."""
+        """Code-review round, substantive-critic finding 3: the citing
+        doc lives OUTSIDE repo_root entirely (a different tree,
+        ``--out-dir`` elsewhere again) — a working relative link would
+        be a ``../../..`` traversal into an unrelated repo's layout, so
+        this must fall back to the plain, non-clickable
+        ``(repo-relative)`` label instead — never leak repo_root, never
+        emit a cross-repo traversal link."""
         repo_root = tmp_path / "repo"
         rel_path = "notes/deep/paper.md"
         (repo_root / "notes" / "deep").mkdir(parents=True)
@@ -705,13 +774,11 @@ class TestRenderResolvesCatalogLinks:
         rendered = out_dir / "src.rendered.md"
         assert rendered.exists(), result.output
         body = rendered.read_text()
+        assert "Deep Paper" in body
         assert "file://" not in body
         assert str(repo_root) not in body
-
-        emitted = _extract_link_target(body)
-        resolved = (rendered.parent / emitted).resolve()
-        assert resolved == (repo_root / rel_path).resolve()
-        assert resolved.read_text() == "deep paper content\n"
+        assert ".." not in body  # no cross-repo traversal link emitted
+        assert f"(repo-relative) `{rel_path}`" in body
 
     def test_merged_duplicate_redirects_to_canonical(
         self, tmp_path: Path,

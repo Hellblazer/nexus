@@ -1176,7 +1176,8 @@ A file path can name more than one catalog document — one file catalogued unde
 ### nx catalog footnotes
 
 ```
-nx catalog footnotes FILE.md [FILE2.md ...] [--check] [--dry-run] [--to-links]
+nx catalog footnotes FILE.md [FILE2.md ...]
+    [--check] [--dry-run] [--to-links] [--refresh] [--style long|short]
 ```
 
 GH #896 (nexus-sxiay) — the in-place converter the issue actually asked for
@@ -1184,37 +1185,62 @@ GH #896 (nexus-sxiay) — the in-place converter the issue actually asked for
 covers a `.rendered.md` sidecar only; GitHub/GitLab/VS Code preview render
 the *source* file, which that half never touches). Converts every
 `[label](nx://catalog/<tumbler>)` markdown link IN PLACE in the source file
-into a stable GFM footnote marker `label[^tumbler-<slug>]`, and appends or
-refreshes a `## Footnotes` section at the bottom with one definition per
-unique tumbler: title, content type, indexed date (when available), a
-working link or `(repo-relative)` label (see `nx doc render`'s note on
-link safety — the same `safe_link_target` helper, same rules), any merge
-note, and outbound links.
+into a stable GFM footnote marker `[label][^tumbler-<slug>]` — the label
+STAYS bracketed, immediately followed by the footnote reference, which is
+what makes `--to-links` exact regardless of what precedes or follows a
+citation on its line (see the module docstring in
+`src/nexus/doc/footnote_converter.py` for why the label must stay
+bracketed). Appends or refreshes a `## Footnotes` section at the bottom
+with one definition per unique tumbler: title, content type, indexed date
+(when available), a working link or `(repo-relative)` label (see
+`nx doc render`'s note on link safety — the same `safe_link_target`
+helper, same rules), any merge note, and outbound links.
+
+The file is read as STRICT UTF-8 — never a lossy decode — and refused
+outright (exit 2, nothing written) if it contains invalid UTF-8 bytes;
+writes are ATOMIC (a sibling `.tmp` file, then an atomic rename), so a
+crash mid-write can never leave the file half-written.
 
 Idempotent: re-running an already-converted file with an unchanged catalog
-state is a byte-for-byte no-op. Once a tumbler has a marker, that marker
-NEVER moves or changes on a later run — only the footnote section's
-DEFINITION bodies are rewritten when the cited catalog entries have
-drifted (a title edit, a merge). Slugs are derived deterministically from
-the entry's title (`tumbler-<slugified-title>`, falling back to the
+state is a byte-for-byte no-op, trailing newline (or its absence) and
+CRLF-vs-LF line endings preserved exactly. Once a tumbler has a marker,
+that marker NEVER moves or changes on a later run — only the footnote
+section's DEFINITION bodies are rewritten when the cited catalog entries
+have drifted (a title edit, a merge). Slugs are derived deterministically
+from the entry's title (`tumbler-<slugified-title>`, falling back to the
 tumbler itself when there is no title), with a numeric suffix on collision
-(`tumbler-x`, `tumbler-x-2`, ...). Fenced code blocks are never touched.
+(`tumbler-x`, `tumbler-x-2`, ...). Fenced code blocks, inline backtick code
+spans (including double-backtick spans), and 4-space-indented code blocks
+are never touched.
 
-A tumbler that does not resolve is left as a plain markdown link — never
-silently dropped — and reported as `file:line: unresolved tumbler
-<tumbler>` on stderr; the command still converts everything else and exits
-1 to say the conversion is incomplete.
+GH #896's own acceptance criterion, held literally: a tumbler that does
+not resolve means NOTHING is written for that file — not even the parts
+that would have converted cleanly. Every failure is still reported as
+`file:line: unresolved tumbler <tumbler>` on stderr, and the command exits
+1. `--dry-run` always shows the full picture (the diff as if the write had
+happened) regardless of any dangling reference.
 
 ```
---check      Exit non-zero if the file is not already in current,
-             converted form (a dangling reference also counts). Writes
-             nothing — for CI / pre-commit.
---dry-run    Print a unified diff of what would change; write nothing.
---to-links   Reverse conversion: expand every footnote marker back into
-             its nx://catalog/<tumbler> link and drop the Footnotes
-             section. No catalog access needed — the tumbler is read
-             back out of the footnote body itself.
+--check         Exit non-zero if the file is not already in current,
+                converted form (a dangling reference also counts). Writes
+                nothing — for CI / pre-commit.
+--dry-run       Print a unified diff of what would change; write nothing.
+--to-links      Reverse conversion: expand every footnote marker back into
+                its nx://catalog/<tumbler> link and drop the Footnotes
+                section. No catalog access needed — the tumbler is read
+                back out of the footnote body itself.
+--refresh       Only refresh EXISTING footnote bodies against current
+                catalog state; add no new markers for links not already
+                converted (a brand-new link is left completely untouched
+                — never attempted, never reported).
+--style TEXT    Footnote body verbosity: 'long' (default: title, content
+                type, indexed date, link, outbound links) or 'short'
+                (title + tumbler id only).
 ```
+
+`--check`/`--dry-run`, `--check`/`--to-links`, and `--refresh`/`--to-links`
+are each mutually exclusive (exit 2, a usage error) — `--dry-run` combines
+with `--to-links` freely, to preview the reverse conversion.
 
 `## Footnotes` is recognized and managed ONLY when every line under it
 matches this command's own definition format; a file that already has an
@@ -1226,6 +1252,8 @@ nx catalog footnotes docs/rdr/rdr-200-example.md
 nx catalog footnotes docs/rdr/*.md --check     # CI gate
 nx catalog footnotes docs/rdr/rdr-200.md --dry-run
 nx catalog footnotes docs/rdr/rdr-200.md --to-links   # reverse
+nx catalog footnotes docs/rdr/rdr-200.md --refresh    # bodies only, no new markers
+nx catalog footnotes docs/rdr/rdr-200.md --style short
 ```
 
 ### nx catalog link-generate
@@ -2826,16 +2854,22 @@ or an absolute/UNC/`~`/upward-escaping path — `nx index repo` derives
 preference would leak the indexing machine's own path layout, and a
 filesystem-native "is this absolute" check misses a Windows or UNC path on a
 POSIX host. `source_uri` is preferred only when its scheme (parsed
-case-insensitively) is on an explicit allowlist (`https`, `x-devonthink-item`,
-`nx-scratch` — never "anything that isn't `file://`"); a `file_path` is the
-fallback only after a content-based classifier clears it of every unsafe
-shape (POSIX-absolute, Windows drive-letter, UNC, `~`, or a `..` sequence that
-climbs above its own root). A cleared `file_path` becomes a WORKING relative
-link — re-expressed relative to the rendered file's own directory via the
-entry's owner's `repo_root` — when that repo_root is known; otherwise it is
-shown as plain, non-clickable `(repo-relative)` text rather than a link that
-has never been confirmed to resolve. Neither candidate being safe omits the
-link segment entirely (title/type/owner only). A tumbler that has been
+case-insensitively) is on an explicit allowlist (`https`, `x-devonthink-item`
+— never "anything that isn't `file://`"; `nx-scratch` is deliberately
+excluded too, since T1 scratch is session-scoped and unresolvable by any
+later reader); a `file_path` is the fallback only after a content-based
+classifier (percent-decoded first, so `%2e%2e%2f` doesn't hide a traversal)
+clears it of every unsafe shape (POSIX-absolute, Windows drive-letter, UNC,
+`~`, or a `..` sequence that climbs above its own root). A cleared
+`file_path` becomes a WORKING relative link — re-expressed relative to the
+rendered file's own directory via the entry's owner's `repo_root` — only
+when that repo_root is known AND the rendered file's own directory is
+actually inside it; a citing file outside the entry's repo (or an unknown
+repo_root) instead shows plain, non-clickable `(repo-relative)` text rather
+than a link that has never been confirmed to resolve, or a `../../..`
+traversal into an unrelated repository's layout. Neither candidate being
+safe omits the link segment entirely (title/type/owner only). A tumbler
+that has been
 MERGED into another (a duplicate whose
 `alias_of` points at a canonical tumbler — the row survives the merge, it is
 never tombstoned) resolves to the canonical entry's data, with a

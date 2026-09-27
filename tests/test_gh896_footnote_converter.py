@@ -91,7 +91,7 @@ class TestConvertLinksToFootnotes:
 
         assert result.changed is True
         assert result.dangling == []
-        assert "tumbler 1.1.194[^tumbler-attention-is-all-you-need]" in result.text
+        assert "[tumbler 1.1.194][^tumbler-attention-is-all-you-need]" in result.text
         assert "## Footnotes" in result.text
         assert "[^tumbler-attention-is-all-you-need]: nx catalog tumbler `1.1.194`." in result.text
         assert 'Title: "Attention Is All You Need".' in result.text
@@ -118,14 +118,14 @@ class TestConvertLinksToFootnotes:
         reader1 = _fake_reader({"2.2.2": e1})
         text = "[tumbler](nx://catalog/2.2.2)\n"
         first = convert_links_to_footnotes(text, lambda: reader1)
-        assert "tumbler[^tumbler-original-title]" in first.text
+        assert "[tumbler][^tumbler-original-title]" in first.text
 
         e1_renamed = _FakeEntry(tumbler=_FakeTumbler((2, 2, 2)), title="Renamed Title")
         reader2 = _fake_reader({"2.2.2": e1_renamed})
         second = convert_links_to_footnotes(first.text, lambda: reader2)
 
         assert second.changed is True
-        assert "tumbler[^tumbler-original-title]" in second.text  # marker UNCHANGED
+        assert "[tumbler][^tumbler-original-title]" in second.text  # marker UNCHANGED
         assert "Renamed Title" in second.text
         assert "Original Title" not in second.text
 
@@ -175,7 +175,7 @@ class TestConvertLinksToFootnotes:
         reader1 = _fake_reader({"4.4.4": e1})
         text = "[tumbler](nx://catalog/4.4.4)\n"
         first = convert_links_to_footnotes(text, lambda: reader1)
-        marker = "tumbler[^tumbler-doomed]"
+        marker = "[tumbler][^tumbler-doomed]"
         assert marker in first.text
 
         reader2 = _fake_reader({})  # now dangling
@@ -194,8 +194,8 @@ class TestConvertLinksToFootnotes:
 
         result = convert_links_to_footnotes(text, lambda: reader)
 
-        assert "a[^tumbler-alpha-paper]" in result.text
-        assert "b[^tumbler-beta-paper]" in result.text
+        assert "[a][^tumbler-alpha-paper]" in result.text
+        assert "[b][^tumbler-beta-paper]" in result.text
         assert result.text.count("## Footnotes") == 1
 
     def test_slug_collision_gets_numeric_suffix(self) -> None:
@@ -206,8 +206,8 @@ class TestConvertLinksToFootnotes:
 
         result = convert_links_to_footnotes(text, lambda: reader)
 
-        assert "a[^tumbler-same-title]" in result.text
-        assert "b[^tumbler-same-title-2]" in result.text
+        assert "[a][^tumbler-same-title]" in result.text
+        assert "[b][^tumbler-same-title-2]" in result.text
 
     def test_repeated_citation_of_the_same_tumbler_reuses_one_slug(self) -> None:
         e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="Doc")
@@ -233,7 +233,7 @@ class TestConvertLinksToFootnotes:
         result = convert_links_to_footnotes(text, lambda: reader)
 
         assert "[example](nx://catalog/1.1.1)" in result.text  # untouched
-        assert "tumbler[^tumbler-real-doc]" in result.text
+        assert "[tumbler][^tumbler-real-doc]" in result.text
         # The fenced tumbler was never scanned, so it never entered
         # resolution and is not reported as dangling.
         assert result.dangling == []
@@ -271,7 +271,10 @@ class TestConvertLinksToFootnotes:
         with pytest.raises(FootnoteSectionConflict):
             convert_links_to_footnotes(text, lambda: MagicMock())
 
-    def test_working_relative_link_with_base_dir_and_repo_root(self, tmp_path: Path) -> None:
+    def test_working_relative_link_with_base_dir_inside_repo_root(self, tmp_path: Path) -> None:
+        """base_dir must be INSIDE repo_root for a working link to be
+        emitted (code-review round, cross-repo safety) -- here base_dir
+        is repo_root itself, the simplest such case."""
         repo_root = tmp_path / "repo"
         (repo_root / "docs").mkdir(parents=True)
         e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="Doc", file_path="docs/x.md")
@@ -279,9 +282,26 @@ class TestConvertLinksToFootnotes:
         reader.get_owner_by_prefix.return_value = {"repo_root": str(repo_root)}
         text = "[x](nx://catalog/1.1.1)\n"
 
-        result = convert_links_to_footnotes(text, lambda: reader, base_dir=tmp_path)
+        result = convert_links_to_footnotes(text, lambda: reader, base_dir=repo_root)
 
-        assert "[repo/docs/x.md](repo/docs/x.md)." in result.text
+        assert "[docs/x.md](docs/x.md)." in result.text
+
+    def test_plain_text_fallback_when_base_dir_outside_repo_root(self, tmp_path: Path) -> None:
+        """base_dir OUTSIDE repo_root entirely -- falls back to the
+        plain (repo-relative) label, never a cross-repo link."""
+        repo_root = tmp_path / "repo"
+        (repo_root / "docs").mkdir(parents=True)
+        other_dir = tmp_path / "elsewhere"
+        other_dir.mkdir()
+        e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="Doc", file_path="docs/x.md")
+        reader = _fake_reader({"1.1.1": e1})
+        reader.get_owner_by_prefix.return_value = {"repo_root": str(repo_root)}
+        text = "[x](nx://catalog/1.1.1)\n"
+
+        result = convert_links_to_footnotes(text, lambda: reader, base_dir=other_dir)
+
+        assert "(repo-relative) `docs/x.md`." in result.text
+        assert str(repo_root) not in result.text
 
 
 # ── Reverse conversion ──────────────────────────────────────────────────────
@@ -297,7 +317,7 @@ class TestConvertFootnotesToLinks:
 
     def test_expands_marker_back_into_link(self) -> None:
         text = (
-            "tumbler 1.1.194[^tumbler-x]\n\n"
+            "[tumbler 1.1.194][^tumbler-x]\n\n"
             "## Footnotes\n\n"
             '[^tumbler-x]: nx catalog tumbler `1.1.194`. Title: "X". Content type: paper.\n'
         )
@@ -307,31 +327,48 @@ class TestConvertFootnotesToLinks:
 
     def test_unknown_slug_left_as_marker_and_reported(self) -> None:
         text = (
-            "orphan[^tumbler-ghost]\n\n"
+            "[orphan][^tumbler-ghost]\n\n"
             "## Footnotes\n\n"
             '[^tumbler-real]: nx catalog tumbler `1.1.1`. Title: "Real". Content type: paper.\n'
         )
         result = convert_footnotes_to_links(text)
-        assert "orphan[^tumbler-ghost]" in result.text  # left untouched
+        assert "[orphan][^tumbler-ghost]" in result.text  # left untouched
         assert len(result.dangling) == 1
         assert result.dangling[0].tumbler == "tumbler-ghost"
 
     def test_fenced_code_left_untouched(self) -> None:
         text = (
-            "```\nexample[^tumbler-x]\n```\n"
-            "real[^tumbler-x]\n\n"
+            "```\n[example][^tumbler-x]\n```\n"
+            "[real][^tumbler-x]\n\n"
             "## Footnotes\n\n"
             '[^tumbler-x]: nx catalog tumbler `1.1.1`. Title: "X". Content type: paper.\n'
         )
         result = convert_footnotes_to_links(text)
-        assert "example[^tumbler-x]" in result.text  # inside fence, untouched
+        assert "[example][^tumbler-x]" in result.text  # inside fence, untouched
         assert "[real](nx://catalog/1.1.1)" in result.text
+
+    def test_inline_code_span_example_left_untouched(self) -> None:
+        """Code-review round: a docs page quoting the marker syntax as
+        a literal example (inline backticks) must not be reverse-
+        converted -- it was never a real citation."""
+        text = (
+            "Example syntax: `[label][^tumbler-real]` is what it looks like.\n"
+            "Real one: [it works][^tumbler-real]\n\n"
+            "## Footnotes\n\n"
+            '[^tumbler-real]: nx catalog tumbler `1.1.1`. Title: "Real". Content type: paper.\n'
+        )
+        result = convert_footnotes_to_links(text)
+        assert "`[label][^tumbler-real]`" in result.text  # inline example untouched
+        assert "[it works](nx://catalog/1.1.1)" in result.text
 
 
 class TestRoundTrip:
     """Acceptance criterion: links -> footnotes -> --to-links reproduces
-    the original. EXACT whenever each citation is the first thing on its
-    own line (see the module docstring on the label-recovery boundary)."""
+    the original. Code-review round: EXACT regardless of what precedes
+    or follows a citation on its line, or how many citations share a
+    line -- see the module docstring's "Marker form and why" section
+    (the label stays bracketed, so the reverse regex needs no boundary
+    guess)."""
 
     def test_single_tumbler_round_trip(self) -> None:
         e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 194)), title="Attention Is All You Need")
@@ -343,6 +380,82 @@ class TestRoundTrip:
 
         assert back.text == original
         assert back.dangling == []
+
+    def test_mid_line_citation_round_trip(self) -> None:
+        """Code-review round finding 1: the common #896 case -- a
+        citation embedded mid-sentence, not alone at the start of its
+        line."""
+        e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="X")
+        reader = _fake_reader({"1.1.1": e1})
+        original = "As noted in the paper [x](nx://catalog/1.1.1), the technique works.\n"
+
+        footnoted = convert_links_to_footnotes(original, lambda: reader)
+        back = convert_footnotes_to_links(footnoted.text)
+
+        assert back.text == original
+        assert back.dangling == []
+
+    def test_multiple_citations_on_one_line_round_trip(self) -> None:
+        e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="Alpha")
+        e2 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 2)), title="Beta")
+        reader = _fake_reader({"1.1.1": e1, "1.1.2": e2})
+        original = "Compare [a](nx://catalog/1.1.1) with [b](nx://catalog/1.1.2) directly.\n"
+
+        footnoted = convert_links_to_footnotes(original, lambda: reader)
+        back = convert_footnotes_to_links(footnoted.text)
+
+        assert back.text == original
+        assert back.dangling == []
+
+    def test_label_containing_brackets_is_left_untouched_and_round_trips_trivially(self) -> None:
+        """A label with an embedded, unescaped ``]`` is a PRE-EXISTING
+        limitation of ``nexus.doc.catalog_links``'s own link-scanning
+        regex (``[^\\]\\n]+`` cannot match across a literal ``]``,
+        nested or not) -- unrelated to this module, and out of scope to
+        fix here. Documented, not silently broken: such a citation is
+        simply never recognized as a catalog link in the first place,
+        so it passes through both directions completely unchanged --
+        round-tripping trivially, by virtue of never being touched."""
+        e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="X")
+        reader = _fake_reader({"1.1.1": e1})
+        original = "[term [x]](nx://catalog/1.1.1) more text\n"
+
+        footnoted = convert_links_to_footnotes(original, lambda: reader)
+        assert footnoted.text == original  # never recognized as a link at all
+        assert footnoted.changed is False
+
+        back = convert_footnotes_to_links(footnoted.text)
+        assert back.text == original
+
+    def test_no_trailing_newline_round_trip(self) -> None:
+        """Code-review round: a source file with NO trailing newline at
+        all must come back with none after a full footnote-then-link
+        round trip."""
+        e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="X")
+        reader = _fake_reader({"1.1.1": e1})
+        original = "[x](nx://catalog/1.1.1)"  # no trailing \n
+
+        footnoted = convert_links_to_footnotes(original, lambda: reader)
+        assert not footnoted.text.endswith("\n\n")  # sanity: well-formed
+
+        back = convert_footnotes_to_links(footnoted.text)
+        assert back.text == original
+        assert not back.text.endswith("\n")
+
+    def test_crlf_round_trip(self) -> None:
+        """Code-review round: a CRLF file keeps CRLF line endings
+        through the whole round trip, and no masking artifact
+        (``\\x00``) ever reaches the output."""
+        e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="X")
+        reader = _fake_reader({"1.1.1": e1})
+        original = "[x](nx://catalog/1.1.1)\r\nsecond line\r\n"
+
+        footnoted = convert_links_to_footnotes(original, lambda: reader)
+        assert "\r\n" in footnoted.text
+        assert "\x00" not in footnoted.text
+
+        back = convert_footnotes_to_links(footnoted.text)
+        assert back.text == original
 
     def test_multi_tumbler_multi_line_round_trip(self) -> None:
         e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 194)), title="Attention Is All You Need")
@@ -362,6 +475,91 @@ class TestRoundTrip:
         back = convert_footnotes_to_links(footnoted.text)
         assert back.text == original
         assert back.dangling == []
+
+
+class TestRefreshOnly:
+    """GH #896 ask 1's ``--refresh``: only refresh EXISTING footnote
+    bodies against current catalog state; a brand-new raw link is left
+    completely untouched -- not converted, not resolved, not reported."""
+
+    def test_new_link_is_untouched_and_not_reported(self) -> None:
+        reader = _fake_reader({})  # would be dangling if attempted
+        text = "[brand new](nx://catalog/9.9.9)\n"
+
+        result = convert_links_to_footnotes(text, lambda: reader, refresh_only=True)
+
+        assert result.text == text
+        assert result.changed is False
+        assert result.dangling == []  # never attempted, so never reported
+
+    def test_existing_marker_body_still_refreshes(self) -> None:
+        e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="Original")
+        reader1 = _fake_reader({"1.1.1": e1})
+        text = "[x](nx://catalog/1.1.1)\n"
+        first = convert_links_to_footnotes(text, lambda: reader1)
+
+        e1_renamed = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="Refreshed")
+        reader2 = _fake_reader({"1.1.1": e1_renamed})
+        second = convert_links_to_footnotes(
+            first.text, lambda: reader2, refresh_only=True,
+        )
+
+        assert "[x][^tumbler-original]" in second.text  # marker unchanged
+        assert "Refreshed" in second.text
+        assert "Original" not in second.text.split("## Footnotes")[1]
+
+    def test_new_link_alongside_existing_marker_only_new_one_is_untouched(self) -> None:
+        e1 = _FakeEntry(tumbler=_FakeTumbler((1, 1, 1)), title="Known")
+        reader1 = _fake_reader({"1.1.1": e1})
+        first = convert_links_to_footnotes(
+            "[x](nx://catalog/1.1.1)\n", lambda: reader1,
+        )
+        body, footnotes_section = first.text.split("## Footnotes")
+        text_with_new_link = (
+            body + "[brand new](nx://catalog/9.9.9)\n\n"
+            "## Footnotes" + footnotes_section
+        )
+
+        reader2 = _fake_reader({"1.1.1": e1})  # unchanged
+        result = convert_links_to_footnotes(
+            text_with_new_link, lambda: reader2, refresh_only=True,
+        )
+
+        assert "[x][^tumbler-known]" in result.text  # existing marker refreshed/kept
+        assert "[brand new](nx://catalog/9.9.9)" in result.text  # new link untouched
+        assert result.dangling == []
+
+
+class TestStyleOption:
+    """GH #896 ask 1's ``--style``: 'long' (default) vs 'short' footnote
+    body verbosity."""
+
+    def test_short_style_is_title_and_tumbler_only(self) -> None:
+        e1 = _FakeEntry(
+            tumbler=_FakeTumbler((1, 1, 1)), title="A Paper", content_type="paper",
+            indexed_at="2026-01-01",
+        )
+        reader = _fake_reader({"1.1.1": e1})
+        text = "[x](nx://catalog/1.1.1)\n"
+
+        result = convert_links_to_footnotes(text, lambda: reader, style="short")
+
+        assert '[^tumbler-a-paper]: nx catalog tumbler `1.1.1`. Title: "A Paper".' in result.text
+        assert "Content type" not in result.text
+        assert "Indexed" not in result.text
+
+    def test_long_style_is_the_default_and_includes_more_detail(self) -> None:
+        e1 = _FakeEntry(
+            tumbler=_FakeTumbler((1, 1, 1)), title="A Paper", content_type="paper",
+            indexed_at="2026-01-01",
+        )
+        reader = _fake_reader({"1.1.1": e1})
+        text = "[x](nx://catalog/1.1.1)\n"
+
+        result = convert_links_to_footnotes(text, lambda: reader)  # default style
+
+        assert "Content type: paper." in result.text
+        assert "Indexed 2026-01-01." in result.text
 
 
 # ── CLI-level tests against the real engine substrate ───────────────────────
@@ -476,7 +674,12 @@ class TestFootnotesCliConversion:
         assert doc.read_text() == original
         assert "## Footnotes" not in doc.read_text()
 
-    def test_dangling_tumbler_left_as_link_reported_and_exits_nonzero(self, tmp_path: Path) -> None:
+    def test_dangling_tumbler_writes_nothing_reports_and_exits_1(self, tmp_path: Path) -> None:
+        """GH #896's own acceptance criterion, held literally
+        (code-review round): an unresolvable tumbler means NOTHING is
+        written for the file -- not even the surrounding text that
+        would have otherwise been left alone. Every failure is still
+        reported, and the file is byte-identical to before the run."""
         from nexus.catalog.http_catalog_client import HttpCatalogClient
         from nexus.commands.catalog import catalog
 
@@ -485,13 +688,39 @@ class TestFootnotesCliConversion:
             cat.delete_document(tumbler)
 
         doc = tmp_path / "src.md"
-        doc.write_text(f"line one\nline two [x](nx://catalog/{tumbler}) here\n")
+        original = f"line one\nline two [x](nx://catalog/{tumbler}) here\n"
+        doc.write_text(original)
 
         result = CliRunner().invoke(catalog, ["footnotes", str(doc)])
         assert result.exit_code == 1, result.output
         assert f"{doc}:2: unresolved tumbler {tumbler}" in result.output
-        # left as a link, not silently dropped
-        assert f"[x](nx://catalog/{tumbler})" in doc.read_text()
+        assert "not converted" in result.output
+        assert doc.read_text() == original  # NOTHING written
+
+    def test_mixed_resolvable_and_dangling_writes_nothing_at_all(self, tmp_path: Path) -> None:
+        """The literal 'no PARTIAL write' case: one tumbler resolves
+        fine, a second is dangling -- the whole file stays untouched,
+        including the citation that would have converted cleanly on
+        its own."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.commands.catalog import catalog
+
+        good_tumbler = _register_real_doc(title="Good Doc", owner_name="footnotes-cli-mixed-good")
+        bad_tumbler = _register_real_doc(title="Bad Doc", owner_name="footnotes-cli-mixed-bad")
+        with HttpCatalogClient() as cat:
+            cat.delete_document(bad_tumbler)
+
+        doc = tmp_path / "src.md"
+        original = (
+            f"[good](nx://catalog/{good_tumbler})\n"
+            f"[bad](nx://catalog/{bad_tumbler})\n"
+        )
+        doc.write_text(original)
+
+        result = CliRunner().invoke(catalog, ["footnotes", str(doc)])
+        assert result.exit_code == 1, result.output
+        assert f"unresolved tumbler {bad_tumbler}" in result.output
+        assert doc.read_text() == original  # not even the "good" one converted
 
     def test_check_treats_dangling_tumbler_as_failure(self, tmp_path: Path) -> None:
         from nexus.catalog.http_catalog_client import HttpCatalogClient
@@ -509,13 +738,93 @@ class TestFootnotesCliConversion:
         assert result.exit_code == 1, result.output
         assert doc.read_text() == original
 
+    def test_dry_run_shows_dangling_reference_without_writing(self, tmp_path: Path) -> None:
+        """--dry-run always shows the FULL picture, dangling references
+        included, even though the real write would be refused."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.commands.catalog import catalog
+
+        tumbler = _register_real_doc(title="Dry Run Dangling", owner_name="footnotes-cli-dry-dangling")
+        with HttpCatalogClient() as cat:
+            cat.delete_document(tumbler)
+
+        doc = tmp_path / "src.md"
+        original = f"[x](nx://catalog/{tumbler})\n"
+        doc.write_text(original)
+
+        result = CliRunner().invoke(catalog, ["footnotes", str(doc), "--dry-run"])
+        assert f"unresolved tumbler {tumbler}" in result.output
+        assert doc.read_text() == original
+
     def test_check_and_dry_run_are_mutually_exclusive(self, tmp_path: Path) -> None:
         from nexus.commands.catalog import catalog
 
         doc = tmp_path / "src.md"
         doc.write_text("plain prose\n")
         result = CliRunner().invoke(catalog, ["footnotes", str(doc), "--check", "--dry-run"])
-        assert result.exit_code != 0
+        assert result.exit_code == 2, result.output  # code-review round: flag misuse -> 2
+
+    def test_check_and_to_links_are_mutually_exclusive(self, tmp_path: Path) -> None:
+        from nexus.commands.catalog import catalog
+
+        doc = tmp_path / "src.md"
+        doc.write_text("plain prose\n")
+        result = CliRunner().invoke(catalog, ["footnotes", str(doc), "--check", "--to-links"])
+        assert result.exit_code == 2, result.output
+
+    def test_dry_run_and_to_links_together_is_allowed(self, tmp_path: Path) -> None:
+        """--dry-run + --to-links previews the REVERSE conversion --
+        an entirely legitimate, explicitly supported combination."""
+        from nexus.commands.catalog import catalog
+
+        tumbler = _register_real_doc(title="Dry Reverse Doc", owner_name="footnotes-cli-dry-reverse")
+        doc = tmp_path / "src.md"
+        original_link = f"[x](nx://catalog/{tumbler})\n"
+        doc.write_text(original_link)
+
+        runner = CliRunner()
+        assert runner.invoke(catalog, ["footnotes", str(doc)]).exit_code == 0
+        converted = doc.read_text()
+        assert "## Footnotes" in converted
+
+        result = runner.invoke(catalog, ["footnotes", str(doc), "--to-links", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert doc.read_text() == converted  # nothing written
+        assert "+" in result.output or "-" in result.output  # a diff was printed
+
+    def test_refresh_and_to_links_are_mutually_exclusive(self, tmp_path: Path) -> None:
+        from nexus.commands.catalog import catalog
+
+        doc = tmp_path / "src.md"
+        doc.write_text("plain prose\n")
+        result = CliRunner().invoke(catalog, ["footnotes", str(doc), "--refresh", "--to-links"])
+        assert result.exit_code == 2, result.output
+
+    def test_refresh_flag_leaves_new_link_untouched(self, tmp_path: Path) -> None:
+        from nexus.commands.catalog import catalog
+
+        tumbler = _register_real_doc(title="Refresh New Doc", owner_name="footnotes-cli-refresh-new")
+        doc = tmp_path / "src.md"
+        original = f"[x](nx://catalog/{tumbler})\n"
+        doc.write_text(original)
+
+        result = CliRunner().invoke(catalog, ["footnotes", str(doc), "--refresh"])
+        assert result.exit_code == 0, result.output
+        assert doc.read_text() == original  # brand-new link untouched
+        assert "already up to date" in result.output
+
+    def test_style_short_option_produces_shorter_footnote_body(self, tmp_path: Path) -> None:
+        from nexus.commands.catalog import catalog
+
+        tumbler = _register_real_doc(title="Short Style Doc", owner_name="footnotes-cli-style-short")
+        doc = tmp_path / "src.md"
+        doc.write_text(f"[x](nx://catalog/{tumbler})\n")
+
+        result = CliRunner().invoke(catalog, ["footnotes", str(doc), "--style", "short"])
+        assert result.exit_code == 0, result.output
+        body = doc.read_text()
+        assert "Short Style Doc" in body
+        assert "Content type" not in body
 
     def test_service_outage_exits_2(self, tmp_path: Path) -> None:
         from unittest.mock import patch
@@ -532,3 +841,41 @@ class TestFootnotesCliConversion:
             result = CliRunner().invoke(catalog, ["footnotes", str(doc)])
         assert result.exit_code == 2, result.output
         assert "catalog" in result.output.lower()
+
+
+class TestStrictUtf8AndAtomicWrite:
+    """nexus-3ioz2 (CRITICAL, code-review round): the source file is
+    read as strict UTF-8, never ``errors="replace"`` (which silently
+    corrupts non-UTF-8 bytes and writes the corruption back over the
+    original), and written atomically."""
+
+    def test_invalid_utf8_bytes_refused_file_untouched(self, tmp_path: Path) -> None:
+        doc = tmp_path / "src.md"
+        # 0xFF is not valid UTF-8 anywhere; a real link is present too,
+        # so a lossy read-and-rewrite would have silently corrupted it.
+        invalid_bytes = b"[x](nx://catalog/1.1.1) \xff\xfe binary garbage\n"
+        doc.write_bytes(invalid_bytes)
+
+        from nexus.commands.catalog import catalog
+
+        result = CliRunner().invoke(catalog, ["footnotes", str(doc)])
+        assert result.exit_code == 2, result.output
+        assert "not valid UTF-8" in result.output
+        # byte-identical afterward -- not even a partial/lossy rewrite.
+        assert doc.read_bytes() == invalid_bytes
+
+    def test_write_uses_a_sibling_tmp_file_then_replaces(self, tmp_path: Path) -> None:
+        """Mirrors nexus.commands.t3._save_backfill_state's tmp+rename
+        pattern -- proven here by asserting no stray .tmp file survives
+        a successful run (Path.replace() consumed it) and the final
+        content is exactly what conversion produced."""
+        from nexus.commands.catalog import catalog
+
+        tumbler = _register_real_doc(title="Atomic Write Doc", owner_name="footnotes-cli-atomic")
+        doc = tmp_path / "src.md"
+        doc.write_text(f"[x](nx://catalog/{tumbler})\n")
+
+        result = CliRunner().invoke(catalog, ["footnotes", str(doc)])
+        assert result.exit_code == 0, result.output
+        assert not doc.with_suffix(".tmp").exists()
+        assert "Atomic Write Doc" in doc.read_text()

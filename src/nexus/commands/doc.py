@@ -318,7 +318,7 @@ def _append_catalog_link_footnotes(
     """GH #896: append a footnote block resolving every
     ``nx://catalog/<tumbler>`` link to its catalog entry (title,
     content type, owner, and a working link — see
-    ``nexus.doc.catalog_links._safe_link_target`` for the never-a-
+    ``nexus.doc.catalog_links.safe_link_target`` for the never-a-
     machine-local-path rule).
 
     Mirrors ``_append_chash_footnotes``'s sibling-lookup and dedup-by-

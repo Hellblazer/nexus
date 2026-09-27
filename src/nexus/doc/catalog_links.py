@@ -38,7 +38,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 # nexus-w715w round 2: single source of truth for which source_uri
 # schemes the catalog recognizes at all (register-boundary validation,
@@ -274,10 +274,16 @@ def scan_and_resolve_catalog_links(
 #: `_KNOWN_URI_SCHEMES` (the catalog's full register-boundary allowlist):
 #: excludes ``file`` (a host-local path — the very thing this helper
 #: exists to never leak), ``chroma`` (retired substrate, RDR-155 P4b —
-#: nothing resolves it), and ``nx-orphan-backfill`` (an internal marker
-#: with nothing to follow — see `_KNOWN_URI_SCHEMES`'s own comment).
+#: nothing resolves it), ``nx-orphan-backfill`` (an internal marker with
+#: nothing to follow — see `_KNOWN_URI_SCHEMES`'s own comment), and
+#: ``nx-scratch`` (code-review round: T1 scratch is SESSION-scoped —
+#: a ``nx-scratch://`` URI is unresolvable by anyone outside the
+#: session that wrote it, including the reader of a rendered doc
+#: minutes or days later, so it is not a "working link" by this
+#: function's own contract; entries carrying only a scratch source get
+#: the file_path fallback or no link, same as any other unsafe source).
 _LINK_SAFE_SCHEMES: frozenset[str] = _KNOWN_URI_SCHEMES - {
-    "file", "chroma", "nx-orphan-backfill",
+    "file", "chroma", "nx-orphan-backfill", "nx-scratch",
 }
 
 #: A Windows drive-letter absolute path (``C:\...`` or ``C:/...``).
@@ -293,24 +299,35 @@ def _looks_unsafe_relative_path(raw: str) -> bool:
     ``~``-relative or upward-escaping (``../..``) path reads as
     "relative" everywhere despite not staying inside the repo. This
     classifier is purely CONTENT-based (string patterns), so it catches
-    all four regardless of the host OS running the check:
+    all these regardless of the host OS running the check:
 
     * POSIX absolute (``/...``) or ``~``-relative.
     * UNC (``\\\\server\\share`` or ``//server/share``).
     * Windows drive-letter absolute (``C:\\...`` / ``C:/...``).
     * Any path whose ``..`` segments, once normalized across both ``/``
       and ``\\`` separators, would climb above the path's own start.
+
+    Code-review round: classification runs against ``unquote(raw)``,
+    not *raw* itself — a percent-encoded traversal (``%2e%2e%2f``) is
+    invisible to every literal check above until decoded, and a
+    catalog ``file_path`` is caller-supplied (the register/update
+    boundary), so this is reachable. *raw* itself is unaffected — the
+    decoded form is used ONLY to decide safety; a safe value is still
+    joined/displayed using its original (possibly still-encoded)
+    bytes, since real filesystem paths are not URL-decoded by this
+    function.
     """
-    if not raw:
+    decoded = unquote(raw)
+    if not decoded:
         return True
-    if raw.startswith(("/", "~")):
+    if decoded.startswith(("/", "~")):
         return True
-    if raw.startswith("\\\\") or raw.startswith("//"):
+    if decoded.startswith("\\\\") or decoded.startswith("//"):
         return True
-    if _DRIVE_LETTER_RE.match(raw):
+    if _DRIVE_LETTER_RE.match(decoded):
         return True
     depth = 0
-    for part in re.split(r"[\\/]+", raw):
+    for part in re.split(r"[\\/]+", decoded):
         if part in ("", "."):
             continue
         if part == "..":
@@ -391,12 +408,23 @@ def safe_link_target(
 
     if repo_root and base_dir is not None:
         try:
-            abs_target = (Path(repo_root) / file_path).resolve()
-            rel = os.path.relpath(abs_target, Path(base_dir).resolve())
+            repo_root_resolved = Path(repo_root).resolve()
+            base_dir_resolved = Path(base_dir).resolve()
+            # Code-review round: a working relative link is only safe to
+            # emit when the citing file is actually INSIDE this entry's
+            # own repo — otherwise the "relative" link is a "../../.."
+            # traversal into an entirely different repository's
+            # filesystem layout, which is exactly the kind of local-
+            # machine-topology leak this function exists to prevent
+            # (see the module docstring precedent for source_uri). Cross-
+            # repo falls back to the plain, non-clickable label below,
+            # same as "repo_root/base_dir unknown".
+            if base_dir_resolved.is_relative_to(repo_root_resolved):
+                abs_target = (repo_root_resolved / file_path).resolve()
+                rel = os.path.relpath(abs_target, base_dir_resolved)
+                return SafeLinkTarget(text=rel, is_link=True)
         except (OSError, ValueError):
-            rel = None
-        if rel is not None:
-            return SafeLinkTarget(text=rel, is_link=True)
+            pass
     return SafeLinkTarget(text=file_path, is_link=False)
 
 
