@@ -1603,10 +1603,10 @@
 
     <!--
         Bead nexus-l46pu (follow-up to nexus-kk4ut): nexus.catalog_collections
-        gains aspects_enabled BOOLEAN NOT NULL DEFAULT FALSE, the tenant-wide
-        home for the docs__ aspect-extraction opt-in, replacing per-machine
-        config.yml as the durable source of truth. See the included file's own
-        header for the default-preservation reasoning. Placed after catalog-039
+        gains aspects_enabled BOOLEAN NULL (no default: NULL means nobody set
+        it, so the local config.yml opt-in still applies), the tenant-wide home
+        for the docs__ aspect-extraction opt-in. See the included file's own
+        header for why it is nullable. Placed after catalog-039
         (the tail when it landed) and before the grants-nexus-svc.xml runAlways
         block, matching the established late-append convention.
     -->
@@ -1616,8 +1616,7 @@
         nexus-1vc0n: partial (tenant_id, file_path) index for the new bulk
         owner-agnostic file_path lookup (documentsByFilePaths,
         POST /v1/catalog/list_by_file_paths) — see the included file's own
-        header. catalog-040 is reserved for a different, already-in-flight
-        bead; catalog-041 is the first genuinely untouched number past it.
+        header. catalog-040 is nexus-l46pu's (included just above).
         Placed after catalog-039 (the tail when this landed) and before the
         grants-nexus-svc.xml runAlways block, matching the established
         late-append convention.

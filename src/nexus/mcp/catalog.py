@@ -316,7 +316,7 @@ def catalog_list(
 # (a custom scheme, https://, nx-scratch://) to store verbatim. Malformed
 # URIs raise at register-time.
 #
-# HISTORY (nexus-0ne1m critique, 40c235f69 Critical): record_https_etag
+# HISTORY (nexus-0ne1m critique, 6908c29b5 Critical): record_https_etag
 # below adds one bounded, best-effort outbound HEAD for an https:// source_uri
 # -- see its own docstring (nexus.aspect_readers) for the full contract. The
 # tool's own docstring states the side effect in caller-facing terms; this
