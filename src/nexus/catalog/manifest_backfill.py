@@ -136,11 +136,20 @@ Edge-case contracts:
     chash as its own identity could be wrongly manifested as that chunk's
     owner (a genuine misattribution, not just a missed rescue), and (b)
     gave the operator no diagnostic for the gap at all. This round closes
-    (a) unconditionally. For (b) — a chash whose true forward owner is
-    live but registered elsewhere is reported via
+    (a) unconditionally. For (b), only PARTIALLY: a chash whose true
+    forward owner is live but registered elsewhere is reported via
     ``BackfillResult.docs_cross_collection_forward_owner_skipped`` (plus a
     structured warning naming the chash and the owner's tumbler and
-    collection) rather than silently dropped: the write itself is legal
+    collection) ONLY when a note in this collection also claims that
+    chash in reverse, because only reverse candidates are examined here.
+    The general case, a forward-owned-elsewhere chunk no note claims, is
+    invisible to this document-driven pass: its owner is never iterated,
+    so it surfaces nowhere in this result and the counter reads 0. The
+    census (``nx t3 census-manifest-less`` or the standalone SQL) is the
+    only complete detector: an operator must check its legacy-unmanifested
+    items for an owner registered in a different collection before relying
+    on backfill, and the closing ``--require-zero legacy-unmanifested``
+    run catches anything left. The write itself would be legal
     (``fk_catalog_chunks_chunk`` keys on ``(tenant_id, collection, chash)``,
     not on the owning document's own registered collection — the SAME
     schema shape the census's own rename-copy scenario already relies on),
@@ -340,8 +349,10 @@ class BackfillResult:
     # this chash into that owner from this collection-scoped, document-
     # driven pass (see the module docstring's PRECEDENCE, TENANT-WIDE
     # section) -- reported here rather than silently dropped or wrongly
-    # attributed. Non-vacuity: an operator whose live tenant holds this
-    # shape must SEE this count rise, never a silent 0.
+    # attributed. Coverage is partial: only chashes a note in this
+    # collection also claims in reverse are examined, so 0 does NOT mean
+    # the tenant has no forward-owned-elsewhere legacy-unmanifested chunks;
+    # the census is the complete check.
     docs_cross_collection_forward_owner_skipped: int = 0
     # nexus-wbfpw.7 fix-round-1 (T2 nexus/review-wbfpw7-code Important):
     # count reverse candidates dropped because the winning note's own

@@ -1811,6 +1811,35 @@ class TestWbfpw7ReverseNotesDiscovery:
         # be granted regardless of the true owner's collection.
         assert active_catalog.get_manifest(note) == []
 
+    def test_tombstoned_forward_owner_does_not_block_reverse_rescue(
+        self, active_catalog, t3_db,
+    ):
+        """Round-2 review suggestion: a forward pointer naming a TOMBSTONED
+        document must not exclude reverse candidacy. The census rescues
+        such a chunk through a live note (a live owner beats a dead one),
+        so backfill must manifest it into that note, exactly as when the
+        forward pointer is absent."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll("knowledge")
+        chash = "4" * 64
+        dead_doc = _register_doc(active_catalog, coll)
+        note = _register_note_doc(active_catalog, coll, chash)
+        _seed_chunk(
+            t3_db, collection=coll,
+            content="rescued by a live note", doc_id=dead_doc,
+            chunk_index=0, chunk_text_hash=chash,
+        )
+        active_catalog.delete_document(dead_doc)
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_reverse_discovered == 1
+        assert result.docs_cross_collection_forward_owner_skipped == 0
+        assert [r.chash for r in active_catalog.get_manifest(note)] == [chash]
+
     def test_reverse_multi_piece_note_is_skipped_not_partially_healed(
         self, active_catalog, t3_db,
     ):
