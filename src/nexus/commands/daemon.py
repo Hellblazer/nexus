@@ -588,6 +588,19 @@ def ensure_storage_supervisor(config_dir: Path):
 
     spawn_log = open_child_log_or_devnull("storage_service.crash", config_dir)
     try:
+        # nexus-6y4e0 surveyed this site and left it unwired for two
+        # independent reasons: (1) the supervisor this spawns is stopped by
+        # a LATER, separate CLI invocation (``nx daemon service stop``)
+        # reading its pid from the lease registry, not by this process --
+        # the same cross-process shape as the mineru spawn in
+        # _mineru_spawn.py, which a Windows job-object handle held only in
+        # THIS process's memory cannot reach; and (2) the supervisor class
+        # itself (``storage_service_daemon.StorageServiceSupervisor``) calls
+        # ``os.getuid()`` unconditionally at construction and does not run
+        # on native Windows at all (its own module docstring says so) --
+        # RDR-218's Windows story is a WSL2 appliance, a real POSIX
+        # environment, so this spawn site is dead code from a native-
+        # Windows-client perspective regardless of containment.
         _popen(
             argv,
             stdin=subprocess.DEVNULL,  # detached daemon: never inherit a TTY stdin (avoids read-block / dangling fd)

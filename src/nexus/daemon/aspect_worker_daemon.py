@@ -651,6 +651,12 @@ def ensure_aspect_worker_daemon(
         # lost to DEVNULL. Inherited env: NO env= override.
         spawn_log = open_child_log_or_devnull("aspect_worker_daemon.crash", config_dir)
         try:
+            # nexus-6y4e0 surveyed this site and left it unwired: this
+            # spawn is never killed by pid at all -- the daemon it starts
+            # is retired by LEASE FENCING (a newer-generation daemon claims
+            # the lease and the stale one exits on its own next heartbeat,
+            # per this function's own docstring), not by anything signalling
+            # this pid. There is no kill call site for containment to serve.
             proc = _popen(
                 argv,
                 stdin=subprocess.DEVNULL,

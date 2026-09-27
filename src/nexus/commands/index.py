@@ -2380,6 +2380,10 @@ def _spawn_deferred_labeling() -> bool:
         log_dir = nexus_config_dir() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log = open(log_dir / "deferred_labeling.log", "ab")  # noqa: SIM115 — handed to the child for its lifetime
+        # nexus-6y4e0 surveyed this site and left it unwired: nothing ever
+        # kills this child by pid -- it is a pure fire-and-forget spawn
+        # (the caller returns immediately and never records the pid at
+        # all). There is no kill call site for containment to serve.
         subprocess.Popen(
             [sys.executable, "-m", "nexus.cli", "taxonomy", "label"],
             stdin=subprocess.DEVNULL,

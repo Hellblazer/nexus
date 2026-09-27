@@ -1205,6 +1205,13 @@ class StorageServiceSupervisor:
         except OSError:
             self._log_offset_at_spawn = 0
         try:
+            # nexus-6y4e0 surveyed this site and left it unwired: this
+            # class's own __init__ calls os.getuid() unconditionally (see
+            # self._scope above), so StorageServiceSupervisor cannot even
+            # be constructed on native Windows, let alone reach this spawn
+            # -- RDR-218's Windows story runs the storage service inside a
+            # WSL2 appliance (a real POSIX environment), never natively.
+            # Windows job-object containment is therefore moot here.
             proc = _popen(
                 argv,
                 env=env,
