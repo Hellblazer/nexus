@@ -238,6 +238,70 @@ def test_windows_branch_reports_process_reach_without_raising(
     )
 
 
+def test_windows_branch_with_a_job_closes_it_for_group_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-6y4e0: with a job handle (from ``process_group.contain`` at
+    spawn), the Windows branch closes the JOB rather than killing only the
+    direct child, and reports the stronger ``"group"`` reach -- the
+    tree-kill this bead adds. Windows-shaped via a fake kernel32 (see
+    tests/test_win_job.py); no real Windows box involved.
+    """
+    from nexus.util import win_job
+    from tests.test_win_job import _FakeKernel32
+
+    monkeypatch.delattr(os, "killpg", raising=True)
+    monkeypatch.setattr(win_job, "IS_WINDOWS", True)
+    fake = _FakeKernel32()
+    monkeypatch.setattr(win_job, "_kernel32", fake)
+
+    killed: list[bool] = []
+
+    class _FakeProc:
+        pid = 4321
+        args = ["fake"]
+
+        def kill(self) -> None:
+            killed.append(True)
+
+    job = fake._mint()
+    assert kill_child_and_descendants(_FakeProc(), job) == "group"  # type: ignore[arg-type]
+    assert job in fake.closed_handles
+    assert killed == [], (
+        "the direct child must NOT be separately .kill()ed when the job "
+        "close already reached the whole tree"
+    )
+
+
+def test_windows_branch_falls_back_to_process_when_job_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job handle that fails to close (already gone, or a genuine API
+    failure) must not be treated as success -- fall back to killing the
+    direct child, same as having no job at all."""
+    from nexus.util import win_job
+    from tests.test_win_job import _FakeKernel32
+
+    monkeypatch.delattr(os, "killpg", raising=True)
+    monkeypatch.setattr(win_job, "IS_WINDOWS", True)
+    fake = _FakeKernel32()
+    fake.close_ok = False
+    monkeypatch.setattr(win_job, "_kernel32", fake)
+
+    killed: list[bool] = []
+
+    class _FakeProc:
+        pid = 4321
+        args = ["fake"]
+
+        def kill(self) -> None:
+            killed.append(True)
+
+    job = fake._mint()
+    assert kill_child_and_descendants(_FakeProc(), job) == "process"  # type: ignore[arg-type]
+    assert killed == [True]
+
+
 def test_already_dead_child_reports_none(monkeypatch: pytest.MonkeyPatch) -> None:
     class _GoneProc:
         pid = 4321

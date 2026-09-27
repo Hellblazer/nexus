@@ -1962,6 +1962,8 @@ def _run_claude_isolated(
         # itself, which is synchronous), so closing our handle the
         # moment Popen() returns is safe -- mirrors
         # _spawn_with_prompt_file's identical close-immediately shape.
+        from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
         with open(prompt_path, "rb") as prompt_file:
             proc = subprocess.Popen(
                 argv,
@@ -1969,17 +1971,21 @@ def _run_claude_isolated(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                start_new_session=True,
                 env=child_env,
                 preexec_fn=(_pdeathsig.set_pdeathsig_preexec if _pdeathsig.LIBC is not None else None),
+                **isolation_popen_kwargs(),
             )
+        # nexus-6y4e0: Windows job-object containment, assigned right after
+        # spawn. No-op (returns None) on POSIX, where start_new_session=True
+        # above already makes the child a killable group.
+        job = contain(proc)
         try:
             # No `input=` -- stdin is no longer a PIPE, so there is
             # nothing left to feed; the data is already on disk and was
             # redirected in at spawn time above.
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _kill_process_group(proc)
+            _kill_process_group(proc, job)
             with contextlib.suppress(Exception):
                 proc.communicate(timeout=5)  # reap the killed group
             raise
@@ -1989,13 +1995,13 @@ def _run_claude_isolated(
             prompt_path.unlink(missing_ok=True)
 
 
-def _kill_process_group(proc: subprocess.Popen) -> None:
-    """Hard-kill the child's whole process group; fall back to killing just
-    the child if the group is already gone, or on Windows, where there is no
-    group (nexus-34f7r)."""
-    from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+def _kill_process_group(proc: subprocess.Popen, job: int | None = None) -> None:
+    """Hard-kill the child's whole tree: the process group on POSIX, the
+    Windows job object when *job* is not ``None`` (nexus-6y4e0), or just the
+    child otherwise -- the pre-nexus-6y4e0 degraded reach (nexus-34f7r)."""
+    from nexus.util.process_group import kill_tree  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    if not safe_killpg(proc):
+    if not kill_tree(proc, job):
         with contextlib.suppress(Exception):
             proc.kill()
 

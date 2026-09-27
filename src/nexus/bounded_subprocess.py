@@ -101,13 +101,15 @@ It is "there is no group; kill the process and say so" — :func:`kill_child_
 and_descendants` returns the reach it actually achieved, and the caller
 logs it, so a Windows timeout is visibly weaker rather than quietly weaker.
 
-The known Windows equivalent is a Job Object, or ``CREATE_NEW_PROCESS_
-GROUP`` plus ``taskkill /T /F``. Neither is implemented here and this is
-deliberate: nobody on this project has run either on Windows, adding an
-unverified ``taskkill`` spawn INSIDE a timeout handler adds a second
-unbounded call to the path that is already hanging, and this repo has spent
-two days on confident wrong mechanisms in this exact area. It belongs to
-nexus-34f7r, behind a measurement.
+REAL WINDOWS CONTAINMENT (nexus-6y4e0): a Job Object, assigned to the child
+right after spawn via :func:`nexus.util.process_group.contain`. Every
+descendant the child spawns afterward joins the same job automatically, so
+:func:`kill_child_and_descendants` reaching the job (via
+:func:`nexus.util.process_group.kill_tree`) reaches the whole tree, not
+just the direct child — closing the job's last handle terminates every
+process still assigned to it (``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE``). No
+``taskkill`` spawn, so the "second unbounded call inside a timeout handler"
+concern above does not apply: closing a handle is not a subprocess.
 """
 
 from __future__ import annotations
@@ -135,7 +137,9 @@ REAP_TIMEOUT_S: float = 5.0
 KillReach = Literal["group", "process", "none"]
 
 
-def kill_child_and_descendants(proc: subprocess.Popen[Any]) -> KillReach:
+def kill_child_and_descendants(
+    proc: subprocess.Popen[Any], job: int | None = None,
+) -> KillReach:
     """SIGKILL ``proc``'s whole process group, returning the reach achieved.
 
     This is the single named platform branch for "stop this child and
@@ -143,10 +147,17 @@ def kill_child_and_descendants(proc: subprocess.Popen[Any]) -> KillReach:
     builds on this function rather than beside it, so the AttributeError
     fact below has one home.
 
-    Returns ``"group"`` when the process group was signalled, ``"process"``
-    when only the direct child could be killed (always the case on Windows,
-    where ``os.killpg`` does not exist), and ``"none"`` when the child was
-    already gone.
+    *job* is the Windows job-object handle :func:`run_bounded` obtained
+    from :func:`nexus.util.process_group.contain` at spawn time (``None``
+    on POSIX, or when containment could not be established). When
+    present, it is closed instead of killing only the direct child —
+    nexus-6y4e0's actual tree reach on Windows, where there is no process
+    group to fall back to.
+
+    Returns ``"group"`` when the process group (POSIX) or job object
+    (Windows, *job* not ``None``) was signalled/closed, ``"process"`` when
+    only the direct child could be killed (Windows with no job — the
+    pre-nexus-6y4e0 reach), and ``"none"`` when the child was already gone.
 
     CALLER CONTRACT: ``proc`` was spawned with ``start_new_session=True``,
     which is what :func:`run_bounded` does. That makes the child a session
@@ -169,10 +180,15 @@ def kill_child_and_descendants(proc: subprocess.Popen[Any]) -> KillReach:
     """
     killpg = getattr(os, "killpg", None)
     if killpg is None:
-        # Windows. Not a failure to be retried or fallen back from -- the
-        # primitive is absent, and start_new_session was ignored at spawn,
-        # so there was never a group. Kill the child and report the weaker
-        # reach honestly.
+        # Windows. No process group -- but nexus-6y4e0 (job): if run_bounded
+        # obtained a job object at spawn, closing it reaches the whole tree.
+        from nexus.util.process_group import kill_tree  # noqa: PLC0415 — deferred: avoids import-time cost on the POSIX-only path above
+
+        if job is not None and kill_tree(proc, job):
+            return "group"
+        # No job (containment failed or was never attempted), or the job
+        # close itself failed (job already gone). Kill the direct child and
+        # report the weaker reach honestly.
         try:
             proc.kill()
         except (ProcessLookupError, PermissionError, OSError):
@@ -243,6 +259,8 @@ def run_bounded(
     if input is not None and stdin is not None:
         raise ValueError("run_bounded: pass input= or stdin=, not both")
 
+    from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 — deferred: avoids import-time cost on the hot common path
+
     proc = subprocess.Popen(  # noqa: S603 - argv is a sequence, never a shell string
         argv,
         stdin=subprocess.PIPE if input is not None else stdin,
@@ -251,15 +269,22 @@ def run_bounded(
         text=text,
         cwd=cwd,
         env=env,
-        # POSIX: makes the child a session/group leader so the whole group
-        # is killable as a unit. Windows: accepted and ignored -- see the
-        # module docstring; kill_child_and_descendants owns that fact.
-        start_new_session=True,
+        # POSIX: start_new_session=True -- makes the child a session/group
+        # leader so the whole group is killable as a unit. Windows:
+        # creationflags=CREATE_NEW_PROCESS_GROUP -- see the module
+        # docstring; kill_child_and_descendants owns the platform split.
+        **isolation_popen_kwargs(),
     )
+    # nexus-6y4e0: assign to a Windows job object right away, so every
+    # descendant this child spawns from here on joins it automatically. A
+    # no-op returning None on POSIX (the process group above already
+    # contains the tree) or on any Windows failure (degrades to the
+    # single-process reach kill_child_and_descendants already reported).
+    job = contain(proc)
     try:
         out, err = proc.communicate(input=input, timeout=timeout)
     except subprocess.TimeoutExpired:
-        reach = kill_child_and_descendants(proc)
+        reach = kill_child_and_descendants(proc, job)
         with contextlib.suppress(Exception):
             proc.communicate(timeout=REAP_TIMEOUT_S)
         _log.warning(
