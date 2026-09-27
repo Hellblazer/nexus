@@ -77,8 +77,27 @@ FALLBACK_PLUGINS: tuple[str, ...] = ("conexus", "sn")
 def _plugin_names(data: object) -> tuple[str, ...] | None:
     """Plugin short names from parsed marketplace.json content, or
     ``None`` for any unexpected shape (missing/non-list ``plugins``, no
-    usable names)."""
+    usable names, or a top-level ``"name"`` that is not
+    :data:`MARKETPLACE_NAME`).
+
+    The name check matters for route 2 (:func:`_dev_checkout_path`): it
+    walks up TWO parents from this file and trusts whatever
+    ``.claude-plugin/marketplace.json`` it finds there with no further
+    check. For the two install shapes this repo actually ships (an
+    editable dev checkout, or an isolated venv with an empty
+    ``lib/python3.12``) that always either lands on this repo's own
+    marketplace.json or on nothing -- but a flatter/vendored install
+    (e.g. ``pip install --target``, or ``PYTHONPATH`` vendoring two
+    directories under an unrelated project that happens to itself be a
+    Claude Code marketplace root) could otherwise satisfy the walk-up
+    with someone else's marketplace.json and silently report ITS plugin
+    set instead (code-review finding, 2026-09-27). Applied uniformly here
+    (not just on route 2) since :func:`_read` is the one reader shared by
+    every route (env override, dev checkout, installed clone) -- cheap
+    insurance on all three for one check."""
     if not isinstance(data, dict):
+        return None
+    if data.get("name") != MARKETPLACE_NAME:
         return None
     plugins = data.get("plugins")
     if not isinstance(plugins, list):

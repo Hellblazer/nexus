@@ -220,6 +220,24 @@ def _marketplace_json_path() -> Path | None:
     return Path(root).parent / ".claude-plugin" / "marketplace.json"
 
 
+def _warn_fallback(reason: str) -> None:
+    """Unconditional one-line notice on the marketplace.json fallback
+    path, printed to STDERR regardless of ``NX_HOOK_DEBUG``.
+
+    Follow-up (code review, 2026-09-27): this module's fallback used to
+    be reachable ONLY through :func:`debug`, which prints nothing unless
+    ``NX_HOOK_DEBUG=1`` (off by default) -- so by default the fallback
+    WAS the silent-skip failure this whole derivation exists to catch,
+    in the exact SessionStart surface meant to catch drift every
+    session. SessionStart's own stdout carries the additionalContext
+    JSON payload (see :func:`main`) and must stay clean; stderr is safe
+    -- the harness does not read it, and it is where :func:`debug`'s own
+    output already goes.
+    """
+    print(f"[version-lockstep-hook] falling back to built-in plugin set "
+          f"{_FALLBACK_PLUGINS}: {reason}", file=sys.stderr)
+
+
 def known_plugins() -> tuple[str, ...]:
     """Plugin short names ``.claude-plugin/marketplace.json`` currently
     lists, read from the clone next to ``CLAUDE_PLUGIN_ROOT`` (see
@@ -230,19 +248,25 @@ def known_plugins() -> tuple[str, ...]:
     marketplace.json, so the two stay in agreement without a shared
     import.
 
-    Missing/unreadable/malformed -> :data:`_FALLBACK_PLUGINS`, logged via
-    :func:`debug` -- the same fail-open posture every other reader in
-    this file takes: this is a self-heal input (this session's plugin
-    lockstep check), never a session-blocking read, so "cannot tell" is
-    never an error here.
+    Missing/unreadable/malformed -> :data:`_FALLBACK_PLUGINS`. This is a
+    self-heal input (this session's plugin lockstep check), never a
+    session-blocking read, so "cannot tell" is never an error here -- but
+    it is NEVER a silent skip: the fallback is unconditionally reported
+    via :func:`_warn_fallback` (stderr, every time, not gated on
+    ``NX_HOOK_DEBUG``), on top of the granular ``NX_HOOK_DEBUG=1``
+    diagnostics :func:`debug` still prints along the way.
     """
     path = _marketplace_json_path()
-    if path is not None:
+    if path is None:
+        reason = "CLAUDE_PLUGIN_ROOT unset; cannot locate marketplace.json"
+    else:
         try:
             data = json.loads(path.read_text())
         except (OSError, ValueError) as exc:
-            debug(f"could not read marketplace.json at {path}: {exc}")
             data = None
+            reason = f"could not read marketplace.json at {path}: {exc}"
+        else:
+            reason = f"marketplace.json at {path} had no usable plugins list"
         if isinstance(data, dict):
             plugins = data.get("plugins")
             if isinstance(plugins, list):
@@ -252,10 +276,8 @@ def known_plugins() -> tuple[str, ...]:
                 )
                 if names:
                     return names
-        debug(f"marketplace.json at {path} had no usable plugins list")
-    else:
-        debug("CLAUDE_PLUGIN_ROOT unset; cannot locate marketplace.json")
-    debug(f"falling back to the built-in plugin set {_FALLBACK_PLUGINS}")
+    debug(f"falling back to the built-in plugin set {_FALLBACK_PLUGINS}: {reason}")
+    _warn_fallback(reason)
     return _FALLBACK_PLUGINS
 
 

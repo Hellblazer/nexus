@@ -300,18 +300,26 @@ Cross-walk against:
 
 Update any drift before bumping version. Doc audit is what catches "we changed the wire format but forgot to document it."
 
-### 3. Bump version in ALL SEVEN bump targets
+### 3. Bump version in ALL EIGHT bump targets
 
-CI enforces parity. Missing any one of these fails the marketplace-version-matches-pyproject test, the marketplace-source-ref-matches-pyproject test, or the mcpb-manifest-version-matches-pyproject test.
+CI enforces parity on all but two of these (`conexus/.claude-plugin/plugin.json` has no
+dedicated test yet, and `conexus/PENDING_RELEASE.md` is a drift ledger, not a version
+field — see `AGENTS.md` § Release cadence policy rule 6 and `docs/contributing.md` §
+Release Process Step 7 for the exact enumeration these agree on, nexus-smsau 2026-09-27).
+Missing any one of the six CI-enforced ones fails the marketplace-version-matches-pyproject
+test, the marketplace-source-ref-matches-pyproject test, the mcpb-manifest-version-matches-
+pyproject test, the sn-version-matches-plugin-json/pyproject tests, or the
+uv-lock-version-matches-pyproject test.
 
 - `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
 - `mcpb/pyproject.toml`: `version` **and** the `conexus[local]>=X.Y.Z` dependency pin (the `[local]` extra is required — without it the .mcpb's venv resolves without `fastembed` and `LocalEmbeddingFunction` silently falls back to the 384-dim ONNX MiniLM against 768/1024-dim collections; `tests/test_plugin_structure.py::test_mcpb_pins_conexus_local_extra` enforces the pin tracks the version. T2 [22511] gap 11 — this line previously said `conexus>=X.Y.Z`, missing the extra.)
 - `mcpb/manifest.json`: `version`
-- `.claude-plugin/marketplace.json`: **both `version` fields** (one for conexus, one for sn)
-- `.claude-plugin/marketplace.json`: **both `plugins[].source.ref` fields** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
-- `conexus/PENDING_RELEASE.md`: **empty the pending list.** Advancing `source.ref` is exactly what makes those plugin changes live, so the ledger's entries stop being pending at this step. `tests/test_plugin_release_drift_ledger.py` FAILS on a stale entry, so a forgotten clear blocks the release rather than rotting silently. The list you are deleting is also the honest "what becomes active in this release" note for the CHANGELOG (nexus-mk3tw / the 2026-07-25 inert-guard incident: three guards were merged, closed as "mechanized", and protecting nothing because the pin had not moved).
-- `conexus/.claude-plugin/plugin.json`: `version`
+- `.claude-plugin/marketplace.json`: **`plugins[].version` for every plugin the file lists** (today conexus and sn; a loop, not a fixed pair)
+- `.claude-plugin/marketplace.json`: **`plugins[].source.ref` for every plugin the file lists** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
+- `uv.lock`: `version` — pinned exact versions the release publishes from
 - `sn/.claude-plugin/plugin.json`: `version`
+- `conexus/.claude-plugin/plugin.json`: `version` (no dedicated parity test yet — bump it anyway; forgetting it will not fail CI, only `sn/.claude-plugin/plugin.json`'s own tests catch that class of miss for sn)
+- `conexus/PENDING_RELEASE.md`: **empty the pending list.** Not a version field (nothing here equals `X.Y.Z`) — a drift LEDGER. Advancing `source.ref` is exactly what makes those plugin changes live, so the ledger's entries stop being pending at this step. `tests/test_plugin_release_drift_ledger.py` FAILS on a stale entry, so a forgotten clear blocks the release rather than rotting silently. The list you are deleting is also the honest "what becomes active in this release" note for the CHANGELOG (nexus-mk3tw / the 2026-07-25 inert-guard incident: three guards were merged, closed as "mechanized", and protecting nothing because the pin had not moved).
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
 
@@ -436,8 +444,8 @@ git checkout develop && git pull
 git checkout -b release/vX.Y.Z
 
 # PRE-MERGE MAIN FIRST (added 2026-07-04, learned on v6.3.1): a release branch
-# based on develop ALWAYS conflicts with main's release-only files (all seven
-# version manifests, both changelogs, the engine pin, uv.lock) because release
+# based on develop ALWAYS conflicts with main's release-only files (the eight
+# bump targets from Step 3, both changelogs, the engine pin) because release
 # bumps land on main and never merge back to develop. GitHub cannot build the
 # PR merge ref while CONFLICTING, so PR checks silently never run ("no checks
 # reported") — the conflict must be resolved BEFORE the bumps, or you resolve
@@ -452,8 +460,8 @@ git merge origin/main   # resolve: changelogs = union (fold main's released
 # (they were never bumped on develop) — Step 3 bumps from whatever is present,
 # so bump by pattern, not by exact-previous-version string match.
 
-# Stage ALL SEVEN bump targets from Step 3, plus uv.lock, both changelogs and
-# the cleared PENDING_RELEASE.md ledger. mcpb/pyproject.toml and
+# Stage ALL EIGHT bump targets from Step 3 (uv.lock among them), both
+# changelogs and the cleared PENDING_RELEASE.md ledger. mcpb/pyproject.toml and
 # mcpb/manifest.json are the easy-to-miss pair here, and omitting either fails
 # CI's mcpb-manifest-version parity check.
 git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
@@ -487,13 +495,13 @@ Run from the release branch BEFORE pushing:
 git diff --name-only main..HEAD          # all release files must appear
 nx --version                             # must NOT yet print X.Y.Z (reinstall happens post-tag)
 grep '^version' pyproject.toml           # must equal X.Y.Z
-grep '"version"' .claude-plugin/marketplace.json    # both must equal X.Y.Z
+grep '"version"' .claude-plugin/marketplace.json    # every plugin entry must equal X.Y.Z
 grep '"version"' conexus/.claude-plugin/plugin.json # must equal X.Y.Z
 grep '"version"' sn/.claude-plugin/plugin.json      # must equal X.Y.Z
-grep '"ref"' .claude-plugin/marketplace.json        # both must equal "vX.Y.Z"
+grep '"ref"' .claude-plugin/marketplace.json        # every plugin entry must equal "vX.Y.Z"
 ```
 
-The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity checks (version field AND `source.ref` field) fail the build if any mismatch.
+The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity checks (version field AND `source.ref` field, looped over EVERY plugin marketplace.json lists — not a fixed count) fail the build if any mismatch. Add one more `grep '"version"' <plugin>/.claude-plugin/plugin.json` line here for each plugin marketplace.json gains; the two shown are today's set (conexus, sn), not a ceiling.
 
 ### 8a. Optional: bump source.sha post-merge (defends against tag force-push)
 
@@ -502,7 +510,7 @@ After Step 7's merge lands on main, the release commit has a known SHA. Optional
 ```bash
 git checkout main && git pull
 RELEASE_SHA=$(git rev-parse HEAD)        # the merge commit (or the chore(release) commit if merged via merge-commit)
-# Edit .claude-plugin/marketplace.json: add "sha": "$RELEASE_SHA" alongside "ref": "vX.Y.Z" for both plugins
+# Edit .claude-plugin/marketplace.json: add "sha": "$RELEASE_SHA" alongside "ref": "vX.Y.Z" for every plugin the file lists
 git add .claude-plugin/marketplace.json
 git commit -m "chore(release): pin sha for vX.Y.Z"
 git push
