@@ -1,10 +1,13 @@
-"""Anonymous daily install ping (nexus-h5olw).
+"""Daily install ping (nexus-h5olw).
 
 The only signal that counts local-mode installs: once every 24 hours the MCP
 server, on a background thread, POSTs a random install id plus the client
 version, install mode, OS, arch, and Python minor to the managed service's
 unauthenticated ``/v1/install-ping`` route. Nothing else is sent: no tenant,
-no hostname, no paths, no collection names.
+no hostname, no paths, no collection names. The managed service derives and
+stores a keyed fingerprint of the connecting address (HMAC-SHA256 under a
+server-side key, truncated to 16 hex characters); the raw address is never
+stored by the service (nexus-5zv4j).
 
 Opt-out, default on. Any of these disables it:
 

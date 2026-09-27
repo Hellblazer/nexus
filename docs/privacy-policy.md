@@ -1,6 +1,6 @@
 # Privacy Policy — Conexus
 
-_Effective: 2026-08-18_
+_Effective: RELEASE-DATE (set when the release carrying nexus-5zv4j is cut)_
 
 > **Change note (2026-08-18):** corrected three data-locality misstatements
 > present since the 2026-06-20 revision — T1 session scratch is Postgres-backed
@@ -17,6 +17,12 @@ _Effective: 2026-08-18_
 > service to embed and rerank with Voyage AI instead of the bundled bge-768
 > ONNX — the same outbound call managed-cloud mode always makes. §2 below now
 > states this opt-in, and how to revert it, explicitly.
+
+> **Change note (2026-09-27, nexus-5zv4j):** the daily install ping was never
+> described here, and §3 said Conexus sends no usage data to its author, which
+> has been untrue since the ping shipped. §2 now describes the ping in full,
+> including a keyed network fingerprint the managed service derives from each
+> ping's source address. §3 is corrected.
 
 Conexus is a self-hosted MCP server and Claude Code / Claude Desktop extension that indexes content on your machine and provides semantic search and persistent memory across Claude conversations. This policy describes what data Conexus handles, where it goes, and what is never collected.
 
@@ -50,10 +56,13 @@ The local service sends your chunk text and query strings to Voyage AI's API for
 
 You control which (if any) of the above are reachable by deciding whether to set the corresponding credentials.
 
+**Daily install ping** (all modes, on by default, opt-out):
+Once every 24 hours the MCP server sends one message to the managed service at `api.conexus-nexus.com`. The message carries six values: a random install id generated on your machine, the Conexus version, the install mode, operating system, CPU type and Python version. It carries no hostname, username, file paths, collection names or content. The service stores these six values. It also stores a short keyed fingerprint of the network address the message came from: the first 16 hex characters of an HMAC-SHA256 of that address, under a secret key held only by the service. The address itself is never written to the service's database. The fingerprint lets the operator see that several installs share a network source, such as one office or one home connection, without storing the address. Given a known address and the key, the operator can check whether that address sent pings, so the ping is pseudonymous, not anonymous. Rotating the key makes new fingerprints incomparable with old ones. The ping is how active installs are counted. Turn it off with `nx telemetry off` or `NX_NO_TELEMETRY=1`. It never runs from a development checkout. `nx telemetry status` shows the current setting and when the last ping was sent.
+
 ## 3. What Conexus never collects
 
 - Conexus does not query or extract data from Claude's memory, chat history, conversation summaries, or user-uploaded files.
-- Conexus does not transmit telemetry, analytics, crash reports, or usage data to the Conexus author.
+- Apart from the daily install ping described in §2, Conexus does not send telemetry, analytics, crash reports or usage data to the Conexus author.
 - Conexus does not include any third-party tracking, advertising, or session-recording components.
 - Conexus does not collect personally identifiable information beyond what the user explicitly writes into the indexed content or memory.
 

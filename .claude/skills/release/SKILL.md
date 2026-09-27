@@ -324,6 +324,20 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 - `CHANGELOG.md` (root): move `## [Unreleased]` content into a new `## [X.Y.Z] - YYYY-MM-DD` section. Leave a fresh empty `## [Unreleased]` at the top.
 - `conexus/CHANGELOG.md` (plugin changelog): always update, even if no plugin changes (note: "Plugin version aligned with conexus X.Y.Z. No plugin-side changes." is acceptable).
 
+### 4a. Set the privacy-policy effective date (nexus-5zv4j)
+
+`docs/privacy-policy.md` line 3 carries the effective date. If it reads
+`_Effective: RELEASE-DATE (set when the release carrying nexus-5zv4j is
+cut)_` (or, on a later release, any line starting `_Effective:
+RELEASE-DATE`), replace it with `_Effective: <release date YYYY-MM-DD>_`
+using the SAME `YYYY-MM-DD` the CHANGELOG section above just used — the
+placeholder exists precisely because nexus-5zv4j's own bead landed with no
+known release date yet. If the line already carries a real date (a prior
+release already stamped it), leave it alone; this step is a no-op past the
+release that first stamps it. `tests/test_privacy_policy_release_date.py`
+fails a tagged release tree (pyproject version == the newest `v*` tag) that
+still carries the placeholder.
+
 ### 5. Refresh `uv.lock`
 
 ```bash

@@ -1427,8 +1427,8 @@ async def _t1_lifespan(_app: Any):
     # per nx-mcp start regardless of which branch this session resolves to.
     _warn_if_harness_oauth_grant_present()
 
-    # nexus-h5olw: anonymous daily install ping, daemon thread, never
-    # blocks; opt-out via NX_NO_TELEMETRY=1 / `nx telemetry off`.
+    # nexus-h5olw: daily install ping, daemon thread, never blocks;
+    # opt-out via NX_NO_TELEMETRY=1 / `nx telemetry off`.
     from nexus.install_ping import ping_in_background  # noqa: PLC0415 — startup cost
     ping_in_background()
 

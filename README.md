@@ -112,7 +112,7 @@ The full sequence, including exporting your knowledge first and removing the Cla
 
 One service on your computer: Postgres 17 with pgvector, holding three stores. Scratch lasts one session. Memory holds project facts. Knowledge holds everything you index: code, documents, PDFs, and the decisions you record. The search model runs locally, so your data does not leave the machine.
 
-Once a day the MCP server sends one anonymous message with six values: a random install id, the conexus version, the install mode, operating system, CPU type, and Python version. No hostname, paths, collection names, or content. `nx telemetry off` stops it; `nx telemetry status` shows the setting.
+Once a day the MCP server sends one message with six values: a random install id, the conexus version, the install mode, operating system, CPU type, and Python version. No hostname, paths, collection names, or content. The service also keeps a keyed fingerprint of the network address the message came from, never the address itself; see the [privacy policy](docs/privacy-policy.md). `nx telemetry off` stops it; `nx telemetry status` shows the setting.
 
 ## Learn
 
