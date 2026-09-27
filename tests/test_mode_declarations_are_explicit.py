@@ -283,7 +283,7 @@ def test_mode_declarations_are_explicit(request: pytest.FixtureRequest) -> None:
 # continuation (the remaining entries mostly carry MANY tests per file,
 # or a scattered literal across dozens of call sites, and were left for
 # a future batch).
-_MODE_LINT_EXCLUDE_FILES_CEILING = 3
+_MODE_LINT_EXCLUDE_FILES_CEILING = 1
 # 44 -> 45 (nexus-vnz3d, 2026-09-20): +test_aspect_uri_repair.py. The
 # aspect source_uri backfill planner is a pure function whose only use of
 # the collection is a PREFIX test (FILE_ROUTED_PREFIXES); its voyage
@@ -468,6 +468,27 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 3
 # `_MODE_LINT_EXCLUDE_NODEIDS` entry in conftest.py; T2
 # nexus/mode-lint-burndown-nexus-03wze-2026-09-27 has the round's
 # summary.
+# 3 -> 1 (nexus-03wze fix round, review fold, same day): -2, both
+# deferrals above reclassified per-test rather than left whole (the
+# substantive-critic caught both as broader than needed). test_rdr_109_
+# phase2_dispatch.py: 6 of 15 offenders cleared with zero functional
+# change (2 docstring-reword/predicate-input swaps, 2 pure-regex-parse
+# swaps, 2 promoted via giving its `t3_cloud` fixture a `cloud_mode`
+# dependency), 9 stay as nodeid exclusions below. test_exporter.py: 3 of
+# 11 swapped (2 directly -- index_model_for_collection parses a
+# conformant name's model segment with no canonical-set check, so the
+# exported header just echoes back whatever neutral token the name
+# carries -- and 1 by renaming a legacy 2-segment import target to an
+# equivalent conformant name, so its expected model reads from the name
+# instead of a fixed real prefix-fallback value), 8 stay as nodeid
+# exclusions below -- one more than the fold's own estimate of 7,
+# because test_import_mixed_some_none_some_text's "taxonomy__mixed"
+# target has no conformant-rename escape (taxonomy is not a recognized
+# content_type) and renaming its prefix away from "taxonomy__" would
+# break its own fetch-by-original-id assertions (non-taxonomy
+# collections get their ids REHASHED on import) -- proven by A/B, not
+# assumed, the same discipline that caught the earlier round's
+# test_catalog_path.py false-inert classification.
 # 82 -> 62 (nexus-0y4c6 burn-down batch 1, 2026-09-09): -20 nodeid
 # entries. 19 were PROMOTED, not merely retargeted: each test's
 # voyage-token literal was hoisted out of the flagged function's own
@@ -640,7 +661,33 @@ _MODE_LINT_EXCLUDE_FILES_CEILING = 3
 # contradicting an older stale comment that called it unused fixture
 # noise. Reverted to the real literal. Rationale in conftest.py beside
 # the entry.
-_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 48
+# 48 -> 65 (nexus-03wze fix round, review fold, same day): +17, all
+# PROMOTED from the two file-level entries reclassified this round (see
+# _MODE_LINT_EXCLUDE_FILES_CEILING's matching -2 shrink), never a fresh
+# hoist. test_rdr_109_phase2_dispatch.py contributed 9: 8 module-level
+# "mode-self-test" functions pinning LOCAL mode explicitly and asserting
+# the real nexus-35ok4/GH-#1461 local-voyage write/read chokepoint
+# dispatch (same class as test_o5x2c_write_chokepoint_repros.py), plus
+# test_dispatch_local_mode_voyage_name_raises (mode-self-test AND
+# canonical-set-dependent: _build_embedding_fn's raise condition is
+# "not a recognized LOCAL token", so a neutral swap would keep the test
+# passing while silently narrowing what it proves, verified by reading
+# src/nexus/db/t3.py rather than assumed). test_exporter.py contributed
+# 8: test_code_into_docs_error_detail (a real-value interlock — the
+# exact substrings asserted are the export's real source model and the
+# real legacy-target prefix-fallback), the 5 TestEmbeddingDimensionMismatch
+# tests (MODEL_DIMS-keyed, the disagreement between a real model's
+# implied dimension and the seeded vectors' actual dimension IS the
+# point — the module's own comment says an unrecognized token skips the
+# check silently), test_assume_model_flag_wired_through (same
+# interlock, CLI-level), and test_import_mixed_some_none_some_text —
+# ADDED beyond the fold's own 7-entry estimate after an A/B proved its
+# "taxonomy__mixed" target has no conformant-rename escape (taxonomy is
+# not a recognized content_type) and no prefix-rename escape either
+# (non-taxonomy collections get their ids rehashed on import, breaking
+# this test's own fetch-by-original-id assertions). Full per-entry
+# rationale is beside each entry in conftest.py.
+_MODE_LINT_EXCLUDE_NODEIDS_CEILING = 65
 
 
 def test_mode_lint_exclude_files_ratchet() -> None:

@@ -2850,49 +2850,39 @@ _MODE_LINT_EXCLUDE_FILES: frozenset[str] = frozenset({
     # matching decrement in test_mode_declarations_are_explicit.py.
     #
     # nexus-03wze burn-down (2026-09-27, continuation of nexus-0y4c6):
-    # 44 -> 3. Every file below this comment except the two named next
-    # was fixed per-test (a genuine cloud-mode test promoted to declare
-    # `cloud_mode`; an inert literal swapped in place for a neutral
-    # token `model-code`/`model-ctx`; a real-value assertion moved to a
+    # 44 -> 1. Every file below this comment was fixed per-test (a
+    # genuine cloud-mode test promoted to declare `cloud_mode`; an
+    # inert literal swapped in place for a neutral token
+    # `model-code`/`model-ctx`; a real-value assertion moved to a
     # `_MODE_LINT_EXCLUDE_NODEIDS` entry) and dropped from this set
     # entirely. Full per-test disposition is recorded in the
     # corresponding `_MODE_LINT_EXCLUDE_NODEIDS` entries added the same
     # round and in T2 (nexus/mode-lint-burndown-nexus-03wze-2026-09-27).
     #
+    # nexus-03wze fix round (review fold, same day): test_rdr_109_
+    # phase2_dispatch.py and test_exporter.py were initially left here
+    # whole (judgment deferred) -- the substantive-critic caught both as
+    # broader than needed. Reclassified per-test: 6 of
+    # test_rdr_109_phase2_dispatch.py's 15 offenders swapped or
+    # docstring-reworded with zero functional change, 2 promoted by
+    # giving its `t3_cloud` fixture a `cloud_mode` dependency, 9 stay as
+    # nodeid exclusions (mode-self-test / canonical-set-dependent). Of
+    # test_exporter.py's 11, 3 swapped (2 directly, 1 via renaming a
+    # legacy 2-segment target to an equivalent conformant name so its
+    # expected model reads from the name instead of a fixed real
+    # prefix-fallback value), 8 stay as nodeid exclusions -- one more
+    # than the fold's estimate of 7: test_import_mixed_some_none_some_
+    # text's "taxonomy__mixed" target has NO conformant-rename escape
+    # (taxonomy is not a recognized content_type, so even a 4-segment-
+    # shaped name still falls to the same fixed real prefix-fallback
+    # value) and renaming its prefix away from "taxonomy__" would
+    # break its own fetch-by-original-id assertions (non-taxonomy
+    # collections get their ids REHASHED on import) -- proven by A/B,
+    # not assumed. See each entry below for its own rationale.
+    #
     # This file itself stays (it contains the regex/exclusion-set
     # definitions this lint tests against, never a real offender).
     "test_mode_declarations_are_explicit.py",
-    #
-    # test_rdr_109_phase2_dispatch.py: LEFT EXCLUDED, judgment deferred.
-    # The whole file is a deliberate (mode, embedded-model-token) 4-cell
-    # dispatch matrix (module docstring) -- each of its 15 offending
-    # tests needs its own determination of which cell it pins (real
-    # cloud-mode behavior needing `cloud_mode`, a local-mode-pinned
-    # self-test needing a nodeid exclusion, or a genuinely inert
-    # fixture), and several test names ("test_dispatch_local_mode_
-    # voyage_name_raises", "test_dispatch_cloud_mode_voyage_conformant_
-    # name") suggest the literal IS the (mode, name) pairing under test,
-    # not swappable at all. Deferred to a dedicated follow-up round
-    # rather than rushed here.
-    "test_rdr_109_phase2_dispatch.py",
-    #
-    # test_exporter.py: LEFT EXCLUDED, judgment deferred. Its 11
-    # offending tests interlock TWO real-value-dependent gates at once
-    # -- import_collection's EmbeddingModelMismatch (real prefix-based
-    # `voyage_model_for_collection` fallback for legacy 2-segment
-    # targets; name-embedded token for conformant 4-segment targets) and
-    # EmbeddingDimensionMismatch (MODEL_DIMS-keyed dimension sanity,
-    # requiring the header's declared model to be a REAL canonical/local
-    # token whose implied dimension deliberately DISAGREES with the
-    # seeded vector dimension). A swap here is not a single substitution
-    # per test: it requires re-deriving the intended dim relationship
-    # for each of the ~8 mismatch-class tests to avoid silently making
-    # the safety check vacuous (passing without exercising the mismatch
-    # it exists to catch) -- exactly the failure mode
-    # _MODE_LINT_EXCLUDE_NODEIDS_CEILING's changelog already documents
-    # once (nexus-0y4c6 fix round, 2026-09-10). Deferred to a dedicated
-    # follow-up round rather than rushed here.
-    "test_exporter.py",
 })
 
 _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
@@ -3180,6 +3170,93 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     # by A/B: swapped -> FAILED, reverted -> passes. Not swappable;
     # reverted to the real literal.
     "tests/test_catalog_path.py::TestIndexDocumentSourceKey::test_staleness_check_uses_content_hash_when_catalog_absent",
+    #
+    # nexus-03wze fix round (review fold): test_rdr_109_phase2_
+    # dispatch.py's file-level exclusion reclassified per-test.
+    #
+    # Reason class "mode-self-test": each of these 8 pins LOCAL mode
+    # explicitly (monkeypatching is_local_mode/local_embed_model_choice/
+    # get_credential directly) and asserts the REAL nexus-35ok4/GH-#1461
+    # local-install-can-use-Voyage write/read chokepoint dispatch --
+    # t3_collection_name's grandfather/mint/read-write truth table and
+    # effective_embedding_model_for_writes's local-voyage branch, the
+    # same class as test_o5x2c_write_chokepoint_repros.py above.
+    # `cloud_mode` would force is_local_mode() False, the opposite of
+    # what these exist to exercise as True, and the asserted OUTPUT
+    # values are real per-content-type canonical mappings
+    # (voyage-code-3/voyage-context-3), not swappable without asserting
+    # something false.
+    "tests/test_rdr_109_phase2_dispatch.py::test_effective_local_voyage_with_key_mints_canonical_voyage_token",
+    "tests/test_rdr_109_phase2_dispatch.py::test_effective_local_voyage_without_key_fails_loud",
+    "tests/test_rdr_109_phase2_dispatch.py::test_write_path_targets_voyage_not_bge_when_key_present",
+    "tests/test_rdr_109_phase2_dispatch.py::test_read_path_still_finds_bge_when_key_present",
+    "tests/test_rdr_109_phase2_dispatch.py::test_read_path_prefers_voyage_over_bge_once_voyage_sibling_exists",
+    "tests/test_rdr_109_phase2_dispatch.py::test_write_path_raises_when_nothing_to_grandfather_keyless_voyage",
+    "tests/test_rdr_109_phase2_dispatch.py::test_write_path_no_t3_probe_raises_keyless_voyage_config",
+    "tests/test_rdr_109_phase2_dispatch.py::test_write_path_mints_voyage_when_key_present_and_nothing_preexisting",
+    #
+    # Reason class "mode-self-test" + canonical-set-dependent:
+    # T3Database._build_embedding_fn's LOCAL-mode branch raises
+    # IncompatibleCollectionError whenever the parsed model token is
+    # not itself a recognized LOCAL model (`parsed_token in
+    # LOCAL_EMBEDDING_MODELS`) -- verified by reading src/nexus/db/t3.py,
+    # not assumed: a neutral non-voyage token would ALSO trigger the
+    # same raise (the condition is "not a local token", not
+    # "specifically voyage"), so this test would keep passing after a
+    # swap while silently testing a narrower claim than its own name
+    # and the module's stated acceptance criteria ("IncompatibleCollectionError
+    # raised loud on local + voyage-name"). `cloud_mode` is irrelevant
+    # (t3_local pins local_mode=True explicitly). Kept on the real
+    # literal for semantic fidelity to what the test claims to prove.
+    "tests/test_rdr_109_phase2_dispatch.py::test_dispatch_local_mode_voyage_name_raises",
+    #
+    # nexus-03wze fix round (review fold): test_exporter.py's file-level
+    # exclusion reclassified per-test.
+    #
+    # Reason class "real-value interlock" (both gates read the REAL
+    # production dispatch, verified by reading src/nexus/exporter.py):
+    # asserts the exact substrings "voyage-code-3"/"voyage-context-3"
+    # produced by import_collection's EmbeddingModelMismatch message --
+    # the export's real source model (a genuinely code__-prefixed,
+    # populated collection) and the real voyage_model_for_collection
+    # prefix-fallback for a legacy "docs__corpus" target. Not swappable
+    # without asserting a false message.
+    "tests/test_exporter.py::TestEmbeddingModelValidation::test_code_into_docs_error_detail",
+    #
+    # Reason class "real-value, no conformant-rename escape" (proven by
+    # A/B, contradicting the fold's own estimate that this test was a
+    # simple swap candidate): "taxonomy__mixed" is a legacy 2-segment
+    # name whose expected model is voyage_model_for_collection's FIXED
+    # non-docs/knowledge/rdr fallback ("voyage-code-3") -- confirmed via
+    # index_model_for_collection("taxonomy__mixed"). Unlike
+    # test_import_corrupt_msgpack_raises's "knowledge__corrupt" (fixed
+    # in place, see that entry's own comment), "taxonomy" is not a
+    # recognized content_type at all, so even a 4-segment-shaped rename
+    # still falls through to the same fixed real value -- there is no
+    # conformant-name escape route here. Renaming the prefix away from
+    # "taxonomy__" is also not an option: non-taxonomy collections get
+    # their raw ids REHASHED on import (GH #1370 D1), which would break
+    # this test's own fetch-by-original-id assertions
+    # (`col.get(ids=["a", "b"], ...)`). A neutral header token would
+    # disagree with the fixed expected value and raise
+    # EmbeddingModelMismatch instead of reaching the mixed-None-document
+    # handling this test exists to exercise.
+    "tests/test_exporter.py::TestVectorOnlyImport::test_import_mixed_some_none_some_text",
+    #
+    # Reason class "real-value interlock": MODEL_DIMS-keyed dimension
+    # sanity (EmbeddingDimensionMismatch) deliberately seeds a REAL
+    # canonical/local model token whose implied dimension DISAGREES with
+    # the vectors' actual dimension -- the mismatch IS the point, so the
+    # token must be real and the disagreement must be real; an
+    # unrecognized neutral token silently skips the dims check entirely
+    # (src/nexus/exporter.py's own comment: "Unknown models ... skip
+    # silently"), making the test vacuous.
+    "tests/test_exporter.py::TestEmbeddingDimensionMismatch::test_dims_mismatch_raises_clear_error",
+    "tests/test_exporter.py::TestEmbeddingDimensionMismatch::test_assume_model_corrects_wrong_label",
+    "tests/test_exporter.py::TestEmbeddingDimensionMismatch::test_assume_model_wrong_override_fails_loud",
+    "tests/test_exporter.py::TestEmbeddingDimensionMismatch::test_legacy_two_segment_target_exempt_from_dims_check",
+    "tests/test_exporter.py::TestEmbeddingDimensionMismatch::test_assume_model_still_enforces_model_mismatch_gate",
+    "tests/test_exporter.py::TestImportFlagsCLI::test_assume_model_flag_wired_through",
 })
 
 

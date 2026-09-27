@@ -475,7 +475,12 @@ class TestServiceModeExport:
 
     def test_export_via_http_vector_client_builds_valid_file(self, tmp_path: Path):
         from unittest.mock import patch
-        collection_name = "code__svc__voyage-code-3__v1"
+        # nexus-03wze mode-lint fix round: index_model_for_collection
+        # parses the model segment DIRECTLY out of a conformant 4-segment
+        # name (no canonical-set check for a name-embedded token, per
+        # embedding_model_for_collection_name's own contract) -- the
+        # header just echoes back whatever this name carries.
+        collection_name = "code__svc__model-code__v1"
         ids = [f"{i:032x}" for i in range(3)]
         documents = [f"document {i}" for i in range(3)]
         metadatas = [{"source_path": f"/repo/file_{i}.py"} for i in range(3)]
@@ -503,7 +508,7 @@ class TestServiceModeExport:
                 records = list(msgpack.Unpacker(gz, raw=False))
 
         assert header["collection_name"] == collection_name
-        assert header["embedding_model"] == "voyage-code-3"
+        assert header["embedding_model"] == "model-code"
         assert len(records) == 3
         assert {r["id"] for r in records} == set(ids)
         by_id_meta = {r["id"]: r["metadata"] for r in records}
@@ -521,7 +526,7 @@ class TestServiceModeExport:
         with the local-mode import path -- proves the file shape doesn't
         silently diverge between backends."""
         from unittest.mock import patch
-        collection_name = "code__svc__voyage-code-3__v1"
+        collection_name = "code__svc__model-code__v1"
         ids = [f"{i:064x}" for i in range(2)]  # RDR-180: canonical 64-hex ids
         documents = [f"document {i}" for i in range(2)]
         metadatas = [{"source_path": f"/repo/file_{i}.py"} for i in range(2)]
@@ -877,11 +882,24 @@ class TestEmptyCollectionRoundTrip:
 
 class TestCorruptMsgpackBody:
     def test_import_corrupt_msgpack_raises(self, ephemeral_db: T3Database, tmp_path: Path):
+        # nexus-03wze mode-lint fix round: the ORIGINAL legacy 2-segment
+        # "knowledge__corrupt" name's expected model is a FIXED real CCE
+        # value (voyage_model_for_collection's "knowledge__" prefix
+        # dispatch, confirmed via index_model_for_collection) -- a
+        # neutral header token there would disagree and raise
+        # EmbeddingModelMismatch INSTEAD of reaching the corrupt-msgpack
+        # body this test exists to exercise (still caught by the broad
+        # `pytest.raises(Exception)` below, so the test would keep
+        # "passing" while testing the wrong thing). Switched to a
+        # conformant 4-segment name instead, whose expected model is
+        # read directly from the name -- confirmed by A/B (both the
+        # legacy-name+real-model original and this conformant-name+
+        # neutral-token version reach the same msgpack-corruption raise).
         header = {
             "format_version": FORMAT_VERSION,
-            "collection_name": "knowledge__corrupt",
+            "collection_name": "knowledge__corrupt__model-ctx__v1",
             "database_type": "knowledge",
-            "embedding_model": "voyage-context-3",
+            "embedding_model": "model-ctx",
             "record_count": 1,
             "embedding_dim": 128,
             "exported_at": "2026-01-01T00:00:00+00:00",
@@ -892,7 +910,7 @@ class TestCorruptMsgpackBody:
             f.write(json.dumps(header).encode() + b"\n")
             with gzip.GzipFile(fileobj=f, mode="wb") as gz:
                 gz.write(b"this is not valid msgpack data at all!!")
-        ephemeral_db.get_or_create_collection("knowledge__corrupt", strict=False)
+        ephemeral_db.get_or_create_collection("knowledge__corrupt__model-ctx__v1", strict=False)
         with pytest.raises(Exception):
             import_collection(ephemeral_db, out)
 
