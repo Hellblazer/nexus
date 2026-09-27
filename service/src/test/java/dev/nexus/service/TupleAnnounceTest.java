@@ -184,6 +184,105 @@ class TupleAnnounceTest {
                 .isEqualTo(2);
     }
 
+    // ── the stamp's clock (bead nexus-4h7fo) ──────────────────────────────────
+    //
+    // The due test compares announced_at with the DATABASE clock (now()). The stamp
+    // used to come from the engine host's clock, so whenever the host ran ahead of the
+    // database by more than the few milliseconds between an announcement and the next
+    // probe, an interval_s=0 row read as announced in the future and was not due. On a
+    // Docker Desktop test box the host/VM offset moves in steps as the VM clock is
+    // corrected; one 300-iteration loop of the claimed-row test's exact sequence caught
+    // a ~7 ms host lead and returned nothing after release in 295 of 300 iterations.
+    //
+    // These pins hold the announcing transaction open, start a second transaction
+    // while it is held, and require the stamp to be earlier than that second
+    // transaction's own now(): true when the stamp is the announcing transaction's
+    // now(), false for a host-clock stamp taken after the hold, whatever the offset
+    // between the two clocks (up to the hold itself).
+
+    private static final long ANNOUNCE_HOLD_MS = 200;
+
+    private OffsetDateTime dbNow() {
+        return tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class));
+    }
+
+    /** Runs {@code probe} with its announcing transaction held open; returns the
+     *  probe's result and the now() of a transaction that STARTED while it was held. */
+    private record HeldProbe(List<TupleRepository.WaitResult> result, OffsetDateTime laterTxnNow) { }
+
+    private HeldProbe probeWhileHeld(TupleRepository.WaitSpec spec) throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch proceed = new CountDownLatch(1);
+        TupleRepository.setTestOnlyAnnounceTxnHold(() -> {
+            entered.countDown();
+            try {
+                proceed.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<List<TupleRepository.WaitResult>> f = pool.submit(() -> probe(spec));
+            assertThat(entered.await(5, TimeUnit.SECONDS))
+                    .as("non-vacuity: the announcing transaction reached the hold").isTrue();
+            OffsetDateTime later = dbNow();
+            assertThat(f.isDone()).as("non-vacuity: the announcing transaction is still held").isFalse();
+            // Clear the seam before anything else can announce, then let the held one finish.
+            TupleRepository.setTestOnlyAnnounceTxnHold(null);
+            Thread.sleep(ANNOUNCE_HOLD_MS);
+            proceed.countDown();
+            return new HeldProbe(f.get(10, TimeUnit.SECONDS), later);
+        } finally {
+            TupleRepository.setTestOnlyAnnounceTxnHold(null);
+            proceed.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void announce_stampIsTheDatabaseClockOfTheAnnouncingTransaction_notTheEngineHostClock() throws Exception {
+        String to = "announce-clock-" + UUID.randomUUID();
+        byte[] id = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"),
+                "hello", "nonce-1", null);
+
+        HeldProbe held = probeWhileHeld(mailboxSpec(to, 0, 5));
+
+        assertThat(held.result()).hasSize(1);
+        OffsetDateTime stamped = held.result().get(0).tuples().get(0).announcedAt();
+        assertThat(stamped.toInstant())
+                .as("a transaction that began after the announcing one began already sees the stamp in its "
+                        + "past, so interval_s=0 is due again at once -- the database clock, not the host's")
+                .isBefore(held.laterTxnNow().toInstant());
+        OffsetDateTime stored = tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(TUPLES.ANNOUNCED_AT).from(TUPLES).where(TUPLES.ID.eq(id))
+                        .fetchOne(TUPLES.ANNOUNCED_AT));
+        assertThat(stored.toInstant()).as("the returned stamp is the stored one").isEqualTo(stamped.toInstant());
+    }
+
+    @Test
+    void subscriberAnnounce_stampIsTheDatabaseClockOfTheAnnouncingTransaction_notTheEngineHostClock()
+            throws Exception {
+        String topic = "sub-clock-" + UUID.randomUUID();
+        post(topic, "author", "hello", "n-1");
+
+        HeldProbe held = probeWhileHeld(boardSpec(topic, "session-a", 0, 5));
+
+        assertThat(held.result()).hasSize(1);
+        TupleRepository.TupleRow row = held.result().get(0).tuples().get(0);
+        assertThat(row.announcedAt().toInstant())
+                .as("the per-subscriber stamp follows the same clock as the row-level one")
+                .isBefore(held.laterTxnNow().toInstant());
+        OffsetDateTime stored = tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(TUPLE_DELIVERIES.ANNOUNCED_AT).from(TUPLE_DELIVERIES)
+                        .where(TUPLE_DELIVERIES.TUPLE_ID.eq(row.id()))
+                        .and(TUPLE_DELIVERIES.SUBSCRIBER.eq("session-a"))
+                        .fetchOne(TUPLE_DELIVERIES.ANNOUNCED_AT));
+        assertThat(stored.toInstant()).as("the returned stamp is the stored one")
+                .isEqualTo(row.announcedAt().toInstant());
+    }
+
     // ── dead-lettered rows never announced ────────────────────────────────────
 
     @Test

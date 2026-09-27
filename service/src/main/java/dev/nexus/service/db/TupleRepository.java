@@ -68,7 +68,11 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
  * server clock, typed — never a raw {@code now()} string); values WRITTEN
  * into a row use the JVM clock ({@code OffsetDateTime.now(ZoneOffset.UTC)}),
  * the same split {@link AspectRepository#claimNext} already uses between its
- * WHERE-clause backoff gate and its {@code last_attempt_at} write.
+ * WHERE-clause backoff gate and its {@code last_attempt_at} write. The announce
+ * stamps ({@code tuples.announced_at}, {@code tuple_deliveries.announced_at}) are
+ * the exception and are written with the database clock (bead nexus-4h7fo): they
+ * exist only to be compared with {@code now()} at intervals as small as zero, where
+ * any offset between the two clocks changes the answer.
  */
 public final class TupleRepository {
 
@@ -156,6 +160,30 @@ public final class TupleRepository {
      * never assigned outside test code, not a production delay mechanism.
      */
     static volatile Runnable TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
+
+    /**
+     * TEST-ONLY seam (bead nexus-4h7fo): invoked inside both announce-mode
+     * transactions ({@link #queryOnceAnnounce}, {@link #queryOnceAnnounceSubscriber})
+     * after the transaction has started and before its matching {@code SELECT}, so a
+     * test can hold the announcing transaction open and start another transaction
+     * while it is held. That separates the announcing transaction's own clock
+     * ({@code now()}, fixed at its start) from the moment its stamp is written, which
+     * is the only way to tell a stamp taken from the database clock from one taken
+     * from the engine host's clock without skewing either clock. Same shape and rules
+     * as {@link #TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY}: a no-op by default, never
+     * assigned outside test code, not a production delay mechanism.
+     */
+    static volatile Runnable TEST_ONLY_ANNOUNCE_TXN_HOLD = () -> { };
+
+    /**
+     * Cross-package installer for {@link #TEST_ONLY_ANNOUNCE_TXN_HOLD}, for the same
+     * reason as {@link #setTestOnlySignalHook}: {@code TupleAnnounceTest} lives in
+     * {@code dev.nexus.service}. Pass {@code null} to restore the no-op default.
+     * Never call this outside test code.
+     */
+    public static void setTestOnlyAnnounceTxnHold(Runnable holdOrNull) {
+        TEST_ONLY_ANNOUNCE_TXN_HOLD = holdOrNull == null ? () -> { } : holdOrNull;
+    }
 
     /**
      * TEST-ONLY (RDR-205 bead nexus-em75s.7, the wake-test mutation pins): installs a
@@ -887,6 +915,7 @@ public final class TupleRepository {
                         .and(TUPLES.ANNOUNCE_COUNT.lt(announce.max())));
         Condition cond = baseCond.and(claimable).and(due);
 
+        TEST_ONLY_ANNOUNCE_TXN_HOLD.run();
         var rows = ctx.selectFrom(TUPLES)
                 .where(cond)
                 .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
@@ -902,16 +931,27 @@ public final class TupleRepository {
         for (TuplesRecord r : rows) {
             ids.add(r.getId());
         }
-        // Truncated to microseconds (RDR-205 follow-on nexus-mvfm9's own reasoning,
-        // reused here): the value written matches Postgres TIMESTAMPTZ precision
-        // exactly, so the in-memory TupleRow this method returns and a later
-        // read-back of the same row agree on announced_at's fractional seconds.
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
-        ctx.update(TUPLES)
-                .set(TUPLES.ANNOUNCED_AT, now)
+        // Stamped with the DATABASE clock (bead nexus-4h7fo), the one exception to
+        // the class-level write-with-the-JVM-clock convention: announced_at is only
+        // ever compared with now() in the due test above, at intervals as small as 0,
+        // so writing it from the engine host's clock made the rate limit depend on the
+        // host/database clock offset. A host running a few ms ahead made an
+        // interval_s=0 row read as announced in the future. now() is constant within a
+        // transaction, so every returned row carries the same value; RETURNING reads
+        // it back at the column's own precision, so the returned TupleRow and a later
+        // read-back agree.
+        var stamped = ctx.update(TUPLES)
+                .set(TUPLES.ANNOUNCED_AT, DSL.currentOffsetDateTime())
                 .set(TUPLES.ANNOUNCE_COUNT, TUPLES.ANNOUNCE_COUNT.add(1))
                 .where(TUPLES.ID.in(ids))
-                .execute();
+                .returning(TUPLES.ANNOUNCED_AT)
+                .fetch();
+        if (stamped.isEmpty()) {
+            // The ids are locked by this transaction's own SELECT above; an UPDATE
+            // matching none of them means the statement did not run as written.
+            throw new IllegalStateException("announce stamp updated no rows for " + ids.size() + " locked ids");
+        }
+        OffsetDateTime now = stamped.get(0).get(TUPLES.ANNOUNCED_AT).withOffsetSameInstant(ZoneOffset.UTC);
 
         List<TupleRow> out = new ArrayList<>();
         for (TuplesRecord r : rows) {
@@ -975,6 +1015,7 @@ public final class TupleRepository {
         Condition due = DSL.notExists(ctx.selectOne().from(TUPLE_DELIVERIES).where(blocked));
         Condition cond = baseCond.and(claimable).and(due);
 
+        TEST_ONLY_ANNOUNCE_TXN_HOLD.run();
         var rows = ctx.selectFrom(TUPLES)
                 .where(cond)
                 .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
@@ -986,29 +1027,31 @@ public final class TupleRepository {
             return List.of();
         }
 
-        // Microsecond truncation: queryOnceAnnounce's own reasoning (Postgres
-        // TIMESTAMPTZ precision), so the in-memory value and a later read-back
-        // of the delivery row agree.
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        // Stamped with the DATABASE clock, for queryOnceAnnounce's reason (bead
+        // nexus-4h7fo): the blocked test above compares the delivery row's
+        // announced_at with now(), so the stamp must come from the same clock.
+        // RETURNING reads it back at the column's precision.
         List<TupleRow> out = new ArrayList<>(rows.size());
         for (TuplesRecord r : rows) {
-            Integer count = ctx.insertInto(TUPLE_DELIVERIES,
+            var stamped = ctx.insertInto(TUPLE_DELIVERIES,
                             TUPLE_DELIVERIES.TENANT_ID, TUPLE_DELIVERIES.SUBSPACE, TUPLE_DELIVERIES.SUBSCRIBER,
                             TUPLE_DELIVERIES.TUPLE_ID, TUPLE_DELIVERIES.ANNOUNCED_AT, TUPLE_DELIVERIES.ANNOUNCE_COUNT)
-                    .values(tenant, subspace, subscriber, r.getId(), now, 1)
+                    .values(DSL.val(tenant), DSL.val(subspace), DSL.val(subscriber), DSL.val(r.getId()),
+                            DSL.currentOffsetDateTime(), DSL.val(1))
                     .onConflict(TUPLE_DELIVERIES.TENANT_ID, TUPLE_DELIVERIES.SUBSPACE,
                             TUPLE_DELIVERIES.SUBSCRIBER, TUPLE_DELIVERIES.TUPLE_ID)
                     .doUpdate()
-                    .set(TUPLE_DELIVERIES.ANNOUNCED_AT, now)
+                    .set(TUPLE_DELIVERIES.ANNOUNCED_AT, DSL.currentOffsetDateTime())
                     .set(TUPLE_DELIVERIES.ANNOUNCE_COUNT, TUPLE_DELIVERIES.ANNOUNCE_COUNT.add(1))
-                    .returning(TUPLE_DELIVERIES.ANNOUNCE_COUNT)
-                    .fetchOne(TUPLE_DELIVERIES.ANNOUNCE_COUNT);
-            if (count == null) {
+                    .returning(TUPLE_DELIVERIES.ANNOUNCED_AT, TUPLE_DELIVERIES.ANNOUNCE_COUNT)
+                    .fetchOne();
+            if (stamped == null) {
                 // RETURNING on an upsert always yields the row; a null here means the
                 // statement did not run as written, which is a defect to fail loud on.
                 throw new IllegalStateException("tuple_deliveries upsert returned no row for subscriber " + subscriber);
             }
-            out.add(toRow(r, now, count));
+            out.add(toRow(r, stamped.get(TUPLE_DELIVERIES.ANNOUNCED_AT).withOffsetSameInstant(ZoneOffset.UTC),
+                    stamped.get(TUPLE_DELIVERIES.ANNOUNCE_COUNT)));
         }
         return out;
     }
