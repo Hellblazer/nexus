@@ -36,6 +36,17 @@ is the platform's hard kill, :func:`safe_killpg` degrades to signalling the
 one process (the same weaker reach ``nexus.bounded_subprocess`` reports),
 and :func:`safe_killpg_group` refuses, because a recorded pid whose owner
 may already have exited is not safe to kill by number alone.
+
+REAL CONTAINMENT ON WINDOWS (nexus-6y4e0): a Job Object
+(``nexus.util.win_job``), assigned right after spawn, reaches the whole
+descendant tree the way a POSIX process group does. :func:`isolation_popen_kwargs`
+gives a spawn site the right ``Popen`` kwargs per platform,
+:func:`contain` assigns the just-spawned child to a fresh job (a no-op on
+POSIX, where ``start_new_session=True`` already contains the tree), and
+:func:`kill_tree` reaches the whole tree via the job when one exists and
+falls back to :func:`safe_killpg` otherwise -- the same degraded single-
+process reach as before this bead, for any site that spawned before
+``contain`` existed or where a job could not be created.
 """
 from __future__ import annotations
 
@@ -44,6 +55,8 @@ import signal as _signal
 from typing import Any
 
 import structlog
+
+from nexus.util import win_job
 
 _log = structlog.get_logger(__name__)
 
@@ -173,4 +186,77 @@ def safe_killpg_group(pgid: Any, sig: int = KILL_SIGNAL) -> bool:
         return False
 
 
-__all__ = ["KILL_SIGNAL", "safe_killpg", "safe_killpg_group"]
+def isolation_popen_kwargs() -> dict[str, Any]:
+    """Platform ``Popen`` kwargs that isolate a spawned child so a later
+    :func:`contain` / :func:`kill_tree` has something to work with.
+
+    POSIX: ``start_new_session=True`` (unchanged — this is what every
+    existing call site already passes). Windows:
+    ``creationflags=CREATE_NEW_PROCESS_GROUP``, which does not itself
+    contain the tree (:func:`contain` does that, via a job object) but is
+    the flag a job-object spawn conventionally pairs with, and what a
+    future graceful-stop ``CTRL_BREAK_EVENT`` would need.
+
+    A caller with its own ``creationflags`` merges this dict's keys in
+    rather than overwriting them wholesale.
+    """
+    if getattr(os, "killpg", None) is not None:
+        return {"start_new_session": True}
+    return {"creationflags": win_job.CREATE_NEW_PROCESS_GROUP}
+
+
+def contain(proc_or_pid: Any) -> int | None:
+    """Assign a just-spawned child to a fresh Windows job object so its
+    whole descendant tree is reachable by :func:`kill_tree` (nexus-6y4e0).
+
+    Call this immediately after ``Popen`` returns — a grandchild spawned
+    before the assignment lands could in principle race it, but every
+    child a contained process spawns AFTER assignment joins the same job
+    automatically, so the window is only the gap between ``Popen()``
+    returning and this call, not the child's whole lifetime.
+
+    Returns the job handle to hand to :func:`kill_tree` later, or ``None``
+    on POSIX (where ``start_new_session=True`` at spawn already contains
+    the tree via a process group — nothing further to do) or on any
+    Windows failure (job creation or assignment refused; the caller
+    degrades to :func:`safe_killpg`'s single-process reach, exactly as it
+    did before this function existed).
+    """
+    if getattr(os, "killpg", None) is not None:
+        return None  # POSIX: start_new_session=True already contains the tree
+    pid = proc_or_pid.pid if hasattr(proc_or_pid, "pid") else proc_or_pid
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
+    job = win_job.create_job()
+    if job is None:
+        return None
+    if not win_job.assign_process(job, pid):
+        win_job.close_job(job)
+        return None
+    return job
+
+
+def kill_tree(proc_or_pid: Any, job: int | None, sig: int = KILL_SIGNAL) -> bool:
+    """Kill *proc_or_pid*'s whole tree: via the process group on POSIX, via
+    the Windows job object when *job* is not ``None`` (from :func:`contain`),
+    or via :func:`safe_killpg`'s single-process reach otherwise.
+
+    *job*, once closed, must not be passed again — closing an
+    already-closed handle is a Windows error, and the tree it named may by
+    then be a different, unrelated job. Callers hold *job* exactly as long
+    as the process it was assigned to is live and clear it (set the
+    variable back to ``None``) once this returns.
+    """
+    if job is not None:
+        return win_job.close_job(job)
+    return safe_killpg(proc_or_pid, sig)
+
+
+__all__ = [
+    "KILL_SIGNAL",
+    "contain",
+    "isolation_popen_kwargs",
+    "kill_tree",
+    "safe_killpg",
+    "safe_killpg_group",
+]

@@ -1,0 +1,241 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+"""Unit tests for nexus.util.win_job (nexus-6y4e0).
+
+No real Windows box is assumed. ``TestNonWindows`` exercises the actual
+platform this suite runs on (macOS/Linux: ``IS_WINDOWS`` is really
+``False`` here, no monkeypatching needed) and pins the no-op-degradation
+contract. ``TestWindowsShaped*`` monkeypatches ``win_job.IS_WINDOWS`` and
+``win_job._kernel32`` to a Python test double implementing the same five
+methods, so the WINDOWS branch of every function runs and is asserted on
+shape: the right constants, the right argument order, the right handles
+closed. That proves this module CALLS the Win32 surface the design calls
+for; it does not prove the real kernel32 behaves as documented — that is
+what the qwentescence live run in nexus-6y4e0's closing report is for.
+"""
+from __future__ import annotations
+
+import ctypes
+
+import pytest
+
+from nexus.util import win_job
+
+
+class _FakeKernel32:
+    """Stand-in for the five kernel32 exports win_job.py binds.
+
+    Every call is recorded verbatim so tests can assert on the exact
+    arguments this module passes, and every failure mode is an
+    independent toggle so each can be exercised without disturbing the
+    others.
+    """
+
+    def __init__(self) -> None:
+        self._next_handle = 1000
+        self.calls: list[tuple] = []
+        self.closed_handles: list[int] = []
+        self.set_info_limit_flags: int | None = None
+
+        self.create_ok = True
+        self.set_info_ok = True
+        self.open_process_ok = True
+        self.assign_ok = True
+        self.close_ok = True
+        self.ctrl_break_ok = True
+
+    def _mint(self) -> int:
+        self._next_handle += 1
+        return self._next_handle
+
+    def CreateJobObjectW(self, sec_attrs, name):  # noqa: N802 - mirrors the real Win32 name
+        self.calls.append(("CreateJobObjectW", sec_attrs, name))
+        if not self.create_ok:
+            return 0
+        return self._mint()
+
+    def SetInformationJobObject(self, handle, info_class, ptr, size):  # noqa: N802
+        self.calls.append(("SetInformationJobObject", handle, info_class, size))
+        if not self.set_info_ok:
+            return 0
+        info = ptr.contents
+        self.set_info_limit_flags = info.BasicLimitInformation.LimitFlags
+        return 1
+
+    def OpenProcess(self, access, inherit, pid):  # noqa: N802
+        self.calls.append(("OpenProcess", access, inherit, pid))
+        if not self.open_process_ok:
+            return 0
+        return self._mint()
+
+    def AssignProcessToJobObject(self, job, hproc):  # noqa: N802
+        self.calls.append(("AssignProcessToJobObject", job, hproc))
+        return 1 if self.assign_ok else 0
+
+    def CloseHandle(self, handle):  # noqa: N802
+        self.calls.append(("CloseHandle", handle))
+        self.closed_handles.append(handle)
+        return 1 if self.close_ok else 0
+
+    def GenerateConsoleCtrlEvent(self, event, pid):  # noqa: N802
+        self.calls.append(("GenerateConsoleCtrlEvent", event, pid))
+        return 1 if self.ctrl_break_ok else 0
+
+
+@pytest.fixture
+def windows_shaped(monkeypatch: pytest.MonkeyPatch) -> _FakeKernel32:
+    """Force every win_job function down its Windows branch, against a fake."""
+    fake = _FakeKernel32()
+    monkeypatch.setattr(win_job, "IS_WINDOWS", True)
+    monkeypatch.setattr(win_job, "_kernel32", fake)
+    return fake
+
+
+class TestNonWindows:
+    """The platform this suite actually runs on (macOS/Linux CI)."""
+
+    def test_is_windows_is_false_here(self) -> None:
+        assert win_job.IS_WINDOWS is False, (
+            "this test asserts the no-op degradation path on a NON-Windows "
+            "box; if this ever runs ON Windows, TestWindowsShaped* is redundant "
+            "with it rather than this one being wrong"
+        )
+
+    def test_create_job_returns_none_without_touching_ctypes_windll(self) -> None:
+        # The regression this guards: nexus-34f7r found that an unguarded
+        # ctypes.WinDLL(...) reference raises AttributeError off Windows at
+        # IMPORT time. win_job's own module-level _kernel32 binding already
+        # proved that at import (this test file imported cleanly), but
+        # every PUBLIC function must also refuse to touch it again.
+        assert win_job.create_job() is None
+
+    def test_assign_process_returns_false(self) -> None:
+        assert win_job.assign_process(123, 456) is False
+
+    def test_assign_process_returns_false_for_falsy_job(self) -> None:
+        assert win_job.assign_process(None, 456) is False
+        assert win_job.assign_process(0, 456) is False
+
+    def test_close_job_returns_false(self) -> None:
+        assert win_job.close_job(123) is False
+
+    def test_close_job_returns_false_for_falsy_job(self) -> None:
+        assert win_job.close_job(None) is False
+        assert win_job.close_job(0) is False
+
+    def test_send_ctrl_break_returns_false(self) -> None:
+        assert win_job.send_ctrl_break(456) is False
+
+
+class TestWindowsShapedHappyPath:
+    def test_create_job_sets_kill_on_close_limit_flag(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        job = win_job.create_job()
+        assert job is not None
+        assert isinstance(job, int)
+        assert (
+            windows_shaped.set_info_limit_flags
+            == win_job._JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        )
+        info_class_call = next(
+            c for c in windows_shaped.calls if c[0] == "SetInformationJobObject"
+        )
+        assert info_class_call[2] == win_job._JOB_OBJECT_EXTENDED_LIMIT_INFORMATION
+
+    def test_assign_process_opens_with_set_quota_and_terminate(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        job = win_job.create_job()
+        assert win_job.assign_process(job, 4242) is True
+
+        open_call = next(c for c in windows_shaped.calls if c[0] == "OpenProcess")
+        assert open_call[1] == win_job._PROCESS_SET_QUOTA | win_job._PROCESS_TERMINATE
+        assert open_call[3] == 4242
+
+        assign_call = next(
+            c for c in windows_shaped.calls if c[0] == "AssignProcessToJobObject"
+        )
+        assert assign_call[1] == job
+        # The PROCESS handle (not the job handle) must be closed right
+        # after assignment -- it is not needed once the job holds the
+        # membership, and leaking it would leak a kernel handle per spawn.
+        assert assign_call[2] in windows_shaped.closed_handles
+        assert job not in windows_shaped.closed_handles
+
+    def test_close_job_closes_the_handle(self, windows_shaped: _FakeKernel32) -> None:
+        job = win_job.create_job()
+        assert win_job.close_job(job) is True
+        assert job in windows_shaped.closed_handles
+
+    def test_send_ctrl_break_uses_ctrl_break_event_constant(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        assert win_job.send_ctrl_break(777) is True
+        call = next(
+            c for c in windows_shaped.calls if c[0] == "GenerateConsoleCtrlEvent"
+        )
+        assert call[1] == win_job.CTRL_BREAK_EVENT
+        assert call[2] == 777
+
+
+class TestWindowsShapedFailureDegradesHonestly:
+    """Every failure path returns None/False -- never raises."""
+
+    def test_create_job_returns_none_when_create_job_object_fails(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        windows_shaped.create_ok = False
+        assert win_job.create_job() is None
+
+    def test_create_job_closes_the_handle_when_set_information_fails(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        windows_shaped.set_info_ok = False
+        assert win_job.create_job() is None
+        # The handle CreateJobObjectW minted must not leak just because the
+        # limit could not be applied.
+        assert len(windows_shaped.closed_handles) == 1
+
+    def test_assign_process_returns_false_when_open_process_fails(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        job = win_job.create_job()
+        windows_shaped.open_process_ok = False
+        assert win_job.assign_process(job, 4242) is False
+
+    def test_assign_process_returns_false_when_assign_fails(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        job = win_job.create_job()
+        windows_shaped.assign_ok = False
+        assert win_job.assign_process(job, 4242) is False
+        # Even on a failed assignment, the opened process handle must not leak.
+        assert len(windows_shaped.closed_handles) == 1
+
+    def test_close_job_returns_false_when_close_handle_fails(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        job = win_job.create_job()
+        windows_shaped.close_ok = False
+        assert win_job.close_job(job) is False
+
+    def test_send_ctrl_break_returns_false_when_event_fails(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        windows_shaped.ctrl_break_ok = False
+        assert win_job.send_ctrl_break(777) is False
+
+
+def test_structures_have_consistent_sizes() -> None:
+    """The ctypes structs must actually assemble -- a field-order or type
+    mistake here would raise at import (caught by this file importing at
+    all) or silently mis-marshal on a real Windows box (not caught by
+    anything short of qwentescence). This pins the one thing checkable
+    without either: the extended struct is not smaller than its embedded
+    basic-limit struct plus its IO-counters struct.
+    """
+    basic = ctypes.sizeof(win_job._JobObjectBasicLimitInformation)
+    io = ctypes.sizeof(win_job._IoCounters)
+    extended = ctypes.sizeof(win_job._JobObjectExtendedLimitInformation)
+    assert extended >= basic + io
