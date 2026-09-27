@@ -95,22 +95,74 @@ Edge-case contracts:
 
     Discovery is materialized ONCE per collection from the SAME ``docs``
     list ``list_by_collection`` already returned (every live document in
-    this collection) — never a per-chunk catalog or T3 round trip, mirroring
-    the census's own ``live_notes``/``rev_candidates`` CTEs. For each
-    note-shaped document, its own ``meta["doc_id"]`` is grouped by chash;
-    when several live notes reverse-match the SAME chash, the census's
-    EXACT tie-break applies — fewest manifest rows anywhere (any
-    collection) wins, ties broken by the lowest tumbler
-    (:class:`nexus.catalog.tumbler.Tumbler`'s own ``__lt__``, the same
-    integer-segment ordering the engine's tumbler column sorts by) — via
-    ONE batched ``catalog.get_manifests(...)`` call over just the
-    candidate note tumblers (reusing the ``only_gapped`` pre-pass's own
-    batched call when it already covers every doc in the collection,
-    never a second round trip for the same information). A winning
-    candidate is only eligible when it has ZERO manifest rows in ANY
-    collection — matching the census's own ``legacy-unmanifested``
+    this collection), mirroring the census's own ``live_notes``/
+    ``rev_candidates`` CTEs. For each note-shaped document, its own
+    ``meta["doc_id"]`` is grouped by chash; when several live notes
+    reverse-match the SAME chash, the census's EXACT tie-break applies —
+    fewest manifest rows anywhere (any collection) wins, ties broken by
+    the lowest tumbler (:class:`nexus.catalog.tumbler.Tumbler`'s own
+    ``__lt__``, the same integer-segment ordering the engine's tumbler
+    column sorts by) — via ONE batched ``catalog.get_manifests(...)`` call
+    over just the candidate note tumblers (reusing the ``only_gapped``
+    pre-pass's own batched call when it already covers every doc in the
+    collection, never a second round trip for the same information). A
+    winning candidate is only eligible when it has ZERO manifest rows in
+    ANY collection — matching the census's own ``legacy-unmanifested``
     condition; a note with rows elsewhere is ``dead-owner`` territory
     (a rename-copy leftover) and backfill must not touch it.
+
+    T3 cost (nexus-wbfpw.7 fix-round-1, correcting an earlier overclaim of
+    "never a per-chunk round trip" that was true for the *document*
+    discovery above but not for the *chunk* reads this needs): ONE batched
+    ``col.get(ids=[...])`` call over every distinct candidate chash in the
+    collection (:func:`_forward_hints_for_chashes`), never a per-candidate
+    round trip. That same batched fetch's raw metadata is cached and reused
+    (:func:`_fetch_chunk_by_id`'s ``cached_meta`` parameter) when a winning
+    candidate is later manifested, so the winner pays no second T3 round
+    trip either.
+
+    PRECEDENCE, TENANT-WIDE (nexus-wbfpw.7 fix-round-1 CRITICAL, T2
+    nexus/review-wbfpw7-code and nexus/critique-wbfpw7-code): a candidate
+    chash whose own T3 chunk carries a forward pointer naming a document
+    that is LIVE ANYWHERE IN THE TENANT — resolved via ONE batched
+    ``catalog.resolve_many(...)`` call over every distinct forward pointer
+    found, which (like the census's own ``fwd_owner`` join) returns only
+    documents with ``deleted_at IS NULL`` — is dropped from reverse
+    candidacy, exactly mirroring the census's own forward-wins-when-live
+    rule. The FIRST fix round scoped this exclusion to only THIS
+    collection's own live-doc set, which both (a) let a live forward owner
+    registered under a DIFFERENT ``physical_collection`` slip through
+    undetected, so a coincidental same-collection note with the identical
+    chash as its own identity could be wrongly manifested as that chunk's
+    owner (a genuine misattribution, not just a missed rescue), and (b)
+    gave the operator no diagnostic for the gap at all. This round closes
+    (a) unconditionally. For (b) — a chash whose true forward owner is
+    live but registered elsewhere is reported via
+    ``BackfillResult.docs_cross_collection_forward_owner_skipped`` (plus a
+    structured warning naming the chash and the owner's tumbler and
+    collection) rather than silently dropped: the write itself is legal
+    (``fk_catalog_chunks_chunk`` keys on ``(tenant_id, collection, chash)``,
+    not on the owning document's own registered collection — the SAME
+    schema shape the census's own rename-copy scenario already relies on),
+    but reaching it requires enumerating every chunk in a T3 collection
+    independent of any document that names it, a capability this
+    document-driven backfill does not have and this round does not add;
+    see ``scripts/sql/manifest_less_census.sql``'s own bucket comment for
+    the authoritative classification this residual maps to.
+
+    MULTI-PIECE GUARD (nexus-wbfpw.7 fix-round-1, T2
+    nexus/review-wbfpw7-code Important): a note's reverse identity
+    (``meta["doc_id"]``) names only ONE chunk, whatever the note's true
+    piece count — ``note_manifest_metadata`` (``catalog/store_hook.py``)
+    stamps a MULTI-piece note's identity from piece 0's own chash alone.
+    A winning candidate is only manifested when its registered
+    ``chunk_count`` is <= 1; a winner with ``chunk_count`` > 1 is a legacy
+    multi-piece note with no forward pointer on any piece, and manifesting
+    piece 0 alone would resync ``chunk_count`` to 1 and mark the document
+    healed while pieces 1..N-1 stay orphaned with no path back — a silent,
+    irreversible partial heal. Skipped instead, counted in
+    ``BackfillResult.docs_reverse_multi_piece_skipped`` (plus a structured
+    warning naming the doc, the chash, and the registered chunk_count).
 
     In the main loop, reverse discovery is consulted ONLY as the fallback
     when a document's FORWARD lookup (``_iter_chunks_for_doc``) matches
@@ -118,15 +170,17 @@ Edge-case contracts:
     census (forward wins when live; reverse only rescues a document the
     forward path found nothing for), and a note-shaped document's defining
     property (nexus-cotmr) is that it carries no forward-pointing chunk in
-    the first place. The reverse chunk itself is fetched directly by id
-    (``col.get(ids=[chash])``) — a where-filter lookup by definition finds
-    nothing, since the chunk carries no forward pointer to this document —
-    and, since a note's catalog identity is always single-chunk
-    (``catalog/store_hook.py::single_chunk_manifest_metadata``), manifested
-    at position 0. Counted separately from forward discovery in
-    ``BackfillResult.docs_reverse_discovered`` (never folded into a
-    forward-only counter) so a dry run's report distinguishes the two
-    discovery paths, matching the census's own ``owner_path`` column.
+    the first place. The reverse chunk itself is fetched by id
+    (``_fetch_chunk_by_id``, reusing the discovery pass's cached metadata
+    when available, else one more ``col.get(ids=[chash])``) — a
+    where-filter lookup by definition finds nothing, since the chunk
+    carries no forward pointer to this document — and, since a note's
+    catalog identity is always single-chunk (subject to the multi-piece
+    guard above), manifested at position 0. Counted separately from
+    forward discovery in ``BackfillResult.docs_reverse_discovered`` (never
+    folded into a forward-only counter) so a dry run's report distinguishes
+    the two discovery paths, matching the census's own ``owner_path``
+    column.
 """
 from __future__ import annotations
 
@@ -277,6 +331,28 @@ class BackfillResult:
     # never a silent 0 that reads as "nothing to discover" when the census
     # says otherwise.
     docs_reverse_discovered: int = 0
+    # nexus-wbfpw.7 fix-round-1 CRITICAL (T2 nexus/review-wbfpw7-code): count
+    # reverse candidates dropped because their forward pointer names a
+    # document that is LIVE somewhere in the tenant but registered under a
+    # DIFFERENT physical_collection than this one -- the census's own
+    # tenant-wide fwd_owner join would name that document, not any note in
+    # this collection, as the chunk's true owner. Backfill cannot manifest
+    # this chash into that owner from this collection-scoped, document-
+    # driven pass (see the module docstring's PRECEDENCE, TENANT-WIDE
+    # section) -- reported here rather than silently dropped or wrongly
+    # attributed. Non-vacuity: an operator whose live tenant holds this
+    # shape must SEE this count rise, never a silent 0.
+    docs_cross_collection_forward_owner_skipped: int = 0
+    # nexus-wbfpw.7 fix-round-1 (T2 nexus/review-wbfpw7-code Important):
+    # count reverse candidates dropped because the winning note's own
+    # registered chunk_count is > 1 -- a note's reverse identity names only
+    # ONE chunk regardless of true piece count, so manifesting position 0
+    # alone for a legacy multi-piece note would resync chunk_count to 1 and
+    # mark it healed while the remaining pieces stay orphaned forever. Never
+    # partially healed -- see the module docstring's MULTI-PIECE GUARD.
+    # Non-vacuity: an operator with a legacy multi-piece reverse-owned note
+    # must SEE this count rise, never a silent partial heal.
+    docs_reverse_multi_piece_skipped: int = 0
 
 
 # nexus-b91tv: the two metadata keys a doc's tumbler can be stamped under.
@@ -354,8 +430,10 @@ def _fetch_chunk_by_id(
     chash: str,
     doc_id: str,
     collection: str,
+    *,
+    cached_meta: dict | None = None,
 ) -> dict | None:
-    """Fetch ONE T3 chunk directly by its own id (nexus-wbfpw.7 REVERSE path).
+    """Fetch ONE T3 chunk by its own id (nexus-wbfpw.7 REVERSE path).
 
     Unlike :func:`_fetch_chunks_by_key`, this never filters by a forward
     metadata key -- a reverse-owned chunk by definition carries no forward
@@ -364,6 +442,15 @@ def _fetch_chunk_by_id(
     ``where``-filter lookup would always find nothing. ``doc_id`` here is
     the note-shaped document whose own ``meta["doc_id"]`` named *chash* --
     used only for error attribution, never as a lookup key.
+
+    *cached_meta* (nexus-wbfpw.7 fix-round-1, T2 nexus/review-wbfpw7-code
+    Important -- "_forward_hint_for_chash is a per-candidate round trip, not
+    batched"): when the caller already fetched this chash's metadata via
+    :func:`_forward_hints_for_chashes`'s single batched pass, pass it here
+    to validate and build the manifest row WITHOUT a second network round
+    trip. ``None`` (the default) falls through to a live ``col.get(ids=
+    [chash])`` -- used when the cache has no entry (the chash was not found
+    during discovery, e.g. deleted since) or the caller has no cache at all.
 
     Returns None if the chunk no longer exists in T3 (its catalog row
     stamped this chash into ``meta["doc_id"]`` at write time, but the T3
@@ -377,15 +464,19 @@ def _fetch_chunk_by_id(
     disagrees with its ``chunk_text_hash`` copy -- same contract as the
     forward path, applied uniformly to the reverse one.
     """
-    result = col.get(ids=[chash], include=["metadatas"])
-    ids: list[str] = result.get("ids") or []
-    if not ids:
-        return None
-    metas: list[dict] = result.get("metadatas") or []
-    cid = ids[0]
-    meta = metas[0] if metas else {}
-    if not isinstance(meta, dict):
-        meta = {}
+    if cached_meta is not None:
+        cid = chash
+        meta = cached_meta
+    else:
+        result = col.get(ids=[chash], include=["metadatas"])
+        ids: list[str] = result.get("ids") or []
+        if not ids:
+            return None
+        metas: list[dict] = result.get("metadatas") or []
+        cid = ids[0]
+        meta = metas[0] if metas else {}
+        if not isinstance(meta, dict):
+            meta = {}
     meta_chash = meta.get("chunk_text_hash") or ""
     if not meta_chash:
         raise MissingChunkHashError(chunk_id=cid, collection=collection)
@@ -407,26 +498,68 @@ def _fetch_chunk_by_id(
     }
 
 
-def _forward_hint_for_chash(col: "_ServiceCollectionStub", chash: str) -> str:
-    """Return the RAW forward-pointer value stamped on *chash*'s own T3
-    chunk metadata (``catalog_doc_id``, falling back to ``doc_id``), or
-    ``""`` when absent or the chunk itself does not exist.
+def _forward_hints_for_chashes(
+    col: "_ServiceCollectionStub", chashes: list[str],
+) -> tuple[dict[str, str], dict[str, dict]]:
+    """ONE batched T3 fetch for every reverse-candidate chash (nexus-wbfpw.7
+    fix-round-1, T2 nexus/review-wbfpw7-code Important -- replaces an O(N)
+    per-chash ``col.get`` loop with one call).
 
-    Used ONLY to decide reverse-candidacy eligibility in
-    :func:`_reverse_note_owner_by_doc` -- deliberately NOT chash-validated
-    here (no ``chunk_text_hash``/divergence check): the actual manifest
-    write later re-fetches and validates via :func:`_fetch_chunk_by_id`,
-    so a light, unvalidated read is all this needs.
+    Returns ``(forward_hint_by_chash, raw_meta_by_chash)``:
+      - ``forward_hint_by_chash``: the RAW forward-pointer value
+        (``catalog_doc_id``, falling back to ``doc_id``) stamped on each
+        FOUND chash's own T3 chunk metadata, or ``""`` when the chunk
+        carries neither key. A chash absent from this dict was not found
+        in T3 at all. Used ONLY to decide reverse-candidacy eligibility in
+        :func:`_reverse_note_owner_by_doc` -- deliberately NOT
+        chash-validated here (no ``chunk_text_hash``/divergence check);
+        the winning candidate's manifest write validates via
+        :func:`_fetch_chunk_by_id`, reusing ``raw_meta_by_chash`` below.
+      - ``raw_meta_by_chash``: the raw metadata dict for every chash T3
+        actually has, keyed by chash -- passed to :func:`_fetch_chunk_by_id`
+        as ``cached_meta`` so the winning candidate's manifest row is built
+        without a second network round trip for the same chash.
+
+    ONE ``col.get(ids=[...])`` call for every distinct candidate chash --
+    :meth:`_ServiceCollectionStub.get` already paginates internally at
+    ``QUOTAS.MAX_RECORDS_PER_WRITE`` on the ``ids=`` branch, so this stays
+    bounded to one call per collection regardless of candidate count.
     """
-    result = col.get(ids=[chash], include=["metadatas"])
+    if not chashes:
+        return {}, {}
+    result = col.get(ids=list(chashes), include=["metadatas"])
     ids: list[str] = result.get("ids") or []
-    if not ids:
-        return ""
     metas: list[dict] = result.get("metadatas") or []
-    meta = metas[0] if metas else {}
-    if not isinstance(meta, dict):
-        return ""
-    return meta.get("catalog_doc_id") or meta.get("doc_id") or ""
+    forward_hints: dict[str, str] = {}
+    raw_meta_by_chash: dict[str, dict] = {}
+    for cid, meta in zip(ids, metas):
+        if not isinstance(meta, dict):
+            meta = {}
+        raw_meta_by_chash[cid] = meta
+        forward_hints[cid] = meta.get("catalog_doc_id") or meta.get("doc_id") or ""
+    return forward_hints, raw_meta_by_chash
+
+
+@dataclass
+class _ReverseDiscovery:
+    """Result of one collection's reverse-notes discovery pass.
+
+    ``winner_chash_by_doc``: doc_id -> the chash it should manifest (the
+    prior return type, unchanged).
+    ``raw_meta_by_chash``: cached T3 metadata for every candidate chash
+    found, reused by the caller to avoid re-fetching the winner's row.
+    ``cross_collection_forward_owner``: count of candidates dropped because
+    their forward pointer names a document LIVE elsewhere in the tenant
+    (``BackfillResult.docs_cross_collection_forward_owner_skipped``).
+    ``multi_piece_skipped``: count of candidates dropped because the
+    winning note's registered ``chunk_count`` is > 1
+    (``BackfillResult.docs_reverse_multi_piece_skipped``).
+    """
+
+    winner_chash_by_doc: dict[str, str] = field(default_factory=dict)
+    raw_meta_by_chash: dict[str, dict] = field(default_factory=dict)
+    cross_collection_forward_owner: int = 0
+    multi_piece_skipped: int = 0
 
 
 def _reverse_note_owner_by_doc(
@@ -436,7 +569,7 @@ def _reverse_note_owner_by_doc(
     collection: str,
     *,
     manifest_counts_by_doc: "dict[str, list] | None",
-) -> dict[str, str]:
+) -> _ReverseDiscovery:
     """Map winning reverse-note doc_id -> the chash it should manifest.
 
     Mirrors ``manifest_less_census.sql``'s ``live_notes``/``rev_candidates``
@@ -450,24 +583,40 @@ def _reverse_note_owner_by_doc(
     only returned when it has ZERO manifest rows anywhere -- the
     ``legacy-unmanifested`` condition; a winner with rows elsewhere is
     ``dead-owner`` territory the census does not rescue, and backfill must
-    not touch it either.
+    not touch it either (no counter -- this branch was already silent
+    before this fix and stays silent; see
+    ``test_reverse_sole_candidate_with_rows_elsewhere_is_not_granted``).
 
-    PRECEDENCE (forward wins when live, exactly like the census): before
-    any tie-break, a candidate chash whose OWN T3 chunk carries a forward
-    pointer (``catalog_doc_id``/``doc_id``) naming a document that is LIVE
-    in *docs* -- this same collection's live-document population -- is
-    dropped from reverse candidacy entirely. Without this, a chunk a LIVE
-    document already forward-owns (and which that document's own
-    ``_iter_chunks_for_doc`` pass will manifest normally) could ALSO get
-    manifested into an unrelated reverse-matching note, duplicating
-    ownership of one chunk across two documents -- exactly what "never
-    manifest a chunk into a document the census would not name as owner"
-    forbids. Scoped to THIS collection's live-doc set, not the whole
-    tenant: a forward pointer to a live document registered under a
-    DIFFERENT physical_collection is the documented rename-copy edge case
-    the census resolves via its own tenant-wide join, and unlike the
-    same-collection shape it carries no risk of THIS run's own writes
-    duplicating ownership, so it is out of scope here.
+    PRECEDENCE, TENANT-WIDE (forward wins when live, exactly like the
+    census -- nexus-wbfpw.7 fix-round-1 CRITICAL, T2
+    nexus/review-wbfpw7-code / nexus/critique-wbfpw7-code): before any
+    tie-break, every candidate chash's forward pointer
+    (``catalog_doc_id``/``doc_id``, batched via
+    :func:`_forward_hints_for_chashes`) is resolved via ONE
+    ``catalog.resolve_many(...)`` call. ``resolve_many`` -- like the
+    census's own ``fwd_owner`` join precedence -- returns only documents
+    with ``deleted_at IS NULL``, so membership in its result IS "live
+    ANYWHERE IN THE TENANT", not just in *docs*. A candidate whose forward
+    pointer resolves this way is dropped from reverse candidacy entirely,
+    regardless of which ``physical_collection`` the forward owner is
+    registered under. The FIRST fix round scoped this exclusion to
+    ``{str(d.tumbler) for d in docs}`` (this collection's own live-doc set
+    only), which let a same-collection note wrongly claim a chash whose
+    true forward owner was live but registered elsewhere -- a genuine
+    misattribution the tenant-wide check closes unconditionally. When the
+    live forward owner is registered under a DIFFERENT collection than
+    *collection*, that is reported via
+    ``_ReverseDiscovery.cross_collection_forward_owner`` (backfill still
+    cannot manifest the chash into that owner from here -- see the module
+    docstring's PRECEDENCE, TENANT-WIDE section for why).
+
+    MULTI-PIECE GUARD (nexus-wbfpw.7 fix-round-1, T2
+    nexus/review-wbfpw7-code Important): a winning candidate whose
+    registered ``chunk_count`` is > 1 is a legacy multi-piece note with no
+    forward pointer on any piece -- manifesting its reverse identity chash
+    alone would resync ``chunk_count`` to 1 and silently, irreversibly
+    orphan the remaining pieces. Skipped and counted in
+    ``_ReverseDiscovery.multi_piece_skipped`` instead of granted.
 
     *manifest_counts_by_doc*, when not None, is the ``only_gapped``
     pre-pass's already-fetched ``catalog.get_manifests(...)`` result over
@@ -486,7 +635,7 @@ def _reverse_note_owner_by_doc(
             note_candidates.setdefault(doc_chash, []).append(doc)
 
     if not note_candidates:
-        return {}
+        return _ReverseDiscovery()
 
     if manifest_counts_by_doc is None:
         note_doc_ids = [
@@ -496,12 +645,35 @@ def _reverse_note_owner_by_doc(
 
     live_tumblers_this_collection = {str(d.tumbler) for d in docs}
 
+    forward_hints, raw_meta_by_chash = _forward_hints_for_chashes(
+        col, list(note_candidates.keys()),
+    )
+    forward_tumblers = sorted({h for h in forward_hints.values() if h})
+    # nexus-wbfpw.7 fix-round-1: ONE batched tenant-wide resolve, mirroring
+    # the census's own fwd_owner join -- resolve_many returns only LIVE
+    # (deleted_at IS NULL) documents (confirmed against
+    # CatalogRepository.resolveMany), so membership here IS the tenant-wide
+    # liveness check.
+    live_forward_owners = catalog.resolve_many(forward_tumblers) if forward_tumblers else {}
+
     winner_chash_by_doc: dict[str, str] = {}
+    cross_collection_forward_owner = 0
+    multi_piece_skipped = 0
     for doc_chash, candidates in note_candidates.items():
-        forward_hint = _forward_hint_for_chash(col, doc_chash)
-        if forward_hint and forward_hint in live_tumblers_this_collection:
+        forward_hint = forward_hints.get(doc_chash, "")
+        if forward_hint and forward_hint in live_forward_owners:
             # A live forward owner always wins -- this chash is never a
             # reverse candidate at all, tie-break included.
+            if forward_hint not in live_tumblers_this_collection:
+                owner_entry = live_forward_owners[forward_hint]
+                cross_collection_forward_owner += 1
+                _log.warning(
+                    "manifest_backfill_reverse_cross_collection_forward_owner",
+                    collection=collection,
+                    chash=doc_chash,
+                    forward_owner_tumbler=forward_hint,
+                    forward_owner_collection=owner_entry.physical_collection,
+                )
             continue
         winner = min(
             candidates,
@@ -510,9 +682,26 @@ def _reverse_note_owner_by_doc(
                 d.tumbler,
             ),
         )
-        if len(manifest_counts_by_doc.get(str(winner.tumbler), []) or []) == 0:
-            winner_chash_by_doc[str(winner.tumbler)] = doc_chash
-    return winner_chash_by_doc
+        if len(manifest_counts_by_doc.get(str(winner.tumbler), []) or []) != 0:
+            continue
+        chunk_count = getattr(winner, "chunk_count", 0) or 0
+        if chunk_count > 1:
+            multi_piece_skipped += 1
+            _log.warning(
+                "manifest_backfill_reverse_multi_piece_skipped",
+                collection=collection,
+                doc_id=str(winner.tumbler),
+                chash=doc_chash,
+                chunk_count=chunk_count,
+            )
+            continue
+        winner_chash_by_doc[str(winner.tumbler)] = doc_chash
+    return _ReverseDiscovery(
+        winner_chash_by_doc=winner_chash_by_doc,
+        raw_meta_by_chash=raw_meta_by_chash,
+        cross_collection_forward_owner=cross_collection_forward_owner,
+        multi_piece_skipped=multi_piece_skipped,
+    )
 
 
 def _iter_chunks_for_doc(
@@ -679,14 +868,20 @@ def backfill_manifest_for_collection(
     # when `col is None` (collection absent in T3), every doc is about to
     # be counted docs_skipped_no_t3 below regardless, so there is nothing
     # to discover.
-    reverse_owner_chash_by_doc: dict[str, str] = (
+    reverse_discovery = (
         _reverse_note_owner_by_doc(
             catalog, col, all_docs, collection_name,
             manifest_counts_by_doc=existing_manifests,
         )
         if col is not None
-        else {}
+        else _ReverseDiscovery()
     )
+    reverse_owner_chash_by_doc: dict[str, str] = reverse_discovery.winner_chash_by_doc
+    reverse_raw_meta_by_chash: dict[str, dict] = reverse_discovery.raw_meta_by_chash
+    result.docs_cross_collection_forward_owner_skipped = (
+        reverse_discovery.cross_collection_forward_owner
+    )
+    result.docs_reverse_multi_piece_skipped = reverse_discovery.multi_piece_skipped
 
     for doc in docs:
         doc_id = str(doc.tumbler)
@@ -750,6 +945,7 @@ def backfill_manifest_for_collection(
             try:
                 reverse_chunk = _fetch_chunk_by_id(
                     col, reverse_chash, doc_id, collection_name,
+                    cached_meta=reverse_raw_meta_by_chash.get(reverse_chash),
                 )
             except ChashDivergentError as exc:
                 # Same contract as the forward path's ChashDivergentError

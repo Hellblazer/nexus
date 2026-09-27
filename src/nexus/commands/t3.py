@@ -938,6 +938,8 @@ def backfill_manifest_cmd(
     total_skipped_chash_divergent = 0
     total_skipped_fk_409 = 0
     total_reverse_discovered = 0
+    total_cross_collection_forward_owner_skipped = 0
+    total_reverse_multi_piece_skipped = 0
     skipped_taxonomy = 0
     errors: list[str] = []
     docs_processed_overall = 0
@@ -1030,11 +1032,27 @@ def backfill_manifest_cmd(
             if result.docs_reverse_discovered
             else ""
         )
+        # nexus-wbfpw.7 fix-round-1: cross-collection forward-owner and
+        # multi-piece reverse skips -- never silent, same discipline as
+        # every other skip class above.
+        cross_collection_part = (
+            f" ({result.docs_cross_collection_forward_owner_skipped} skipped: "
+            f"cross_collection_forward_owner)"
+            if result.docs_cross_collection_forward_owner_skipped
+            else ""
+        )
+        reverse_multi_piece_part = (
+            f" ({result.docs_reverse_multi_piece_skipped} skipped: "
+            f"reverse_multi_piece)"
+            if result.docs_reverse_multi_piece_skipped
+            else ""
+        )
         print(
             f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
             f"doc(s), {verb} {result.chunks_written} chunk manifest row(s)"
             f"{skipped_part}{zero_chunks_part}{phase3_no_index_part}"
-            f"{has_manifest_part}{chash_divergent_part}{fk_409_part}{reverse_part}",
+            f"{has_manifest_part}{chash_divergent_part}{fk_409_part}{reverse_part}"
+            f"{cross_collection_part}{reverse_multi_piece_part}",
             file=sys.stderr,
         )
 
@@ -1077,6 +1095,18 @@ def backfill_manifest_cmd(
                 if result.docs_reverse_discovered
                 else ""
             )
+            + (
+                f" ({result.docs_cross_collection_forward_owner_skipped} skipped: "
+                f"cross-collection forward owner)"
+                if result.docs_cross_collection_forward_owner_skipped
+                else ""
+            )
+            + (
+                f" ({result.docs_reverse_multi_piece_skipped} skipped: "
+                f"reverse multi-piece note)"
+                if result.docs_reverse_multi_piece_skipped
+                else ""
+            )
         )
 
         total_docs += result.docs_processed
@@ -1088,6 +1118,10 @@ def backfill_manifest_cmd(
         total_skipped_chash_divergent += result.docs_skipped_chash_divergent
         total_skipped_fk_409 += result.docs_skipped_fk_409
         total_reverse_discovered += result.docs_reverse_discovered
+        total_cross_collection_forward_owner_skipped += (
+            result.docs_cross_collection_forward_owner_skipped
+        )
+        total_reverse_multi_piece_skipped += result.docs_reverse_multi_piece_skipped
         docs_processed_overall += result.docs_processed
 
         # SIG-6: periodic progress every _PROGRESS_INTERVAL docs.
@@ -1119,10 +1153,18 @@ def backfill_manifest_cmd(
         # already healed) rather than trusting a bare --resume to have
         # picked the residual up.
         if not dry_run:
+            # nexus-wbfpw.7 fix-round-1: cross-collection forward-owner and
+            # reverse multi-piece skips are unhealed gaps of the same kind
+            # as the three below -- a future fix (widened discovery, a
+            # re-put that re-splits the note) can make them recoverable, so
+            # a collection whose only gaps are these must also stay
+            # revisitable by --resume, not be marked done.
             residual = (
                 result.docs_skipped_fk_409
                 + result.docs_skipped_chash_divergent
                 + result.docs_skipped_zero_chunks
+                + result.docs_cross_collection_forward_owner_skipped
+                + result.docs_reverse_multi_piece_skipped
             )
             if residual > 0:
                 state[coll_name] = [
@@ -1130,12 +1172,17 @@ def backfill_manifest_cmd(
                     f"fk_409={result.docs_skipped_fk_409}",
                     f"chash_divergent={result.docs_skipped_chash_divergent}",
                     f"zero_chunks={result.docs_skipped_zero_chunks}",
+                    f"cross_collection_forward_owner={result.docs_cross_collection_forward_owner_skipped}",
+                    f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}",
                 ]
                 click.echo(
                     f"  {coll_name}: NOT marked done -- {residual} doc(s) "
                     f"skipped (fk_409={result.docs_skipped_fk_409}, "
                     f"chash_divergent={result.docs_skipped_chash_divergent}, "
-                    f"zero_chunks={result.docs_skipped_zero_chunks}); "
+                    f"zero_chunks={result.docs_skipped_zero_chunks}, "
+                    f"cross_collection_forward_owner="
+                    f"{result.docs_cross_collection_forward_owner_skipped}, "
+                    f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}); "
                     f"a future --resume will reprocess this collection"
                 )
             else:
@@ -1185,6 +1232,21 @@ def backfill_manifest_cmd(
         if total_reverse_discovered
         else ""
     )
+    # nexus-wbfpw.7 fix-round-1: cross-collection forward-owner and reverse
+    # multi-piece skip totals -- never silent, same discipline as every
+    # other skip class above.
+    cross_collection_forward_owner_part = (
+        f", {total_cross_collection_forward_owner_skipped} chash(es) skipped "
+        f"(cross-collection forward owner)"
+        if total_cross_collection_forward_owner_skipped
+        else ""
+    )
+    reverse_multi_piece_part = (
+        f", {total_reverse_multi_piece_skipped} note(s) skipped "
+        f"(reverse multi-piece)"
+        if total_reverse_multi_piece_skipped
+        else ""
+    )
     click.echo(
         f"\nSummary: processed {total_docs} doc(s), "
         f"{verb} {total_chunks} manifest row(s)"
@@ -1195,6 +1257,8 @@ def backfill_manifest_cmd(
         + skipped_chash_divergent_part
         + skipped_fk_409_part
         + reverse_discovered_part
+        + cross_collection_forward_owner_part
+        + reverse_multi_piece_part
         + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
         + (f", {len(errors)} error(s)" if errors else "")
     )

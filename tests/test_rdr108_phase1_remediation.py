@@ -1761,4 +1761,130 @@ class TestWbfpw7ReverseNotesDiscovery:
         # reverse discovery.
         assert active_catalog.get_manifest(note) == []
 
+    def test_cross_collection_forward_owner_excludes_reverse_and_is_reported(
+        self, active_catalog, t3_db,
+    ):
+        """(e) fix-round-1 CRITICAL: a chunk physically living in collection
+        A whose forward pointer names a document that is LIVE but
+        registered under a DIFFERENT collection B must NEVER be manifested
+        into a coincidental same-collection note that also reverse-matches
+        the same chash -- the tenant-wide forward-liveness check must
+        exclude it regardless of which collection the live owner is
+        registered under, and the exclusion must be REPORTED (never a
+        silent drop), since backfill cannot reach the true owner from a
+        collection-A-scoped, document-driven run.
+
+        Pre-fix, the exclusion set was built from THIS collection's own
+        live-doc list only (``{str(d.tumbler) for d in docs}``), which does
+        NOT contain forward_doc (registered under collB) -- so forward_hint
+        would NOT be found in that set and the note would wrongly win as
+        the sole reverse candidate with zero manifest rows, corrupting
+        chunk ownership."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll_a = _unique_coll("knowledge")
+        coll_b = _unique_coll("knowledge")
+        chash = "2" * 64
+
+        # forward_doc is LIVE and registered under coll_b -- a different
+        # collection than the chunk physically lives in.
+        forward_doc = _register_doc(active_catalog, coll_b)
+        # note is registered under coll_a and coincidentally reverse-claims
+        # the SAME chash as its own identity.
+        note = _register_note_doc(active_catalog, coll_a, chash)
+
+        # The chunk physically lives in coll_a's T3 store and forward-points
+        # to forward_doc (registered under coll_b).
+        _seed_chunk(
+            t3_db, collection=coll_a,
+            content="cross-collection owned", doc_id=forward_doc,
+            chunk_index=0, chunk_text_hash=chash,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll_a, dry_run=False,
+        )
+
+        assert result.docs_cross_collection_forward_owner_skipped == 1
+        assert result.docs_reverse_discovered == 0
+        # The note must get NOTHING -- the coincidental collision must never
+        # be granted regardless of the true owner's collection.
+        assert active_catalog.get_manifest(note) == []
+
+    def test_reverse_multi_piece_note_is_skipped_not_partially_healed(
+        self, active_catalog, t3_db,
+    ):
+        """(f) fix-round-1: a legacy multi-piece note (registered
+        chunk_count > 1) with no forward pointer on any piece must be
+        SKIPPED by the reverse path, never manifested with only its
+        identity chash at position 0 -- that would resync chunk_count to 1
+        and permanently orphan the remaining pieces with no diagnostic."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+        coll = _unique_coll("knowledge")
+        chash = "3" * 64
+        note = _register_note_doc(active_catalog, coll, chash)
+        # Simulate the pre-note-splitting legacy shape: the catalog record
+        # says this note has 3 chunks, but only piece 0's identity chash is
+        # ever discoverable via the reverse path (its own meta.doc_id).
+        active_catalog.update(note, chunk_count=3)
+
+        _seed_reverse_chunk(
+            t3_db, collection=coll, content="piece 0 of 3", chunk_text_hash=chash,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_reverse_multi_piece_skipped == 1
+        assert result.docs_reverse_discovered == 0
+        # Never partially healed -- the note's manifest stays untouched.
+        assert active_catalog.get_manifest(note) == []
+
+    def test_reverse_sole_candidate_with_rows_elsewhere_is_not_granted(
+        self, active_catalog, t3_db,
+    ):
+        """(g) coverage gap named in T2 nexus/review-wbfpw7-code: a SOLE
+        reverse candidate (no tie-break needed) that already carries a
+        manifest row in another collection must NOT be granted the reverse
+        chash -- matching the census's own ``total_count = 0`` eligibility
+        condition exactly. A candidate with rows elsewhere is dead-owner
+        territory, not legacy-unmanifested."""
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        coll = _unique_coll("knowledge")
+        chash = "4" * 64
+        note = _register_note_doc(active_catalog, coll, chash)
+
+        # note already has ONE manifest row elsewhere -- total_count > 0,
+        # so it is NOT eligible for the reverse rescue even as the sole
+        # candidate.
+        other_chash = "5" * 64
+        seed_manifest_chunks(coll, [other_chash])
+        active_catalog.write_manifest(
+            note,
+            [{
+                "chash": other_chash, "position": 0, "line_start": None,
+                "line_end": None, "char_start": None, "char_end": None,
+            }],
+            collection=coll,
+        )
+
+        _seed_reverse_chunk(
+            t3_db, collection=coll, content="not eligible", chunk_text_hash=chash,
+        )
+
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+
+        assert result.docs_reverse_discovered == 0
+        # The note's pre-existing manifest row is untouched; the reverse
+        # chash was never granted.
+        manifest = active_catalog.get_manifest(note)
+        assert len(manifest) == 1
+        assert manifest[0].chash == other_chash
+
 
