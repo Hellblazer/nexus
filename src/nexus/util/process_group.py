@@ -252,11 +252,32 @@ def kill_tree(proc_or_pid: Any, job: int | None, sig: int = KILL_SIGNAL) -> bool
     return safe_killpg(proc_or_pid, sig)
 
 
+def release(job: int | None) -> None:
+    """Close *job* (from :func:`contain`) without attempting to kill
+    anything -- the SUCCESS-path counterpart to :func:`kill_tree`
+    (nexus-6y4e0 review: a job handle assigned at spawn must close on
+    EVERY outcome, not only a timeout/failure kill; three call sites
+    closed it only inside their ``except TimeoutExpired`` branch and
+    leaked it on every other exit).
+
+    Call this from an unconditional ``finally`` alongside the spawn. A
+    no-op on POSIX (``job`` is always ``None`` there) and when *job* is
+    already ``None`` -- in particular, after a kill path (``kill_tree``)
+    already closed it and set its local variable back to ``None``, so a
+    caller's ``finally`` never double-closes: closing an ALREADY-closed
+    Windows handle is undefined, and by the time a second close could
+    happen the number may name an unrelated job entirely.
+    """
+    if job is not None:
+        win_job.close_job(job)
+
+
 __all__ = [
     "KILL_SIGNAL",
     "contain",
     "isolation_popen_kwargs",
     "kill_tree",
+    "release",
     "safe_killpg",
     "safe_killpg_group",
 ]

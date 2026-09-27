@@ -44,18 +44,33 @@ class _FakeKernel32:
         self.close_ok = True
         self.ctrl_break_ok = True
 
+        #: Names of methods that should RAISE instead of returning a
+        #: failure value -- the exception-guard regression (nexus-6y4e0
+        #: review): win_job's module docstring promises every public
+        #: function degrades to None/False rather than raising, but
+        #: nothing enforced that until create_job/assign_process/
+        #: close_job each wrapped their raw kernel32 calls + struct
+        #: marshalling in ``except (OSError, ctypes.ArgumentError)``.
+        self.raise_from: set[str] = set()
+
     def _mint(self) -> int:
         self._next_handle += 1
         return self._next_handle
 
+    def _maybe_raise(self, name: str) -> None:
+        if name in self.raise_from:
+            raise OSError(f"fake kernel32: {name} raised")
+
     def CreateJobObjectW(self, sec_attrs, name):  # noqa: N802 - mirrors the real Win32 name
         self.calls.append(("CreateJobObjectW", sec_attrs, name))
+        self._maybe_raise("CreateJobObjectW")
         if not self.create_ok:
             return 0
         return self._mint()
 
     def SetInformationJobObject(self, handle, info_class, ptr, size):  # noqa: N802
         self.calls.append(("SetInformationJobObject", handle, info_class, size))
+        self._maybe_raise("SetInformationJobObject")
         if not self.set_info_ok:
             return 0
         info = ptr.contents
@@ -64,21 +79,25 @@ class _FakeKernel32:
 
     def OpenProcess(self, access, inherit, pid):  # noqa: N802
         self.calls.append(("OpenProcess", access, inherit, pid))
+        self._maybe_raise("OpenProcess")
         if not self.open_process_ok:
             return 0
         return self._mint()
 
     def AssignProcessToJobObject(self, job, hproc):  # noqa: N802
         self.calls.append(("AssignProcessToJobObject", job, hproc))
+        self._maybe_raise("AssignProcessToJobObject")
         return 1 if self.assign_ok else 0
 
     def CloseHandle(self, handle):  # noqa: N802
         self.calls.append(("CloseHandle", handle))
+        self._maybe_raise("CloseHandle")
         self.closed_handles.append(handle)
         return 1 if self.close_ok else 0
 
     def GenerateConsoleCtrlEvent(self, event, pid):  # noqa: N802
         self.calls.append(("GenerateConsoleCtrlEvent", event, pid))
+        self._maybe_raise("GenerateConsoleCtrlEvent")
         return 1 if self.ctrl_break_ok else 0
 
 
@@ -225,6 +244,56 @@ class TestWindowsShapedFailureDegradesHonestly:
     ) -> None:
         windows_shaped.ctrl_break_ok = False
         assert win_job.send_ctrl_break(777) is False
+
+
+class TestWindowsShapedExceptionGuard:
+    """nexus-6y4e0 review: the module docstring promises every public
+    function here degrades to ``None``/``False`` rather than raising, but
+    nothing enforced that -- a ctypes marshalling failure
+    (``ctypes.ArgumentError``, e.g. a bad struct/pointer) or the kernel32
+    call itself raising (``OSError``, ctypes' own errno-mapped failure
+    path) both propagated uncaught. ``create_job``, ``assign_process`` and
+    ``close_job`` now wrap their raw kernel32 calls and struct marshalling
+    in ``except (OSError, ctypes.ArgumentError)``.
+    """
+
+    def test_create_job_degrades_when_create_job_object_raises(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        windows_shaped.raise_from.add("CreateJobObjectW")
+        assert win_job.create_job() is None
+
+    def test_create_job_degrades_and_closes_the_handle_when_set_information_raises(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        windows_shaped.raise_from.add("SetInformationJobObject")
+        assert win_job.create_job() is None
+        # The handle CreateJobObjectW minted before the raise must not leak.
+        assert len(windows_shaped.closed_handles) == 1
+
+    def test_assign_process_degrades_when_open_process_raises(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        job = win_job.create_job()
+        windows_shaped.raise_from.add("OpenProcess")
+        assert win_job.assign_process(job, 4242) is False
+
+    def test_assign_process_degrades_and_closes_the_process_handle_when_assign_raises(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        job = win_job.create_job()
+        windows_shaped.raise_from.add("AssignProcessToJobObject")
+        assert win_job.assign_process(job, 4242) is False
+        # The opened PROCESS handle (not the job handle) must still close.
+        assert len(windows_shaped.closed_handles) == 1
+        assert job not in windows_shaped.closed_handles
+
+    def test_close_job_degrades_when_close_handle_raises(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        job = win_job.create_job()
+        windows_shaped.raise_from.add("CloseHandle")
+        assert win_job.close_job(job) is False
 
 
 def test_structures_have_consistent_sizes() -> None:

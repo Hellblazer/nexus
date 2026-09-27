@@ -192,34 +192,49 @@ def create_job() -> int | None:
     ``None`` off Windows or on any API failure (never raises).
 
     The returned handle is a real Windows kernel resource: callers own it
-    and must eventually pass it to :func:`close_job` (or :func:`kill_job`)
-    exactly once, or it leaks for the life of the process.
+    and must eventually pass it to :func:`close_job` exactly once, or it
+    leaks for the life of the process.
     """
     if not IS_WINDOWS or _kernel32 is None:
         return None
-    handle = _kernel32.CreateJobObjectW(None, None)
-    if not handle:
-        _log.debug("win_job_create_failed", error=_last_error())
+    handle = None
+    try:
+        handle = _kernel32.CreateJobObjectW(None, None)
+        if not handle:
+            _log.debug("win_job_create_failed", error=_last_error())
+            return None
+        info = _JobObjectExtendedLimitInformation()
+        info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        # ctypes.pointer(), not the lighter ctypes.byref(): the latter
+        # produces a call-only reference object that a real WinDLL call
+        # accepts but a Python test double cannot introspect. A pointer is
+        # equally valid here (this is not a hot path) and lets
+        # tests/test_win_job.py's fake kernel32 read ``.contents`` back to
+        # assert the LimitFlags this module actually set.
+        ok = _kernel32.SetInformationJobObject(
+            handle,
+            _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+            ctypes.pointer(info),
+            ctypes.sizeof(info),
+        )
+        if not ok:
+            _log.debug("win_job_set_limit_failed", error=_last_error())
+            _kernel32.CloseHandle(handle)
+            return None
+        return int(handle)
+    except (OSError, ctypes.ArgumentError) as exc:
+        # The module docstring promises every public function here
+        # degrades to None/False rather than raising; nothing enforced
+        # that until this review (nexus-6y4e0). Logs the exception CLASS
+        # only -- a ctypes marshalling failure's message can embed raw
+        # struct/pointer values, which do not belong in a log line.
+        _log.debug("win_job_create_exception", exc_class=type(exc).__name__)
+        if handle:
+            try:
+                _kernel32.CloseHandle(handle)
+            except (OSError, ctypes.ArgumentError):
+                pass
         return None
-    info = _JobObjectExtendedLimitInformation()
-    info.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-    # ctypes.pointer(), not the lighter ctypes.byref(): the latter produces
-    # a call-only reference object that a real WinDLL call accepts but a
-    # Python test double cannot introspect. A pointer is equally valid
-    # here (this is not a hot path) and lets
-    # tests/test_win_job.py's fake kernel32 read ``.contents`` back to
-    # assert the LimitFlags this module actually set.
-    ok = _kernel32.SetInformationJobObject(
-        handle,
-        _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
-        ctypes.pointer(info),
-        ctypes.sizeof(info),
-    )
-    if not ok:
-        _log.debug("win_job_set_limit_failed", error=_last_error())
-        _kernel32.CloseHandle(handle)
-        return None
-    return int(handle)
 
 
 def assign_process(job: int | None, pid: int) -> bool:
@@ -239,23 +254,33 @@ def assign_process(job: int | None, pid: int) -> bool:
     """
     if not IS_WINDOWS or _kernel32 is None or not job:
         return False
-    hproc = _kernel32.OpenProcess(
-        _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid,
-    )
-    if not hproc:
-        _log.debug(
-            "win_job_open_process_failed", pid=pid, error=_last_error(),
-        )
-        return False
+    hproc = None
     try:
+        hproc = _kernel32.OpenProcess(
+            _PROCESS_SET_QUOTA | _PROCESS_TERMINATE, False, pid,
+        )
+        if not hproc:
+            _log.debug(
+                "win_job_open_process_failed", pid=pid, error=_last_error(),
+            )
+            return False
         ok = bool(_kernel32.AssignProcessToJobObject(job, hproc))
         if not ok:
             _log.debug(
                 "win_job_assign_failed", pid=pid, error=_last_error(),
             )
         return ok
+    except (OSError, ctypes.ArgumentError) as exc:
+        _log.debug(
+            "win_job_assign_exception", pid=pid, exc_class=type(exc).__name__,
+        )
+        return False
     finally:
-        _kernel32.CloseHandle(hproc)
+        if hproc:
+            try:
+                _kernel32.CloseHandle(hproc)
+            except (OSError, ctypes.ArgumentError):
+                pass
 
 
 def close_job(job: int | None) -> bool:
@@ -273,7 +298,11 @@ def close_job(job: int | None) -> bool:
     """
     if not IS_WINDOWS or _kernel32 is None or not job:
         return False
-    ok = bool(_kernel32.CloseHandle(job))
+    try:
+        ok = bool(_kernel32.CloseHandle(job))
+    except (OSError, ctypes.ArgumentError) as exc:
+        _log.debug("win_job_close_exception", exc_class=type(exc).__name__)
+        return False
     if not ok:
         _log.debug("win_job_close_failed", error=_last_error())
     return ok

@@ -407,6 +407,15 @@ class TestContainAndKillTreeWindowsShaped:
         del job_call  # the handle itself isn't returned to us on this path
         assert len(fake.closed_handles) >= 1
 
+    def test_contain_degrades_when_win_job_raises(self, monkeypatch):
+        """nexus-6y4e0 review: win_job's own exception guard covers its
+        three functions individually; this pins that contain() -- the
+        caller one level up -- sees only the degraded None/False return
+        and never a propagated exception, end to end."""
+        pg, fake = self._windows_shaped(monkeypatch)
+        fake.raise_from.add("CreateJobObjectW")
+        assert pg.contain(4242) is None
+
     def test_kill_tree_with_a_job_closes_it_and_never_calls_safe_killpg(
         self, monkeypatch,
     ):
