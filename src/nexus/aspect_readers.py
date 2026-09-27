@@ -1246,7 +1246,8 @@ def read_source(
 #                          stable to compare.  Writers record the ETag via
 #                          :func:`capture_https_etag` / :func:`record_https_etag`
 #                          at register/refresh time, bounded to
-#                          HTTPS_ETAG_CAPTURE_TIMEOUT_S (~3s) rather than
+#                          HTTPS_ETAG_CAPTURE_TIMEOUT_S (read ~3s plus a separate ~2s connect
+#                          budget, so about 5s worst case) rather than
 #                          this read-time path's looser budget, since the
 #                          write path runs synchronously inside
 #                          register/update — see those functions.  Wired

@@ -228,6 +228,8 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
         HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S,
         HTTPS_ETAG_CAPTURE_TIMEOUT_S,
         HTTPS_ETAG_META_KEY,
+        NX_REFERENCE_ETAG_CAPTURE_ENV,
+        _https_etag_capture_enabled,
         capture_https_etag,
     )
     from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — command-local
@@ -260,6 +262,17 @@ def backfill_etags_cmd(owner: str, dry_run: bool, limit: int) -> None:
 
     if not scoped:
         click.echo("Nothing to backfill.")
+        return
+
+    # capture_https_etag enforces the opt-out on its own; saying so here as
+    # well keeps an operator who inherited the variable from reading
+    # "HEAD failed or no ETag header" for documents nothing ever contacted.
+    if not _https_etag_capture_enabled():
+        click.echo(
+            f"ETag capture is disabled ({NX_REFERENCE_ETAG_CAPTURE_ENV}=0): "
+            f"{len(scoped)} document(s) left without an ETag; no network calls "
+            "made, nothing recorded."
+        )
         return
 
     import httpx  # noqa: PLC0415 — optional/heavy dependency deferred (httpx)

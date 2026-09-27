@@ -205,7 +205,8 @@ def test_env_opt_out_makes_no_head_request(monkeypatch) -> None:
     assert head_calls == []
     assert result.exit_code == 0, result.output
     assert writer.update_calls == []
-    assert "Recorded 0 ETag(s); 2 had none to capture" in result.output
+    assert "ETag capture is disabled (NX_REFERENCE_ETAG_CAPTURE=0): 2 document(s)" in result.output
+    assert "HEAD failed" not in result.output
 
 
 def test_idempotent_when_nothing_is_missing(monkeypatch) -> None:
