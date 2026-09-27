@@ -24,7 +24,11 @@ among several, applied at the write instead of the read.
 Cost note: this costs one owner-agnostic ``/list?file_path=`` per attempted
 MINT (the owner-scoped lookup missed), so it belongs on per-document write
 paths and NOT inside a batched ``register_many`` loop, where it would turn
-one round trip into N+1.
+one round trip into N+1. The batched ``nx index repo`` registrar still
+drives :func:`announce_cross_owner_mint` and
+:func:`announce_cross_owner_resolve`, but feeds them from one bulk
+``find_all_by_file_paths`` call per register page (nexus-1vc0n) instead of
+calling :func:`find_cross_owner_conflict` per document.
 
 nexus-r1tnx: the query and the announcement are deliberately TWO functions,
 not one. A single call made *before* ``register()`` (the original shape) had

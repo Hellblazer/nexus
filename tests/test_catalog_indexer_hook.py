@@ -789,7 +789,7 @@ class TestCatalogHookBatchedServiceMode:
         ``{file_path: [document_dict, ...]}`` map answering
         ``POST /v1/catalog/list_by_file_paths`` — the bulk
         ``find_all_by_file_paths`` call ``_catalog_hook`` now makes once
-        per batch, BEFORE ``register_many``. Absent means empty (no
+        per register page, BEFORE that page's ``register_many``. Absent means empty (no
         cross-owner conflict anywhere), the pre-nexus-1vc0n behaviour every
         test that predates this parameter still gets.
         """
@@ -1737,7 +1737,7 @@ class TestCatalogHookReconciledIsNotNew:
         must announce a genuine cross-owner mint, fed by the bulk
         ``find_all_by_file_paths`` answer computed BEFORE ``register_many``
         -- the same event ``announce_cross_owner_mint`` fires for the
-        per-file fallback, at one round trip for the whole batch instead
+        per-file fallback, at one round trip per register page instead
         of one per doc."""
         import structlog.testing
 
