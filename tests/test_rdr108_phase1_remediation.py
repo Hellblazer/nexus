@@ -1931,4 +1931,126 @@ class TestWbfpw7ReverseNotesDiscovery:
         assert len(manifest) == 1
         assert manifest[0].chash == other_chash
 
+    def test_reverse_tie_break_matches_census_route_on_both_levels(
+        self, active_catalog, t3_db, t2_service_env,
+    ):
+        """nexus-wbfpw.8 (T2 nexus/review-rdr-192-phase1-code, finding 3):
+        ``_reverse_note_owner_by_doc``'s tie-break docstring claims to
+        mirror ``manifest_less_census.sql``'s ``rev_candidates`` CTE
+        tie-break "exactly" (fewest manifest rows anywhere, THEN lowest
+        tumbler), but nothing tested the two independently-maintained
+        implementations against each other directly. ONE shared fixture,
+        seeded once against the real engine substrate, exercises BOTH
+        tie-break levels in the SAME collection and asserts the live
+        census route's reported owner for each manifest-less chunk equals
+        the note backfill actually manifests it into.
+
+        Registration order is deliberately adversarial to the count-level
+        case: the eventual LOSER (extra manifest row elsewhere) is
+        registered FIRST (so it would win a tumbler-only comparison), and
+        the eventual WINNER (zero rows) is registered SECOND (higher
+        tumbler) -- so a correct tie-break can only reach the right answer
+        by consulting manifest-row count first, exactly like
+        ``test_reverse_tie_break_picks_fewest_manifest_rows_anywhere``
+        above, but this test additionally cross-checks against the real
+        census SQL rather than only against backfill's own bookkeeping.
+        """
+        from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+        from nexus.catalog.tumbler import Tumbler
+        from nexus.db.http_vector_client import HttpVectorClient
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        coll = _unique_coll("knowledge")
+
+        # ── Level 1: manifest-row COUNT decides ─────────────────────────
+        # note_count_loser is registered FIRST (lower tumbler) but carries
+        # an unrelated manifest row elsewhere (total_count=1); note_count_
+        # winner is registered SECOND (higher tumbler) with zero rows.
+        # Only a count-first tie-break reaches the right answer here.
+        chash_count = "6" * 64
+        note_count_loser = _register_note_doc(
+            active_catalog, coll, chash_count, title="wbfpw8-count-loser",
+        )
+        note_count_winner = _register_note_doc(
+            active_catalog, coll, chash_count, title="wbfpw8-count-winner",
+        )
+        other_chash = "7" * 64
+        seed_manifest_chunks(coll, [other_chash])
+        active_catalog.write_manifest(
+            note_count_loser,
+            [{
+                "chash": other_chash, "position": 0, "line_start": None,
+                "line_end": None, "char_start": None, "char_end": None,
+            }],
+            collection=coll,
+        )
+        _seed_reverse_chunk(
+            t3_db, collection=coll, content="count-level tie-break",
+            chunk_text_hash=chash_count,
+        )
+
+        # ── Level 2: counts TIE at zero -- lowest tumbler decides ───────
+        chash_tumbler = "8" * 64
+        note_tumbler_a = _register_note_doc(
+            active_catalog, coll, chash_tumbler, title="wbfpw8-tumbler-a",
+        )
+        note_tumbler_b = _register_note_doc(
+            active_catalog, coll, chash_tumbler, title="wbfpw8-tumbler-b",
+        )
+        expected_tumbler_winner = str(min(
+            Tumbler.parse(note_tumbler_a), Tumbler.parse(note_tumbler_b),
+        ))
+        expected_tumbler_loser = (
+            note_tumbler_b if expected_tumbler_winner == note_tumbler_a
+            else note_tumbler_a
+        )
+        _seed_reverse_chunk(
+            t3_db, collection=coll, content="tumbler-level tie-break",
+            chunk_text_hash=chash_tumbler,
+        )
+
+        # The real engine's own SQL (independent implementation) resolves
+        # each chunk's owner BEFORE backfill writes anything -- read while
+        # both chunks are still genuinely manifest-less.
+        db = HttpVectorClient(tenant=t2_service_env)
+        census = db.manifest_less_census(coll)
+        assert census["owners"][chash_count] == {
+            "owner_tumbler": note_count_winner, "owner_path": "reverse",
+        }, census["owners"][chash_count]
+        assert census["owners"][chash_tumbler] == {
+            "owner_tumbler": expected_tumbler_winner, "owner_path": "reverse",
+        }, census["owners"][chash_tumbler]
+
+        # Backfill's Python-side tie-break, read via which document it
+        # actually manifests each chash into.
+        result = backfill_manifest_for_collection(
+            active_catalog, t3_db, coll, dry_run=False,
+        )
+        assert result.docs_reverse_discovered == 2
+
+        loser_manifest = active_catalog.get_manifest(note_count_loser)
+        assert [r.chash for r in loser_manifest] == [other_chash]
+        winner_manifest = active_catalog.get_manifest(note_count_winner)
+        assert [r.chash for r in winner_manifest] == [chash_count]
+
+        tumbler_winner_doc = (
+            note_tumbler_a if expected_tumbler_winner == note_tumbler_a
+            else note_tumbler_b
+        )
+        tumbler_loser_doc = (
+            note_tumbler_b if tumbler_winner_doc == note_tumbler_a
+            else note_tumbler_a
+        )
+        assert [r.chash for r in active_catalog.get_manifest(tumbler_winner_doc)] == [
+            chash_tumbler,
+        ]
+        assert active_catalog.get_manifest(tumbler_loser_doc) == []
+
+        # Cross-implementation agreement: the census's independently
+        # computed owner for each chash is the SAME document backfill
+        # picked.
+        assert census["owners"][chash_count]["owner_tumbler"] == note_count_winner
+        assert census["owners"][chash_tumbler]["owner_tumbler"] == tumbler_winner_doc
+        assert expected_tumbler_loser == tumbler_loser_doc
+
 
