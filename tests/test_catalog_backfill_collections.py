@@ -112,6 +112,25 @@ def test_backfill_registers_t3_and_catalog_collections(catalog, runner):
 # HttpCatalogClient.register_collection, which is what this backfill loop's
 # bare non-conformant branch calls. Its engine-backed twin is item 16 in
 # tests/db/test_i711w_gap_xfails.py.
+def test_backfill_reports_an_unregistered_quarantine_sibling_and_does_not_count_it(catalog, runner):
+    """nexus-ny7j4: the registration seam skips a quarantine sibling on the
+    name-derived path, so backfill's non-conformant branch would otherwise
+    print it under "new" without a row ever being written. The T3 listing
+    already drops quarantine- names (_BYPASS_SCHEMA_PREFIXES), so the
+    sibling reaches backfill only through a document's physical_collection;
+    it is reported and left out of the count."""
+    fake_t3 = _FakeT3(names=[f"code__1-41__{_CODE_MODEL}__v1"])
+    _seed_document(catalog, tumbler="1.1.1", collection=f"quarantine-code__1-41__{_CODE_MODEL}__v1")
+
+    with patch("nexus.db.make_t3", return_value=fake_t3):
+        result = runner.invoke(main, ["catalog", "backfill-collections", "--no-dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert _projection_names(catalog) == [f"code__1-41__{_CODE_MODEL}__v1"]
+    assert "Done: 1 new" in result.output
+    assert f"skipping quarantine-code__1-41__{_CODE_MODEL}__v1: a quarantine sibling" in result.output
+
+
 def test_backfill_marks_legacy_via_projector(catalog, runner):
     """Non-conformant names land with legacy_grandfathered=True;
     conformant names land False.

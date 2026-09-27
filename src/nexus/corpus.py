@@ -1618,6 +1618,18 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
     }
 
 
+class QuarantineSiblingNotRegisteredError(LookupError):
+    """A write named a ``quarantine-<type>__...`` collection the engine has
+    not registered. The client never registers one (nexus-ny7j4), so the
+    registration retry in :func:`write_with_registration_retry` cannot
+    repair it and names the reason instead."""
+
+
+def _is_quarantine_sibling(name: str) -> bool:
+    from nexus.catalog.chunk_quarantine import is_quarantine_sibling_name  # noqa: PLC0415 — circular-dep avoidance (catalog imports corpus)
+    return is_quarantine_sibling_name(name)
+
+
 #: Per-process cache of collection names already registered by
 #: :func:`ensure_collection_registered` through the AMBIENT (default)
 #: registrar — see that function's docstring. Untouched by a scoped
@@ -1781,8 +1793,7 @@ def ensure_collection_registered(
     scope = getattr(registrar, "scope", None)
     if _registration_cache_contains(scope, name):
         return
-    from nexus.catalog.chunk_quarantine import is_quarantine_sibling_name  # noqa: PLC0415 — circular-dep avoidance (catalog imports corpus)
-    if kwargs is None and is_quarantine_sibling_name(name):
+    if kwargs is None and _is_quarantine_sibling(name):
         # The sibling exists by construction (the engine registered it
         # from the origin's row when it quarantined the first chunk) and
         # its name carries no content type to derive fields from; a write
@@ -1976,6 +1987,17 @@ def write_with_registration_retry(
     except Exception as exc:  # noqa: BLE001 — narrowed immediately below; anything else re-raised unchanged
         if not _looks_like_stale_registration_error(exc):
             raise
+        if _is_quarantine_sibling(name):
+            # The funnel never registers a sibling (see
+            # ensure_collection_registered), so a retry cannot repair
+            # this; name the reason instead of the engine's bare 422.
+            raise QuarantineSiblingNotRegisteredError(
+                f"{name!r} is not registered and the client never registers "
+                "a quarantine sibling: the engine's GC function registers it "
+                "from the origin collection's row when it first quarantines a "
+                "chunk, so a sibling that does not exist has nothing to "
+                "write into. Check the origin collection and `nx t3 gc`."
+            ) from exc
         _log.info(
             "collection_registration_stale_after_boot_sweep_retry",
             name=name,

@@ -230,20 +230,21 @@ def test_a_quarantine_sibling_is_never_registered_by_the_client(
     assert name not in corpus._REGISTERED_COLLECTIONS
 
 
-def test_a_quarantine_sibling_write_that_422s_is_never_repaired_by_registering() -> None:
-    """A stale-registration 422 on a quarantine sibling is retried once,
-    like any other, but the retry re-enters the skip: the client cannot
-    register a sibling, so the engine's answer propagates."""
+def test_a_quarantine_sibling_write_that_422s_names_the_reason_instead_of_retrying() -> None:
+    """A stale-registration 422 on a quarantine sibling is not retried:
+    the client cannot register a sibling, so the retry could only fail
+    the same way. The error names that, with the engine's 422 chained."""
     writer = _fake_writer()
     name = "quarantine-docs__1-7__voyage-context-3__v1"
     resp = httpx.Response(422, text="collection quarantine-docs__1-7__voyage-context-3__v1 is not registered",
                           request=httpx.Request("POST", "http://x"))
     write_fn = MagicMock(side_effect=httpx.HTTPStatusError("422", request=resp.request, response=resp))
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with pytest.raises(corpus.QuarantineSiblingNotRegisteredError, match="never registers a quarantine sibling") as info:
         write_with_registration_retry(name, write_fn, registrar=lambda: writer)
 
-    assert write_fn.call_count == 2
+    assert isinstance(info.value.__cause__, httpx.HTTPStatusError)
+    assert write_fn.call_count == 1
     writer.register_collection.assert_not_called()
 
 

@@ -54,8 +54,11 @@ def is_quarantine_sibling_name(name: str) -> bool:
     on ``quarantine-code__1-41__voyage-code-3__v1`` refused with
     ``unknown content_type 'quarantine-code'``).
     """
-    first, sep, _rest = name.partition("__")
-    return bool(sep) and first.startswith(f"{QUARANTINE_PREFIX}-")
+    from nexus.collection_shape import collection_attributes  # noqa: PLC0415 — deferred, keeps this module import-light
+
+    # The one sanctioned name parser for the quarantine flag (RDR-204: no
+    # new raw parse sites; tests/test_collection_name_parse_census.py).
+    return collection_attributes({"name": name}).quarantine
 
 
 def quarantine_collection_name(origin: str) -> str:
