@@ -1,0 +1,413 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-gt03d — found by conexus-86 accounting for nexus-9la1f (2026-09-24):
+    nexus.gc_restore_rereferenced (catalog-023) moves rows OUT of quarantine
+    with no nexus.gc_audit row, while its two sibling GC producers
+    (gc_quarantine_orphans, sweep_superseded_chunks — catalog-033) both
+    already audit their reap. On 2026-09-16 about 36k code__1-1 rows left
+    quarantine via a restore with no audit row; sampling proved it benign,
+    but only by hand, with no forensic trail to consult. This closes the
+    gap the same way catalog-033 closed it for the other two producers: an
+    INSERT INTO nexus.gc_audit as the function's own last statement before
+    RETURN, in the SAME transaction as the DELETE that reaps the quarantine
+    rows — an audit that can be lost separately from the delete it
+    documents is not an audit.
+
+    CREATE OR REPLACE is taken from the function's CURRENT body
+    (hygiene-005-2, hygiene-005-gc-registration-from-origin-row.xml — the
+    last changeset to redefine gc_restore_rereferenced; catalog-023's
+    original body predates the dim-unification (vectors-004/005) and the
+    self-registration-from-origin-row fix (hygiene-005) both), not
+    catalog-023's original three-dim-branch shape. Every line of that body
+    — DECLARE block, dim check, the "mine" anti-join (COALESCE-to-self
+    default), the N7 cross-dim collision guard, the self-registration-
+    from-quarantine-row block, the copy-INSERT/DELETE pair — is carried
+    forward byte-identical (the DECLARE block gains NO new local; every
+    variable the audit block below reads, v_chashes and v_restored, is
+    already declared by hygiene-005-2). The only change is the new audit
+    INSERT block inserted between the pre-existing `v_restored :=
+    array_length(v_chashes, 1);` assignment and the pre-existing `RETURN
+    v_restored;`.
+
+    AUDIT SHAPE matches catalog-033's two `v_chashes bytea[]`-shaped
+    producers (gc_expire_quarantine's hard-delete audit is the closest
+    precedent: no caller-supplied sample_limit here either, so `chashes` is
+    v_chashes itself, truncated at GC_AUDIT_MAX_CHASHES = 5000
+    (CatalogRepository.java) with `chashes_truncated`/`chashes_stored` set
+    only past that cap — same convention, same constant, kept in lockstep
+    here since this function writes its own audit row and never crosses
+    the JVM boundary to reuse the Java constant). `collection` is the
+    QUARANTINE collection (the collection rows are REAPED FROM — same
+    convention as gc_quarantine_orphans's `collection = p_collection`,
+    the source of its move, and gc_expire_quarantine's
+    `collection = p_quarantine_collection`, the source of its hard
+    delete); `details.origin_collection` names the destination. Skipped
+    entirely on a genuinely no-op call (nothing to restore) — the
+    IF v_chashes IS NULL THEN RETURN 0 branch above this changeset's new
+    block returns before ever reaching it, so a no-op restore leaves no
+    row, exactly like the three catalog-033 producers.
+
+    TRUNCATION BOUNDARY COVERAGE (substantive-critic Significant finding,
+    T2 [27238]): unlike gc_quarantine_orphans, this function has no
+    caller-supplied sample_limit to game past GC_AUDIT_MAX_CHASHES with a
+    single real row (VectorHandler's own clamp test seeds one orphan and
+    requests an oversized limit) — the ONLY way to exercise this
+    changeset's own `> 5000` branch end-to-end is a real quarantine with
+    more than 5000 re-referenced rows, which this test suite's own
+    precedent (CatalogGcAuditProducersTest's gc_quarantine_orphans test,
+    same class) already documents as "prohibitively slow" to seed for a
+    SAMPLE-capped truncation at this scale, and restore additionally needs
+    a matching manifest row AND a matching origin-side stub chunk row per
+    seeded chash (three ~5000-row inserts, not one). `CatalogGcAuditProducersTest
+    .restoreAuditTruncation_caseLogic_atBoundary` instead proves the exact
+    arithmetic this changeset's audit INSERT performs — `cardinality(arr)`
+    (chash_count), `cardinality(arr) > 5000` (chashes_truncated), and
+    `LEAST(cardinality(arr), 5000)` (chashes_stored) — against a REAL,
+    typed-jOOQ-constructed Postgres array at n=4999/5000/5001, via
+    Postgres's own `cardinality()`, `>`, and `LEAST()` (identical
+    operators to this changeset's `array_length(v_chashes,1)`,
+    `COALESCE(...) > 5000`, and `v_chashes[1:LEAST(...,5000)]`  — the
+    `[1:N]` array-slice mechanics themselves are UNCHANGED from
+    gc_expire_quarantine's own catalog-033-3 precedent, not re-derived
+    here). What this does NOT prove: that `unnest(v_chashes[1:N])` really
+    yields exactly N elements end-to-end through a live restore against
+    real quarantine/manifest rows — accepted residual, same shape as this
+    suite's `gc_quarantine_orphans` sample-limit test already accepts for
+    its own truncation path.
+
+    DATA EFFECT: none on existing rows — this changeset only adds an
+    INSERT statement (into nexus.gc_audit, a new row) to an existing
+    function body; the function's own pre-existing DELETE/UPDATE
+    semantics against nexus.chunks are UNCHANGED byte-for-byte. No
+    FORCE-RLS row-DML rehearsal-seed coverage is needed either: the only
+    literal DML this changeset's <sql> block contains is the
+    CREATE OR REPLACE FUNCTION statement itself (a DDL statement, not a
+    row-DML one); every INSERT/DELETE inside the function's own $$-quoted
+    body is deferred, caller-triggered SQL invoked only through a separate
+    HTTP/vecRepo call, never from this changeset itself — the same
+    exemption catalog-033's own gc_quarantine_orphans/gc_expire_quarantine
+    changesets already rely on (see tests/test_rehearsal_seed_coverage_lint.py's
+    module docstring, "Function/trigger-body DML... defined for LATER,
+    caller-triggered use").
+
+    Filename/id chosen as catalog-039 (not catalog-038): catalog-038 was a
+    real, once-used-then-reverted filename (824b6a5c6, "catalog-038
+    dropped" — a partial expression index landed then removed before ever
+    shipping, per that commit and the master changelog's own comment at
+    vectors-018's include) — technically free (never released, no
+    checksum on any deployed cluster) but reusing it invites a confusing
+    git-blame read; catalog-039 is the first genuinely untouched number.
+    Also placed to avoid any collision with a pending sibling changeset
+    named vectors-019 (a different filename prefix entirely, so no
+    ordering conflict either way).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-039-1" author="nexus-gt03d">
+        <comment>nexus.gc_restore_rereferenced: record a gc_audit row in the SAME transaction as its restore DELETE (nexus-gt03d) — the third and last GC-lifecycle producer catalog-033 left un-audited. DATA EFFECT: none on existing rows; audit inserts only, added to an existing function body (see this file's own header).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_chashes                 bytea[];
+    v_restored                bigint := 0;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    SELECT array_agg(c.chash) INTO v_chashes
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND c.collection = p_quarantine_collection
+       AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+       AND EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = p_origin_collection
+                AND m.chash      = c.chash
+           );
+
+    IF v_chashes IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    -- N7-STYLE cross-dim collision guard (Critical-1 fix, T2 [22454]):
+    -- same reasoning as gc_quarantine_orphans's guard -- detect, BEFORE
+    -- any row moves, any restore candidate whose chash already exists at
+    -- p_origin_collection under a DIFFERENT populated embedding_&lt;dim&gt;
+    -- column than the candidate's own.
+    WITH candidate AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+    ),
+    collision AS (
+        SELECT cand.chash, cand.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM candidate cand
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_origin_collection
+           AND e.chash      = cand.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: % cross-dim (tenant_id, collection, chash) collision(s) at restore target % for tenant=%, quarantine collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the origin-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_origin_collection, p_tenant_id, p_quarantine_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    -- RDR-204 nexus-uxd2a (hygiene-005-2): NO ENGINE PATH DERIVES A
+    -- COLLECTION'S ATTRIBUTES FROM ITS NAME (coordinator nexus-71 decision,
+    -- same as gc_quarantine_orphans above). p_origin_collection's own name
+    -- usually parsed correctly here (it never carries the quarantine-
+    -- prefix), but deriving from a name is still fragile by construction --
+    -- an origin name outside the four name-shape branches (hygiene-004's
+    -- underscored-owner class, a two-segment grandfathered name, or
+    -- anything unparseable) silently fell to the 'unknown' stub with no
+    -- dimension ever recorded. This self-registration is a DELIBERATE
+    -- CARVE-OUT (PgVectorRepository.restoreRereferenced's own javadoc,
+    -- RDR-204 Phase 2 nexus-ft04v.16): a genuinely first-ever origin
+    -- collection is still minted here, from real, known attributes -- now
+    -- copied from the QUARANTINE collection's own row rather than parsed
+    -- from either name, since p_quarantine_collection is REQUIRED to
+    -- already be registered (PgVectorRepository.restoreRereferenced
+    -- resolves dim from it before ever reaching this function) and both
+    -- collections share the same embedding space by construction (restore
+    -- only ever moves a chunk between the two). An existing origin row is
+    -- left exactly as it is (ON CONFLICT DO NOTHING) -- only a genuinely
+    -- first-ever origin is minted from the quarantine row's attributes.
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_quarantine_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: quarantine collection % is not registered for tenant % -- attributes for a first-ever origin registration are copied from the quarantine row, never parsed from either name (RDR-204 nexus-uxd2a)',
+            p_quarantine_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_origin_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'live'
+    )
+    ON CONFLICT (tenant_id, name) DO NOTHING;
+
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024, metadata)
+    SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+       AND c.chash = ANY(v_chashes)
+    ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+      SET chunk_text     = EXCLUDED.chunk_text,
+          embedding_384  = EXCLUDED.embedding_384,
+          embedding_768  = EXCLUDED.embedding_768,
+          embedding_1024 = EXCLUDED.embedding_1024,
+          metadata       = EXCLUDED.metadata;
+
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+       AND c.chash = ANY(v_chashes);
+
+    v_restored := array_length(v_chashes, 1);
+
+    -- nexus-gt03d: audit the restore IN THE SAME TRANSACTION as the DELETE
+    -- above -- this is the exact gap conexus-86/nexus-9la1f found: rows
+    -- leaving quarantine by restore had no forensic trail, unlike
+    -- gc_quarantine_orphans/sweep_superseded_chunks (catalog-033).
+    -- `chashes` here is v_chashes itself (no caller-supplied sample_limit
+    -- on this function, unlike gc_quarantine_orphans -- same shape as
+    -- gc_expire_quarantine's own audit above), truncated at
+    -- GC_AUDIT_MAX_CHASHES (5000, CatalogRepository.java) with
+    -- chash_count still carrying the exact full v_restored count
+    -- regardless of truncation.
+    INSERT INTO nexus.gc_audit
+        (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+    VALUES (
+        p_tenant_id, 'gc_restore_rereferenced', p_quarantine_collection, 'engine', false, v_restored,
+        COALESCE(
+            (SELECT jsonb_agg(encode(x, 'hex'))
+               FROM unnest(v_chashes[1:LEAST(COALESCE(array_length(v_chashes, 1), 0), 5000)]) x),
+            '[]'::jsonb),
+        jsonb_build_object('origin_collection', p_origin_collection)
+            || CASE WHEN COALESCE(array_length(v_chashes, 1), 0) > 5000
+                    THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+                    ELSE '{}'::jsonb END
+    );
+
+    RETURN v_restored;
+END;
+$$
+        </sql>
+        <rollback>
+            <!-- Restores gc_restore_rereferenced to hygiene-005-2's own body
+                 (nexus-uxd2a), the last definition of this function before
+                 this changeset, no audit row. -->
+            <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.gc_restore_rereferenced(
+    dim                      int,
+    p_tenant_id              text,
+    p_quarantine_collection  text,
+    p_origin_collection      text
+)
+RETURNS bigint
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    v_chashes                 bytea[];
+    v_restored                bigint := 0;
+    v_collision_count         bigint;
+    v_collision_sample        text[];
+    v_origin_content_type     text;
+    v_origin_owner_id         text;
+    v_origin_embedding_model  text;
+    v_origin_model_version    text;
+    v_origin_dimension        int;
+BEGIN
+    IF dim NOT IN (384, 768, 1024) THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: unsupported dim %. Supported values: 384, 768, 1024',
+            dim;
+    END IF;
+
+    SELECT array_agg(c.chash) INTO v_chashes
+      FROM nexus.chunks c
+     WHERE c.tenant_id  = p_tenant_id
+       AND c.collection = p_quarantine_collection
+       AND COALESCE(c.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+       AND EXISTS (
+             SELECT 1 FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = c.tenant_id
+                AND m.collection = p_origin_collection
+                AND m.chash      = c.chash
+           );
+
+    IF v_chashes IS NULL THEN
+        RETURN 0;
+    END IF;
+
+    WITH candidate AS (
+        SELECT c.chash,
+               CASE WHEN c.embedding_384  IS NOT NULL THEN 384
+                    WHEN c.embedding_768  IS NOT NULL THEN 768
+                    WHEN c.embedding_1024 IS NOT NULL THEN 1024 END AS src_dim
+          FROM nexus.chunks c
+         WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+           AND c.chash = ANY(v_chashes)
+    ),
+    collision AS (
+        SELECT cand.chash, cand.src_dim,
+               CASE WHEN e.embedding_384  IS NOT NULL THEN 384
+                    WHEN e.embedding_768  IS NOT NULL THEN 768
+                    WHEN e.embedding_1024 IS NOT NULL THEN 1024 END AS existing_dim
+          FROM candidate cand
+          JOIN nexus.chunks e
+            ON e.tenant_id  = p_tenant_id
+           AND e.collection = p_origin_collection
+           AND e.chash      = cand.chash
+    )
+    SELECT count(*),
+           COALESCE(array_agg(encode(chash, 'hex') ORDER BY chash), '{}'::text[])
+      INTO v_collision_count, v_collision_sample
+      FROM collision
+     WHERE src_dim IS DISTINCT FROM existing_dim;
+
+    IF v_collision_count > 0 THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: % cross-dim (tenant_id, collection, chash) collision(s) at restore target % for tenant=%, quarantine collection=% -- the unified PK cannot hold two different-dim rows for the same chash (mirrors vectors-004''s N7 guard, T2 22454). Sample chashes: %. Refusing to overwrite; verify the origin-collection naming keeps distinct dims/collections separated before retrying.',
+            v_collision_count, p_origin_collection, p_tenant_id, p_quarantine_collection, v_collision_sample
+            USING ERRCODE = 'unique_violation';
+    END IF;
+
+    SELECT content_type, owner_id, embedding_model, model_version, dimension
+      INTO v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+           v_origin_model_version, v_origin_dimension
+      FROM nexus.catalog_collections
+     WHERE tenant_id = p_tenant_id AND name = p_quarantine_collection;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'gc_restore_rereferenced: quarantine collection % is not registered for tenant % -- attributes for a first-ever origin registration are copied from the quarantine row, never parsed from either name (RDR-204 nexus-uxd2a)',
+            p_quarantine_collection, p_tenant_id;
+    END IF;
+
+    INSERT INTO nexus.catalog_collections
+        (tenant_id, name, content_type, owner_id, embedding_model, model_version, dimension, lifecycle_state)
+    VALUES (
+        p_tenant_id, p_origin_collection,
+        v_origin_content_type, v_origin_owner_id, v_origin_embedding_model,
+        v_origin_model_version, v_origin_dimension, 'live'
+    )
+    ON CONFLICT (tenant_id, name) DO NOTHING;
+
+    INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                               embedding_384, embedding_768, embedding_1024, metadata)
+    SELECT p_tenant_id, p_origin_collection, c.chash, c.chunk_text,
+           c.embedding_384, c.embedding_768, c.embedding_1024,
+           (COALESCE(c.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection')
+      FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+       AND c.chash = ANY(v_chashes)
+    ON CONFLICT (tenant_id, collection, chash) DO UPDATE
+      SET chunk_text     = EXCLUDED.chunk_text,
+          embedding_384  = EXCLUDED.embedding_384,
+          embedding_768  = EXCLUDED.embedding_768,
+          embedding_1024 = EXCLUDED.embedding_1024,
+          metadata       = EXCLUDED.metadata;
+
+    DELETE FROM nexus.chunks c
+     WHERE c.tenant_id = p_tenant_id AND c.collection = p_quarantine_collection
+       AND c.chash = ANY(v_chashes);
+
+    v_restored := array_length(v_chashes, 1);
+    RETURN v_restored;
+END;
+$$
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

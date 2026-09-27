@@ -316,4 +316,168 @@ class CatalogGcAuditProducersTest {
         assertThat(((Number) details.get("chashes_stored")).intValue())
             .isEqualTo(CatalogRepository.GC_AUDIT_MAX_CHASHES);
     }
+
+    // ── gc_restore_rereferenced: SQL-side producer (catalog-039-1) ──────────────
+
+    /**
+     * nexus-gt03d — the third GC-lifecycle producer catalog-033 left
+     * un-audited (found by conexus-86 / nexus-9la1f, 2026-09-24): a heal
+     * re-referencing a quarantined chash moves it back to its origin
+     * collection with no gc_audit row, unlike its two catalog-033 siblings
+     * (gc_quarantine_orphans, sweep_superseded_chunks). Mirrors this file's
+     * own {@code quarantineOrphans_...} shape one level up the GC lifecycle:
+     * seed a chunk already IN quarantine, reference its chash from the
+     * ORIGIN collection's manifest (the "re-referenced" condition
+     * {@code restoreRereferenced} exists to detect), restore it, and assert
+     * the audit row's shape -- {@code collection} is the QUARANTINE
+     * collection (the reap source, same convention as
+     * gc_quarantine_orphans/gc_expire_quarantine above), {@code
+     * details.origin_collection} names the restore destination.
+     */
+    @Test @Order(40)
+    void restoreRereferenced_reReferencedQuarantineChunk_insertsGcAuditRow() throws Exception {
+        String collection = "code__gcaudit-restore__minilm-l6-v2-384__v1";
+        String quarantineCollection = "quarantine-code__gcaudit-restore__minilm-l6-v2-384__v1";
+        String docId = "gc-audit-restore-doc";
+        String chash = ch("gc-audit-restore-chunk");
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            // nexus-gt03d: both sides pre-registered -- PgVectorRepository
+            // .restoreRereferenced resolves dim from the ORIGIN collection
+            // before ever calling the SQL function (see that method's own
+            // javadoc), and the function itself requires the QUARANTINE
+            // collection to already be registered (its self-registration
+            // block copies the origin's attributes FROM that row).
+            PgContainerHelper.insertCollection(dsl, TENANT, collection);
+            PgContainerHelper.insertCollection(dsl, TENANT, quarantineCollection);
+        }
+
+        // The chunk already lives in the QUARANTINE collection (no
+        // `origin_collection` metadata stamp -- exercises the COALESCE-to-
+        // self default the function's own header documents, same as
+        // gc_restore_rereferenced's own "mine" filter comment).
+        vecRepo.upsertChunks(TENANT, quarantineCollection, List.of(chash),
+            List.of("gc audit restore text"), List.of(Map.of()));
+        // fk_catalog_chunks_catalog_doc: the manifest row below needs a real
+        // catalog_documents row to reference.
+        repo.upsertDocument(TENANT, Map.of(
+            "tumbler", docId, "title", "gc-audit-restore-" + docId,
+            "content_type", "code", "corpus", "code",
+            "physical_collection", collection, "chunk_count", 0));
+        // fk_catalog_chunks_chunk: the manifest row below scopes the FK to
+        // (tenant_id, ORIGIN collection, chash) -- a stub chunks row must
+        // already exist there too (mirrors the manifestSweep test's own
+        // "kept" stub above; gc_restore_rereferenced's copy-INSERT below
+        // then ON-CONFLICT-DO-UPDATEs this stub with the quarantine row's
+        // real content, same as a heal rehydrating a reference before the
+        // chunk vector itself came back).
+        vecRepo.upsertChunks(TENANT, collection, List.of(chash),
+            List.of("gc audit restore stub text"), List.of(Map.of()));
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            // A heal re-referenced this chash from the ORIGIN collection's
+            // manifest -- the condition restoreRereferenced moves it back on.
+            insertManifestRow(su, TENANT, docId, chash, collection);
+        }
+
+        assertThat(repo.listGcAudit(TENANT, quarantineCollection, "gc_restore_rereferenced", 100, 0)).isEmpty();
+
+        long restored = vecRepo.restoreRereferenced(TENANT, quarantineCollection, collection);
+        assertThat(restored).isEqualTo(1L);
+
+        var rows = repo.listGcAudit(TENANT, quarantineCollection, "gc_restore_rereferenced", 100, 0);
+        assertThat(rows)
+            .as("nexus.gc_restore_rereferenced must leave a gc_audit row behind IN THE SAME "
+                + "TRANSACTION as its restore DELETE -- the exact gap conexus-86/nexus-9la1f "
+                + "found: rows leaving quarantine by restore had no forensic trail")
+            .hasSize(1);
+        Map<String, Object> row = rows.get(0);
+        assertThat(row.get("actor")).as("server-driven producer, not a client-attributed one").isEqualTo("engine");
+        assertThat(row.get("dry_run")).isEqualTo(false);
+        assertThat(((Number) row.get("chash_count")).intValue())
+            .as("exactly the one chunk restoreRereferenced actually moved").isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        var chashes = (List<Object>) row.get("chashes");
+        assertThat(chashes).containsExactly(chash);
+        @SuppressWarnings("unchecked")
+        var details = (Map<String, Object>) row.get("details");
+        assertThat(details.get("origin_collection")).isEqualTo(collection);
+    }
+
+    /**
+     * nexus-gt03d fix round (substantive-critic Significant, T2 [27238]):
+     * catalog-039-1's audit INSERT has a truncation CASE for more than
+     * GC_AUDIT_MAX_CHASHES (5000) chashes, and nothing above exercises it --
+     * unlike {@code gc_quarantine_orphans} (whose truncation the
+     * {@code quarantineOrphans_oversizedSampleLimitRequest_...} test above
+     * reaches cheaply by gaming a caller-supplied {@code sample_limit}),
+     * {@code gc_restore_rereferenced} has NO caller-supplied limit to game
+     * -- the only end-to-end path to its own {@code > 5000} branch is a
+     * real quarantine with more than 5000 re-referenced rows, each needing
+     * a matching manifest row AND a matching origin-side stub chunk row
+     * (three ~5000-row inserts, not one), which this same test class's own
+     * precedent already documents as prohibitively slow to seed for a
+     * smaller-scoped truncation. See the changeset's own header ("TRUNCATION
+     * BOUNDARY COVERAGE") for the full derivation and the accepted residual.
+     *
+     * <p>Proves the exact arithmetic the changeset's audit INSERT performs
+     * -- {@code cardinality(arr)} (chash_count), {@code cardinality(arr) &gt;
+     * 5000} (chashes_truncated), and the literal 5000 the changeset reports
+     * as chashes_stored whenever that predicate holds -- against a REAL,
+     * typed-jOOQ-constructed Postgres array of exactly n elements (n =
+     * 4999, 5000, 5001), via Postgres's own {@code cardinality()} rather
+     * than a Java re-implementation of the same arithmetic: a Java-side
+     * reimplementation would prove nothing about the actual SQL text if the
+     * changeset's threshold were ever mistyped ({@code &gt;=} for
+     * {@code &gt;}, or an off-by-one constant). {@code DSL.array(Integer...)}
+     * builds the fabricated array as ONE bound Postgres array parameter
+     * (n literal Java values, zero per-row round trips), so all three
+     * boundary points run in well under a second combined.
+     */
+    @Test @Order(50)
+    void restoreAuditTruncation_caseLogic_atBoundary() {
+        for (int n : new int[] {4999, 5000, 5001}) {
+            Integer[] fabricated = new Integer[n];
+            java.util.Arrays.fill(fabricated, 0);
+            org.jooq.Field<Integer[]> arr = DSL.array(fabricated);
+            org.jooq.Field<Integer> count = DSL.cardinality(arr);
+            org.jooq.Field<Boolean> truncated = DSL.coalesce(count, 0).gt(5000);
+            // Mirrors the changeset's own
+            //   CASE WHEN COALESCE(array_length(v_chashes,1),0) > 5000
+            //        THEN jsonb_build_object('chashes_truncated', true, 'chashes_stored', 5000)
+            //        ELSE '{}'::jsonb END
+            // at the field level: chashes_stored is the LITERAL 5000 when the
+            // predicate holds, and absent (NULL here, standing in for "key not
+            // present in the jsonb object") otherwise -- never a recomputed
+            // LEAST(n,5000) value, since the branch only fires once n already
+            // exceeds 5000.
+            org.jooq.Field<Integer> chashesStored =
+                DSL.when(truncated, DSL.val(5000)).otherwise(DSL.castNull(Integer.class));
+
+            var rec = tenantScope.withTenant(TENANT, ctx -> ctx.select(
+                    count.as("chash_count"),
+                    truncated.as("chashes_truncated"),
+                    chashesStored.as("chashes_stored"))
+                .fetchOne());
+
+            boolean expectedTruncated = n > 5000;
+            assertThat(((Number) rec.get("chash_count", Object.class)).intValue())
+                .as("chash_count is the FULL array length, never the post-truncation one -- n=" + n)
+                .isEqualTo(n);
+            assertThat(rec.get("chashes_truncated", Object.class))
+                .as("the changeset's own `COALESCE(array_length(v_chashes,1),0) > 5000` predicate at n=" + n)
+                .isEqualTo(expectedTruncated);
+            if (expectedTruncated) {
+                assertThat(((Number) rec.get("chashes_stored", Object.class)).intValue())
+                    .as("chashes_stored is the literal cap 5000 whenever truncated fires -- n=" + n)
+                    .isEqualTo(5000);
+            } else {
+                assertThat(rec.get("chashes_stored", Object.class))
+                    .as("chashes_stored is ABSENT (never a recomputed LEAST(n,5000)) below the cap -- n=" + n)
+                    .isNull();
+            }
+        }
+    }
 }

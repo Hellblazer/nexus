@@ -1552,6 +1552,15 @@
     <include file="db/changelog/vectors-018-chunk-live-owners-function.xml"/>
 
     <!--
+        nexus-gt03d: nexus.gc_restore_rereferenced now audits its restore the
+        same way catalog-033 audited gc_quarantine_orphans/
+        sweep_superseded_chunks — see the included file's own header. Placed
+        after vectors-018 (current tail) and before the grants-nexus-svc.xml
+        runAlways block, matching the established late-append convention.
+    -->
+    <include file="db/changelog/catalog-039-gc-restore-audit.xml"/>
+
+    <!--
         RDR-192 Step 2 round-2 fix (bead nexus-wbfpw.4, code-review Important)
         added idx_catalog_documents_live_note_doc_id here (catalog-038), a
         partial expression index meant to serve PgVectorRepository
