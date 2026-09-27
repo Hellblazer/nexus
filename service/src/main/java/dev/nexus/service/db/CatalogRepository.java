@@ -3203,6 +3203,53 @@ public final class CatalogRepository {
         );
     }
 
+    /**
+     * Batch owner-agnostic file_path lookup (nexus-1vc0n): for each of N
+     * file_paths, EVERY live document that names it, in one round trip.
+     *
+     * <p>Backs the batched {@code nx index repo} registrar's cross-owner
+     * mint announcement. The per-document announce
+     * ({@code nexus.catalog.path_ambiguity.announce_cross_owner_mint}, one
+     * owner-agnostic {@code /list?file_path=} per MINT) is deliberately NOT
+     * called inside {@code indexer._catalog_hook}'s batched
+     * {@code register_many} loop — that would turn one round trip into
+     * N+1. This route is what makes the bulk form possible: one request
+     * carrying every path in the batch's misses, one response naming every
+     * existing document per path.
+     *
+     * <p>Owner-agnostic and tombstone-filtered, same read contract as
+     * {@link #documentsByFilePath} — several documents legitimately share
+     * one file_path (one file catalogued under two owners is a normal
+     * steady state, nexus-yzij1), so each entry in the result is a LIST,
+     * not a single winner. The caller
+     * ({@code HttpCatalogClient.find_all_by_file_paths}) decides what to
+     * do with more than one, exactly as {@code find_all_by_file_path}
+     * does for the single-path form.
+     *
+     * @return {@code {file_path -> [document rows]}}; a file_path with no
+     *         live document is absent from the map.
+     */
+    public Map<String, List<Map<String, Object>>> documentsByFilePaths(
+            String tenant, List<String> filePaths) {
+        if (filePaths == null || filePaths.isEmpty()) return Map.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+                          .where(CATALOG_DOCUMENTS.FILE_PATH.in(filePaths)
+                              .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                          .orderBy(CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.TUMBLER)
+                          .fetch();
+            Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                Map<String, Object> doc = docRowFromRecord(r.intoMap());
+                String filePath = (String) doc.get("file_path");
+                if (filePath != null) {
+                    result.computeIfAbsent(filePath, k -> new ArrayList<>()).add(doc);
+                }
+            }
+            return result;
+        });
+    }
+
     /** Documents by content_type. {@code limit <= 0} is unbounded (nexus-xoimv). */
     public List<Map<String, Object>> documentsByContentType(
             String tenant, String contentType, int limit, int offset) {

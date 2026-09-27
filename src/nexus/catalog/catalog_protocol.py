@@ -113,6 +113,17 @@ class CatalogReader(Protocol):
         # surface, not a client-only extra.
         ...
 
+    def find_all_by_file_paths(self, file_paths) -> object:  # nexus-1vc0n
+        # The batched twin of find_all_by_file_path: N paths in, every live
+        # document per path out, in one round trip per page. Caller-facing
+        # via indexer._catalog_hook's batched register_many registrar (the
+        # ONE writer nexus-yzij1 left out, because a per-mint
+        # announce_cross_owner_mint call there would turn one round trip
+        # into N+1) — a method a production call site needs is part of the
+        # surface, not a client-only extra, same reasoning as
+        # find_all_by_file_path's own entry above.
+        ...
+
     def get_collection(self, name) -> object:  # canonical
         ...
 

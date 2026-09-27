@@ -63,6 +63,7 @@ import java.util.*;
  *   POST  /v1/catalog/index-run/complete FAIL-CLOSED verify-then-stamp index_state='complete'
  *   POST  /v1/catalog/index-run/fail     stamp index_state='failed'
  *   POST  /v1/catalog/resolve_many       batch-resolve multiple doc_ids to entries (nexus-7lm3q)
+ *   POST  /v1/catalog/list_by_file_paths batch owner-agnostic file_path lookup, N paths -> live docs (nexus-1vc0n)
  *   POST  /v1/catalog/owners/upsert      upsert owner
  *   GET   /v1/catalog/owners/list        list all owners
  *   POST  /v1/catalog/owners/sweep_next_seq_drift  floor every drifted owner's next_seq (nexus-0ehwe item 5)
@@ -257,6 +258,7 @@ public final class CatalogHandler implements HttpHandler {
 
                 // ── Batch resolve endpoints (nexus-7lm3q) ────────────────────
                 case "/resolve_many"          -> handleResolveMany(exchange, tenant, method);
+                case "/list_by_file_paths"    -> handleListByFilePaths(exchange, tenant, method);
 
                 // ── Span / chash resolution (nexus-njrcn.4) ──────────────────
                 case "/resolve_span"          -> handleResolveSpan(exchange, tenant, method);
@@ -1579,6 +1581,43 @@ public final class CatalogHandler implements HttpHandler {
         }
         var entries = repo.resolveMany(tenant, docIds);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("entries", entries)));
+    }
+
+    /**
+     * POST /v1/catalog/list_by_file_paths (nexus-1vc0n)
+     *
+     * <p>Batch owner-agnostic file_path lookup: N paths -> every LIVE
+     * document for each, in one round trip. Backs the batched
+     * {@code nx index repo} registrar's cross-owner mint announcement —
+     * see {@link CatalogRepository#documentsByFilePaths}'s javadoc for the
+     * full rationale.
+     *
+     * <p>Request body:  {@code {"file_paths": ["path1", "path2", ...]}}
+     * Response body:   {@code {"documents": {"path1": [doc...], "path2": [doc...]}}}
+     *
+     * <p>Paths with no live document are absent from the response map.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleListByFilePaths(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("file_paths");
+        List<String> filePaths = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (filePaths.isEmpty()) {
+            HttpUtil.send(exchange, 200, "{\"documents\":{}}"); return;
+        }
+        // Same cap + rationale as handleManifestGetMany/handleResolveMany: well
+        // under PostgreSQL's 32767-parameter Bind limit. The Python client pages
+        // at 300 (src/nexus/db/limits.py QUOTAS.MAX_RECORDS_PER_WRITE) but the
+        // endpoint must not trust the caller.
+        if (filePaths.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many file_paths (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var documents = repo.documentsByFilePaths(tenant, filePaths);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", documents)));
     }
 
     /**

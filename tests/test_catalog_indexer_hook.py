@@ -772,6 +772,7 @@ class TestCatalogHookBatchedServiceMode:
 
     def _http_client_and_log(
         self, monkeypatch, docs: list[dict], *, show_responses: dict[str, dict] | None = None,
+        list_by_file_paths_response: dict[str, list[dict]] | None = None,
     ):
         """Real HttpCatalogClient over a MockTransport serving *docs*.
 
@@ -783,6 +784,14 @@ class TestCatalogHookBatchedServiceMode:
         the existing empty-``{}`` response (``resolve()`` reads that as
         "not found" and reconciliation is a no-op), so every test that
         predates this parameter is unaffected.
+
+        ``list_by_file_paths_response`` (nexus-1vc0n): optional
+        ``{file_path: [document_dict, ...]}`` map answering
+        ``POST /v1/catalog/list_by_file_paths`` — the bulk
+        ``find_all_by_file_paths`` call ``_catalog_hook`` now makes once
+        per batch, BEFORE ``register_many``. Absent means empty (no
+        cross-owner conflict anywhere), the pre-nexus-1vc0n behaviour every
+        test that predates this parameter still gets.
         """
         import httpx
 
@@ -790,6 +799,7 @@ class TestCatalogHookBatchedServiceMode:
 
         requests: list[tuple[str, dict]] = []
         _show_responses = show_responses or {}
+        _list_by_file_paths_response = list_by_file_paths_response or {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(request.url.params)
@@ -802,6 +812,8 @@ class TestCatalogHookBatchedServiceMode:
                 doc = _show_responses.get(params.get("tumbler", ""))
                 if doc is not None:
                     return httpx.Response(200, json=doc)
+            if request.url.path == "/v1/catalog/list_by_file_paths" and request.method == "POST":
+                return httpx.Response(200, json={"documents": _list_by_file_paths_response})
             return httpx.Response(200, json={})
 
         monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
@@ -815,12 +827,14 @@ class TestCatalogHookBatchedServiceMode:
     def _run_hook(
         self, tmp_path, monkeypatch, docs, head_hash, *, writer=None, files=None,
         show_responses: dict[str, dict] | None = None,
+        list_by_file_paths_response: dict[str, list[dict]] | None = None,
     ):
         from nexus.indexer import _catalog_hook
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
         client, requests = self._http_client_and_log(
             monkeypatch, docs, show_responses=show_responses,
+            list_by_file_paths_response=list_by_file_paths_response,
         )
         writer = writer if writer is not None else self._StubWriter()
 
@@ -1715,6 +1729,71 @@ class TestCatalogHookReconciledIsNotNew:
             f"never repointed: update_calls={writer.update_calls}"
         )
         assert get_reconciled_collections_count() == 1
+
+    def test_a_batched_mint_over_an_existing_path_is_announced(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-1vc0n: the batched fast path's own ``created=True`` branch
+        must announce a genuine cross-owner mint, fed by the bulk
+        ``find_all_by_file_paths`` answer computed BEFORE ``register_many``
+        -- the same event ``announce_cross_owner_mint`` fires for the
+        per-file fallback, at one round trip for the whole batch instead
+        of one per doc."""
+        import structlog.testing
+
+        t = TestCatalogHookBatchedServiceMode()
+        a = tmp_path / "a.py"
+        a.write_text("a = 1\n")
+
+        with structlog.testing.capture_logs() as logs:
+            t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", files=[a],
+                list_by_file_paths_response={
+                    "a.py": [{"tumbler": "1.10.7", "title": "a.py (other owner)",
+                              "content_type": "code", "file_path": "a.py"}],
+                },
+            )
+
+        events = [e for e in logs if e["event"] == "catalog_mint_over_existing_file_path"]
+        assert len(events) == 1, f"expected exactly one mint announcement, got {logs}"
+        assert events[0]["file_path"] == "a.py"
+        assert events[0]["existing_tumblers"] == ["1.10.7"]
+
+    def test_a_batched_reconcile_onto_another_owner_is_announced(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-1vc0n: the ``created=False`` counterpart. b.py reconciles
+        onto 1.10.41 (owner ``1.10``, a DIFFERENT owner than this
+        fixture's own ``1.1``) -- the batched fast path's reconciled
+        branch had NO signal for this at all before nexus-1vc0n (only the
+        per-file fallback called ``announce_cross_owner_resolve``); the
+        bulk lookup now feeds it here too, silent unless created is False
+        AND a real conflict was found."""
+        import structlog.testing
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter()
+        writer.reconcile_paths = {"b.py"}
+
+        with structlog.testing.capture_logs() as logs:
+            t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+                list_by_file_paths_response={
+                    "b.py": [{"tumbler": "1.10.41", "title": "b.py (other owner)",
+                              "content_type": "code", "file_path": "b.py"}],
+                },
+            )
+
+        events = [e for e in logs if e["event"] == "catalog_mint_resolved_existing_document"]
+        assert len(events) == 1, f"expected exactly one resolve announcement, got {logs}"
+        assert events[0]["file_path"] == "b.py"
+        assert events[0]["existing_tumblers"] == ["1.10.41"]
+        # The created=True mint announce must NOT also fire for this doc.
+        mint_events = [e for e in logs if e["event"] == "catalog_mint_over_existing_file_path"]
+        assert not mint_events, f"a reconciled (created=False) doc must not also mint-announce: {mint_events}"
 
     def test_all_created_keeps_the_plain_line(self, tmp_path, monkeypatch, capsys) -> None:
         t = TestCatalogHookBatchedServiceMode()

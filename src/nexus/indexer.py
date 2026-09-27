@@ -1672,6 +1672,35 @@ def _catalog_hook(
         _stage_s["pass1b_update_many"] = time.monotonic() - _stage_mark
         _stage_mark = time.monotonic()
 
+        # nexus-1vc0n: the bulk owner-agnostic twin of
+        # ``find_cross_owner_conflict`` for this WHOLE batch's misses, in
+        # ONE round trip — computed BEFORE any register_many call below,
+        # for the identical reason find_cross_owner_conflict's own
+        # docstring gives for running before register(): querying after
+        # would also see this run's own just-minted rows and misreport an
+        # uncontested path as conflicting with itself. This is what makes
+        # the batched fast path affordable to wire at all — the per-doc
+        # ``find_cross_owner_conflict`` cost that path_ambiguity.py's
+        # module docstring rules out of this loop (one owner-agnostic
+        # ``/list?file_path=`` per doc, N+1 against this page's ONE
+        # register_many round trip) becomes one bulk
+        # ``find_all_by_file_paths`` call for the entire batch instead.
+        _conflicts_by_path: dict[str, list[str]] = {}
+        if new_batch:
+            try:
+                _existing_by_path = cat.find_all_by_file_paths(
+                    [doc["file_path"] for _, doc in new_batch],
+                )
+                _conflicts_by_path = {
+                    fp: [str(e.tumbler) for e in entries]
+                    for fp, entries in _existing_by_path.items()
+                }
+            except Exception:  # noqa: BLE001 — announce must never fail the write
+                _log.debug(
+                    "catalog_bulk_conflict_lookup_failed",
+                    repo=repo_name, exc_info=True,
+                )
+
         # Pass 2: batch-register the NEW docs. The RDR-146 fairness yield moves
         # from per-file to a per-PAGE check — a page is ONE register_many round-
         # trip (one multi-row INSERT server-side), not 1000 serial writes, so the
@@ -1684,24 +1713,20 @@ def _catalog_hook(
         # nexus-r1tnx round 2 (code-review finding): a cross-owner path
         # collision IS possible here (a repo file this owner is registering
         # can already be catalogued under a DIFFERENT owner — the exact
-        # nexus-yzij1 population this whole module exists to make audible),
-        # but ``find_cross_owner_conflict`` deliberately does NOT run inside
-        # this batched loop: its own module docstring (path_ambiguity.py)
-        # already rules that out — one owner-agnostic ``/list?file_path=``
-        # per doc would turn this page's ONE ``register_many`` round trip
-        # into N+1, exactly the cost the batching exists to avoid. The
-        # per-file fallback below already pays one round trip per doc by
-        # construction (register_many itself already failed), so THAT is
-        # where find_cross_owner_conflict/announce_cross_owner_mint are
-        # wired instead.
+        # nexus-yzij1 population this whole module exists to make audible).
+        # nexus-1vc0n closes it: the bulk ``_conflicts_by_path`` computed
+        # above feeds ``announce_cross_owner_mint``/``announce_cross_owner_
+        # resolve`` below exactly like the per-file fallback's
+        # ``find_cross_owner_conflict`` answer feeds the SAME two
+        # functions — one round trip for the whole batch, not one per doc.
         #
         # nexus-r1tnx round 3: ``reconcile_stale_physical_collection`` is a
         # DIFFERENT cost shape and DOES run in this batched loop, at the
         # ``reconciled.append`` site below — it costs one resolve() plus a
         # conditional update(), paid only for a doc THIS batch's own
         # ``created=False`` pairs already singled out, not the whole page,
-        # so it never reintroduces the N+1 that ruled out the conflict
-        # check above.
+        # so it never reintroduces the N+1 that ruled out the per-doc
+        # conflict check above.
         for _start in range(0, len(new_batch), _CATALOG_REGISTER_PAGE):
             if _batch_producer and await_fair_window(
                 writer.is_interactive_write_pending, on_locked,
@@ -1730,6 +1755,8 @@ def _catalog_hook(
                     )
                 for (path, doc), (tum, created) in zip(page, pairs):
                     file_to_doc_id[path] = str(tum)
+                    _fp = doc.get("file_path", "")
+                    _conflict = _conflicts_by_path.get(_fp) or None
                     if created:
                         new_tumblers.append(tum)
                         new_content_types.add(doc.get("content_type", ""))
@@ -1738,6 +1765,19 @@ def _catalog_hook(
                                 (doc.get("meta") or {}).get("content_hash", ""),
                                 doc.get("physical_collection", ""),
                             )
+                        # nexus-1vc0n: the bulk-lookup twin of the per-file
+                        # fallback's announce_cross_owner_mint call below —
+                        # silent unless _conflict actually names another
+                        # owner's document at this path (the bulk answer
+                        # computed above), matching the single-path
+                        # contract exactly.
+                        from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+                            announce_cross_owner_mint,
+                        )
+                        announce_cross_owner_mint(
+                            _conflict, file_path=_fp, owner=owner,
+                            context="indexer._catalog_hook", created=created,
+                        )
                         continue
                     # The owner-scoped snapshot had no row for this path,
                     # yet the server reconciled onto a live row by
@@ -1748,7 +1788,7 @@ def _catalog_hook(
                     reconciled.append((path, str(tum)))
                     _log.warning(
                         "catalog_register_reconciled_onto_existing_row",
-                        repo=repo_name, rel_path=doc.get("file_path", ""),
+                        repo=repo_name, rel_path=_fp,
                         tumbler=str(tum), owner=str(owner),
                     )
                     # nexus-r1tnx round 3: find_cross_owner_conflict stays
@@ -1763,13 +1803,25 @@ def _catalog_hook(
                     # stale-physical_collection exposure the per-file
                     # fallback below already closes, without reintroducing
                     # the N+1 the conflict check was kept out for.
+                    #
+                    # nexus-1vc0n: announce_cross_owner_resolve is the
+                    # created=False counterpart, fed by the SAME bulk
+                    # _conflict answer as the created=True branch above —
+                    # the batched fast path's own reconciled branch had no
+                    # signal for this at all before (only the per-file
+                    # fallback below called it).
                     from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+                        announce_cross_owner_resolve,
                         reconcile_stale_physical_collection,
+                    )
+                    announce_cross_owner_resolve(
+                        _conflict, file_path=_fp, owner=owner,
+                        context="indexer._catalog_hook", created=created,
                     )
                     reconcile_stale_physical_collection(
                         reader, writer, tumbler=tum,
                         target_collection=doc.get("physical_collection", ""),
-                        file_path=doc.get("file_path", ""),
+                        file_path=_fp,
                         owner=owner,
                     )
             except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback

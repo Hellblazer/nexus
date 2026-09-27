@@ -1527,6 +1527,69 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // documentsByFilePaths — batch owner-agnostic file_path lookup (nexus-1vc0n)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(59)
+    void documentsByFilePaths_returnsDocumentsAcrossOwnersForExistingPaths() {
+        // Two distinct owners (tumbler prefixes vc0na / vc0nb) share one
+        // file_path -- the normal steady state nexus-yzij1 accommodates -- plus
+        // a second, unrelated path under a third owner. The bulk lookup must
+        // return every live document for each requested path, owner-agnostic.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0na.1", "title", "Owner A copy",
+            "content_type", "code", "corpus", "code", "file_path", "shared/one.py"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0nb.1", "title", "Owner B copy",
+            "content_type", "code", "corpus", "code", "file_path", "shared/one.py"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0nc.1", "title", "Owner C solo",
+            "content_type", "code", "corpus", "code", "file_path", "shared/two.py"));
+
+        var result = repo.documentsByFilePaths(TENANT_A, List.of("shared/one.py", "shared/two.py"));
+
+        assertThat(result).containsOnlyKeys("shared/one.py", "shared/two.py");
+        assertThat(result.get("shared/one.py").stream().map(d -> d.get("tumbler")))
+            .containsExactlyInAnyOrder("vc0na.1", "vc0nb.1");
+        assertThat(result.get("shared/two.py").stream().map(d -> d.get("tumbler")))
+            .containsExactly("vc0nc.1");
+    }
+
+    @Test @Order(59)
+    void documentsByFilePaths_omitsUnknownPaths() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0nd.1", "title", "Known",
+            "content_type", "code", "corpus", "code", "file_path", "vc0n/known.py"));
+
+        var result = repo.documentsByFilePaths(TENANT_A, List.of("vc0n/known.py", "vc0n/no-such-path.py"));
+
+        assertThat(result).containsOnlyKeys("vc0n/known.py");
+    }
+
+    @Test @Order(59)
+    void documentsByFilePaths_excludesTombstonedRows() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0ne.1", "title", "Will be tombstoned",
+            "content_type", "code", "corpus", "code", "file_path", "vc0n/gone.py"));
+        assertThat(repo.deleteDocument(TENANT_A, "vc0ne.1"))
+            .as("precondition: the delete must actually tombstone one row").isEqualTo(1);
+
+        var result = repo.documentsByFilePaths(TENANT_A, List.of("vc0n/gone.py"));
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(59)
+    void documentsByFilePaths_tenantIsolation() {
+        repo.upsertDocument(TENANT_B, Map.of("tumbler", "vc0nf.1", "title", "Tenant B Doc",
+            "content_type", "code", "corpus", "code", "file_path", "vc0n/tenant-b.py"));
+
+        var result = repo.documentsByFilePaths(TENANT_A, List.of("vc0n/tenant-b.py"));
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(59)
+    void documentsByFilePaths_emptyInput_returnsEmptyMap() {
+        assertThat(repo.documentsByFilePaths(TENANT_A, List.of())).isEmpty();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // COLLECTIONS
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -4411,6 +4474,8 @@ class CatalogRepositoryTest {
             .as("documentsByCollection — the bead's own repro").containsExactly(live);
         assertThat(tumblersOf(repo.documentsByFilePath(tenant, "/abs/dead.py", 0, 0)))
             .as("documentsByFilePath").isEmpty();
+        assertThat(repo.documentsByFilePaths(tenant, List.of("/abs/dead.py")))
+            .as("documentsByFilePaths (nexus-1vc0n)").isEmpty();
         assertThat(tumblersOf(repo.documentsBySourceUri(tenant, "file:///abs/dead.py", 0, 0)))
             .as("documentsBySourceUri").isEmpty();
         assertThat(tumblersOf(repo.documentsByOwner(tenant, "9", 0, 0)))

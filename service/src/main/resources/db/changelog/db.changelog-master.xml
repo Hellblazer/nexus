@@ -1602,6 +1602,18 @@
     <include file="db/changelog/telemetry-015-install-ping-source.xml"/>
 
     <!--
+        nexus-1vc0n: partial (tenant_id, file_path) index for the new bulk
+        owner-agnostic file_path lookup (documentsByFilePaths,
+        POST /v1/catalog/list_by_file_paths) — see the included file's own
+        header. catalog-040 is reserved for a different, already-in-flight
+        bead; catalog-041 is the first genuinely untouched number past it.
+        Placed after catalog-039 (the tail when this landed) and before the
+        grants-nexus-svc.xml runAlways block, matching the established
+        late-append convention.
+    -->
+    <include file="db/changelog/catalog-041-file-path-batch-index.xml"/>
+
+    <!--
         nexus-e8h5x: nexus.gc_restore_rereferenced_bounded, a bounded restore
         sweep mirroring catalog-037's gc_quarantine_orphans_bounded
         (nexus-a6mon) for the opposite direction — see the included file's
