@@ -54,6 +54,10 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   RESUMED. Deferred because the bead's ledger half is wheel content
   (`src/nexus/hooks/expectations.py`, `subagent_start_stamp.py`), so the
   doc ships with the client release that makes it true.
+- `conexus/hooks/scripts/mailbox_drain.py` — nexus-3lc5s: the claim loop's
+  budget stop now logs a SKIP instead of returning silently. Deferred because
+  the same fix is in the wheel copy (`src/nexus/hooks/mailbox_drain.py`), so
+  both copies ship together in the next client release.
 
 _The four RDR-215 straddling beads deferred here by nexus-2x3qy
 (nexus-t9klx, nexus-z9cz2, nexus-silj0, nexus-veh77) shipped with the 7.58.0
