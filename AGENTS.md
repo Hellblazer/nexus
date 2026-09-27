@@ -378,16 +378,23 @@ things to avoid carefully; they are impossible.
    every job of every workflow, about 70 posts per develop push; nothing in
    this repo's workflows posts anything. Read the board for one commit with
    `uv run python scripts/ci_status.py <full 40-char sha>` (exit 0 green,
-   1 failed, 2 pending, 3 no posts for that sha). Its fold: within one
-   attempt the most advanced state wins, so a late `queued` copy cannot
-   hide a finished job; across reruns the newest attempt wins. A commit
-   whose run has no `completed` post and no newer commit posting behind it
-   is live. Exit 1 covers `cancelled` as well as `failure`, so on an older
-   commit read the rows before calling it red: a superseded run (the
-   concurrency group cancelled it when a newer commit pushed) shows
-   `cancelled` on its jobs, with `pytest-gate` alone reading `failure`
-   because its shards never reported; a `cancelled` job with no newer
-   commit on the board can be one past its time limit, so rerun.
+   1 failed, 2 pending, 3 no posts for that sha, 4 cancelled). Its fold:
+   within one attempt the most advanced state wins, so a late `queued`
+   copy cannot hide a finished job; across reruns the newest attempt wins.
+   A commit whose run has no `completed` post and no newer commit posting
+   behind it is live. A superseded run (the concurrency group cancelled it
+   when a newer commit pushed) posts `cancelled` for the run and its jobs,
+   with `pytest-gate` alone reading `failure` because its shards never
+   reported; every row of a run whose own run post is `cancelled` reads
+   `cancelled`, the aggregator included, and the exit is 4, not 1
+   (nexus-lgx93), so read the newer commit's run instead. That covers a
+   job that failed on its merits before the supersede too: an audit of a
+   superseded commit reads the `conclusion` column, not the verdict. A
+   `cancelled` job inside a run GitHub did not cancel was not superseded
+   (a job past its time limit, for one) and reads `failed`, so rerun it.
+   A `cancelled` job whose run has no post at all reads `cancelled` and
+   exits 4, because the fold cannot tell which it was: the run post is a
+   separate delivery and can be missing, so read the rows.
    Subscribe once per session with
    `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
    each post arrives as a ping naming the tuple, so wait for the state you

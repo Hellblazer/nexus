@@ -183,7 +183,7 @@ figure.fig .arrow.you{fill:var(--brass)}
 <tr><td>ping</td><td>The notification for a new post. It names the subspace and the tuple id, never the body.</td></tr>
 <tr><td>attempt</td><td>One execution of a workflow run. A rerun of the same run has a higher attempt number.</td></tr>
 <tr><td>fold</td><td>To reduce many posts to one current state for each run and each job.</td></tr>
-<tr><td>verdict</td><td>The script's summary for one run or job: <code>green</code>, <code>pending</code>, or <code>failed</code>.</td></tr>
+<tr><td>verdict</td><td>The script's summary for one run or job: <code>green</code>, <code>pending</code>, <code>failed</code>, or <code>cancelled</code>.</td></tr>
 </table></details></div>
 
 <!-- ============ 1 ============ -->
@@ -307,13 +307,14 @@ Subscribed <b>board/ci/nexus-develop</b></pre></details>
 <div class="cmd"><pre>uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span>
 uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span> --json
 uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span> --topic nexus-main</pre><button class="copy" type="button">Copy</button></div>
-<p>The first form prints one row for each run and job. <code>--json</code> prints the same as JSON, and <code>--topic</code> reads another branch's topic. The script needs the full 40-character commit sha. Each row starts with a verdict: <code>green</code>, <code>pending</code>, or <code>failed</code>. The row also shows the workflow or job name, the conclusion or the current state, and the age of the post that set that state. The age shows when a state is stale, for example when a post did not arrive. The exit status gives the answer to a script:</p>
+<p>The first form prints one row for each run and job. <code>--json</code> prints the same as JSON, and <code>--topic</code> reads another branch's topic. The script needs the full 40-character commit sha. Each row starts with a verdict: <code>green</code>, <code>pending</code>, <code>failed</code>, or <code>cancelled</code>. The row also shows the workflow or job name, the conclusion or the current state, and the age of the post that set that state. The age shows when a state is stale, for example when a post did not arrive. The exit status gives the answer to a script:</p>
 <div class="tbl"><table>
 <tr><th>Exit</th><th>Meaning</th></tr>
 <tr><td>0</td><td>Every run and job completed green. <code>success</code>, <code>skipped</code>, and <code>neutral</code> count as green.</td></tr>
 <tr><td>1</td><td>At least one run or job failed.</td></tr>
 <tr><td>2</td><td>Nothing failed, and something is still queued or in progress.</td></tr>
 <tr><td>3</td><td>The topic has no post for the commit.</td></tr>
+<tr><td>4</td><td>Nothing failed and nothing is pending, and at least one run was cancelled.</td></tr>
 </table></div>
 <p>Two rules decide which post counts when several posts describe the same job:</p>
 <ul class="plain">
@@ -322,7 +323,9 @@ uv run python scripts/ci_status.py <span class="ph">&lt;SHA&gt;</span> --topic n
 </ul>
 <p>Two more rules help when you read the rows:</p>
 <ul class="plain">
-<li>Only one run of the CI workflow on <code>develop</code> can be in progress. A new push cancels the older run, and its run post and job posts show the conclusion <code>cancelled</code>. So a <code>cancelled</code> run for an older commit is normal when a newer commit has posts. A <code>cancelled</code> job with no newer commit on the board can mean that the job ran past its time limit. Then run the workflow again.</li>
+<li>Only one run of the CI workflow on <code>develop</code> can be in progress. A new push cancels the older run, and its run post and job posts show the conclusion <code>cancelled</code>. A job that collects the results of other jobs shows <code>failure</code>, because the jobs it waited for never reported. The script reads every row of a cancelled run as <code>cancelled</code>, that job included, and exits with 4. So a <code>cancelled</code> run for an older commit is normal when a newer commit has posts.</li>
+<li>A <code>cancelled</code> job in a run that GitHub did not cancel was not superseded. One cause is a job that ran past its time limit. The script reads that job as <code>failed</code>. Run the workflow again.</li>
+<li>A <code>cancelled</code> job whose run has no post reads <code>cancelled</code>. The run post is a separate delivery, and it can be missing. The script cannot tell a superseded run from a cancelled job then, so read the rows.</li>
 <li>Before you push, read the board for a run that another session waits for.</li>
 </ul>
 <p>If the board has no post for a commit, one direct GitHub call answers the question: <code>gh api repos/<span class="ph">&lt;OWNER/REPO&gt;</span>/commits/<span class="ph">&lt;SHA&gt;</span>/check-runs</code>. Make that call once, not in a loop.</p>

@@ -17,9 +17,23 @@ body JSON ``{"state", "workflow", "job"?, "sha", "run", "attempt",
 "conclusion", "url"}``; ``state`` is ``queued``, ``in_progress`` or
 ``completed``; run posts omit ``job``.
 
+Verdicts: ``green``, ``pending``, ``failed``, ``cancelled``. A run the
+concurrency group cancelled when a newer commit pushed (a superseded run)
+posts ``cancelled`` for the run and its jobs, and ``failure`` for an
+aggregator job whose shards never reported; every row of such a run reads
+``cancelled``, because the failure is a consequence of the cancellation,
+not a red (a job that failed on its merits before the supersede reads
+``cancelled`` too; its ``conclusion`` column still says ``failure``, so an
+audit of a superseded commit reads conclusions, not verdicts). A
+``cancelled`` job inside a run GitHub did NOT cancel was not superseded
+(a job past its time limit, for one) and reads ``failed``. A ``cancelled``
+job with no run post reads ``cancelled``, since the fold cannot tell which
+it was; the run post is a separate delivery and can be missing.
+
 Exit status: 0 when every job completed green, 1 when any job failed,
 2 when nothing failed but something is still pending, 3 when the topic has
-no post for the commit. Usage::
+no post for the commit, 4 when nothing failed or is pending but something
+was cancelled. Usage::
 
     uv run python scripts/ci_status.py <sha> [--topic nexus-develop] [--json]
 """
@@ -37,6 +51,12 @@ DEFAULT_TOPIC: str = "nexus-develop"
 GREEN: frozenset[str] = frozenset({"success", "skipped", "neutral"})
 _STATE_RANK: dict[str, int] = {"queued": 0, "in_progress": 1, "completed": 2}
 _PAGE: int = 200
+#: Exit codes, by precedence: a genuine red outranks a wait, which outranks a supersede.
+EXIT_GREEN: int = 0
+EXIT_FAILED: int = 1
+EXIT_PENDING: int = 2
+EXIT_NO_POSTS: int = 3
+EXIT_CANCELLED: int = 4
 
 
 @dataclass(frozen=True)
@@ -48,12 +68,27 @@ class Status:
     conclusion: str
     url: str
     updated_at: str
+    verdict: str
 
-    @property
-    def verdict(self) -> str:
-        if self.state != "completed":
-            return "pending"
-        return "green" if self.conclusion in GREEN else "failed"
+    def __post_init__(self) -> None:
+        if self.verdict not in VERDICTS:
+            raise ValueError(f"Status.verdict must be one of {sorted(VERDICTS)}, got {self.verdict!r}")
+
+
+VERDICTS: frozenset[str] = frozenset({"green", "pending", "failed", "cancelled"})
+
+
+def _verdict(state: str, conclusion: str, run_conclusion: str | None) -> str:
+    """*run_conclusion* is the workflow's own run row conclusion, None when unposted."""
+    if state != "completed":
+        return "pending"
+    if conclusion in GREEN:
+        return "green"
+    if run_conclusion == "cancelled":
+        return "cancelled"
+    if conclusion == "cancelled" and run_conclusion is None:
+        return "cancelled"
+    return "failed"
 
 
 def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) -> list[Status]:
@@ -68,7 +103,9 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
     expired and was purged, lands as a NEW row with a later ``created_at``
     (RDR-220 gate round 2).
     """
-    latest: dict[tuple[str, str, int], Status] = {}
+    # (state, conclusion, url, created_at) per key; a Status is built only
+    # once its verdict is known, so no Status ever exists without one.
+    latest: dict[tuple[str, str, int], tuple[str, str, str, str]] = {}
     for created_at, body, dims in posts:
         if dims.get("from") != "github" or body.get("sha") != sha:
             continue
@@ -77,31 +114,34 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
             continue
         key = (str(body.get("workflow", "")), str(body.get("job", "")),
                int(body.get("attempt", 1) or 1))
-        cand = Status(key[0], key[1], key[2], state,
-                      str(body.get("conclusion") or ""), str(body.get("url", "")),
-                      created_at)
+        cand = (state, str(body.get("conclusion") or ""), str(body.get("url", "")), created_at)
         prev = latest.get(key)
-        if prev is None or (_STATE_RANK[cand.state], cand.updated_at) >= (
-                _STATE_RANK[prev.state], prev.updated_at):
+        if prev is None or (_STATE_RANK[cand[0]], cand[3]) >= (_STATE_RANK[prev[0]], prev[3]):
             latest[key] = cand
     newest_attempt: dict[tuple[str, str], int] = {}
     for wf, job, attempt in latest:
         newest_attempt[(wf, job)] = max(attempt, newest_attempt.get((wf, job), 0))
+    current = {k: v for k, v in latest.items() if k[2] == newest_attempt[(k[0], k[1])]}
+    run_conclusion = {wf: v[1] for (wf, job, _a), v in current.items() if job == "" and v[0] == "completed"}
     return sorted(
-        (s for (wf, job, attempt), s in latest.items() if attempt == newest_attempt[(wf, job)]),
+        (Status(wf, job, attempt, state, conclusion, url, created_at,
+                _verdict(state, conclusion, run_conclusion.get(wf)))
+         for (wf, job, attempt), (state, conclusion, url, created_at) in current.items()),
         key=lambda s: (s.workflow, s.job != "", s.job),
     )
 
 
 def exit_code(statuses: list[Status]) -> int:
     if not statuses:
-        return 3
+        return EXIT_NO_POSTS
     verdicts = {s.verdict for s in statuses}
     if "failed" in verdicts:
-        return 1
+        return EXIT_FAILED
     if "pending" in verdicts:
-        return 2
-    return 0
+        return EXIT_PENDING
+    if "cancelled" in verdicts:
+        return EXIT_CANCELLED
+    return EXIT_GREEN
 
 
 def _age(ts: str, now: datetime) -> str:
@@ -156,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
     statuses = fold(read_posts(args.topic), args.sha)
     code = exit_code(statuses)
     if args.json:
-        print(json.dumps([s.__dict__ | {"verdict": s.verdict} for s in statuses], indent=2))
+        print(json.dumps([s.__dict__ for s in statuses], indent=2))
     elif not statuses:
         print(f"no posts for {args.sha} on board/ci/{args.topic}", file=sys.stderr)
     else:
