@@ -177,4 +177,98 @@ class InstallPingHandlerTest {
                 p -> { throw new IllegalStateException("db down"); }, limiter, 0));
         assertThat(post(VALID.formatted(UUID.randomUUID())).statusCode()).isEqualTo(500);
     }
+
+    // ------------------------------------------------------------------
+    // nexus-5zv4j: source_hash
+    // ------------------------------------------------------------------
+
+    private void reconfigure(int trustedProxies, String hashKey) {
+        server.removeContext("/v1/install-ping");
+        var limiter = new MintRateLimiter(Clock.systemUTC(), 5, 1, 100);
+        server.createContext("/v1/install-ping",
+                new InstallPingHandler(recorded::add, limiter, trustedProxies, hashKey));
+    }
+
+    @Test
+    void hashKeyUnset_sourceHashIsNull() throws Exception {
+        // start()'s default handler uses the back-compat 3-arg ctor: no key.
+        UUID id = UUID.randomUUID();
+        assertThat(post(VALID.formatted(id)).statusCode()).isEqualTo(202);
+        assertThat(recorded).singleElement().satisfies(p -> assertThat(p.sourceHash()).isNull());
+    }
+
+    @Test
+    void hashKeySet_sourceHashIsDeterministicHmacOfRemoteAddress() throws Exception {
+        reconfigure(0, "test-hash-key");
+        UUID id = UUID.randomUUID();
+        assertThat(post(VALID.formatted(id)).statusCode()).isEqualTo(202);
+        // Every request in this test class arrives from the loopback socket peer.
+        String expected = InstallPingHandler.sourceHash("test-hash-key", "127.0.0.1");
+        assertThat(expected).isNotNull().hasSize(InstallPingHandler.SOURCE_HASH_HEX_CHARS);
+        assertThat(recorded).singleElement()
+                .satisfies(p -> assertThat(p.sourceHash()).isEqualTo(expected));
+    }
+
+    @Test
+    void hashKeySet_usesTheSameXffDerivedAddressAsTheRateLimiter() throws Exception {
+        reconfigure(1, "test-hash-key");
+        UUID id = UUID.randomUUID();
+        assertThat(post(VALID.formatted(id), "203.0.113.9, 10.0.0.1").statusCode()).isEqualTo(202);
+        String expected = InstallPingHandler.sourceHash("test-hash-key", "203.0.113.9");
+        assertThat(recorded).singleElement()
+                .satisfies(p -> assertThat(p.sourceHash()).isEqualTo(expected));
+    }
+
+    @Test
+    void hashKeyUnset_warnsOnceAtConstruction() throws Exception {
+        var limiter = new MintRateLimiter(Clock.systemUTC(), 5, 1, 100);
+        java.util.List<String> messages = captureLogs(() ->
+                new InstallPingHandler(recorded::add, limiter, 0, null));
+        assertThat(messages).anySatisfy(m -> assertThat(m).contains("install_ping_hash_key_unset"));
+    }
+
+    @Test
+    void hashKeyBlank_warnsOnceAtConstruction() throws Exception {
+        var limiter = new MintRateLimiter(Clock.systemUTC(), 5, 1, 100);
+        java.util.List<String> messages = captureLogs(() ->
+                new InstallPingHandler(recorded::add, limiter, 0, "   "));
+        assertThat(messages).anySatisfy(m -> assertThat(m).contains("install_ping_hash_key_unset"));
+    }
+
+    @Test
+    void hashKeySet_doesNotWarnAtConstruction() throws Exception {
+        var limiter = new MintRateLimiter(Clock.systemUTC(), 5, 1, 100);
+        java.util.List<String> messages = captureLogs(() ->
+                new InstallPingHandler(recorded::add, limiter, 0, "a-real-key"));
+        assertThat(messages).noneSatisfy(m -> assertThat(m).contains("install_ping_hash_key_unset"));
+    }
+
+    /**
+     * Attaches a {@link ch.qos.logback.core.read.ListAppender} to the ROOT
+     * logger for the duration of {@code body}, then hands back every captured
+     * message. Mirrors {@code NexusServiceScheduledSweepTest}'s established
+     * root-logger ListAppender pattern for asserting on structured log lines.
+     */
+    private static java.util.List<String> captureLogs(ThrowingRunnable body) throws Exception {
+        ch.qos.logback.classic.Logger root =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(
+                        org.slf4j.Logger.ROOT_LOGGER_NAME);
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+                new ch.qos.logback.core.read.ListAppender<>();
+        logs.start();
+        root.addAppender(logs);
+        try {
+            body.run();
+            return logs.list.stream()
+                    .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                    .toList();
+        } finally {
+            root.detachAppender(logs);
+            logs.stop();
+        }
+    }
+
+    private interface ThrowingRunnable {
+        void run() throws Exception;
+    }
 }

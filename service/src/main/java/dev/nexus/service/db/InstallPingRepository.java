@@ -25,9 +25,22 @@ import static dev.nexus.service.jooq.nexus.Tables.INSTALL_PINGS;
  */
 public final class InstallPingRepository implements InstallPingSink {
 
-    /** One ping as the handler validated it. */
+    /**
+     * One ping as the handler validated it. {@code sourceHash} (nexus-5zv4j)
+     * is nullable and computed by the handler, never sent by the client —
+     * see {@code telemetry-015-install-ping-source.xml}'s header.
+     */
     public record Ping(UUID installId, String clientVersion, String mode,
-                       String os, String arch, String python) {}
+                       String os, String arch, String python,
+                       String sourceHash) {
+
+        /** Back-compat convenience: no source_hash (existing callers that
+         * predate nexus-5zv4j, or that don't exercise that path). */
+        public Ping(UUID installId, String clientVersion, String mode,
+                    String os, String arch, String python) {
+            this(installId, clientVersion, mode, os, arch, python, null);
+        }
+    }
 
     private final DataSource dataSource;
     private final Clock clock;
@@ -50,6 +63,7 @@ public final class InstallPingRepository implements InstallPingSink {
              .set(INSTALL_PINGS.OS, ping.os())
              .set(INSTALL_PINGS.ARCH, ping.arch())
              .set(INSTALL_PINGS.PYTHON, ping.python())
+             .set(INSTALL_PINGS.SOURCE_HASH, ping.sourceHash())
              .set(INSTALL_PINGS.RECEIVED_AT, OffsetDateTime.now(clock).withOffsetSameInstant(ZoneOffset.UTC))
              .execute();
     }
