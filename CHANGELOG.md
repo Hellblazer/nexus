@@ -6,6 +6,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx collection re-embed` works on a quarantine sibling** (nexus-ny7j4). The write path's registration step derived registration fields from the collection name, and a `quarantine-<type>` first segment is not a content type, so the command refused with `unknown content_type 'quarantine-code'`. The client never registers a quarantine sibling (the engine does, from the origin's row), so the step now skips it.
+
+### Changed
+
+- **`scripts/ci_status.py` has a `cancelled` verdict and exit code 4** (nexus-lgx93). Every row of a run whose own run post is `cancelled` reads `cancelled`, the aggregator job that reports `failure` because its shards never reported included, so a run a newer push superseded no longer reads as failed. A `cancelled` job inside a run GitHub did not cancel was not superseded and still reads `failed`; one whose run has no post reads `cancelled`, since the run post is a separate delivery. A genuine failure or a pending job outranks a cancellation.
+
 ## [7.63.0] - 2026-09-26
 
 Pairs with engine-service-v0.1.134, already deployed. That engine refuses a change old clients could make: rotating a tenant that holds tokens of more than one scope, without naming a scope, now returns 409 instead of silently collapsing them. Its deploy was armed with conexus.

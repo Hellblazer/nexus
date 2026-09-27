@@ -43,6 +43,21 @@ QUARANTINE_DAYS_DEFAULT = 14
 _WRITE_BATCH = 300  # ChromaCloud MAX_RECORDS_PER_WRITE; safe everywhere
 
 
+def is_quarantine_sibling_name(name: str) -> bool:
+    """True when *name* is a quarantine sibling: its first ``__`` segment
+    starts with ``quarantine-`` (the shape :func:`quarantine_collection_name`
+    mints). The client never registers one: the engine's GC function
+    registers the sibling from the origin's row when it first moves a
+    chunk into it, and its first segment is not a content type, so
+    deriving registration fields from the name would fail loud on a
+    collection that already exists (nexus-ny7j4: ``nx collection re-embed``
+    on ``quarantine-code__1-41__voyage-code-3__v1`` refused with
+    ``unknown content_type 'quarantine-code'``).
+    """
+    first, sep, _rest = name.partition("__")
+    return bool(sep) and first.startswith(f"{QUARANTINE_PREFIX}-")
+
+
 def quarantine_collection_name(origin: str) -> str:
     """``code__nexus-1-1__voyage-code-3__v1`` -> its quarantine sibling
     ``quarantine-code__nexus-1-1__voyage-code-3__v1``.

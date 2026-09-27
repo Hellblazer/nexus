@@ -1781,6 +1781,17 @@ def ensure_collection_registered(
     scope = getattr(registrar, "scope", None)
     if _registration_cache_contains(scope, name):
         return
+    from nexus.catalog.chunk_quarantine import is_quarantine_sibling_name  # noqa: PLC0415 — circular-dep avoidance (catalog imports corpus)
+    if kwargs is None and is_quarantine_sibling_name(name):
+        # The sibling exists by construction (the engine registered it
+        # from the origin's row when it quarantined the first chunk) and
+        # its name carries no content type to derive fields from; a write
+        # to an unregistered sibling still 422s at the engine, and
+        # write_with_registration_retry propagates that after one retry.
+        # A caller holding row-derived *kwargs* (backfill, rename) still
+        # registers explicitly; only the name-derived path skips.
+        _log.debug("collection_registration_skipped_quarantine_sibling", name=name)
+        return
     with _REGISTERED_COLLECTIONS_LOCK:
         if _registration_cache_contains(scope, name):
             return

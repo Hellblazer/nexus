@@ -210,6 +210,43 @@ def test_registers_once_then_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     writer.close.assert_called_once()
 
 
+def test_a_quarantine_sibling_is_never_registered_by_the_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-ny7j4: ``nx collection re-embed`` on a quarantine sibling died
+    in this funnel deriving registration fields from a name whose first
+    segment is ``quarantine-code``, not a content type. The engine's GC
+    function registers the sibling from the origin's row; the client
+    skips it and never calls the registrar."""
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+    writer = _fake_writer()
+    name = "quarantine-code__1-41__voyage-code-3__v1"
+
+    with pytest.raises(ValueError, match="unknown content_type 'quarantine-code'"):
+        collection_registration_kwargs(name)  # the derivation itself still refuses
+    ensure_collection_registered(name, registrar=lambda: writer)  # the funnel does not reach it
+
+    writer.register_collection.assert_not_called()
+    assert name not in corpus._REGISTERED_COLLECTIONS
+
+
+def test_a_quarantine_sibling_write_that_422s_is_never_repaired_by_registering() -> None:
+    """A stale-registration 422 on a quarantine sibling is retried once,
+    like any other, but the retry re-enters the skip: the client cannot
+    register a sibling, so the engine's answer propagates."""
+    writer = _fake_writer()
+    name = "quarantine-docs__1-7__voyage-context-3__v1"
+    resp = httpx.Response(422, text="collection quarantine-docs__1-7__voyage-context-3__v1 is not registered",
+                          request=httpx.Request("POST", "http://x"))
+    write_fn = MagicMock(side_effect=httpx.HTTPStatusError("422", request=resp.request, response=resp))
+
+    with pytest.raises(httpx.HTTPStatusError):
+        write_with_registration_retry(name, write_fn, registrar=lambda: writer)
+
+    assert write_fn.call_count == 2
+    writer.register_collection.assert_not_called()
+
+
 def test_registrar_receives_the_derived_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -763,9 +800,11 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
         one of the canonical types cannot derive an embedding model under
         cloud mode and raises ValueError -- why a caller holding the real
         fields passes them instead of letting the name be parsed
-        (nexus-ft04v.28 C1 was this failure, swallowed)."""
+        (nexus-ft04v.28 C1 was this failure, swallowed). The example is
+        a made-up type, not a quarantine sibling: that name is now the
+        one shape this funnel skips without deriving (nexus-ny7j4)."""
         with pytest.raises(ValueError, match="unknown content_type"):
-            ensure_collection_registered("quarantine-code__myrepo__voyage-code-3__v1")
+            ensure_collection_registered("scratch__myrepo__voyage-code-3__v1")
 
 
 class TestEnsureCollectionRegisteredInvalidatesCollectionsCache:
