@@ -1680,6 +1680,20 @@ def _catalog_hook(
         # is 1:1-or-raise; the client already degrades a failed batch to per-doc
         # register() internally, and if even that raises we fall back here to a
         # per-file register with the same ghost-class isolation as pass 1.
+        #
+        # nexus-r1tnx round 2 (code-review finding): a cross-owner path
+        # collision IS possible here (a repo file this owner is registering
+        # can already be catalogued under a DIFFERENT owner — the exact
+        # nexus-yzij1 population this whole module exists to make audible),
+        # but ``find_cross_owner_conflict`` deliberately does NOT run inside
+        # this batched loop: its own module docstring (path_ambiguity.py)
+        # already rules that out — one owner-agnostic ``/list?file_path=``
+        # per doc would turn this page's ONE ``register_many`` round trip
+        # into N+1, exactly the cost the batching exists to avoid. The
+        # per-file fallback below already pays one round trip per doc by
+        # construction (register_many itself already failed), so THAT is
+        # where find_cross_owner_conflict/announce_cross_owner_mint are
+        # wired instead.
         for _start in range(0, len(new_batch), _CATALOG_REGISTER_PAGE):
             if _batch_producer and await_fair_window(
                 writer.is_interactive_write_pending, on_locked,
@@ -1736,6 +1750,18 @@ def _catalog_hook(
                 )
                 for path, doc in page:
                     try:
+                        # nexus-r1tnx round 2: one register() call per doc
+                        # here (register_many already failed), so this is
+                        # exactly the per-document write path
+                        # find_cross_owner_conflict is costed for — unlike
+                        # the batched fast path above, this pays no extra
+                        # round trip by wiring it.
+                        from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+                            announce_cross_owner_mint,
+                            announce_cross_owner_resolve,
+                            find_cross_owner_conflict,
+                        )
+                        _conflict = find_cross_owner_conflict(reader, doc.get("file_path", ""))
                         # with_created here too, or this fallback re-opens the
                         # nexus-53cae miscount for every doc it handles
                         # (review [24413] Major).
@@ -1752,12 +1778,22 @@ def _catalog_hook(
                                     (doc.get("meta") or {}).get("content_hash", ""),
                                     doc.get("physical_collection", ""),
                                 )
+                            announce_cross_owner_mint(
+                                _conflict, file_path=doc.get("file_path", ""),
+                                owner=owner, context="catalog_hook_per_file_fallback",
+                                created=created,
+                            )
                         else:
                             reconciled.append((path, str(tum)))
                             _log.warning(
                                 "catalog_register_reconciled_onto_existing_row",
                                 repo=repo_name, rel_path=doc.get("file_path", ""),
                                 tumbler=str(tum), owner=str(owner),
+                            )
+                            announce_cross_owner_resolve(
+                                _conflict, file_path=doc.get("file_path", ""),
+                                owner=owner, context="catalog_hook_per_file_fallback",
+                                created=created,
                             )
                     except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
                         skipped_files.append((path, str(exc)))

@@ -45,6 +45,31 @@ already exposes (nexus-vfef0) through the split:
 * :func:`announce_cross_owner_mint` runs AFTER ``register()``, once the
   caller knows whether THIS call actually minted anything, and stays silent
   when it did not.
+
+nexus-r1tnx round 2 (substantive-critic finding): silence on ``created=False``
+traded one wrong claim for a different gap. The engine's idempotency leg
+(``CatalogRepository.registerDocumentWithOutcome``) returns a cross-owner
+resolve's row VERBATIM — it never touches ``physical_collection`` — while the
+SAME-owner resolve branches in ``doc_indexer.py``/``pipeline_stages.py``
+compare the resolved row's ``physical_collection`` against the run's target
+and repoint it on mismatch (nexus-2t63u: a stale value there makes the
+engine's manifest write stamp every row from the WRONG collection, tripping
+the RUNFENCE verify). The cross-owner mint-fallback branches had no such
+check, so the exact scenario the original bug report came from (a resolve
+onto another owner's document) got neither a correctly-worded signal nor a
+collection reconcile. Two more pieces close that:
+
+* :func:`announce_cross_owner_resolve` — the ``created=False`` counterpart
+  to :func:`announce_cross_owner_mint`: logs that this path resolved onto an
+  existing document under another owner instead of minting one, so a
+  cross-owner path collision is never TOTALLY silent, whichever way
+  ``register()`` went.
+* :func:`reconcile_stale_physical_collection` — the same compare-and-repoint
+  the same-owner branches already do, extracted so the cross-owner mint
+  paths can call it too instead of copying it a fourth time. Runs whenever
+  ``created`` is ``False`` (register() resolved onto an existing row),
+  regardless of whether a conflict was pre-detected, mirroring the
+  same-owner branches' own unconditional-on-resolve behavior.
 """
 
 from __future__ import annotations
@@ -158,3 +183,147 @@ def announce_cross_owner_mint(
                "documents per path is allowed — this line exists so it "
                "is never a surprise.",
     )
+
+
+def created_from_register_result(result: Any) -> bool:
+    """Unwrap a ``writer.register(..., with_created=True)`` return.
+
+    ``HttpCatalogClient.register`` returns ``(tumbler, created)`` when
+    ``with_created=True``. A test double that predates the kwarg (several
+    exist across the writer-fake population) ignores it and returns a bare
+    tumbler/string instead. Treat that the same way
+    ``HttpCatalogClient.register`` itself treats an older engine that omits
+    the wire field entirely — ``created=True`` is the historical assumption
+    every caller ignoring this parameter already makes, not a guess this
+    helper invents.
+
+    Shared by every ``register()`` call site that requests the signal, so
+    the isinstance-tuple unwrap is written once rather than copied at each
+    one (nexus-r1tnx round 2, code-review minor finding).
+    """
+    if isinstance(result, tuple):
+        return bool(result[1])
+    return True
+
+
+def tumbler_from_register_result(result: Any) -> Any:
+    """Unwrap a ``writer.register(..., with_created=True)`` return to just
+    the tumbler, the companion half of :func:`created_from_register_result`
+    (same tuple-vs-bare-value shape, same "older/predating fake" fallback).
+    """
+    if isinstance(result, tuple):
+        return result[0]
+    return result
+
+
+def announce_cross_owner_resolve(
+    conflict: list[str] | None,
+    *,
+    file_path: str,
+    owner: Any,
+    context: str,
+    created: bool,
+) -> None:
+    """Log that *file_path* resolved onto an EXISTING document under
+    another owner instead of minting a new one.
+
+    The ``created=False`` counterpart to :func:`announce_cross_owner_mint`.
+    Call this AFTER the same ``register()`` — silent unless BOTH hold:
+    *conflict* names at least one document already at this path (the
+    pre-register answer from :func:`find_cross_owner_conflict`), AND
+    ``created`` is ``False``. A conflict list alongside ``created=True`` is
+    the OTHER function's case (a genuine additional mint); a conflict list
+    alongside ``created=False`` means ``register()``'s own idempotency leg
+    (matching ``source_uri``/``file_path`` across owners) resolved this
+    call onto a document some other owner already registered — allowed,
+    same as an additional mint is allowed, but worth knowing about: the
+    original nexus-r1tnx bug report's exact scenario (owner 1.14 resolving
+    onto 1.12.25) is precisely this branch, and prior to this function it
+    got no signal at all once the false "ADDITIONAL document" claim was
+    removed.
+    """
+    if not conflict or created:
+        return
+    _log.warning(
+        "catalog_mint_resolved_existing_document",
+        file_path=file_path,
+        owner=str(owner),
+        context=context,
+        existing=len(conflict),
+        existing_tumblers=list(conflict),
+        detail="this path is already catalogued under another owner; "
+               "register() resolved onto that existing document instead "
+               "of minting a new one for this owner. No additional "
+               "document was created.",
+    )
+
+
+def reconcile_stale_physical_collection(
+    reader: Any,
+    writer: Any,
+    *,
+    tumbler: Any,
+    target_collection: str,
+    file_path: str,
+) -> bool:
+    """Repoint *tumbler*'s ``physical_collection`` to *target_collection*
+    if the resolved row's is stale.
+
+    Call this whenever a register call resolved onto an existing document
+    rather than minting one (``created=False``), regardless of whether a
+    conflict was pre-detected — mirrors what the SAME-owner resolve
+    branches (``doc_indexer._register_or_lookup_doc_id``,
+    ``doc_indexer._catalog_markdown_hook``, ``pipeline_stages.
+    _catalog_pdf_hook``) already do on their own owner-scoped hit, extracted
+    here so the cross-owner mint-fallback branches can reuse it instead of
+    each copying the compare-and-repoint block a fourth time.
+
+    Without this, the engine's ``writeManifestRows``/``appendManifestChunks``
+    stamp every manifest row from ``catalog_documents.physical_collection``
+    at write time (read unconditionally), so a stale value there makes
+    ``manifest_verify`` join against the WRONG collection and report live,
+    present chunks as missing — the nexus-2t63u RUNFENCE-refusal class,
+    previously closed only for the same-owner resolve path.
+
+    Best-effort / advisory by construction, mirroring the same-owner
+    branches' own fail-open contract (nexus-ir68m): a register call that
+    already resolved a live tumbler must never have that tumbler's identity
+    discarded because a follow-up repoint probe or write failed — the
+    caller still has a perfectly good ``doc_id`` either way.
+
+    Returns ``True`` iff a repoint was written. ``False`` covers: the
+    resolve probe failed, the row wasn't found, it has no
+    ``physical_collection`` yet (a ghost/never-indexed row — nothing to
+    compare against, mirrors the same-owner branches' identical ghost
+    exemption), or it already matches *target_collection*.
+    """
+    try:
+        entry = reader.resolve(tumbler)
+    except Exception:  # noqa: BLE001 — advisory probe, must never fail a write
+        _log.debug(
+            "catalog_cross_owner_reconcile_probe_failed",
+            file_path=file_path, tumbler=str(tumbler), exc_info=True,
+        )
+        return False
+    if entry is None:
+        return False
+    old_collection = getattr(entry, "physical_collection", "")
+    if not old_collection or old_collection == target_collection:
+        return False
+    try:
+        writer.update(tumbler, physical_collection=target_collection)
+    except Exception:  # noqa: BLE001 — advisory write, must never discard an already-resolved tumbler (nexus-ir68m fail-open contract)
+        _log.warning(
+            "doc_physical_collection_reconcile_write_failed",
+            tumbler=str(tumbler), file_path=file_path,
+            old_collection=old_collection, new_collection=target_collection,
+        )
+        return False
+    _log.warning(
+        "doc_physical_collection_reconciled",
+        tumbler=str(tumbler), file_path=file_path,
+        old_collection=old_collection, new_collection=target_collection,
+    )
+    from nexus.mcp_infra import _record_physical_collection_reconciled  # noqa: PLC0415 — circular-dep avoidance (nexus.mcp_infra)
+    _record_physical_collection_reconciled()
+    return True

@@ -1630,7 +1630,11 @@ def _backfill_per_file_from_t3(
         # an existing row is not an additional document.
         from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
             announce_cross_owner_mint,
+            announce_cross_owner_resolve,
+            created_from_register_result,
             find_cross_owner_conflict,
+            reconcile_stale_physical_collection,
+            tumbler_from_register_result,
         )
         _conflict = find_cross_owner_conflict(cat, rel)
         try:
@@ -1642,11 +1646,26 @@ def _backfill_per_file_from_t3(
                 file_path=rel,
                 with_created=True,
             )
-            _created = _write_result[1] if isinstance(_write_result, tuple) else True
+            _created = created_from_register_result(_write_result)
             announce_cross_owner_mint(
                 _conflict, file_path=rel, owner=owner,
                 context="backfill_per_file_from_t3", created=_created,
             )
+            if not _created:
+                # nexus-r1tnx round 2: no same-owner reconcile branch exists
+                # in this function to mirror (a fresh owner-scoped miss has
+                # no prior row of its own), but the resolve can still land
+                # on another owner's document with a stale
+                # physical_collection — same nexus-2t63u exposure, same fix.
+                announce_cross_owner_resolve(
+                    _conflict, file_path=rel, owner=owner,
+                    context="backfill_per_file_from_t3", created=_created,
+                )
+                reconcile_stale_physical_collection(
+                    cat, w,
+                    tumbler=tumbler_from_register_result(_write_result),
+                    target_collection=collection, file_path=rel,
+                )
             registered += 1
         except ValueError as exc:
             # Cross-project anchor rejection from nexus-3e4s: the chunk

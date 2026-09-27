@@ -1151,7 +1151,11 @@ def _register_or_lookup_doc_id(
         # returns, not what it needs to know internally.
         from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
             announce_cross_owner_mint,
+            announce_cross_owner_resolve,
+            created_from_register_result,
             find_cross_owner_conflict,
+            reconcile_stale_physical_collection,
+            tumbler_from_register_result,
         )
         _conflict = find_cross_owner_conflict(reader, fp)
         _write_result = writer.register(
@@ -1168,21 +1172,34 @@ def _register_or_lookup_doc_id(
             source_uri=source_uri,
             with_created=True,
         )
-        # Defensive: a test double's ``writer.register`` fake (several
-        # exist, predating with_created) ignores the kwarg and returns a
-        # bare tumbler/string rather than a 2-tuple. Treat that the same
-        # way HttpCatalogClient.register treats an older engine that omits
-        # the wire field entirely — "created=True" is the historical
-        # assumption every caller ignoring this parameter already makes,
-        # not a guess this call site invents.
-        if isinstance(_write_result, tuple):
-            tumbler, created = _write_result
-        else:
-            tumbler, created = _write_result, True
+        # created_from_register_result/tumbler_from_register_result handle
+        # a test double's ``writer.register`` fake (several exist, predating
+        # with_created) ignoring the kwarg and returning a bare tumbler/
+        # string rather than a 2-tuple the same way HttpCatalogClient.
+        # register treats an older engine that omits the wire field
+        # entirely — "created=True" is the historical assumption every
+        # caller ignoring this parameter already makes, not a guess this
+        # call site invents.
+        created = created_from_register_result(_write_result)
+        tumbler = tumbler_from_register_result(_write_result)
         announce_cross_owner_mint(
             _conflict, file_path=fp, owner=owner,
             context="register_or_lookup_doc_id", created=created,
         )
+        if not created:
+            # nexus-r1tnx round 2: register() resolved onto an existing row
+            # instead of minting one — the same reconciliation the
+            # ``existing is not None`` branch above already does, closing
+            # the nexus-2t63u stale-physical_collection exposure for this
+            # (previously unreconciled) cross-owner resolve path too.
+            announce_cross_owner_resolve(
+                _conflict, file_path=fp, owner=owner,
+                context="register_or_lookup_doc_id", created=created,
+            )
+            reconcile_stale_physical_collection(
+                reader, writer, tumbler=tumbler,
+                target_collection=physical_collection, file_path=fp,
+            )
         if with_created:
             return str(tumbler), created
         return str(tumbler)
@@ -3502,7 +3519,11 @@ def _catalog_markdown_hook(
             # own created signal.
             from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
                 announce_cross_owner_mint,
+                announce_cross_owner_resolve,
+                created_from_register_result,
                 find_cross_owner_conflict,
+                reconcile_stale_physical_collection,
+                tumbler_from_register_result,
             )
             _conflict = find_cross_owner_conflict(reader, fp)
             _write_result = writer.register(
@@ -3513,11 +3534,25 @@ def _catalog_markdown_hook(
                 source_uri=source_uri,
                 with_created=True,
             )
-            _created = _write_result[1] if isinstance(_write_result, tuple) else True
+            _created = created_from_register_result(_write_result)
             announce_cross_owner_mint(
                 _conflict, file_path=fp, owner=owner,
                 context="catalog_markdown_hook", created=_created,
             )
+            if not _created:
+                # nexus-r1tnx round 2: the same reconciliation the
+                # ``if existing is not None:`` branch above already does,
+                # closing the nexus-2t63u stale-physical_collection
+                # exposure for this cross-owner resolve path too.
+                announce_cross_owner_resolve(
+                    _conflict, file_path=fp, owner=owner,
+                    context="catalog_markdown_hook", created=_created,
+                )
+                reconcile_stale_physical_collection(
+                    reader, writer,
+                    tumbler=tumbler_from_register_result(_write_result),
+                    target_collection=collection_name, file_path=fp,
+                )
     except Exception as exc:  # noqa: BLE001 — best-effort catalog markdown hook; logged + audited, cleanup in finally
         # nexus-ou4tb (site from the e9ru2 review): an indexed markdown doc
         # that never reached the catalog is invisible to every catalog-routed

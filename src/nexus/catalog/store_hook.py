@@ -1065,6 +1065,18 @@ def catalog_store_hook_tracked(
         # actually the WINNER's row) instead of the previously-hardcoded
         # ``True`` — the exact gap rollback_minted_catalog_entry's KNOWN
         # RESIDUAL documented.
+        #
+        # nexus-r1tnx round 2 (code-review finding): this call requests
+        # ``with_created`` but deliberately does NOT run
+        # ``find_cross_owner_conflict``/``announce_cross_owner_mint``
+        # (path_ambiguity.py) the way the four file_path-keyed mint
+        # branches do. Not applicable here: a knowledge doc's identity is
+        # ``title`` + ``source_uri`` (this call passes no ``file_path`` at
+        # all — it defaults to ``""`` on the wire), and
+        # ``find_cross_owner_conflict`` is keyed on
+        # ``find_all_by_file_path``, which has nothing to search for
+        # against an empty path. There is no cross-OWNER file_path
+        # collision this call site could ever mint a second document over.
         tumbler, created = writer.register(
             owner=owner, title=title, content_type="knowledge",
             physical_collection=collection_name,

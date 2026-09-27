@@ -831,7 +831,11 @@ def _catalog_pdf_hook(
             # minting a new one, and that is not an additional document.
             from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 - circular-dep avoidance (nexus.catalog)
                 announce_cross_owner_mint,
+                announce_cross_owner_resolve,
+                created_from_register_result,
                 find_cross_owner_conflict,
+                reconcile_stale_physical_collection,
+                tumbler_from_register_result,
             )
             _conflict = find_cross_owner_conflict(reader, file_path_str)
             _write_result = writer.register(
@@ -844,11 +848,26 @@ def _catalog_pdf_hook(
                 source_uri=source_uri,
                 with_created=True,
             )
-            _created = _write_result[1] if isinstance(_write_result, tuple) else True
+            _created = created_from_register_result(_write_result)
             announce_cross_owner_mint(
                 _conflict, file_path=file_path_str, owner=owner,
                 context="catalog_pdf_hook", created=_created,
             )
+            if not _created:
+                # nexus-r1tnx round 2: register() resolved onto an existing
+                # row instead of minting one — the same reconciliation the
+                # ``if existing:`` branch above already does, closing the
+                # nexus-2t63u stale-physical_collection exposure for this
+                # (previously unreconciled) resolve path too.
+                announce_cross_owner_resolve(
+                    _conflict, file_path=file_path_str, owner=owner,
+                    context="catalog_pdf_hook", created=_created,
+                )
+                reconcile_stale_physical_collection(
+                    reader, writer,
+                    tumbler=tumbler_from_register_result(_write_result),
+                    target_collection=collection_name, file_path=file_path_str,
+                )
     except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
         # nexus-ou4tb: an indexed PDF that never reached the catalog is
         # invisible to every catalog-routed query. WARNING + audit row.

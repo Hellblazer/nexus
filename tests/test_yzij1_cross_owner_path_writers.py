@@ -33,7 +33,11 @@ from structlog.testing import capture_logs
 from nexus import indexer as indexer_mod
 from nexus.catalog.path_ambiguity import (
     announce_cross_owner_mint,
+    announce_cross_owner_resolve,
+    created_from_register_result,
     find_cross_owner_conflict,
+    reconcile_stale_physical_collection,
+    tumbler_from_register_result,
 )
 from nexus.commands import catalog as _cat_cmd
 from nexus.commands.catalog_cmds import report as report_mod
@@ -47,6 +51,7 @@ def _entry(tumbler: str, **kw):
         year=kw.get("year", 0),
         content_type=kw.get("content_type", "paper"),
         file_path=kw.get("file_path", ""),
+        physical_collection=kw.get("physical_collection", ""),
     )
 
 
@@ -548,6 +553,11 @@ class TestTheMintSitesActuallyCallIt:
             (di, "_register_or_lookup_doc_id"),
             (di, "_catalog_markdown_hook"),
             (cat_cmd, "_backfill_per_file_from_t3"),
+            # nexus-r1tnx round 2 (code-review sweep): indexer.py's
+            # register_many per-file FALLBACK loop (not the batched fast
+            # path above it, which deliberately skips the conflict check —
+            # see the comment at its call site for why).
+            (indexer_mod, "_catalog_hook"),
         ]
         missing = []
         for mod, fname in sites:
@@ -669,3 +679,213 @@ class TestTheAnnouncementReachesTheOperator:
         assert emitter.index("_emit_cross_owner_mint_summary()") > emitter.index(
             "def _emit_cross_owner_mint_summary",
         ), "the emitter must be defined before it is called"
+
+
+# ── unwrap helpers (nexus-r1tnx round 2, code-review minor finding) ─────────
+
+
+class TestRegisterResultUnwrapHelpers:
+    def test_created_from_a_tuple(self) -> None:
+        assert created_from_register_result(("1.1", True)) is True
+        assert created_from_register_result(("1.1", False)) is False
+
+    def test_created_from_a_bare_value_defaults_true(self) -> None:
+        """A test double predating with_created (several exist) returns a
+        bare tumbler/string. Treated as created=True, same as
+        HttpCatalogClient.register treats an older engine's missing field."""
+        assert created_from_register_result("1.1") is True
+
+    def test_tumbler_from_a_tuple(self) -> None:
+        assert tumbler_from_register_result(("1.1", True)) == "1.1"
+        assert tumbler_from_register_result(("1.1", False)) == "1.1"
+
+    def test_tumbler_from_a_bare_value(self) -> None:
+        assert tumbler_from_register_result("1.1") == "1.1"
+
+
+# ── resolved-onto-existing (nexus-r1tnx round 2, substantive-critic finding) ─
+
+
+class TestAnnounceCrossOwnerResolve:
+    """The ``created=False`` counterpart to ``TestAnnounceCrossOwnerMint``.
+
+    Pre-round-2, a resolve onto another owner's document got NO signal at
+    all once the false "ADDITIONAL document" claim was removed — the exact
+    scenario the original bug report came from (owner 1.14 resolving onto
+    1.12.25). These tests pin the replacement signal.
+    """
+
+    def test_a_resolve_with_a_conflict_is_announced(self) -> None:
+        with capture_logs() as logs:
+            announce_cross_owner_resolve(
+                ["1.12.25"], file_path="a/b.pdf", owner="1.14",
+                context="unit", created=False,
+            )
+
+        events = [e for e in logs
+                  if e.get("event") == "catalog_mint_resolved_existing_document"]
+        assert len(events) == 1
+        assert events[0]["existing_tumblers"] == ["1.12.25"]
+        assert events[0]["owner"] == "1.14"
+        assert events[0]["context"] == "unit"
+
+    def test_a_genuine_mint_is_not_reported_as_a_resolve(self) -> None:
+        """The mirror-image false positive: created=True means register()
+        DID mint, so this function (the resolve-side signal) must stay
+        silent — announce_cross_owner_mint owns that case."""
+        with capture_logs() as logs:
+            announce_cross_owner_resolve(
+                ["1.12.25"], file_path="a/b.pdf", owner="1.14",
+                context="unit", created=True,
+            )
+
+        assert not [e for e in logs
+                    if e.get("event") == "catalog_mint_resolved_existing_document"]
+
+    def test_a_resolve_with_no_conflict_is_silent(self) -> None:
+        """Without this, the signal could fire on every resolve — same-owner
+        idempotency hits included — making it worthless noise."""
+        with capture_logs() as logs:
+            announce_cross_owner_resolve(
+                None, file_path="a/b.pdf", owner="1.14",
+                context="unit", created=False,
+            )
+
+        assert not [e for e in logs
+                    if e.get("event") == "catalog_mint_resolved_existing_document"]
+
+
+# ── physical_collection reconciliation for a cross-owner resolve ───────────
+
+
+class _ReconcileReader:
+    def __init__(self, entry=None, raises: bool = False):
+        self._entry = entry
+        self._raises = raises
+
+    def resolve(self, tumbler):
+        if self._raises:
+            raise RuntimeError("catalog unreachable")
+        return self._entry
+
+
+class _ReconcileWriter:
+    def __init__(self, raises: bool = False):
+        self.updates: list[tuple] = []
+        self._raises = raises
+
+    def update(self, tumbler, **kw):
+        if self._raises:
+            raise RuntimeError("write failed")
+        self.updates.append((str(tumbler), kw))
+
+
+class TestReconcileStalePhysicalCollection:
+    """Mirrors the SAME-owner branches' own compare-and-repoint (nexus-2t63u),
+    extracted so the cross-owner resolve paths can reuse it (substantive
+    critique finding 1b)."""
+
+    def setup_method(self):
+        from nexus.mcp_infra import reset_reconciled_collections_count
+        reset_reconciled_collections_count()
+
+    def test_a_stale_collection_is_repointed_and_logged(self) -> None:
+        """The stale-physical_collection reproduction the critique asked
+        for: a cross-owner resolve onto a row still stamped with its OLD
+        collection must repoint it, exactly like the same-owner branch."""
+        from nexus.mcp_infra import get_reconciled_collections_count
+
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection="docs__old"))
+        writer = _ReconcileWriter()
+
+        with capture_logs() as logs:
+            result = reconcile_stale_physical_collection(
+                reader, writer, tumbler="1.12.25",
+                target_collection="docs__new", file_path="a/b.pdf",
+            )
+
+        assert result is True
+        assert writer.updates == [
+            ("1.12.25", {"physical_collection": "docs__new"}),
+        ]
+        events = [e for e in logs if e.get("event") == "doc_physical_collection_reconciled"]
+        assert len(events) == 1
+        assert events[0]["old_collection"] == "docs__old"
+        assert events[0]["new_collection"] == "docs__new"
+        assert get_reconciled_collections_count() == 1
+
+    def test_a_matching_collection_is_left_alone(self) -> None:
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection="docs__new"))
+        writer = _ReconcileWriter()
+
+        with capture_logs() as logs:
+            result = reconcile_stale_physical_collection(
+                reader, writer, tumbler="1.12.25",
+                target_collection="docs__new", file_path="a/b.pdf",
+            )
+
+        assert result is False
+        assert writer.updates == []
+        assert not [e for e in logs if e.get("event") == "doc_physical_collection_reconciled"]
+
+    def test_a_ghost_row_with_no_collection_is_left_alone(self) -> None:
+        """Mirrors the same-owner branches' identical ghost exemption —
+        nothing to compare a never-indexed row's collection against."""
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection=""))
+        writer = _ReconcileWriter()
+
+        result = reconcile_stale_physical_collection(
+            reader, writer, tumbler="1.12.25",
+            target_collection="docs__new", file_path="a/b.pdf",
+        )
+
+        assert result is False
+        assert writer.updates == []
+
+    def test_an_unresolvable_tumbler_is_left_alone(self) -> None:
+        reader = _ReconcileReader(entry=None)
+        writer = _ReconcileWriter()
+
+        result = reconcile_stale_physical_collection(
+            reader, writer, tumbler="1.12.25",
+            target_collection="docs__new", file_path="a/b.pdf",
+        )
+
+        assert result is False
+        assert writer.updates == []
+
+    def test_a_failing_resolve_probe_never_propagates(self) -> None:
+        """Advisory by construction: the caller already has a resolved
+        tumbler from register() — a repoint PROBE failure must not touch
+        that."""
+        reader = _ReconcileReader(raises=True)
+        writer = _ReconcileWriter()
+
+        result = reconcile_stale_physical_collection(
+            reader, writer, tumbler="1.12.25",
+            target_collection="docs__new", file_path="a/b.pdf",
+        )
+
+        assert result is False
+        assert writer.updates == []
+
+    def test_a_failing_repoint_write_never_propagates(self) -> None:
+        """nexus-ir68m fail-open contract: an already-resolved tumbler must
+        never be discarded because the follow-up repoint write failed."""
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection="docs__old"))
+        writer = _ReconcileWriter(raises=True)
+
+        with capture_logs() as logs:
+            result = reconcile_stale_physical_collection(
+                reader, writer, tumbler="1.12.25",
+                target_collection="docs__new", file_path="a/b.pdf",
+            )
+
+        assert result is False
+        events = [
+            e for e in logs
+            if e.get("event") == "doc_physical_collection_reconcile_write_failed"
+        ]
+        assert len(events) == 1
+        assert events[0]["old_collection"] == "docs__old"
+        assert events[0]["new_collection"] == "docs__new"
