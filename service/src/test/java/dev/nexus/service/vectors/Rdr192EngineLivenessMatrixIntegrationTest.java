@@ -10,7 +10,6 @@ import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.TaxonomyRepository;
 import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.jooq.nexus.Routines;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
@@ -24,6 +23,7 @@ import java.sql.PreparedStatement;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.LIVE_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -71,12 +71,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       {@link PgVectorRepository#quarantineOrphansBounded}.</li>
  *   <li><b>P9</b> — {@code taxonomy_unassigned_chashes_384} (Gap 1 item 9),
  *       driven through {@link TaxonomyRepository#unassignedChashes}.</li>
- *   <li><b>LIVE</b> — RDR-192 Step 4's own {@code nexus.chunk_is_live(tenant,
- *       collection, chash)} (bead nexus-wbfpw.9), called directly via the
- *       generated {@link Routines#chunkIsLive}. Not yet wired into any
- *       production call site (that is Step 5, nexus-wbfpw.10) — this column
- *       exists to pin what the new predicate itself returns, independent of
- *       P1g/P1s/P2/P9's own existing bodies.</li>
+ *   <li><b>LIVE</b> — RDR-192 Step 4's own {@code EXISTS (SELECT 1 FROM
+ *       nexus.chunk_live_owners(tenant, collection, chash))} (bead
+ *       nexus-wbfpw.9), called via the generated {@code CHUNK_LIVE_OWNERS}
+ *       table-valued function and {@code ctx.fetchExists}. {@code
+ *       chunk_live_owners} is a SET-RETURNING function (round-2 fix, T2
+ *       nexus/review-wbfpw9-code) — the round-1 scalar {@code RETURNS
+ *       boolean} form never inlined and measurably cost a real latency
+ *       regression once called; see the changeset's own header. Not yet
+ *       wired into any production call site (that is Step 5,
+ *       nexus-wbfpw.10) — this column exists to pin what the new predicate
+ *       itself returns, independent of P1g/P1s/P2/P9's own existing
+ *       bodies.</li>
  * </ul>
  *
  * <p>Fixture rows, seeded once per (isolated) tenant by {@link
@@ -605,16 +611,20 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertExistencePredicate(tenant, fx, "P7");
     }
 
-    // ── LIVE: nexus.chunk_is_live(tenant, collection, chash) (RDR-192 Step 4, bead nexus-wbfpw.9) ──
+    // ── LIVE: EXISTS(nexus.chunk_live_owners(tenant, collection, chash)) (RDR-192 Step 4, bead nexus-wbfpw.9) ──
 
-    /** Direct call to the generated routine, inside the tenant's own RLS session
+    /** live(c) is EXISTS(SELECT 1 FROM nexus.chunk_live_owners(...)), not a direct
+     *  scalar call -- {@code nexus.chunk_live_owners} is a set-returning function
+     *  (RETURNS TABLE), the shape PostgreSQL's inliner actually accepts for a body
+     *  needing a join (round-2 fix; a scalar RETURNS-boolean form does not inline,
+     *  see the changeset's own header). Inside the tenant's own RLS session
      *  (SECURITY INVOKER + FORCE RLS on catalog_document_chunks/catalog_documents
      *  means the {@code nexus.tenant} GUC {@link TenantScope#withTenant} stamps is
      *  the only reason this predicate sees any manifest/document rows at all). */
     private boolean chunkIsLive(String tenant, String collection, String chashHex) {
         byte[] chash = Chash.fromHex(chashHex).toBytes();
-        return tenantScope.withTenant(tenant,
-            ctx -> Routines.chunkIsLive(ctx.configuration(), tenant, collection, chash));
+        var fn = CHUNK_LIVE_OWNERS.call(tenant, collection, chash);
+        return tenantScope.withTenant(tenant, ctx -> ctx.fetchExists(ctx.selectFrom(fn)));
     }
 
     @Test
@@ -681,11 +691,25 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * (GH #1546, nexus-ky9ps) before this bead. P2 ({@code nexus.live_chunks}) is
      * the one column that DISAGREES: it is Gap 5, not yet collection-scoped, so its
      * tenant-wide {@code EXISTS} sees B's live manifest row and marks R9 visible in
-     * A too -- exactly the residual defect Step 5 (nexus-wbfpw.10) closes by
+     * A too -- exactly the R9-SHAPED residual Step 5 (nexus-wbfpw.10) closes by
      * collection-scoping {@code live_chunks} via live(c). LIVE agrees with P1g/P1s
-     * on R9 (all three hidden in A) -- this row does not distinguish the NEW
-     * predicate from the two EXISTING, already-fixed ones; it distinguishes both of
-     * them from the one predicate (P2) that is not fixed yet.
+     * on R9 specifically (all three hidden in A) -- this one row does not
+     * distinguish the NEW predicate from the two EXISTING, already-fixed ones on
+     * THIS shape; it distinguishes both of them from the one predicate (P2) that
+     * is not fixed on this shape yet.
+     *
+     * <p>This is narrower than "P1g/P1s need no further Step 5 work" -- do not
+     * over-read it that way. R1 (the base manifest-less case, Gap 1's core
+     * defect) already shows P1g=true, P1s=true, LIVE=false: a chunk with NO
+     * manifest row anywhere is still VISIBLE under today's P1g/P1s (their
+     * dead-set anti-joins require an owning tombstoned row to hide a chunk; a
+     * manifest-less chunk has none, so neither predicate ever flags it), while
+     * live(c) -- a positive existence check -- correctly reports it not live.
+     * The SAME divergence holds for R3, R4, R6-in-A, and R8. Migrating P1g/P1s
+     * to live(c) (Step 5) is still a full behavior change on those rows, not a
+     * no-op confirmation exercise; R9 only proves the migration is SAFE on the
+     * one cross-collection shape that once (pre-vectors-017) split get from
+     * search.
      */
     private static final Map<String, Map<String, Boolean>> EXPECTED_VALUE_TABLE = Map.ofEntries(
         Map.entry("R1", Map.of("P1g", true,  "P1s", true,  "P2", true,  "P3", false, "P4", true,  "P6", true,  "P7", true,  "P9", false, "LIVE", false)),

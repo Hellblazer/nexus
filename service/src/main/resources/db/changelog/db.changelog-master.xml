@@ -1538,16 +1538,18 @@
     <include file="db/changelog/hygiene-008-gc-bounded-registration-from-origin-row.xml"/>
 
     <!--
-        RDR-192 Step 4 (bead nexus-wbfpw.9): nexus.chunk_is_live(tenant,
-        collection, chash) — the RDR's live(c) predicate, one inlinable SQL
-        function. Non-destructive: no call site is migrated onto it here
-        (Step 5, nexus-wbfpw.10). See the included file's own header for the
-        full derivation. Placed after hygiene-008-gc-bounded-registration-
-        from-origin-row.xml (current tail) and before the grants-nexus-svc.xml
-        runAlways block, matching the established late-append convention
-        (D0.1).
+        RDR-192 Step 4 (bead nexus-wbfpw.9): nexus.chunk_live_owners(tenant,
+        collection, chash) — the RDR's live(c) predicate, expressed as a
+        set-returning function (RETURNS TABLE) so EXISTS(SELECT 1 FROM ...)
+        actually inlines — a scalar RETURNS-boolean form does not (round-1
+        code review finding; see the included file's own header for the
+        full derivation and the corrected reasoning). Non-destructive: no
+        call site is migrated onto it here (Step 5, nexus-wbfpw.10). Placed
+        after hygiene-008-gc-bounded-registration-from-origin-row.xml
+        (current tail) and before the grants-nexus-svc.xml runAlways block,
+        matching the established late-append convention (D0.1).
     -->
-    <include file="db/changelog/vectors-018-chunk-is-live-function.xml"/>
+    <include file="db/changelog/vectors-018-chunk-live-owners-function.xml"/>
 
     <!--
         RDR-192 Step 2 round-2 fix (bead nexus-wbfpw.4, code-review Important)

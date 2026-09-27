@@ -1199,12 +1199,24 @@ class RawSqlGateTest {
         // uses idx_catalog_documents_collection_live), and the pg_proc
         // proleakproof probe for texteq and jsonb_object_field_text.
         // RDR-192 Step 4 (bead nexus-wbfpw.9): 2 raw-SQL sites -- the
-        // nexus.chunk_is_live-filtered KNN query (chunkIsLiveFilteredKnn) and its
-        // EXPLAIN (ANALYZE, BUFFERS) twin (explainChunkIsLiveFilteredKnn). Both carry
-        // the vector-distance OPERATOR(nexus.<=>) ORDER BY, which has no jOOQ DSL
-        // operator (same reason GraphHopParityTest/TaxonomyAssignCrossLateralHnswTest
-        // use the identical raw-literal-SQL idiom for their own KNN plan-shape tests).
-        Map.entry("dev/nexus/service/vectors/ChunkIsLiveHnswExplainRecallIntegrationTest.java", 2),
+        // EXISTS(chunk_live_owners(...))-filtered KNN query (chunkLiveOwnersFilteredKnn)
+        // and its EXPLAIN (ANALYZE, BUFFERS) twin (explainChunkLiveOwnersFilteredKnn).
+        // Both carry the vector-distance OPERATOR(nexus.<=>) ORDER BY, which has no
+        // jOOQ DSL operator (same reason GraphHopParityTest/
+        // TaxonomyAssignCrossLateralHnswTest use the identical raw-literal-SQL idiom
+        // for their own KNN plan-shape tests). Round-2 rework (T2
+        // nexus/review-wbfpw9-code): file renamed from ChunkIsLiveHnswExplainRecallIntegrationTest.java
+        // when the predicate itself was replaced with a set-returning function; same
+        // 2-site count, unchanged.
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersInlineRecallIntegrationTest.java", 2),
+        // RDR-192 Step 4 round 2 (bead nexus-wbfpw.9, critique T2 nexus/critique-wbfpw9
+        // Critical): 3 raw-SQL sites -- the controlled before/after harness
+        // (runProd/runExact, same text-literal vector binding for both predicates) and
+        // its EXPLAIN (ANALYZE, BUFFERS) twin (explainProd), reproducing nexus-msz9i's
+        // own 76k-chunk/57k-manifest-row/1k-doc fixture shape with a tombstone-fraction
+        // sweep. Same OPERATOR(nexus.<=>)-has-no-jOOQ-DSL-form reason as the sibling
+        // entry above.
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
@@ -1579,7 +1591,12 @@ class RawSqlGateTest {
     // nexus-wbfpw.9 (RDR-192 Step 4): 963 -> 965 (+2: one new test file,
     // vectors/ChunkIsLiveHnswExplainRecallIntegrationTest.java new at 2 -- see
     // that entry's own comment).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 965;
+    // nexus-wbfpw.9 round 2 (critique T2 nexus/critique-wbfpw9): 965 -> 968 (+3:
+    // the round-1 file renamed to vectors/ChunkLiveOwnersInlineRecallIntegrationTest.java,
+    // same 2 sites, net 0; one new test file,
+    // vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java new at 3 -- see that
+    // entry's own comment).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 968;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

@@ -418,6 +418,27 @@ manifest-less chunks. Replacing predicates 1 and 2 (search/get visibility,
 free, since the predicate itself is collection-scoped — this closes Gap 5 as
 a side effect of the Gap 1 fix rather than as a separate change.
 
+**The predicate must be a set-returning function, not a scalar one.** A
+scalar SQL function declared `RETURNS boolean`, with a body of the shape
+`SELECT EXISTS (subquery)`, is never inlined by PostgreSQL: the planner's
+scalar inliner requires the function's own body to have no subquery and to
+touch no other table, and an `EXISTS` subquery already disqualifies it,
+regardless of how the function is otherwise declared (`LANGUAGE sql`,
+`STABLE`, `SECURITY INVOKER`, no `SET` clause are all necessary conditions
+for inlining, none of them sufficient on their own). The shape that
+actually inlines is a set-returning function, declared `RETURNS TABLE` or
+`RETURNS SETOF`, whose body is the join above, called as `EXISTS (SELECT 1
+FROM chunk_live_owners(tenant, collection, chash))`. PostgreSQL inlines a
+set-returning function used this way and folds the resulting `EXISTS` into
+the same semi-join shape `plain_search_<dim>` already uses for its own
+anti-join today. This distinction is not stylistic. Bead nexus-wbfpw.9's
+first implementation shipped the scalar form; the engine review that
+followed captured an `EXPLAIN` plan proving it never inlined at all, and
+traced a measured latency regression directly to that opaque, per-row
+function call. The shipped implementation is the set-returning form; the
+definition of `live(c)` above states what the predicate means, the
+set-returning shape is what lets the engine evaluate it fast.
+
 **`reapable(c)`.** A chunk is a garbage-collection candidate, independent of
 whether it is currently live:
 
