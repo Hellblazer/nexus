@@ -1469,7 +1469,7 @@ class TestChannelWaiterRealEngine:
             wait_timeout_s=1, reannounce_interval_s=10_000.0, min_tick_interval_s=0.0,
         )
 
-        def _reverted_build_specs(self: "channel.ChannelWaiter") -> list[WaitSpec]:
+        def _reverted_build_specs(self: "channel.ChannelWaiter", entries=None) -> list[WaitSpec]:  # noqa: ARG001 -- the tick passes its snapshot (nexus-zxthy)
             # The bug: every mailbox spec's `announce` is dropped, so the
             # SAME already-referenced (and never excluded) row matches
             # again on every call -- the plain `queryOnce` path has no
@@ -2336,6 +2336,57 @@ class TestBoardStartAtNowAndFold:
         }
         assert waiter.status()["board_batches"] == 1
         assert waiter._board_activity is True  # noqa: SLF001 -- run() settles before the next wait
+
+    @pytest.mark.asyncio
+    async def test_a_full_batch_notification_stays_small(self) -> None:
+        """Nothing caps a channel notification's size, and a batch now
+        carries up to `DEFAULT_BOARD_WAIT_ROWS` ids in meta. Pin the worst
+        case (real 64-hex ids) so raising the cap has to revisit this."""
+        import hashlib
+        import json
+
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        for i in range(channel.DEFAULT_BOARD_WAIT_ROWS):
+            tid = hashlib.sha256(f"post {i}".encode()).hexdigest()
+            fake.seed("board/ci/x", tid, "body", dims={"from": "github", "kind": "job"})
+            fake._mutate("board/ci/x", tid, created_at=_iso(1_000_001 + i))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        await waiter.tick()
+        [(content, meta)] = sender.calls
+        assert meta["count"] == str(channel.DEFAULT_BOARD_WAIT_ROWS)
+        assert len(content) < 1024
+        assert len(json.dumps(meta)) < 8192
+
+    @pytest.mark.asyncio
+    async def test_one_subscription_snapshot_serves_the_whole_tick(self) -> None:
+        """The subscribe/unsubscribe tools mutate the set from worker
+        threads; the spec builder and the result processor must read the
+        same list, so an unsubscribe landing mid-tick cannot make the
+        processor treat the fetched rows as position-less."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "old", "x")
+        fake._mutate("board/ci/x", "old", created_at=_iso(1))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        calls = {"n": 0}
+        real_entries = subs.entries
+
+        def _entries_then_unsubscribe():
+            calls["n"] += 1
+            out = real_entries()
+            if calls["n"] == 1:  # the tool fires between the two reads of the old shape
+                subs._board.pop("board/ci/x", None)  # noqa: SLF001
+            return out
+
+        subs.entries = _entries_then_unsubscribe  # type: ignore[method-assign]
+        await waiter.tick()
+        assert calls["n"] == 1, "one snapshot per tick"
+        assert sender.calls == [], "the backlog row was filtered by the snapshot's start position"
 
     @pytest.mark.asyncio
     async def test_the_next_batch_carries_the_read_cursor_of_the_last_delivered_post(self) -> None:

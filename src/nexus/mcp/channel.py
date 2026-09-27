@@ -782,7 +782,12 @@ class ChannelWaiter:
                 if self._board_activity:
                     # bead nexus-zxthy: settle so a cluster of posts folds
                     # into the next wait instead of one notification per tick.
+                    # The fast-tick floor's bookkeeping is reset here on
+                    # purpose: this sleep paces the loop itself, and a tick
+                    # that returned rows is a genuine wake, not a fast one.
                     self._board_activity = False
+                    self._fast_tick_streak = 0
+                    self._warned_fast_ticks = False
                     await asyncio.sleep(self.board_coalesce_s)
                     continue
                 elapsed = time.monotonic() - tick_started
@@ -944,12 +949,17 @@ class ChannelWaiter:
         when (or whether) anything is due before that. Exposed (not
         folded into :meth:`run`) so tests can drive iterations directly
         instead of a real timed loop."""
-        live_subspaces = {e["subspace"] for e in self.subs.entries()}
+        # One snapshot of the subscription list per tick (bead nexus-zxthy,
+        # review): the subscribe/unsubscribe tools mutate the set from
+        # worker threads, so the spec builder and the result processor
+        # read the SAME list rather than two that may differ.
+        entries = self.subs.entries()
+        live_subspaces = {e["subspace"] for e in entries}
         for subspace in list(self._last_seen):
             if subspace not in live_subspaces:
                 del self._last_seen[subspace]
 
-        specs = self._build_specs()
+        specs = self._build_specs(entries)
         try:
             results: list[WaitResult] = await asyncio.to_thread(
                 self._call, lambda t: t.wait(specs, self.wait_timeout_s),
@@ -971,7 +981,7 @@ class ChannelWaiter:
         if self._engine_ignores_subscriber(results):
             self._stop_no_subscriber_support()
             return
-        await self._process_results(results)
+        await self._process_results(results, entries)
         self._last_wake = datetime.now(UTC)
         self._publish_status()
 
@@ -1040,7 +1050,7 @@ class ChannelWaiter:
         self._stopped_reason = "no_subscriber_support"
         _log.warning("channel_waiter_no_subscriber_support", session_id=self.session_id)
 
-    def _build_specs(self) -> list[WaitSpec]:
+    def _build_specs(self, entries: list[dict[str, Any]] | None = None) -> list[WaitSpec]:
         """Every subscription -- board or mailbox -- enters the spec
         every tick. The spec is NEVER empty. A board's spec (bead
         nexus-q82tk) carries `announce` with `subscriber` set to this
@@ -1054,7 +1064,7 @@ class ChannelWaiter:
         `max_announces` -- the engine, not this waiter, decides whether
         anything is due."""
         specs: list[WaitSpec] = []
-        for entry in self.subs.entries():
+        for entry in (self.subs.entries() if entries is None else entries):
             subspace = entry["subspace"]
             if subspace.startswith("board/"):
                 specs.append(WaitSpec(
@@ -1074,7 +1084,9 @@ class ChannelWaiter:
                 ))
         return specs
 
-    async def _process_results(self, results: list[WaitResult]) -> None:
+    async def _process_results(
+        self, results: list[WaitResult], entries: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Board posts (bead nexus-q82tk): deliver each; the engine has
         already stamped the per-subscriber delivery row, so there is no
         cursor to advance and nothing to persist. Mailboxes (bead
@@ -1088,7 +1100,7 @@ class ChannelWaiter:
         `tuple_in`)."""
         skew = timedelta(seconds=self.board_start_skew_s)
         since_by_topic: dict[str, datetime | None] = {}
-        for e in self.subs.entries():
+        for e in (self.subs.entries() if entries is None else entries):
             start = _parse_created_at(e.get("since"))
             since_by_topic[e["subspace"]] = (start - skew) if start is not None else None
         for result in results:
