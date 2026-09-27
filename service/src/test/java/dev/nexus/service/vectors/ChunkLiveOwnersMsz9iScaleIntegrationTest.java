@@ -47,7 +47,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * all-live 5,000-row fixture cannot exercise (nothing is ever filtered out).
  *
  * <p>This class reproduces that fixture's SCALE AND SHAPE (chunk count,
- * manifest-row count, document count) with random unit vectors (no ONNX --
+ * manifest-row count, document count) with synthetic vectors of low intrinsic
+ * dimension (see {@link #fixtureVector}; no ONNX --
  * this is a plan-shape/cost/recall measurement, not a semantic-ranking test,
  * so a real embedding model buys nothing here and would make a 76k-row
  * fixture far too slow to seed routinely), and reproduces msz9i's own
@@ -71,9 +72,22 @@ import static org.assertj.core.api.Assertions.assertThat;
  * hnsw.ef_search=200} -- {@code PgVectorRepository#search}'s own {@code
  * PgSession.setHnswEfSearch}/{@code hnsw.iterative_scan} calls, K=10 floored
  * to {@code PgSession.DEFAULT_EF_SEARCH_FLOOR}=200), measured against an
- * EXACT (index scans disabled, forced sequential scan + sort) live-only
- * oracle, at the two fractions (30%, 60%) where a meaningful share of the
- * HNSW-visited candidates are filtered out.
+ * EXACT (ORDER BY rewritten so HNSW cannot serve it, see {@link #exactForm}) oracle graded
+ * against its OWN predicate's live population. Round-3 rework added the
+ * missing CONTROLS a standalone chunk_live_owners recall number cannot
+ * supply on its own: an unfiltered 0%-tombstoned baseline (isolates whether
+ * this fixture's own approximate-search quality, not
+ * filtering, drives a measured gap) and the SAME methodology applied to
+ * today's shipped dead-set anti-join predicate (isolates whether
+ * chunk_live_owners is worse than, equal to, or better than the status quo
+ * on this axis), plus a full-population live-count comparison between the
+ * two predicates at every fraction. That comparison is a FINDING, not a
+ * confirmed assumption: the two predicates do not describe the identical
+ * live population -- they differ by exactly the manifest-less chunk count,
+ * constant at every fraction, because the old dead-set anti-join never
+ * catches a chunk with zero manifest rows (this fixture's own manifest-less
+ * slice) while chunk_live_owners correctly does. See the recall test's own
+ * javadoc below for the full explanation.
  */
 @Tag("integration")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -92,7 +106,14 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     private static final int K = 10;
     private static final int[] TOMBSTONE_FRACTIONS_PCT = {3, 10, 30, 60};
     private static final int LATENCY_REPS = Integer.getInteger("nx.cloMsz9i.reps", 10);
-    private static final int RECALL_QUERY_COUNT = Integer.getInteger("nx.cloMsz9i.recallQueries", 5);
+    private static final int RECALL_QUERY_COUNT = Integer.getInteger("nx.cloMsz9i.recallQueries", 20);
+
+    /** Intrinsic dimension of the fixture's vectors (see {@link #fixtureVector}). */
+    private static final int LOW_RANK = 16;
+
+    /** Fixed DIM x LOW_RANK Gaussian projection shared by every fixture, query, probe and
+     *  pin vector, so all of them are drawn from one distribution. */
+    private static final float[][] PROJECTION = gaussianMatrix(new Random(20260927099L), DIM, LOW_RANK);
 
     /** Production search's own HNSW GUCs (PgVectorRepository#search): {@code
      *  hnsw.iterative_scan=relaxed_order}, {@code hnsw.ef_search =
@@ -151,12 +172,11 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         for (int i = 0; i < NUM_CHUNKS; i++) {
             String id = "clo-msz9i-chunk-" + i;
             chashHex.add(Chash.ofText(id).toHex());
-            vectors.add(randomUnitVector(rnd, DIM));
+            vectors.add(fixtureVector(rnd));
         }
 
         // Chunks, in batches (upsertChunksWithVectors -- no embedder call, precomputed
-        // random vectors; the whole point of this fixture is scale/plan-shape/cost, not
-        // semantic ranking quality).
+        // low-intrinsic-dimension vectors; see fixtureVector for why not uniform noise).
         var pgRepo = new PgVectorRepository(tenantScope, (Embedder) null, (Embedder) null);
         int batch = 1000;
         for (int start = 0; start < NUM_CHUNKS; start += batch) {
@@ -247,16 +267,36 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         }
     }
 
-    private static float[] randomUnitVector(Random rnd, int dim) {
-        float[] v = new float[dim];
+    /** A unit vector in DIM dimensions with intrinsic dimension {@link #LOW_RANK}: a
+     *  Gaussian point in LOW_RANK dimensions, lifted through {@link #PROJECTION} and
+     *  normalised. Round 3 replaced uniform random unit vectors, on which the UNFILTERED
+     *  HNSW baseline measured recall@10 = 0.22: in 384 uniform dimensions every point is
+     *  nearly equidistant from every other, so the exact top-10 is close to arbitrary and
+     *  no approximate index can find it. Real embeddings have low intrinsic dimension;
+     *  this fixture now does too, which is what lets a filtered-vs-unfiltered recall
+     *  comparison mean anything. */
+    private static float[] fixtureVector(Random rnd) {
+        double[] z = new double[LOW_RANK];
+        for (int k = 0; k < LOW_RANK; k++) z[k] = rnd.nextGaussian();
+        float[] v = new float[DIM];
         double sumSq = 0;
-        for (int i = 0; i < dim; i++) {
-            v[i] = (float) rnd.nextGaussian();
-            sumSq += v[i] * v[i];
+        for (int i = 0; i < DIM; i++) {
+            double x = 0;
+            for (int k = 0; k < LOW_RANK; k++) x += PROJECTION[i][k] * z[k];
+            v[i] = (float) x;
+            sumSq += x * x;
         }
         float norm = (float) Math.sqrt(sumSq);
-        for (int i = 0; i < dim; i++) v[i] /= norm;
+        for (int i = 0; i < DIM; i++) v[i] /= norm;
         return v;
+    }
+
+    private static float[][] gaussianMatrix(Random rnd, int rows, int cols) {
+        float[][] m = new float[rows][cols];
+        for (int i = 0; i < rows; i++) {
+            for (int k = 0; k < cols; k++) m[i][k] = (float) rnd.nextGaussian();
+        }
+        return m;
     }
 
     private static String vectorLiteral(float[] v) {
@@ -293,13 +333,61 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
         + " LIMIT ?";
 
+    /** Round-3 rework control (coordinator instruction after round-2 review): the SAME
+     *  KNN shape with NO liveness predicate at all -- isolates whether a measured recall
+     *  drop is caused by FILTERING, or is simply this fixture's own
+     *  HNSW approximation quality on an unfiltered search. Same 3-bind-parameter shape
+     *  (collection, vector, n) as {@link #BEFORE_DEAD_SET_ANTI_JOIN}/{@link
+     *  #AFTER_CHUNK_LIVE_OWNERS}, so it runs through the SAME {@link #runProd}/{@link
+     *  #runExact} call sites -- no new raw-SQL site for this constant. */
+    private static final String NO_PREDICATE_KNN =
+        "SELECT encode(c.chash, 'hex') FROM nexus.chunks c"
+        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
+        + " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector"
+        + " LIMIT ?";
+
+    /** Full-population COUNT variants of the no-predicate/before/after predicates, used
+     *  to confirm {@link #BEFORE_DEAD_SET_ANTI_JOIN} and {@link #AFTER_CHUNK_LIVE_OWNERS}
+     *  agree on the EXACT SAME live population at every tombstone fraction (round-3
+     *  rework: "confirm ... that (b) and (c) return identical live sets"), not merely the
+     *  same top-K under one probe vector. Run through the ONE new {@link #countMatching}
+     *  call site. */
+    private static final String NO_PREDICATE_COUNT =
+        "SELECT count(*) FROM nexus.chunks c"
+        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL";
+
+    private static final String BEFORE_COUNT =
+        "SELECT count(*) FROM nexus.chunks c"
+        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
+        + " AND (NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m"
+        + "                   JOIN nexus.catalog_documents d"
+        + "                     ON d.tenant_id = m.tenant_id AND d.tumbler = m.doc_id"
+        + "                  WHERE m.tenant_id = c.tenant_id AND m.collection = c.collection AND m.chash = c.chash"
+        + "                    AND d.deleted_at IS NOT NULL"
+        + "                    AND NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m2"
+        + "                                      JOIN nexus.catalog_documents d2"
+        + "                                        ON d2.tenant_id = m2.tenant_id AND d2.tumbler = m2.doc_id"
+        + "                                     WHERE m2.tenant_id = m.tenant_id AND m2.collection = m.collection AND m2.chash = m.chash"
+        + "                                       AND d2.deleted_at IS NULL)))";
+
+    private static final String AFTER_COUNT =
+        "SELECT count(*) FROM nexus.chunks c"
+        + " WHERE c.collection = ? AND c.embedding_384 IS NOT NULL"
+        + " AND EXISTS (SELECT 1 FROM nexus.chunk_live_owners(c.tenant_id, c.collection, c.chash))";
+
     /** Runs {@code sql} (either {@link #BEFORE_DEAD_SET_ANTI_JOIN} or {@link
      *  #AFTER_CHUNK_LIVE_OWNERS}) with production HNSW GUCs and returns the ordered
      *  chash-hex result list. */
     private List<String> runProd(String sql, float[] vec, int n) {
+        return runHnsw(sql, vec, n, PROD_ITERATIVE_SCAN, PROD_EF_SEARCH);
+    }
+
+    /** {@link #runProd} with the two HNSW GUCs supplied, for the recall test's positive
+     *  control (a deliberately starved search that MUST lose recall). */
+    private List<String> runHnsw(String sql, float[] vec, int n, String iterativeScan, String efSearch) {
         Result<Record> rows = tenantScope.withTenant(TENANT, ctx -> {
-            PgSession.setLocal(ctx, "hnsw.iterative_scan", PROD_ITERATIVE_SCAN);
-            PgSession.setLocal(ctx, "hnsw.ef_search", PROD_EF_SEARCH);
+            PgSession.setLocal(ctx, "hnsw.iterative_scan", iterativeScan);
+            PgSession.setLocal(ctx, "hnsw.ef_search", efSearch);
             return ctx.fetch(sql, COLLECTION, vectorLiteral(vec), n);
         });
         List<String> ids = new ArrayList<>(rows.size());
@@ -307,18 +395,46 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         return ids;
     }
 
-    /** EXACT oracle: same statement, but with index/bitmap scans disabled so PostgreSQL
-     *  can only satisfy the ORDER BY via a full sequential scan + sort -- true nearest
-     *  neighbors among the LIVE population, no HNSW approximation. */
-    private List<String> runExact(String sql, float[] vec, int n) {
-        Result<Record> rows = tenantScope.withTenant(TENANT, ctx -> {
-            PgSession.setLocal(ctx, "enable_indexscan", "off");
-            PgSession.setLocal(ctx, "enable_bitmapscan", "off");
-            return ctx.fetch(sql, COLLECTION, vectorLiteral(vec), n);
-        });
+    private static final String PROD_ORDER_BY =
+        " ORDER BY c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector";
+
+    /** The EXACT form of a KNN statement: its ORDER BY distance becomes {@code (distance)
+     *  + 0}, an expression the HNSW index cannot serve (pgvector matches only a bare
+     *  {@code column <=> constant} ordering), so PostgreSQL must compute every candidate's
+     *  true distance and sort. Round 3 replaced a session-wide {@code enable_indexscan=off}
+     *  that also took the btree lookups away from chunk_live_owners' EXISTS, turning each
+     *  oracle query into a per-row manifest scan (over 2 minutes each at msz9i scale; the
+     *  40-query recall loop outran surefire's 1800s fork timeout). The recall test pins
+     *  that this form really leaves HNSW. */
+    private static String exactForm(String knnSql) {
+        String exact = knnSql.replace(PROD_ORDER_BY,
+            " ORDER BY (c.embedding_384 OPERATOR(nexus.<=>) ?::nexus.vector) + 0");
+        if (exact.equals(knnSql)) {
+            throw new IllegalArgumentException("no production ORDER BY to rewrite in:\n" + knnSql);
+        }
+        return exact;
+    }
+
+    /** EXACT oracle: same statement in {@link #exactForm} -- true nearest neighbors among
+     *  the population its own predicate admits, no HNSW approximation. */
+    private List<String> runExact(String knnSql, float[] vec, int n) {
+        String sql = exactForm(knnSql);
+        Result<Record> rows = tenantScope.withTenant(TENANT, ctx ->
+            ctx.fetch(sql, COLLECTION, vectorLiteral(vec), n));
         List<String> ids = new ArrayList<>(rows.size());
         for (var rec : rows) ids.add(rec.get(0, String.class));
         return ids;
+    }
+
+    /** Full-population COUNT of {@code sql} (one of the {@code *_COUNT} constants) --
+     *  used to confirm two predicates describe the identical live population, not merely
+     *  the same top-K under one probe vector. SANCTIONED RAW (nexus-wbfpw.9 round 3,
+     *  TEST-TREE RATCHET). */
+    private long countMatching(String sql) {
+        return tenantScope.withTenant(TENANT, ctx -> {
+            Record rec = ctx.fetch(sql, COLLECTION).get(0);
+            return rec.get(0, Long.class);
+        });
     }
 
     /** EXPLAIN (ANALYZE, BUFFERS) of {@code sql} under production HNSW GUCs. Returns
@@ -372,6 +488,28 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
         return oracleTopK.isEmpty() ? 1.0 : (double) hits / oracleTopK.size();
     }
 
+    /** Grades {@code approxSql}'s production-GUC KNN result against {@code oracleSql}'s
+     *  EXACT result, over {@link #RECALL_QUERY_COUNT} random query vectors. Every call
+     *  site in this file's recall test passes the SAME predicate text as both approx and
+     *  oracle, so each case is graded against its OWN correct answer set (round-3
+     *  rework requirement: "confirm the oracle applies the SAME liveness filter as the
+     *  query it grades"). */
+    private List<Double> recallSeries(String approxSql, String oracleSql, long seed) {
+        Random rnd = new Random(seed);
+        List<Double> recalls = new ArrayList<>(RECALL_QUERY_COUNT);
+        for (int q = 0; q < RECALL_QUERY_COUNT; q++) {
+            float[] vec = fixtureVector(rnd);
+            List<String> oracle = runExact(oracleSql, vec, K);
+            List<String> approx = runProd(approxSql, vec, K);
+            recalls.add(recallAt(approx, oracle, K));
+        }
+        return recalls;
+    }
+
+    private static double avg(List<Double> values) {
+        return values.stream().mapToDouble(Double::doubleValue).average().orElseThrow();
+    }
+
     // ── guard ───────────────────────────────────────────────────────────────
 
     @Test
@@ -403,7 +541,7 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     @Test
     void explainAndLatency_acrossTombstoneFractions() throws Exception {
         Random rnd = new Random(20260927102L);
-        float[] probeVec = randomUnitVector(rnd, DIM);
+        float[] probeVec = fixtureVector(rnd);
 
         System.out.println("[nexus-wbfpw.9 MSZ9I SWEEP] fixture=" + NUM_CHUNKS + " chunks / "
             + NUM_MANIFEST + " manifest rows / " + NUM_DOCS + " docs, hnsw.iterative_scan="
@@ -457,39 +595,147 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     // ── recall under selectivity: exact live-only oracle vs production ANN settings ──
 
     /**
-     * At 30% and 60% tombstoned (a meaningful, not merely worst-case-demo, filtered-
-     * out fraction), recall@10 of chunk_live_owners under PRODUCTION HNSW settings
-     * (relaxed_order iterative scan, ef_search=200) against an EXACT live-only oracle
-     * (index/bitmap scans disabled, forcing a true sequential-scan-and-sort nearest-
-     * neighbor computation). Closes critique-wbfpw9's Significant finding: "the one
-     * experiment that would show whether a filtered HNSW search can miss true top-K
-     * results... was never run."
+     * Round-3 rework (coordinator instruction, after round-2 review returned the
+     * standalone chunk_live_owners recall numbers -- 0.24 to 0.28 at 30%/60% -- as
+     * insufficient on their own: "0.24-0.28 alone cannot say whether live(c) causes a
+     * drop"). Supersedes the round-2 test above (which measured only chunk_live_owners,
+     * at 30%/60% only) with three controlled measurements, EACH oracle graded against
+     * its OWN predicate text (never a mismatched liveness filter):
+     *
+     * <ul>
+     *   <li>(a) 0% tombstoned, NO liveness predicate at all -- the unfiltered HNSW
+     *       baseline. It must reach 0.9: below that, the fixture's own approximate-search
+     *       quality, not liveness filtering, would drive any gap in (b)/(c), so the test
+     *       refuses rather than report numbers that cannot distinguish the two. (Round 3
+     *       measured 0.22 here on uniform random vectors; see {@link #fixtureVector}.)</li>
+     *   <li>(b) today's SHIPPED predicate ({@link #BEFORE_DEAD_SET_ANTI_JOIN}), at
+     *       every fraction in {@link #TOMBSTONE_FRACTIONS_PCT}.</li>
+     *   <li>(c) {@link #AFTER_CHUNK_LIVE_OWNERS} (this bead's replacement), at every
+     *       fraction in {@link #TOMBSTONE_FRACTIONS_PCT}.</li>
+     * </ul>
+     *
+     * <p>At every fraction, (b)'s and (c)'s full-population live COUNTS (not merely
+     * their top-K under one probe vector) are compared -- and they are NOT identical.
+     * Measured (this is a finding, not an assumption confirmed): (b), the dead-set
+     * anti-join, only removes a chunk whose EVERY manifest row points at a tombstoned
+     * document; a chunk with ZERO manifest rows at all (this fixture's manifest-less
+     * slice, R1's own shape in the matrix test above) is never caught by that
+     * anti-join and so counts as live under (b). (c), chunk_live_owners, requires an
+     * actual owning row and correctly counts a manifest-less chunk as dead. The two
+     * counts differ by EXACTLY {@code NUM_CHUNKS - NUM_MANIFEST}, constant across
+     * every fraction -- proving the two predicates agree on tombstone handling and
+     * diverge ONLY on the already-documented manifest-less gap this class's own
+     * javadoc names above ("R1/R3/R4/R6-in-A/R8... P1g=true, P1s=true, LIVE=false").
+     * (c) is the CORRECT {@code live(c)}; (b) was always a narrower approximation.
+     * {@code hnsw.max_scan_tuples} is read via {@code current_setting(...)} and
+     * printed -- production code never sets it (grepped: only referenced in comments
+     * describing the failure mode it can cause), so its effective value here is
+     * pgvector's own compiled-in default.
      */
     @Test
-    void recall_underSelectivity_productionEfSearch_vsExactOracle() throws Exception {
-        for (int pct : new int[] {30, 60}) {
+    void recall_withControls_unfilteredBaseline_beforeVsAfter_acrossFractions() throws Exception {
+        String maxScanTuples = tenantScope.withTenant(TENANT, ctx ->
+            ctx.fetch("SELECT current_setting('hnsw.max_scan_tuples')").get(0).get(0, String.class));
+
+        System.out.println("[nexus-wbfpw.9 RECALL CONTROLS] hnsw.max_scan_tuples=" + maxScanTuples
+            + " (never set by production code -- pgvector's own compiled-in default)"
+            + " hnsw.ef_search=" + PROD_EF_SEARCH + " hnsw.iterative_scan=" + PROD_ITERATIVE_SCAN);
+        // The oracle is only an oracle if HNSW cannot serve it. Pinned on both predicates
+        // (and the unfiltered form) before any recall number is trusted.
+        float[] pinVec = fixtureVector(new Random(20260927100L));
+        for (String knn : List.of(NO_PREDICATE_KNN, BEFORE_DEAD_SET_ANTI_JOIN, AFTER_CHUNK_LIVE_OWNERS)) {
+            String exactPlan = explainProd(exactForm(knn), pinVec, K);
+            assertThat(exactPlan)
+                .as("the exact oracle must not use the HNSW index. Plan was:%n%s", exactPlan)
+                .doesNotContain("idx_chunks_embedding_384");
+        }
+
+        System.out.println("case     | tombstone% | avg_recall@10 | per_query                     | live_count(exact)");
+
+        // (a) unfiltered baseline: no liveness predicate at all. Fixed at 0% tombstoned
+        // (deleted_at plays no role in this query at all, so the fraction is otherwise
+        // moot) so the fixture is measured in its known-clean state.
+        setTombstoneFraction(0);
+        List<Double> baseline = recallSeries(NO_PREDICATE_KNN, NO_PREDICATE_KNN, 20260927200L);
+        double baselineAvg = avg(baseline);
+        long baselineLiveCount = countMatching(NO_PREDICATE_COUNT);
+        System.out.printf("%-8s | %10s | %13.3f | %-30s | %d%n",
+            "a-none", "0(n/a)", baselineAvg, baseline, baselineLiveCount);
+        assertThat(baselineAvg)
+            .as("the UNFILTERED baseline (a) must reach 0.9 recall@%d, or this fixture cannot"
+                + " separate filtering loss from its own approximation quality. Per query: %s",
+                K, baseline)
+            .isGreaterThanOrEqualTo(0.9);
+
+        for (int pct : TOMBSTONE_FRACTIONS_PCT) {
             setTombstoneFraction(pct);
 
-            Random rnd = new Random(20260927103L + pct);
-            List<Double> recalls = new ArrayList<>(RECALL_QUERY_COUNT);
-            for (int q = 0; q < RECALL_QUERY_COUNT; q++) {
-                float[] vec = randomUnitVector(rnd, DIM);
-                List<String> oracle = runExact(AFTER_CHUNK_LIVE_OWNERS, vec, K);
-                List<String> approx = runProd(AFTER_CHUNK_LIVE_OWNERS, vec, K);
-                recalls.add(recallAt(approx, oracle, K));
-            }
-            double avgRecall = recalls.stream().mapToDouble(Double::doubleValue).average().orElseThrow();
+            long beforeLiveCount = countMatching(BEFORE_COUNT);
+            long afterLiveCount = countMatching(AFTER_COUNT);
 
-            System.out.println("[nexus-wbfpw.9 RECALL@10 UNDER SELECTIVITY] tombstone%=" + pct
-                + " production(ef_search=" + PROD_EF_SEARCH + ", iterative_scan=" + PROD_ITERATIVE_SCAN
-                + ") vs exact-oracle avg recall@" + K + "=" + avgRecall
-                + " over " + RECALL_QUERY_COUNT + " random-vector queries. Per-query: " + recalls);
+            List<Double> beforeRecalls = recallSeries(
+                BEFORE_DEAD_SET_ANTI_JOIN, BEFORE_DEAD_SET_ANTI_JOIN, 20260927300L + pct);
+            List<Double> afterRecalls = recallSeries(
+                AFTER_CHUNK_LIVE_OWNERS, AFTER_CHUNK_LIVE_OWNERS, 20260927400L + pct);
+            double beforeAvg = avg(beforeRecalls);
+            double afterAvg = avg(afterRecalls);
+
+            long manifestLessGap = beforeLiveCount - afterLiveCount;
+
+            System.out.printf("%-8s | %10d | %13.3f | %-30s | %d%n",
+                "b-before", pct, beforeAvg, beforeRecalls, beforeLiveCount);
+            System.out.printf("%-8s | %10d | %13.3f | %-30s | %d (delta vs before: %d)%n",
+                "c-after", pct, afterAvg, afterRecalls, afterLiveCount, manifestLessGap);
+
+            // MEASURED, not assumed identical: (b) and (c) do NOT describe the same live
+            // population. The dead-set anti-join (b) only removes a chunk whose EVERY
+            // manifest row points at a tombstoned document -- a chunk with ZERO manifest
+            // rows at all (this fixture's [NUM_MANIFEST, NUM_CHUNKS) slice, R1's own shape
+            // in the liveness matrix above) is never caught by that anti-join, so (b)
+            // counts it as live. chunk_live_owners (c) requires an ACTUAL owning row
+            // (an inner JOIN against catalog_document_chunks), so a manifest-less chunk
+            // returns zero owners and (c) counts it as dead. This is exactly the R1/R3/R4/
+            // R6-in-A/R8 divergence this class's own javadoc already documents ("P1g=true,
+            // P1s=true, LIVE=false") -- (c) is the CORRECT live(c); (b) was always a
+            // narrower approximation with this known gap. The two predicates therefore
+            // differ by EXACTLY (NUM_CHUNKS - NUM_MANIFEST), constant across every
+            // tombstone fraction (proving they agree on tombstone handling and diverge
+            // ONLY on the manifest-less population, not on anything fraction-dependent).
+            assertThat(manifestLessGap)
+                .as("tombstone%%=%d: before(b) minus after(c) must equal EXACTLY the"
+                    + " manifest-less chunk count (NUM_CHUNKS-NUM_MANIFEST=%d) -- a different"
+                    + " delta would mean the two predicates disagree on tombstone handling"
+                    + " itself, not merely on the already-documented manifest-less gap", pct,
+                    NUM_CHUNKS - NUM_MANIFEST)
+                .isEqualTo(NUM_CHUNKS - NUM_MANIFEST);
 
             // Evidence, not a hard regression gate (same discipline as the sibling
-            // class's latency test) -- but non-vacuous: the measurement must actually
-            // run and produce a real number in [0,1], and any drop below 1.0 is
-            // reported plainly above, per the bead's acceptance criteria.
-            assertThat(avgRecall).isBetween(0.0, 1.0);
+            // class's latency test) -- but non-vacuous: each measurement must actually
+            // run and produce a real number in [0,1].
+            assertThat(beforeAvg).isBetween(0.0, 1.0);
+            assertThat(afterAvg).isBetween(0.0, 1.0);
         }
+
+        // Positive control: the instrument must be able to SEE a filtering loss, or the
+        // 1.0s above prove nothing. At 60% tombstoned (about 30% of chunks live under
+        // chunk_live_owners), a search with iterative scan off and ef_search=K visits
+        // only K candidates and filters most of them away, so it must fall short of the
+        // exact oracle. Same query vectors as the 60% (c) series above.
+        setTombstoneFraction(60);
+        Random rnd = new Random(20260927400L + 60);
+        List<Double> starved = new ArrayList<>(RECALL_QUERY_COUNT);
+        for (int q = 0; q < RECALL_QUERY_COUNT; q++) {
+            float[] vec = fixtureVector(rnd);
+            List<String> oracle = runExact(AFTER_CHUNK_LIVE_OWNERS, vec, K);
+            List<String> approx = runHnsw(AFTER_CHUNK_LIVE_OWNERS, vec, K, "off", Integer.toString(K));
+            starved.add(recallAt(approx, oracle, K));
+        }
+        double starvedAvg = avg(starved);
+        System.out.printf("%-8s | %10d | %13.3f | %-30s | (iterative_scan=off, ef_search=%d)%n",
+            "d-starve", 60, starvedAvg, starved, K);
+        assertThat(starvedAvg)
+            .as("positive control: a starved filtered search at 60%% tombstoned must lose recall,"
+                + " or this fixture cannot detect filtering loss at all. Per query: %s", starved)
+            .isLessThan(0.9);
     }
 }

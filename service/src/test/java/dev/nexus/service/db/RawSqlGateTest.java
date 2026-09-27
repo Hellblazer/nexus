@@ -1215,8 +1215,15 @@ class RawSqlGateTest {
         // its EXPLAIN (ANALYZE, BUFFERS) twin (explainProd), reproducing nexus-msz9i's
         // own 76k-chunk/57k-manifest-row/1k-doc fixture shape with a tombstone-fraction
         // sweep. Same OPERATOR(nexus.<=>)-has-no-jOOQ-DSL-form reason as the sibling
-        // entry above.
-        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 3),
+        // entry above. Round 3 (coordinator instruction: control the recall numbers
+        // with an unfiltered baseline + the shipped predicate's own oracle, and confirm
+        // before/after agree on the live population): 3 -> 5, +2 -- the new
+        // countMatching(String) call site (used for the before/after/no-predicate full-
+        // population live COUNT queries -- one Java call site, three SQL constants) and
+        // the inline current_setting('hnsw.max_scan_tuples') read in the new recall
+        // test (production code never sets this GUC, so its value is read directly to
+        // report it, per the coordinator's explicit request).
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 5),
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
@@ -1596,7 +1603,10 @@ class RawSqlGateTest {
     // same 2 sites, net 0; one new test file,
     // vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java new at 3 -- see that
     // entry's own comment).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 968;
+    // nexus-wbfpw.9 round 3 (coordinator instruction: control the recall numbers):
+    // 968 -> 970 (+2: that file 3 -> 5, the new countMatching(String) call site and
+    // the inline current_setting('hnsw.max_scan_tuples') read; see its entry).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 970;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
