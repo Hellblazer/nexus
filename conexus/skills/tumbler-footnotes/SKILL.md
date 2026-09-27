@@ -18,18 +18,22 @@ file itself, in place.
 nx catalog footnotes docs/rdr/rdr-200-example.md
 ```
 
-Every `[label](nx://catalog/<tumbler>)` becomes `label[^tumbler-<slug>]`, and a
-`## Footnotes` section is appended (or refreshed) at the bottom with one
-definition per unique tumbler — title, content type, indexed date, a working
-link (or a plain `(repo-relative)` label when it can't be confirmed to
-resolve), any merge note, and outbound links. Fenced code blocks are never
-touched.
+Every `[label](nx://catalog/<tumbler>)` becomes `[label][^tumbler-<slug>]`
+(the label stays bracketed, so `--to-links` restores it exactly wherever it
+sits on the line), and a `## Footnotes` section is appended (or refreshed) at
+the bottom with one definition per unique tumbler — title, content type,
+indexed date, a working link (or a plain `(repo-relative)` label when it
+can't be confirmed to resolve), any merge note, and outbound links. Fenced
+code blocks, inline code spans and indented code blocks are never touched.
+The file must be valid UTF-8 (it is refused otherwise, exit 2), and the
+write is atomic.
 
 Re-running is safe and idempotent: with an unchanged catalog state it's a
 byte-for-byte no-op; with drift (a title edit, a merge) only the footnote
-BODIES are rewritten — markers already assigned in the body never move. A
-tumbler that no longer resolves is left as a link (never silently dropped)
-and reported on stderr as `file:line: unresolved tumbler <tumbler>`.
+BODIES are rewritten — markers already assigned in the body never move. If
+any tumbler does not resolve, NOTHING is written for that file; each one is
+reported on stderr as `file:line: unresolved tumbler <tumbler>` and the
+command exits 1.
 
 ## Check before committing
 
@@ -49,6 +53,24 @@ nx catalog footnotes docs/rdr/rdr-200.md --dry-run
 ```
 
 Prints a unified diff of what would change; writes nothing.
+
+## Refresh existing footnotes only
+
+```bash
+nx catalog footnotes docs/rdr/rdr-200.md --refresh
+```
+
+Rewrites the bodies of footnotes already in the file against current catalog
+state and adds no new markers; a link not yet converted is left alone.
+
+## Shorter footnote bodies
+
+```bash
+nx catalog footnotes docs/rdr/rdr-200.md --style short
+```
+
+`--style short` writes title and tumbler only; `long` (the default) adds
+content type, indexed date, link and outbound links.
 
 ## Reverse conversion
 
@@ -72,7 +94,9 @@ edit that would otherwise fight the footnote layout).
 - After a catalog merge or title edit that could have staled existing
   footnote bodies in already-converted docs — re-running refreshes them.
 
-Full flag reference: `docs/cli-reference.md` § `nx catalog footnotes`.
+`--check`/`--dry-run`, `--check`/`--to-links` and `--refresh`/`--to-links`
+are mutually exclusive (exit 2). Full flag reference: `docs/cli-reference.md`
+§ `nx catalog footnotes`.
 
 ## Agent-Specific PRODUCE
 
