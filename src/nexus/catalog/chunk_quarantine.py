@@ -196,6 +196,58 @@ def restore_rereferenced_serverside(db: Any, quarantine_name: str, origin_name: 
     return fn(quarantine_name, origin_name)
 
 
+#: Batch size for :func:`restore_rereferenced_bounded_serverside`'s loop
+#: (nexus-e8h5x). No production measurement exists yet for the RESTORE
+#: direction the way nexus-a6mon's 41,032-row/58s incident measured the
+#: QUARANTINE direction — this mirrors that fix's own row_limit example
+#: (VectorHandler's route docstring) as a reasonable starting batch, well
+#: under the ~30s edge deadline for typical chunk sizes.
+GC_RESTORE_ROW_LIMIT_DEFAULT = 2000
+
+
+def restore_rereferenced_bounded_serverside(
+    db: Any, quarantine_name: str, origin_name: str, row_limit: int = GC_RESTORE_ROW_LIMIT_DEFAULT,
+) -> int | None:
+    """Try the server-side BOUNDED restore (nexus-e8h5x), looping until
+    drained. Total restored count, or ``None`` if the bounded route is
+    unavailable (caller falls back to :func:`restore_rereferenced_serverside`'s
+    unbounded call — same capability-sensing convention as this module's
+    other ``*_serverside`` wrappers: a ``None`` here is about the CLIENT
+    object's capability, e.g. the in-memory unit-test double, never about
+    whether there was anything to restore).
+
+    Mirrors :func:`quarantine_orphans_serverside`'s bounded sibling that
+    catalog-037/nexus-a6mon added for the quarantine direction — except no
+    such client-side loop exists yet for quarantine to mirror; this is
+    designed directly from the engine's ``gc_restore_rereferenced_bounded``
+    wire contract (``VectorHandler.handleGcRestoreRereferenced``), which is
+    the same additive ``row_limit``-selects-bounded shape catalog-037
+    established for quarantine.
+
+    One call's response omitting ``remaining`` means an OLDER engine that
+    already has the ``/gc/restore-rereferenced`` route but does not
+    recognize ``row_limit`` — its permissive JSON body parsing silently
+    ignores the unknown field and performs the UNBOUNDED restore anyway, so
+    the returned ``restored`` count is already the FULL total and the loop
+    stops after that one call; this is detected from the response SHAPE,
+    never inferred from an engine-version comparison, so it needs no
+    ``REQUIRED_ENGINE_VERSION`` floor bump to stay correct.
+    """
+    fn = getattr(db, "gc_restore_rereferenced_bounded", None)
+    if fn is None:
+        return None
+    total = 0
+    while True:
+        result = fn(quarantine_name, origin_name, row_limit)
+        total += int(result.get("restored", 0))
+        remaining = result.get("remaining")
+        if remaining is None:
+            # Older engine: ignored row_limit, already did the whole thing.
+            return total
+        if int(remaining) <= 0:
+            return total
+
+
 def expire_quarantine_serverside(
     db: Any, quarantine_name: str, origin_name: str, cutoff: str,
     *, floor_fraction: float, floor_min_chunks: int, force: bool = False,

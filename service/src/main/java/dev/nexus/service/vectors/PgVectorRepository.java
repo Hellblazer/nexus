@@ -40,6 +40,7 @@ import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_BOUNDED;
+import static dev.nexus.service.jooq.nexus.Tables.GC_RESTORE_REREFERENCED_BOUNDED;
 import dev.nexus.service.jooq.nexus.Routines;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
@@ -3463,6 +3464,57 @@ FROM scope s
         // perform (see catalog-024-quarantine-collection-registration.xml).
         return tenantScope.withTenant(tenant, ctx ->
             Routines.gcRestoreRereferenced(ctx.configuration(), dim, tenant, quarantineCollection, originCollection));
+    }
+
+    /**
+     * One bounded restore batch (nexus-e8h5x), mirroring {@link
+     * #QuarantineBoundedOutcome} for the opposite direction. {@code remaining}
+     * is what is still eligible after this call COMMITTED, so the caller
+     * loops on it exactly as {@link #quarantineOrphansBounded} does.
+     */
+    public record RestoreBoundedOutcome(long restored, long remaining) {}
+
+    /**
+     * nexus-e8h5x: restore at most {@code rowLimit} re-referenced chunks per
+     * call, one transaction, one commit — mirrors {@link #quarantineOrphansBounded}
+     * for the opposite direction. {@link #restoreRereferenced} restores every
+     * eligible row in one unbounded transaction, which on a large quarantine
+     * collection (about 36,000 code__1-1 rows, 2026-09-16) has the same
+     * edge-deadline exposure catalog-037 fixed for the quarantine direction.
+     * The unbounded form stays for the indexer's small incremental restore;
+     * this is for draining a large quarantine collection under a deadline.
+     *
+     * <p>{@code rowLimit <= 0} is refused by the SQL function, not defaulted
+     * to unbounded — silently removing the bound would hand back the
+     * transaction this exists to prevent.
+     *
+     * <p>The statement bound is set HERE, as its own statement before the
+     * call ({@link PgSession#setGcRestoreBoundedBounds}), for the identical
+     * reason {@link #quarantineOrphansBounded} does: the function body's own
+     * {@code set_config('statement_timeout', ...)} cannot bound the
+     * statement already running it.
+     */
+    public RestoreBoundedOutcome restoreRereferencedBounded(String tenant, String quarantineCollection,
+                                                             String originCollection, int rowLimit) {
+        return restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit,
+                                          PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                          PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
+    }
+
+    /** Explicit-bound form, for tests that need a bound shorter than the default. */
+    public RestoreBoundedOutcome restoreRereferencedBounded(String tenant, String quarantineCollection,
+                                                             String originCollection, int rowLimit,
+                                                             int statementTimeoutMs, int lockTimeoutMs) {
+        int dim = dimForCollection(tenant, originCollection);
+        var rec = tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            return ctx.selectFrom(GC_RESTORE_REREFERENCED_BOUNDED.call(
+                    dim, tenant, quarantineCollection, originCollection, rowLimit))
+               .fetchOne();
+        });
+        long restored = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.RESTORED);
+        long remaining = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.REMAINING);
+        return new RestoreBoundedOutcome(restored, remaining);
     }
 
     /**

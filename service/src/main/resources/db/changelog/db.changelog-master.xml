@@ -1602,6 +1602,18 @@
     <include file="db/changelog/telemetry-015-install-ping-source.xml"/>
 
     <!--
+        nexus-e8h5x: nexus.gc_restore_rereferenced_bounded, a bounded restore
+        sweep mirroring catalog-037's gc_quarantine_orphans_bounded
+        (nexus-a6mon) for the opposite direction — see the included file's
+        own header. Placed after telemetry-015 (the tail when this landed)
+        and before the grants-nexus-svc.xml runAlways block, matching the
+        established D0.1 late-append convention. catalog-040/041 are
+        reserved for a peer's concurrent work and are independent of this
+        file; their relative landing order does not matter to the schema.
+    -->
+    <include file="db/changelog/catalog-042-gc-restore-rereferenced-bounded.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

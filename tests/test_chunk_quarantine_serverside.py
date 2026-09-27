@@ -15,6 +15,7 @@ from nexus.catalog.chunk_quarantine import (
     expire_quarantine_serverside,
     now_stamp,
     quarantine_orphans_serverside,
+    restore_rereferenced_bounded_serverside,
     restore_rereferenced_serverside,
 )
 from nexus.db.http_vector_client import VectorServiceError
@@ -22,6 +23,20 @@ from nexus.db.http_vector_client import VectorServiceError
 
 class _NoGcMethods:
     """A `db` with no HTTP GC capability at all (local/in-memory mode)."""
+
+
+class _Sequence:
+    """Returns one scripted response per call, in order; records call count
+    (nexus-e8h5x: proves a bounded-loop caller actually looped, not just
+    that its first call's result was interpreted correctly)."""
+
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        return self._responses.pop(0)
 
 
 class _Raises:
@@ -107,6 +122,53 @@ def test_restore_serverside_non404_reraises():
 def test_restore_serverside_success_returnsCount():
     db = type("Db", (), {"gc_restore_rereferenced": _Returns(7)})()
     assert restore_rereferenced_serverside(db, "quarantine-code__x", "code__x") == 7
+
+
+# ── restore_rereferenced_bounded_serverside (nexus-e8h5x) ────────────────
+
+
+def test_restore_bounded_serverside_noMethod_returnsNone():
+    db = _NoGcMethods()
+    assert restore_rereferenced_bounded_serverside(db, "quarantine-code__x", "code__x") is None
+
+
+def test_restore_bounded_serverside_loops_untilDrained():
+    # 5 rows at a bound of 2: three batches, matching the engine-side
+    # GcRestoreRereferencedBoundedTest fixture shape exactly. If the loop
+    # were ever removed (a single call, no `while remaining > 0`), this
+    # would fail on BOTH assertions: only 1 call would be made, and the
+    # summed total would be 2, not 5.
+    seq = _Sequence([
+        {"restored": 2, "remaining": 3, "row_limit": 2},
+        {"restored": 2, "remaining": 1, "row_limit": 2},
+        {"restored": 1, "remaining": 0, "row_limit": 2},
+    ])
+    db = type("Db", (), {"gc_restore_rereferenced_bounded": seq})()
+    total = restore_rereferenced_bounded_serverside(db, "quarantine-code__x", "code__x", row_limit=2)
+    assert total == 5, "must sum every batch's restored count, not just the first"
+    assert seq.calls == 3, "must loop until remaining == 0, not stop after one call"
+
+
+def test_restore_bounded_serverside_noopFirstCall_stopsImmediately():
+    seq = _Sequence([{"restored": 0, "remaining": 0, "row_limit": 10}])
+    db = type("Db", (), {"gc_restore_rereferenced_bounded": seq})()
+    total = restore_rereferenced_bounded_serverside(db, "quarantine-code__x", "code__x", row_limit=10)
+    assert total == 0
+    assert seq.calls == 1
+
+
+def test_restore_bounded_serverside_olderEngineIgnoresRowLimit_stopsAfterOneCall():
+    # An engine with the /gc/restore-rereferenced route but predating
+    # gc_restore_rereferenced_bounded silently ignores the unrecognized
+    # row_limit field and performs the UNBOUNDED restore -- its response has
+    # no "remaining" key at all, not a zero one. The caller must detect this
+    # from the response SHAPE and stop, since `restored` is already the
+    # FULL count.
+    seq = _Sequence([{"restored": 41032}])
+    db = type("Db", (), {"gc_restore_rereferenced_bounded": seq})()
+    total = restore_rereferenced_bounded_serverside(db, "quarantine-code__x", "code__x", row_limit=2000)
+    assert total == 41032
+    assert seq.calls == 1, "a response with no remaining key must not be looped on"
 
 
 # ── expire_quarantine_serverside ─────────────────────────────────────────

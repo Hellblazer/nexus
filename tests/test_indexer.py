@@ -999,6 +999,12 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
     # exactly like `upsert_chunks_with_embeddings = None` above.
     db.gc_quarantine_orphans = None
     db.gc_restore_rereferenced = None
+    # nexus-e8h5x: same reasoning as gc_restore_rereferenced above, one
+    # level down — restore_rereferenced_bounded_serverside is tried FIRST
+    # now, so it too must read as "no HTTP GC capability" or this fake
+    # `db`'s MagicMock auto-attrs would short-circuit the client-side
+    # algorithm under test exactly like the unbounded route would have.
+    db.gc_restore_rereferenced_bounded = None
     db.gc_expire_quarantine = None
     return db, cols
 

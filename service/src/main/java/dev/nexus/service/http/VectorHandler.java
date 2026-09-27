@@ -1181,8 +1181,21 @@ public final class VectorHandler implements HttpHandler {
     /**
      * POST /v1/vectors/gc/restore-rereferenced (RDR-191 Phase 1)
      *
-     * <p>Request: {"quarantine_collection": "...", "origin_collection": "..."}
-     * <p>Response 200: {"restored": N}
+     * <p>Request:
+     * <pre>
+     * {
+     *   "quarantine_collection": "...",
+     *   "origin_collection": "...",
+     *   "row_limit": 2000            // optional (nexus-e8h5x): the BOUNDED restore
+     * }
+     * </pre>
+     * <p>Response 200 without {@code row_limit} (unbounded, one transaction over
+     * every re-referenced row; the indexer's small incremental restore):
+     * {"restored": N}
+     * <p>Response 200 with {@code row_limit} (at most that many rows restored, one
+     * commit, statement bound 25 s and gate-lock bound 2 s set by the engine):
+     * {"restored": N, "remaining": R, "row_limit": L} — loop while
+     * {@code remaining > 0}; {@code row_limit <= 0} is a 400, never "unbounded".
      */
     private void handleGcRestoreRereferenced(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1191,6 +1204,20 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String quarantineCollection = requireString(body, "quarantine_collection");
         String originCollection     = requireString(body, "origin_collection");
+
+        // nexus-e8h5x: an optional `row_limit` selects the BOUNDED restore,
+        // mirroring handleGcQuarantineOrphans's identical routing (nexus-a6mon).
+        // Additive: a request without it is the unbounded form exactly as
+        // before, so no released client changes behaviour.
+        int rowLimit = resolveRowLimit(body);
+        if (rowLimit > 0) {
+            var bounded = repo.restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit);
+            HttpUtil.send(ex, 200, json(Map.of(
+                "restored", bounded.restored(),
+                "remaining", bounded.remaining(),
+                "row_limit", rowLimit)));
+            return;
+        }
 
         long restored = repo.restoreRereferenced(tenant, quarantineCollection, originCollection);
         HttpUtil.send(ex, 200, json(Map.of("restored", restored)));

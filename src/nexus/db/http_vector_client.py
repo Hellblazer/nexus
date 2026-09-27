@@ -3716,6 +3716,32 @@ class HttpVectorClient:
         )
         return int(result.get("restored", 0))
 
+    def gc_restore_rereferenced_bounded(
+        self, quarantine_collection: str, origin_collection: str, row_limit: int,
+    ) -> dict:
+        """POST /v1/vectors/gc/restore-rereferenced with ``row_limit`` (nexus-e8h5x),
+        mirroring :meth:`gc_quarantine_orphans`'s identical additive routing
+        (nexus-a6mon) for the opposite direction — same endpoint, an optional
+        ``row_limit`` field selects the bounded form.
+
+        Returns ``{"restored": N, "remaining": R, "row_limit": L}`` from an
+        engine that recognizes ``row_limit``, or ``{"restored": N}`` from an
+        OLDER engine that already has this route but silently ignores an
+        unrecognized request-body field (permissive JSON parsing, not a
+        404) — it performs the UNBOUNDED restore regardless of what this
+        call asked for. Callers detect that by the absent ``remaining`` key,
+        never by inferring engine version.
+        """
+        return _post(
+            "/v1/vectors/gc/restore-rereferenced",
+            {
+                "quarantine_collection": quarantine_collection,
+                "origin_collection": origin_collection,
+                "row_limit": row_limit,
+            },
+            tenant=self._tenant,
+        )
+
     def gc_expire_quarantine(
         self, quarantine_collection: str, origin_collection: str, cutoff: str,
         floor_fraction: float, floor_min_chunks: int, force: bool,

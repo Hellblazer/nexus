@@ -3897,6 +3897,7 @@ def _prune_collection_serverside(
         expire_quarantine_serverside,
         quarantine_days,
         quarantine_orphans_serverside,
+        restore_rereferenced_bounded_serverside,
         restore_rereferenced_serverside,
     )
 
@@ -3912,7 +3913,19 @@ def _prune_collection_serverside(
     # empty sibling projection row on every zero-orphan pass -- the
     # nexus-syfes class `nx catalog doctor --collections-drift` flags and
     # the shakeout's Phase E fails on.
-    restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
+    #
+    # nexus-e8h5x: try the BOUNDED restore first (mirrors catalog-037/
+    # nexus-a6mon's bounded quarantine sweep, for the opposite direction —
+    # about 36,000 code__1-1 rows left quarantine via one unbounded restore
+    # call on 2026-09-16, the same edge-deadline exposure). A ``None``
+    # return means the CLIENT OBJECT lacks the capability (a non-HTTP db,
+    # e.g. the in-memory unit-test double) rather than "nothing to
+    # restore" -- fall back to the unbounded call before giving up; a real
+    # engine has both routes together (they ship in the same changeset),
+    # so this fallback is defensive, not expected to fire in practice.
+    restored = restore_rereferenced_bounded_serverside(db, quarantine_name, collection_name)
+    if restored is None:
+        restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
     if restored is None:
         return False  # route unavailable — client-side path handles restore too
 
