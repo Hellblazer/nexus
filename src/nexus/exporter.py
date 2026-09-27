@@ -653,6 +653,57 @@ def _accumulate_owner_group(
     group["rows"].append((position, chash))
 
 
+def _manifest_rows(rows: list[tuple[int, str]]) -> list[dict]:
+    """Manifest rows for one owner group, ordered by recorded position
+    (nexus-wbfpw.31). Positions are the manifest's primary key per
+    document, so if a hand-made or mixed-vintage file gives two chunks
+    the same position, keep the order and renumber from 0 rather than
+    let ``write_manifest`` fail on the key.
+    """
+    ordered = sorted(enumerate(rows), key=lambda ir: (ir[1][0], ir[0]))
+    positions = [pos for _, (pos, _) in ordered]
+    if len(set(positions)) != len(positions):
+        return [{"chash": chash, "position": i} for i, (_, (_, chash)) in enumerate(ordered)]
+    return [{"chash": chash, "position": pos} for _, (pos, chash) in ordered]
+
+
+def _write_owner_group(
+    group: dict, collection_name: str, owner_tumbler: Tumbler, reader: Any, writer: Any,
+) -> int:
+    """Register (or find) the document for one owner group and write its
+    manifest in *collection_name* (nexus-wbfpw.31). Returns the number of
+    manifest rows written.
+
+    ``source_uri`` is unique across the tenant, and ``write_manifest``
+    replaces a document's rows in EVERY collection, so a document can own
+    live chunks in only one collection. When the export's document still
+    lives in another collection (``--collection`` naming a different
+    target), import COPIES rather than moves (Sam, 2026-09-27): the
+    existing document is left untouched, so its own collection stays
+    live, and the target gets a separate document under the
+    target-qualified identity ``nxexp://<target>/<original source_uri>``.
+    Re-importing finds that qualified document again, so it is idempotent.
+    """
+    source_uri = group["source_uri"]
+    existing = reader.by_source_uri(source_uri) if source_uri else None
+    if existing is not None and existing.physical_collection != collection_name:
+        source_uri = f"nxexp://{collection_name}/{source_uri}"
+        existing = reader.by_source_uri(source_uri)
+    if existing is not None:
+        doc_tumbler = existing.tumbler
+    else:
+        doc_tumbler = writer.register(
+            owner=owner_tumbler,
+            title=group["title"] or source_uri,
+            content_type=group["content_type"] or "knowledge",
+            physical_collection=collection_name,
+            source_uri=source_uri,
+        )
+    rows = _manifest_rows(group["rows"])
+    writer.write_manifest(str(doc_tumbler), rows, collection=collection_name)
+    return len(rows)
+
+
 def import_collection(
     db: "T3Database | HttpVectorClient",
     input_path: Path,
@@ -1008,43 +1059,24 @@ def import_collection(
         from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle
         reader = make_catalog_reader()
         writer = make_catalog_writer(priority="interactive")
+        failures: list[tuple[str, str]] = []
         try:
             owner_tumbler = _resolve_import_owner_tumbler(collection_name, reader, writer)
             for group in owner_groups.values():
-                existing = reader.by_source_uri(group["source_uri"]) if group["source_uri"] else None
-                if existing is not None:
-                    doc_tumbler = existing.tumbler
-                    # nexus-wbfpw.31: source_uri is a tenant-wide unique
-                    # identity, so importing into a DIFFERENT collection
-                    # than the one this document was exported from (a
-                    # rename/migration import, e.g. ``--collection
-                    # code__newname``) finds the SAME row here -- register()
-                    # would just hand back this tumbler unchanged (RDR-108's
-                    # idempotent leg-1 SELECT), never moving
-                    # physical_collection. Explicit update, the same
-                    # reconcile step catalog_store_hook_tracked's own
-                    # by_source_uri branch performs on a knowledge re-put.
-                    if existing.physical_collection != collection_name:
-                        writer.update(
-                            doc_tumbler,
-                            physical_collection=collection_name,
-                            source_uri=group["source_uri"],
-                        )
-                else:
-                    doc_tumbler = writer.register(
-                        owner=owner_tumbler,
-                        title=group["title"] or group["source_uri"],
-                        content_type=group["content_type"] or "knowledge",
-                        physical_collection=collection_name,
-                        source_uri=group["source_uri"],
+                # One group's failure must not strand every later group
+                # manifest-less: record it, carry on, report all at the end.
+                try:
+                    owned_count += _write_owner_group(
+                        group, collection_name, owner_tumbler, reader, writer,
                     )
-                rows = sorted(group["rows"], key=lambda pr: pr[0])
-                writer.write_manifest(
-                    str(doc_tumbler),
-                    [{"chash": chash, "position": pos} for pos, chash in rows],
-                    collection=collection_name,
-                )
-                owned_count += len(rows)
+                except Exception as exc:  # noqa: BLE001 — collected and re-raised below as one NexusError
+                    _log.warning(
+                        "import_owner_group_failed",
+                        collection=collection_name,
+                        source_uri=group["source_uri"],
+                        error=str(exc),
+                    )
+                    failures.append((group["source_uri"], str(exc)))
         finally:
             _close = getattr(writer, "close", None)
             if callable(_close):
@@ -1054,7 +1086,18 @@ def import_collection(
             collection=collection_name,
             document_groups=len(owner_groups),
             owned_count=owned_count,
+            failed_groups=len(failures),
         )
+        if failures:
+            shown = "; ".join(f"{uri}: {err}" for uri, err in failures[:5])
+            more = f" (and {len(failures) - 5} more)" if len(failures) > 5 else ""
+            raise NexusError(
+                f"Import stored every chunk in {collection_name!r}, but "
+                f"{len(failures)} of {len(owner_groups)} owner documents could "
+                f"not be registered, so their chunks have no catalog owner and "
+                f"are not searchable: {shown}{more}. Re-running the same import "
+                f"is safe (document lookup and manifest writes are idempotent)."
+            )
 
     elapsed = time.monotonic() - t0
 

@@ -23,6 +23,7 @@ import msgpack
 import numpy as np
 import pytest
 
+import nexus.exporter as exporter_mod
 from nexus.aspect_readers import uri_for
 from nexus.catalog.collection_name import owner_segment_for_tumbler
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
@@ -31,6 +32,7 @@ from nexus.db.limits import QUOTAS
 from nexus.errors import NexusError
 from nexus.exporter import (
     _accumulate_owner_group,
+    _manifest_rows,
     _resolve_import_owner_tumbler,
     export_collection,
     import_collection,
@@ -165,6 +167,22 @@ def test_accumulate_owner_group_position_and_uri_synthesis():
     assert groups["nxexp://col/f"]["title"] == "f"
 
 
+def test_manifest_rows_orders_and_renumbers_colliding_positions():
+
+    # Distinct positions: kept verbatim, ordered by position.
+    assert _manifest_rows([(3, "a"), (0, "b")]) == [
+        {"chash": "b", "position": 0}, {"chash": "a", "position": 3},
+    ]
+    # A mixed file can give two chunks position 0 (explicit owner position
+    # plus a position-less record's running count): keep order, renumber,
+    # never hand write_manifest a duplicate primary key.
+    assert _manifest_rows([(0, "a"), (0, "b"), (2, "c")]) == [
+        {"chash": "a", "position": 0},
+        {"chash": "b", "position": 1},
+        {"chash": "c", "position": 2},
+    ]
+
+
 # ── Round trip: multi-batch documents stay owned ────────────────────────────
 
 
@@ -215,16 +233,44 @@ def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, m
         got = client.get_collection(dst).get(ids=[chash], include=[])
         assert chash in got["ids"], f"{chash} not live in {dst}"
 
-    new_doc_a = reader.by_source_uri(doc_a_uri)
-    assert new_doc_a is not None
-    assert new_doc_a.physical_collection == dst
-    rows_a = sorted(reader.get_manifest(str(new_doc_a.tumbler)), key=lambda r: r.position)
-    assert [r.chash for r in rows_a] == doc_a_chashes
+    # Copy, not move (Sam, 2026-09-27): dst gets its own documents under the
+    # target-qualified identity; src's documents are untouched.
+    for orig_uri, orig_id, chashes in (
+        (doc_a_uri, doc_a_id, doc_a_chashes), (doc_b_uri, doc_b_id, doc_b_chashes),
+    ):
+        copy = reader.by_source_uri(f"nxexp://{dst}/{orig_uri}")
+        assert copy is not None
+        assert copy.physical_collection == dst
+        assert str(copy.tumbler) != orig_id
+        rows = sorted(reader.get_manifest(str(copy.tumbler)), key=lambda r: r.position)
+        assert [r.chash for r in rows] == chashes
 
-    new_doc_b = reader.by_source_uri(doc_b_uri)
-    assert new_doc_b is not None
-    rows_b = sorted(reader.get_manifest(str(new_doc_b.tumbler)), key=lambda r: r.position)
-    assert [r.chash for r in rows_b] == doc_b_chashes
+        orig = reader.by_source_uri(orig_uri)
+        assert orig is not None
+        assert str(orig.tumbler) == orig_id
+        assert orig.physical_collection == src
+        orig_rows = sorted(reader.get_manifest(orig_id), key=lambda r: r.position)
+        assert [r.chash for r in orig_rows] == chashes, "source manifest must survive the import"
+
+    # The source collection is still live, and both collections answer search
+    # (the bead's acceptance criterion names search, not just get).
+    for chash in doc_a_chashes + doc_b_chashes:
+        got = client.get_collection(src).get(ids=[chash], include=[])
+        assert chash in got["ids"], f"{chash} no longer live in {src}"
+    for coll in (src, dst):
+        hits = client.search(
+            "wbfpw31 doc a chunk one", [coll], n_results=10,
+            threshold=float("inf"), structured=True,
+        )
+        assert set(doc_a_chashes) <= set(hits["ids"]), f"search on {coll} missed doc A"
+
+    # Re-importing lands on the same copy documents, never a sibling.
+    again = import_collection(db=client, input_path=out, target_collection=dst)
+    assert again["owned_count"] == 5
+    copy_a = reader.by_source_uri(f"nxexp://{dst}/{doc_a_uri}")
+    rows_again = sorted(reader.get_manifest(str(copy_a.tumbler)), key=lambda r: r.position)
+    assert [r.chash for r in rows_again] == doc_a_chashes
+    assert [r.chash for r in sorted(reader.get_manifest(doc_a_id), key=lambda r: r.position)] == doc_a_chashes
 
 
 # ── Legacy export (no owner, no doc_id): one document per import file ──────
@@ -302,10 +348,49 @@ def test_skip_existing_records_still_end_up_owned(t2_service_env, tmp_path):
     assert second["skipped_count"] == 2, "every chunk already exists in dst"
     assert second["owned_count"] == 2, "group membership is unconditional on skip_existing"
 
-    doc = reader.by_source_uri(doc_uri)
+    doc = reader.by_source_uri(f"nxexp://{dst}/{doc_uri}")
     assert doc is not None
+    assert doc.physical_collection == dst
     rows = sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)
     assert [r.chash for r in rows] == chashes
+
+
+# ── One owner group failing does not strand the others ─────────────────────
+
+
+@pytest.mark.integration
+def test_one_failed_owner_group_does_not_strand_the_rest(t2_service_env, tmp_path, monkeypatch):
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+
+    src = _coll("src-partial")
+    dst = _coll("dst-partial")
+    _, bad_uri, _ = _owned_doc(writer, client, src, owner, "wbfpw31 Bad Doc", ["wbfpw31 bad chunk"])
+    _, good_uri, good_chashes = _owned_doc(
+        writer, client, src, owner, "wbfpw31 Good Doc", ["wbfpw31 good chunk"],
+    )
+    out = tmp_path / "partial.nxexp"
+    export_collection(db=client, collection_name=src, output_path=out)
+
+    real = exporter_mod._write_owner_group
+
+    def _fail_bad(group, *a, **kw):
+        if group["source_uri"] == bad_uri:
+            raise RuntimeError("injected register failure")
+        return real(group, *a, **kw)
+
+    monkeypatch.setattr(exporter_mod, "_write_owner_group", _fail_bad)
+
+    with pytest.raises(NexusError, match=r"1 of 2 owner documents.*injected register failure"):
+        import_collection(db=client, input_path=out, target_collection=dst)
+
+    good = reader.by_source_uri(f"nxexp://{dst}/{good_uri}")
+    assert good is not None, "the group after (or before) the failure must still be written"
+    rows = reader.get_manifest(str(good.tumbler))
+    assert [r.chash for r in rows] == good_chashes
 
 
 # ── Export fails loud when the catalog cannot answer ────────────────────────
