@@ -918,16 +918,18 @@ class TestRegisterCollectionCallSitesRouteThroughTheSeam:
     #: nexus-ft04v.28's scope. A NEW entry here requires a documented
     #: reason, same discipline as every other census allowlist in this
     #: suite (tests/test_collection_name_parse_census.py's own doctrine).
+    #:
+    #: nexus-aotql (2026-09-27, review round 2) removed the last two
+    #: entries this allowlist ever carried, ``src/nexus/indexer.py``
+    #: (``_migrate_legacy_collections``'s post-rename registration) and
+    #: ``src/nexus/commands/catalog_cmds/migration.py``
+    #: (``migrate_fallback_cmd``'s registration loop) -- both routed
+    #: through ``ensure_collection_registered`` now, with the same
+    #: explicit kwargs they derived before. THIS is the census the bead
+    #: meant: it now pins the FULL consolidation (empty allowlist bar the
+    #: one string-literal exception below), not just the four sites
+    #: nexus-ft04v.29 originally named.
     _ACCEPTED_NON_SEAM_SITES = frozenset({
-        # indexer.py:792/800 -- RDR-103 Phase 4 migration rename-cascade:
-        # best-effort, non-fatal registration immediately after a
-        # legacy->conformant data-plane rename, inside its own dedicated
-        # try/except (phase4_register_collection_failed_after_rename).
-        # Not one of the four sites nexus-ft04v.29's finding named.
-        "src/nexus/indexer.py",
-        # commands/catalog_cmds/migration.py:190 -- legacy migration
-        # command, not one of the four named sites.
-        "src/nexus/commands/catalog_cmds/migration.py",
         # commands/catalog_cmds/doctor.py:454 -- a STRING inside an
         # error-message remediation suggestion
         # ("w.register_collection('<TARGET>'); ..."), never a real call;
@@ -972,3 +974,17 @@ class TestRegisterCollectionCallSitesRouteThroughTheSeam:
             "src/nexus/commands/index.py",
         }
         assert not (named_before_the_fix & self._ACCEPTED_NON_SEAM_SITES)
+
+    def test_the_last_two_sites_are_gone_from_the_offender_set(self) -> None:
+        """Non-vacuity for nexus-aotql's OWN consolidation (review round
+        2): ``indexer.py`` and ``commands/catalog_cmds/migration.py``
+        used to sit in ``_ACCEPTED_NON_SEAM_SITES`` as reviewed-accepted
+        bypasses -- this pin fails loud if either is ever re-added there
+        (a regression re-introducing the bypass, or the allowlist
+        drifting stale again the way it did for these exact two entries
+        between the nexus-ft04v.28 and nexus-aotql fix rounds)."""
+        closed_by_aotql = {
+            "src/nexus/indexer.py",
+            "src/nexus/commands/catalog_cmds/migration.py",
+        }
+        assert not (closed_by_aotql & self._ACCEPTED_NON_SEAM_SITES)

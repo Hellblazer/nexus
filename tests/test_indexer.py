@@ -2910,12 +2910,10 @@ def test_run_index_propagates_embedding_profile_mismatch_from_registration_loop(
     (repo / "main.py").write_text("x = 1\n")
 
     def _raise_mismatch(name, *, registrar=None, kwargs=None):
-        raise EmbeddingProfileMismatchError(
-            "content_type='code': this install's configured intent is "
-            "'voyage-code-3', but the engine's embedding_profile still says "
-            "'bge-base-en-v15-768'. A restart is required for the engine to "
-            "adopt this: `nx daemon service stop && nx daemon service start`."
-        )
+        # nexus-aotql: the exception now builds its own message from
+        # structured (content_type, configured_model, engine_profile_model)
+        # fields rather than taking a caller-composed string.
+        raise EmbeddingProfileMismatchError("code", "voyage-code-3", "bge-base-en-v15-768")
 
     db, col = _mock_db()
     with _patches(db, extra={

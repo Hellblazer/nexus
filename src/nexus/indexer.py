@@ -847,27 +847,40 @@ def _migrate_legacy_collections(
                 # site's loop-safe registrar); ``w``'s ``.close()`` (called
                 # once per name by the seam) is a documented no-op on the
                 # shared service-catalog handle it wraps.
+                #
+                # nexus-ft04v.27 / nexus-aotql fix round: reuse the
+                # CollectionName the render above already built instead of
+                # parsing the very name it just rendered back apart --
+                # BOTH branches below, never only the conformant one.
+                # EXPLICIT kwargs, never bare name-derivation: the generic
+                # seam derivation would recompute embedding_model via the
+                # CURRENT write-intent, which can disagree with the model
+                # this SAME migration just resolved via resolve_write_
+                # embedding_model above. is_conformant_collection_name
+                # decides nothing about WHICH kwargs to pass (both
+                # branches pass the identical explicit set); it exists
+                # only to name the shape distinction, since a pathological
+                # owner_id CollectionName.__post_init__ does not validate
+                # could in principle render a string the regex rejects
+                # even though conformant_name itself is a valid,
+                # fully-derived object -- the code review round 2 fix
+                # (nexus-aotql) closed the actual defect, a bare
+                # register_collection(conformant) in this else branch that
+                # dropped back to name-parsing.
+                register_kwargs = {
+                    "content_type": conformant_name.content_type,
+                    "owner_id": conformant_name.owner_id,
+                    "embedding_model": conformant_name.embedding_model,
+                    "model_version": f"v{conformant_name.model_version}",
+                }
                 if is_conformant_collection_name(conformant):
-                    # nexus-ft04v.27: reuse the CollectionName the render
-                    # above already built instead of parsing the very name
-                    # it just rendered back apart. EXPLICIT kwargs, never
-                    # bare name-derivation: the generic seam derivation
-                    # would recompute embedding_model via the CURRENT
-                    # write-intent, which can disagree with the model this
-                    # SAME migration just resolved via resolve_write_
-                    # embedding_model above.
                     ensure_collection_registered(
-                        conformant,
-                        registrar=lambda: w,
-                        kwargs={
-                            "content_type": conformant_name.content_type,
-                            "owner_id": conformant_name.owner_id,
-                            "embedding_model": conformant_name.embedding_model,
-                            "model_version": f"v{conformant_name.model_version}",
-                        },
+                        conformant, registrar=lambda: w, kwargs=register_kwargs,
                     )
                 else:
-                    ensure_collection_registered(conformant, registrar=lambda: w)
+                    ensure_collection_registered(
+                        conformant, registrar=lambda: w, kwargs=register_kwargs,
+                    )
             except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning(
                     "phase4_register_collection_failed_after_rename",

@@ -3177,6 +3177,52 @@ class TestWhh61MigrationCarve:
             model_version="v1",
         )
 
+    def test_migrate_fallback_profile_mismatch_raises_click_exception_with_remedy(self):
+        """nexus-aotql review round 2 (BLOCKER): the registration loop's
+        default ``--target-model`` is voyage-only (``voyage_model_for_
+        collection``), so a local-mode box whose engine profile is still
+        bge-shaped hits ``EmbeddingProfileMismatchError`` on the very
+        first target. Before this fix that escaped the loop as a raw
+        exception (a click.testing.CliRunner traceback); it must instead
+        render as a clean ClickException naming the collection, the
+        engine's ACTUAL profile model, and the remedy (pass
+        ``--target-model <profile model>``), and no document may be
+        re-pointed for a collection whose registration never landed."""
+        from unittest.mock import MagicMock, patch
+
+        import nexus.catalog.factory as factory_mod
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.cli import main
+
+        entry = MagicMock()
+        entry.tumbler = "1.1.1"
+        cat = MagicMock(spec=HttpCatalogClient)
+        cat.get_collection.return_value = {"name": "docs__default", "content_type": "docs"}
+        cat.list_by_collection.return_value = [entry]
+        writer = MagicMock(spec=[*CATALOG_WRITE_OPS, "close"])
+
+        class _BgeOnlyProfile:
+            def embedding_profile(self) -> list[dict]:
+                return [{
+                    "content_type": "docs",
+                    "embedding_model": "bge-base-en-v15-768",
+                    "dimension": 768,
+                }]
+
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=writer), \
+                patch.object(factory_mod, "make_catalog_reader", lambda: _BgeOnlyProfile()):
+            result = CliRunner().invoke(
+                main, ["catalog", "migrate-fallback", "docs__default", "--yes"],
+            )
+
+        assert result.exit_code != 0, result.output
+        assert "Traceback (most recent call last)" not in result.output, result.output
+        assert "docs__1-1__voyage-context-3__v1" in result.output, result.output
+        assert "bge-base-en-v15-768" in result.output, result.output
+        assert "--target-model" in result.output, result.output
+        writer.update_documents_collection_batch.assert_not_called()
+
 
 class TestWhh61MaintenanceCarve:
     """Contract pins for the nexus-whh61.4 maintenance carve.

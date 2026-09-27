@@ -203,22 +203,49 @@ def migrate_fallback_cmd(
     # writer reuses this command's own writer -- its ``.close()`` (called
     # once per name by the seam) is a documented no-op on the shared
     # service-catalog handle it wraps, safe to call from a loop.
-    from nexus.corpus import ensure_collection_registered  # noqa: PLC0415  — command-local import (nexus.corpus)
+    from nexus.corpus import (  # noqa: PLC0415  — command-local import (nexus.corpus)
+        EmbeddingProfileMismatchError,
+        ensure_collection_registered,
+    )
 
     targets_seen: set[str] = set()
     for _, target in proposals:
         if target in targets_seen:
             continue
-        ensure_collection_registered(
-            target,
-            registrar=lambda: writer,
-            kwargs={
-                "content_type": content_type,
-                "owner_id": target_owners[target],
-                "embedding_model": target_model,
-                "model_version": target_version,
-            },
-        )
+        try:
+            ensure_collection_registered(
+                target,
+                registrar=lambda: writer,
+                kwargs={
+                    "content_type": content_type,
+                    "owner_id": target_owners[target],
+                    "embedding_model": target_model,
+                    "model_version": target_version,
+                },
+            )
+        except EmbeddingProfileMismatchError as exc:
+            # nexus-aotql review round 2 (BLOCKER): --target-model defaults
+            # to a voyage token (voyage_model_for_collection above), so a
+            # local-mode box whose engine profile is still bge-shaped hits
+            # this on the FIRST target -- before this fix the seam's
+            # EmbeddingProfileMismatchError escaped raw mid-loop, with an
+            # arbitrary subset of targets_seen already registered and NO
+            # document re-pointed yet (update_documents_collection_batch
+            # runs after this whole loop). Refuse cleanly, naming the
+            # collection, the engine's actual profile model, and the
+            # concrete remedy, before any per-document re-point for
+            # `source` happens.
+            raise click.ClickException(
+                f"{target!r}: this install's configured intent is "
+                f"{exc.configured_model!r}, but the engine's embedding "
+                f"profile for content_type={exc.content_type!r} still says "
+                f"{exc.engine_profile_model!r}. Re-run with "
+                f"--target-model {exc.engine_profile_model!r} to migrate "
+                f"onto the model the engine currently profiles, or restart "
+                f"the service to adopt the configured intent "
+                f"(`nx daemon service stop && nx daemon service start`). "
+                f"No document has been re-pointed for {source!r} yet."
+            ) from exc
         targets_seen.add(target)
 
     # nexus-qpet.3: single flock + single commit for the per-doc
