@@ -74,8 +74,8 @@ class _FakeHttpCatalogClient:
     def find(self, query, content_type=None):
         return []  # fresh box: no ghost entries to reconcile
 
-    def find_all(self, query, content_type=None):
-        return []  # the ghost-by-title lookup reads every match (nexus-3bafq)
+    def find_by_title_exact(self, title, content_type=None):
+        return []  # the ghost-by-title lookup reads every exact match (nexus-3bafq)
 
     def by_source_uri(self, uri):
         return None  # fresh box: nexus-sdp0u reconcile lookup also misses
