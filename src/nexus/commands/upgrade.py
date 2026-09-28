@@ -641,6 +641,9 @@ def _emit_name_vs_embed_dim_advisory() -> None:
     """Run the name-vs-embed-dim doctor check and emit a one-liner
     if any collections are mislabeled. Silent on PASS, error-tolerant
     (T3 may be unavailable on a freshly-migrated install)."""
+    # nexus-5z0us: this probes one chunk per collection (~15s on a
+    # 100-collection tenant); say so rather than sit silent.
+    click.echo("Checking collection names against their vector dimensions…", err=True)
     try:
         from nexus.commands.catalog_cmds.doctor import _run_name_vs_embed_dim  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         report = _run_name_vs_embed_dim()
