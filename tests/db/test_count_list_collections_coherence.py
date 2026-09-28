@@ -113,6 +113,27 @@ def test_count_list_collections_and_reindex_existence_agree_on_mixed_dim_collect
         metadatas=[{"title": "w84ho-own-dim", "chunk_text_hash": own_chash}],
     )
 
+    # nexus-wbfpw.10 (RDR-192 Step 5 live(c), engine fc99baac9): the
+    # dim-agnostic parity this test proves ((a) below) is itself a
+    # retrieval-inventory property -- list_collections()'s per-collection
+    # count is now backed by LIVE chunk_count, not stored_count, so a chunk
+    # with no catalog manifest owner is invisible to it even though
+    # count()/store-get still see it. Give both rows a real owner via the
+    # same catalog_store_hook_tracked + store_put_manifest_direct path the
+    # real indexing path uses (mirrors
+    # tests/test_wbfpw2_client_liveness_matrix.py), so the dim-agnostic
+    # invariant is exercised against a realistically-owned mixed-dim
+    # collection rather than one only a maintenance read could see.
+    from nexus.catalog.store_hook import catalog_store_hook_tracked, store_put_manifest_direct
+
+    own_tumbler, _created = catalog_store_hook_tracked(
+        title="w84ho-own-dim", doc_id=own_chash, collection_name=_COLLECTION,
+    )
+    assert own_tumbler, "catalog document registration must succeed for the own-dim row"
+    store_put_manifest_direct(
+        own_tumbler, [{"chunk_text_hash": own_chash}], collection=_COLLECTION,
+    )
+
     present = client.get_collection(_COLLECTION).get(ids=[own_chash], include=[])
     assert own_chash in (present.get("ids") or []), (
         "precondition: the own-dim row was actually written by the real "
@@ -130,6 +151,13 @@ def test_count_list_collections_and_reindex_existence_agree_on_mixed_dim_collect
         f"VALUES ('{tenant}', '{_COLLECTION}', decode('{foreign_chash}', 'hex'), "
         f"'foreign-dim chunk text', '{vec_1024}'::nexus.vector, '{{}}'::jsonb, now())"
     ))
+    foreign_tumbler, _created = catalog_store_hook_tracked(
+        title="w84ho-foreign-dim", doc_id=foreign_chash, collection_name=_COLLECTION,
+    )
+    assert foreign_tumbler, "catalog document registration must succeed for the foreign-dim row"
+    store_put_manifest_direct(
+        foreign_tumbler, [{"chunk_text_hash": foreign_chash}], collection=_COLLECTION,
+    )
 
     # ── (a) count() <-> list_collections() cross-endpoint agreement ────────
     total = client.count(_COLLECTION)

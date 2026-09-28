@@ -261,6 +261,31 @@ def seeded_client(java_service):
         chash_to_doc[chash] = d["id"]
     client.upsert_chunks(_COLLECTION, ids, docs,
                          metadatas=[{"doc_id": d["id"]} for d in corpus])
+
+    # RDR-192 Step 5 live(c) (nexus-wbfpw.10, engine fc99baac9): every
+    # content read -- get_embeddings included -- now returns only chunks
+    # with a catalog_document_chunks manifest row owned by a live
+    # catalog_documents row in the same collection. This fixture's whole
+    # purpose is a REAL retrieval corpus for search/topic-boost gates
+    # downstream, so the judged docs need real ownership, not a
+    # maintenance include_non_live escape hatch -- registering each one
+    # through the same catalog_store_hook_tracked + store_put_manifest_
+    # direct path the real indexing path uses (mirrors
+    # tests/test_wbfpw2_client_liveness_matrix.py's pattern).
+    from nexus.catalog.store_hook import catalog_store_hook_tracked, store_put_manifest_direct
+
+    for chash, d in zip(ids, corpus, strict=True):
+        owner_tumbler, _created = catalog_store_hook_tracked(
+            title=f"ndcg-drift-{d['id']}", doc_id=chash, collection_name=_COLLECTION,
+        )
+        assert owner_tumbler, (
+            f"catalog document registration must succeed for judged doc "
+            f"{d['id']!r} against the real engine substrate"
+        )
+        store_put_manifest_direct(
+            owner_tumbler, [{"chunk_text_hash": chash}], collection=_COLLECTION,
+        )
+
     yield client, chash_to_doc
     for k, v in saved.items():
         if v is None:
