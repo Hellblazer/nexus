@@ -71,7 +71,11 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
 
 
 @collection.command("list")
-def list_cmd() -> None:
+@click.option(
+    "--all", "show_all", is_flag=True,
+    help="Also list retired names (a rename's old name) that hold no chunks.",
+)
+def list_cmd(show_all: bool) -> None:
     """List T3 collections: live and stored chunk counts, and the catalog's
     columns (content type, owner, embedding model, dimension, lifecycle state).
 
@@ -80,6 +84,11 @@ def list_cmd() -> None:
     name disagrees with its columns is visible rather than hidden behind a
     consistent-looking name. A collection with no catalog row prints ``-``
     in every column; a catalog row with no chunks prints 0.
+
+    nexus-sis0m.3: a rename keeps the old name's catalog row as a retired
+    tombstone (superseded_by names the new one). An empty tombstone is not a
+    collection and is left out unless ``--all``; one still holding chunks is
+    listed, with STATE ``superseded-><new name>``.
     """
     # nexus-sis0m.1: strict, so a service error is reported rather than read
     # as "No collections found." at exit 0.
@@ -90,7 +99,14 @@ def list_cmd() -> None:
     # chunks with no manifest owner, which shape and catalog verify count.
     stored = {c["name"]: c.get("stored_count", c.get("count", 0)) for c in listed}
     rows, rows_error = _catalog_collection_rows()
-    names = sorted(set(counts) | set(rows))
+
+    def _successor(name: str) -> str:
+        return str(rows.get(name, {}).get("superseded_by") or "")
+
+    names = sorted(
+        n for n in set(counts) | set(rows)
+        if show_all or not _successor(n) or stored.get(n, 0)
+    )
     if not names:
         click.echo("No collections found.")
         return
@@ -98,6 +114,8 @@ def list_cmd() -> None:
         click.echo(f"catalog columns could not be read ({rows_error}); names and counts only")
     width = max(len(n) for n in names)
     def _cell(name: str, key: str) -> str:
+        if key == "lifecycle_state" and _successor(name):
+            return f"superseded->{_successor(name)}"
         val = rows.get(name, {}).get(key)
         return "-" if val is None or val == "" else str(val)
 
@@ -210,6 +228,13 @@ def info_cmd(name: str) -> None:
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
+        # nexus-sis0m.3: a renamed collection's old name keeps a retired
+        # catalog row naming its successor; say where it went.
+        successor = str(_catalog_collection_rows()[0].get(name, {}).get("superseded_by") or "")
+        if successor:
+            raise click.ClickException(
+                f"collection {name!r} was renamed to {successor} — use: nx collection info {successor}"
+            )
         raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
 
     # nexus-sis0m F8: the collection's own catalog row names its model. The
