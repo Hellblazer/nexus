@@ -252,7 +252,31 @@ feed it too.
 - Phase 3: `upsert-chunks` without an owner is refused with a message naming
   the replacement route.
 
+## Decisions (Sam, 2026-09-28)
+
+1. **Refuse ownerless writes at the end.** Phase 3 stays: once the client
+   floor carrying the Phase 2 migration is the paired release,
+   `/v1/vectors/upsert-chunks` and `/v1/vectors/store-put` refuse writes that
+   name no owner.
+2. **Note paths need no engine change** (settled by checking, not by
+   decision). `write_many` with chunks already sets the same
+   `X-Nexus-Usage-Tokens` header `store-put` does (`CatalogHandler.java:1257`),
+   and no client code reads that header, so `store_put`, `nx store put`,
+   `nx memory promote` and recovery import can move onto `write_many` plus
+   chunks as it is.
+3. **Gap 4: stop writing identity-less chunks, and find why they lack
+   identity.** In `nx index repo` every file should get a catalog document, so
+   an identity-less file is an upstream registration gap. The orphan route at
+   `indexer.py:5587` becomes a counted event that writes no chunks, and the
+   registration gap it exposes is fixed. Ghost documents are not used.
+4. **Own RDR.** RDR-223 stays separate from RDR-222.
+5. **Keep nexus-wbfpw.28's registration rollback.** Note registration stays a
+   separate request before the chunk write; a failed first put's zero-chunk
+   document is rolled back as today. No register-if-absent on `write_many`.
+
 ## Open Questions (for Sam)
+
+All five answered above (2026-09-28).
 
 1. Is the Phase 3 refusal wanted, or is migrating the clients enough?
 2. Can the note paths use `write_many` plus chunks as it is, or do they need
@@ -264,6 +288,9 @@ feed it too.
    registration into the chunk-and-manifest transaction?
 
 ## Revision History
+
+- 2026-09-28: Sam's answers to the five open questions recorded under
+  Decisions.
 
 - 2026-09-28: nexus-76's store-path and import review folded in: F-5,
   client-supplied embeddings, explicit positions and `append_many`, the
