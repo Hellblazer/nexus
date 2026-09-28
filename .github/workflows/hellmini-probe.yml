@@ -61,6 +61,16 @@ jobs:
           git --version || echo "MISSING: git"
           gh --version || echo "MISSING: gh"
           jq --version || echo "MISSING: jq"
+          echo "=== brew (needed by scripts/build_pg_bundle.sh: brew install flex bison) ==="
+          brew --version || echo "MISSING: brew"
+          echo "-- brew prefix / ownership --"
+          brew --prefix 2>&1 || true
+          ls -ld "$(brew --prefix 2>/dev/null)" 2>&1 || true
+          echo "-- flex/bison already present? --"
+          brew list flex bison 2>&1 || echo "flex/bison not yet installed (brew install would run at build time)"
+          echo "=== RUNNER_TOOL_CACHE (setup-graalvm/setup-uv persistence across jobs) ==="
+          echo "RUNNER_TOOL_CACHE=${RUNNER_TOOL_CACHE:-<unset>}"
+          [ -n "${RUNNER_TOOL_CACHE:-}" ] && ls -ld "$RUNNER_TOOL_CACHE" 2>&1
 
       - name: Docker smoke (hello-world via colima)
         run: docker run --rm hello-world
