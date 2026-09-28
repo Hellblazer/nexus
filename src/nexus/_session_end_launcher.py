@@ -52,6 +52,26 @@ inline there, as this module used to, spent the hook's whole budget on it,
 and Claude Code on Windows reported "SessionEnd hook
 [nx-session-end-launcher] failed: Hook cancelled". Only if the detached
 spawn fails does the cleanup run synchronously, so it is never skipped.
+
+The parent does no network work after that spawn, on Windows, ever --
+neither on the successful-spawn path nor the inline-fallback one. The
+qwentescence live run (nexus-34f7r, 2026-09-27; T2 nexus/nexus-34f7r-
+live-windows-closing-bar-2026-09-27) found that a POST-spawn call to
+:func:`_print_service_tier_summary` in the parent takes up to ~2.4s
+whenever ``CLAUDE_CODE_SESSION_ID`` is set (always, under Claude Code)
+against an unreachable service -- overrunning the ~1.6s window Claude
+Code allows before it cancels the hook. The resulting "Hook cancelled"
+kill walked the process tree and took the detached cleanup child down
+with it, even though its ``CREATE_BREAKAWAY_FROM_JOB`` spawn had
+succeeded: with the service answering at once the hook completed in
+356ms and the child outlived ``claude.exe`` by 52s, but with no service
+reachable the child died in the same millisecond as the launcher. So
+:func:`_print_service_tier_summary` is never called on Windows at all --
+the tier summary is informational, and the child's stdio is the null
+device, so moving the call into the child would show it to nobody.
+**User-visible cost: no tier summary line at SessionEnd on native
+Windows.** POSIX behaviour is unchanged -- the double-forked parent
+there still prints it, post-fork, per nexus-ov13k below.
 """
 from __future__ import annotations
 
@@ -82,12 +102,31 @@ _CREATE_BREAKAWAY_FROM_JOB: int = 0x01000000
 
 
 def _run_session_end_synchronously() -> None:
-    """Import nexus.hooks and call session_end_flush; swallow exceptions.
+    """Configure hook logging, import nexus.hooks, call session_end_flush;
+    swallow exceptions.
 
-    Runs in the fully detached grandchild, so exceptions are no longer
-    observable by Claude Code -- they must not escape and crash the
-    daemon. Logging goes through the structlog pipeline nexus.hooks
-    already configures (RotatingFileHandler under ~/.config/nexus/logs).
+    Runs in the fully detached grandchild (POSIX) or the detached child
+    (Windows, nexus-34f7r), so exceptions are no longer observable by
+    Claude Code -- they must not escape and crash the daemon.
+
+    Configures hook-mode file logging FIRST, via
+    :func:`nexus._hook_runtime._io.configure_hook_logging` (nexus-34f7r
+    qwentescence live run, T2 nexus/nexus-34f7r-live-windows-closing-bar-
+    2026-09-27). A prior version of this docstring claimed "logging goes
+    through the structlog pipeline nexus.hooks already configures" -- that
+    was false: nothing upstream of this call ever configures structlog for
+    this process, on either platform, so every session_end log line
+    (including the ones this function's own callees emit on failure) fell
+    through to structlog's unconfigured default, which writes to
+    **stdout** -- and this child's stdout is the null device (see
+    :func:`_daemonize_and_run` / :func:`_spawn_detached_cleanup`), so
+    nothing ever landed anywhere. ``configure_hook_logging`` is
+    best-effort (never raises) and attaches the same
+    ``<config>/logs/hook.log`` RotatingFileHandler a hook verb gets. It is
+    called only HERE, never on the POSIX pre-fork path (the module
+    docstring's pre-fork budget invariant): this whole function already
+    runs off that path, in the already-detached child, so its ~0.06s
+    import cost is paid where nothing is waiting on it.
 
     RDR-094 Phase C: dispatches to ``session_end_flush`` (storage-only)
     rather than ``session_end``. Chroma teardown is owned by the MCP
@@ -107,6 +146,8 @@ def _run_session_end_synchronously() -> None:
     below -- see ``nexus._session_end_census``'s module docstring for the
     full reasoning on why no visible line was added.
     """
+    from nexus._hook_runtime._io import configure_hook_logging  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import); off the POSIX pre-fork path, see docstring above
+    configure_hook_logging()
     try:
         from nexus import hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         hooks.session_end_flush()
@@ -227,10 +268,23 @@ def _spawn_detached_cleanup() -> bool:
     The child's stdio is the null device, as the grandchild's is on POSIX,
     because Claude Code may close the hook's handles while it is exiting.
 
-    WHAT IS NOT MEASURED: whether the child outlives Claude Code's own exit
-    on Windows. That depends on the job object Claude Code runs hooks in,
-    which this code cannot see; the breakaway attempt is the best it can do
-    without knowing. The qwentescence check on nexus-34f7r settles it.
+    WHAT WAS MEASURED (qwentescence live run, nexus-34f7r, 2026-09-27; T2
+    nexus/nexus-34f7r-live-windows-closing-bar-2026-09-27): with the hook
+    returning inside its budget, the detached child outlived ``claude.exe``
+    by 52.4s and completed its own work (two expire POSTs to the service)
+    after Claude Code had already exited -- the breakaway spawn does what
+    it is meant to. With the hook cancelled instead (Claude Code kills it
+    at about 1.6s when the parent runs long past the spawn -- see the
+    module docstring), the child died in the SAME millisecond as the
+    launcher, with the same exit code, even though its breakaway spawn had
+    succeeded: consistent with a process-tree kill that walks parent pids
+    and reaches the child through the still-living parent, not with a job
+    object closing. That is exactly why :func:`main`'s no-fork branch does
+    no network work in the parent after a successful spawn -- once the
+    hook is cancelled the child is not safe regardless of breakaway.
+    NOT MEASURED: the no-breakaway fallback arm (``base`` without
+    ``_CREATE_BREAKAWAY_FROM_JOB``) below -- breakaway succeeded on every
+    attempt in that run, so the fallback was never exercised.
     """
     import subprocess  # noqa: PLC0415 — deferred: off the POSIX pre-fork path (module docstring)
     import warnings  # noqa: PLC0415 — deferred with subprocess, for the same reason
@@ -259,6 +313,40 @@ def _spawn_detached_cleanup() -> bool:
     return False
 
 
+def _emit_parent_debug(event: str, **fields: object) -> None:
+    """Emit one DEBUG-level structlog event, safe to call from the
+    launcher's PARENT process, where structlog is never configured — the
+    module's pre-fork budget rule forbids importing ``nexus.logging_setup``
+    ahead of the fork/spawn dispatch (see the module docstring), and this
+    helper exists precisely because :func:`_print_service_tier_summary`
+    runs in that unconfigured parent too.
+
+    ``structlog.get_logger(__name__).debug(...)`` in an unconfigured
+    process falls through to structlog's default ``PrintLoggerFactory``,
+    which writes to **stdout** — the hook's protocol channel, not a log
+    surface. The qwentescence live run (nexus-34f7r, T2 nexus/nexus-34f7r-
+    live-windows-closing-bar-2026-09-27) caught exactly this: Claude Code
+    logged "Hook output does not start with {" from this module's own
+    debug call, unconfigured, in the parent. This binds a throwaway
+    logger straight to stderr, independent of global structlog state —
+    mirrors ``nexus.logging_setup.emit_import_time_warning``'s approach,
+    at DEBUG rather than WARNING, since "service unreachable" is routine
+    here, not import-time noise.
+    """
+    import structlog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+
+    structlog.wrap_logger(
+        structlog.PrintLogger(file=sys.stderr),
+        processors=[
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso", utc=True),
+            structlog.processors.KeyValueRenderer(
+                key_order=["event", "timestamp", "level"], drop_missing=True,
+            ),
+        ],
+    ).debug(event, **fields)
+
+
 def _print_service_tier_summary() -> None:
     """Print the Phase-1C tier-write summary from the engine — POST-fork.
 
@@ -274,10 +362,13 @@ def _print_service_tier_summary() -> None:
     dispatch (review Critical: the mixin's retrying transport has a 20-50s
     worst case that the client timeout kwarg does not bound). Uses the
     single-attempt ``query_tier_writes_once`` — one raw request, hard 2s
-    timeout, no gateway backoff, no lease-wait. Failure is silent on stderr
-    (session close must not noise-fail) but leaves a structured debug event
-    (review Significant: an environment whose summaries fail forever must be
-    diagnosable from the logs).
+    timeout, no gateway backoff, no lease-wait. Failure is silent on stdout
+    (session close must not noise-fail the hook's protocol channel) but
+    leaves a structured DEBUG event on stderr, via :func:`_emit_parent_debug`
+    — not the ambient ``structlog.get_logger(__name__)``, which in this
+    unconfigured parent process falls through to stdout (review Significant:
+    an environment whose summaries fail forever must be diagnosable from
+    the logs; nexus-34f7r's qwentescence live run caught this exact leak).
     """
     try:
         from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
@@ -338,8 +429,7 @@ def _print_service_tier_summary() -> None:
         sys.stderr.flush()
     except Exception as exc:  # noqa: BLE001 — boundary catch; session close must never break on telemetry
         try:
-            import structlog  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-            structlog.get_logger(__name__).debug(
+            _emit_parent_debug(
                 "session_end_tier_summary_service_unavailable",
                 error=str(exc),
             )
@@ -354,10 +444,13 @@ def main() -> None:
     # exact pre-fork SIGTERM race the old ordering had to guard against.
     if not hasattr(os, "fork"):
         # Windows: a detached child is the no-fork double-fork. Inline only
-        # when the spawn itself failed, so cleanup is never skipped.
+        # when the spawn itself failed, so cleanup is never skipped. The
+        # tier summary is never called here, in either case — see the
+        # module docstring's Windows paragraph for why (a POST-spawn
+        # network read in the parent is exactly what let a cancelled hook
+        # take the detached child down with it, nexus-34f7r).
         if not _spawn_detached_cleanup():
             _run_session_end_synchronously()
-        _print_service_tier_summary()
         return
     _daemonize_and_run()
     # POST-fork (parent side): the cleanup child is already dispatched, so a

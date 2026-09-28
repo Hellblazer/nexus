@@ -228,6 +228,14 @@ def test_main_without_fork_spawns_detached_and_falls_back_inline(
     """On platforms without ``os.fork`` (Windows) the cleanup goes to a
     detached child so the hook returns inside its budget (nexus-34f7r).
     Inline only when that spawn failed, so cleanup is never skipped.
+
+    Also pins the qwentescence-live-run fix: ``_print_service_tier_summary``
+    -- a network read -- must NEVER be called from this branch, in either
+    case. Reverted, the pre-fix code called it unconditionally after the
+    if/else, so ``mock_summary.assert_not_called()`` fails against that
+    code (T2 nexus/nexus-34f7r-live-windows-closing-bar-2026-09-27: that
+    call took up to ~2.4s and got the whole hook, and the detached child
+    with it, killed by Claude Code's ~1.6s cancel).
     """
     import nexus._session_end_launcher as launcher
 
@@ -244,10 +252,75 @@ def test_main_without_fork_spawns_detached_and_falls_back_inline(
                      side_effect=lambda: calls.append("sync")),
         patch.object(launcher, "_daemonize_and_run",
                      side_effect=lambda: calls.append("daemon")),
-        patch.object(launcher, "_print_service_tier_summary"),
+        patch.object(launcher, "_print_service_tier_summary") as mock_summary,
     ):
         launcher.main()
     assert calls == expected
+    mock_summary.assert_not_called()
+
+
+def test_main_windows_inline_fallback_writes_nothing_to_stdout(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """nexus-34f7r qwentescence live run (T2 nexus/nexus-34f7r-live-windows-
+    closing-bar-2026-09-27): Claude Code logged "Hook output does not
+    start with {" from a structlog debug line the (unconfigured) launcher
+    parent wrote straight to stdout -- the hook's protocol channel, not a
+    log surface.
+
+    Exercises the REAL Windows-shaped inline-fallback path end to end
+    (spawn fails, so ``main()`` runs ``_run_session_end_synchronously()``
+    for real, in this process) with nothing mocked below ``main()`` except
+    the platform switch, the spawn outcome, and the config dir. With no
+    ambient session id (the file's autouse fixture) ``session_end_flush``
+    fails and logs through ``nexus.hooks``' own ambient
+    ``structlog.get_logger()`` -- exactly the kind of call this bead's
+    fix must keep off stdout. Reverted (drop the ``configure_hook_logging``
+    call this bead adds to ``_run_session_end_synchronously``), that event
+    has nowhere configured to go and structlog's default
+    ``PrintLoggerFactory`` dumps it to stdout, failing this assertion.
+    """
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "config"))
+
+    import nexus._session_end_launcher as launcher
+
+    with (
+        patch("nexus._session_end_launcher.hasattr", return_value=False),
+        patch.object(launcher, "_spawn_detached_cleanup", return_value=False),
+    ):
+        launcher.main()
+
+    captured = capsys.readouterr()
+    assert captured.out == "", f"structlog output leaked to stdout: {captured.out!r}"
+
+
+def test_run_session_end_synchronously_configures_hook_file_logging(
+    tmp_path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-34f7r: neither the POSIX grandchild nor the Windows detached
+    child ever called ``configure_logging``, so the "session_end log line
+    lands" half of the bead's closing bar (T2 nexus/nexus-34f7r-live-
+    windows-closing-bar-2026-09-27, Surprise 2) could not be met on any
+    platform -- structlog's unconfigured default writes to stdout, and
+    this function's caller always redirects stdout to the null device.
+    ``_run_session_end_synchronously`` must configure hook-mode file
+    logging before doing any cleanup work, so events land in
+    ``<config>/logs/hook.log``. Reverted (drop the
+    ``configure_hook_logging()`` call), no such file is ever created and
+    this assertion fails.
+    """
+    config_dir = tmp_path / "config"
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(config_dir))
+
+    import nexus._session_end_launcher as launcher
+
+    launcher._run_session_end_synchronously()
+
+    log_path = config_dir / "logs" / "hook.log"
+    assert log_path.exists(), (
+        "the cleanup path must call configure_hook_logging so structlog "
+        "output lands in hook.log rather than stdout's unconfigured default"
+    )
 
 
 def test_spawn_detached_cleanup_asks_for_breakaway_first_then_retries_without() -> None:
@@ -534,6 +607,51 @@ def test_print_service_tier_summary_unconfigured_uses_static_token() -> None:
 
     assert captured["token"] == "static-service-token"
     assert captured["base_url"] == "http://127.0.0.1:9999"
+
+
+def test_print_service_tier_summary_exception_writes_no_stdout(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """POSIX-parent counterpart of the Windows stdout tests above:
+    ``_print_service_tier_summary`` runs in the launcher's PARENT process,
+    where nothing has ever called ``nexus.logging_setup.configure_logging``
+    -- the module's pre-fork budget rule forbids it pre-fork, and nothing
+    configures it post-fork either. Its except block used to call the
+    ambient ``structlog.get_logger(__name__).debug(...)``, which in an
+    unconfigured process falls through to structlog's default
+    ``PrintLoggerFactory`` -- stdout, the hook's protocol channel. The
+    qwentescence live run (nexus-34f7r, T2 nexus/nexus-34f7r-live-windows-
+    closing-bar-2026-09-27, Surprise 3) caught Claude Code logging "Hook
+    output does not start with {" from exactly this call.
+
+    ``structlog.reset_defaults()`` forces the library's TRUE unconfigured
+    state (``PrintLoggerFactory`` -> stdout) for this call, regardless of
+    whatever an earlier test in this session may have left the stdlib
+    logging bridge pointed at -- otherwise a leaked bridge to stderr from
+    an unrelated ``configure_logging`` call elsewhere in the suite would
+    make this assertion pass whether or not the fix is present, which
+    defeats the point of a regression test. ``tests/conftest.py``'s
+    autouse ``_restore_structlog_after_test`` snapshots the ambient config
+    on fixture SETUP (before this reset) and restores exactly that on
+    teardown, so this reset is local to this test's body.
+    """
+    import structlog
+
+    import nexus._session_end_launcher as launcher
+
+    structlog.reset_defaults()
+
+    with (
+        patch("nexus.session.resolve_active_session_id", return_value="sess-abc"),
+        patch(
+            "nexus.db.service_endpoint.resolve_service_endpoint",
+            side_effect=RuntimeError("no endpoint"),
+        ),
+    ):
+        launcher._print_service_tier_summary()  # must not raise
+
+    captured = capsys.readouterr()
+    assert captured.out == "", f"structlog output leaked to stdout: {captured.out!r}"
 
 
 def test_hooks_json_session_end_drops_detach_fallback() -> None:
