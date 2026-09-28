@@ -7425,7 +7425,7 @@ _MAX_TRACKED_RUN_IDS = 5000
 _MAX_TRACKED_UNSTAMPED = 1000
 
 
-def _check_stale_indexing_runs() -> list[HealthResult]:
+def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResult]:
     """Name documents stranded in ``index_state='indexing'`` beyond a
     threshold (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
     substantive-critic on .3's client diff, T2 nexus/5xn3k3-critique-2026-08-02).
@@ -7524,7 +7524,7 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
         # nexus-ft7eg: share this walk with _check_next_seq_drift
         # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
         # doctor currently pays for the full-corpus walk TWICE per run.
-        for entry in cat.all_documents(limit=0):
+        for entry in (documents if documents is not None else cat.all_documents(limit=0)):
             reported = bool(getattr(entry, "index_state_reported", True))
             state = getattr(entry, "index_state", None)
             if not reported:
@@ -8277,7 +8277,23 @@ def _check_next_seq_drift() -> list[HealthResult]:
     )]
 
 
-def _check_failed_runs_hidden_chunks() -> list[HealthResult]:
+def _walk_documents_for_doctor() -> list | None:
+    """Every catalog document, walked once for the rows that share it, or
+    ``None`` when the walk cannot run (each row then walks and degrades on
+    its own)."""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return None
+        return list(cat.all_documents(limit=0))
+    except Exception as exc:  # noqa: BLE001 — best-effort: each row degrades on its own
+        _log.debug("doctor_document_walk_failed", error=str(exc))
+        return None
+
+
+def _check_failed_runs_hidden_chunks(documents: list | None = None) -> list[HealthResult]:
     """Name failed documents whose stored chunks have no manifest owner
     (nexus-0ntxj).
 
@@ -8288,7 +8304,9 @@ def _check_failed_runs_hidden_chunks() -> list[HealthResult]:
     by hand with ``nx catalog reconcile``. ``_fence_fail`` now heals the
     document at failure time; this row finds what that could not (a run
     killed outright, a heal that failed, anything written before the
-    heal existed).
+    heal existed). Like the heal, it covers documents with no manifest yet
+    (a failed first run); a failed re-index keeps its old, readable
+    manifest and is not counted.
 
     Walks the corpus for ``index_state='failed'`` documents, then runs the
     shared heal core in dry-run mode over just those, so the count is the
@@ -8305,7 +8323,7 @@ def _check_failed_runs_hidden_chunks() -> list[HealthResult]:
         if cat is None:
             return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
         failed = [
-            e for e in cat.all_documents(limit=0)
+            e for e in (documents if documents is not None else cat.all_documents(limit=0))
             if getattr(e, "index_state", None) == "failed"
         ]
         if not failed:
@@ -8838,10 +8856,14 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # nexus-5xn3k.6 (bead-text amendment): a document's fence never
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
-    results.extend(_check_stale_indexing_runs())
+    # nexus-0ntxj: one corpus walk feeds both index-run rows (the second
+    # row would otherwise add a walk; nexus-ft7eg tracks the others). A
+    # failed walk here passes None and each check walks, and degrades, alone.
+    _index_run_docs = _walk_documents_for_doctor()
+    results.extend(_check_stale_indexing_runs(_index_run_docs))
     # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
     # hidden by live(c). Degrades internally.
-    results.extend(_check_failed_runs_hidden_chunks())
+    results.extend(_check_failed_runs_hidden_chunks(_index_run_docs))
     # nexus-rte90: PDF chunks left with the upload placeholder metadata
     # (nexus-w94eo). Degrades internally.
     results.extend(_check_pdf_stub_metadata())

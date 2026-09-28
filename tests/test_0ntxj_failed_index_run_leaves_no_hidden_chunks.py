@@ -146,3 +146,35 @@ def test_doctor_names_unhealed_hidden_chunks_and_reconcile_repairs_them(t2_servi
     assert visible == stored
     [row] = _check_failed_runs_hidden_chunks()
     assert row.ok, row
+
+
+def test_a_failed_reindex_keeps_the_previous_content_readable(t2_service_env, tmp_path):
+    """Control for the heal's scope: a document that completed once and then
+    fails a re-index keeps its old manifest, so its old content stays
+    readable. The heal must not replace it with the failed run's chunks."""
+    from nexus.catalog.factory import make_catalog_reader
+    from nexus.doc_indexer import index_markdown
+
+    md = tmp_path / "ntxj-reindex.md"
+    md.write_text(f"# ntxj reindex v1\n\n{_BODY}\n")
+    client = HttpVectorClient(tenant=t2_service_env)
+    assert index_markdown(md, corpus="ntxj", t3=client, collection_name=_COLLECTION)
+    doc = _doc_for(md)
+    reader = make_catalog_reader()
+    assert reader is not None
+    before = [r.chash for r in sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)]
+    assert before
+
+    md.write_text(f"# ntxj reindex v2\n\n{_BODY.replace('sentence', 'clause')}\n")
+
+    def _hook_chain_dies(self, *args, **kwargs):
+        raise RuntimeError("injected: manifest hook failed after the chunk upsert")
+
+    with patch("nexus.hook_registry.HookRegistry.fire_batch", _hook_chain_dies), \
+            pytest.raises(RuntimeError):
+        index_markdown(md, corpus="ntxj", t3=client, collection_name=_COLLECTION)
+
+    after = [r.chash for r in sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)]
+    assert after == before, "the failed re-index must not replace the readable manifest"
+    visible = set(client.get_collection(_COLLECTION).get(ids=before, include=[])["ids"])
+    assert visible == set(before)
