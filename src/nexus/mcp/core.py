@@ -2930,15 +2930,19 @@ def search(
     `search_graph_hop` when the search should be scoped by catalog metadata,
     an extracted aspect field, or graph neighbours, respectively.
 
-    Returns a ranked, human-readable list of chunks by default, or, when
-    `structured=True`, `{ids, tumblers, distances, hybrid_scores, collections,
-    chunk_collections, chunk_text_hash, truncated, truncated_chars, text}`:
-    `distances` is the raw vector distance (absolute, lower is better),
-    `hybrid_scores` is what the page was SORTED by (min-max normalised within
-    this result window, higher is better, so the best of two poor hits scores
-    1.0 and so does a lone poor one -- read `distances` for a relevance
-    floor). `truncated`/`truncated_chars` say whether the text rendering cut
-    the page and by how much, and `text` is that rendering.
+    Returns a ranked, human-readable list of chunks by default, whose
+    structuredContent is `{ids, tumblers, distances, hybrid_scores,
+    collections, chunk_collections, chunk_text_hash, truncated,
+    truncated_chars, text}`. With `structured=True` it returns the bare
+    `{ids, tumblers, distances, hybrid_scores, collections,
+    chunk_collections, chunk_text_hash}` instead, with no text rendering and
+    so no `truncated`/`truncated_chars`/`text`. `distances` is the raw vector
+    distance (absolute, lower is better), `hybrid_scores` is what the page
+    was SORTED by (min-max normalised within this result window, higher is
+    better, so the best of two poor hits scores 1.0 and so does a lone poor
+    one -- read `distances` for a relevance floor). `truncated`/
+    `truncated_chars` say whether the text rendering cut the page and by how
+    much, and `text` is that rendering.
 
     Constraints:
     - Paged: `limit` <= 300 per call; advance with `offset`.
@@ -5439,7 +5443,14 @@ def store_get(
         # before the fix shipped (new-writes-only, no backfill;
         # nexus-0qc4b — absence is "unknown", not "not mineru").
         extraction_method = entry.get("extraction_method", "")
-        lines: list[str] = [f"ID:         {entry['id']}", f"Collection: {col_name}"]
+        # nexus-spujb: a note split to its model's token window reads back whole.
+        from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+        split = split_note_text(t3, col_name, [entry["id"]])
+        # nexus-zdzm5: the ID line names the NOTE (its first chunk, the id
+        # store_put reported), not whichever of its chunks the caller passed.
+        note_id = split[0] if split is not None else entry["id"]
+        lines: list[str] = [f"ID:         {note_id}", f"Collection: {col_name}"]
         if title:
             lines.append(f"Title:      {title}")
         if tags:
@@ -5448,10 +5459,6 @@ def store_get(
             lines.append(f"Indexed:    {indexed_at}")
         if extraction_method:
             lines.append(f"Extractor:  {extraction_method}")
-        # nexus-spujb: a note split to its model's token window reads back whole.
-        from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
-
-        split = split_note_text(t3, col_name, [entry["id"]])
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         lines.append("")

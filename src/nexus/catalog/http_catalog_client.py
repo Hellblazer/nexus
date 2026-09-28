@@ -2799,10 +2799,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         degraded or crashed in service mode.
         """
         result = self._post("/traverse", payload, mutates=False) or {"nodes": [], "edges": []}
-        return {
-            "nodes": [_to_entry(n) for n in result.get("nodes", [])],
-            "edges": [_link_from_dict(e) for e in result.get("edges", [])],
-        }
+        # nexus-zdzm5: a BFS past depth 1 reaches the same edge from both of
+        # its ends, and the wire carries it once per visit (the 7.64.1
+        # shakeout: links(depth=2) listed 1.11.560 -> 1.1.4325 twice). One
+        # edge per (from, to, type), one node per tumbler, first seen wins.
+        nodes: dict[str, Any] = {}
+        for n in result.get("nodes", []):
+            entry = _to_entry(n)
+            nodes.setdefault(str(entry.tumbler), entry)
+        edges: dict[tuple[str, str, str], Any] = {}
+        for e in result.get("edges", []):
+            link = _link_from_dict(e)
+            edges.setdefault((str(link.from_tumbler), str(link.to_tumbler), link.link_type), link)
+        return {"nodes": list(nodes.values()), "edges": list(edges.values())}
 
     def graph(
         self,

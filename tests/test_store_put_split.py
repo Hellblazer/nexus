@@ -193,6 +193,25 @@ def test_store_get_returns_the_whole_note_by_id_and_by_title(
     assert "Multiple documents" not in by_title
 
 
+def test_store_get_by_a_later_chunk_names_the_note_not_that_chunk(
+    inject_local_t3, catalog_env, small_window,
+) -> None:
+    """nexus-zdzm5 (7.64.1 shakeout surface C F10): store_get by a
+    non-first chunk hash reassembled the note but printed that chunk's hash
+    as its ID, so the same note read back under two IDs."""
+    col_name = t3_collection_name(SUBJECT)
+    pieces = store_hook.note_pieces(NOTE, col_name)
+    assert len(pieces) > 1
+    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
+    _store(inject_local_t3, NOTE, "long-note-later-chunk")
+
+    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+        out = store_get(_sha(pieces[-1]), SUBJECT)
+
+    assert out.splitlines()[0] == f"ID:         {_sha(pieces[0])}"
+    assert NOTE in out
+
+
 def test_store_get_reassembles_a_windowless_split_note(
     inject_local_t3, catalog_env, windowless,
 ) -> None:
