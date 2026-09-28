@@ -97,7 +97,16 @@ def _run_hook(payload: dict, env_extra: dict[str, str], bin_dir: pathlib.Path | 
 
 
 def _decision(proc: subprocess.CompletedProcess) -> dict:
+    """The envelope's ``hookSpecificOutput``, or ``{}`` for a no-decision
+    (empty stdout) verdict (nexus-452oy). A pass-through or warn case now
+    emits no ``permissionDecision`` -- bare pass-through is empty stdout
+    entirely, so ``"permissionDecision" not in out`` is the "not blocked"
+    assertion for both; ``out["permissionDecision"] == "deny"`` is
+    unaffected.
+    """
     assert proc.returncode == 0, f"hook must exit 0; got {proc.returncode}; stderr={proc.stderr}"
+    if proc.stdout == "":
+        return {}
     payload = json.loads(proc.stdout)
     return payload["hookSpecificOutput"]
 
@@ -166,7 +175,7 @@ def test_non_bash_tool_allows(tmp_env):
         {"tool_name": "Edit", "tool_input": {"file_path": "x.py"}},
         env_extra={},
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    assert "permissionDecision" not in _decision(proc)
 
 
 def test_bash_non_bd_command_allows(tmp_env):
@@ -174,7 +183,7 @@ def test_bash_non_bd_command_allows(tmp_env):
         {"tool_name": "Bash", "tool_input": {"command": "git status"}},
         env_extra={},
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    assert "permissionDecision" not in _decision(proc)
 
 
 def test_bd_close_on_non_phase_review_bead_allows(tmp_env):
@@ -184,7 +193,7 @@ def test_bd_close_on_non_phase_review_bead_allows(tmp_env):
         env_extra={},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    assert "permissionDecision" not in _decision(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +220,7 @@ def test_impl_bead_phase_step_title_allows(tmp_env):
         env_extra={},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    assert "permissionDecision" not in _decision(proc)
 
 
 def test_meta_bead_about_phase_review_gate_skill_allows(tmp_env):
@@ -227,7 +236,7 @@ def test_meta_bead_about_phase_review_gate_skill_allows(tmp_env):
         env_extra={},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    assert "permissionDecision" not in _decision(proc)
 
 
 def test_impl_bead_description_mentioning_phase_review_gate_allows(tmp_env):
@@ -244,7 +253,7 @@ def test_impl_bead_description_mentioning_phase_review_gate_allows(tmp_env):
         env_extra={},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    assert "permissionDecision" not in _decision(proc)
 
 
 def test_gate_bead_sub_phase_letter_title_triggers(tmp_env):
@@ -285,7 +294,7 @@ def test_escape_token_allows_even_on_phase_review_bead(tmp_env):
         env_extra={},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    assert "permissionDecision" not in _decision(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +355,7 @@ def test_non_closing_update_forms_on_a_gate_bead_allow(tmp_env, command):
         env_extra={},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow", (command, proc.stdout)
+    assert "permissionDecision" not in _decision(proc), (command, proc.stdout)
 
 
 @pytest.mark.parametrize(
@@ -373,7 +382,7 @@ def test_status_closed_text_in_an_unrelated_and_joined_command_allows(tmp_env, c
         env_extra={},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow", (command, proc.stdout)
+    assert "permissionDecision" not in _decision(proc), (command, proc.stdout)
 
 
 @pytest.mark.parametrize(
@@ -400,7 +409,7 @@ def test_status_closed_text_across_a_newline_or_stderr_pipe_allows(tmp_env, comm
         env_extra={},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow", (command, proc.stdout)
+    assert "permissionDecision" not in _decision(proc), (command, proc.stdout)
 
 
 def test_update_status_closed_on_a_gate_bead_allows_with_a_passed_sentinel(tmp_env):
@@ -424,7 +433,12 @@ def test_update_status_closed_on_a_gate_bead_allows_with_a_passed_sentinel(tmp_e
         env_extra={"NX_FAKE_CLAUDE_PID": str(pid)},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    decision = _decision(proc)
+    # nexus-452oy: sentinel-verified is advisory, not an override of the
+    # user's own Bash permission prompt -- no permissionDecision, the
+    # confirmation text rides in additionalContext alone.
+    assert "permissionDecision" not in decision
+    assert "approved by sentinel" in decision.get("additionalContext", "")
 
 
 def test_update_status_closed_on_a_non_phase_review_bead_allows(tmp_env):
@@ -434,7 +448,7 @@ def test_update_status_closed_on_a_non_phase_review_bead_allows(tmp_env):
         env_extra={},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    assert "permissionDecision" not in _decision(proc)
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +476,12 @@ def test_sentinel_present_fresh_passed_allows(tmp_env):
         env_extra={"NX_FAKE_CLAUDE_PID": str(pid)},
         bin_dir=tmp_env["bin_dir"],
     )
-    assert _decision(proc)["permissionDecision"] == "allow"
+    decision = _decision(proc)
+    # nexus-452oy: sentinel-verified is advisory, not an override of the
+    # user's own Bash permission prompt -- no permissionDecision, the
+    # confirmation text rides in additionalContext alone.
+    assert "permissionDecision" not in decision
+    assert "approved by sentinel" in decision.get("additionalContext", "")
 
 
 def test_sentinel_absent_denies(tmp_env):
@@ -651,13 +670,15 @@ def test_subprocess_stdout_is_pure_json_with_the_real_nexus_session_import(tmp_e
 # ---------------------------------------------------------------------------
 
 
-def test_malformed_stdin_fails_closed(tmp_env):
-    """Empty / non-JSON stdin: hook should still emit valid JSON and exit 0.
+def test_malformed_stdin_yields_no_decision(tmp_env):
+    """Empty / non-JSON stdin: hook should still exit 0 and stay silent.
 
     For non-phase-review semantics we cannot tell what the user intended,
-    so the safe default is allow (cannot block what we cannot identify).
-    Fail-closed only kicks in once we know we are looking at a phase-
-    review close that lacks a valid sentinel.
+    so the safe default is NO decision (nexus-452oy) -- not an explicit
+    allow, which bypassed both Claude Code's own permission prompt and its
+    auto-mode classifier for the command. Fail-closed only kicks in once
+    we know we are looking at a phase-review close that lacks a valid
+    sentinel.
     """
     proc = subprocess.run(
         HOOK_ARGV,
@@ -665,8 +686,7 @@ def test_malformed_stdin_fails_closed(tmp_env):
         capture_output=True, text=True, timeout=10,
     )
     assert proc.returncode == 0
-    payload = json.loads(proc.stdout)
-    assert payload["hookSpecificOutput"]["permissionDecision"] in ("allow", "deny")
+    assert proc.stdout == "", f"expected empty (no-decision) stdout, got: {proc.stdout!r}"
 
 
 # ---------------------------------------------------------------------------

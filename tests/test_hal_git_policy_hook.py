@@ -42,7 +42,15 @@ def _run(payload: dict):
 
 
 def _decision(proc):
+    """The envelope's ``hookSpecificOutput``, or ``{}`` for a no-decision
+    (empty stdout) verdict (nexus-452oy). A pass-through/fail-open case now
+    emits NOTHING rather than an explicit allow, so ``"permissionDecision"
+    not in d`` is the "not blocked" assertion; ``d["permissionDecision"]
+    == "deny"`` is unaffected.
+    """
     assert proc.returncode == 0, proc.stderr
+    if proc.stdout == "":
+        return {}
     return json.loads(proc.stdout)["hookSpecificOutput"]
 
 
@@ -136,45 +144,46 @@ def test_chained_git_add_dot_denies():
 
 def test_git_add_explicit_paths_allows():
     d = _decision(_run(_bash("git add src/foo.py tests/test_foo.py")))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 def test_git_add_single_dotfile_allows():
     """`git add .gitignore` is explicit, not wildcard."""
     d = _decision(_run(_bash("git add .gitignore")))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 def test_git_status_allows():
     d = _decision(_run(_bash("git status")))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 def test_non_git_command_allows():
     d = _decision(_run(_bash("ls -A")))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 def test_non_bash_allows():
     d = _decision(_run({"tool_name": "Edit", "tool_input": {"file_path": "x"}}))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 def test_wildcard_add_escape_allows():
     d = _decision(_run(_bash(
         "git add -A  # routing-allow: scripted bootstrap of fresh repo"
     )))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
-def test_empty_stdin_allows():
+def test_empty_stdin_is_no_decision():
+    """nexus-452oy: empty stdin means no command to evaluate, which is
+    genuinely no-opinion -- empty stdout, not an explicit allow."""
     proc = subprocess.run(
         [sys.executable, str(HOOK)],
         input="", capture_output=True, text=True, timeout=10,
     )
     assert proc.returncode == 0
-    d = json.loads(proc.stdout)["hookSpecificOutput"]
-    assert d["permissionDecision"] == "allow"
+    assert proc.stdout == "", f"expected empty (no-decision) stdout, got: {proc.stdout!r}"
 
 
 def test_escape_on_nonmatching_command_logs_nothing(tmp_path, monkeypatch):
@@ -186,7 +195,7 @@ def test_escape_on_nonmatching_command_logs_nothing(tmp_path, monkeypatch):
     d = _decision(_run(
         _bash("bd close nexus-xyz --reason done  # routing-allow: gate satisfied")
     ))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
     assert not log.exists() or log.read_text().strip() == "", (
         "non-matching annotated command must log NOTHING (phantom escape)"
     )
@@ -198,7 +207,7 @@ def test_escape_on_matching_command_logs_true_escape(tmp_path, monkeypatch):
     d = _decision(_run(
         _bash("git add -A  # routing-allow: scripted bootstrap of fresh repo")
     ))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
     events = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
     assert len(events) == 1
     assert events[0]["outcome"] == "escape"
@@ -253,7 +262,7 @@ def test_bare_push_from_a_checkout_on_main_is_blocked(repo_on):
 def test_bare_push_from_a_feature_branch_is_allowed(repo_on):
     work = repo_on("feature/x")
     out = _decision(_run(_bash("git push", str(work))))
-    assert out["permissionDecision"] == "allow", out
+    assert "permissionDecision" not in out, out
 
 
 @pytest.mark.parametrize("cmd", [
@@ -278,7 +287,7 @@ def test_explicit_main_refspecs_are_blocked(cmd, repo_on):
 def test_pushes_to_other_branches_are_allowed(cmd, repo_on):
     work = repo_on("feature/x")
     out = _decision(_run(_bash(cmd, str(work))))
-    assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
+    assert "permissionDecision" not in out, f"{cmd}: {out}"
 
 
 @pytest.mark.parametrize("cmd", [
@@ -290,7 +299,7 @@ def test_pushes_to_other_branches_are_allowed(cmd, repo_on):
 def test_tag_pushes_are_allowed_even_from_main(cmd, repo_on):
     work = repo_on("main")
     out = _decision(_run(_bash(cmd, str(work))))
-    assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
+    assert "permissionDecision" not in out, f"{cmd}: {out}"
 
 
 @pytest.mark.parametrize("cmd", [
@@ -315,13 +324,13 @@ def test_tag_flags_do_not_exempt_a_branch_push(cmd, repo_on):
 def test_a_bare_tags_push_is_still_allowed(cmd, repo_on):
     work = repo_on("main")
     out = _decision(_run(_bash(cmd, str(work))))
-    assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
+    assert "permissionDecision" not in out, f"{cmd}: {out}"
 
 
 def test_follow_tags_from_a_feature_branch_is_allowed(repo_on):
     work = repo_on("feature/x")
     out = _decision(_run(_bash("git push --follow-tags", str(work))))
-    assert out["permissionDecision"] == "allow", out
+    assert "permissionDecision" not in out, out
 
 
 def test_push_to_main_escape_permits_the_release_version_bump(repo_on):
@@ -330,7 +339,7 @@ def test_push_to_main_escape_permits_the_release_version_bump(repo_on):
         "git push origin main  # routing-allow: release version bump",
         str(work),
     )))
-    assert out["permissionDecision"] == "allow", out
+    assert "permissionDecision" not in out, out
 
 
 def test_push_hidden_in_a_compound_command_is_caught(repo_on):
@@ -343,7 +352,7 @@ def test_non_push_git_commands_are_untouched(repo_on):
     work = repo_on("main")
     for cmd in ("git status", "git log --oneline -3", "git fetch", "git diff"):
         out = _decision(_run(_bash(cmd, str(work))))
-        assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
+        assert "permissionDecision" not in out, f"{cmd}: {out}"
 
 
 def test_bare_push_with_stdout_redirect_from_main_is_still_blocked(repo_on):
@@ -359,7 +368,7 @@ def test_fails_open_outside_a_repo(tmp_path):
     bare = tmp_path / "not-a-repo"
     bare.mkdir()
     out = _decision(_run(_bash("git push", str(bare))))
-    assert out["permissionDecision"] == "allow", out
+    assert "permissionDecision" not in out, out
 
 
 def test_master_default_branch_is_also_protected(tmp_path):
@@ -412,7 +421,7 @@ def test_unbalanced_quote_on_a_feature_push_is_still_allowed(repo_on):
     out = _decision(_run(_bash(
         'git push origin feature/x --receive-pack="unterminated', str(work),
     )))
-    assert out["permissionDecision"] == "allow", out
+    assert "permissionDecision" not in out, out
 
 
 def test_quote_inside_the_verb_is_still_blocked(repo_on):
@@ -499,7 +508,7 @@ def test_amend_in_primary_on_own_recorded_commit_is_allowed(primary):
     # peer's staged file rides it exactly as it rides a fresh bare commit.
     # Rule 3's "your own tip" permission is necessary, not sufficient.
     d = _decision(_run_with_env(_amend_payload(work, cmd="git commit --amend --no-edit -- mine"), env))
-    assert d["permissionDecision"] == "allow", d
+    assert "permissionDecision" not in d, d
 
 
 def test_amend_after_a_peer_commit_on_top_is_denied(primary):
@@ -512,7 +521,7 @@ def test_amend_after_a_peer_commit_on_top_is_denied(primary):
     assert d["permissionDecision"] == "deny"
     d = _decision(_run_with_env(
         _amend_payload(work, "sess-B", cmd="git commit --amend --no-edit -- peer"), env))
-    assert d["permissionDecision"] == "allow", d
+    assert "permissionDecision" not in d, d
 
 
 def test_amend_without_a_session_id_is_denied(primary):
@@ -529,7 +538,7 @@ def test_amend_in_a_linked_worktree_is_never_blocked(primary, tmp_path):
     wt = tmp_path / "wt"
     _git("worktree", "add", "-q", "--detach", str(wt), "HEAD", cwd=work)
     d = _decision(_run_with_env(_amend_payload(wt), env))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 def test_amend_via_dash_C_targets_the_named_repo(primary, tmp_path):
@@ -569,7 +578,7 @@ def test_amend_escape_allows_and_logs(primary, tmp_path, monkeypatch):
     env = {**env, "NX_ROUTING_LOG_PATH": str(log)}
     cmd = "git commit --amend --no-edit  # routing-allow: HEAD predates the recorder"
     d = _decision(_run_with_env(_amend_payload(work, cmd=cmd), env))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
     events = [json.loads(l) for l in log.read_text().splitlines() if l.strip()]
     assert [e["outcome"] for e in events] == ["escape"]
 
@@ -577,7 +586,7 @@ def test_amend_escape_allows_and_logs(primary, tmp_path, monkeypatch):
 def test_amend_outside_a_repo_fails_open(tmp_path):
     payload = {**_bash("git commit --amend", cwd=str(tmp_path)), "session_id": "s"}
     d = _decision(_run_with_env(payload, {"NX_SESSION_COMMITS_DIR": str(tmp_path / "sc")}))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 def test_recorder_records_dash_C_and_dedupes(primary, tmp_path):
@@ -636,7 +645,7 @@ def test_bare_push_to_develop_is_blocked_where_the_script_exists(cmd, repo_on):
 def test_bare_push_to_develop_is_allowed_where_no_script_exists(repo_on):
     work = repo_on("develop")
     d = _decision(_run(_bash("git push origin develop", cwd=str(work))))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 @pytest.mark.parametrize("cmd", ["git push origin feature/x", "git push origin v1.2.3", "git push --tags",
@@ -645,14 +654,14 @@ def test_other_pushes_and_the_script_itself_are_allowed(cmd, repo_on):
     work = repo_on("develop")
     _with_script(work)
     d = _decision(_run(_bash(cmd, cwd=str(work))))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 def test_bare_push_to_develop_escape_allows(repo_on):
     work = repo_on("develop")
     _with_script(work)
     d = _decision(_run(_bash("git push origin develop  # routing-allow: release back-merge", cwd=str(work))))
-    assert d["permissionDecision"] == "allow"
+    assert "permissionDecision" not in d
 
 
 # ── Rule 5: an unscoped `git commit` in the shared primary (nexus-bbriq) ────
@@ -706,7 +715,7 @@ def test_stage_all_commit_in_primary_is_denied(cmd, primary):
 def test_scoped_or_empty_commit_in_primary_is_allowed(cmd, primary):
     work, _store, env = primary
     d = _decision(_run_with_env(_commit_payload(work, cmd), env))
-    assert d["permissionDecision"] == "allow", f"{cmd}: {d}"
+    assert "permissionDecision" not in d, f"{cmd}: {d}"
 
 
 def test_unscoped_commit_in_a_linked_worktree_is_allowed(primary, tmp_path):
@@ -715,7 +724,7 @@ def test_unscoped_commit_in_a_linked_worktree_is_allowed(primary, tmp_path):
     wt = tmp_path / "wt-rule5"
     _git("worktree", "add", "-q", "--detach", str(wt), "HEAD", cwd=work)
     d = _decision(_run_with_env(_commit_payload(wt, "git commit -m x"), env))
-    assert d["permissionDecision"] == "allow", d
+    assert "permissionDecision" not in d, d
 
 
 def test_unscoped_commit_during_a_merge_is_allowed(primary):
@@ -733,7 +742,7 @@ def test_unscoped_commit_during_a_merge_is_allowed(primary):
     res = _merge(work, "side")
     _assert_merge_head(work, res, "fixture did not produce a conflicted merge")
     d = _decision(_run_with_env(_commit_payload(work, "git commit --no-edit"), env))
-    assert d["permissionDecision"] == "allow", d
+    assert "permissionDecision" not in d, d
 
 
 def test_unscoped_commit_via_dash_C_targets_the_named_repo(primary, tmp_path):
@@ -750,7 +759,7 @@ def test_unscoped_commit_escape_allows(primary):
     work, _store, env = primary
     cmd = "git commit -m x  # routing-allow: rebuilding an index git mangled"
     d = _decision(_run_with_env(_commit_payload(work, cmd), env))
-    assert d["permissionDecision"] == "allow", d
+    assert "permissionDecision" not in d, d
 
 
 def test_rule_5_message_carries_both_pathspec_traps(primary):
@@ -805,7 +814,7 @@ def test_a_cd_moves_which_repo_is_judged_and_a_solo_repo_is_exempt(primary, tmp_
     _git("init", "-q", "--initial-branch=main", cwd=scratch)
     cmd = f"cd {scratch} && git commit -m x"
     d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
-    assert d["permissionDecision"] == "allow", d
+    assert "permissionDecision" not in d, d
 
     # Non-vacuity: the SAME command, judged against the shared checkout, is
     # denied. So the allow above comes from the cd being honoured, not from
@@ -842,7 +851,7 @@ def test_a_commit_mentioned_inside_a_heredoc_is_not_a_commit(primary):
         "PY"
     )
     d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
-    assert d["permissionDecision"] == "allow", d
+    assert "permissionDecision" not in d, d
 
 
 def test_a_real_commit_AFTER_a_heredoc_is_still_caught(primary):
@@ -870,7 +879,7 @@ def test_a_primary_checkout_with_no_linked_worktree_is_exempt(repo_on, tmp_path)
     work = repo_on("develop")
     env = {"NX_SESSION_COMMITS_DIR": str(tmp_path / "sc")}
     d = _decision(_run_with_env({**_bash("git commit -m x", cwd=str(work)), "session_id": "s"}, env))
-    assert d["permissionDecision"] == "allow", d
+    assert "permissionDecision" not in d, d
 
     _git("worktree", "add", "-q", "--detach", str(tmp_path / "wt-now"), "HEAD", cwd=work)
     d2 = _decision(_run_with_env({**_bash("git commit -m x", cwd=str(work)), "session_id": "s"}, env))
@@ -893,7 +902,7 @@ def test_a_multi_line_commit_message_with_a_pathspec_is_allowed(primary):
     msg = "feat(x): a subject line\n\nA body paragraph; with a semicolon.\nAnd | a pipe.\n"
     cmd = f'git commit -m "{msg}" -- f.txt'
     d = _decision(_run_with_env({**_bash(cmd, cwd=str(work)), "session_id": "s"}, env))
-    assert d["permissionDecision"] == "allow", d
+    assert "permissionDecision" not in d, d
 
 
 def test_a_commit_inside_a_command_substitution_is_caught(primary):

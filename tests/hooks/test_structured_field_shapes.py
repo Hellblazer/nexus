@@ -188,9 +188,12 @@ class TestTheThreeHooksAgreeAcrossShapes:
             },
         )
         command = "bd close nexus-99xyz --reason probe"
+        # nexus-452oy: T1-unreachable is advisory, not an override of the
+        # user's own Bash permission prompt -- no permissionDecision, so
+        # _decision() (which reads "" for a missing/absent key) is "".
         assert (
             _decision(run({"session_id": "s", "tool_name": "Bash", "tool_input": {"command": command}}))
-            == "allow"
+            == ""
         )
 
     def test_dispatch_expect_records_the_same_subagent_type_either_way(self, tmp_path, monkeypatch) -> None:

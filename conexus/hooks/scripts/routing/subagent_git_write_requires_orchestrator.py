@@ -1224,11 +1224,11 @@ def body(payload: dict[str, Any]) -> None:
     agent_id = str(payload.get("agent_id") or "")
 
     if not agent_id:
-        _lib.allow()  # main conversation — the rule targets subagents only
+        _lib.pass_through()  # main conversation — the rule targets subagents only
 
     command = _lib.get_bash_command(payload)
     if not command:
-        _lib.allow()
+        _lib.pass_through()
 
     normalized = _normalize_for_primary_scan(command)
 
@@ -1262,7 +1262,7 @@ def body(payload: dict[str, Any]) -> None:
             _delete_all_expansions(normalized)
         )
     if not spliced_fragment and primary_match is None:
-        _lib.allow()
+        _lib.pass_through()
 
     # Match FIRST, escape SECOND (the nexus-mzvwa.8 telemetry rule) — applies
     # to EITHER gate above.
@@ -1272,7 +1272,7 @@ def body(payload: dict[str, Any]) -> None:
             command_fragment=command,
             escape_reason=_lib.extract_escape_reason(command),
         )
-        _lib.allow()
+        _lib.pass_through()
 
     cwd = str(payload.get("cwd") or "") or os.getcwd()
     worktree = _in_linked_worktree(cwd)
@@ -1280,7 +1280,7 @@ def body(payload: dict[str, Any]) -> None:
         # Linked worktree, POSITIVELY PROVEN: the agent owns its tree,
         # including destroying it. This is the ONLY exemption from either
         # gate's verdict, applied uniformly.
-        _lib.allow()
+        _lib.pass_through()
     # worktree is False (primary checkout) OR None (undeterminable) — EITHER
     # GATE WINS either way (nexus-3c92m round 4; retires the old nexus-ays2l
     # item 3 fail-open-for-hygiene-verbs carve-out). "I could not prove this

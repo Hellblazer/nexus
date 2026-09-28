@@ -146,21 +146,33 @@ def test_the_close_gate_denies_an_unmarked_bead_over_the_real_wire(tmp_path) -> 
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip(), "the close gate wrote nothing at all"
-    decision = json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"]
+    envelope = json.loads(proc.stdout)["hookSpecificOutput"]
+    decision = envelope.get("permissionDecision")
     # An unreachable T1 fails OPEN by design, and "e2e-no-such-session"
-    # has no T1, so allow is the correct answer here. What this asserts
-    # is narrower and is the thing that was broken: the verb resolves,
-    # runs, and puts a well-formed decision envelope on stdout.
-    assert decision in {"allow", "deny"}, proc.stdout
+    # has no T1 -- but nexus-452oy: fail-open now means NO decision
+    # (advisory text in additionalContext only), not an explicit allow,
+    # because an explicit allow on this path bypassed both Claude Code's
+    # own permission prompt and its auto-mode classifier for every
+    # `bd close` this gate could not verify. A reachable T1 with the
+    # marker genuinely missing still denies. What this asserts is narrower
+    # and is the thing that was broken: the verb resolves, runs, and puts
+    # a well-formed envelope on stdout either way.
+    assert decision in {None, "deny"}, proc.stdout
+    if decision is None:
+        assert envelope.get("additionalContext"), proc.stdout
 
 
-def test_a_non_bash_call_is_allowed_immediately() -> None:
+def test_a_non_bash_call_is_no_decision_immediately() -> None:
+    """nexus-452oy: a non-Bash call is genuinely no-opinion for this gate
+    -- empty stdout, not an explicit allow. An explicit allow here would
+    bypass Claude Code's own permission prompt and its auto-mode
+    classifier for the command."""
     proc = _run_verb(
         "pre-close-verification",
         {"session_id": "s", "tool_name": "Read", "tool_input": {"file_path": "/x"}},
     )
     assert proc.returncode == 0, proc.stderr
-    assert json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert proc.stdout == "", f"expected empty (no-decision) stdout, got: {proc.stdout!r}"
 
 
 def test_subagent_stop_runs_and_stays_silent_with_no_ledger(tmp_path) -> None:

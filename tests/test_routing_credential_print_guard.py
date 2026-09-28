@@ -82,10 +82,17 @@ def _raw(stdin_text: str) -> subprocess.CompletedProcess:
     )
 
 
-def _decision(proc: subprocess.CompletedProcess) -> str:
+def _decision(proc: subprocess.CompletedProcess) -> str | None:
+    """The envelope's ``permissionDecision``, or ``None`` for a no-decision
+    (empty stdout) verdict (nexus-452oy). A pass-through/fail-open case
+    now emits NOTHING rather than an explicit allow, so ``is None`` is the
+    "not blocked" assertion; ``"deny"`` is unaffected.
+    """
     assert proc.returncode == 0, (
         f"hook must exit 0; got {proc.returncode}; stderr={proc.stderr}"
     )
+    if proc.stdout == "":
+        return None
     out = json.loads(proc.stdout)
     return out["hookSpecificOutput"]["permissionDecision"]
 
@@ -501,7 +508,7 @@ ALLOWED_SHAPES = ALLOWED_SHAPES + ALLOWED_SHAPES_FORMERLY_DENIED_ENV_DUMPS
 @pytest.mark.parametrize("command", ALLOWED_SHAPES)
 def test_legitimate_shape_is_allowed(command: str) -> None:
     proc = _run(command)
-    assert _decision(proc) == "allow", (
+    assert _decision(proc) is None, (
         f"expected allow for {command!r}; got {_decision(proc)!r}, "
         f"reason={_reason(proc)!r}"
     )
@@ -514,27 +521,27 @@ def test_legitimate_shape_is_allowed(command: str) -> None:
 
 def test_non_bash_tool_is_allowed() -> None:
     proc = _run("security find-generic-password -s nexus-automation-oauth-token -w", tool_name="Edit")
-    assert _decision(proc) == "allow"
+    assert _decision(proc) is None
 
 
 def test_empty_command_is_allowed() -> None:
     proc = _run("", tool_name="Bash")
-    assert _decision(proc) == "allow"
+    assert _decision(proc) is None
 
 
 def test_no_tool_input_is_allowed() -> None:
     proc = _run(None, tool_name="Bash")
-    assert _decision(proc) == "allow"
+    assert _decision(proc) is None
 
 
 def test_malformed_stdin_is_allowed() -> None:
     proc = _raw("not json at all {{{")
-    assert _decision(proc) == "allow"
+    assert _decision(proc) is None
 
 
 def test_empty_stdin_is_allowed() -> None:
     proc = _raw("")
-    assert _decision(proc) == "allow"
+    assert _decision(proc) is None
 
 
 # ---------------------------------------------------------------------------
@@ -563,11 +570,20 @@ mod._lib.run_hook(mod.body, fail_closed=False, rule_name=mod.RULE_NAME)
 """
 
 
-def _drive_forced_error(command: str) -> tuple[int, dict]:
+def _drive_forced_error(command: str) -> subprocess.CompletedProcess:
+    """Run the guard with its matching logic forced to raise.
+
+    Returns the raw ``CompletedProcess`` -- nexus-452oy split what used to
+    be one shared "stdout must be non-empty" assertion here, because that
+    is no longer true for every caller: the no-marker fail-open path now
+    correctly emits NO decision (empty stdout), while the marker-present
+    failsafe path must still speak (a deny). Each caller asserts its own
+    expected shape.
+    """
     env = os.environ.copy()
     env["NX_HOOK_PYTHON"] = sys.executable
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
-    proc = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-c", _FAILURE_DRIVER.format(script=str(SCRIPT))],
         input=payload,
         capture_output=True,
@@ -575,25 +591,31 @@ def _drive_forced_error(command: str) -> tuple[int, dict]:
         timeout=10,
         env=env,
     )
-    assert proc.stdout.strip(), (
-        f"the guard emitted NOTHING on a raised body (rc={proc.returncode}). "
-        f"Silence is the failure this test exists to catch.\n{proc.stderr}"
-    )
-    return proc.returncode, json.loads(proc.stdout)
 
 
 def test_forced_error_denies_a_command_carrying_a_marker() -> None:
-    rc, out = _drive_forced_error(
+    proc = _drive_forced_error(
         'security find-generic-password -s "Claude Code-credentials" -w'
     )
+    assert proc.returncode == 0, "the deny is envelope-encoded; the exit code is 0"
+    assert proc.stdout.strip(), (
+        f"the guard emitted NOTHING on a raised body with a protected "
+        f"marker present (rc={proc.returncode}). Silence is the failure "
+        f"this test exists to catch -- the failsafe-marker deny path must "
+        f"still speak.\n{proc.stderr}"
+    )
+    out = json.loads(proc.stdout)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert rc == 0, "the deny is envelope-encoded; the exit code is 0"
 
 
 def test_forced_error_allows_a_command_with_no_marker() -> None:
-    rc, out = _drive_forced_error("echo hello world")
-    assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert rc == 0
+    """nexus-452oy: fail-open with no protected marker present is now NO
+    decision (empty stdout), not an explicit allow -- an explicit allow on
+    a fail-open path bypassed both Claude Code's own permission prompt and
+    its auto-mode classifier for the command."""
+    proc = _drive_forced_error("echo hello world")
+    assert proc.returncode == 0
+    assert proc.stdout == "", f"expected empty (no-decision) stdout, got: {proc.stdout!r}"
 
 
 @pytest.mark.parametrize("var", ["CLAUDE_CODE_OAUTH_TOKEN", "NX_HARNESS_CLAUDE_OAUTH_TOKEN"])
@@ -601,6 +623,12 @@ def test_forced_error_denies_on_each_failsafe_marker(var: str) -> None:
     """One control per marker the module docstring pins
     (:data:`credential_print_guard._FAILSAFE_MARKERS`), so the failure-mode
     substring list can't silently drop one."""
-    rc, out = _drive_forced_error(f"do something with {var} unrelated to the regexes")
+    proc = _drive_forced_error(f"do something with {var} unrelated to the regexes")
+    assert proc.returncode == 0
+    assert proc.stdout.strip(), (
+        f"the guard emitted NOTHING on a raised body with failsafe marker "
+        f"{var!r} present (rc={proc.returncode}). Silence is the failure "
+        f"this test exists to catch.\n{proc.stderr}"
+    )
+    out = json.loads(proc.stdout)
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert rc == 0

@@ -20,13 +20,23 @@ changes were unavoidable:
 
 2. **The emitters return instead of exiting.** ``_lib.allow()`` /
    ``_lib.deny()`` printed an envelope and ``sys.exit(0)``; this body
-   returns ``_lib.allow_result()`` / ``_lib.deny_result()`` and
+   returns ``_lib.pass_result()`` / ``_lib.deny_result()`` and
    ``run_hook_result`` hands it back. That matters more here than
    elsewhere: a ``sys.exit`` inside a verb reaches ``never_fail``'s
    SystemExit passthrough and ends the hook process mid-dispatch, which
    for a fail-closed rule is the one shape it must never take. The
    fail-closed branch itself is unchanged and now returns a deny envelope
    on ANY exception, which ``run_hook_result``'s own tests exercise.
+
+3. **Every ``allow_result()`` here became ``pass_result()`` (nexus-452oy).**
+   "No match", "escape token used", and even the sentinel-PASSED path at
+   the bottom are this gate's opinion that IT has nothing to deny — not a
+   decision that the user's own Bash permission prompt should be skipped.
+   An explicit ``permissionDecision: allow`` for those cases bypassed both
+   the prompt and Claude Code's auto-mode classifier for every ``bd close``
+   this gate did not need to block. The sentinel-PASSED case keeps its
+   advisory text; it now rides in ``additionalContext`` with no decision
+   attached, exactly the "warn" shape.
 
 The original module docstring follows, unedited:
 
@@ -290,7 +300,7 @@ def _redirect_message(rdr_id: str | None, phase: str | None, reason: str) -> str
 def body(payload: dict[str, Any]) -> HookResult | None:
     command = _lib.get_bash_command(payload)
     if not command:
-        return _lib.allow_result()
+        return _lib.pass_result()
 
     match = _BD_CLOSE_RE.search(command)
     if not match:
@@ -314,7 +324,7 @@ def body(payload: dict[str, Any]) -> HookResult | None:
         # file's own scoping fix closed for &&/;/|/then/do).
         update_match = _BD_UPDATE_RE.search(command)
         if not update_match:
-            return _lib.allow_result()
+            return _lib.pass_result()
         tail_start = update_match.end()
         boundary = next(
             (m for m, _is_strong in iter_shell_boundaries(command) if m.start() >= tail_start),
@@ -325,7 +335,7 @@ def body(payload: dict[str, Any]) -> HookResult | None:
         if _STATUS_CLOSED_RE.search(own_argv_text):
             match = update_match
         else:
-            return _lib.allow_result()
+            return _lib.pass_result()
 
     # Escape token takes precedence; audit and pass through.
     if _lib.should_skip_for_reason(command):
@@ -334,14 +344,14 @@ def body(payload: dict[str, Any]) -> HookResult | None:
             command_fragment=command,
             escape_reason=_lib.extract_escape_reason(command),
         )
-        return _lib.allow_result()
+        return _lib.pass_result()
 
     bead_id = match.group("bead_id")
     bd_output = _bd_show(bead_id)
     if not bd_output:
         # Cannot determine if this is a phase-review bead. Allow rather
         # than fail-closed; we have no signal to deny on.
-        return _lib.allow_result()
+        return _lib.pass_result()
 
     # Trigger: match against the bead's TITLE line only (the first non-empty
     # line of bd show output), and only for the narrow "Phase N ... review
@@ -350,7 +360,7 @@ def body(payload: dict[str, Any]) -> HookResult | None:
     # or "review" no longer false-positive (GH #931 / nexus-1pr9n).
     title_line = _bd_header_line(bd_output)
     if not _GATE_TITLE_RE.search(title_line):
-        return _lib.allow_result()
+        return _lib.pass_result()
 
     rdr_id, phase = _extract_rdr_phase(bd_output)
     if not rdr_id or not phase:
@@ -382,7 +392,7 @@ def body(payload: dict[str, Any]) -> HookResult | None:
         rule=RULE_NAME, outcome="allow", tool_name="Bash",
         command_fragment=command,
     )
-    return _lib.allow_result(
+    return _lib.pass_result(
         f"phase-review close approved by sentinel (RDR-{rdr_id} phase {phase})"
     )
 

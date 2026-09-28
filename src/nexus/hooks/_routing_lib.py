@@ -50,7 +50,27 @@ Helpers every routing hook imports. The hook protocol is:
 
 Decision envelope shape (PreToolUse):
 
-    allow:
+    no decision (nexus-452oy) — THE DEFAULT for a rule that has nothing to
+    say: pass-through (nothing matched) and fail-open (the rule crashed)
+    both land here, and so does a body that returns without emitting.
+    Emitting an explicit ``permissionDecision: allow`` for "nothing to
+    report" bypasses Claude Code's own permission prompt AND its auto-mode
+    classifier for the command — proven live by cc-validation scenario 28 —
+    so every one of these must stay silent instead, and let the ordinary
+    permission flow decide:
+        (empty stdout, exit 0)
+
+    warn — advisory text with NO decision. The permission system still
+    decides normally; the note rides in ``additionalContext`` alone:
+        {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": "..."
+        }}
+
+    allow — RESERVED for a rule that deliberately means to override the
+    prompt (e.g. ``auto_approve.py``'s conexus-MCP-tool allowlist). Not the
+    default for "no objection"; see ``pass_envelope``/``pass_through``/
+    ``pass_result`` for that:
         {"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "allow",
@@ -70,7 +90,8 @@ Decision envelope shape (PreToolUse):
 Fail-open is the default. Hooks opt in to fail-closed by passing
 ``fail_closed=True`` to ``run_hook``; the registry.yaml ``fail_closed:
 true`` flag is the source of truth and the hook script reads its own
-rule entry to decide.
+rule entry to decide. Failing open now means ``pass_through``/``pass_result``
+(no decision), never ``allow`` — see nexus-452oy.
 
 Escape token: a command may include ``# routing-allow: <reason>``
 (reason >= 8 characters) to bypass any routing hook. The token is
@@ -106,8 +127,43 @@ ESCAPE_REASON_MIN_LENGTH = 8
 # ---------------------------------------------------------------------------
 
 
+def pass_envelope(context: str = "") -> str:
+    """No decision: ``""`` (write nothing), or an advisory-only envelope.
+
+    This is the "I have no opinion" shape (nexus-452oy): bare, it means
+    genuinely nothing to say, and the caller must write NOTHING to stdout
+    -- Claude Code's own permission flow (an allow-list rule, a prompt, the
+    auto-mode classifier) then decides with no interference from this
+    hook, exactly as ``auto_approve.py``'s own non-match case already does
+    (``HookResult()``, silent, "not an empty envelope" per that module's
+    docstring). A non-empty *context* still emits NO ``permissionDecision``
+    -- it rides in ``additionalContext`` alone, so the model/user see the
+    note while the permission system still decides normally. That second
+    shape is what ``warn_envelope`` aliases.
+
+    Never confuse this with :func:`allow_envelope`: that one is reserved
+    for a rule that means to deliberately OVERRIDE the prompt (the conexus
+    MCP-tool allowlist in ``auto_approve.py`` is the one legitimate case in
+    this codebase). Pass-through, warn, and fail-open all use this
+    function instead -- see the module docstring's envelope-shape table.
+    """
+    if not context:
+        return ""
+    payload: dict[str, Any] = {
+        "hookEventName": "PreToolUse",
+        "additionalContext": context,
+    }
+    return json.dumps({"hookSpecificOutput": payload})
+
+
 def allow_envelope(context: str = "") -> str:
-    """Return an allow envelope as a JSON string."""
+    """Return an allow envelope as a JSON string.
+
+    RESERVED for a rule that deliberately means to override Claude Code's
+    permission prompt (nexus-452oy) -- the "I have no opinion" case is
+    :func:`pass_envelope`, not this. See the module docstring's envelope
+    table.
+    """
     payload: dict[str, Any] = {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow",
@@ -159,13 +215,17 @@ def deny_envelope(reason: str, summary: str | None = None) -> str:
 
 
 def warn_envelope(message: str) -> str:
-    """Semantic alias for ``allow_envelope`` that signals advisory intent.
+    """Semantic alias for ``pass_envelope`` that signals advisory intent.
 
     Routing hooks emit warnings when a pattern looks suspicious but the
-    command should proceed. The permission decision stays ``allow``;
-    the message rides in ``additionalContext`` so the user sees it.
+    hook has no reason to interfere with the permission system. There is
+    NO ``permissionDecision`` (nexus-452oy: emitting ``allow`` here was the
+    defect -- it bypassed Claude Code's own prompt and auto-mode
+    classifier for every warned command); the message rides in
+    ``additionalContext`` alone so the user/model see it while the
+    ordinary permission flow still decides.
     """
-    return allow_envelope(message)
+    return pass_envelope(message)
 
 
 # ---------------------------------------------------------------------------
@@ -173,8 +233,27 @@ def warn_envelope(message: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def pass_through(context: str = "") -> None:
+    """Emit no decision (see :func:`pass_envelope`) and ``exit 0``.
+
+    Bare, this writes NOTHING to stdout -- the "I have no opinion" case
+    (pass-through, fail-open, or a body that returned without deciding).
+    With *context*, it writes the warn-shaped envelope instead (advisory
+    text, still no ``permissionDecision``).
+    """
+    text = pass_envelope(context)
+    if text:
+        sys.stdout.write(text + "\n")
+        sys.stdout.flush()
+    sys.exit(0)
+
+
 def allow(context: str = "") -> None:
-    """Emit allow envelope to stdout and ``exit 0``."""
+    """Emit allow envelope to stdout and ``exit 0``.
+
+    RESERVED for a deliberate override of the permission prompt -- see
+    :func:`allow_envelope`. Use :func:`pass_through` for "no opinion".
+    """
     sys.stdout.write(allow_envelope(context) + "\n")
     sys.stdout.flush()
     sys.exit(0)
@@ -193,10 +272,8 @@ def deny(reason: str, summary: str | None = None) -> None:
 
 
 def warn(message: str) -> None:
-    """Emit warn envelope (allow + additionalContext) and ``exit 0``."""
-    sys.stdout.write(warn_envelope(message) + "\n")
-    sys.stdout.flush()
-    sys.exit(0)
+    """Emit warn envelope (additionalContext, no permissionDecision) and ``exit 0``."""
+    pass_through(message)
 
 
 # ---------------------------------------------------------------------------
@@ -696,9 +773,11 @@ def run_hook(
     ``body`` is responsible for calling ``allow()`` / ``deny()`` /
     ``warn()`` itself; those calls ``sys.exit(0)``. If ``body`` returns
     normally without emitting an envelope, we fall through to a default
-    allow. If ``body`` raises ``SystemExit`` (from our own emitters), we
-    re-raise — that is the normal path. Any other exception triggers
-    the fail-open / fail-closed branch.
+    NO DECISION (nexus-452oy: a body that decided nothing is "no opinion",
+    not "allow" -- see :func:`pass_through`). If ``body`` raises
+    ``SystemExit`` (from our own emitters), we re-raise — that is the
+    normal path. Any other exception triggers the fail-open / fail-closed
+    branch; fail-open now emits no decision too, never an explicit allow.
     """
     raw = ""
     try:
@@ -728,10 +807,10 @@ def run_hook(
                 tool_name=payload.get("tool_name", "") or "",
                 session_id=payload.get("session_id", "") or "",
             )
-            allow()
+            pass_through()
 
-    # Body returned without emitting — default allow.
-    allow()
+    # Body returned without emitting — default: no decision (nexus-452oy).
+    pass_through()
 
 
 # ---------------------------------------------------------------------------
@@ -753,8 +832,23 @@ def run_hook(
 # ---------------------------------------------------------------------------
 
 
+def pass_result(context: str = "") -> HookResult:
+    """No decision (see :func:`pass_envelope`) as a verb result.
+
+    Bare, this is ``HookResult()`` -- ``stdout=None``, stdout-silent by
+    contract, exactly what ``auto_approve.py``'s own non-match case
+    returns. With *context* it carries the warn-shaped envelope (advisory
+    text, still no ``permissionDecision``).
+    """
+    return HookResult(stdout=pass_envelope(context) or None)
+
+
 def allow_result(context: str = "") -> HookResult:
-    """An allow envelope as a verb result."""
+    """An allow envelope as a verb result.
+
+    RESERVED for a deliberate override of the permission prompt -- see
+    :func:`allow_envelope`. Use :func:`pass_result` for "no opinion".
+    """
     return HookResult(stdout=allow_envelope(context))
 
 
@@ -764,8 +858,8 @@ def deny_result(reason: str, *, summary: str = "") -> HookResult:
 
 
 def warn_result(context: str = "") -> HookResult:
-    """A warn envelope as a verb result."""
-    return HookResult(stdout=warn_envelope(context))
+    """A warn envelope as a verb result (additionalContext, no permissionDecision)."""
+    return pass_result(context)
 
 
 def run_hook_result(
@@ -778,10 +872,12 @@ def run_hook_result(
     """:func:`run_hook`'s contract, for a body that returns its envelope.
 
     Identical branch structure: a body that returns ``None`` falls through
-    to a default allow, and any exception takes the fail-open or
-    fail-closed arm with the same logged outcome names. What differs is
-    that the payload arrives as an argument (the verb tier owns stdin) and
-    the envelope comes back rather than going out through ``sys.exit``.
+    to a default NO DECISION (nexus-452oy — see :func:`pass_result`), and
+    any exception takes the fail-open or fail-closed arm with the same
+    logged outcome names; fail-open now returns no decision too, never an
+    explicit allow. What differs is that the payload arrives as an
+    argument (the verb tier owns stdin) and the envelope comes back rather
+    than going out through ``sys.exit``.
 
     ``SystemExit`` is deliberately NOT special-cased the way ``run_hook``
     re-raises it: on this tier no emitter raises it, so a ``SystemExit``
@@ -802,5 +898,5 @@ def run_hook_result(
         )
         if fail_closed:
             return deny_result(f"cannot verify, fail-closed: {exc}")
-        return allow_result()
-    return result if result is not None else allow_result()
+        return pass_result()
+    return result if result is not None else pass_result()

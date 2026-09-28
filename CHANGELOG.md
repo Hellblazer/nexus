@@ -6,6 +6,20 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.64.2] - 2026-09-28
+
+Pairs with engine-service-v0.1.137, already deployed. A client and plugin security fix: no engine or wire change.
+
+### Security
+
+- **The conexus plugin's Bash hooks no longer approve commands on your behalf** (nexus-452oy). From v2.10.1 (2026-04-01) through v7.64.1, the plugin's PreToolUse hooks on the Bash tool returned an explicit `permissionDecision: "allow"` for every command they did not block, including when a rule only warned and when a hook failed. Claude Code treats an explicit allow as a decision, so while the plugin was installed it skipped its own permission prompt, and in auto mode its classifier, for every Bash command that no permission rule in your settings covered. Your own `permissions.deny` and `permissions.ask` rules still applied, because Claude Code evaluates them regardless of what a hook returns. The hooks did not create or change any commands; every command that ran was one your own session chose to run. What was lost was your chance to approve it first. Sessions running with permissions bypassed were not affected.
+
+  The hooks now return no decision when they have nothing to say, so Claude Code's normal permission handling decides. Advisory messages travel as context without a decision. The hooks still deny the commands they exist to block. The only explicit allow left is the one that auto-approves conexus's own MCP tools, which is its purpose. A new live test (cc-validation scenario 32) runs a real Claude Code session with the plugin's hooks installed and confirms an unmatched Bash command reaches Claude Code's own permission prompt.
+
+  **What to do:** update the plugin (`/plugin update conexus`) and the CLI (`nx self install`, or `uv tool upgrade conexus`), then restart your Claude Code sessions. If you relied on permission prompts as a safety check, review what your sessions ran while on an affected version; Claude Code keeps transcripts under `~/.claude/projects/`.
+
+  **Why it was missed:** our tests checked that the hooks produced the JSON we had specified. The specification itself was wrong, and no test checked what that JSON made Claude Code do.
+
 ## [7.64.1] - 2026-09-28
 
 Pairs with engine-service-v0.1.137, already deployed. A client-only fix: no engine or wire change.

@@ -650,6 +650,22 @@ under the keyed Phase 2 path.
 
 Record: T2 `nexus/request-identity-decisions-2026-09-27`.
 
+## Decisions after Phase 0 (Sam, 2026-09-28)
+
+Phase 0 read small (T2 `nexus/rdr222-phase0-interpretation`): at most 47
+duplicate-embed requests over 09-17..09-26 and none since the 09-27 fast
+503s; no real late cross-run commits in M-c, whose signal was a query artifact
+plus two since-fixed causes (be444581c, and the quarantine-restore overwrite
+fixed by catalog-043, nexus-brxnp).
+
+1. **nexus-wvek6 (Phase 2) deferred** at P4: revisit after two weeks of
+   `raced_embeds_total` readings from `engine-service-v0.1.137` (live
+   2026-09-28); build only if the retry share is material.
+2. **nexus-mfw6c (Phase 3) closed**, no evidence. This section stays the
+   design of record if the class ever appears.
+3. **nexus-ll31n (Phase 1)** stays open; nothing measured argues for or
+   against it.
+
 ## Open Questions (for Sam)
 
 Questions 3, 4 and 6 are answered above. Still open: 1, 2, 5 and 7.
@@ -674,6 +690,8 @@ Questions 3, 4 and 6 are answered above. Still open: 1, 2, 5 and 7.
    retention arm should run once per database, not once per instance.
 
 ## Revision History
+
+- 2026-09-28: post-Phase-0 decisions recorded (wvek6 deferred, mfw6c closed).
 
 - 2026-09-28: Phase 0 as built (nexus-ulrjq). `raced_embeds_total` is a top-level `/v1/status` field, not part of `EmbedActivitySnapshot`; `process_start_time` added beside it for restart detection; raced chashes sampled into the log line so retries can be split from shared text; same-request cross-doc repeats excluded; the throughput A/B moved to the v0.1.137 cut. From the round-1 code review and critique (T2 `nexus/review-nexus-ulrjq-raced-embed-counter-round1`, `nexus/critique-nexus-ulrjq-rdr222-phase0-raced-counter`).
 

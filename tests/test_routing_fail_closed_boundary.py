@@ -68,16 +68,20 @@ _lib.run_hook(body, fail_closed={fail_closed}, rule_name="induced_test_rule")
 """
 
 
-def _drive(*, fail_closed: bool) -> tuple[int, dict]:
-    proc = subprocess.run(
+def _drive(*, fail_closed: bool) -> subprocess.CompletedProcess:
+    """Run the induced-crash driver; return the raw process.
+
+    nexus-452oy: what used to be one shared "stdout must be non-empty"
+    assertion here is no longer true for every caller -- the fail-OPEN
+    path now correctly emits NO decision (empty stdout, deferring to
+    Claude Code's own permission flow) rather than an explicit allow,
+    while the fail-CLOSED path must still speak (a deny). Each caller
+    below asserts its own expected shape.
+    """
+    return subprocess.run(
         [sys.executable, "-c", _DRIVER.format(fail_closed=fail_closed)],
         input="{}", capture_output=True, text=True, timeout=30,
     )
-    assert proc.stdout.strip(), (
-        f"run_hook emitted NOTHING on a raised body (rc={proc.returncode}). "
-        f"Silence is the failure this file exists to catch.\n{proc.stderr}"
-    )
-    return proc.returncode, json.loads(proc.stdout)
 
 
 class TestARaisedBodyStillDecides:
@@ -91,26 +95,36 @@ class TestARaisedBodyStillDecides:
     """
 
     def test_fail_closed_denies(self):
-        rc, out = _drive(fail_closed=True)
+        proc = _drive(fail_closed=True)
+        assert proc.returncode == 0, "the deny is envelope-encoded; the exit code is 0"
+        assert proc.stdout.strip(), (
+            f"run_hook emitted NOTHING on a raised fail-closed body "
+            f"(rc={proc.returncode}). Silence is the failure this file "
+            f"exists to catch -- a fail-closed guard must still deny.\n{proc.stderr}"
+        )
+        out = json.loads(proc.stdout)
         decision = out["hookSpecificOutput"]["permissionDecision"]
         assert decision == "deny", (
             f"a crashed fail-closed guard answered {decision!r}. That is the "
             "inversion: a phase could close without its gate."
         )
-        assert rc == 0, "the deny is envelope-encoded; the exit code is 0"
 
-    def test_fail_open_allows(self):
-        """The other half, so the test above is not passing for some
-        reason unrelated to the flag."""
-        rc, out = _drive(fail_closed=False)
-        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
-        assert rc == 0
+    def test_fail_open_is_no_decision(self):
+        """nexus-452oy: fail-open now means NO decision, not an explicit
+        allow -- an explicit allow on fail-open bypassed both Claude
+        Code's own permission prompt and its auto-mode classifier for the
+        command. The other half of the fail-closed test above, so that
+        one is not passing for some reason unrelated to the flag."""
+        proc = _drive(fail_closed=False)
+        assert proc.returncode == 0
+        assert proc.stdout == "", f"expected empty (no-decision) stdout, got: {proc.stdout!r}"
 
     def test_the_deny_reason_names_the_cause(self):
         """A bare deny with no reason is indistinguishable from a policy
         deny, and sends the reader hunting for a gate that was never the
         problem."""
-        _rc, out = _drive(fail_closed=True)
+        proc = _drive(fail_closed=True)
+        out = json.loads(proc.stdout)
         reason = json.dumps(out)
         assert "fail-closed" in reason
         assert "induced" in reason, (

@@ -942,10 +942,24 @@ def _deny_message(
 
 
 def _allow(context: str = "") -> HookResult:
-    """The allow envelope, key order carried from the script's printf."""
-    out: dict = {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
-    if context:
-        out["additionalContext"] = context
+    """No decision (bare), or an advisory-only envelope (nexus-452oy).
+
+    Every call site here is this gate's opinion that it has nothing to
+    DENY -- not a bd close, no bd verb found, on_close disabled, an
+    indeterminate bead id, an override, or a verified review-completed
+    marker. None of those is a deliberate decision to override the user's
+    own Bash permission prompt, so none of them may carry
+    ``permissionDecision``: an explicit ``allow`` here bypassed both the
+    prompt and Claude Code's auto-mode classifier for every gated command
+    this gate did not need to block (proven live by cc-validation scenario
+    28). Bare, this is ``HookResult()`` -- stdout-silent, exactly what
+    ``auto_approve.py``'s own no-match case returns. With *context* it
+    carries the advisory text alone, in ``additionalContext``, with no
+    decision attached -- the "warn" shape.
+    """
+    if not context:
+        return HookResult()
+    out: dict = {"hookEventName": "PreToolUse", "additionalContext": context}
     return HookResult(stdout=json.dumps({"hookSpecificOutput": out}))
 
 
@@ -994,13 +1008,17 @@ def run(payload: dict | None) -> HookResult:
     IS the semantics here, and every reordering is a chance to change
     which arm wins. "Move, do not rewrite" (RDR-215 Approach item 9)
     names this file.
-    EVERY exit here EMITS an allow envelope rather than staying silent.
-    The script calls its ``allow`` helper on each no-op path, and while a
-    silent PreToolUse result means the same thing to the harness, it does
-    not to the 67 tests that parse stdout -- ten of them failed on
-    JSONDecodeError against an empty string. Silence and an explicit
-    allow are the same DECISION and different OUTPUT, and the output is
-    the part with consumers.
+
+    EVERY no-op exit here is now SILENT (nexus-452oy), not an explicit
+    allow envelope. An earlier version of this docstring argued the
+    reverse -- that emitting allow rather than staying silent was needed
+    because 67 tests parsed stdout and ten failed with JSONDecodeError
+    against an empty string -- and that argument is exactly the bug: an
+    explicit ``permissionDecision: allow`` on a no-op path bypasses both
+    Claude Code's own permission prompt and its auto-mode classifier for
+    the Bash command (proven live by cc-validation scenario 28), so the
+    fix is emitting nothing on those paths and updating the tests that
+    assumed otherwise, not the other way around. See :func:`_allow`.
     """
     data = payload if isinstance(payload, dict) else {}
     # Record the session id BEFORE any branch: every `nx` subprocess this

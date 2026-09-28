@@ -93,7 +93,15 @@ def _run(payload: dict, env_extra: dict[str, str] | None = None):
 
 
 def _decision(proc):
+    """The envelope's ``hookSpecificOutput``, or ``{}`` for a no-decision
+    (empty stdout) verdict (nexus-452oy). A pass-through case now emits
+    NOTHING rather than an explicit allow, so ``"permissionDecision" not
+    in out`` is the "not blocked" assertion; ``out["permissionDecision"]
+    == "deny"`` is unaffected and still works.
+    """
     assert proc.returncode == 0, proc.stderr
+    if proc.stdout == "":
+        return {}
     return json.loads(proc.stdout)["hookSpecificOutput"]
 
 
@@ -247,16 +255,16 @@ class TestDeny:
 class TestAllow:
     def test_main_conversation_commit_allowed(self, shared_repo):
         out = _decision(_run(_bash("git commit -m msg", agent=False, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow"
+        assert "permissionDecision" not in out
 
     def test_subagent_readonly_git_allowed(self, shared_repo):
         for cmd in ("git status", "git diff", "git log --oneline", "git show HEAD"):
             out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-            assert out["permissionDecision"] == "allow", cmd
+            assert "permissionDecision" not in out, cmd
 
     def test_subagent_nongit_allowed(self, shared_repo):
         out = _decision(_run(_bash("ls -la && echo commit", cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow"
+        assert "permissionDecision" not in out
 
     def test_commit_substring_not_subcommand_denied_since_round4(self, shared_repo):
         """PRE-nexus-3c92m-round-4 this allowed (the structured parser saw
@@ -275,7 +283,7 @@ class TestAllow:
         round 4: a POSITIVELY PROVEN linked worktree is the one exemption
         left in the primary rule."""
         out = _decision(_run(_bash("git commit -m wt", cwd=str(linked_worktree))))
-        assert out["permissionDecision"] == "allow"
+        assert "permissionDecision" not in out
 
     def test_non_repo_cwd_now_fails_CLOSED_since_round4(self, tmp_path):
         """PRE-round-4 this allowed: the old design fail-OPENED hygiene verbs
@@ -304,7 +312,7 @@ class TestAllow:
         out = _decision(
             _run(_bash("git commit -m msg # routing-allow: orchestrator sanctioned", cwd=str(shared_repo)))
         )
-        assert out["permissionDecision"] == "allow"
+        assert "permissionDecision" not in out
         log = (tmp_path / "dropped_writes.jsonl").read_text()
         assert '"outcome": "escape"' in log or '"escape"' in log
 
@@ -368,7 +376,7 @@ def test_read_only_inspection_still_allowed(cmd, shared_repo):
     """Reviewers must keep working. The bead's stated preference: allowlist the
     read-only invocations rather than blanket-denying the verb."""
     out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-    assert out["permissionDecision"] == "allow", f"{cmd} was blocked: {out}"
+    assert "permissionDecision" not in out, f"{cmd} was blocked: {out}"
 
 
 @pytest.mark.parametrize("cmd", ["git stash list", "git stash show -p"])
@@ -390,13 +398,13 @@ def test_stash_readonly_forms_now_denied_since_round4(cmd, shared_repo):
 def test_destructive_verbs_allowed_in_linked_worktree(cmd, linked_worktree):
     """A worktree-isolated agent owns its tree — including destroying it."""
     out = _decision(_run(_bash(cmd, cwd=str(linked_worktree))))
-    assert out["permissionDecision"] == "allow", f"{cmd} was blocked: {out}"
+    assert "permissionDecision" not in out, f"{cmd} was blocked: {out}"
 
 
 def test_main_conversation_unaffected_by_the_widening(shared_repo):
     """The rule targets subagents. The orchestrator resets its own tree."""
     out = _decision(_run(_bash("git checkout -- x.py", agent=False, cwd=str(shared_repo))))
-    assert out["permissionDecision"] == "allow"
+    assert "permissionDecision" not in out
 
 
 def test_routing_allow_escape_still_works(shared_repo):
@@ -404,7 +412,7 @@ def test_routing_allow_escape_still_works(shared_repo):
         "git checkout -- x.py  # routing-allow: orchestrator asked me to revert this",
         cwd=str(shared_repo),
     )))
-    assert out["permissionDecision"] == "allow"
+    assert "permissionDecision" not in out
 
 
 # ── Fail mode WAS split by what is at stake (Hal ruling 2026-07-25, item 3),
@@ -584,7 +592,7 @@ class TestNexus3c92mNamedInvocations:
     ])
     def test_read_only_git_allowed(self, cmd, shared_repo):
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
+        assert "permissionDecision" not in out, f"{cmd}: {out}"
 
     def test_stash_list_now_denied_since_round4(self, shared_repo):
         """Was in the read-only-allowed set above pre-round-4; see
@@ -598,7 +606,7 @@ class TestNexus3c92mNamedInvocations:
         out = _decision(_run(_bash(
             "git checkout -- f.py", agent=False, cwd=str(shared_repo),
         )))
-        assert out["permissionDecision"] == "allow"
+        assert "permissionDecision" not in out
 
     def test_deny_message_names_the_rule(self, shared_repo):
         out = _decision(_run(_bash("git checkout -- f.py", cwd=str(shared_repo))))
@@ -716,7 +724,7 @@ class TestNexus3c92mNewlineAndHeredocGap:
     def test_multiline_with_no_git_at_all_stays_allowed(self, shared_repo):
         cmd = "\n".join([f"cd {shared_repo}", "echo hi", "ls -la"])
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
 
 class TestNexus3c92mAddDashNAndResetPathspec:
@@ -806,7 +814,7 @@ class TestNexus3c92mReviewRound2Bypasses:
         must not become deny-by-default just because `<<<` is now excluded
         from heredoc-open matching."""
         out = _decision(_run(_bash('cat <<< "hello world"', cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_backslash_line_continuation_denied(self, shared_repo):
         """`git \\` + newline + `checkout -- t3.py` is ONE logical shell
@@ -978,7 +986,7 @@ class TestNexus3c92mRound4PrimaryRule:
     ])
     def test_expanded_read_only_set_allowed(self, cmd, shared_repo):
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
+        assert "permissionDecision" not in out, f"{cmd}: {out}"
 
     def test_100kb_command_scans_well_under_50ms(self):
         """Performance bound the round-4/5 design must meet. Round 5 removed
@@ -1071,7 +1079,7 @@ class TestNexus3c92mRound5PrimaryRuleFixes:
         single-backslash-plus-ordinary-char case)."""
         cmd = "echo " + (chr(92) * 2) + "n"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_flag_padding_beyond_the_old_160_char_window_denied(self, shared_repo):
         """The review's named exploit shape: an ordinary, syntactically
@@ -1118,7 +1126,7 @@ class TestNexus3c92mRound5PrimaryRuleFixes:
         out = _decision(_run(_bash(
             f"echo {b64} | base64 -d | sh", cwd=str(shared_repo),
         )))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
 
 # ── nexus-3c92m round 6: expansions spliced INSIDE a token ───────────────────
@@ -1161,24 +1169,24 @@ class TestNexus3c92mRound6SplicedExpansions:
         attach a verb."""
         cmd = "g" + chr(36) + "{x:-i}t"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_command_sub_echo_reconstructs_bare_git_no_verb_allowed(self, shared_repo):
         cmd = "g" + chr(36) + "(echo i)t"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_ansi_c_octal_reconstructs_bare_git_no_verb_allowed(self, shared_repo):
         cmd = "g" + chr(36) + "'" + chr(92) + "151't"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_command_sub_echo_reconstructs_benign_status_allowed(self, shared_repo):
         """`git st$(echo a)tus` reconstructs `git status` -- read-only,
         correctly ALLOWED even though the splicing mechanism fires."""
         cmd = "git st" + chr(36) + "(echo a)tus"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_param_default_spliced_into_verb_denied(self, shared_repo):
         """The actual exploit: `git ch${x:-e}ckout -- f`."""
@@ -1237,14 +1245,14 @@ class TestNexus3c92mRound6SplicedExpansions:
         never glued; read-only verb, correctly ALLOWED."""
         cmd = 'git diff -- "' + chr(36) + '(pwd)/f"'
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_whole_word_bare_var_readonly_allowed(self, shared_repo):
         """`git log $REV` -- `$REV` is a standalone token, not glued;
         read-only verb, correctly ALLOWED."""
         cmd = "git log " + chr(36) + "REV"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_whole_word_command_sub_unrelated_to_git_allowed(self, shared_repo):
         """No `git` anywhere in the command at all -- the adjacency rule is
@@ -1253,7 +1261,7 @@ class TestNexus3c92mRound6SplicedExpansions:
         allowed."""
         cmd = 'echo "' + chr(36) + '(pwd)"'
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_spliced_expansion_deny_message_names_the_rule(self, shared_repo):
         cmd = "git ch" + chr(36) + "VARckout -- t3.py"
@@ -1267,7 +1275,7 @@ class TestNexus3c92mRound6SplicedExpansions:
         gate in this hook."""
         cmd = "git ch" + chr(36) + "VARckout -- t3.py"
         out = _decision(_run(_bash(cmd, agent=False, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_spliced_expansion_routing_allow_escape_works(self, shared_repo):
         cmd = (
@@ -1275,14 +1283,14 @@ class TestNexus3c92mRound6SplicedExpansions:
             "  # routing-allow: orchestrator sanctioned this specific rephrase"
         )
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_spliced_expansion_denied_in_linked_worktree_is_allowed(self, linked_worktree):
         """The worktree exemption applies uniformly to both gates: a
         positively-proven linked worktree is the agent's own tree."""
         cmd = "git ch" + chr(36) + "VARckout -- t3.py"
         out = _decision(_run(_bash(cmd, cwd=str(linked_worktree))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_ansi_c_decode_function_correctness(self):
         """Direct unit-level check of `_expand_ansi_c_strings`: octal, hex,
@@ -1476,7 +1484,7 @@ class TestNexus3c92mRound7ScopedAdjacency:
         3-letter target `git` (no shared letters)."""
         cmd = "echo file" + chr(36) + "{i}.txt"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_path_interpolation_in_quotes_allowed(self, shared_repo):
         """`cp "${dir}/a${n}.log" .` -- no `git` present (branch A); both
@@ -1485,14 +1493,14 @@ class TestNexus3c92mRound7ScopedAdjacency:
         on either side, `${n}` touches only `a` on the left)."""
         cmd = 'cp "' + chr(36) + '{dir}/a' + chr(36) + '{n}.log" .'
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_package_filename_interpolation_allowed(self, shared_repo):
         """`tar xf pkg${ver}.tgz` -- no `git` present (branch A); joined
         fragment `pkg` is not a subsequence of `git` (no shared letters)."""
         cmd = "tar xf pkg" + chr(36) + "{ver}.tgz"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_command_sub_path_join_allowed(self, shared_repo):
         """`x=$(pwd)/sub` -- no `git` present (branch A); `$(pwd)` touches
@@ -1500,7 +1508,7 @@ class TestNexus3c92mRound7ScopedAdjacency:
         joined fragment is empty."""
         cmd = "x=" + chr(36) + "(pwd)/sub"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_joined_fragment_not_a_verb_subsequence_allowed(self, shared_repo):
         """`echo a${b}c` -- the coordinator's own worked example: no `git`
@@ -1508,7 +1516,7 @@ class TestNexus3c92mRound7ScopedAdjacency:
         in-order subsequence of `git` (no `a` in `git` at all)."""
         cmd = "echo a" + chr(36) + "{b}c"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_command_sub_reconstructs_verb_with_git_present_denied(self, shared_repo):
         """`git ch$(cmd)ckout -- f` -- a literal `git` is present, so
@@ -1578,7 +1586,7 @@ class TestNexus3c92mRound7ScopedAdjacency:
         target `git` (no shared letters at all)."""
         cmd = "a" + chr(36) + "{x}dd bystander"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_deny_message_names_the_reconstructed_fragment(self, shared_repo):
         cmd = "git re" + chr(36) + "{x}set --hard"
@@ -1654,7 +1662,7 @@ class TestNexus3c92mRound8CompoundVerbCoverage:
     ])
     def test_ordinary_interpolation_no_git_allowed(self, cmd, shared_repo):
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", f"{cmd}: {out}"
+        assert "permissionDecision" not in out, f"{cmd}: {out}"
 
     def test_make_int_no_git_present_documents_the_coordinators_own_verified_edge_case(self, shared_repo):
         """`make i${n}t` -- NO `git` anywhere, so branch A applies (kept
@@ -1772,19 +1780,19 @@ class TestNexus3c92mRound9ChainedExpansions:
         run-grouping fix doesn't over-merge non-adjacent constructs."""
         cmd = 'cp "' + chr(36) + '{dir}/a' + chr(36) + '{n}.log" .'
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_file_interpolation_still_allowed_zero_expansion_has_no_git(self, shared_repo):
         """`echo file${i}.txt` -- the zero-expansion text is literally
         `echo file.txt`, which contains no `git` at all."""
         cmd = "echo file" + chr(36) + "{i}.txt"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_command_sub_path_join_still_allowed(self, shared_repo):
         cmd = "x=" + chr(36) + "(pwd)/sub"
         out = _decision(_run(_bash(cmd, cwd=str(shared_repo))))
-        assert out["permissionDecision"] == "allow", out
+        assert "permissionDecision" not in out, out
 
     def test_zero_expansion_pass_directly(self):
         """Unit-level: `_delete_all_expansions` on the exact repro produces
