@@ -45,3 +45,42 @@ def test_a_read_verb_names_the_stopped_service(service_down, argv):
     )
     assert "nx daemon service start" in result.output, result.output
     assert "Collection not found" not in result.output, result.output
+
+
+@pytest.fixture
+def lease_points_at_a_stopped_service(monkeypatch):
+    """The other shape of "stopped": a lease that still names a port nothing
+    listens on (review of dd203cf35)."""
+    for name in ("NX_SERVICE_URL", "NX_SERVICE_TOKEN", "NX_SERVICE_HOST", "NX_SERVICE_PORT"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr("nexus.config.get_credential", lambda name: "")
+    monkeypatch.setattr(hvc, "_discover_lease", lambda: ("http://127.0.0.1:9", "sis0m-token"))
+    monkeypatch.setattr(hvc, "_lease_cache", None)
+    monkeypatch.setattr("nexus.db.service_endpoint.mint_armed", lambda: False)
+
+
+@pytest.mark.parametrize("argv", _VERBS, ids=lambda a: " ".join(a[:2]))
+def test_a_read_verb_names_a_service_that_does_not_answer(lease_points_at_a_stopped_service, argv):
+    result = CliRunner().invoke(main, argv)
+
+    assert result.exit_code != 0, result.output
+    assert isinstance(result.exception, SystemExit), (
+        f"{argv}: {type(result.exception).__name__} escaped as a traceback"
+    )
+    assert "did not answer" in result.output, result.output
+    assert "Collection not found" not in result.output, result.output
+
+
+def test_a_service_error_mid_run_is_one_line(monkeypatch):
+    """A service that answers with an error (a 5xx) is rendered once, with
+    its message, never as a traceback (critique of dd203cf35)."""
+    def _boom(*a, **k):
+        raise hvc.VectorServiceError("POST /v1/vectors/search failed: HTTP 500", code=500)
+
+    monkeypatch.setattr(hvc, "_post", _boom)
+    monkeypatch.setattr(hvc, "_get", _boom)
+    result = CliRunner().invoke(main, ["collection", "list"])
+
+    assert result.exit_code != 0, result.output
+    assert isinstance(result.exception, SystemExit), type(result.exception).__name__
+    assert "HTTP 500" in result.output, result.output

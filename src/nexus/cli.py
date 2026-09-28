@@ -89,6 +89,9 @@ class _StorageBackendGuardGroup(click.Group):
     """
 
     def invoke(self, ctx: click.Context):
+        import urllib.error  # noqa: PLC0415 — deferred: keep CLI import surface light
+
+        from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.t2.http_token_store import TokenAdminAuthError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -102,6 +105,20 @@ class _StorageBackendGuardGroup(click.Group):
             # no managed endpoint). The message names the remedy; a
             # traceback buried it (shakeout 7.64.1 F6).
             raise click.ClickException(str(exc)) from exc
+        except VectorServiceError as exc:
+            # nexus-sis0m.1: the service answered with an error mid-run (a 5xx,
+            # a refusal); its message already carries any remedy.
+            raise click.ClickException(f"the nexus service returned an error: {exc}") from exc
+        except (urllib.error.URLError, ConnectionError) as exc:
+            # nexus-sis0m.1: the other shape of a stopped service, a lease or
+            # endpoint naming a port nothing answers on. The vector client
+            # re-raises the raw error on purpose (its retry keys on the
+            # type), so the process boundary is where it becomes one line.
+            raise click.ClickException(
+                f"a service this command needs did not answer ({exc}). "
+                "If it is the local nexus service, start it with "
+                "'nx daemon service start'; 'nx doctor' checks every endpoint."
+            ) from exc
         except TokenAdminAuthError as exc:
             # nexus-xzeml: a refused token-admin call is a credential problem
             # the operator has to act on, not a crash.

@@ -81,7 +81,9 @@ def list_cmd() -> None:
     consistent-looking name. A collection with no catalog row prints ``-``
     in every column; a catalog row with no chunks prints 0.
     """
-    listed = _t3().list_collections()
+    # nexus-sis0m.1: strict, so a service error is reported rather than read
+    # as "No collections found." at exit 0.
+    listed = _t3().list_collections(strict=True)
     counts = {c["name"]: c.get("count", 0) for c in listed}
     # nexus-7q8zg: CHUNKS is live (owned) chunks; STORED is what physically
     # sits in the collection. They differ for quarantine siblings and for

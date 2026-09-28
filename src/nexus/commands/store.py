@@ -499,10 +499,13 @@ def _list_documents(db: T3Database, col_name: str) -> None:
     try:
         total_chunks = db.collection_info(col_name)["count"]
     except KeyError:
-        # nexus-sis0m.1: only a genuinely absent collection is "not found".
-        # Every other failure (a stopped service among them) used to print
-        # this too, at exit 0, which reads as data loss.
-        raise click.ClickException(f"Collection not found: {col_name}")
+        # nexus-sis0m.1: only an absent or empty collection lands here
+        # (collection_info cannot tell the two apart), and it is reported the
+        # way plain `store list` reports it, at exit 0. Every other failure,
+        # a stopped service among them, used to print "Collection not found"
+        # too, which reads as data loss; those now propagate.
+        click.echo(f"No documents in {col_name}.")
+        return
 
     from nexus.catalog.store_hook import manifest_doc_index  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 
