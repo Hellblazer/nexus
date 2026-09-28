@@ -55,7 +55,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: pg-bundle-cache-seed-${{ github.ref }}
+  # Keyed on the mac runner too: a dispatch for hellmini and one for macos-14
+  # seed different cache keys, so one must not cancel the other (it did on
+  # 2026-09-28, run 36490979010). push/schedule seed both and share one group.
+  group: pg-bundle-cache-seed-${{ github.ref }}-${{ inputs.mac_runner || 'all' }}
   cancel-in-progress: true
 
 jobs:
