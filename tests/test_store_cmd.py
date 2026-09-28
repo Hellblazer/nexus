@@ -855,3 +855,16 @@ def test_store_put_refuses_a_placeholder_collection(tmp_path, monkeypatch) -> No
     result = CliRunner().invoke(main, ["store", "put", str(src), "--title", "n", "--collection", "knowledge"])
     assert result.exit_code != 0, result.output
     assert "placeholder" in result.output and "docs/collections.md" in result.output
+
+
+def test_store_list_names_its_total_as_stored(runner):
+    """nexus-sis0m.3 (shakeout 7.64.1 F10): after a delete, `store list`
+    printed "showing 1-39 of 62" beside a live count of 39; the 62 is the
+    stored count, and the line now says so."""
+    mock_db = MagicMock()
+    mock_db.list_store.return_value = [{"id": "a" * 64, "title": "t"}]
+    mock_db.collection_info.return_value = {"count": 62}
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        result = runner.invoke(main, ["store", "list", "-c", "knowledge__x__model-ctx__v1"])
+    assert result.exit_code == 0, result.output
+    assert "(showing 1-1; 62 stored)" in result.output, result.output

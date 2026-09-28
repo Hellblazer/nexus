@@ -454,7 +454,10 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
 
     shown_start = offset + 1
     shown_end = offset + len(entries)
-    click.echo(f"{col_name}  (showing {shown_start}-{shown_end} of {total})\n")
+    # nexus-sis0m.3: `total` is the collection's STORED chunk count (the
+    # cheap count); the rows listed are live ones, so after a delete the
+    # two differ (shakeout 7.64.1 F10). Name it rather than imply live.
+    click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n")
     from datetime import datetime, timedelta  # noqa: PLC0415  — stdlib deferred to call site (datetime)
     for e in entries:
         doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
@@ -536,7 +539,7 @@ def _list_documents(db: T3Database, col_name: str) -> None:
         seen.items(),
         key=lambda kv: doc_titles.get(kv[0]) or kv[1].get("title") or "",
     )
-    click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} chunks)\n")
+    click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} stored chunks)\n")
     if degraded:
         click.echo(
             f"  NOTE: grouped by chunk, not by manifest — {degraded}. "

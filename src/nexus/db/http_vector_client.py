@@ -4891,7 +4891,10 @@ class HttpVectorClient:
         return {"count": self._count_or_key_error(name), "metadata": {}}
 
     def _count_or_key_error(self, name: str) -> int:
-        """Return the live chunk count for *name*, raising ``KeyError`` on absent.
+        """Return the STORED chunk count for *name* (every physical row, owned
+        or not: the engine's /count is a plain row count), raising
+        ``KeyError`` on absent. A live count needs the tenant-wide stats
+        route (:meth:`list_collections`).
 
         Shared by :meth:`collection_info` and :meth:`collection_metadata`
         (wave review: the block was duplicated verbatim). On the pgvector

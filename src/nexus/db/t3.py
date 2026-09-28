@@ -1352,8 +1352,12 @@ class T3Database:
             for doc_id, meta in zip(result["ids"], result["metadatas"])
         ]
 
-    def list_collections(self) -> list[dict]:
+    def list_collections(self, *, strict: bool = False) -> list[dict]:
         """Return all T3 collections with their document counts.
+
+        *strict* matches ``HttpVectorClient.list_collections``'s signature
+        (callers pass it to have a listing failure raise); this facade's
+        listing never swallows an error, so it changes nothing here.
 
         Queries the single ChromaDB client and parallelizes count queries
         up to 8 concurrent requests.
