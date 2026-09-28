@@ -284,19 +284,18 @@ public final class MemoryHandler implements HttpHandler {
         Integer limit = null;
         String rawLimit = params.get("limit");
         if (rawLimit != null && !rawLimit.isBlank()) {
-            int parsed;
-            try {
-                parsed = Integer.parseInt(rawLimit.trim());
-            } catch (NumberFormatException e) {
-                throw new IllegalArgumentException("limit must be a positive integer, got '" + rawLimit + "'");
-            }
+            int parsed = parseInt(rawLimit.trim(), "limit");
             if (parsed < 1) {
-                throw new IllegalArgumentException("limit must be a positive integer, got " + parsed);
+                throw new IllegalArgumentException("query param 'limit' must be a positive integer, got " + parsed);
             }
             limit = Math.min(parsed, LIST_LIMIT_CEILING);
         }
 
         var rows = repo.listEntries(tenant, project, agent, limit);
+        // A bounded read also reports how many rows match in total, on each
+        // row (the response stays a list, so an older client ignores the
+        // key); the prefix scan prints "N more" from it.
+        Integer matchingTotal = limit == null ? null : repo.countEntries(tenant, project, agent);
         // Mirror Python list_entries: summary view (id, project, title, agent, timestamp)
         var summaries = rows.stream().map(r -> {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -304,6 +303,9 @@ public final class MemoryHandler implements HttpHandler {
             m.put("project", r.getProject());
             m.put("title", r.getTitle());
             m.put("agent", r.getAgent());
+            if (matchingTotal != null) {
+                m.put("matching_total", matchingTotal);
+            }
             // Use same UTC second-precision format as recordToMap
             m.put("timestamp", r.getTimestamp() != null
                 ? MemoryRepository.UTC_SECOND.format(r.getTimestamp().withOffsetSameInstant(ZoneOffset.UTC))

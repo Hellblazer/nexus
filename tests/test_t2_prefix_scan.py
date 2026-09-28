@@ -76,6 +76,7 @@ class _RowStore:
     def __init__(self) -> None:
         self._rows: dict[str, list[dict[str, Any]]] = {}
         self.limits_requested: list[int | None] = []
+        self.reports_total = True
         self.get_calls: list[tuple[str, str]] = []
 
     def put(self, project: str, title: str, content: str) -> None:
@@ -91,11 +92,16 @@ class _RowStore:
         retry_read_timeout: bool = True,
     ) -> list[dict[str, Any]]:
         self.limits_requested.append(limit)
-        rows = [
-            {"title": r["title"], "project": project}
-            for r in self._rows.get(project or "", [])
+        all_rows = self._rows.get(project or "", [])
+        rows = [{"title": r["title"], "project": project} for r in all_rows]
+        if limit is None:
+            return rows
+        # An engine honouring the bound reports the full match count on
+        # each row (nexus-xn9ut); an old engine does not.
+        return [
+            dict(r, matching_total=len(all_rows)) if self.reports_total else r
+            for r in rows[:limit]
         ]
-        return rows[:limit] if limit is not None else rows
 
     def get(
         self,
@@ -148,23 +154,31 @@ def test_entries_snippet_limit_to_title_limit_are_title_only() -> None:
     assert len(without_snippet) == _TITLE_LIMIT - _SNIPPET_LIMIT
 
 
-def test_entries_beyond_title_limit_are_marked_as_more() -> None:
-    """Entries beyond ``_TITLE_LIMIT`` per namespace are marked '… (more)'.
-
-    nexus-xn9ut: the scan now lists only ``_TITLE_LIMIT + 1`` rows per
-    namespace (the whole-project list cost 2.4s of the hook's 9s bound), so
-    the exact overflow count ('… (N more)', nexus-h33x8.5) is no longer
-    known; the extra row says more exist. Pinned here: the bound reaches
-    the store, and the marker still appears."""
+def test_entries_beyond_title_limit_appear_as_count() -> None:
+    """Entries beyond ``_TITLE_LIMIT`` per namespace are summarised as
+    '… (N more)' (nexus-h33x8.5). Since nexus-xn9ut the scan lists only
+    ``_TITLE_LIMIT + 1`` rows per namespace (the whole-project list cost
+    2.4s of the hook's 9s bound) and N comes from the engine's
+    matching_total. Pinned: the bound reaches the store, and N is exact."""
     overflow = 3
     store = _RowStore()
     for i in range(1, _TITLE_LIMIT + overflow + 1):
         store.put("repo", f"entry-{i}.md", f"Content {i}")
     output = _run_scan(store, "repo")
-    assert "… (more)" in output
+    assert f"… ({overflow} more)" in output
     assert store.limits_requested and all(
         lim == _TITLE_LIMIT + 1 for lim in store.limits_requested
     ), store.limits_requested
+
+
+def test_an_engine_without_matching_total_still_marks_more() -> None:
+    """An engine older than the limit parameter returns no matching_total;
+    the extra row still says more exist."""
+    store = _RowStore()
+    store.reports_total = False
+    for i in range(1, _TITLE_LIMIT + 4):
+        store.put("repo", f"entry-{i}.md", f"Content {i}")
+    assert "… (more)" in _run_scan(store, "repo")
 
 
 def test_exactly_title_limit_entries_have_no_more_marker() -> None:

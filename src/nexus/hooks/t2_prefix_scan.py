@@ -321,10 +321,15 @@ def _build_output(
             lines.append(f"### {label}")
             lines.extend(ns_lines)
             if ns_remaining:
-                # The list is bounded (nexus-xn9ut), so the number past the
-                # rendered titles is not known; the extra row says there
-                # are more.
-                lines.append("  … (more)")
+                # The list is bounded (nexus-xn9ut). An engine that honours
+                # the bound reports matching_total on each row, so the exact
+                # count survives; an older engine's rows carry none, and the
+                # extra row only says there are more.
+                total = summaries[0].get("matching_total")
+                if isinstance(total, int) and total > len(ns_lines):
+                    lines.append(f"  … ({total - len(ns_lines)} more)")
+                else:
+                    lines.append("  … (more)")
             lines.append("")
 
     if skipped_for_cap:

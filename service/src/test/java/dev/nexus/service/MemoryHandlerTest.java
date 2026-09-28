@@ -396,8 +396,19 @@ class MemoryHandlerTest {
         // the last two written.
         assertThat(entries.stream().map(e -> (String) e.get("title")).toList())
             .containsExactly("limit-entry-3", "limit-entry-2");
+        assertThat(entries).allSatisfy(e -> assertThat(e.get("matching_total")).isEqualTo(4));
         var all = mapper.readValue(get("/v1/memory/list?project=list-limit-proj", TENANT).body(), LIST_T);
         assertThat(all).hasSize(4);
+        assertThat(all.get(0)).doesNotContainKey("matching_total");
+    }
+
+    @Test
+    void list_limitAboveTheCeilingIsClampedNotRefused() throws Exception {
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"list-clamp-proj\",\"title\":\"only\",\"content\":\"c\",\"ttl\":30}");
+        var resp = get("/v1/memory/list?project=list-clamp-proj&limit=10001", TENANT);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(resp.body(), LIST_T)).hasSize(1);
     }
 
     @Test

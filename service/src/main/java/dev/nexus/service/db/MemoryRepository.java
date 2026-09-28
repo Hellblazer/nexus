@@ -469,6 +469,24 @@ public final class MemoryRepository {
     }
 
     /**
+     * How many rows {@link #listEntries(String, String, String, Integer)} would
+     * return unbounded, so a bounded caller can still say how many it did not
+     * receive (nexus-xn9ut: the prefix scan's "N more").
+     */
+    public int countEntries(String tenant, String project, String agent) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Condition where = NOT_QUARANTINED;
+            if (project != null && !project.isBlank()) {
+                where = where.and(MEMORY.PROJECT.eq(project));
+            }
+            if (agent != null && !agent.isBlank()) {
+                where = where.and(MEMORY.AGENT.eq(agent));
+            }
+            return ctx.fetchCount(MEMORY, where);
+        });
+    }
+
+    /**
      * Return distinct project namespaces starting with {@code prefix}, ordered by
      * latest timestamp descending (mirrors Python get_projects_with_prefix).
      * Returns a list of {@code [project, last_updated]} pairs as String arrays.

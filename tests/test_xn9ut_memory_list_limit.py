@@ -34,6 +34,7 @@ def test_the_engine_returns_only_the_newest_limit_rows(t2_service_env, tmp_path,
     rows = store.list_entries(project="xn9ut-limit", limit=2)
 
     assert [r["title"] for r in rows] == ["xn9ut-4", "xn9ut-3"]
+    assert all(r.get("matching_total") == 5 for r in rows), rows
     assert sent[-1].get("limit") == "2", "the bound must reach the engine"
     assert len(store.list_entries(project="xn9ut-limit")) == 5
 
