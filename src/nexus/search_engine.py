@@ -123,8 +123,16 @@ def _attach_doc_ids_from_catalog(
     nonempty = [c for c in chashes if c]
     if not nonempty:
         return
+    # nexus-w032x: the reverse lookup fetches every referencing document's
+    # manifest anyway; take them from it rather than fetching a subset of the
+    # same manifests again below (one ~2.5 s cloud round trip).
+    prefetched: dict[str, list[Any]] | None = None
+    _with_manifests = getattr(catalog, "docs_and_manifests_for_chashes", None)
     try:
-        chash_to_docs = catalog.docs_for_chashes(nonempty)
+        if _with_manifests is not None:
+            chash_to_docs, prefetched = _with_manifests(nonempty)
+        else:
+            chash_to_docs = catalog.docs_for_chashes(nonempty)
     except Exception:  # noqa: BLE001 — best-effort catalog lookup; failure logged at debug, doc_id attach skipped
         _log.debug("attach_doc_ids_lookup_failed", exc_info=True)
         return
@@ -171,7 +179,9 @@ def _attach_doc_ids_from_catalog(
     })
     manifest_cache: dict[str, list[Any]] = {}
     _get_manifests_batch = getattr(catalog, "get_manifests", None)
-    if _get_manifests_batch is not None and distinct_doc_ids:
+    if prefetched is not None:
+        manifest_cache.update({d: prefetched.get(d, []) for d in distinct_doc_ids})
+    elif _get_manifests_batch is not None and distinct_doc_ids:
         try:
             batch_result = _get_manifests_batch(distinct_doc_ids)
             # nexus-7lm3q review (CR Low-1): ``update(... or {})`` makes an
@@ -1056,7 +1066,12 @@ def search_cross_corpus(
     # inside _search_batch re-raises any non-``VectorServiceError`` (fail-
     # loud, matching the prior serial behaviour where such errors bubbled
     # out of the loop).
-    workers = min(8, len(batches))
+    # nexus-w032x: the quota constant, not a hand-picked 8. A default
+    # knowledge,code,docs,rdr search plans ~28 batches (the per-collection
+    # floor splits each model group; nexus-d9xt2), so the wave count is what
+    # the caller waits on. Each batch names different collections, and the
+    # quota is per collection.
+    workers = min(QUOTAS.MAX_CONCURRENT_READS, len(batches))
     if workers <= 1:
         batch_results = [_search_batch(b) for b in batches]
     else:

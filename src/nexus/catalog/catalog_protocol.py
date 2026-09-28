@@ -92,6 +92,9 @@ class CatalogReader(Protocol):
     def docs_for_chashes(self, chashes) -> object:  # canonical
         ...
 
+    def docs_and_manifests_for_chashes(self, chashes) -> object:  # canonical (nexus-w032x)
+        ...
+
     def find(self, query, *, content_type=..., limit=...) -> object:  # canonical
         ...
 

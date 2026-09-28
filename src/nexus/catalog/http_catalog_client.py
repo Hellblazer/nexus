@@ -3487,7 +3487,23 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return [row.chash for row in rows if row.chash]
 
     def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
-        """Reverse-lookup: chash -> [doc_id, ...] — dict-shape parity with local
+        """Reverse-lookup: chash -> [doc_id, ...]. See
+        :meth:`docs_and_manifests_for_chashes`, which does the work and also
+        returns the manifests it fetched on the way."""
+        return self.docs_and_manifests_for_chashes(chashes)[0]
+
+    def docs_and_manifests_for_chashes(
+        self, chashes: list[str],
+    ) -> tuple[dict[str, list[str]], dict[str, list[ManifestRow]]]:
+        """``(chash -> [doc_id, ...], doc_id -> manifest rows)``.
+
+        The reverse lookup already fetches every referencing document's
+        manifest to rebuild the chash -> doc_id edges; a caller that needs
+        those manifests too (search's chunk_count / chunk_index attach) used
+        to fetch them again, a second ``/manifest/get_many`` for a subset of
+        the same documents, about 2.5 s on the cloud (nexus-w032x).
+
+        Reverse-lookup: chash -> [doc_id, ...] — dict-shape parity with local
         ``Catalog.docs_for_chashes`` (nexus-h8rf6.3).
 
         ``CatalogRepository.docsForChashes()`` runs a single SELECT DISTINCT on
@@ -3538,13 +3554,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         a set of doc ids that reference the chash).
         """
         if not chashes:
-            return {}
+            return {}, {}
         prefix_to_inputs: dict[str, list[str]] = defaultdict(list)
         for c in chashes:
             if c:
                 prefix_to_inputs[c].append(c)
         if not prefix_to_inputs:
-            return {}
+            return {}, {}
         unique_chashes = list(prefix_to_inputs.keys())
         tumblers: set[str] = set()
         for start in range(0, len(unique_chashes), _DOCS_FOR_CHASHES_PAGE):
@@ -3590,7 +3606,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 )
             tumblers.update(batch_tumblers)
         if not tumblers:
-            return {}
+            return {}, {}
         manifests = self.get_manifests(list(tumblers))  # {doc_id: [ManifestRow, ...]}
         wanted_prefixes = set(prefix_to_inputs.keys())
         prefix_to_docs: dict[str, list[str]] = defaultdict(list)
@@ -3602,7 +3618,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         for prefix, doc_ids in prefix_to_docs.items():
             for input_form in prefix_to_inputs[prefix]:
                 out[input_form] = list(doc_ids)
-        return out
+        return out, manifests
 
     def _manifest_chashes_reconciled(
         self, physical_collection: str, result: dict,

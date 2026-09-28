@@ -806,6 +806,7 @@ class TestAttachDocIdsFromCatalog:
     def test_no_chashes_is_noop(self):
         from nexus.search_engine import _attach_doc_ids_from_catalog
         catalog = MagicMock()
+        del catalog.docs_and_manifests_for_chashes  # the pre-w032x catalog surface
         r = self._result()  # no chunk_text_hash
         _attach_doc_ids_from_catalog([r], catalog=catalog)
         catalog.docs_for_chashes.assert_not_called()
@@ -819,6 +820,7 @@ class TestAttachDocIdsFromCatalog:
         from nexus.search_engine import _attach_doc_ids_from_catalog
         chash = "a" * 64
         catalog = MagicMock()
+        del catalog.docs_and_manifests_for_chashes  # the pre-w032x catalog surface
         catalog.docs_for_chashes.return_value = {chash: ["1.1.5"]}
         r = self._result(chunk_text_hash=chash)
         _attach_doc_ids_from_catalog([r], catalog=catalog)
@@ -859,6 +861,7 @@ class TestAttachDocIdsFromCatalog:
     def test_chash_with_no_manifest_entry_leaves_field_unset(self):
         from nexus.search_engine import _attach_doc_ids_from_catalog
         catalog = MagicMock()
+        del catalog.docs_and_manifests_for_chashes  # the pre-w032x catalog surface
         catalog.docs_for_chashes.return_value = {}  # nothing matched
         r = self._result(chunk_text_hash="c" * 64)
         _attach_doc_ids_from_catalog([r], catalog=catalog)
@@ -870,6 +873,7 @@ class TestAttachDocIdsFromCatalog:
         consumers degrade gracefully)."""
         from nexus.search_engine import _attach_doc_ids_from_catalog
         catalog = MagicMock()
+        del catalog.docs_and_manifests_for_chashes  # the pre-w032x catalog surface
         catalog.docs_for_chashes.side_effect = RuntimeError("catalog dead")
         r = self._result(chunk_text_hash="d" * 64)
         # Must not raise.
@@ -887,6 +891,7 @@ class TestAttachDocIdsFromCatalog:
 
         chash = "e" * 64
         catalog = MagicMock()
+        del catalog.docs_and_manifests_for_chashes  # the pre-w032x catalog surface
         catalog.docs_for_chashes.return_value = {chash: ["DOC-with-links"]}
         # nexus-qnp5s: apply_link_boost now uses links_from_batch() (public API).
         catalog.links_from_batch.return_value = {
@@ -1222,6 +1227,7 @@ class TestAttachDocIdsBatchManifest:
         chash_a = "a" * 64
         chash_b = "b" * 64
         catalog = MagicMock()
+        del catalog.docs_and_manifests_for_chashes  # the pre-w032x catalog surface
         catalog.docs_for_chashes.return_value = {
             chash_a: ["doc-A"],
             chash_b: ["doc-B"],
@@ -1272,6 +1278,7 @@ class TestAttachDocIdsBatchManifest:
 
         chash = "d" * 64
         catalog = MagicMock()
+        del catalog.docs_and_manifests_for_chashes  # the pre-w032x catalog surface
         catalog.docs_for_chashes.return_value = {chash: ["doc-D"]}
         catalog.get_manifests.side_effect = RuntimeError("service dead")
         r = self._result(chunk_text_hash=chash)
@@ -1289,6 +1296,7 @@ class TestAttachDocIdsBatchManifest:
 
         chash = "e" * 64
         catalog = MagicMock()
+        del catalog.docs_and_manifests_for_chashes  # the pre-w032x catalog surface
         catalog.docs_for_chashes.return_value = {chash: ["doc-E"]}
         catalog.get_manifests.return_value = {
             "doc-E": [{"chash": chash, "position": 0}],
@@ -1308,6 +1316,7 @@ class TestAttachDocIdsBatchManifest:
         chash_a = "a" * 64
         chash_b = "b" * 64
         catalog = MagicMock()
+        del catalog.docs_and_manifests_for_chashes  # the pre-w032x catalog surface
         catalog.docs_for_chashes.return_value = {
             chash_a: ["doc-A"],
             chash_b: ["doc-B"],
