@@ -79,10 +79,11 @@ class AnswerShape(str, Enum):
     #: Empty or whitespace-only ``final_text``.
     EMPTY = "empty"
     #: No plan ran: the plan-match gate missed and the inline planner
-    #: failed. Set by ``nx_answer`` directly and never produced by
-    #: :func:`classify_answer_shape`, so it is not in
-    #: :data:`NON_ANSWER_SHAPES` (``nx answer-runs`` already classes these
-    #: rows by their recorded text, as ``planner_error``) (nexus-f9kxd).
+    #: failed. This and the two below are set by ``nx_answer`` directly and
+    #: never produced by :func:`classify_answer_shape`, so their membership
+    #: in :data:`NON_ANSWER_SHAPES` changes nothing that classifies text
+    #: (``nx answer-runs`` classes these rows by their recorded text)
+    #: (nexus-f9kxd).
     PLANNER_ERROR = "planner_error"
     #: ``nx_answer`` stopped on an error: invalid input, a plan-match or
     #: plan-execution failure, or a retrieval refusal. Set directly, like
@@ -105,6 +106,9 @@ NON_ANSWER_SHAPES: frozenset[AnswerShape] = frozenset({
     AnswerShape.OPERATOR_PAYLOAD,
     AnswerShape.LISTING,
     AnswerShape.EMPTY,
+    AnswerShape.PLANNER_ERROR,
+    AnswerShape.ERROR,
+    AnswerShape.NO_EVIDENCE,
 })
 
 #: Operators whose bare terminal output IS an answer: prose composed from
