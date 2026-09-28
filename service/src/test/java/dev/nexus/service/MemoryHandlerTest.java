@@ -380,6 +380,33 @@ class MemoryHandlerTest {
             .contains("list-entry-1", "list-entry-2");
     }
 
+    @Test
+    void list_limitReturnsTheNewestNOnly() throws Exception {
+        // nexus-xn9ut: t2_prefix_scan renders 5 titles but paid for the whole
+        // project (3,840 rows, 2.4s). limit bounds the rows the engine reads.
+        for (int i = 0; i < 4; i++) {
+            post("/v1/memory/put", TENANT,
+                "{\"project\":\"list-limit-proj\",\"title\":\"limit-entry-" + i
+                    + "\",\"content\":\"c\",\"ttl\":30}");
+        }
+        var resp = get("/v1/memory/list?project=list-limit-proj&limit=2", TENANT);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var entries = mapper.readValue(resp.body(), LIST_T);
+        // Same-second timestamps tie; the id tiebreak makes the newest two
+        // the last two written.
+        assertThat(entries.stream().map(e -> (String) e.get("title")).toList())
+            .containsExactly("limit-entry-3", "limit-entry-2");
+        var all = mapper.readValue(get("/v1/memory/list?project=list-limit-proj", TENANT).body(), LIST_T);
+        assertThat(all).hasSize(4);
+    }
+
+    @Test
+    void list_rejectsANonPositiveOrNonNumericLimit() throws Exception {
+        assertThat(get("/v1/memory/list?project=x&limit=0", TENANT).statusCode()).isEqualTo(400);
+        assertThat(get("/v1/memory/list?project=x&limit=-3", TENANT).statusCode()).isEqualTo(400);
+        assertThat(get("/v1/memory/list?project=x&limit=abc", TENANT).statusCode()).isEqualTo(400);
+    }
+
     // ── Test 7: PROJECTS ──────────────────────────────────────────────────────
 
     @Test

@@ -442,6 +442,15 @@ public final class MemoryRepository {
      * Returns id, project, title, agent, timestamp columns (mirrors Python list_entries).
      */
     public List<MemoryRecord> listEntries(String tenant, String project, String agent) {
+        return listEntries(tenant, project, agent, null);
+    }
+
+    /**
+     * {@link #listEntries(String, String, String)} bounded to the newest
+     * {@code limit} rows; {@code null} reads all (nexus-xn9ut: a caller
+     * rendering five titles paid for every row of a 3,840-row project).
+     */
+    public List<MemoryRecord> listEntries(String tenant, String project, String agent, Integer limit) {
         return tenantScope.withTenant(tenant, ctx -> {
             Condition where = NOT_QUARANTINED;
             if (project != null && !project.isBlank()) {
@@ -450,10 +459,12 @@ public final class MemoryRepository {
             if (agent != null && !agent.isBlank()) {
                 where = where.and(MEMORY.AGENT.eq(agent));
             }
-            return ctx.selectFrom(MEMORY)
-                      .where(where)
-                      .orderBy(MEMORY.TIMESTAMP.desc())
-                      .fetch();
+            // ID breaks timestamp ties (second precision) so a bounded read
+            // is deterministic.
+            var query = ctx.selectFrom(MEMORY)
+                           .where(where)
+                           .orderBy(MEMORY.TIMESTAMP.desc(), MEMORY.ID.desc());
+            return limit == null ? query.fetch() : query.limit(limit).fetch();
         });
     }
 

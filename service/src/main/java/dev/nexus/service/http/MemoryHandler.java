@@ -66,6 +66,9 @@ public final class MemoryHandler implements HttpHandler {
 
     private static final Logger log = LoggerFactory.getLogger(MemoryHandler.class);
 
+    /** nexus-xn9ut: the most rows one {@code /list?limit=} returns; larger values are clamped. */
+    static final int LIST_LIMIT_CEILING = 10_000;
+
     // Jackson configured to handle OffsetDateTime and include null fields in output (SQLite-parity: every column key always present, RDR-152 nexus-fjwxh).
     static final ObjectMapper MAPPER = new ObjectMapper()
             .registerModule(new JavaTimeModule())
@@ -275,8 +278,25 @@ public final class MemoryHandler implements HttpHandler {
         Map<String, String> params = queryParams(ex.getRequestURI());
         String project = params.get("project");
         String agent   = params.get("agent");
+        // nexus-xn9ut: optional bound on the newest rows returned. Absent
+        // reads all (the old contract); a non-positive or non-numeric value
+        // is a 400; a value above LIST_LIMIT_CEILING is clamped to it.
+        Integer limit = null;
+        String rawLimit = params.get("limit");
+        if (rawLimit != null && !rawLimit.isBlank()) {
+            int parsed;
+            try {
+                parsed = Integer.parseInt(rawLimit.trim());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("limit must be a positive integer, got '" + rawLimit + "'");
+            }
+            if (parsed < 1) {
+                throw new IllegalArgumentException("limit must be a positive integer, got " + parsed);
+            }
+            limit = Math.min(parsed, LIST_LIMIT_CEILING);
+        }
 
-        var rows = repo.listEntries(tenant, project, agent);
+        var rows = repo.listEntries(tenant, project, agent, limit);
         // Mirror Python list_entries: summary view (id, project, title, agent, timestamp)
         var summaries = rows.stream().map(r -> {
             Map<String, Object> m = new LinkedHashMap<>();
