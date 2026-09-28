@@ -642,6 +642,7 @@ def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
 
 def resolve_knowledge_doc_for_chash(
     reader, chash: str, *, log_event: str, collection: str | None = None,
+    owner_collection: str | None = None,
 ):
     """Resolve *chash* to the single store_put-origin catalog document it
     identifies, or ``None`` if there is no match or the match is ambiguous.
@@ -652,14 +653,22 @@ def resolve_knowledge_doc_for_chash(
     pure function of chunk text, collection-independent — so an
     unscoped call can match a document registered under a DIFFERENT
     collection whose manifest happens to reference an identical chunk.
-    That is correct for a raw "which document owns this chash" query
-    (the delete-path and tombstone-reap callers, which omit *collection*
-    and keep the original catalog-wide behavior — they act on the chash
-    itself, not on one particular collection's identity), but wrong for
-    a store_put RECONCILE, whose contract is keyed on (collection,
-    title): pass *collection* there so a cross-collection chash
-    coincidence can never be mistaken for "this document already
-    exists in the collection I am writing to."
+    Pass *collection* for a store_put RECONCILE, whose contract is keyed
+    on (collection, title), so a cross-collection chash coincidence can
+    never be mistaken for "this document already exists in the
+    collection I am writing to."
+
+    *owner_collection* is the delete-path scope (nexus-r3cdg): candidates
+    are entries whose ``physical_collection`` equals it OR is blank (a
+    ghost, which has no collection to mismatch; nexus-sz89e). A chunk row
+    lives in one collection, and the engine's delete anti-join and
+    live(c) both count only manifest rows in that collection, so an
+    owner in another collection neither owns nor protects it. Before
+    this scope the delete callers resolved catalog-wide: after an
+    ``.nxexp`` import into another collection the chash had two owners,
+    resolution called it ambiguous, nothing was reaped, and the home
+    document's own manifest row then protected the chunk (shakeout
+    7.64.1 F2: "Deleted 0 entries", exit 0).
 
     nexus-5axey: ``by_doc_id`` is a TUMBLER-only lookup on the engine (the
     settled wji11 contract: tumbler is the only document identity); it
@@ -712,6 +721,11 @@ def resolve_knowledge_doc_for_chash(
             and entry.content_type == "knowledge"
             and not entry.file_path
             and (collection is None or entry.physical_collection == collection)
+            and (
+                owner_collection is None
+                or not entry.physical_collection
+                or entry.physical_collection == owner_collection
+            )
         ):
             candidates.append(entry)
     if len(candidates) > 1:
@@ -2137,11 +2151,10 @@ def store_delete_catalog_cleanup(
     noticed. When given (nexus-c53hy defense-in-depth): the resolved
     entry's ``physical_collection`` must match it, or cleanup is
     skipped (returns ``("", "")``, same as "nothing to clean"). The chash
-    -> document resolution below is GLOBAL (no collection scoping of its
-    own — see :func:`resolve_knowledge_doc_for_chash`), so without this
-    check a chash that happens to also be a live document's natural id in
-    a DIFFERENT physical collection than the one the caller is deleting
-    from would get tombstoned by mistake. Callers that have already
+    -> document resolution below is scoped to *expected_collection* plus
+    ghosts (``owner_collection``, nexus-r3cdg), so a document in another
+    collection is neither tombstoned nor counted as a second owner; the
+    check after it is the older defense-in-depth layer. Callers that have already
     confirmed (via a collection-scoped T3 existence check) that this chash
     exists in a specific collection should pass that collection here; this
     is the second of two layers — see ``mcp/core.py::store_delete``'s own
@@ -2204,7 +2217,8 @@ def store_delete_catalog_cleanup(
         # and already applies the content_type == "knowledge" / no
         # file_path filter below.
         entry = resolve_knowledge_doc_for_chash(
-            reader, chash_doc_id, log_event="store_delete_catalog_lookup"
+            reader, chash_doc_id, log_event="store_delete_catalog_lookup",
+            owner_collection=expected_collection,
         )
     except Exception as exc:  # noqa: BLE001 — lookup failure must not mask the successful T3 delete; surfaced to caller
         _log.warning(
@@ -2306,11 +2320,12 @@ def reap_catalog_manifest_for_chashes(
 
     When given as a real collection name: a resolved entry only gets
     reaped if its ``physical_collection`` matches. The per-chash
-    resolution below is a GLOBAL chash lookup with no collection scoping
-    of its own, so without this guard a chash that is ALSO (coincidentally,
-    or via duplicate content) a live document's natural id in a DIFFERENT
-    physical collection than the one being acted on would get tombstoned
-    by mistake. This is a second, cheap layer — the primary defense is the
+    resolution below is scoped to *expected_collection* plus ghosts
+    (``owner_collection``, nexus-r3cdg): a document in another collection
+    that shares the chash (an ``.nxexp`` import copy, duplicate content)
+    is neither tombstoned nor counted as a second owner, matching the
+    engine's collection-scoped delete anti-join. The ``physical_collection``
+    check below is a second, cheap layer — the primary defense is the
     caller doing a collection-scoped T3 existence check before calling
     this at all (see ``commands/store.py::delete_cmd``'s ``--id`` branch).
 
@@ -2378,7 +2393,8 @@ def reap_catalog_manifest_for_chashes(
         writer = make_catalog_writer()
         for chash in chashes:
             entry = resolve_knowledge_doc_for_chash(
-                reader, chash, log_event="catalog_reap"
+                reader, chash, log_event="catalog_reap",
+                owner_collection=expected_collection,
             )
             if entry is None:
                 continue

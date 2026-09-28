@@ -622,11 +622,10 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str], *, expected_collection: str | 
     CALL BEFORE deleting the T3 chunk(s), not after — see the relocated
     function's docstring for why the order is load-bearing (RDR-191 F10c's
     anti-join). CALL ONLY after confirming *doc_ids* actually exist in the
-    target T3 collection (nexus-c53hy) — this function's own chash
-    resolution has no collection scoping, so calling it unconditionally
-    (e.g. before knowing whether the T3 delete will find anything) can
-    tombstone an unrelated live document that happens to share a chash
-    registered under a different collection. See ``delete_cmd``'s ``--id``
+    target T3 collection (nexus-c53hy) — its chash resolution is scoped to
+    *expected_collection* plus blank-collection ghosts (nexus-r3cdg), so
+    calling it before knowing whether the T3 delete will find anything can
+    still tombstone a ghost that happens to share the chash. See ``delete_cmd``'s ``--id``
     branch for the existence-check-first call shape.
 
     *doc_ids* are T3 chunk natural ids (chashes), not tumblers.
@@ -676,11 +675,12 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
         # reaping. A collection-scoped T3 existence check runs FIRST -- a
         # doc_id that is not actually in col_name (bogus/stale, or paired
         # with the wrong --collection) is caught here, before the catalog
-        # reap ever fires. Without this check the reap below (which
-        # resolves purely by chash, with no collection scoping of its
-        # own) could tombstone a live, unrelated document that happens to
-        # own this exact chash under a DIFFERENT collection -- the inverse
-        # of the F10c bug class this whole area exists to fix.
+        # reap ever fires. When this landed the reap resolved purely by
+        # chash and could tombstone a live, unrelated document owning this
+        # exact chash under a DIFFERENT collection -- the inverse of the
+        # F10c bug class this whole area exists to fix. The reap is now
+        # collection-scoped itself (nexus-r3cdg); this check stays as the
+        # primary layer.
         if db.get_by_id(col_name, doc_id) is None:
             raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
 
