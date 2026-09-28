@@ -4257,7 +4257,7 @@ The tuple space is a coordination and metadata store, not a value store: `--body
 ### nx tuple rd
 
 ```
-nx tuple rd SUBSPACE [--pattern KEY=VALUE ...] [-n N] [--since CREATED_AT[,ID]] [--all | --newest] [--max-rows N] [--timeout-s SECONDS] [--json]
+nx tuple rd SUBSPACE [--pattern KEY=VALUE ...] [-n N] [--since CREATED_AT,ID] [--all | --newest] [--max-rows N] [--timeout-s SECONDS] [--json]
 ```
 
 Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset of the pinned keys `--pattern` supplies (an empty pattern reads the whole subspace); returns dead-lettered rows too (dead-lettering is a claim state, not an exclusion). A probe by default (`--timeout-s 0`, never blocks); parks up to `--timeout-s` seconds when nothing matches immediately. The engine caps this at 25 seconds by default: a `--timeout-s` at the cap returns the probe result at expiry like any other park, but a `--timeout-s` ABOVE the cap is refused outright as `TimeoutTooLong`, never silently clamped. A wait of minutes is a LOOP of parked calls at or under the cap, not one long park.
@@ -4266,14 +4266,14 @@ Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset o
 |------|-------------|
 | `--pattern KEY=VALUE` | A key-equality filter (repeatable; subset match) |
 | `-n N` | Max rows to return (default 1). One engine read returns at most 300; with `--newest`, how many of the newest rows to keep |
-| `--since CREATED_AT[,ID]` | Start after this cursor. A bare timestamp reads rows created after it |
-| `--all` | Page through every matching row, oldest first, up to `--max-rows` |
+| `--since CREATED_AT,ID` | Start after this cursor, the one a truncation note prints. Both halves are required |
+| `--all` | Page through every matching row, oldest first, up to `--max-rows` (`-n` is ignored) |
 | `--newest` | Return the newest `-n` rows instead of the oldest (pages the subspace, up to `--max-rows`) |
 | `--max-rows N` | Hard bound on rows read by `--all` / `--newest` (default 10000) |
 | `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
 | `--json` | Output as a JSON array |
 
-Rows come back OLDEST first. A plain read returns one page; when the page is full, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` and `--newest` print the same marker when they stop at `--max-rows` with rows left. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
+Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` and `--newest` print the same marker when they stop at `--max-rows` with rows left, and `--newest` then exits 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
 
 ### nx tuple in
 

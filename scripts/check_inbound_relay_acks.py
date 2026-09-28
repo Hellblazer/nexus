@@ -466,7 +466,7 @@ DEFAULT_MAILBOX_PREFIX = "mailbox/"
 #: script avoids importing the `nexus` package (subprocess-only IO
 #: boundary, matching the rest of the file), so the value is restated,
 #: not imported.
-DEFAULT_TUPLE_READ_LIMIT = 300
+DEFAULT_TUPLE_READ_LIMIT = 10_000
 
 
 def parse_tuple_subspaces(raw: str) -> list[str]:
@@ -574,13 +574,21 @@ def fetch_tuple_list_json(prefix: str) -> str:
 
 
 def fetch_tuple_rows_json(subspace: str, limit: int) -> str:
+    """Every row of *subspace*, up to *limit*. ``-n`` alone returned the
+    oldest page only (one engine read caps at 300), so a mailbox with more
+    rows was swept partially and silently (nexus-sh1ea); a read that stops
+    at the bound with rows left is unrunnable, never a partial pass."""
     try:
-        r = _run(["nx", "tuple", "rd", subspace, "-n", str(limit), "--json"])
+        r = _run(["nx", "tuple", "rd", subspace, "--all", "--max-rows", str(limit), "--json"])
     except FileNotFoundError as exc:
         raise SweepUnrunnableError(f"nx not found on PATH: {exc}") from exc
     if r.returncode != 0:
         raise SweepUnrunnableError(
             f"nx tuple rd {subspace} rc={r.returncode}: {r.stderr.strip()[:300]}"
+        )
+    if "nx tuple rd: truncated" in r.stderr:
+        raise SweepUnrunnableError(
+            f"nx tuple rd {subspace}: more than {limit} rows; the sweep would be partial"
         )
     return r.stdout
 

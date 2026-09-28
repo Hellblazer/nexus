@@ -131,13 +131,17 @@ TRUNCATION_MARKER: str = "nx tuple rd: truncated"
 
 
 def _parse_since(value: str | None) -> tuple[str, str] | None:
-    """CREATED_AT[,ID] -> the store's (created_at, id) cursor. A bare
-    timestamp reads rows created after it (the store's watermark form)."""
+    """``CREATED_AT,ID`` -> the store's ``(created_at, id)`` cursor. Both
+    halves are required: the engine's rd drops a cursor without an id and
+    reads from the start (review of 195b1bb1b), so a bare timestamp would
+    silently return the oldest rows."""
     if not value:
         return None
     created_at, _, row_id = value.partition(",")
-    if not created_at.strip():
-        raise click.UsageError(f"--since expects CREATED_AT[,ID], got {value!r}")
+    if not created_at.strip() or not row_id.strip():
+        raise click.UsageError(
+            f"--since expects CREATED_AT,ID (the cursor a truncation note prints), got {value!r}"
+        )
     return created_at.strip(), row_id.strip()
 
 
@@ -152,11 +156,12 @@ def _cursor_of(row: Any) -> str:
 @click.option("-n", "n", type=int, default=1, show_default=True,
               help=f"Max rows to return. One engine read returns at most {_RD_PAGE}; "
                    "with --newest, how many of the newest rows to keep.")
-@click.option("--since", "since", default=None, metavar="CREATED_AT[,ID]",
+@click.option("--since", "since", default=None, metavar="CREATED_AT,ID",
               help="Start after this cursor (oldest first). The truncation note "
                    "prints the cursor for the next page.")
 @click.option("--all", "read_all", is_flag=True, default=False,
-              help="Page through every matching row, oldest first, up to --max-rows.")
+              help="Page through every matching row, oldest first, up to --max-rows "
+                   "(-n is ignored).")
 @click.option("--newest", is_flag=True, default=False,
               help="Return the newest -n rows instead of the oldest (pages the "
                    "subspace, up to --max-rows).")
@@ -173,36 +178,40 @@ def tuple_rd_cmd(
     default (--timeout-s 0); returns dead-lettered rows too (dead-lettering
     is a claim state, not an exclusion).
 
-    A plain read returns one page; when the page is full, a note on stderr
-    says so and names the --since cursor for the next one. --all pages
+    A plain read returns one page; when more rows exist past it, a note on
+    stderr says so and names the --since cursor for the next one. --all pages
     through everything and --newest keeps the latest -n; both stop at
     --max-rows and say so on stderr when they do (nexus-sh1ea: the board
     read returned the 300 oldest rows with nothing saying more existed).
+    --newest also exits 3 then, because the rows it printed are not the
+    newest.
     """
     pattern_map = _parse_kv_pairs(patterns, option_name="--pattern") or None
     cursor = _parse_since(since)
     if max_rows <= 0:
         raise click.UsageError("--max-rows must be positive")
-    store = _store()
+    if n <= 0:
+        raise click.UsageError("-n must be positive")
+    truncated = False
+    store = None
     try:
+        store = _store()
         if not (read_all or newest):
             rows = store.rd(subspace, pattern_map, n=n, since=cursor, timeout_s=timeout_s)
-            full = len(rows) >= min(n, _RD_PAGE) > 0
-            if n > _RD_PAGE and full:
+            # One probe past the last row decides whether more exist, so the
+            # note is exact whatever the engine's per-read cap is
+            # (NX_TUPLE_READ_MAX) and never fires on a page that ends the data.
+            if rows and store.rd(
+                subspace, pattern_map, n=1, since=(rows[-1].created_at or "", rows[-1].id),
+            ):
+                capped = f" (one read returns at most the engine's cap; asked for {n})" if len(rows) < n else ""
                 click.echo(
-                    f"{TRUNCATION_MARKER}: one read returns at most {_RD_PAGE} rows "
-                    f"(asked for {n}); next page: --since '{_cursor_of(rows[-1])}', "
-                    "or --all / --newest.", err=True,
-                )
-            elif full and n > 1:
-                click.echo(
-                    f"{TRUNCATION_MARKER}: showing the oldest {len(rows)} matching rows; "
-                    f"more may exist. Next page: --since '{_cursor_of(rows[-1])}', "
+                    f"{TRUNCATION_MARKER}: showing the oldest {len(rows)} matching rows{capped}; "
+                    f"more exist. Next page: --since '{_cursor_of(rows[-1])}', "
                     "or --all / --newest.", err=True,
                 )
         else:
             rows = []
-            truncated = False
             # Stop on an EMPTY page, not a short one: the engine's per-read cap
             # is configurable (NX_TUPLE_READ_MAX) and may sit below _RD_PAGE.
             while len(rows) < max_rows:
@@ -229,10 +238,14 @@ def tuple_rd_cmd(
         _print_tuple_error(e)
         raise SystemExit(1) from e
     finally:
-        close = getattr(store, "close", None)
-        if close is not None:
-            close()
+        if store is not None:
+            store.close()
     _render_rows(rows, json_out)
+    if newest and truncated:
+        # The rows printed are the newest of the oldest --max-rows, not the
+        # subspace's newest: a caller reading only stdout must not take them
+        # as current. An engine-side descending read would remove this case.
+        raise SystemExit(3)
 
 
 @tuple_group.command(name="in")
