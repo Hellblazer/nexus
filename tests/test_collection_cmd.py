@@ -128,12 +128,12 @@ def test_list_shows_stored_beside_live_counts(runner, env_creds, mock_db) -> Non
 
 
 def test_info_names_stored_chunks_the_live_count_hides(runner, env_creds, mock_db, monkeypatch) -> None:
-    _mock_db_for_info(mock_db, "quarantine-code__1-1__voyage-code-3__v1", 0, [{}])
+    _mock_db_for_info(mock_db, "quarantine-code__1-1__model-code__v1", 0, [{}])
     mock_db.list_collections.return_value = [
-        {"name": "quarantine-code__1-1__voyage-code-3__v1", "count": 0, "stored_count": 8},
+        {"name": "quarantine-code__1-1__model-code__v1", "count": 0, "stored_count": 8},
     ]
     _catalog_with_documents(monkeypatch, [])
-    result = _invoke(runner, mock_db, ["info", "quarantine-code__1-1__voyage-code-3__v1"])
+    result = _invoke(runner, mock_db, ["info", "quarantine-code__1-1__model-code__v1"])
     assert result.exit_code == 0, result.output
     assert "Chunks:      0 live, 8 stored" in result.output, result.output
 

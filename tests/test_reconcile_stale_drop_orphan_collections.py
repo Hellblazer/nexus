@@ -104,7 +104,9 @@ class _T3:
         # The real listing carries each collection's count; a collection
         # whose count cannot be read has none (nexus-5z0us sibling).
         return [
-            {"name": n, "count": self._counts.get(n, 0)} if n not in self._count_errors else {"name": n}
+            {"name": n, "count": self._counts.get(n, 0)} if n not in self._count_errors
+            # the pre-catalog-005 fallback listing reports a failed count as -1
+            else {"name": n, "count": -1, "stored_count": -1}
             for n in self._names
         ]
 

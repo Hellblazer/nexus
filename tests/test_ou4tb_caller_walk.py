@@ -539,6 +539,9 @@ class TestDoctorRetry:
             def get_collection(self, name):
                 return flaky
 
+            def get_or_create_collection(self, name):
+                return flaky
+
             def get_embeddings(self, name, ids):
                 return [[0.0] * 768]
 

@@ -1391,7 +1391,9 @@ def reidentify_cmd(
             file=sys.stderr,
         )
         try:
-            res = reidentify_collection(t3_db, coll_name, dry_run=dry_run)
+            res = reidentify_collection(
+                t3_db, coll_name, dry_run=dry_run, known_to_exist=not collection,
+            )
         except MissingChunkHashError as exc:
             return idx, coll_name, None, str(exc)
         except Exception as exc:  # noqa: BLE001 — per-collection worker; error returned in result tuple, not raised

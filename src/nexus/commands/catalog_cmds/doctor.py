@@ -815,7 +815,8 @@ def _run_t3_vs_catalog() -> dict:
         # get_collection per name (each re-lists the whole tenant).
         row = t3_listing[name]
         raw = row.get("stored_count", row.get("count"))
-        if raw is None:
+        if raw is None or int(raw) < 0:
+            # (-1 is the pre-catalog-005 fallback listing's failed count.)
             # nexus-pyv0e sibling: an unreadable count is reported, never
             # silently read as zero (or dropped from consideration).
             zombie_errors.append({"name": name, "error": "no chunk count in the collection listing"})

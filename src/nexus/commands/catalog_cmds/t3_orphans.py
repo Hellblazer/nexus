@@ -101,8 +101,10 @@ def classify_t3_orphan_collections(cat: "CatalogReader", t3_db: Any) -> list[dic
         # (see doctor.py's ``_run_t3_vs_catalog``).
         row = listing[name]
         raw = row.get("stored_count", row.get("count"))
-        if raw is None:
-            # A row with no count is unreadable, never "0 chunks".
+        if raw is None or int(raw) < 0:
+            # A row with no count, or the -1 the pre-catalog-005 fallback
+            # listing reports for a failed count, is unreadable, never
+            # "0 chunks".
             orphans.append({"name": name, "error": "no chunk count in the collection listing"})
             continue
         count = int(raw)
