@@ -329,6 +329,26 @@ class TestRule6Lifecycle:
         f = run_checks(_facts([_filled(name)], [_stats(name, 2)], {}), write_model_for=_cloud_write_model)
         assert f == []
 
+    def test_a_quarantine_row_with_its_base_content_type_is_skipped(self) -> None:
+        """nexus-7q8zg: since nexus-uxd2a a quarantine sibling's row carries
+        the BASE content type and lifecycle_state='quarantine'. Detection
+        keyed only on a 'quarantine-' content type, so the shape audit told
+        the operator to curate GC machinery ("thin-collection ... merge it")
+        and reported collections_skipped_quarantine=0, while doctor's
+        quarantine row sends operators to this very command."""
+        name = "quarantine-code__1-1__voyage-code-3__v1"
+        row = _row(name, content_type="code", owner_id="1-1", embedding_model="voyage-code-3",
+                   model_version="v1", lifecycle_state="quarantine")
+        assert collection_attributes(row).quarantine is True
+        live = _filled("code__1-1__voyage-code-3__v1")
+        report = AuditReport.build(
+            _facts([row, live], [_stats(name, 2), _stats(live["name"], 500)], {live["name"]: 50}),
+            write_model_for=_cloud_write_model,
+        )
+        assert [f for f in report.findings if f.collection == name] == []
+        assert report.collections_skipped_quarantine == 1
+        assert report.collections_examined == 1
+
 
 # ── report, non-vacuity, and the rule pin ──────────────────────────────────
 

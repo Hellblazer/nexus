@@ -111,6 +111,33 @@ def test_list_prints_the_five_catalog_columns(runner, env_creds, mock_db) -> Non
         assert value in line, line
 
 
+@pytest.mark.usefixtures("cloud_mode")
+def test_list_shows_stored_beside_live_counts(runner, env_creds, mock_db) -> None:
+    """nexus-7q8zg: a quarantine sibling holds stored chunks with no live
+    owner. list printed its live count, 0, while shape and catalog verify
+    counted the stored chunks, so the two read as contradicting each other."""
+    name = "quarantine-code__1-1__voyage-code-3__v1"
+    mock_db.list_collections.return_value = [{"name": name, "count": 0, "stored_count": 8}]
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row(name, "code", "1-1", "voyage-code-3", 1024, "quarantine"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "STORED" in result.output.splitlines()[0]
+    cells = _line_for(result.output, name)[len(name):].split()
+    assert cells[:2] == ["0", "8"], cells
+
+
+def test_info_names_stored_chunks_the_live_count_hides(runner, env_creds, mock_db, monkeypatch) -> None:
+    _mock_db_for_info(mock_db, "quarantine-code__1-1__voyage-code-3__v1", 0, [{}])
+    mock_db.list_collections.return_value = [
+        {"name": "quarantine-code__1-1__voyage-code-3__v1", "count": 0, "stored_count": 8},
+    ]
+    _catalog_with_documents(monkeypatch, [])
+    result = _invoke(runner, mock_db, ["info", "quarantine-code__1-1__voyage-code-3__v1"])
+    assert result.exit_code == 0, result.output
+    assert "Chunks:      0 live, 8 stored" in result.output, result.output
+
+
 def test_list_shows_the_row_values_when_the_name_disagrees(runner, env_creds, mock_db) -> None:
     """The name says docs / owner nine / minilm-384; the catalog row says
     knowledge / 1-1 / bge 768 and is disputed. The row wins, visibly."""
@@ -234,11 +261,10 @@ def test_info_shows_embedding_model(runner, env_creds, mock_db, col_name, expect
 def _catalog_with_documents(monkeypatch, indexed_ats):
     """nexus-ktsa1: info reads the latest indexed_at from the catalog's
     documents in the collection, not by paging chunk metadata."""
-    from types import SimpleNamespace
-
     class _Reader:
-        def list_by_collection(self, name):
-            return [SimpleNamespace(indexed_at=t) for t in indexed_ats]
+        def collection_health_meta(self, name):
+            stamps = [t for t in indexed_ats if t]
+            return {"last_indexed": max(stamps) if stamps else None, "orphan_count": 0}
 
         def close(self):
             pass

@@ -72,8 +72,8 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
 
 @collection.command("list")
 def list_cmd() -> None:
-    """List T3 collections: live chunk counts, and the catalog's columns
-    (content type, owner, embedding model, dimension, lifecycle state).
+    """List T3 collections: live and stored chunk counts, and the catalog's
+    columns (content type, owner, embedding model, dimension, lifecycle state).
 
     RDR-204 Day 2 (nexus-ft04v.32): every column is read from the
     collection's catalog row, never derived from its name, so a row whose
@@ -81,7 +81,12 @@ def list_cmd() -> None:
     consistent-looking name. A collection with no catalog row prints ``-``
     in every column; a catalog row with no chunks prints 0.
     """
-    counts = {c["name"]: c.get("count", 0) for c in _t3().list_collections()}
+    listed = _t3().list_collections()
+    counts = {c["name"]: c.get("count", 0) for c in listed}
+    # nexus-7q8zg: CHUNKS is live (owned) chunks; STORED is what physically
+    # sits in the collection. They differ for quarantine siblings and for
+    # chunks with no manifest owner, which shape and catalog verify count.
+    stored = {c["name"]: c.get("stored_count", c.get("count", 0)) for c in listed}
     rows, rows_error = _catalog_collection_rows()
     names = sorted(set(counts) | set(rows))
     if not names:
@@ -99,12 +104,12 @@ def list_cmd() -> None:
         max(len(label), *(len(cells[n][i]) for n in names))
         for i, (label, _) in enumerate(_LIST_COLUMNS)
     ]
-    header = f"{'NAME':<{width}}  {'CHUNKS':>6}  " + "  ".join(
+    header = f"{'NAME':<{width}}  {'CHUNKS':>6}  {'STORED':>6}  " + "  ".join(
         f"{label:<{w}}" for (label, _), w in zip(_LIST_COLUMNS, col_widths)
     )
     click.echo(header.rstrip())
     for n in names:
-        line = f"{n:<{width}}  {counts.get(n, 0):>6}  " + "  ".join(
+        line = f"{n:<{width}}  {counts.get(n, 0):>6}  {stored.get(n, 0):>6}  " + "  ".join(
             f"{cell:<{w}}" for cell, w in zip(cells[n], col_widths)
         )
         click.echo(line.rstrip())
@@ -219,7 +224,12 @@ def info_cmd(name: str) -> None:
     last_indexed = _latest_document_indexed_at(name) or "unknown"
 
     click.echo(f"Collection:  {match['name']}")
-    click.echo(f"Chunks:      {match['count']}")
+    stored_count = match.get("stored_count", match["count"])
+    if stored_count != match["count"]:
+        click.echo(f"Chunks:      {match['count']} live, {stored_count} stored "
+                   "(stored chunks with no live manifest owner are hidden from reads)")
+    else:
+        click.echo(f"Chunks:      {match['count']}")
     click.echo(f"Index model: {idx_model}")
     click.echo(f"Query model: {query_model}")
     click.echo(f"Indexed:     {last_indexed}")
@@ -227,7 +237,10 @@ def info_cmd(name: str) -> None:
 
 def _latest_document_indexed_at(name: str) -> str:
     """Most recent ``indexed_at`` over the live catalog documents in
-    collection *name*, or ``""`` when the catalog has none or cannot be read."""
+    collection *name*, or ``""`` when the catalog has none or cannot be read.
+
+    One row from the engine's collection-health aggregate (nexus-dsu5z), the
+    read ``nx collection health`` already makes."""
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     reader = None
@@ -235,8 +248,7 @@ def _latest_document_indexed_at(name: str) -> str:
         reader = make_catalog_reader()
         if reader is None:
             return ""
-        stamps = [e.indexed_at for e in reader.list_by_collection(name) if e.indexed_at]
-        return max(stamps) if stamps else ""
+        return str(reader.collection_health_meta(name).get("last_indexed") or "")
     except Exception:  # noqa: BLE001 — informational line; "unknown" is the honest fallback
         return ""
     finally:
