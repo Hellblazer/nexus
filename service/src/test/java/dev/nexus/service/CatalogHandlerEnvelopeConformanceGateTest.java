@@ -316,6 +316,12 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/collections/upsert", "handleCollectionUpsert"),
         collectionExempt("/collections/list", "handleCollectionList", ADMIN_SCALE),
         neither("/collections/get", "handleCollectionGet"),
+        // nexus-l46pu: response is a flat scalar map ({"updated": N}) -- no JSON
+        // array of items (not collectionReturning) -- and the request body
+        // carries a single name + a boolean, no id list (not idListAccepting).
+        // Same shape as /owners/deactivate (nexus-cw262) and /collections/rehome
+        // (nexus-wsx4l) above.
+        neither("/collections/set_aspects_enabled", "handleCollectionSetAspectsEnabled"),
         // RDR-204 Phase 2 (nexus-ft04v.33): one row per profiled content type,
         // bounded by the content-type vocabulary; emits count.
         collectionOk("/embedding_profile", "handleEmbeddingProfile"),
@@ -366,6 +372,13 @@ class CatalogHandlerEnvelopeConformanceGateTest {
 
         // ── Batch resolve ─────────────────────────────────────────────────
         idListOk("/resolve_many", "handleResolveMany"),
+        // nexus-1vc0n: file_paths is a bare-identifier list (not full row
+        // objects) bound into a FILE_PATH.in(...) clause, same idListAccepting
+        // class as resolve_many's doc_ids -- and the response's "documents"
+        // map is keyed by that already-capped input list (each value a small,
+        // owner-count-bounded list, never a server-side page), so this is
+        // NOT collectionReturning, same reasoning as resolve_many's "entries".
+        idListOk("/list_by_file_paths", "handleListByFilePaths"),
 
         // ── Span / chash resolution ───────────────────────────────────────
         neither("/resolve_span", "handleResolveSpan"),

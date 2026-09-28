@@ -576,7 +576,7 @@ def baseline_cmd(since: str | None, json_out: bool) -> None:
 
 @telemetry_group.command("status")
 def status_cmd() -> None:
-    """Show whether the anonymous daily install ping is on, and why."""
+    """Show whether the daily install ping is on, and why."""
     from nexus.install_ping import install_id, last_ping_at, telemetry_status  # noqa: PLC0415
 
     st = telemetry_status()

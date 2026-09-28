@@ -147,7 +147,7 @@ class _FakeColAntiJoin:
         self.doc_id_by_native_id: dict[str, str] = dict(doc_id_by_native_id or {})
         self.refuse: set[str] = set(refuse)
 
-    def get(self, ids=None, include=None, where=None, limit=None, offset=None):
+    def get(self, ids=None, include=None, where=None, limit=None, offset=None, include_non_live=False):
         if ids is not None:
             return {"ids": [i for i in ids if i in self.ids]}
         if where is not None:

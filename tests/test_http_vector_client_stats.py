@@ -111,8 +111,8 @@ class TestListCollectionsViaStats:
 
         # Exactly the T3Database parity shape, name ascending.
         assert got == [
-            {"name": "a__coll", "count": 3},
-            {"name": "z__coll", "count": 5},
+            {"name": "a__coll", "count": 3, "stored_count": 3},
+            {"name": "z__coll", "count": 5, "stored_count": 5},
         ]
 
     def test_explicit_null_count_treated_as_zero(self, monkeypatch):
@@ -127,8 +127,8 @@ class TestListCollectionsViaStats:
         got = HttpVectorClient().list_collections()
 
         assert got == [
-            {"name": "null__coll", "count": 0},
-            {"name": "ok__coll", "count": 2},
+            {"name": "null__coll", "count": 0, "stored_count": 0},
+            {"name": "ok__coll", "count": 2, "stored_count": 2},
         ]
 
     def test_multidim_collection_collapses_counts_summed(self, monkeypatch):
@@ -140,7 +140,7 @@ class TestListCollectionsViaStats:
 
         got = HttpVectorClient().list_collections()
 
-        assert got == [{"name": "mixed__coll", "count": 5}]
+        assert got == [{"name": "mixed__coll", "count": 5, "stored_count": 5}]
 
     def test_non_404_error_returns_empty_list(self, monkeypatch):
         def handler(path: str) -> Any:
@@ -183,8 +183,8 @@ class TestListCollectionsSkewFallback:
         got = HttpVectorClient().list_collections()
 
         assert got == [
-            {"name": "coll_one", "count": 4},
-            {"name": "coll_two", "count": 9},
+            {"name": "coll_one", "count": 4, "stored_count": 4},
+            {"name": "coll_two", "count": 9, "stored_count": 9},
         ]
         assert paths[0] == STATS_PATH
         assert paths[1] == COLLECTIONS_PATH
@@ -206,8 +206,8 @@ class TestListCollectionsSkewFallback:
 
         # A failing per-collection count must NOT drop the collection.
         assert got == [
-            {"name": "coll_ok", "count": 1},
-            {"name": "coll_bad", "count": -1},
+            {"name": "coll_ok", "count": 1, "stored_count": 1},
+            {"name": "coll_bad", "count": -1, "stored_count": -1},
         ]
 
     def test_404_then_collections_also_failing_returns_empty(self, monkeypatch):

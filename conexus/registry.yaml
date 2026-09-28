@@ -387,6 +387,15 @@ standalone_skills:
       - "blocked on a migration or holding an old/dormant install"
     tools: [Bash]
 
+  tumbler-footnotes:
+    description: "GH #896 / nexus-sxiay — convert nx://catalog/<tumbler> markdown links to stable GFM footnotes in place via nx catalog footnotes, or check/reverse; thin CLI wrapper, no agent spawn"
+    triggers:
+      - "convert nx://catalog links to footnotes"
+      - "dead catalog links in a markdown doc"
+      - "check that a doc's catalog citations are converted"
+      - "reverse footnotes back into catalog links"
+    tools: [Bash]
+
   serena-code-nav:
     description: "LSP-backed symbol navigation via Serena MCP — find definitions, all callers, type hierarchies, safe rename, and symbol-scoped editing. Use instead of Grep for any symbol-level task."
     triggers:

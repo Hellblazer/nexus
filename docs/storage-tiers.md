@@ -292,7 +292,7 @@ nx store import myrepo-backup.nxexp --remap "/old/path:/new/path"
 nx store import myrepo-backup.nxexp --collection code__newname
 ```
 
-**Format**: `.nxexp` files contain a JSON header line (format version, collection name, embedding model) followed by a gzip-compressed msgpack stream of records. Embeddings are stored as raw float32 bytes.
+**Format**: `.nxexp` files contain a JSON header line (format version, collection name, embedding model) followed by a gzip-compressed msgpack stream of records. Embeddings are stored as raw float32 bytes. Each record may also carry an `owner` field (source URI, title, content type, manifest position) naming the chunk's live catalog document at export time; import registers that document in the target collection and writes its manifest, so an imported chunk gets its own catalog ownership instead of arriving manifest-less (RDR-192, nexus-wbfpw.31). If that document still lives in another collection, import copies rather than moves: the original is left alone and the target gets its own document with source URI `nxexp://<target>/<original source URI>`. A record with no `owner` (an older export, or a chunk that had none) is grouped under one document per import file instead.
 
 **Safety**: Embedding model validation is enforced on import — importing a `code__` export (voyage-code-3) into a `docs__` collection (voyage-context-3) is rejected to prevent vector space corruption.
 

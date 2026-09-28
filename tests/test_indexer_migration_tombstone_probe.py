@@ -178,6 +178,13 @@ def test_post_rename_registration_carries_the_rendered_collectionname_fields(
     ``conformant`` from, rather than re-parsed back out of that string via
     the retired ``parse_conformant_collection_name``.
 
+    nexus-aotql: the call itself is now routed through
+    ``ensure_collection_registered`` instead of a direct
+    ``writer.register_collection`` call -- the seam calls
+    ``writer.register_collection(conformant, **kwargs)`` with the
+    IDENTICAL explicit kwargs this test already pinned, so the assertion
+    below is unchanged.
+
     Reuses this module's own rename-path harness (the ONLY existing
     coverage of decision-tree case 1 -- see this file's module docstring
     and ``tests/test_collection_name_migration.py``'s GAP-CANDIDATE note)
@@ -192,6 +199,63 @@ def test_post_rename_registration_carries_the_rendered_collectionname_fields(
     registry.add(repo_with_owner)
     writer = MagicMock()
     writer.rename_collection_cascade = MagicMock(return_value={})
+
+    result = _migrate_legacy_collections(
+        repo_with_owner, cat=catalog, t3_db=t3_db, registry=registry,
+        writer=writer,
+    )
+
+    conformant = result["code"]
+    assert conformant == "code__1-1__voyage-code-3__v1"
+    writer.register_collection.assert_called_once_with(
+        conformant,
+        content_type="code",
+        owner_id="1-1",
+        embedding_model="voyage-code-3",
+        model_version="v1",
+    )
+
+
+def test_post_rename_registration_else_branch_still_carries_explicit_kwargs(
+    repo_with_owner: Path, catalog: ActiveCatalog, registry: RepoRegistry, monkeypatch,
+) -> None:
+    """nexus-aotql review round 2 (BLOCKER): the ``else`` branch of
+    ``_migrate_legacy_collections``'s post-rename registration --
+    reached when ``is_conformant_collection_name(conformant)`` is False
+    -- used to call ``ensure_collection_registered(conformant,
+    registrar=...)`` with NO kwargs, falling back to a bare name-parse
+    even though ``conformant_name`` (the already-rendered
+    ``CollectionName``) was sitting right there. Force
+    ``is_conformant_collection_name`` to return False for this exact
+    ``conformant`` string (the string itself IS conformant; only the
+    predicate is forced) and assert the writer still receives the
+    IDENTICAL explicit kwargs the ``if`` branch pins in the sibling test
+    above -- proving both branches are now byte-identical in effect and
+    neither name-parses.
+    """
+    from nexus.indexer import _legacy_collection_name, _migrate_legacy_collections
+
+    legacy = _legacy_collection_name(repo_with_owner, "code")
+    _patch_get(monkeypatch, stats_names={legacy}, raw_names={legacy})
+    t3_db = HttpVectorClient()
+    registry.add(repo_with_owner)
+    writer = MagicMock()
+    writer.rename_collection_cascade = MagicMock(return_value={})
+
+    real_is_conformant = None
+
+    def _force_false(name: str) -> bool:
+        # Force False only for the rename target this test drives, so
+        # any OTHER internal use of the predicate (e.g. by helpers this
+        # test does not exercise) is unaffected.
+        if name == "code__1-1__voyage-code-3__v1":
+            return False
+        return real_is_conformant(name)
+
+    import nexus.corpus as corpus_mod
+
+    real_is_conformant = corpus_mod.is_conformant_collection_name
+    monkeypatch.setattr(corpus_mod, "is_conformant_collection_name", _force_false)
 
     result = _migrate_legacy_collections(
         repo_with_owner, cat=catalog, t3_db=t3_db, registry=registry,

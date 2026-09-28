@@ -2417,6 +2417,45 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             return True
         return abs(current_count - last) / last > 0.05
 
+    #: Engine-side cap (TaxonomyRepository.MAX_LAST_DISCOVER_BATCH) on one
+    #: /meta/last_discover_batch request; paged transparently below so a
+    #: caller never has to know the cap exists. Parity-pinned against the
+    #: Java constant by tests/db/test_http_taxonomy_store.py — a drift
+    #: either overflows the engine's cap (400) or under-uses a raised one.
+    _LAST_DISCOVER_BATCH_PAGE = 300
+
+    def get_last_discover_stamps(self, collections: list[str]) -> dict[str, dict[str, Any]]:
+        """Batched ``taxonomy_meta`` discover-stamp read for a LIST of
+        collections in ONE round trip per <=300-collection page (nexus-l3dg2,
+        du6d0 residual) — ``POST /meta/last_discover_batch``.
+
+        Returns ``{collection: {"last_discover_at": iso, "last_discover_doc_count":
+        int}}`` for collections that HAVE a ``taxonomy_meta`` row WITH A
+        NON-NULL stamp — ``last_discover_at`` is never ``None`` in a returned
+        entry. A collection absent from the result was never discovered
+        under this tenant (no row at all), had its stamp explicitly cleared
+        (a fidelity-ETL import can preserve a source record's null
+        verbatim), or the name is unknown/typo'd — the engine OMITS all
+        three cases rather than returning a null/zero placeholder row, and
+        this method preserves that: "absent" is the only signal for "no
+        usable stamp", never a present-but-null entry.
+
+        Raises ``httpx.HTTPStatusError`` (status 404) UNCHANGED on an engine
+        that predates this route (``TaxonomyHandler``'s generic route-miss
+        response) — callers distinguish "no route on this engine" from "no
+        rows for these collections" by catching that status, never by
+        treating an empty dict as "route missing".
+        """
+        if not collections:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(collections), self._LAST_DISCOVER_BATCH_PAGE):
+            page = collections[start : start + self._LAST_DISCOVER_BATCH_PAGE]
+            rows = self._post("/meta/last_discover_batch", {"collections": page}, mutates=False)
+            for r in rows or []:
+                out[r["collection"]] = r
+        return out
+
     # ── ETL import (used by nx storage migrate) ────────────────────────────────
 
     def import_topic(

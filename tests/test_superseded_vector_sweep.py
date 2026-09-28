@@ -783,3 +783,165 @@ def test_note_lookup_failure_is_cached_not_retried_per_document_in_the_batch() -
         "a failed collection-documents fetch must not be retried once per "
         "document in the same batch"
     )
+
+
+# ── nexus-wbfpw.12: log 'superseded_sweep_kept' at the silent guard returns ─
+#
+# Both _sweep_superseded_vectors and _sweep_superseded_vectors_many have TWO
+# returns that fire after real candidates were computed and then entirely
+# retained (never reaching delete()) — the union guard (every candidate is
+# shared with another live document) and the note guard (every surviving
+# candidate is itself a manifest-less note's identity). Neither logged
+# anything before this bead: a sweep that kept everything looked identical,
+# in the logs, to a sweep with nothing to do at all.
+#
+# The new event is logged at INFO; the suite default structlog filter is
+# WARNING (tests/conftest.py::pytest_configure), which would drop it before
+# capture_logs() ever sees it (same reasoning as tests/test_chunk_batcher.py's
+# _info_level fixture). Each test below reconfigures the filter to INFO for
+# its own duration; the suite's own _restore_structlog_after_test autouse
+# fixture restores the saved config afterward regardless.
+
+
+def _allow_info_logs() -> None:
+    import logging
+
+    import structlog
+
+    structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
+
+
+def test_union_guard_clearing_every_candidate_logs_kept() -> None:
+    """Per-doc sibling, union-guard return: every dropped chash is shared
+    with another live document, so `orphaned` comes back empty before the
+    note lookup ever runs."""
+    _allow_info_logs()
+    import structlog
+
+    cat = _cat({"a": ["other-doc-1"], "b": ["other-doc-2"]})
+    col = MagicMock()
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors(cat, "doc-A", {"a", "b"}, _chunks("new"),
+                                  "coll", reader=cat, notes_provider=_notes())
+    col.delete.assert_not_called()
+    kept_events = [l for l in logs if l.get("event") == "superseded_sweep_kept"]
+    assert len(kept_events) == 1, f"expected exactly one kept event, got: {logs}"
+    ev = kept_events[0]
+    assert ev["site"] == "_sweep_superseded_vectors"
+    assert ev["collection"] == "coll"
+    assert ev["doc_id"] == "doc-A"
+    assert ev["dropped"] == 2
+    assert ev["kept"] == 2
+    assert ev["kept_notes"] == 0
+
+
+def test_genuine_orphan_deletes_and_logs_no_kept_event() -> None:
+    """Non-vacuity control for the kept events above: when a dropped chash
+    has no other live reference and is no note's identity, the sweep
+    deletes it and superseded_sweep_kept does not fire."""
+    _allow_info_logs()
+    import structlog
+
+    cat = _cat({})
+    col = MagicMock()
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors(cat, "doc-A", {"orphan"}, _chunks("new"),
+                                  "coll", reader=cat, notes_provider=_notes())
+    col.delete.assert_called_once()
+    assert [l for l in logs if l.get("event") == "superseded_sweep_kept"] == []
+
+
+def test_note_guard_clearing_every_candidate_logs_kept() -> None:
+    """Per-doc sibling, note-guard return: the union guard finds no OTHER
+    document reference at all, but the sole survivor is itself a
+    manifest-less note's identity — the note guard clears it too."""
+    _allow_info_logs()
+    import structlog
+
+    cat = _cat({})
+    col = MagicMock()
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors(cat, "doc-A", {"note-chash"}, _chunks("new"),
+                                  "coll", reader=cat, notes_provider=_notes("note-chash"))
+    col.delete.assert_not_called()
+    kept_events = [l for l in logs if l.get("event") == "superseded_sweep_kept"]
+    assert len(kept_events) == 1, f"expected exactly one kept event, got: {logs}"
+    ev = kept_events[0]
+    assert ev["site"] == "_sweep_superseded_vectors"
+    assert ev["collection"] == "coll"
+    assert ev["doc_id"] == "doc-A"
+    assert ev["dropped"] == 1
+    assert ev["kept"] == 1
+    assert ev["kept_notes"] == 1
+
+
+def test_batch_union_guard_clearing_every_candidate_logs_kept() -> None:
+    """Batch sibling of the union-guard test above."""
+    _allow_info_logs()
+    import structlog
+    from types import SimpleNamespace
+
+    from nexus.mcp_infra import _sweep_superseded_vectors_many
+
+    cat = _cat({"shared": ["doc-other-live"]})
+    cat.resolve_many.return_value = {
+        "doc-other-live": SimpleNamespace(physical_collection="coll"),
+    }
+    col = MagicMock()
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors_many(
+            cat, {"doc-A": {"shared"}}, "coll",
+            reader=cat, notes_provider=_notes(),
+        )
+    col.delete.assert_not_called()
+    kept_events = [l for l in logs if l.get("event") == "superseded_sweep_kept"]
+    assert len(kept_events) == 1, f"expected exactly one kept event, got: {logs}"
+    ev = kept_events[0]
+    assert ev["site"] == "_sweep_superseded_vectors_many"
+    assert ev["collection"] == "coll"
+    assert ev["dropped"] == 1
+    assert ev["kept"] == 1
+    assert ev["kept_notes"] == 0
+
+
+def test_batch_note_guard_clearing_every_candidate_logs_kept() -> None:
+    """Batch sibling of the note-guard test above.
+
+    Not named in the nexus-wbfpw.12 bead text (which names only "the
+    equivalent return near 2500" for this function, singular) — but
+    `_sweep_superseded_vectors_many` has the identical two-guard shape as
+    its per-doc sibling, and the note-guard return here is exactly as
+    silent as the one the bead DOES name. Added because it fits the
+    bead's own stated pattern: "candidates computed, then returns without
+    deleting or logging"."""
+    _allow_info_logs()
+    import structlog
+
+    from nexus.mcp_infra import _sweep_superseded_vectors_many
+
+    cat = _cat({})
+    col = MagicMock()
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock(
+                get_collection=MagicMock(return_value=col))):
+        _sweep_superseded_vectors_many(
+            cat, {"doc-A": {"note-chash"}}, "coll",
+            reader=cat, notes_provider=_notes("note-chash"),
+        )
+    col.delete.assert_not_called()
+    kept_events = [l for l in logs if l.get("event") == "superseded_sweep_kept"]
+    assert len(kept_events) == 1, f"expected exactly one kept event, got: {logs}"
+    ev = kept_events[0]
+    assert ev["site"] == "_sweep_superseded_vectors_many"
+    assert ev["collection"] == "coll"
+    assert ev["dropped"] == 1
+    assert ev["kept"] == 1
+    assert ev["kept_notes"] == 1

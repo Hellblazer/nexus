@@ -411,6 +411,21 @@ class _FakeTaxonomyHandler(BaseHTTPRequestHandler):
                 }
                 self._json(200, {"ok": True})
 
+            elif path == "/v1/taxonomy/meta/last_discover_batch":
+                # nexus-l3dg2: mirrors TaxonomyRepository.getLastDiscoverStamps —
+                # one row per collection that HAS a _META entry, unknown
+                # collections simply omitted (never a null placeholder).
+                collections = body.get("collections", [])
+                rows = [
+                    {
+                        "collection": c,
+                        "last_discover_at": _META[c].get("last_discover_at"),
+                        "last_discover_doc_count": _META[c].get("last_discover_doc_count", 0),
+                    }
+                    for c in collections if c in _META
+                ]
+                self._json(200, rows)
+
             elif path == "/v1/taxonomy/import/topic":
                 tid = int(body["id"])
                 # Keep the autoincrement ahead of explicitly-imported ids so a
@@ -1099,6 +1114,75 @@ class TestMetaAndRebalance:
     def test_needs_rebalance_stable(self, client: HttpTaxonomyStore) -> None:
         client.record_discover_count("coll", 100)
         assert not client.needs_rebalance("coll", 103)  # 3% growth
+
+    def test_get_last_discover_stamps_omits_unknown_collections(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        """nexus-l3dg2: known collections come back keyed by name; a
+        collection never discovered is simply absent, never a null/zero
+        placeholder entry."""
+        client.record_discover_count("knowledge__stamps-a", 7)
+        client.record_discover_count("knowledge__stamps-b", 13)
+        result = client.get_last_discover_stamps(
+            ["knowledge__stamps-a", "knowledge__stamps-b", "knowledge__stamps-unknown"],
+        )
+        assert set(result) == {"knowledge__stamps-a", "knowledge__stamps-b"}
+        assert result["knowledge__stamps-a"]["last_discover_doc_count"] == 7
+        assert result["knowledge__stamps-b"]["last_discover_doc_count"] == 13
+
+    def test_get_last_discover_stamps_empty_input_short_circuits(
+        self, client: HttpTaxonomyStore,
+    ) -> None:
+        assert client.get_last_discover_stamps([]) == {}
+
+    def test_get_last_discover_stamps_pages_at_300(self, monkeypatch) -> None:
+        """critic minor finding (nexus-l3dg2): a caller with more than
+        ``_LAST_DISCOVER_BATCH_PAGE`` (300) collections pages transparently
+        -- ``ceil(N/300)`` POST calls, never one oversized request the
+        engine's ``MAX_LAST_DISCOVER_BATCH`` cap would 400 on."""
+        store = HttpTaxonomyStore.__new__(HttpTaxonomyStore)
+        posts: list[list[str]] = []
+
+        def _fake_post(path, body, **kwargs):
+            cols = body["collections"]
+            posts.append(list(cols))
+            return [
+                {"collection": c, "last_discover_at": "2026-09-01T00:00:00Z",
+                 "last_discover_doc_count": 1}
+                for c in cols
+            ]
+
+        monkeypatch.setattr(store, "_post", _fake_post, raising=False)
+        n = 305
+        collections = [f"knowledge__page-{i}" for i in range(n)]
+        result = store.get_last_discover_stamps(collections)
+
+        assert len(posts) == 2  # ceil(305 / 300)
+        assert len(posts[0]) == 300
+        assert len(posts[1]) == 5
+        assert set(posts[0]) | set(posts[1]) == set(collections)
+        assert set(result) == set(collections)
+
+    def test_last_discover_batch_page_size_matches_engine_cap(self) -> None:
+        """critic minor finding (nexus-l3dg2): parity-pin the client's page
+        size to the engine's ``MAX_LAST_DISCOVER_BATCH`` cap -- a
+        client-side drift either overflows the engine's cap (400) or
+        silently under-pages a raised one. Light form: read the Java
+        constant as text, mirroring this repo's other client/engine
+        constant-parity checks."""
+        import re
+        from pathlib import Path
+
+        java_path = (
+            Path(__file__).resolve().parent.parent.parent
+            / "service" / "src" / "main" / "java" / "dev" / "nexus"
+            / "service" / "db" / "TaxonomyRepository.java"
+        )
+        source = java_path.read_text(encoding="utf-8")
+        m = re.search(r"MAX_LAST_DISCOVER_BATCH\s*=\s*(\d+)", source)
+        assert m is not None, "MAX_LAST_DISCOVER_BATCH constant not found in TaxonomyRepository.java"
+        engine_cap = int(m.group(1))
+        assert HttpTaxonomyStore._LAST_DISCOVER_BATCH_PAGE == engine_cap
 
 
 class TestImportFidelity:

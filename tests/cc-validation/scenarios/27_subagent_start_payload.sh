@@ -70,18 +70,32 @@ chmod +x "$TEST_HOME/.claude/capture_sid.sh"
 # reimplementing them, so the rows this leg reads are written by the
 # shipped code.
 #
-# WHAT CHANGED, AND WHAT IT COSTS. Production dispatches these as
-# `type: mcp_tool` entries (hook_agent_dispatch_expect /
-# hook_subagent_start_stamp in conexus/hooks/hooks.json), not as
-# `type: command`. This scenario keeps the command form because it needs
-# the per-hook `env XDG_STATE_HOME=...` pin below -- an mcp_tool entry has
-# no per-hook env, so the ledger would land wherever the MCP server's
-# environment put it and the assert could not find it. So this leg proves
-# the shipped WRITE PATH, as it always did, and does not prove the shipped
-# TRANSPORT, which it never did either (it hand-writes settings.json
-# rather than loading conexus's hooks.json). Proving the mcp_tool
-# transport needs a `type: mcp_tool` entry against a real server, the way
-# scenario 03 does.
+# WHAT CHANGED, AND WHAT IT COSTS. Production ALSO dispatches these on the
+# `type: command` tier now (bead nexus-5l8i8): conexus/hooks/hooks.json
+# runs `python3 ${CLAUDE_PLUGIN_ROOT}/hooks/scripts/nx_hook_shim.py
+# agent-dispatch-expect` / `... subagent-start-stamp`, not the
+# `hook_agent_dispatch_expect` / `hook_subagent_start_stamp` mcp_tool
+# entries this comment used to name -- an mcp_tool hook's very invocation
+# depended on this session's own MCP connection, and a disconnect was
+# silently dropping EXPECT rows while the matching START still landed
+# (that bead's own commit message has the measured incident). Both stay
+# registered as MCP tools for diagnosis, but neither fires that way in a
+# real session any more.
+#
+# This scenario's command form PREDATES that move and was never meant to
+# mirror it byte-for-byte: it drives tests/e2e/lib/drive_hook.sh directly
+# so it can pin `env XDG_STATE_HOME=...` per hook below -- the real
+# hooks.json invocation resolves XDG_STATE_HOME (if set at all) from the
+# session's own environment, not from a per-entry override, since nothing
+# in hooks.json's `input`/`args` shape carries one. So this leg proves the
+# shipped WRITE PATH, as it always did (drive_hook.sh IMPORTS the
+# production modules rather than reimplementing them), and does not prove
+# the shipped TRANSPORT byte-for-byte -- it never did, before or after
+# nexus-5l8i8 (it hand-writes settings.json rather than loading conexus's
+# hooks.json). Proving the real `nx_hook_shim.py`/`nx-hook` transport for
+# these two, or the mcp_tool transport scenario 03 exercises for a
+# different hook, needs the ACTUAL hooks.json entry driven against a real
+# session -- the container-based tests/e2e/hook-surface-shakeout harness.
 DISPATCH_EXPECT_HOOK="env XDG_STATE_HOME=$LEDGER_STATE $REPO_ROOT/tests/e2e/lib/drive_hook.sh agent_dispatch_expect"
 START_STAMP_HOOK="env XDG_STATE_HOME=$LEDGER_STATE $REPO_ROOT/tests/e2e/lib/drive_hook.sh subagent_start_stamp"
 

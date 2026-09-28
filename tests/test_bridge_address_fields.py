@@ -25,7 +25,7 @@ SEARCH_ROW_WITH_URI = {
     "id":         "abc123def456abc1230000000000000",
     "content":    "chunk text with address fields",
     "distance":   0.15,
-    "collection": "knowledge__test__voyage-context-3__v1",
+    "collection": "knowledge__test__model-ctx__v1",
     "chash":      "abc123def456abc1230000000000000",
     "source_uri": "file:///vault/notes/test.md",
     "span":       "chash:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899",
@@ -39,7 +39,7 @@ SEARCH_ROW_DEFAULT = {
     "id":         "abc123def456abc1230000000000000",
     "content":    "chunk text default path",
     "distance":   0.15,
-    "collection": "knowledge__test__voyage-context-3__v1",
+    "collection": "knowledge__test__model-ctx__v1",
     "chash":      "abc123def456abc1230000000000000",
     # NO source_uri
     "span":       "10-20",
@@ -51,7 +51,7 @@ SEARCH_ROW_LEGACY = {
     "id":         "deadbeef00000000000000000000000a",
     "content":    "legacy chunk without address fields",
     "distance":   0.25,
-    "collection": "knowledge__test__voyage-context-3__v1",
+    "collection": "knowledge__test__model-ctx__v1",
     "chunk_text_hash": "deadbeef",
 }
 
@@ -103,7 +103,7 @@ class TestSearchDefaultPath:
         client = _make_client()
 
         with patch("nexus.db.http_vector_client._post", return_value=rows) as mock_post:
-            result = client.search("test query", ["knowledge__test__voyage-context-3__v1"])
+            result = client.search("test query", ["knowledge__test__model-ctx__v1"])
 
         # include_source_uri must NOT be in the posted body
         posted_body = mock_post.call_args[0][1]
@@ -124,13 +124,13 @@ class TestSearchDefaultPath:
         with patch("nexus.db.http_vector_client._post", return_value=rows):
             result = client.search(
                 "test query",
-                ["knowledge__test__voyage-context-3__v1"],
+                ["knowledge__test__model-ctx__v1"],
                 structured=True,
             )
 
         assert result["ids"] == ["abc123def456abc1230000000000000"]
         assert result["distances"] == [pytest.approx(0.15)]
-        assert result["collections"] == ["knowledge__test__voyage-context-3__v1"]
+        assert result["collections"] == ["knowledge__test__model-ctx__v1"]
 
 
 # ---------------------------------------------------------------------------
@@ -148,7 +148,7 @@ class TestSearchOptIn:
         with patch("nexus.db.http_vector_client._post", return_value=rows) as mock_post:
             result = client.search(
                 "test query",
-                ["knowledge__test__voyage-context-3__v1"],
+                ["knowledge__test__model-ctx__v1"],
                 include_source_uri=True,
             )
 
@@ -175,7 +175,7 @@ class TestSearchBackwardCompat:
         client = _make_client()
 
         with patch("nexus.db.http_vector_client._post", return_value=rows):
-            result = client.search("test", ["knowledge__test__voyage-context-3__v1"])
+            result = client.search("test", ["knowledge__test__model-ctx__v1"])
 
         row = result[0]
         assert row["id"] == "deadbeef00000000000000000000000a"
@@ -193,7 +193,7 @@ class TestGetEnvelope:
     def test_opt_in_surfaces_source_uris(self):
         """include_source_uri=True forwarded to store-get; response carries source_uris."""
         env = GET_ENVELOPE_OPT_IN
-        stub = _ServiceCollectionStub("knowledge__test__voyage-context-3__v1", "test-tenant")
+        stub = _ServiceCollectionStub("knowledge__test__model-ctx__v1", "test-tenant")
 
         with patch("nexus.db.http_vector_client._post", return_value=env) as mock_post:
             raw = stub.get(ids=["abc123def456abc1230000000000000"], include_source_uri=True)
@@ -209,7 +209,7 @@ class TestGetEnvelope:
     def test_default_path_has_no_source_uris(self):
         """Default get (no flag): chashes/spans present, source_uris absent."""
         env = GET_ENVELOPE_DEFAULT
-        stub = _ServiceCollectionStub("knowledge__test__voyage-context-3__v1", "test-tenant")
+        stub = _ServiceCollectionStub("knowledge__test__model-ctx__v1", "test-tenant")
 
         with patch("nexus.db.http_vector_client._post", return_value=env) as mock_post:
             raw = stub.get(where={})
@@ -225,7 +225,7 @@ class TestGetEnvelope:
     def test_legacy_envelope_does_not_raise(self):
         """Backward compat: pre-G5 envelope (no chashes/source_uris/spans) must not error."""
         env = GET_ENVELOPE_LEGACY
-        stub = _ServiceCollectionStub("knowledge__test__voyage-context-3__v1", "test-tenant")
+        stub = _ServiceCollectionStub("knowledge__test__model-ctx__v1", "test-tenant")
 
         with patch("nexus.db.http_vector_client._post", return_value=env):
             raw = stub.get(where={})
@@ -242,7 +242,7 @@ class TestGetAllMetadata:
     for the staleness-cache-build phase."""
 
     def test_posts_to_get_all_metadata_endpoint(self):
-        stub = _ServiceCollectionStub("code__test__voyage-code-3__v1", "test-tenant")
+        stub = _ServiceCollectionStub("code__test__model-code__v1", "test-tenant")
         server_result = {
             "ids": ["c1", "c2"],
             "metadatas": [{"chunk_text_hash": "h1"}, {"chunk_text_hash": "h2"}],
@@ -253,12 +253,12 @@ class TestGetAllMetadata:
 
         path, body = mock_post.call_args[0]
         assert path == "/v1/vectors/get-all-metadata"
-        assert body["collection"] == "code__test__voyage-code-3__v1"
+        assert body["collection"] == "code__test__model-code__v1"
         assert "where" not in body
         assert out == {"ids": ["c1", "c2"], "metadatas": [{"chunk_text_hash": "h1"}, {"chunk_text_hash": "h2"}]}
 
     def test_forwards_where_filter(self):
-        stub = _ServiceCollectionStub("code__test__voyage-code-3__v1", "test-tenant")
+        stub = _ServiceCollectionStub("code__test__model-code__v1", "test-tenant")
 
         with patch("nexus.db.http_vector_client._post", return_value={"ids": [], "metadatas": []}) as mock_post:
             stub.get_all_metadata(where={"kind": "a"})
@@ -270,7 +270,7 @@ class TestGetAllMetadata:
         """No 'documents' field in the response shape -- staleness only
         needs metadata, keeping the payload lean (the whole point of the
         endpoint versus the general-purpose /get)."""
-        stub = _ServiceCollectionStub("code__test__voyage-code-3__v1", "test-tenant")
+        stub = _ServiceCollectionStub("code__test__model-code__v1", "test-tenant")
 
         with patch("nexus.db.http_vector_client._post", return_value={"ids": ["c1"], "metadatas": [{}]}):
             out = stub.get_all_metadata()
@@ -284,7 +284,7 @@ class TestGetAllMetadata:
         instead of falling back to the paginated path."""
         from nexus.db.http_vector_client import VectorServiceError
 
-        stub = _ServiceCollectionStub("code__test__voyage-code-3__v1", "test-tenant")
+        stub = _ServiceCollectionStub("code__test__model-code__v1", "test-tenant")
 
         with patch(
             "nexus.db.http_vector_client._post",

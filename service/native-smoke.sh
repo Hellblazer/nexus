@@ -429,9 +429,36 @@ if [ -f "$BGE_MODEL" ]; then
     curl -s -o /tmp/ns-rerank-put.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"collection\":\"$RCOL\",\"doc_id\":\"$1\",\"content\":$2}" "$U/v1/vectors/store-put"
   }
-  p1=$(put_rerank_chunk "$(printf 'e%.0s' {1..64})" '"Mix flour and water, ferment the dough, bake the bread in a hot oven."')
-  p2=$(put_rerank_chunk "$(printf 'f%.0s' {1..64})" '"Quantum chromodynamics describes the strong interaction between quarks."')
+  CHASH1="$(printf 'e%.0s' {1..64})"
+  CHASH2="$(printf 'f%.0s' {1..64})"
+  p1=$(put_rerank_chunk "$CHASH1" '"Mix flour and water, ferment the dough, bake the bread in a hot oven."')
+  p2=$(put_rerank_chunk "$CHASH2" '"Quantum chromodynamics describes the strong interaction between quarks."')
   if [ "$p1" = "200" ] && [ "$p2" = "200" ]; then
+    # fc99baac9 (nexus-wbfpw.10, RDR-192 Step 5): every T3 content read now
+    # goes through live(c) -- nexus.chunk_live_owners(tenant, collection,
+    # chash) must find a catalog_document_chunks manifest row owned by a
+    # non-tombstoned catalog_documents row, or the chunk is invisible to
+    # search no matter how well it scores. store-put above writes only the
+    # chunks_<dim> row (chash = the doc_id it was given, verbatim -- see
+    # PgVectorRepository#upsertChunksInternal's own "chash is the caller's
+    # identity" comment) with no owning document, so the two chunks above
+    # are dead(c) the instant they land. A real client always follows a
+    # store-put with a manifest write; do the same here so the search below
+    # can see them.
+    rdoc=$(curl -s -o /tmp/ns-rerank-doc.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      -d "{\"owner_prefix\":\"nativesmoke.rerank\",\"title\":\"native-smoke rerank fixture\",\"content_type\":\"knowledge\",\"physical_collection\":\"$RCOL\"}" \
+      "$U/v1/catalog/doc/register")
+    if [ "$rdoc" != "200" ]; then
+      echo "  FAIL rerank fixture doc register -> $rdoc: $(head -c200 /tmp/ns-rerank-doc.out)"; fail=1
+    else
+      RDOC_ID=$(python3 -c "import json,sys; print(json.load(open('/tmp/ns-rerank-doc.out'))['tumbler'])" 2>/dev/null)
+      rman=$(curl -s -o /tmp/ns-rerank-man.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+        -d "{\"doc_id\":\"$RDOC_ID\",\"collection\":\"$RCOL\",\"rows\":[{\"position\":0,\"chash\":\"$CHASH1\"},{\"position\":1,\"chash\":\"$CHASH2\"}]}" \
+        "$U/v1/catalog/manifest/write")
+      if [ "$rman" != "200" ]; then
+        echo "  FAIL rerank fixture manifest write -> $rman: $(head -c200 /tmp/ns-rerank-man.out)"; fail=1
+      fi
+    fi
     rcode=$(curl -s -o /tmp/ns-rerank.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"query\":\"how do I bake bread\",\"collections\":[\"$RCOL\"],\"n_results\":2,\"rerank\":true}" \
       "$U/v1/vectors/search")

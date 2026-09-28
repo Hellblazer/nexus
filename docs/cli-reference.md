@@ -113,7 +113,7 @@ Every `nx index repo` run also writes a per-repo log file at `~/.config/nexus/lo
 - **`nx store import`'s `[embed]` heartbeat** (nexus-s71lr) — the import is one call with no per-record progress at all (worse than the per-file loops: not even a start/end line per record). Same mechanism, armed for the whole call: `  [embed] importing <file> still running (Xs elapsed)` every 5 s, always on.
 - **`nx store put`'s `[embed]` heartbeat** (nexus-s71lr pass 3) — a single document is still ONE embed call, and a large document's embed can run a minute+ with zero progress signal. Same mechanism, armed for the whole `db.put()` call: `  [embed] storing <title> still running (Xs elapsed)` every 5 s, always on.
 - **`GET /v1/status`** (nexus-s71lr, engine-side) — additive endpoint serving live embed-activity counters (`embedding_mode`, `local_embed_activity` for the local bge path, and — pass 3 — `embedder_activity`, a map keyed by model token covering the cloud-mode Voyage/CCE embedders too, so a cloud install is no longer always `null`). `nx doctor` (also `--check-engine-activity` standalone) polls it and renders one "Engine activity: …" line, falling back to the busiest tracked embedder when `local_embed_activity` is null.
-- **`POST /v1/install-ping`** (nexus-h5olw, engine-side) — additive unauthenticated route recording the client's anonymous daily install ping into the global, RLS-free `nexus.install_pings` table (telemetry-014). 202 on accept; 400 on any malformed or over-long field; 429 with `Retry-After` past the mint-route rate limits (per remote address, then per install id). Active installs = distinct `install_id` in the trailing 28 days. See `nx telemetry status`.
+- **`POST /v1/install-ping`** (nexus-h5olw, engine-side) — additive unauthenticated route recording the client's daily install ping into the global, RLS-free `nexus.install_pings` table (telemetry-014) and a keyed source fingerprint (telemetry-015). 202 on accept; 400 on any malformed or over-long field; 429 with `Retry-After` past the mint-route rate limits (per remote address, then per install id). Active installs = distinct `install_id` in the trailing 28 days. See `nx telemetry status`.
 
 **Voyage per-project rate limit (nexus-cy9u7):** the engine embeds server-side on write, so a bulk `nx index` run's real "embed pressure" is its T3 vector-write and catalog manifest-write request rate. Voyage's RPM budget (4000 RPM for `voyage-context-3`) is per PROJECT, not per process or per worker — every concurrent worker thread AND every concurrent `nx index` session sharing that Voyage project draws from the SAME budget. Every write path now routes through a shared process-wide "rate brake" — `HttpVectorClient.upsert_chunks` (the one choke point every T3 write call site funnels through: the ChunkBatcher's combined-write flush, the per-file prose/code fallback, and PDF indexing, which never uses the batcher), the catalog manifest write, and the migration-ETL leg. The first worker to see ANY retryable transient failure — a 429, 502, 503, or 504, or a retryable transport error (connect refused, read timeout, ...), not only a narrow 429/503-with-`Retry-After` signal — pauses EVERY writer in this process until the same shared deadline, instead of each worker backing off independently and re-firing the limit the moment its own backoff elapses (the 2026-08-15 incident, conexus-ddh0/nexus-99r7y: the engine was retrying Voyage internally and the edge's own timeout surfaced to the client as a 502/504 with no `Retry-After` at all — a signal the narrower pre-fix scope would have missed entirely). The pause is floored at the server's `Retry-After` when one is supplied, otherwise an escalating default (2s, doubling per consecutive process-wide trip, capped at 60s); it resumes at the base delay once a write succeeds. `nexus-99r7y` (engine fail-fast with an explicit 429 + `Retry-After` instead of a bare edge timeout) sharpens this signal but is **not required** for the brake to engage — the escalating-default path covers every retryable failure shape either way.
 
@@ -1030,6 +1030,19 @@ orphan behind. Most indexing paths (`nx index repo`/`pdf`/`md`/`rdr`, `nx dt
 index`) register through their own pipelines; this verb is for one-off or
 scripted registration outside those flows.
 
+**Side effect for `https://` (nexus-0ne1m):** after a successful register, this
+makes ONE real outbound HEAD request to capture the resource's `ETag` for
+`nx doctor --check-references` to compare against later — bounded to
+`aspect_readers.HTTPS_ETAG_CAPTURE_TIMEOUT_S`/`HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S`
+(connect and read/write/pool are independent phase budgets, so worst case is
+about 5s, not ~3s), one attempt, best-effort (a slow, failed, or `ETag`-less
+response never fails the register and records nothing). No other scheme
+makes any network call. Set `NX_REFERENCE_ETAG_CAPTURE=0` to disable this
+HEAD entirely — checked in `capture_https_etag` itself, so `nx catalog
+backfill-etags` (below) honors the same opt-out. `nx catalog
+backfill-etags` captures it in bulk for references already registered before
+this shipped.
+
 ### nx catalog backfill (hidden)
 
 ```
@@ -1173,6 +1186,89 @@ Show linked RDRs for recently git-modified files. Default: last 24 hours. Useful
 
 A file path can name more than one catalog document — one file catalogued under two owners is a normal steady state — and every such document is reported, each labelled with its tumbler. Before 7.57.0 only the first was consulted, so this could print "No linked RDRs found" while the links sat on a sibling row.
 
+### nx catalog footnotes
+
+```
+nx catalog footnotes FILE.md [FILE2.md ...]
+    [--check] [--dry-run] [--to-links] [--refresh] [--style long|short]
+```
+
+GH #896 (nexus-sxiay) — the in-place converter the issue actually asked for
+(`nx doc render`/`nx doc validate`'s catalog-link resolution, nexus-sevlu,
+covers a `.rendered.md` sidecar only; GitHub/GitLab/VS Code preview render
+the *source* file, which that half never touches). Converts every
+`[label](nx://catalog/<tumbler>)` markdown link IN PLACE in the source file
+into a stable GFM footnote marker `[label][^tumbler-<slug>]` — the label
+STAYS bracketed, immediately followed by the footnote reference, which is
+what makes `--to-links` exact regardless of what precedes or follows a
+citation on its line (see the module docstring in
+`src/nexus/doc/footnote_converter.py` for why the label must stay
+bracketed). Appends or refreshes a `## Footnotes` section at the bottom
+with one definition per unique tumbler: title, content type, indexed date
+(when available), a working link or `(repo-relative)` label (see
+`nx doc render`'s note on link safety — the same `safe_link_target`
+helper, same rules), any merge note, and outbound links.
+
+The file is read as STRICT UTF-8 — never a lossy decode — and refused
+outright (exit 2, nothing written) if it contains invalid UTF-8 bytes;
+writes are ATOMIC (a sibling `.tmp` file, then an atomic rename), so a
+crash mid-write can never leave the file half-written.
+
+Idempotent: re-running an already-converted file with an unchanged catalog
+state is a byte-for-byte no-op, trailing newline (or its absence) and
+CRLF-vs-LF line endings preserved exactly. Once a tumbler has a marker,
+that marker NEVER moves or changes on a later run — only the footnote
+section's DEFINITION bodies are rewritten when the cited catalog entries
+have drifted (a title edit, a merge). Slugs are derived deterministically
+from the entry's title (`tumbler-<slugified-title>`, falling back to the
+tumbler itself when there is no title), with a numeric suffix on collision
+(`tumbler-x`, `tumbler-x-2`, ...). Fenced code blocks, inline backtick code
+spans (including double-backtick spans), and 4-space-indented code blocks
+are never touched.
+
+GH #896's own acceptance criterion, held literally: a tumbler that does
+not resolve means NOTHING is written for that file — not even the parts
+that would have converted cleanly. Every failure is still reported as
+`file:line: unresolved tumbler <tumbler>` on stderr, and the command exits
+1. `--dry-run` always shows the full picture (the diff as if the write had
+happened) regardless of any dangling reference.
+
+```
+--check         Exit non-zero if the file is not already in current,
+                converted form (a dangling reference also counts). Writes
+                nothing — for CI / pre-commit.
+--dry-run       Print a unified diff of what would change; write nothing.
+--to-links      Reverse conversion: expand every footnote marker back into
+                its nx://catalog/<tumbler> link and drop the Footnotes
+                section. No catalog access needed — the tumbler is read
+                back out of the footnote body itself.
+--refresh       Only refresh EXISTING footnote bodies against current
+                catalog state; add no new markers for links not already
+                converted (a brand-new link is left completely untouched
+                — never attempted, never reported).
+--style TEXT    Footnote body verbosity: 'long' (default: title, content
+                type, indexed date, link, outbound links) or 'short'
+                (title + tumbler id only).
+```
+
+`--check`/`--dry-run`, `--check`/`--to-links`, and `--refresh`/`--to-links`
+are each mutually exclusive (exit 2, a usage error) — `--dry-run` combines
+with `--to-links` freely, to preview the reverse conversion.
+
+`## Footnotes` is recognized and managed ONLY when every line under it
+matches this command's own definition format; a file that already has an
+unrelated `## Footnotes` section (hand-written, or from another tool) is
+refused outright (exit 2) rather than risked.
+
+```
+nx catalog footnotes docs/rdr/rdr-200-example.md
+nx catalog footnotes docs/rdr/*.md --check     # CI gate
+nx catalog footnotes docs/rdr/rdr-200.md --dry-run
+nx catalog footnotes docs/rdr/rdr-200.md --to-links   # reverse
+nx catalog footnotes docs/rdr/rdr-200.md --refresh    # bodies only, no new markers
+nx catalog footnotes docs/rdr/rdr-200.md --style short
+```
+
 ### nx catalog link-generate
 
 ```
@@ -1232,7 +1328,15 @@ Update catalog entry metadata. `TUMBLER` accepts a tumbler or title. Batch mode 
 entries whose DT-URI stamp failed during `nx dt index` (the entry carries
 `source_uri=file://…` instead of `x-devonthink-item://<UUID>`), or for
 manual reassignment of catalog identity. Validated against the same scheme
-allowlist as register-time.
+allowlist as register-time. **Side effect for `https://` (nexus-0ne1m):**
+same bounded, best-effort ETag-capture HEAD request `nx catalog register`
+makes (see above) — one attempt, ~5s worst-case bound (connect and read are
+separate budgets), `NX_REFERENCE_ETAG_CAPTURE=0` disables it. Refused
+outright in combination with `--owner`/`--search`
+batch mode: `source_uri` is a per-document identity, and a batch write
+would either collide on the engine's live-`source_uri` uniqueness
+constraint or fan out one HEAD request per matched document — use
+`nx catalog backfill-etags` for bulk ETag capture instead.
 
 `--file-path` sets or replaces the `file_path` column (nexus-y8qtj) —
 repoints an entry whose recorded path is dead (moved/renamed on disk)
@@ -1409,6 +1513,20 @@ For each candidate, parses the path component out of the stored `chroma://<colle
 |------|-------------|
 | `--apply` | Perform the rewrite (default: dry-run report only) |
 | `--json` | Emit JSON instead of the human-readable report |
+
+### nx catalog backfill-etags
+
+```
+nx catalog backfill-etags [--owner PREFIX] [--dry-run] [--limit N]
+```
+
+Captures the ETag for every `https://` catalog reference that lacks one (nexus-0ne1m): a reference registered/refreshed before ETag capture shipped, or whose HEAD request failed at the time, reads `unknown` forever under `nx doctor --check-references` otherwise. Candidates are live (non-alias) documents whose `source_uri` starts with `https://` and whose metadata does not already carry an ETag; already-recorded documents are excluded automatically, so re-running is idempotent and safe to repeat past the `--limit` cap. `--dry-run` lists the candidates and makes NO network call and NO write. Otherwise one bounded HEAD request per candidate (the same tight ~5s worst-case write-path budget `nx catalog register`/`update` use — connect and read are separate budgets, not a single ~3s bound) shares ONE `httpx.Client` across the run; a document whose HEAD fails or returns no ETag is reported, not retried, and a document whose catalog write fails is reported and counted (exit 1 if any failed), without aborting the rest. `NX_REFERENCE_ETAG_CAPTURE=0` disables capture here too (checked in `capture_https_etag` itself, the function this command calls), making every candidate come back with no ETag and zero outbound HEAD requests.
+
+| Flag | Description |
+|------|-------------|
+| `--owner PREFIX` | Restrict to this owner tumbler (e.g. `1.1`). Default: every owner |
+| `--dry-run` | Report candidates only; no network calls, no writes |
+| `--limit N` | Cap on candidates processed in one run (default 500, max 2000) — a bounded sweep, never an unlimited fan-out |
 
 ### nx catalog backfill-collections
 
@@ -1831,7 +1949,7 @@ With `--json`, human-readable diagnostics (the `--require-zero` violation notice
 | `require_zero_violations` | List of `--require-zero` bucket names found above zero across the censused collections. |
 | `exit_code` | The process exit code, mirrored into the document. |
 
-**Sam's 2026-09-26 ruling on nexus-wbfpw.5**: this verb no longer gates the production census — that runs as direct SQL (`scripts/sql/manifest_less_census.sql`) against production until the rest of RDR-192 ships. This verb ships anyway, built and tested against a dev jar, for the client release paired with the eventual RDR-192 engine tag.
+Needs engine-service-v0.1.133 or later. Against an older engine the verb exits 4; the same census runs as direct SQL (`scripts/sql/manifest_less_census.sql`) under psql.
 
 ---
 
@@ -2180,6 +2298,41 @@ the service backend's `chash` length constraint) are re-hashed to full 64-char
 content-derived ids automatically (RDR-180); the CLI reports how many were
 re-hashed.
 
+**Owner registration:** after every chunk batch is written, `import` finds or
+registers a catalog document per owner group and writes its manifest
+(nexus-wbfpw.31), so an imported chunk stays visible under RDR-192 Step 5's
+live(c) read predicate — a chunk with no manifest row in its own collection
+is otherwise invisible to search and get.
+
+- Chunks are grouped by owner identity — the export's `owner` record field
+  (`source_uri`, `title`, `content_type`, `position`) — across the whole
+  file, and each group's document is found or registered once every batch
+  has upserted, not per batch: the per-batch manifest hook restarts position
+  numbering at each 300-chunk batch and would corrupt a multi-batch
+  document's manifest.
+- Importing into a collection other than the one the documents live in
+  (`-c`/`--collection`) COPIES rather than moves: the source collection's
+  documents are left untouched and stay live, and the target gets its own
+  documents under `nxexp://<target>/<original source_uri>`. Re-importing the
+  same file finds that qualified document again, so the copy is idempotent.
+- A legacy record carrying `meta.doc_id` (a pre-RDR-108 export with no
+  `owner` field) keeps that document when it is still live in the target
+  collection, and otherwise gets a new one scoped to the file
+  (`nxexp://<target>/<file>#<doc_id>`).
+- A record with no owner at all (an older export predating this field, or a
+  live-but-unmanifested chunk the export could not resolve) is grouped under
+  one document per import file, keyed by the target collection and file name.
+- `--skip-existing` still ends every record owned: grouping happens before
+  duplicate filtering, since a chunk dropped as an existing duplicate was
+  written by a prior run and must still end up owned by this one.
+- An owner with no title (an export whose document had none) keeps its
+  source URI as the registered document's title.
+- If an owner document or its manifest fails to write, the rest of the
+  import still completes; the command then fails, naming every failed
+  source URI (capped at 5, with a count of the rest) and noting that
+  re-running the same import is safe — document lookup and manifest writes
+  are idempotent.
+
 **Restoring a pre-migration (Chroma-era) backup:**
 
 ```
@@ -2329,6 +2482,8 @@ nx collection list
 |------------|-------------|
 | `list` | All T3 collections with live chunk counts and the catalog's columns: `CONTENT_TYPE`, `OWNER`, `MODEL`, `DIM`, `STATE` (`live`, `quarantine`, `dormant`, `disputed`). Every column is read from the collection's catalog row, never parsed from its name (RDR-204 Day 2, nexus-ft04v.32), so a row whose name disagrees with its columns shows the columns. A collection with no catalog row prints `-` in each column; a registered row with no chunks (dormant) prints `0`. If the catalog cannot be read the listing says so and prints names and counts only |
 | `info NAME` | Details for one collection |
+| `aspects NAME [--enable\|--disable] [--yes]` | Show or set the engine's tenant-wide `catalog_collections.aspects_enabled` attribute — the docs__ aspect-extraction opt-in (nexus-l46pu, follow-up to nexus-kk4ut). Bare invocation shows the current value, or, on a row nobody has ever set (`aspects_enabled` is `NULL` — a fresh install, an old engine, or simply untouched), names the local `aspects.docs_collections` fallback answer instead of guessing. `--enable`/`--disable` sets it and prints the tenant-wide blast radius and the LLM-call cost before writing, then prompts for confirmation unless `--yes`/`-y` is given (a non-interactive run without `--yes` refuses rather than hanging). Refuses (nonzero exit) a non-docs__ collection. The engine is AUTHORITATIVE once it has an opinion — an explicit `true`/`false`, never a column default — round 2, T2 critique-nexus-l46pu-tenant-wide-aspects-enabled item 1 — a machine's local `aspects.docs_collections` config.yml entry is consulted only when the engine has none yet |
+| `aspects --from-config [--dry-run] [--yes]` | Sync every registered docs__ collection this machine's local `aspects.docs_collections` list matches onto the engine (sets `aspects_enabled=true` there); the migration path off the local-only list. Prompts once for the whole batch unless `--yes`/`-y` is given. `--dry-run` reports without writing and never prompts. Cannot combine with `NAME` or `--enable`/`--disable` |
 | `verify NAME` | Existence check + document count |
 | `reindex NAME` | Delete and re-index a collection from its source documents |
 | `rename OLD NEW` | In-place metadata-only rename in the T3 vector store + T2 + catalog cascade (4.8.0, nexus-1ccq). Never re-embeds; same-prefix renames whose embedding-model segment differs are rejected (6.3.1, nexus-tcvpn) |
@@ -2761,6 +2916,42 @@ also resolves every `[display](chash:<hex>)` span and appends a `## Citations`
 footnote block containing the chunk text (truncated at 500 chars). Unresolvable
 chash values render as `[unresolved chash: <first8>…]` rather than crashing.
 
+Unconditionally (no flag) also resolves every `[display](nx://catalog/<tumbler>)`
+link (GH #896 render/validate half — the in-place `nx catalog footnotes`
+converter GH #896 also asks for is `nx catalog footnotes`, nexus-sxiay)
+against the catalog and appends a `## Catalog References` footnote block naming
+the title, content type, owner, and a link. The link is never a `file://` URI
+or an absolute/UNC/`~`/upward-escaping path — `nx index repo` derives
+`source_uri` as `file://<abspath>` for every registration, so a bare
+preference would leak the indexing machine's own path layout, and a
+filesystem-native "is this absolute" check misses a Windows or UNC path on a
+POSIX host. `source_uri` is preferred only when its scheme (parsed
+case-insensitively) is on an explicit allowlist (`https`, `x-devonthink-item`
+— never "anything that isn't `file://`"; `nx-scratch` is deliberately
+excluded too, since T1 scratch is session-scoped and unresolvable by any
+later reader); a `file_path` is the fallback only after a content-based
+classifier (percent-decoded first, so `%2e%2e%2f` doesn't hide a traversal)
+clears it of every unsafe shape (POSIX-absolute, Windows drive-letter, UNC,
+`~`, or a `..` sequence that climbs above its own root). A cleared
+`file_path` becomes a WORKING relative link — re-expressed relative to the
+rendered file's own directory via the entry's owner's `repo_root` — only
+when that repo_root is known AND the rendered file's own directory is
+actually inside it; a citing file outside the entry's repo (or an unknown
+repo_root) instead shows plain, non-clickable `(repo-relative)` text rather
+than a link that has never been confirmed to resolve, or a `../../..`
+traversal into an unrelated repository's layout. Neither candidate being
+safe omits the link segment entirely (title/type/owner only). A tumbler
+that has been
+MERGED into another (a duplicate whose
+`alias_of` points at a canonical tumbler — the row survives the merge, it is
+never tombstoned) resolves to the canonical entry's data, with a
+`merged into` \`nx://catalog/<canonical>\` note — never the stale duplicate's
+own fields. A tumbler that no longer resolves at all renders
+`[unresolved tumbler: <tumbler>]` rather than crashing; a doc with no such
+links opens no catalog client at all. A catalog service outage aborts the
+whole render (exit 1) rather than silently reporting every citation as
+unresolved (the same nexus-ib6uy precedent `--expand-citations` follows).
+
 ```
 nx doc render docs/paper.md
 nx doc render docs/paper.md --expand-citations
@@ -2771,7 +2962,16 @@ nx doc render docs/paper.md --project-root /path/to/repo  # resolver context (be
 
 ### nx doc validate
 
-Parse-and-resolve without emission. Exits non-zero on any unresolved token.
+Parse-and-resolve without emission. Exits non-zero on any unresolved token, and
+on any `nx://catalog/<tumbler>` link (GH #896 render/validate half; see
+`nx catalog footnotes` for the in-place converter) that no longer resolves —
+reported as
+`file:line: unresolved tumbler <tumbler> (nx://catalog/<tumbler>)` ONCE PER
+CITING LINE (a tumbler cited twice is reported twice; deduplication is correct
+for the render footnote, wrong for an error report a reader must act on line
+by line). Exit 2 (distinct from exit 1's "this tumbler genuinely does not
+resolve") means the catalog service itself was unreachable while checking —
+an environment failure, not a content finding; fix the service and re-run.
 
 ```
 nx doc validate docs/paper.md
@@ -2866,10 +3066,16 @@ so a sweep that printed genuine ✗ lines exited `0` and any script gating on
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
 `--check-*` diagnostics inline: `resources`, `plan-library`, `taxonomy`,
 `aspect-queue`, `t1`, `engine-activity`, `index-failures`, `fanout-floor`,
-`tuple-projection`, `ghost-sweep`, `harness-grant` (the last four have no
-`--check-fanout-floor` / `--check-tuple-projection` / `--check-ghost-sweep`
-/ `--check-harness-grant` flag; they only run as
-part of this supplementary set).
+`tuple-projection`, `ghost-sweep`, `harness-grant`, `docs-aspects-config`
+(the last five have no `--check-fanout-floor` / `--check-tuple-projection`
+/ `--check-ghost-sweep` / `--check-harness-grant` / `--check-docs-aspects-config`
+flag; they only run as part of this supplementary set).
+`docs-aspects-config` (nexus-l46pu round 2) warns when a local
+`aspects.docs_collections` glob matches a registered `docs__` collection
+whose engine `aspects_enabled` is not yet `True` — the engine is
+authoritative once it has an opinion (see [Aspects](configuration.md#aspects)),
+so an unsynced local match is silent cross-machine drift. N/A on a machine
+with an empty `docs_collections` list.
 `tuple-projection` (nexus-08cfl) reports whether
 this session's RDR-205 ledger tuple projector
 (`nexus.hooks.tuple_ledger_project`) has logged any SKIP lines to its
@@ -2898,8 +3104,8 @@ section ends by naming the flags a default run still does NOT cover
 (`--check-schema`, `--check-search`, `--check-quotas`, `--check-mcp-logs`,
 `--check-tier-discipline`, `--check-storage-boundary`,
 `--check-post-store-hooks`, `--check-mineru`, `--check-wal-retention`,
-`--check-collection-shape`, `--check-embeddings`, `--check-assignments`) so the
-blind spots stay explicit. The section is printed on the human-readable path
+`--check-collection-shape`, `--check-embeddings`, `--check-assignments`,
+`--check-references`) so the blind spots stay explicit. The section is printed on the human-readable path
 only; `--json` output shape is unchanged.
 
 Checks (live T3 first): the nexus-service vector reachability probe (RDR-155: probed unconditionally — a pgvector install with the service down does NOT doctor all-green), the T3 collection census via the pgvector service, the service bge-768 model in local-service mode, and (local-service mode only) the service cross-encoder reranker model.
@@ -2947,6 +3153,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 | `--check-collection-shape` | Read-only shape audit of the collection set against [docs/collections.md](collections.md), the doctor surface of `nx collection shape`: one row per check with its finding count and an examined count so a clean tenant is never confused with an audit that saw nothing. Findings are curation input and never fail doctor; **exit 1 only when the tenant cannot be read** (nexus-ger23) |
 | `--check-embeddings` | Embedding drift probe (nexus-f9duo): samples chunks per collection, embeds their stored text again with the collection's registered model (`POST /v1/vectors/embed`, which stores nothing) and compares with the stored vector. A chunk below cosine 0.99 is named with its collection's median and minimum; healthy engine-written chunks measure 0.998 or above, and the nexus-tysei stale vectors sat at 0.25 to 0.87. `--embeddings-sample N` (default 20, max 300) sets chunks per collection, drawn from non-overlapping windows at random offsets in four equal strata (engine rows are ordered by chash, so a window is not one document or one indexing era); a sampled chunk with text but no stored vector at the collection's dim (a re-embed in progress) is counted and not compared, and a collection with nothing comparable is named NOT CHECKED; `--embeddings-collection NAME` (repeatable) narrows the scope from every collection holding chunks; `--embeddings-seed` repeats a sample (default: today's UTC date, printed in the result). **Exit 1** when any sampled chunk is below the floor, when any collection could not be probed, or when nothing was compared. Opt-in because it costs one embedding call per sampled chunk. Remedy: `nx collection re-embed <collection>`, a production write |
 | `--check-assignments` | Cross-collection ("projection") topic-assignment audit (nexus-v4pj4): since engine-service-v0.1.132 the projection pass of `assign_from_chashes_<dim>` picks each chunk's nearest FOREIGN-collection centroid via an HNSW `LATERAL` (approximate) instead of an exact join — measured equal to exact under production insertion order, but a wrong pick would be silent. Round 1 compared a STORED historical pick against today's live centroids and could false-alarm on healthy taxonomy growth; round 2 closes that structurally with a new read-only engine route, `POST /v1/taxonomy/assignments/cross-preview` (`nexus.cross_preview_<dim>`, taxonomy-021 — a read-only twin of `assign_from_chashes`'s cross branch: the byte-identical `batch`/`nearest` CTE under the identical HNSW/access-path settings, but no persisted INSERT, so it can never write to `topic_assignments`). For each sampled chunk this compares the engine's LIVE ANN pick (via that route, right now) against an exact Python recompute over the SAME live foreign-centroid snapshot fetched in the same run — never a stored row; a currently-persisted assignment, if any, is shown in a disagreement's report line as context only (`stored=N`), never consulted to decide pass or fail. Same tie-break as the engine's own `ORDER BY distance, topic_id`. At the default sample of 20, a systemic wrong-pick rate of 10% is caught with ~88% probability, 20% with ~99%; a rare, isolated bad pick under 1% of a collection's population may not land in any one run's sample. `--assignments-sample N` (default 20, max 300), `--assignments-collection NAME` (repeatable; default: every collection holding chunks), `--assignments-seed` (default: today's UTC date). Each sampled chunk's foreign-centroid snapshot is fetched twice per attempt — once immediately before the `cross-preview` call, once immediately after — and compared; a change (a topic added, removed, or revised in place mid-probe) means this collection's batch is not compared this run, retried once, and if it still changed, reported CHANGED DURING PROBE rather than risking a comparison against a snapshot the engine's own answer never actually saw. **Exit 1** when any sampled chunk disagrees beyond a float-noise tolerance, any collection could not be probed, or nothing was compared. A collection with no live foreign centroid to project onto is not applicable; a sample that turned up no comparable chunk is reported INCONCLUSIVE; an engine older than this route 404s on the first call and is reported not applicable, exit 0 — none of the four counts as a failure alone. No billed calls, but opt-in: real per-collection network work (up to `sample` route calls plus up to four foreign-centroid fetches per collection audited), and its false-positive behavior against a real corpus is not yet observed |
+| `--check-references` | Reference-only staleness sweep (RDR-169 Gap 6 leg 3): the first production caller of `stat_source`/`staleness_signal` (`nexus.aspect_readers`). Samples up to `--references-sample` catalog documents whose `source_uri` names an external, non-`file://` resource (`https://`, `obsidian://`, `x-devonthink-item://`, `nx-scratch://`, `chroma://`) and stats each one's CURRENT source against its RECORDED `source_mtime` (or, for `https://` with no usable `Last-Modified`, its recorded `ETag` — see `nx catalog register`/`update` below for how that ETag gets recorded) with up to 8 concurrent stats sharing one `httpx.Client`. Reports fresh/stale/dangling/unknown counts per scheme and names the stale and dangling documents (capped). `--references-sample N` (default 10, max 300), `--references-seed` (default: today's UTC date). Every scheme but `https://` is a cheap local check; the `https://` HEAD is bounded per call to `aspect_readers.HTTPS_STAT_MAX_ATTEMPTS` attempts, each up to twice `aspect_readers.HTTPS_STAT_TIMEOUT_S` (httpx applies that timeout to connect/read/write/pool separately), plus `aspect_readers.HTTPS_STAT_RETRY_DELAYS_S` backoff — about 61.5s worst case per document, so `ceil(sample / min(8, sample)) * 61.5s` worst case for the whole run (~2 minutes at the default sample of 10 if every sampled document were `https://` and every one exhausted its retries); a run prints its own estimate for the `--references-sample` it was given as its first line. **Exit 1** when any sampled document reads stale or dangling; `unknown` never fails the check alone. Not applicable (exit 0) on a box with no reference-only catalog documents. Remedy for a document stuck at `unknown` because it predates ETag capture: `nx catalog backfill-etags`. Residual limitation `backfill-etags` does NOT fix: a host that mints a fresh `ETag` on every response (no stable validator at all) reads `stale` on every run regardless of real content change — treat repeated `stale` against the same host as effectively `unknown`, not a real signal |
 | `--git-hooks-scope PATH` | Restrict the git-hooks stanza-drift check (part of the default sweep, not a `--check-*` flag) to repos registered at or under `PATH`; repos elsewhere are excluded from the walk rather than reported. The registered-repo catalog is shared machine-wide, not scoped to `$HOME`, so an unscoped sweep run from an isolated automation sandbox also sees (and can be reddened by) every other repo ever indexed on the same machine. Default: unscoped, walks every registered repo (nexus-jds59) |
 | `--json` | Emit machine-parseable JSON. On the MAIN sweep (no mode flag) this emits `{"checks": [{name, ok, status: ok\|warn\|fail, detail, fatal, fix_suggestions}], "summary": {total, ok, warn, fail}, "local_mode"}` (nexus-0vycz — previously the flag was silently ignored there). Also honored by `--check-search`, `--check-quotas`, `--check-mcp-logs`. Combining `--json` with any other mode flag that cannot honor it is a usage error, never a silent ignore. |
 
@@ -4540,12 +4747,14 @@ nx telemetry off
 nx telemetry on
 ```
 
-The anonymous daily install ping (nexus-h5olw): once every 24 hours the
+The daily install ping (nexus-h5olw): once every 24 hours the
 MCP server POSTs six fields to the managed service's unauthenticated
 `POST /v1/install-ping` route so active installs can be counted across
 local and cloud mode. Fields: `install_id` (random UUID in
 `~/.config/nexus/install_id`), `client_version`, `mode` (`local`/`cloud`,
-the same dispatch `nx init` uses), `os`, `arch`, `python`. Nothing else.
+the same dispatch `nx init` uses), `os`, `arch`, `python`. Nothing else is
+sent. The service also records a keyed fingerprint of the source address,
+never the address itself (see `docs/privacy-policy.md` §2).
 Daemon thread, 2 s timeout, every failure swallowed at debug level; the
 last successful send is recorded in `~/.config/nexus/install_ping.last`.
 

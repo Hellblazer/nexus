@@ -17,6 +17,19 @@ only possible because this row exists.
 **STDOUT-SILENT by contract**, like its sibling writer. It appends to the
 ledger and says nothing.
 
+**A SendMessage resume writes ``RESUMED``, not ``START`` (nexus-xxvv3).**
+After a ``/clear``, a background worktree agent resumed by SendMessage
+re-fires this hook under a NEW session id, as ``general-purpose`` (the
+harness drops the original type), with no PreToolUse Agent dispatch to
+have written an EXPECT row here first. Before appending anything, this
+hook checks whether ``agent_id`` already has a real ``START`` row in
+SOME OTHER session's ledger (:func:`nexus.hooks.expectations.expectations_find_resume_origin`)
+-- if so, it is a resume of an already-declared dispatch, and the row
+written is ``RESUMED`` (:func:`nexus.hooks.expectations.expectations_resume`)
+so the retro audit credits it against its original dispatch instead of
+flagging it undeclared and spending this session's own EXPECT credit for
+whatever type it re-STARTed as.
+
 **A bug class the port removes for free.** The bash decodes three fields
 with ``IFS=$'\\t' read``, and tab is IFS whitespace, so a genuinely empty
 middle field COLLAPSES and the remaining values shift left --
@@ -42,14 +55,32 @@ __all__ = ["run"]
 _SCRUB = str.maketrans({"\t": " ", "\n": " ", "\r": " "})
 _LOCK_TRIES = 10
 
+#: The harness's own collapsed ``agent_type`` for a SendMessage-resumed
+#: dispatch (nexus-xxvv3 IMPORTANT-2, code review). Gates the cross-session
+#: resume scan so an ORDINARY dispatch with a real declared type (the vast
+#: majority of traffic: ``conexus:developer``, ``worktree-developer``, etc)
+#: never pays it -- only a first-time START reporting exactly this type
+#: does. Approximate, not exact: an ordinary FRESH dispatch with no
+#: specific subagent_type also reports as ``general-purpose``, so the scan
+#: still runs for that common case too -- correctly finding nothing, at the
+#: cost this module's own docstring already measures. No narrower signal is
+#: available in the SubagentStart payload to distinguish the two (the
+#: payload does not carry a "resumed" flag; see
+#: ``expectations_find_resume_origin``'s own docstring for the failure
+#: modes this approximation still leaves open).
+_RESUMABLE_AGENT_TYPE = "general-purpose"
+
 
 def _already_stamped(file: str, agent_id: str) -> bool:
-    """True iff this agent already has a START row.
+    """True iff this agent already has a START or RESUMED row.
 
     Stamp-at-most-once. A duplicate START is far less harmful than a
     duplicate EXPECT -- the readers dedupe it by agent id and it inflates
     no credit pool -- but a second row still muddies the census's own
-    counts, so it is refused where it can be seen cheaply.
+    counts, so it is refused where it can be seen cheaply. RESUMED
+    (nexus-xxvv3) is included because it is this function's OTHER row
+    shape for the same "already handled this agent_id" fact -- a resumed
+    dispatch never gets both a START and a RESUMED row for the same id.
     """
     try:
         text = Path(file).read_text()
@@ -57,7 +88,7 @@ def _already_stamped(file: str, agent_id: str) -> bool:
         return False
     for line in text.split("\n"):
         row = line.split("\t")
-        if len(row) > 2 and row[1] == "START" and row[2] == agent_id:
+        if len(row) > 2 and row[1] in ("START", "RESUMED") and row[2] == agent_id:
             return True
     return False
 
@@ -103,8 +134,36 @@ def run(payload: dict | None) -> HookResult:
     held = _acquire(lockdir)
     try:
         if not _already_stamped(file, agent_id):
+            # nexus-xxvv3: a SendMessage-resumed background worktree agent
+            # re-fires SubagentStart under a NEW session id, as
+            # general-purpose (the harness drops the original type), with
+            # no preceding PreToolUse Agent dispatch to write an EXPECT
+            # row here. If this agent_id already has a real START
+            # elsewhere, this is that resume, not a fresh dispatch -- write
+            # RESUMED instead of START so the retro audit credits it
+            # against its ORIGINAL dispatch rather than flagging it
+            # UNDECLARED and consuming this session's credit for whatever
+            # it re-STARTed as.
+            #
+            # Gated on agent_type (nexus-xxvv3 IMPORTANT-2, code review):
+            # the scan is not free, so it only runs for the ONE type the
+            # harness is known to report for a resume -- see
+            # _RESUMABLE_AGENT_TYPE's own comment for what this does and
+            # does not distinguish.
+            origin = (
+                _exp.expectations_find_resume_origin(session_id, agent_id)
+                if agent_type == _RESUMABLE_AGENT_TYPE
+                else None
+            )
             try:
-                _exp.expectations_start(session_id, agent_id, agent_type)
+                if origin is not None:
+                    origin_session_id, original_agent_type = origin
+                    _exp.expectations_resume(
+                        session_id, agent_id, agent_type,
+                        origin_session_id, original_agent_type,
+                    )
+                else:
+                    _exp.expectations_start(session_id, agent_id, agent_type)
             except _exp.ExpectationsUsageError:
                 return HookResult()
     finally:

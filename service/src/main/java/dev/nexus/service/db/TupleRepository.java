@@ -68,7 +68,20 @@ import static dev.nexus.service.jooq.nexus.Tables.TUPLE_TENANTS;
  * server clock, typed — never a raw {@code now()} string); values WRITTEN
  * into a row use the JVM clock ({@code OffsetDateTime.now(ZoneOffset.UTC)}),
  * the same split {@link AspectRepository#claimNext} already uses between its
- * WHERE-clause backoff gate and its {@code last_attempt_at} write.
+ * WHERE-clause backoff gate and its {@code last_attempt_at} write. The announce
+ * stamps ({@code tuples.announced_at}, {@code tuple_deliveries.announced_at}) are
+ * the exception and are written with the database clock (bead nexus-4h7fo): they
+ * exist only to be compared with {@code now()} at intervals as small as zero, where
+ * any offset between the two clocks changes the answer. Two other JVM-written
+ * timestamps stay on the JVM clock, for different reasons. {@code
+ * tuple_tenants.last_seen} ({@code maintainTenant}) is compared only with the JVM
+ * clock, never with {@code now()}, so it cannot see a host/database offset at all.
+ * {@code tuples.lease_until} ({@code claimOnce}, {@code renew}) has the same
+ * JVM-write/{@code now()}-compare shape {@code announced_at} had; it escapes only
+ * because {@code leaseSeconds} is validated positive (seconds to minutes in
+ * practice) against a measured host/container drift of 0.3 to 7 ms. That is
+ * margin, not immunity: a sub-second lease or a host with larger drift would
+ * expose it.
  */
 public final class TupleRepository {
 
@@ -156,6 +169,30 @@ public final class TupleRepository {
      * never assigned outside test code, not a production delay mechanism.
      */
     static volatile Runnable TEST_ONLY_CLAIM_MUTATION_READ_TO_UPDATE_DELAY = () -> { };
+
+    /**
+     * TEST-ONLY seam (bead nexus-4h7fo): invoked inside both announce-mode
+     * transactions ({@link #queryOnceAnnounce}, {@link #queryOnceAnnounceSubscriber})
+     * after the transaction has started and before its matching {@code SELECT}, so a
+     * test can hold the announcing transaction open and start another transaction
+     * while it is held. That separates the announcing transaction's own clock
+     * ({@code now()}, fixed at its start) from the moment its stamp is written, which
+     * is the only way to tell a stamp taken from the database clock from one taken
+     * from the engine host's clock without skewing either clock. Same shape and rules
+     * as {@link #TEST_ONLY_CLAIM_SELECT_TO_UPDATE_DELAY}: a no-op by default, never
+     * assigned outside test code, not a production delay mechanism.
+     */
+    static volatile Runnable TEST_ONLY_ANNOUNCE_TXN_HOLD = () -> { };
+
+    /**
+     * Cross-package installer for {@link #TEST_ONLY_ANNOUNCE_TXN_HOLD}, for the same
+     * reason as {@link #setTestOnlySignalHook}: {@code TupleAnnounceTest} lives in
+     * {@code dev.nexus.service}. Pass {@code null} to restore the no-op default.
+     * Never call this outside test code.
+     */
+    public static void setTestOnlyAnnounceTxnHold(Runnable holdOrNull) {
+        TEST_ONLY_ANNOUNCE_TXN_HOLD = holdOrNull == null ? () -> { } : holdOrNull;
+    }
 
     /**
      * TEST-ONLY (RDR-205 bead nexus-em75s.7, the wake-test mutation pins): installs a
@@ -806,10 +843,16 @@ public final class TupleRepository {
      * {@code announce} (bead nexus-vsipz, RDR-213 engine half) is {@code null} for
      * every {@code rd}/{@code rdp} call and for a {@link WaitSpec} that does not
      * carry one -- exactly the 5-arg overload's prior behaviour, unchanged. When
-     * non-null, the match and the stamp both move into {@link #queryOnceAnnounce};
-     * {@code since} is ignored on that path ({@link #waitAny}'s validation pass
-     * refuses a spec that sets both, so this method never has to choose between
-     * them).
+     * non-null and row-level ({@code !announce.perSubscriber()}), the match and the
+     * stamp both move into {@link #queryOnceAnnounce}; {@code since} is ignored on
+     * that path ({@link #waitAny}'s validation pass refuses a row-level-announce
+     * spec that also sets {@code since}, so this method never has to choose between
+     * them there). Per-subscriber announce ({@code announce.perSubscriber()},
+     * bead nexus-n36sw) is the one case where BOTH are honoured: {@code since} rides
+     * along into {@link #queryOnceAnnounceSubscriber} as the subscriber's start
+     * watermark. See that method's javadoc for why per-subscriber announce -- and
+     * only it -- can accept a client-supplied position alongside the engine's own
+     * per-row due tracking.
      */
     private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
                                       int n, ReadCursor since, WaitSpec.Announce announce) {
@@ -832,7 +875,7 @@ public final class TupleRepository {
                 cond = cond.and(DSL.jsonbGetAttributeAsText(TUPLES.KEYS, e.getKey()).eq(e.getValue()));
             }
             if (announce != null && announce.perSubscriber()) {
-                return queryOnceAnnounceSubscriber(ctx, cond, limit, announce, tenant, subspace);
+                return queryOnceAnnounceSubscriber(ctx, cond, limit, announce, tenant, subspace, since);
             }
             if (announce != null) {
                 return queryOnceAnnounce(ctx, cond, limit, announce);
@@ -887,6 +930,7 @@ public final class TupleRepository {
                         .and(TUPLES.ANNOUNCE_COUNT.lt(announce.max())));
         Condition cond = baseCond.and(claimable).and(due);
 
+        TEST_ONLY_ANNOUNCE_TXN_HOLD.run();
         var rows = ctx.selectFrom(TUPLES)
                 .where(cond)
                 .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
@@ -902,16 +946,27 @@ public final class TupleRepository {
         for (TuplesRecord r : rows) {
             ids.add(r.getId());
         }
-        // Truncated to microseconds (RDR-205 follow-on nexus-mvfm9's own reasoning,
-        // reused here): the value written matches Postgres TIMESTAMPTZ precision
-        // exactly, so the in-memory TupleRow this method returns and a later
-        // read-back of the same row agree on announced_at's fractional seconds.
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
-        ctx.update(TUPLES)
-                .set(TUPLES.ANNOUNCED_AT, now)
+        // Stamped with the DATABASE clock (bead nexus-4h7fo), the one exception to
+        // the class-level write-with-the-JVM-clock convention: announced_at is only
+        // ever compared with now() in the due test above, at intervals as small as 0,
+        // so writing it from the engine host's clock made the rate limit depend on the
+        // host/database clock offset. A host running a few ms ahead made an
+        // interval_s=0 row read as announced in the future. now() is constant within a
+        // transaction, so every returned row carries the same value; RETURNING reads
+        // it back at the column's own precision, so the returned TupleRow and a later
+        // read-back agree.
+        var stamped = ctx.update(TUPLES)
+                .set(TUPLES.ANNOUNCED_AT, DSL.currentOffsetDateTime())
                 .set(TUPLES.ANNOUNCE_COUNT, TUPLES.ANNOUNCE_COUNT.add(1))
                 .where(TUPLES.ID.in(ids))
-                .execute();
+                .returning(TUPLES.ANNOUNCED_AT)
+                .fetch();
+        if (stamped.isEmpty()) {
+            // The ids are locked by this transaction's own SELECT above; an UPDATE
+            // matching none of them means the statement did not run as written.
+            throw new IllegalStateException("announce stamp updated no rows for " + ids.size() + " locked ids");
+        }
+        OffsetDateTime now = stamped.get(0).get(TUPLES.ANNOUNCED_AT).withOffsetSameInstant(ZoneOffset.UTC);
 
         List<TupleRow> out = new ArrayList<>();
         for (TuplesRecord r : rows) {
@@ -956,10 +1011,57 @@ public final class TupleRepository {
      * returned carry the POST-stamp per-subscriber values in {@code announcedAt}/
      * {@code announceCount} (the row's own columns are neither read for this
      * decision nor written by it).
+     *
+     * <p>{@code since} (bead nexus-n36sw, follow-up to nexus-zxthy): a fresh board
+     * subscriber has no delivery row for any post already on the topic, so every
+     * retained post reads as due and gets stamped-and-returned one wait at a time
+     * -- the client's own subscribe-time watermark cannot be applied client-side,
+     * because the engine still stamps (and so exhausts) every row it returns
+     * regardless of what the client keeps or drops afterward. Folding the
+     * watermark into THIS predicate closes that: a candidate row is additionally
+     * required to have {@code created_at > since}, so a row at or before the
+     * subscriber's watermark is excluded from the SELECT above and therefore never
+     * locked, never stamped, and never returned -- not "returned but ignored." The
+     * bound is a bare {@code created_at > since} timestamp compare, NOT {@link
+     * #queryOnce}'s general {@code (created_at, id) > (since.createdAt, since.id)}
+     * ROW compare: that finer-grained tuple compare exists to give an exact
+     * resumption point inside a single busy microsecond for a client that is
+     * itself tracking discrete rows (a cursor advanced one tuple at a time,
+     * {@code rd}/{@code rdp}'s own contract). A board subscriber's watermark is
+     * never that -- {@code SubscriptionSet} records only the wall-clock instant a
+     * topic was subscribed to (nothing before that instant has an id worth
+     * comparing against), so {@code since.id()} would be a value with no meaning
+     * to compare against and a bare timestamp bound is the correct -- and
+     * sufficient -- shape for it. {@code null} (an announce.perSubscriber() spec
+     * with no since) is today's unchanged behaviour: no watermark, every due row
+     * eligible, exactly the pre-nexus-n36sw predicate.
+     *
+     * <p>Commit-visibility race (critic finding, round 2): {@code created_at}
+     * is stamped from {@code DSL.currentOffsetDateTime()} -- Postgres's
+     * {@code now()}/{@code transaction_timestamp()}, fixed at the WRITER's
+     * transaction START, never its commit ({@link #out}'s own {@link
+     * #writeOut}) -- so a writer transaction that starts before a watermark
+     * is captured but is held open past that capture commits a row whose
+     * {@code created_at} predates the watermark even though the row is only
+     * visible to anyone else AFTER it: excluded by this predicate,
+     * permanently. {@code TupleAnnounceTest
+     * .subscriberAnnounce_sinceWatermarkExclusion_isACommitVisibilityRace_
+     * boundedByTheWriterTransactionsOwnDuration} proves this happens under an
+     * artificially held writer transaction, and also proves what bounds it in
+     * real operation: {@link #out}'s production transaction ({@link
+     * TenantScope#withTenant}) is one bounded sequence of synchronous round
+     * trips -- an optional max-live-rows check, one {@code INSERT}, {@link
+     * #maintainTenant}'s upsert -- with nothing between {@code BEGIN} and
+     * {@code COMMIT} that can block on anything external, so that span is
+     * single-digit milliseconds in practice, never remotely close to
+     * {@code ChannelWaiter.DEFAULT_BOARD_START_SKEW_S}'s 30 seconds, which the
+     * client subtracts from the watermark it sends specifically to absorb
+     * this (that constant's own javadoc names it as the second thing the
+     * margin covers, alongside engine/client clock skew).
      */
     private List<TupleRow> queryOnceAnnounceSubscriber(DSLContext ctx, Condition baseCond, int limit,
                                                         WaitSpec.Announce announce, String tenant,
-                                                        String subspace) {
+                                                        String subspace, ReadCursor since) {
         String subscriber = announce.subscriber();
         Condition claimable = TUPLES.CLAIM_STATE.isDistinctFrom(CLAIM_STATE_DEAD)
                 .and(TUPLES.CLAIM_STATE.isNull().or(TUPLES.LEASE_UNTIL.lt(DSL.currentOffsetDateTime())));
@@ -974,7 +1076,11 @@ public final class TupleRepository {
                         .or(TUPLE_DELIVERIES.ANNOUNCE_COUNT.ge(announce.max())));
         Condition due = DSL.notExists(ctx.selectOne().from(TUPLE_DELIVERIES).where(blocked));
         Condition cond = baseCond.and(claimable).and(due);
+        if (since != null) {
+            cond = cond.and(TUPLES.CREATED_AT.gt(since.createdAt()));
+        }
 
+        TEST_ONLY_ANNOUNCE_TXN_HOLD.run();
         var rows = ctx.selectFrom(TUPLES)
                 .where(cond)
                 .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
@@ -986,29 +1092,31 @@ public final class TupleRepository {
             return List.of();
         }
 
-        // Microsecond truncation: queryOnceAnnounce's own reasoning (Postgres
-        // TIMESTAMPTZ precision), so the in-memory value and a later read-back
-        // of the delivery row agree.
-        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC).truncatedTo(java.time.temporal.ChronoUnit.MICROS);
+        // Stamped with the DATABASE clock, for queryOnceAnnounce's reason (bead
+        // nexus-4h7fo): the blocked test above compares the delivery row's
+        // announced_at with now(), so the stamp must come from the same clock.
+        // RETURNING reads it back at the column's precision.
         List<TupleRow> out = new ArrayList<>(rows.size());
         for (TuplesRecord r : rows) {
-            Integer count = ctx.insertInto(TUPLE_DELIVERIES,
+            var stamped = ctx.insertInto(TUPLE_DELIVERIES,
                             TUPLE_DELIVERIES.TENANT_ID, TUPLE_DELIVERIES.SUBSPACE, TUPLE_DELIVERIES.SUBSCRIBER,
                             TUPLE_DELIVERIES.TUPLE_ID, TUPLE_DELIVERIES.ANNOUNCED_AT, TUPLE_DELIVERIES.ANNOUNCE_COUNT)
-                    .values(tenant, subspace, subscriber, r.getId(), now, 1)
+                    .values(DSL.val(tenant), DSL.val(subspace), DSL.val(subscriber), DSL.val(r.getId()),
+                            DSL.currentOffsetDateTime(), DSL.val(1))
                     .onConflict(TUPLE_DELIVERIES.TENANT_ID, TUPLE_DELIVERIES.SUBSPACE,
                             TUPLE_DELIVERIES.SUBSCRIBER, TUPLE_DELIVERIES.TUPLE_ID)
                     .doUpdate()
-                    .set(TUPLE_DELIVERIES.ANNOUNCED_AT, now)
+                    .set(TUPLE_DELIVERIES.ANNOUNCED_AT, DSL.currentOffsetDateTime())
                     .set(TUPLE_DELIVERIES.ANNOUNCE_COUNT, TUPLE_DELIVERIES.ANNOUNCE_COUNT.add(1))
-                    .returning(TUPLE_DELIVERIES.ANNOUNCE_COUNT)
-                    .fetchOne(TUPLE_DELIVERIES.ANNOUNCE_COUNT);
-            if (count == null) {
+                    .returning(TUPLE_DELIVERIES.ANNOUNCED_AT, TUPLE_DELIVERIES.ANNOUNCE_COUNT)
+                    .fetchOne();
+            if (stamped == null) {
                 // RETURNING on an upsert always yields the row; a null here means the
                 // statement did not run as written, which is a defect to fail loud on.
                 throw new IllegalStateException("tuple_deliveries upsert returned no row for subscriber " + subscriber);
             }
-            out.add(toRow(r, now, count));
+            out.add(toRow(r, stamped.get(TUPLE_DELIVERIES.ANNOUNCED_AT).withOffsetSameInstant(ZoneOffset.UTC),
+                    stamped.get(TUPLE_DELIVERIES.ANNOUNCE_COUNT)));
         }
         return out;
     }
@@ -1020,11 +1128,22 @@ public final class TupleRepository {
      *  {@code n <= 0} clamps to 1, {@code since == null} reads from the start.
      *  {@code announce} (bead nexus-vsipz, RDR-213 engine half) is an ADDITIVE field:
      *  {@code null} (the 4-arg constructor below) is today's unchanged behaviour for
-     *  every existing caller. {@code since} and {@code announce} together are refused
-     *  ({@link #waitAny}'s own validation pass) -- announce mode tracks position on
-     *  the ROW itself via {@code announced_at}/{@code announce_count}, never via a
-     *  client-supplied cursor, so combining the two would silently do nothing with
-     *  the cursor rather than fail loud if it were merely ignored. */
+     *  every existing caller. {@code since} and a ROW-LEVEL {@code announce} (no
+     *  subscriber, the mailbox shape) together are refused ({@link #waitAny}'s own
+     *  validation pass) -- that mode tracks position on the ROW itself via {@code
+     *  announced_at}/{@code announce_count}, never via a client-supplied cursor, so
+     *  combining the two would silently do nothing with the cursor rather than fail
+     *  loud if it were merely ignored. {@code since} together with a PER-SUBSCRIBER
+     *  {@code announce} (bead nexus-n36sw, follow-up to nexus-zxthy) is the one
+     *  exception, and is honoured, not refused: a board post is due-per-subscriber
+     *  regardless of {@code since} (that arithmetic is unchanged), but {@code since}
+     *  additionally excludes any candidate at or before the watermark from ever
+     *  being selected, stamped, or returned -- see {@link
+     *  #queryOnceAnnounceSubscriber}'s javadoc for why this is safe where the
+     *  row-level case is not: the delivery state lives per-{@code (subspace,
+     *  subscriber, tuple_id)} in {@code nexus.tuple_deliveries}, never on the tuple
+     *  row itself, so a client-supplied watermark narrows the CANDIDATE SET rather
+     *  than substituting for the engine's own per-subscriber due tracking. */
     public record WaitSpec(String subspace, Map<String, String> pattern, int n, ReadCursor since,
                             Announce announce) {
 
@@ -1223,12 +1342,18 @@ public final class TupleRepository {
             checkFieldSize("subspace", spec.subspace(), TupleLimits.MAX_SUBSPACE_BYTES);
             resolveOrThrow(spec.subspace());
             checkPatternSizes(spec.pattern() == null ? Map.of() : spec.pattern());
-            // nexus-vsipz (RDR-213 engine half): announce mode tracks position on the
-            // ROW itself (announced_at/announce_count), never via a client-supplied
-            // cursor -- a spec naming both would have the cursor silently do nothing,
-            // so the combination is refused loud here rather than tolerated quietly.
-            if (spec.announce() != null && spec.since() != null) {
-                throw new SchemaViolationException("since", "must not be set together with announce");
+            // nexus-vsipz (RDR-213 engine half): row-level announce mode tracks
+            // position on the ROW itself (announced_at/announce_count), never via a
+            // client-supplied cursor -- a spec naming both would have the cursor
+            // silently do nothing, so the combination is refused loud here rather
+            // than tolerated quietly. Per-subscriber announce (bead nexus-n36sw) is
+            // the one exception: its due state lives per-subscriber in
+            // nexus.tuple_deliveries, never on the row, so a since watermark narrows
+            // the candidate set instead of colliding with the engine's own position
+            // tracking -- queryOnceAnnounceSubscriber honours it. See WaitSpec's own
+            // javadoc for the full contrast.
+            if (spec.since() != null && spec.announce() != null && !spec.announce().perSubscriber()) {
+                throw new SchemaViolationException("since", "must not be set together with a row-level announce");
             }
             subspaces.add(spec.subspace());
         }

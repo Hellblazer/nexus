@@ -1919,6 +1919,7 @@ class _ServiceCollectionStub:
         offset: int = 0,
         *,
         include_source_uri: bool = False,
+        include_non_live: bool = False,
     ) -> dict:
         """Query chunks from the service. Returns Chroma-style result dict.
 
@@ -2009,6 +2010,15 @@ class _ServiceCollectionStub:
           that need this: omit ``limit`` (resolves to each page's own
           batch size), or pre-chunk ``ids`` into ``<= page_size``
           batches themselves.
+
+        nexus-wbfpw.10 (RDR-192 Step 5 amendment): ``include_non_live=True``
+        reads stored rows ignoring live(c), for maintenance code that must
+        see a chunk with no live own-collection owner (manifest heal and
+        ``nx catalog reconcile``, the misclassified-chunk prune, the manifest
+        backfill). The engine returns ids and metadata only, never documents;
+        this stub does not fabricate them. An engine older than the amendment
+        ignores the field and answers from its own read filter, which already
+        returned unowned chunks.
         """
         if ids is not None:
             from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
@@ -2048,6 +2058,8 @@ class _ServiceCollectionStub:
                 }
                 if include_source_uri:
                     body["include_source_uri"] = True
+                if include_non_live:
+                    body["include_non_live"] = True
                 page = _post("/v1/vectors/store-get", body, tenant=self._tenant)
                 page_ids = page.get("ids", []) or []
                 # nexus-hdx2u E4 (fix-round): engine-side count (E3, now a
@@ -2061,7 +2073,11 @@ class _ServiceCollectionStub:
                 # (pre-E3 engine, or a rolling deploy window) is the ONLY
                 # case that falls back to the heuristic and logs the once-
                 # per-process count-unreported notice.
-                if "count" in page:
+                if include_non_live:
+                    # The physical probe answers every stored id in the batch
+                    # and carries no count; there is nothing to reconcile.
+                    pass
+                elif "count" in page:
                     reported_count = page["count"]
                     if reported_count > len(page_ids):
                         # A real truncation the engine itself measured (not a
@@ -2107,10 +2123,15 @@ class _ServiceCollectionStub:
                 body["include"] = include
             if include_source_uri:
                 body["include_source_uri"] = True
+            if include_non_live:
+                body["include_non_live"] = True
             result = _post("/v1/vectors/get", body, tenant=self._tenant)
             # Normalise to Chroma shape: {ids, documents, metadatas}.
             # RDR-169 G5 (nexus-jkv85): chashes + spans always present when service is G5+.
             # source_uris present only when include_source_uri=True was forwarded.
+            # include_non_live (nexus-wbfpw.10): the engine omits "documents"
+            # under this flag -- .get("documents", []) below degrades to an
+            # empty list rather than raising, which is correct (never content).
             out = {
                 "ids":       result.get("ids", []),
                 "documents": result.get("documents", []),
@@ -2147,7 +2168,7 @@ class _ServiceCollectionStub:
         )
         return int(result.get("count", 0))
 
-    def get_all_metadata(self, where: dict | None = None) -> dict:
+    def get_all_metadata(self, where: dict | None = None, *, include_non_live: bool = False) -> dict:
         """ids + metadata for EVERY chunk in this collection in ONE round trip
         (nexus-duoak follow-up: collapses the indexer's staleness-cache-build
         paginated ``/get`` loop -- measured ~113s of a ~116s phase on this
@@ -2162,15 +2183,51 @@ class _ServiceCollectionStub:
         :class:`VectorServiceError` on any failure, including the server's
         422 "too many rows for one call" cap -- callers should catch and
         fall back to the paginated :meth:`get` loop.
+
+        ``include_non_live`` (RDR-192 Step 5 amendment, nexus-wbfpw.10):
+        physical scan, ignoring live(c) -- ``pipeline_stages.
+        _force_t3_orphan_cleanup``'s whole job is finding a chunk with no
+        live own-collection manifest owner, so it must set this.
         """
         body: dict[str, Any] = {"collection": self._name}
         if where:
             body["where"] = where
+        if include_non_live:
+            body["include_non_live"] = True
         result = _post("/v1/vectors/get-all-metadata", body, tenant=self._tenant)
         return {
             "ids": result.get("ids", []),
             "metadatas": result.get("metadatas", []),
         }
+
+    def existing_ids(self, ids: list[str]) -> set[str]:
+        """The subset of *ids* physically stored in this collection, ignoring
+        liveness (RDR-192 Step 5 amendment, nexus-wbfpw.10) -- the
+        collection-handle mirror of :meth:`HttpVectorClient.existing_ids`,
+        scoped to this stub's own collection/tenant, for a maintenance caller
+        holding a collection handle rather than the client
+        (``indexer._prune_misclassified_in_collection``'s manifest-chash
+        presence probe). Pages at 300 ids per request, same as the top-level
+        method.
+        """
+        if not ids:
+            return set()
+        found: set[str] = set()
+        page = 300
+        for start in range(0, len(ids), page):
+            batch = ids[start : start + page]
+            result = _post(
+                "/v1/vectors/store-get",
+                {
+                    "collection": self._name,
+                    "ids": batch,
+                    "limit": len(batch),
+                    "include_non_live": True,
+                },
+                tenant=self._tenant,
+            )
+            found.update(result.get("ids") or [])
+        return found
 
     def update(self, ids: list[str], metadatas: list[dict]) -> dict:
         """Metadata-only update of existing chunks, Chroma-collection shape.
@@ -3588,13 +3645,21 @@ class HttpVectorClient:
 
         RDR-156 P3 (nexus-70r3c.12): served from the
         ``nexus.collection_vector_stats`` SECURITY INVOKER view — one
-        round-trip for all of the tenant's collections, TOMBSTONE-FILTERED
-        (chunks whose only manifest rows point to trashed documents are not
-        counted; manifest-less note chunks are).
+        round-trip for all of the tenant's collections. This view is the
+        collection INVENTORY (RDR-192 Step 5 amendment, Sam 2026-09-27): a row
+        exists for every ``(collection, dim)`` that PHYSICALLY holds chunks,
+        whether or not any of them are live. ``count`` is the live count
+        (a chunk counts iff it has a live owner in its OWN collection,
+        RDR-192 Step 5, live(c); may be 0). ``stored_count`` is every stored
+        chunk, live or not — the additive RDR-192 field. A ``quarantine-*``
+        sibling (never has manifests) reads ``count=0``, ``stored_count=N``.
 
-        Returns ``[{"name": ..., "dim": 384, "count": N,
-        "last_write": "2026-..."}, ...]``, name ascending. Collections with
-        zero live chunks do not appear. ``last_write`` may be absent.
+        Returns ``[{"name": ..., "dim": 384, "count": N, "stored_count": N,
+        "last_write": "2026-..."}, ...]``, name ascending. A row exists for
+        every collection that physically holds chunks; ``last_write`` may be
+        absent. ``stored_count`` is absent from a row served by an engine
+        older than this amendment — treat an absent ``stored_count`` as equal
+        to ``count``.
 
         Raises :class:`VectorServiceError` on failure — including ``code=404``
         from a pre-catalog-005 service JAR (deployment skew); callers that
@@ -3642,6 +3707,38 @@ class HttpVectorClient:
             tenant=self._tenant,
         )
 
+    def gc_quarantine_orphans_bounded(
+        self, collection: str, quarantine_collection: str,
+        quarantined_at: str, sample_limit: int, row_limit: int,
+    ) -> dict:
+        """POST /v1/vectors/gc/quarantine-orphans with ``row_limit`` (catalog-037/
+        nexus-a6mon's engine route; wired client-side at nexus-e8h5x review
+        round 2 — the engine route shipped in v0.1.124/125 with no caller,
+        so the original a6mon incident (a 41,032-row code__1-1 quarantine
+        call cut mid-transaction at the ~30s edge deadline) was still
+        reproducible end-to-end until this method existed). Same additive
+        per-route toggle as :meth:`gc_restore_rereferenced_bounded`.
+
+        Returns ``{"moved": N, "sample": [...], "remaining": R, "row_limit": L}``
+        from an engine that recognizes ``row_limit``, or ``{"moved": N,
+        "sample": [...]}`` from an OLDER engine that already has this route
+        but silently ignores an unrecognized request-body field — it
+        performs the UNBOUNDED quarantine regardless of what this call
+        asked for. Callers detect that by the absent ``remaining`` key,
+        never by inferring engine version.
+        """
+        return _post(
+            "/v1/vectors/gc/quarantine-orphans",
+            {
+                "collection": collection,
+                "quarantine_collection": quarantine_collection,
+                "quarantined_at": quarantined_at,
+                "sample_limit": sample_limit,
+                "row_limit": row_limit,
+            },
+            tenant=self._tenant,
+        )
+
     def gc_restore_rereferenced(self, quarantine_collection: str, origin_collection: str) -> int:
         """POST /v1/vectors/gc/restore-rereferenced. Returns the restored count."""
         result = _post(
@@ -3650,6 +3747,32 @@ class HttpVectorClient:
             tenant=self._tenant,
         )
         return int(result.get("restored", 0))
+
+    def gc_restore_rereferenced_bounded(
+        self, quarantine_collection: str, origin_collection: str, row_limit: int,
+    ) -> dict:
+        """POST /v1/vectors/gc/restore-rereferenced with ``row_limit`` (nexus-e8h5x),
+        mirroring :meth:`gc_quarantine_orphans`'s identical additive routing
+        (nexus-a6mon) for the opposite direction — same endpoint, an optional
+        ``row_limit`` field selects the bounded form.
+
+        Returns ``{"restored": N, "remaining": R, "row_limit": L}`` from an
+        engine that recognizes ``row_limit``, or ``{"restored": N}`` from an
+        OLDER engine that already has this route but silently ignores an
+        unrecognized request-body field (permissive JSON parsing, not a
+        404) — it performs the UNBOUNDED restore regardless of what this
+        call asked for. Callers detect that by the absent ``remaining`` key,
+        never by inferring engine version.
+        """
+        return _post(
+            "/v1/vectors/gc/restore-rereferenced",
+            {
+                "quarantine_collection": quarantine_collection,
+                "origin_collection": origin_collection,
+                "row_limit": row_limit,
+            },
+            tenant=self._tenant,
+        )
 
     def gc_expire_quarantine(
         self, quarantine_collection: str, origin_collection: str, cutoff: str,
@@ -3739,9 +3862,14 @@ class HttpVectorClient:
         collection-row cache below: that cache is the identity read every
         gc and quarantine tool depends on and must stay complete.
 
-        T3Database parity: returns ``[{"name": ..., "count": N, ...}, ...]``
-        — ``nx collection list`` and friends index both keys (the missing
-        ``count`` was a live KeyError on every service-mode box, RDR-156 P3).
+        T3Database parity: returns ``[{"name": ..., "count": N,
+        "stored_count": N, ...}, ...]`` — ``nx collection list`` and friends
+        index both keys (the missing ``count`` was a live KeyError on every
+        service-mode box, RDR-156 P3). A row exists for every collection that
+        physically holds chunks (RDR-192 Step 5 amendment): ``count`` is
+        live, ``stored_count`` is physical. An engine older than the
+        amendment omits ``stored_count`` from its rows; this method then
+        sets it equal to ``count`` so callers can read it unconditionally.
         Since RDR-204 Phase 3 (nexus-ft04v.26) each row also carries
         ``content_type``/``owner_id``/``embedding_model``/``lifecycle_state``
         when the engine's stats route joined a catalog row for that
@@ -3792,9 +3920,12 @@ class HttpVectorClient:
             name = row.get("name", "")
             if not name:
                 continue
-            entry = merged.setdefault(name, {"name": name, "count": 0})
+            entry = merged.setdefault(name, {"name": name, "count": 0, "stored_count": 0})
             # `or 0` guards an explicit null count, not just an absent key
             entry["count"] += int(row.get("count") or 0)
+            # A row from an engine older than the RDR-192 Step 5 amendment has
+            # no stored_count; its single count then stands for both.
+            entry["stored_count"] += int(row.get("stored_count", row.get("count")) or 0)
             for key in self._STATS_CATALOG_ATTR_KEYS:
                 if key in row and key not in entry:
                     entry[key] = row[key]
@@ -3842,6 +3973,9 @@ class HttpVectorClient:
         Pre-catalog-005 JARs have no ``/stats`` route. Counts here are RAW
         (the old endpoint's semantics); a failing per-collection count is
         reported as -1 rather than dropping the collection from the listing.
+        ``stored_count`` is set equal to ``count`` here — this engine predates
+        the RDR-192 Step 5 amendment entirely, so live and physical coincide
+        from its point of view.
         """
         try:
             result = _get("/v1/vectors/collections", tenant=self._tenant)
@@ -3854,14 +3988,15 @@ class HttpVectorClient:
             if not name:
                 continue
             try:
-                out.append({"name": name, "count": self.count(name)})
+                n = self.count(name)
+                out.append({"name": name, "count": n, "stored_count": n})
             except VectorServiceError as e:
                 _log.warning(
                     "http_vector_collection_count_failed",
                     collection=name,
                     error=str(e),
                 )
-                out.append({"name": name, "count": -1})
+                out.append({"name": name, "count": -1, "stored_count": -1})
         return out
 
     def collection_exists(self, name: str) -> bool:
@@ -3935,7 +4070,14 @@ class HttpVectorClient:
         return int(result.get("count", 0))
 
     def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
-        """Return the subset of *ids* present in *collection*.
+        """Return the subset of *ids* physically stored in *collection*.
+
+        Presence, not visibility: ``include_non_live`` makes the engine answer
+        for a stored chunk whether or not it has a live owner (RDR-192 Step 5
+        amendment), because every caller asks "is this already stored" (verify,
+        the migration ETL, skip-existing, the ``put_note_pieces`` delete guard).
+        An engine older than that ignores the field and answers from its own
+        read filter, which before Step 5 already returned unowned chunks.
 
         T3Database parity (``nx catalog verify`` / gc paths). Pages at 300
         ids per request to mirror the historical batch shape.
@@ -3961,7 +4103,12 @@ class HttpVectorClient:
             batch = ids[start : start + page]
             result = _post(
                 "/v1/vectors/store-get",
-                {"collection": collection, "ids": batch, "limit": len(batch)},
+                {
+                    "collection": collection,
+                    "ids": batch,
+                    "limit": len(batch),
+                    "include_non_live": True,
+                },
                 tenant=self._tenant,
             )
             found.update(result.get("ids") or [])
@@ -4413,7 +4560,7 @@ class HttpVectorClient:
         for start in range(0, len(chunk_ids), size):
             batch = chunk_ids[start:start + size]
             try:
-                _post(
+                result = _post(
                     "/v1/vectors/store-delete",
                     {"collection": collection_name, "ids": batch},
                     tenant=self._tenant,
@@ -4427,7 +4574,10 @@ class HttpVectorClient:
                 if exc.code == 404 and deleted == 0:
                     return 0
                 raise
-            deleted += len(batch)
+            # The engine skips an id a live manifest still references (RDR-191
+            # F10c) and reports what it removed; count that, not the batch.
+            reported = (result or {}).get("deleted")
+            deleted += int(reported) if reported is not None else len(batch)
         return deleted
 
     def list_unique_source_paths(self, collection_name: str) -> list[str]:
@@ -4456,6 +4606,13 @@ class HttpVectorClient:
         skipped every collection in service mode. T3Database parity:
         ``metadata_subset`` contains only the requested ``fields`` with
         empty strings for missing keys; missing collection yields nothing.
+
+        nexus-wbfpw.10 (RDR-192 Step 5 amendment): ``include_non_live=True``
+        on every page -- the orphan-candidate set ``nx t3 gc`` builds from
+        this listing is, by definition, chunks whose manifest owner lives
+        elsewhere (or nowhere); a live(c)-filtered listing structurally
+        cannot see them (an owned chunk is never a candidate; an unowned one
+        is exactly what live(c) hides).
         """
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 
@@ -4470,6 +4627,7 @@ class HttpVectorClient:
                         "include": ["metadatas"],
                         "limit": page_limit,
                         "offset": offset,
+                        "include_non_live": True,
                     },
                     tenant=self._tenant,
                 )
@@ -4589,6 +4747,14 @@ class HttpVectorClient:
         Returns the total number of chunks ACTUALLY deleted (may be less
         than the number of TTL-lapsed rows found, in the rare case one
         genuinely shares content with another still-live document).
+
+        nexus-wbfpw.10 (RDR-192 Step 5 amendment, Sam's ruling): the where-scan
+        below sets ``include_non_live=True`` -- expiry removes a TTL-lapsed
+        stored note whether or not it currently has a live manifest owner. A
+        live(c)-filtered scan would leave an unowned TTL-lapsed chunk
+        permanently un-swept (no later GC pass reclaims it either, per this
+        method's own docstring above), the exact silent-leak shape this
+        method exists to close.
         """
         from nexus.catalog.store_hook import reap_catalog_manifest_for_chashes  # noqa: PLC0415 — deferred to avoid import cycle
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
@@ -4625,6 +4791,7 @@ class HttpVectorClient:
                         "include": ["metadatas"],
                         "limit": page_limit,
                         "offset": offset,
+                        "include_non_live": True,
                     },
                     tenant=self._tenant,
                 )

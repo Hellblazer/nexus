@@ -94,12 +94,13 @@ class TestCriticalThreeModelVersionV1:
             cat=cat, registry_path=tmp_path / "repos.json",
         )
         adapter.add(repo)
+        col_name = f"knowledge__myrepo-1-1__{_DOCS_MODEL}__v1"
         adapter.update(
             repo,
-            docs_collection="knowledge__myrepo-1-1__voyage-context-3__v1",
+            docs_collection=col_name,
         )
 
-        row = cat.get_collection("knowledge__myrepo-1-1__voyage-context-3__v1")
+        row = cat.get_collection(col_name)
         assert row is not None
         assert row["model_version"] == "v1", (
             f"Expected conformant 'v1' form; saw {row['model_version']!r}. "

@@ -39,8 +39,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Fixture: two documents in the same collection, each with one manifest-backed
  * chunk in {@code nexus.chunks} (dim=384), plus one THIRD manifest-less chunk (no {@code
- * catalog_document_chunks} row at all — the RDR-145 MCP/{@code store_put} note-chunk
- * shape {@code SoftDeleteTest}:814-867 pins as "never swept"). One document is
+ * catalog_document_chunks} row at all). Since RDR-192 Step 5 (nexus-wbfpw.10) every read
+ * path uses live(c), which requires a live own-collection owner, so the manifest-less
+ * chunk is hidden from search and from the get family alike. One document is
  * tombstoned via the real production path ({@link CatalogRepository#deleteDocument}) —
  * not a raw SQL UPDATE — so this suite proves the actual caller-visible behavior, not
  * just the SQL predicate in isolation.
@@ -200,25 +201,26 @@ class PgVectorTombstoneFilterTest {
     // ── Plain search (searchWithTokens) ─────────────────────────────────────────
 
     @Test @Order(10)
-    void plainSearch_beforeTombstone_allThreeChunksVisible() {
+    void plainSearch_beforeTombstone_manifestedChunksVisible_orphanHidden() {
         var rows = vecRepo.search(TENANT, QUERY_TEXT, List.of(COLLECTION), 10, null);
         assertThat(ids(rows))
-            .as("before any tombstone, live + dead-to-be + manifest-less chunks all searchable")
-            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_DEAD, CHASH_ORPHAN);
+            .as("before any tombstone, both manifested chunks are searchable; the manifest-less chunk is not (RDR-192 Step 5, live(c))")
+            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_DEAD)
+            .doesNotContain(CHASH_ORPHAN);
     }
 
     @Test @Order(20)
-    void plainSearch_afterTombstone_deadChunkInvisible_liveAndOrphanSurvive() {
+    void plainSearch_afterTombstone_deadChunkInvisible_liveSurvives_orphanHidden() {
         int n = catalogRepo.deleteDocument(TENANT, DOC_DEAD);
         assertThat(n).as("deleteDocument tombstoned exactly one row").isEqualTo(1);
 
         var rows = vecRepo.search(TENANT, QUERY_TEXT, List.of(COLLECTION), 10, null);
         assertThat(ids(rows))
             .as("nexus-3ck2g fix: the tombstoned doc's chunk must no longer be searchable "
-                + "via searchWithTokens; the live doc's chunk and the manifest-less (RDR-145) "
-                + "chunk must still be searchable")
-            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_ORPHAN)
-            .doesNotContain(CHASH_DEAD);
+                + "via searchWithTokens; the live doc's chunk is, and the manifest-less chunk "
+                + "stays hidden (RDR-192 Step 5)")
+            .containsExactlyInAnyOrder(CHASH_LIVE)
+            .doesNotContain(CHASH_DEAD, CHASH_ORPHAN);
     }
 
     // ── Hybrid search (hybridSearch) — both selectivity-dispatch branches ──────
@@ -231,10 +233,10 @@ class PgVectorTombstoneFilterTest {
         // PER_CLASS fixture — DOC_DEAD stays tombstoned for the rest of this class.
         var rows = vecRepo.hybridSearch(TENANT, QUERY_TEXT, List.of(COLLECTION), 10, null);
         assertThat(ids(rows))
-            .as("hybridSearch SELECTIVE branch must exclude the tombstoned doc's chunk while "
-                + "keeping the live and manifest-less chunks")
-            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_ORPHAN)
-            .doesNotContain(CHASH_DEAD);
+            .as("hybridSearch SELECTIVE branch must exclude the tombstoned doc's chunk and the "
+                + "manifest-less chunk while keeping the live one")
+            .containsExactlyInAnyOrder(CHASH_LIVE)
+            .doesNotContain(CHASH_DEAD, CHASH_ORPHAN);
     }
 
     @Test @Order(40)
@@ -246,10 +248,10 @@ class PgVectorTombstoneFilterTest {
         var rows = vecRepo.hybridSearch(TENANT, QUERY_TEXT, List.of(COLLECTION), 10, null, 1);
         assertThat(ids(rows))
             .as("hybridSearch NON-SELECTIVE (HNSW-first) branch must ALSO exclude the "
-                + "tombstoned doc's chunk while keeping the live and manifest-less chunks — "
+                + "tombstoned doc's chunk and the manifest-less chunk while keeping the live one — "
                 + "this is the third of the three raw-read sites nexus-3ck2g fixes")
-            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_ORPHAN)
-            .doesNotContain(CHASH_DEAD);
+            .containsExactlyInAnyOrder(CHASH_LIVE)
+            .doesNotContain(CHASH_DEAD, CHASH_ORPHAN);
     }
 
     @Test @Order(45)
@@ -292,45 +294,46 @@ class PgVectorTombstoneFilterTest {
     }
 
     @Test @Order(50)
-    void get_afterTombstone_deadChunkInvisible_liveOrphanAndSharedSurvive() {
+    void get_afterTombstone_deadChunkInvisible_liveAndSharedSurvive_orphanHidden() {
         var envelope = vecRepo.get(TENANT, COLLECTION,
             List.of(CHASH_LIVE, CHASH_DEAD, CHASH_ORPHAN, CHASH_SHARED), 10, 0);
         assertThat(idsOf(envelope))
             .as("nexus-8j1zx fix: get() must exclude the tombstoned doc's chunk while keeping "
-                + "the live, manifest-less, and shared-chash (live+dead manifest rows) chunks")
-            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_ORPHAN, CHASH_SHARED)
-            .doesNotContain(CHASH_DEAD);
+                + "the live and shared-chash (live+dead manifest rows) chunks; the manifest-less chunk "
+                + "stays hidden (RDR-192 Step 5)")
+            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_SHARED)
+            .doesNotContain(CHASH_DEAD, CHASH_ORPHAN);
     }
 
     @Test @Order(60)
-    void getWhere_afterTombstone_deadChunkInvisible_liveOrphanAndSharedSurvive() {
+    void getWhere_afterTombstone_deadChunkInvisible_liveAndSharedSurvive_orphanHidden() {
         var envelope = vecRepo.getWhere(TENANT, COLLECTION, null, 100, 0);
         assertThat(idsOf(envelope))
             .as("nexus-8j1zx fix: getWhere() must exclude the tombstoned doc's chunk while "
-                + "keeping the live, manifest-less, and shared-chash chunks")
-            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_ORPHAN, CHASH_SHARED)
-            .doesNotContain(CHASH_DEAD);
+                + "keeping the live and shared-chash chunks; the manifest-less chunk stays hidden")
+            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_SHARED)
+            .doesNotContain(CHASH_DEAD, CHASH_ORPHAN);
     }
 
     @Test @Order(70)
-    void getEmbeddings_afterTombstone_deadChunkInvisible_liveOrphanAndSharedSurvive() {
+    void getEmbeddings_afterTombstone_deadChunkInvisible_liveAndSharedSurvive_orphanHidden() {
         var envelope = vecRepo.getEmbeddings(TENANT, COLLECTION,
             List.of(CHASH_LIVE, CHASH_DEAD, CHASH_ORPHAN, CHASH_SHARED));
         assertThat(idsOf(envelope))
             .as("nexus-8j1zx fix: getEmbeddings() must exclude the tombstoned doc's chunk while "
-                + "keeping the live, manifest-less, and shared-chash chunks")
-            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_ORPHAN, CHASH_SHARED)
-            .doesNotContain(CHASH_DEAD);
+                + "keeping the live and shared-chash chunks; the manifest-less chunk stays hidden")
+            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_SHARED)
+            .doesNotContain(CHASH_DEAD, CHASH_ORPHAN);
     }
 
     @Test @Order(80)
-    void getAllMetadata_afterTombstone_deadChunkInvisible_liveOrphanAndSharedSurvive() {
+    void getAllMetadata_afterTombstone_deadChunkInvisible_liveAndSharedSurvive_orphanHidden() {
         var envelope = vecRepo.getAllMetadata(TENANT, COLLECTION, null);
         assertThat(idsOf(envelope))
             .as("nexus-8j1zx fix: getAllMetadata() must exclude the tombstoned doc's chunk while "
-                + "keeping the live, manifest-less, and shared-chash chunks")
-            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_ORPHAN, CHASH_SHARED)
-            .doesNotContain(CHASH_DEAD);
+                + "keeping the live and shared-chash chunks; the manifest-less chunk stays hidden")
+            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_SHARED)
+            .doesNotContain(CHASH_DEAD, CHASH_ORPHAN);
     }
 
     // ── list() (nexus-txcbo, round-2 critique) ───────────────────────────────────
@@ -339,13 +342,14 @@ class PgVectorTombstoneFilterTest {
     // surfaced tombstoned content by default before this fix.
 
     @Test @Order(90)
-    void list_afterTombstone_deadChunkInvisible_liveOrphanAndSharedSurvive() {
+    void list_afterTombstone_deadChunkInvisible_liveAndSharedSurvive_orphanHidden() {
         var envelope = vecRepo.list(TENANT, COLLECTION, 100, 0);
         assertThat(idsOf(envelope))
             .as("nexus-txcbo fix: list() must exclude the tombstoned doc's chunk while keeping "
-                + "the live, manifest-less, and shared-chash (live+dead manifest rows) chunks")
-            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_ORPHAN, CHASH_SHARED)
-            .doesNotContain(CHASH_DEAD);
+                + "the live and shared-chash (live+dead manifest rows) chunks; the manifest-less chunk "
+                + "stays hidden (RDR-192 Step 5)")
+            .containsExactlyInAnyOrder(CHASH_LIVE, CHASH_SHARED)
+            .doesNotContain(CHASH_DEAD, CHASH_ORPHAN);
     }
 
     // ── Cross-collection tombstone leak (GH #1546, nexus-ky9ps) ─────────────────

@@ -753,7 +753,10 @@ def _truncate(text: str, cap: int) -> str:
 #: 2026-09-25, option A2). Every docs__ document costs an LLM call on each
 #: change, so nothing is extracted until ``aspects.docs_collections`` in
 #: config.yml names the collection (glob patterns, a YAML list or a comma-
-#: separated string, the ``taxonomy.local_exclude_collections`` shape).
+#: separated string, the ``taxonomy.local_exclude_collections`` shape) OR
+#: the engine's tenant-wide ``catalog_collections.aspects_enabled`` row
+#: attribute says so (nexus-l46pu follow-up — see
+#: :func:`docs_collection_opted_in`).
 _DOCS_PREFIX: str = "docs__"
 #: The files in an opted-in docs__ collection that are prose worth a call.
 #: Not ``classifier.classify_file``: every file in a docs__ collection is
@@ -783,11 +786,130 @@ def _docs_opt_in_patterns() -> list[str]:
     return [str(p) for p in raw if str(p).strip()]
 
 
+#: nexus-l46pu (follow-up to nexus-kk4ut, T2 critique
+#: nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1, round 2
+#: nexus/critique-nexus-l46pu-tenant-wide-aspects-enabled item 2): per-process
+#: cache of the engine's tenant-wide ``catalog_collections.aspects_enabled``
+#: read, keyed by collection name, with a bounded TTL (not process-lifetime
+#: — a remote ``--disable`` must take effect within a known window, not only
+#: on process restart). Each entry is ``(fetched_at, enabled, has_opinion)``.
+#: Populated lazily by :func:`_engine_aspects_enabled`; cleared by
+#: :func:`invalidate_engine_aspects_enabled_cache`.
+_ENGINE_ASPECTS_CACHE_TTL_S: float = 60.0
+#: Injectable clock (nexus-l46pu round 2): tests swap this for a fake to
+#: exercise TTL expiry deterministically, without a real sleep.
+_clock: Callable[[], float] = time.monotonic
+_ENGINE_ASPECTS_ENABLED_CACHE: dict[str, tuple[float, bool, bool]] = {}
+
+
+def invalidate_engine_aspects_enabled_cache(collection: str | None = None) -> None:
+    """Clear the cached engine ``aspects_enabled`` read for ``collection``, or
+    every entry when ``collection`` is ``None``. Call after
+    ``nx collection aspects <name> --enable/--disable`` sets the row, and in
+    tests that exercise :func:`docs_collection_opted_in` across a value
+    change — otherwise a same-process read after the write would still see
+    the value cached before it (or before the TTL above lapses)."""
+    if collection is None:
+        _ENGINE_ASPECTS_ENABLED_CACHE.clear()
+    else:
+        _ENGINE_ASPECTS_ENABLED_CACHE.pop(collection, None)
+
+
+def _engine_aspects_enabled(collection: str) -> tuple[bool, bool]:
+    """The engine's ``catalog_collections.aspects_enabled`` for ``collection``
+    (nexus-l46pu), cached per process for
+    :data:`_ENGINE_ASPECTS_CACHE_TTL_S` seconds (see
+    :data:`_ENGINE_ASPECTS_ENABLED_CACHE`).
+
+    Returns ``(enabled, has_opinion)``. ``has_opinion`` is ``False`` when the
+    engine carries no fact at all to read: an old engine that predates
+    catalog-040 and so never sends the ``aspects_enabled`` key, a row on a
+    CURRENT engine nobody has ever called ``--enable``/``--disable``/
+    ``--from-config`` on (catalog-040 ships the column ``BOOLEAN NULL``, no
+    default — round-2 fix, Finding A, T2 critique-nexus-l46pu-
+    round2-2026-09-27: a ``NOT NULL DEFAULT FALSE`` column could not tell
+    "nobody has set this" apart from "explicitly disabled", so every
+    pre-existing docs__ collection would have silently overridden a
+    machine's local opt-in the instant a tenant's engine crossed the
+    migration), an unregistered collection (``get_collection`` returns
+    ``None``), or a transport error; ``enabled`` is meaningless in that case
+    and always ``False``. The three "no opinion" cases (absent key, present
+    key with a ``null``/non-bool value, no row at all) are deliberately
+    indistinguishable here — a bare ``fnmatch`` local fallback either
+    applies or it doesn't, and there is no fourth thing to do with any of
+    them. Never raises and never crashes the enqueue/worker path over a
+    catalog read — same fail-closed contract as :func:`_docs_opt_in_patterns`.
+
+    A transient read failure (timeout, connection reset, a mid-request
+    engine restart) is answered as ``(False, False)`` but is NEVER cached
+    (round 2, Important item 2, T2 critique-nexus-l46pu-round2-2026-09-27):
+    caching a failure for the full TTL would silently disable extraction on
+    a genuinely-enabled collection for up to :data:`_ENGINE_ASPECTS_CACHE_TTL_S`
+    seconds after a blip that would otherwise have resolved on the very next
+    call — a materially worse outcome than an uncached immediate retry.
+    """
+    cached = _ENGINE_ASPECTS_ENABLED_CACHE.get(collection)
+    if cached is not None:
+        fetched_at, cached_enabled, cached_has_opinion = cached
+        if _clock() - fetched_at < _ENGINE_ASPECTS_CACHE_TTL_S:
+            return cached_enabled, cached_has_opinion
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred: catalog import is heavier than this module's callers need at load
+
+        reader = make_catalog_reader()
+        row = reader.get_collection(collection) if reader is not None else None
+    except Exception as exc:  # noqa: BLE001 — any catalog failure means "no opinion" for THIS call, never a crash on the enqueue/worker path — and never cached, so the next call retries the engine instead of a remembered failure
+        _log.warning(
+            "aspects_engine_opt_in_unreadable",
+            collection=collection, error=f"{type(exc).__name__}: {exc}",
+        )
+        return False, False
+    # The opinion test is "the value is a bool", not "the key is present"
+    # (round 2 fix round, Finding A): with the column nullable, a CURRENT
+    # engine sends the key on every row, but an untouched row's value is
+    # JSON null, not a bool. isinstance(..., bool) reads a null the same as
+    # an absent key (both "no opinion") while still reading an explicit
+    # True/False as an opinion — a bare `"aspects_enabled" in row` or
+    # `row.get(...)` truthiness check cannot make that distinction.
+    val = row.get("aspects_enabled") if row is not None else None
+    has_opinion = isinstance(val, bool)
+    enabled = val if has_opinion else False
+    _ENGINE_ASPECTS_ENABLED_CACHE[collection] = (_clock(), enabled, has_opinion)
+    return enabled, has_opinion
+
+
 def docs_collection_opted_in(collection: str) -> bool:
-    """True when ``collection`` is a docs__ collection that
-    ``aspects.docs_collections`` opts in to aspect extraction (nexus-kk4ut)."""
+    """True when ``collection`` is a docs__ collection opted in to aspect
+    extraction.
+
+    The engine's tenant-wide ``catalog_collections.aspects_enabled``
+    attribute (nexus-l46pu) is AUTHORITATIVE the moment it carries an
+    opinion (see :func:`_engine_aspects_enabled`'s ``has_opinion``): every
+    machine indexing this collection then agrees, closing the T2 critique
+    nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1 gap (two
+    machines with different local config giving partial ``document_aspects``
+    coverage). The LOCAL ``aspects.docs_collections`` glob list (nexus-kk4ut)
+    is consulted ONLY as a fallback for an engine with no opinion yet — an
+    old engine that never sends the ``aspects_enabled`` key at all, OR a
+    row on a perfectly current engine that no operator has ever called
+    ``--enable``/``--disable``/``--from-config`` on (the column is
+    ``BOOLEAN NULL`` with no default, catalog-040 round-2 fix, Finding A,
+    T2 critique-nexus-l46pu-round2-2026-09-27 — an untouched row's value is
+    ``None``, distinct from an explicit ``False``, so it is never mistaken
+    for "another machine disabled this") — so a fresh install with nothing
+    synced keeps today's per-machine-only behaviour until ``nx collection
+    aspects --from-config`` (or a bare ``--enable``/``--disable``) gives the
+    engine a first opinion, round-2 critic decision, T2
+    critique-nexus-l46pu-tenant-wide-aspects-enabled item 1: "local wins"
+    kept exactly the cross-machine drift this bead exists to close, since a
+    stale local entry would silently re-override a value another machine
+    had already synced to the engine.
+    """
     if not collection.startswith(_DOCS_PREFIX):
         return False
+    enabled, has_opinion = _engine_aspects_enabled(collection)
+    if has_opinion:
+        return enabled
     import fnmatch  # noqa: PLC0415 — stdlib, only needed on this branch
 
     return any(fnmatch.fnmatchcase(collection, p) for p in _docs_opt_in_patterns())
@@ -1840,6 +1962,12 @@ def _run_claude_isolated(
         # itself, which is synchronous), so closing our handle the
         # moment Popen() returns is safe -- mirrors
         # _spawn_with_prompt_file's identical close-immediately shape.
+        from nexus.util.process_group import contain, isolation_popen_kwargs, release  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        # Pre-declared so the outer ``finally`` below can always release it
+        # -- including on a spawn failure (``Popen`` itself raising), where
+        # ``contain()`` is never reached and this stays None.
+        job: int | None = None
         with open(prompt_path, "rb") as prompt_file:
             proc = subprocess.Popen(
                 argv,
@@ -1847,33 +1975,46 @@ def _run_claude_isolated(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                start_new_session=True,
                 env=child_env,
                 preexec_fn=(_pdeathsig.set_pdeathsig_preexec if _pdeathsig.LIBC is not None else None),
+                **isolation_popen_kwargs(),
             )
+        # nexus-6y4e0: Windows job-object containment, assigned right after
+        # spawn. No-op (returns None) on POSIX, where start_new_session=True
+        # above already makes the child a killable group.
+        job = contain(proc)
         try:
             # No `input=` -- stdin is no longer a PIPE, so there is
             # nothing left to feed; the data is already on disk and was
             # redirected in at spawn time above.
             out, err = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            _kill_process_group(proc)
+            _kill_process_group(proc, job)
+            # Already closed (or its close was already attempted) above --
+            # the outer finally must never touch it again.
+            job = None
             with contextlib.suppress(Exception):
                 proc.communicate(timeout=5)  # reap the killed group
             raise
         return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
     finally:
+        # nexus-6y4e0 review (CRITICAL): the job handle must close on
+        # EVERY outcome, not only the except branch above -- success and a
+        # non-zero return (this function never raises on either) never
+        # touched it and leaked it every time. A no-op when job is None:
+        # POSIX, a spawn failure, or the timeout path (already released).
+        release(job)
         with contextlib.suppress(OSError):
             prompt_path.unlink(missing_ok=True)
 
 
-def _kill_process_group(proc: subprocess.Popen) -> None:
-    """Hard-kill the child's whole process group; fall back to killing just
-    the child if the group is already gone, or on Windows, where there is no
-    group (nexus-34f7r)."""
-    from nexus.util.process_group import safe_killpg  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+def _kill_process_group(proc: subprocess.Popen, job: int | None = None) -> None:
+    """Hard-kill the child's whole tree: the process group on POSIX, the
+    Windows job object when *job* is not ``None`` (nexus-6y4e0), or just the
+    child otherwise -- the pre-nexus-6y4e0 degraded reach (nexus-34f7r)."""
+    from nexus.util.process_group import kill_tree  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-    if not safe_killpg(proc):
+    if not kill_tree(proc, job):
         with contextlib.suppress(Exception):
             proc.kill()
 

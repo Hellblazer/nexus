@@ -184,6 +184,105 @@ class TupleAnnounceTest {
                 .isEqualTo(2);
     }
 
+    // ── the stamp's clock (bead nexus-4h7fo) ──────────────────────────────────
+    //
+    // The due test compares announced_at with the DATABASE clock (now()). The stamp
+    // used to come from the engine host's clock, so whenever the host ran ahead of the
+    // database by more than the few milliseconds between an announcement and the next
+    // probe, an interval_s=0 row read as announced in the future and was not due. On a
+    // Docker Desktop test box the host/VM offset moves in steps as the VM clock is
+    // corrected; one 300-iteration loop of the claimed-row test's exact sequence caught
+    // a ~7 ms host lead and returned nothing after release in 295 of 300 iterations.
+    //
+    // These pins hold the announcing transaction open, start a second transaction
+    // while it is held, and require the stamp to be earlier than that second
+    // transaction's own now(): true when the stamp is the announcing transaction's
+    // now(), false for a host-clock stamp taken after the hold, whatever the offset
+    // between the two clocks (up to the hold itself).
+
+    private static final long ANNOUNCE_HOLD_MS = 200;
+
+    private OffsetDateTime dbNow() {
+        return tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class));
+    }
+
+    /** Runs {@code probe} with its announcing transaction held open; returns the
+     *  probe's result and the now() of a transaction that STARTED while it was held. */
+    private record HeldProbe(List<TupleRepository.WaitResult> result, OffsetDateTime laterTxnNow) { }
+
+    private HeldProbe probeWhileHeld(TupleRepository.WaitSpec spec) throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch proceed = new CountDownLatch(1);
+        TupleRepository.setTestOnlyAnnounceTxnHold(() -> {
+            entered.countDown();
+            try {
+                proceed.await(10, TimeUnit.SECONDS);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            Future<List<TupleRepository.WaitResult>> f = pool.submit(() -> probe(spec));
+            assertThat(entered.await(5, TimeUnit.SECONDS))
+                    .as("non-vacuity: the announcing transaction reached the hold").isTrue();
+            OffsetDateTime later = dbNow();
+            assertThat(f.isDone()).as("non-vacuity: the announcing transaction is still held").isFalse();
+            // Clear the seam before anything else can announce, then let the held one finish.
+            TupleRepository.setTestOnlyAnnounceTxnHold(null);
+            Thread.sleep(ANNOUNCE_HOLD_MS);
+            proceed.countDown();
+            return new HeldProbe(f.get(10, TimeUnit.SECONDS), later);
+        } finally {
+            TupleRepository.setTestOnlyAnnounceTxnHold(null);
+            proceed.countDown();
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void announce_stampIsTheDatabaseClockOfTheAnnouncingTransaction_notTheEngineHostClock() throws Exception {
+        String to = "announce-clock-" + UUID.randomUUID();
+        byte[] id = repo.out(TENANT_A, "mailbox/" + to, Map.of("to", to), Map.of("from", "sender"),
+                "hello", "nonce-1", null);
+
+        HeldProbe held = probeWhileHeld(mailboxSpec(to, 0, 5));
+
+        assertThat(held.result()).hasSize(1);
+        OffsetDateTime stamped = held.result().get(0).tuples().get(0).announcedAt();
+        assertThat(stamped.toInstant())
+                .as("a transaction that began after the announcing one began already sees the stamp in its "
+                        + "past, so interval_s=0 is due again at once -- the database clock, not the host's")
+                .isBefore(held.laterTxnNow().toInstant());
+        OffsetDateTime stored = tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(TUPLES.ANNOUNCED_AT).from(TUPLES).where(TUPLES.ID.eq(id))
+                        .fetchOne(TUPLES.ANNOUNCED_AT));
+        assertThat(stored.toInstant()).as("the returned stamp is the stored one").isEqualTo(stamped.toInstant());
+    }
+
+    @Test
+    void subscriberAnnounce_stampIsTheDatabaseClockOfTheAnnouncingTransaction_notTheEngineHostClock()
+            throws Exception {
+        String topic = "sub-clock-" + UUID.randomUUID();
+        post(topic, "author", "hello", "n-1");
+
+        HeldProbe held = probeWhileHeld(boardSpec(topic, "session-a", 0, 5));
+
+        assertThat(held.result()).hasSize(1);
+        TupleRepository.TupleRow row = held.result().get(0).tuples().get(0);
+        assertThat(row.announcedAt().toInstant())
+                .as("the per-subscriber stamp follows the same clock as the row-level one")
+                .isBefore(held.laterTxnNow().toInstant());
+        OffsetDateTime stored = tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(TUPLE_DELIVERIES.ANNOUNCED_AT).from(TUPLE_DELIVERIES)
+                        .where(TUPLE_DELIVERIES.TUPLE_ID.eq(row.id()))
+                        .and(TUPLE_DELIVERIES.SUBSCRIBER.eq("session-a"))
+                        .fetchOne(TUPLE_DELIVERIES.ANNOUNCED_AT));
+        assertThat(stored.toInstant()).as("the returned stamp is the stored one")
+                .isEqualTo(row.announcedAt().toInstant());
+    }
+
     // ── dead-lettered rows never announced ────────────────────────────────────
 
     @Test
@@ -485,13 +584,121 @@ class TupleAnnounceTest {
                 .hasMessageContaining("subscriber");
     }
 
+    // ── since alongside a PER-SUBSCRIBER announce: honoured, not refused ──────
+    //
+    // Bead nexus-n36sw (follow-up to nexus-zxthy): unlike a row-level announce
+    // (mailboxAnnounce_sinceWithAnnounce_isRefused above), a per-subscriber
+    // announce's due state lives in nexus.tuple_deliveries, never on the tuple
+    // row, so a since watermark narrows the candidate set instead of colliding
+    // with the engine's own per-subscriber position tracking. This used to be
+    // subscriberAnnounce_sinceTogetherWithAnnounce_isStillRefused; the three
+    // tests below replace it: a row at/before the watermark is excluded before
+    // the SELECT ever runs (never stamped, not merely filtered after stamping),
+    // a row after it is announced normally, and the row-level refusal above is
+    // untouched.
+
     @Test
-    void subscriberAnnounce_sinceTogetherWithAnnounce_isStillRefused() {
-        String topic = "sub-since-" + UUID.randomUUID();
-        var cursor = new TupleRepository.ReadCursor(OffsetDateTime.now(ZoneOffset.UTC), new byte[32]);
-        TupleRepository.WaitSpec both = new TupleRepository.WaitSpec("board/" + topic, null, 10, cursor,
+    void subscriberAnnounce_sinceExcludesARowBeforeTheWatermark_neverStampsIt() {
+        String topic = "sub-since-watermark-" + UUID.randomUUID();
+        post(topic, "writer-1", "before", "nonce-before");
+
+        List<TupleRepository.TupleRow> seeded = repo.rd(TENANT_A, "board/" + topic, null, 10, null, 0);
+        assertThat(seeded).hasSize(1);
+        byte[] beforeId = seeded.get(0).id();
+
+        OffsetDateTime watermark = tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class));
+        var since = new TupleRepository.ReadCursor(watermark, new byte[0]);
+        TupleRepository.WaitSpec spec = new TupleRepository.WaitSpec("board/" + topic, null, 10, since,
                 new TupleRepository.WaitSpec.Announce(0, 1, "session-a"));
-        assertThatThrownBy(() -> repo.waitAny(TENANT_A, List.of(both), 0))
+
+        assertThat(repo.waitAny(TENANT_A, List.of(spec), 0))
+                .as("a post created strictly before the watermark is not a due candidate at all -- "
+                        + "the subspace reports nothing, per WaitResult's own contract")
+                .isEmpty();
+
+        Integer deliveryCount = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchCount(TUPLE_DELIVERIES,
+                TUPLE_DELIVERIES.TUPLE_ID.eq(beforeId)));
+        assertThat(deliveryCount)
+                .as("never stamped -- excluded from the locking SELECT, not merely filtered from the result after")
+                .isEqualTo(0);
+    }
+
+    @Test
+    void subscriberAnnounce_sinceExcludesARowExactlyAtTheWatermark_neverStampsIt() {
+        // Code-review round, bead nexus-n36sw: the companion to the
+        // strictly-before case above, deterministic rather than relying on
+        // "before" alone to stand in for "at or before" -- a row inserted
+        // with created_at set to the EXACT captured watermark value (not a
+        // second call to currentOffsetDateTime(), which could tick forward)
+        // proves the compare is `>` (strict), excluding equality too, not
+        // merely `>=` misread as `>`.
+        String topic = "sub-since-watermark-eq-" + UUID.randomUUID();
+        String templateName = registry.resolve("board/" + topic).name();
+        byte[] atId = new byte[32];
+        new java.security.SecureRandom().nextBytes(atId);
+
+        OffsetDateTime watermark = tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class));
+        tenantScope.withTenant(TENANT_A, ctx -> {
+            ctx.insertInto(TUPLES,
+                            TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
+                            TUPLES.KEYS, TUPLES.BODY, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
+                    .values(DSL.val(atId), DSL.val(TENANT_A), DSL.val("board/" + topic), DSL.val(templateName),
+                            DSL.val(JSONB.valueOf("{\"topic\":\"" + topic + "\"}")), DSL.val("at-watermark"),
+                            DSL.currentOffsetDateTime().add(interval(3600)), DSL.val(watermark))
+                    .execute();
+            return (TuplesRecord) null;
+        });
+
+        var since = new TupleRepository.ReadCursor(watermark, new byte[0]);
+        TupleRepository.WaitSpec spec = new TupleRepository.WaitSpec("board/" + topic, null, 10, since,
+                new TupleRepository.WaitSpec.Announce(0, 1, "session-a"));
+
+        assertThat(repo.waitAny(TENANT_A, List.of(spec), 0))
+                .as("a post created AT the watermark (created_at == since, not >) is not a due candidate")
+                .isEmpty();
+
+        Integer deliveryCount = tenantScope.withTenant(TENANT_A, ctx -> ctx.fetchCount(TUPLE_DELIVERIES,
+                TUPLE_DELIVERIES.TUPLE_ID.eq(atId)));
+        assertThat(deliveryCount).as("never stamped").isEqualTo(0);
+    }
+
+    @Test
+    void subscriberAnnounce_sinceAllowsARowAfterTheWatermark_returnedOnce() {
+        String topic = "sub-since-after-" + UUID.randomUUID();
+        post(topic, "writer-1", "before", "nonce-before");
+
+        OffsetDateTime watermark = tenantScope.withTenant(TENANT_A,
+                ctx -> ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class));
+
+        post(topic, "writer-2", "after", "nonce-after");
+
+        var since = new TupleRepository.ReadCursor(watermark, new byte[0]);
+        TupleRepository.WaitSpec spec = new TupleRepository.WaitSpec("board/" + topic, null, 10, since,
+                new TupleRepository.WaitSpec.Announce(0, 1, "session-a"));
+
+        List<TupleRepository.WaitResult> result = repo.waitAny(TENANT_A, List.of(spec), 0);
+        assertThat(result.get(0).tuples())
+                .as("only the post created after the watermark is a due candidate")
+                .hasSize(1);
+        assertThat(result.get(0).tuples().get(0).body())
+                .as("the pre-watermark post is excluded, the post-watermark one is not")
+                .isEqualTo("after");
+        assertThat(result.get(0).tuples().get(0).announceCount()).isEqualTo(1);
+    }
+
+    @Test
+    void mailboxAnnounce_sinceWithAnnounce_isStillRefused_rowLevelUnaffectedByTheSubscriberException() {
+        String to = "announce-since-refused-row-level-" + UUID.randomUUID();
+        var cursor = new TupleRepository.ReadCursor(OffsetDateTime.now(ZoneOffset.UTC), new byte[32]);
+        // No subscriber: the mailbox/row-level shape, which keeps the original
+        // refusal (waitAny_sinceWithAnnounce_isRefused above covers the same
+        // contract from the mailbox side; this one is scoped explicitly to the
+        // board/subspace shape so the two are not confused after nexus-n36sw).
+        TupleRepository.WaitSpec rowLevel = new TupleRepository.WaitSpec("board/" + to, null, 10, cursor,
+                new TupleRepository.WaitSpec.Announce(0, 1));
+        assertThatThrownBy(() -> repo.waitAny(TENANT_A, List.of(rowLevel), 0))
                 .isInstanceOf(SchemaViolationException.class)
                 .hasMessageContaining("since");
     }
@@ -593,6 +800,122 @@ class TupleAnnounceTest {
             assertThat(announcedA).as("(d) A is due for session-a: no delivery row for it yet").hasSize(1);
             assertThat(announcedA.get(0).tuples().get(0).id()).isEqualTo(heldId);
             assertThat(probe(forA)).as("both posts now stamped once for session-a").isEmpty();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /**
+     * The {@code since}-watermark's OWN commit-visibility race (critic finding,
+     * bead nexus-n36sw round 2): {@code created_at} is stamped from Postgres's
+     * {@code now()}/{@code transaction_timestamp()} -- fixed at the writer's
+     * TRANSACTION START, never its commit -- so a transaction that starts
+     * before a watermark is captured but is held open PAST that capture
+     * commits a row whose {@code created_at} predates the watermark even
+     * though the row only becomes visible to anyone else AFTER it. The
+     * {@code since} compare excludes such a row from the candidate set before
+     * the due check ever runs, permanently: this is not a defect this bead
+     * introduces so much as a property every {@code created_at}-anchored
+     * compare has (the row-level {@code since} cursor {@link
+     * #announce_sinceCursorSkipsALateCommit_announceModeDoesNot} and the
+     * board no-{@code since} case {@link
+     * #subscriberAnnounce_lateCommittingPost_isStillAnnouncedToTheSubscriber}
+     * both demonstrate the identical mechanism from other angles).
+     *
+     * <p>What bounds it in practice: {@code TupleRepository.out()}'s own
+     * production transaction ({@code TenantScope.withTenant} wrapping {@code
+     * writeOut}) is ONE bounded sequence of synchronous round trips -- an
+     * optional max-live-rows check, one {@code INSERT}, {@code
+     * maintainTenant}'s upsert -- with nothing between {@code BEGIN} and
+     * {@code COMMIT} that can block on anything external (no lock wait
+     * outside ordinary row contention, no I/O to another system, no
+     * user-facing pause). BEGIN-to-COMMIT is single-digit milliseconds in
+     * practice, never remotely close to {@code DEFAULT_BOARD_START_SKEW_S}'s
+     * 30 seconds. The ONLY way to widen that window at all is the artificial
+     * hold this test uses -- there is no equivalent knob reachable through
+     * {@code out()} itself. {@code ChannelWaiter._build_specs} widens the
+     * watermark it sends BACKWARDS by that same 30 seconds specifically to
+     * absorb this: a transaction that began more than 30s before the
+     * client's subscribe instant has, given the bound above, long since
+     * committed by the time that instant arrives, so the excluded region
+     * this test proves exists is never reached by a real writer. This test
+     * is the pin for that claim, not a regression test for a bug to fix.
+     */
+    @Test
+    void subscriberAnnounce_sinceWatermarkExclusion_isACommitVisibilityRace_boundedByTheWriterTransactionsOwnDuration()
+            throws Exception {
+        String topic = "sub-since-race-" + UUID.randomUUID();
+        String templateName = registry.resolve("board/" + topic).name();
+        byte[] heldId = new byte[32];
+        new java.security.SecureRandom().nextBytes(heldId);
+
+        CountDownLatch inserted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        ExecutorService pool = Executors.newSingleThreadExecutor();
+        try {
+            // Writer A: transaction starts (and created_at is stamped) FIRST,
+            // held open past the watermark capture below.
+            Future<?> held = pool.submit(() -> tenantScope.withTenant(TENANT_A, ctx -> {
+                ctx.insertInto(TUPLES,
+                                TUPLES.ID, TUPLES.TENANT_ID, TUPLES.SUBSPACE, TUPLES.TEMPLATE,
+                                TUPLES.KEYS, TUPLES.BODY, TUPLES.EXPIRES_AT, TUPLES.CREATED_AT)
+                        .values(DSL.val(heldId), DSL.val(TENANT_A), DSL.val("board/" + topic),
+                                DSL.val(templateName), DSL.val(JSONB.valueOf("{\"topic\":\"" + topic + "\"}")),
+                                DSL.val("A-held"), DSL.currentOffsetDateTime().add(interval(3600)),
+                                DSL.currentOffsetDateTime())
+                        .execute();
+                inserted.countDown();
+                try {
+                    release.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
+                return (TuplesRecord) null;
+            }));
+            assertThat(inserted.await(5, TimeUnit.SECONDS))
+                    .as("A's insert ran (uncommitted) before the watermark below is captured")
+                    .isTrue();
+
+            // The watermark: a SEPARATE transaction's own now(), captured
+            // strictly after A's transaction started (confirmed above) and
+            // strictly before A commits (A is still held). A's created_at,
+            // fixed at A's transaction start, therefore predates this value.
+            OffsetDateTime watermark = tenantScope.withTenant(TENANT_A,
+                    ctx -> ctx.select(DSL.currentOffsetDateTime()).fetchOne(0, OffsetDateTime.class));
+            var since = new TupleRepository.ReadCursor(watermark, new byte[0]);
+            TupleRepository.WaitSpec sinceSpec = new TupleRepository.WaitSpec("board/" + topic, null, 10, since,
+                    new TupleRepository.WaitSpec.Announce(0, 1, "session-a"));
+
+            assertThat(repo.waitAny(TENANT_A, List.of(sinceSpec), 0))
+                    .as("A is still uncommitted -- correctly absent, nothing wrong yet")
+                    .isEmpty();
+
+            release.countDown();
+            held.get(5, TimeUnit.SECONDS);
+
+            // THE RACE: A is now committed, claimable, and due for session-a,
+            // but created_at(A) < watermark (A's transaction started first),
+            // so the since compare excludes it from the candidate SELECT
+            // before the due check ever runs -- never merely filtered from
+            // an already-fetched result, never stamped, never returned again
+            // through this watermark.
+            assertThat(repo.waitAny(TENANT_A, List.of(sinceSpec), 0))
+                    .as("(the race) A committed after the watermark was taken, but its created_at predates it "
+                            + "-- excluded, permanently, by the since compare")
+                    .isEmpty();
+
+            // Proof this is a since-shaped exclusion, not a genuine non-due
+            // row: the identical row IS due through the no-since per-
+            // subscriber path -- the full re-scan has no position to have
+            // excluded it (same mechanism subscriberAnnounce_
+            // lateCommittingPost_isStillAnnouncedToTheSubscriber's own (d)
+            // proves; repeated here against this test's own row so this
+            // test stands alone).
+            TupleRepository.WaitSpec noSinceSpec = new TupleRepository.WaitSpec("board/" + topic, null, 10, null,
+                    new TupleRepository.WaitSpec.Announce(0, 1, "session-a"));
+            assertThat(repo.waitAny(TENANT_A, List.of(noSinceSpec), 0).get(0).tuples())
+                    .as("without since, the full re-scan has no position to have excluded A")
+                    .hasSize(1);
         } finally {
             pool.shutdownNow();
         }

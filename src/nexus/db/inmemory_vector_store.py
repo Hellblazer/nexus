@@ -287,7 +287,12 @@ class InMemoryCollection:
     def get(self, *, ids: list[str] | None = None,
             where: dict[str, Any] | None = None,
             limit: int | None = None, offset: int = 0,
-            include: list[str] | None = None) -> dict[str, Any]:
+            include: list[str] | None = None,
+            include_non_live: bool = False) -> dict[str, Any]:
+        # include_non_live (nexus-wbfpw.10, RDR-192 Step 5 amendment): a
+        # no-op here -- this in-memory test double has no manifest-ownership
+        # concept to filter on, so it is always the "physical" view.
+        del include_non_live
         include = include if include is not None else ["documents", "metadatas"]
         with self._lock:
             if ids is not None:

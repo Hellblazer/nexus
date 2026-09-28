@@ -85,7 +85,25 @@ def backfill_collections_cmd(dry_run: bool) -> None:
 
     candidate_names = sorted(t3_names | catalog_names)
     already = {r["name"] for r in cat.list_collections()}
-    to_register = [n for n in candidate_names if n not in already]
+    missing = [n for n in candidate_names if n not in already]
+    # nexus-ny7j4: the client never registers a quarantine sibling (the
+    # engine does, from the origin's row, when it first quarantines a
+    # chunk), and the registration seam skips one rather than deriving
+    # fields from a name whose first segment is not a content type. A
+    # sibling with chunks but no row is therefore reported, never counted
+    # as registered: silently passing it through the seam's skip would
+    # print it under "new" while nx catalog doctor kept flagging it. The
+    # T3 listing above already drops quarantine- names, so this reaches
+    # only a name that arrived through a document's physical_collection.
+    from nexus.catalog.chunk_quarantine import is_quarantine_sibling_name  # noqa: PLC0415  — command-local import
+    quarantine_unregistered = [n for n in missing if is_quarantine_sibling_name(n)]
+    to_register = [n for n in missing if n not in quarantine_unregistered]
+    for name in quarantine_unregistered:
+        click.echo(
+            f"skipping {name}: a quarantine sibling with no catalog row; the "
+            "client never registers one (the engine does, from the origin "
+            "collection's row). Check the origin collection and `nx t3 gc`.",
+        )
 
     if not to_register:
         click.echo(
@@ -506,7 +524,10 @@ def collection_gc_cmd(apply: bool) -> None:
 
     for c in t3_collections:
         name = c["name"]
-        count = c.get("count", 0)
+        # RDR-192 Step 5 amendment: "empty" means no stored chunk. A
+        # collection whose chunks have no live owner has live count 0 but is
+        # not empty, and must not be deleted as a zombie.
+        count = c.get("stored_count", c.get("count", 0))
         if name.startswith(_BYPASS_SCHEMA_PREFIXES):
             skipped_bypass += 1
             continue

@@ -73,9 +73,15 @@ def runner() -> CliRunner:
 
 
 @pytest.fixture
-def env_creds(monkeypatch: pytest.MonkeyPatch) -> None:
+def env_creds(monkeypatch: pytest.MonkeyPatch, cloud_mode: None) -> None:
     # RDR-155 P4b: the chroma-key mode inference is gone — pin cloud mode
     # explicitly so the voyage collection-name promotion under test fires.
+    # nexus-03wze mode-lint burn-down: depends on the shared `cloud_mode`
+    # fixture (conftest.py) so every test that goes through `mock_store` ->
+    # `env_creds` carries "cloud_mode" in its fixturenames closure -- this
+    # file's cloud posture was already real (NX_LOCAL=0 + credentials
+    # below), just spelled through a file-local fixture the mode-census
+    # regex can't recognize by name.
     monkeypatch.setenv("NX_LOCAL", "0")
     monkeypatch.setenv("CHROMA_API_KEY", "test-chroma-key")
     monkeypatch.setenv("VOYAGE_API_KEY", "test-voyage-key")
@@ -245,7 +251,12 @@ def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tm
 
     exc_cls = getattr(corpus_mod, exc_cls_name)
     message = "content_type='knowledge': this install's configured intent is 'voyage-context-3', but the engine's embedding_profile still says 'bge-base-en-v15-768'. A restart is required: `nx daemon service stop && nx daemon service start`."
-    mock_store.put.side_effect = exc_cls(message)
+    # EmbeddingProfileMismatchError builds its message from structured
+    # fields since nexus-aotql; the credential error still takes one string.
+    if exc_cls_name == "EmbeddingProfileMismatchError":
+        mock_store.put.side_effect = exc_cls("knowledge", "voyage-context-3", "bge-base-en-v15-768")
+    else:
+        mock_store.put.side_effect = exc_cls(message)
 
     src = tmp_path / "note.md"
     src.write_text("a note under a mismatched embedding intent")
@@ -618,7 +629,7 @@ def test_store_delete_by_title_reports_actual_deleted_count_on_partial_anti_join
 
     result = runner.invoke(main, [
         "store", "delete",
-        "--collection", "knowledge__nexus__voyage-context-3__v1",
+        "--collection", "knowledge__nexus__model-ctx__v1",
         "--title", "doc.md", "--yes",
     ])
 
@@ -669,7 +680,7 @@ def test_store_delete_by_title_service_mode_real_client(runner, real_http_vector
 
     result = runner.invoke(main, [
         "store", "delete",
-        "--collection", "knowledge__nexus__voyage-context-3__v1",
+        "--collection", "knowledge__nexus__model-ctx__v1",
         "--title", "doc.md", "--yes",
     ])
     assert result.exit_code == 0, result.output
@@ -688,7 +699,7 @@ def test_store_delete_by_title_not_found_service_mode_clean_error(runner, real_h
 
     result = runner.invoke(main, [
         "store", "delete",
-        "--collection", "knowledge__nexus__voyage-context-3__v1",
+        "--collection", "knowledge__nexus__model-ctx__v1",
         "--title", "missing.md", "--yes",
     ])
     assert result.exit_code != 0
@@ -764,7 +775,7 @@ def test_store_import_heartbeat_ticks_during_a_slow_import(runner, tmp_path, mon
 
     def _slow_import_collection(**kwargs):
         time.sleep(0.09)  # several 0.02s intervals elapse with nothing done
-        return {"imported_count": 5, "collection_name": "knowledge__x__voyage-context-3__v1",
+        return {"imported_count": 5, "collection_name": "knowledge__x__model-ctx__v1",
                 "elapsed_seconds": 0.09}
 
     with patch("nexus.commands.store._t3", return_value=MagicMock()), \
@@ -781,7 +792,7 @@ def test_store_import_heartbeat_silent_on_a_fast_import(runner, tmp_path):
     dummy = tmp_path / "dummy.nxexp"
     dummy.write_bytes(b"not a real file -- import_collection is fully mocked below")
 
-    fake_result = {"imported_count": 5, "collection_name": "knowledge__x__voyage-context-3__v1",
+    fake_result = {"imported_count": 5, "collection_name": "knowledge__x__model-ctx__v1",
                    "elapsed_seconds": 0.01}
     with patch("nexus.commands.store._t3", return_value=MagicMock()), \
          patch("nexus.exporter.import_collection", return_value=fake_result):

@@ -100,12 +100,18 @@ def test_serverside_prune_quarantines_exactly_the_orphans(t2_service_env) -> Non
 
     _prune_deleted_files(coll_name, "docs__gcq-equiv-unused", db, catalog=cat)
 
-    remaining = set(db.get_collection(coll_name).get_all_metadata()["ids"])
+    # nexus-wbfpw.10 (RDR-192 Step 5 amendment): include_non_live=True --
+    # neither an orphan (by definition unowned) nor a quarantined chunk
+    # (physically moved, never manifest-referenced) has a live owner, so a
+    # plain live(c)-filtered read hides them regardless of whether the
+    # prune actually ran; the physical scan is the only ground truth this
+    # equivalence proof can check against.
+    remaining = set(db.get_collection(coll_name).get_all_metadata(include_non_live=True)["ids"])
     assert remaining == set(live_chashes), (
         f"expected exactly the live chashes to survive in origin; got {remaining}"
     )
     qname = quarantine_collection_name(coll_name)
-    quarantined = set(db.get_collection(qname).get_all_metadata()["ids"])
+    quarantined = set(db.get_collection(qname).get_all_metadata(include_non_live=True)["ids"])
     assert quarantined == set(orphan_chashes), (
         f"expected exactly the orphan chashes in quarantine; got {quarantined}"
     )
@@ -141,13 +147,13 @@ def test_serverside_prune_sweeps_rdr_collection_when_passed(t2_service_env) -> N
         catalog=cat, rdr_collection=rdr_coll,
     )
 
-    remaining = set(db.get_collection(rdr_coll).get_all_metadata()["ids"])
+    remaining = set(db.get_collection(rdr_coll).get_all_metadata(include_non_live=True)["ids"])
     assert remaining == set(rdr_live), (
         f"the rdr_collection kwarg must actually be swept; expected only "
         f"the live chash to survive, got {remaining}"
     )
     qname = quarantine_collection_name(rdr_coll)
-    quarantined = set(db.get_collection(qname).get_all_metadata()["ids"])
+    quarantined = set(db.get_collection(qname).get_all_metadata(include_non_live=True)["ids"])
     assert quarantined == set(rdr_orphans), (
         f"the rdr collection's orphan must be quarantined; got {quarantined}"
     )
@@ -174,15 +180,15 @@ def test_serverside_prune_rerun_with_no_new_orphans_is_idempotent(t2_service_env
     chashes, live_chashes, orphan_chashes = _seed(cat, db, coll_name, owner, n_live=2, n_orphan=2)
 
     _prune_deleted_files(coll_name, "docs__gcq-idempotent-unused", db, catalog=cat)
-    first_remaining = set(db.get_collection(coll_name).get_all_metadata()["ids"])
+    first_remaining = set(db.get_collection(coll_name).get_all_metadata(include_non_live=True)["ids"])
     qname = quarantine_collection_name(coll_name)
-    first_quarantined = set(db.get_collection(qname).get_all_metadata()["ids"])
+    first_quarantined = set(db.get_collection(qname).get_all_metadata(include_non_live=True)["ids"])
     assert first_remaining == set(live_chashes)
     assert first_quarantined == set(orphan_chashes)
 
     _prune_deleted_files(coll_name, "docs__gcq-idempotent-unused", db, catalog=cat)
-    second_remaining = set(db.get_collection(coll_name).get_all_metadata()["ids"])
-    second_quarantined = set(db.get_collection(qname).get_all_metadata()["ids"])
+    second_remaining = set(db.get_collection(coll_name).get_all_metadata(include_non_live=True)["ids"])
+    second_quarantined = set(db.get_collection(qname).get_all_metadata(include_non_live=True)["ids"])
     assert second_remaining == first_remaining, (
         f"a second pass with no new orphans must not change the origin "
         f"collection; first={first_remaining} second={second_remaining}"
@@ -216,7 +222,7 @@ def test_serverside_prune_noOrphans_movesNothing(t2_service_env) -> None:
 
     _prune_deleted_files(coll_name, "docs__gcq-noorphan-unused", db, catalog=cat)
 
-    remaining = set(db.get_collection(coll_name).get_all_metadata()["ids"])
+    remaining = set(db.get_collection(coll_name).get_all_metadata(include_non_live=True)["ids"])
     assert remaining == set(live_chashes)
     qname = quarantine_collection_name(coll_name)
     assert cat.get_collection(qname) is None, (
@@ -276,7 +282,7 @@ def test_serverside_failure_skips_only_that_collection(t2_service_env) -> None:
 
     # The raising collection was skipped, NOT swept: everything it had is
     # still in the origin collection, orphans included.
-    boom_remaining = set(db.get_collection(boom_coll).get_all_metadata()["ids"])
+    boom_remaining = set(db.get_collection(boom_coll).get_all_metadata(include_non_live=True)["ids"])
     assert boom_remaining == set(boom_live) | set(boom_orphans), (
         "a failed server-side prune must leave its collection untouched; "
         f"got {boom_remaining}"
@@ -284,13 +290,13 @@ def test_serverside_failure_skips_only_that_collection(t2_service_env) -> None:
 
     # The sweep continued: the SECOND collection was still pruned, via the
     # real server-side path.
-    ok_remaining = set(db.get_collection(ok_coll).get_all_metadata()["ids"])
+    ok_remaining = set(db.get_collection(ok_coll).get_all_metadata(include_non_live=True)["ids"])
     assert ok_remaining == set(ok_live), (
         "the sweep must continue past a failed collection; "
         f"second collection left as {ok_remaining}"
     )
     ok_quarantined = set(
-        db.get_collection(quarantine_collection_name(ok_coll)).get_all_metadata()["ids"]
+        db.get_collection(quarantine_collection_name(ok_coll)).get_all_metadata(include_non_live=True)["ids"]
     )
     assert ok_quarantined == set(ok_orphans), (
         f"second collection's orphans should be quarantined; got {ok_quarantined}"
@@ -382,7 +388,9 @@ def test_route_unavailable_prunes_nothing_and_crosses_no_wire(t2_service_env) ->
 
     with capture_logs() as cap, \
          patch.object(hvc.HttpVectorClient, "gc_quarantine_orphans", None), \
+         patch.object(hvc.HttpVectorClient, "gc_quarantine_orphans_bounded", None), \
          patch.object(hvc.HttpVectorClient, "gc_restore_rereferenced", None), \
+         patch.object(hvc.HttpVectorClient, "gc_restore_rereferenced_bounded", None), \
          patch.object(hvc.HttpVectorClient, "gc_expire_quarantine", None), \
          patch("nexus.db.http_vector_client._post", side_effect=_spy_post):
         _prune_deleted_files(coll_name, "docs__gcq-fallback-unused", db, catalog=cat)
@@ -404,7 +412,7 @@ def test_route_unavailable_prunes_nothing_and_crosses_no_wire(t2_service_env) ->
     assert warn_logs[0]["collection"] == coll_name
     assert warn_logs[0].get("log_level") == "warning", warn_logs[0]
 
-    remaining = set(db.get_collection(coll_name).get_all_metadata()["ids"])
+    remaining = set(db.get_collection(coll_name).get_all_metadata(include_non_live=True)["ids"])
     assert remaining == set(chashes), (
         "a route-unavailable collection must be left COMPLETELY untouched "
         f"(orphans included — no fallback prunes them any more); got {remaining}"

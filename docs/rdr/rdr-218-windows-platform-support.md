@@ -276,7 +276,16 @@ there are two distinct blocking sites:
   other exposed sites; it does not cover the one that was measured. A
   standing hypothesis, labelled as one: on Windows, concurrent spawning from
   threads can leak a pipe handle into a SIBLING process, and the hook path
-  does run each tool in a worker thread. Testable directly, untested so far.
+  does run each tool in a worker thread. Tested 2026-09-27 (`nexus-ijue9.10`)
+  and NOT REPRODUCED: on native CPython 3.12.13 on qwentescence, a leaf
+  `git rev-parse` under `subprocess.run(capture_output=True, timeout=5.0)`
+  never exceeded 0.045s across 36 trials, in two shapes (a barrier-synced
+  sibling holding inheritable pipes, and six threads spawning continuously).
+  The harness ran `rev-parse --is-inside-work-tree` with `cwd=`, not the
+  measured `-C <dir> rev-parse --git-common-dir`, and used plain threads, not
+  the hook path's own dispatch or its accumulated handle state. So this rules
+  out two reproductions, not the hypothesis, and the 25-second block stays
+  unexplained.
 - `tuple_registry`, and other tools that construct a `T2Database`, block in
   `T2Database.__init__` importing numpy's C extension. The same import outside
   that process takes 0.08 seconds, including from a worker thread under an
@@ -394,7 +403,16 @@ things block it on Windows specifically:
 - `mcpb/pyproject.toml:13` depends on `conexus[local]>=7.56.0` — the `[local]`
   extra is mandatory because the bundle "cannot run the interactive `nx init`
   embedder choice" — and whether Windows wheels exist for that whole dependency
-  closure is unverified anywhere in the tree.
+  closure was unverified anywhere in the tree. Measured 2026-09-27
+  (`nexus-ijue9.18`) at conexus 7.63.0, with the shipped overrides
+  (`src/nexus/_install/overrides.txt`) applied: the bare closure (217 packages)
+  and the `[local]` closure (220) both resolve for Windows, install and import
+  on qwentescence (`torch 2.8.0+cpu`, `onnxruntime`, `mineru`, `docling`). One
+  package, `antlr4-python3-runtime==4.9.3`, has no wheel; it is pure Python
+  and builds without a compiler. Only import was tested, not a MinerU parse or
+  a docling conversion. The result holds for that version on one box; no gate
+  keeps it true as pins move, and nothing asserts that Windows keeps getting
+  the CPU torch wheel by default, which Linux needs a dedicated index for.
 
 The bundle also assumes a nexus-service already exists: it starts nothing, and
 with no endpoint `src/nexus/db/service_endpoint.py:476-486` raises
@@ -695,19 +713,33 @@ the same tar, simulating an image update, and the volume reattached.
 service without toasting the data" is a measured property of this design, not
 an aspiration.
 
-**Still unverified, and it is the friction claim rather than the mechanism:**
+**Settled 2026-09-27 (`nexus-ijue9.3`), and half of it goes against us:**
 whether `wsl --mount` and `wsl --import` work *without administrative rights*.
-Both succeeded here, but the ssh session that ran them carries a full
-Administrator token, so the experiment cannot distinguish "works" from "works
-because elevated" — and Microsoft documents `wsl --mount` as requiring
-elevation. This matters for the Desktop install story specifically and is the
-next thing Phase 1 should settle.
+Both succeeded above under a full Administrator token, which could not
+distinguish "works" from "works because elevated". The test was rerun twice
+on qwentescence (WSL 2.7.14.0):
+
+- As a non-elevated token of the box's administrator account (Scheduled Task,
+  `/rl limited`, Administrators deny-only, Medium integrity), both commands
+  succeeded.
+- As a genuine standard account (`nexus-std-probe`, not in Administrators,
+  no Administrators SID in its token at all), `wsl --import` succeeded and
+  `wsl --mount --vhd ... --bare` was refused:
+  `Wsl/Service/AttachDisk/MountDisk/HCS/E_ACCESSDENIED`.
+
+So `--import` needs neither elevation nor membership, and `--mount` gates on
+Administrators *group membership*, not on the calling token's elevation. An
+administrator can mount without a UAC prompt; a standard user cannot mount at
+all, matching Microsoft's documented requirement. The Desktop install flow
+therefore needs an administrator step for the data volume whenever the user is
+not an administrator. Per-user WSL registration also lives in that user's own
+hive: a distro a standard user imported can only be unregistered from inside
+that user's context.
 
 **Also unverified, and smaller:** that a *fixed* port behaves under WSL2's
 localhost relay the way ephemeral ones did — what was measured was the bind
-*family*, not port fixedness; and that Windows wheels exist for the whole
-conexus dependency closure, which the native-client half needs and which no
-gate covers.
+*family*, not port fixedness. The Windows wheel closure the native-client half
+needs is measured for conexus 7.63.0 (see Gap 5), but no gate covers it.
 
 **That WSL2 itself is acceptable as a dependency.** Every option except C
 requires it. On the one host tested, installing it required an MSI, admin
@@ -1042,10 +1074,11 @@ The two mechanism questions this phase existed to de-risk are already
 answered — a `docker export` rootfs boots with systemd as pid 1, lingering
 works in it, a separate VHDX mounts as ext4 inside the distro, and the data
 survives an unregister-and-re-import cycle (see Critical Assumptions). What
-Phase 1 still owes is the *elevation* question: whether `wsl --import` and
-`wsl --mount` work for a non-administrator, since the experiment ran under an
-Administrator token and cannot tell the difference. A negative answer does not
-reshape the architecture but does reshape the Desktop install flow.
+Phase 1 owed was the *elevation* question, answered 2026-09-27 (see Critical
+Assumptions): `wsl --import` works for a standard user, and `wsl --mount` does
+not. The architecture stands. The Desktop install flow must mount the data
+volume through an administrator step (a UAC prompt, or a refusal naming the
+remedy) when the user is not an administrator.
 
 **Phase 2 — the endpoint contract (Gaps 1 and 2).** With an appliance we
 control, discovery mostly dissolves: the systemd unit pins a *fixed* port
@@ -1277,8 +1310,11 @@ decision surface keeps that open deliberately.
    cost reducer, not needed by the appliance.
 4. Does the MCP *tool* surface work from a native Windows client? Still
    unproven; the one attempt was invalidated by Gap 3. Phase 1 closes it.
-5. Is `wsl --import` of a published appliance image acceptable to install
-   without administrative rights, given WSL2 itself is already present?
+5. ~~Is `wsl --import` of a published appliance image acceptable to install
+   without administrative rights, given WSL2 itself is already present?~~
+   **Answered (2026-09-27, `nexus-ijue9.3`): the import is, the data-volume
+   mount is not.** A standard user can `wsl --import`; `wsl --mount --vhd`
+   needs Administrators membership. See Critical Assumptions.
 6. What is the update path for an appliance image, and does Sam's "updating via
    CLI is fine" extend to re-importing a distro?
 
@@ -1410,4 +1446,5 @@ questions rather than from the drafting.
 | 2026-09-22 | Round-2 Significant: replaced the superseded ``not obviously Windows-specific`` hedge in Gap 4, which contradicted the measured `if _mswindows` finding four paragraph blocks later. |
 | 2026-09-22 | Fix check `nexus_rdr/218-fix-check-34a68b628` (three passes, PASS, 0 BLOCKS-PLANNING) closed residual 2; its six OBSERVATIONs fixed here. The `four shapes` figure rested on an unrecorded probe and is now pinned by `test_stock_subprocess_run_does_not_hang_on_posix`; `wait()`'s own untimed-but-finite step is stated; the Windows-only finding is explicitly marked as NOT explaining the 25s block. |
 | 2026-09-22 | Finalization Gate section still read "Not yet run ... `status: draft`" after the gate had run twice and Sam had accepted the record. Corrected; the caution it carried is kept, because three contradictions were then found by the gate and its fix check, which is what that caution predicted. |
+| 2026-09-27 | Recorded three experiment results. `nexus-ijue9.3`: `wsl --import` works for a standard user; `wsl --mount --vhd` needs Administrators membership (Critical Assumptions, Phase 1, Open Question 5). `nexus-ijue9.10`: the sibling-thread pipe-handle hypothesis was not reproduced in two shapes, and the 25-second block stays unexplained (Gap 4). `nexus-ijue9.18`: the Windows wheel closure resolves, installs and imports at 7.63.0 with the shipped overrides (Gap 5). Evidence in T2 `nexus/rdr218-experiments-2026-09-27`. |
 | 2026-09-22 | Dropped `nexus-1vc0n` from related_issues: it is the batched `nx index repo` writer needing an engine-side bulk file_path lookup, and has nothing to do with Windows. Surfaced by the planner, which found no phase for it because there is none. |

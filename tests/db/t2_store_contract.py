@@ -345,6 +345,11 @@ T2_SUPPLEMENTAL_CONTRACT: dict[str, dict[str, list[str]]] = {
         # caller: mcp_infra.drain_unassigned_chunks (nx taxonomy drain, and the
         # drain at the end of every nx index repo).
         'unassigned_chashes': ['collection', 'limit', 'after'],
+        # nexus-l3dg2: batched taxonomy_meta discover stamps for a list of
+        # collections (engine-service-v0.1.135). Service-only by construction:
+        # the SQLite era had no engine-side discover stamp to reconcile
+        # against. Production caller: health._check_taxonomy_discover_health.
+        'get_last_discover_stamps': ['collections'],
         # nexus-v4pj4: the engine's live cross-pass ANN pick for a batch of
         # chunks, computed read-only under the cross pass's own HNSW and plan
         # settings (taxonomy-021, next engine tag). Service-only by

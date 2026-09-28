@@ -84,6 +84,80 @@ def test_exit_code(conclusions, code) -> None:
     assert cs.exit_code(cs.fold(posts, SHA)) == code
 
 
+def _superseded_run() -> list:
+    # The shape of a run the concurrency group cancelled when a newer commit
+    # pushed: the run post and the shard jobs read cancelled, and the
+    # pytest-gate aggregator alone reads failure because its shards never
+    # reported (nexus-lgx93).
+    return [_p("2026-09-26T10:05:00Z", state="completed", conclusion="cancelled", job="",
+               dims={"from": "github", "kind": "run"}),
+            _p("2026-09-26T10:04:00Z", state="completed", conclusion="cancelled", job="shard-1"),
+            _p("2026-09-26T10:04:00Z", state="completed", conclusion="cancelled", job="shard-2"),
+            _p("2026-09-26T10:04:30Z", state="completed", conclusion="failure", job="pytest-gate"),
+            _p("2026-09-26T10:02:00Z", state="completed", conclusion="success", job="lint")]
+
+
+def test_a_superseded_run_reads_cancelled_not_failed() -> None:
+    statuses = cs.fold(_superseded_run(), SHA)
+    by_job = {s.job: s for s in statuses}
+    assert by_job[""].verdict == "cancelled"
+    assert by_job["shard-1"].verdict == "cancelled"
+    # The aggregator's failure is a consequence of the cancellation, not a red.
+    assert by_job["pytest-gate"].verdict == "cancelled"
+    assert by_job["pytest-gate"].conclusion == "failure"  # the row still says why
+    assert by_job["lint"].verdict == "green"
+    assert cs.exit_code(statuses) == 4
+
+
+def test_a_cancelled_job_in_a_run_github_did_not_cancel_is_failed() -> None:
+    # A job past its time limit: GitHub cancels the job and fails the run.
+    posts = [_p("2026-09-26T10:05:00Z", state="completed", conclusion="failure", job="",
+                dims={"from": "github", "kind": "run"}),
+             _p("2026-09-26T10:04:00Z", state="completed", conclusion="cancelled", job="slow")]
+    statuses = cs.fold(posts, SHA)
+    assert {s.job: s.verdict for s in statuses} == {"": "failed", "slow": "failed"}
+    assert cs.exit_code(statuses) == 1
+
+
+def test_a_cancelled_job_with_no_run_post_reads_cancelled() -> None:
+    # Without the run post the fold cannot tell a timeout from a supersede,
+    # so it reports what GitHub said and leaves the reading to the caller.
+    posts = [_p("2026-09-26T10:04:00Z", state="completed", conclusion="cancelled", job="slow"),
+             _p("2026-09-26T10:04:00Z", state="completed", conclusion="success", job="lint")]
+    statuses = cs.fold(posts, SHA)
+    assert {s.job: s.verdict for s in statuses} == {"slow": "cancelled", "lint": "green"}
+    assert cs.exit_code(statuses) == 4
+
+
+def test_a_genuine_failure_outranks_a_cancelled_sibling_workflow() -> None:
+    superseded = _superseded_run()
+    other = [_p("2026-09-26T10:06:00Z", state="completed", conclusion="failure",
+                job="build", workflow="Service CI")]
+    assert cs.exit_code(cs.fold(superseded + other, SHA)) == 1
+
+
+def test_pending_outranks_cancelled() -> None:
+    posts = _superseded_run() + [_p("2026-09-26T10:07:00Z", state="in_progress",
+                                    job="build", workflow="Service CI")]
+    assert cs.exit_code(cs.fold(posts, SHA)) == 2
+
+
+def test_a_status_cannot_exist_without_a_verdict() -> None:
+    # The verdict is a stored field; a construction site that forgets it
+    # would otherwise read green through exit_code's membership checks.
+    with pytest.raises(ValueError, match="verdict"):
+        cs.Status("CI", "lint", 1, "completed", "success", "u", "t", "")
+    with pytest.raises(TypeError):
+        cs.Status("CI", "lint", 1, "completed", "success", "u", "t")
+
+
+def test_json_output_carries_the_verdict(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(cs, "read_posts", lambda topic: _superseded_run())
+    assert cs.main([SHA, "--json"]) == 4
+    rows = json.loads(capsys.readouterr().out)
+    assert {r["job"]: r["verdict"] for r in rows}["pytest-gate"] == "cancelled"
+
+
 def test_run_rows_sort_before_their_jobs() -> None:
     posts = [_p("t1", state="completed", conclusion="success", job="zeta"),
              _p("t2", state="completed", conclusion="success", job="")]

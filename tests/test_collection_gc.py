@@ -132,8 +132,8 @@ class TestCollectionGCCli:
         self._seed(
             t3_db, catalog_env, monkeypatch,
             zombie_collections=[
-                "rdr__zombie-1__voyage-context-3__v1",
-                "rdr__zombie-2__voyage-context-3__v1",
+                "rdr__zombie-1__model-ctx__v1",
+                "rdr__zombie-2__model-ctx__v1",
                 "code__zombie-leak",
             ],
             registered_collections=["code__live"],
@@ -145,15 +145,15 @@ class TestCollectionGCCli:
         assert result.exit_code == 0, result.output
         assert "zombie candidates): 3" in result.output
         assert "would delete" in result.output
-        assert "rdr__zombie-1__voyage-context-3__v1" in result.output
-        assert "rdr__zombie-2__voyage-context-3__v1" in result.output
+        assert "rdr__zombie-1__model-ctx__v1" in result.output
+        assert "rdr__zombie-2__model-ctx__v1" in result.output
         assert "code__zombie-leak" in result.output
         assert "Re-run with --apply" in result.output
 
         # T3 unchanged.
         names = {c["name"] for c in t3_db.list_collections()}
-        assert {"rdr__zombie-1__voyage-context-3__v1",
-                "rdr__zombie-2__voyage-context-3__v1",
+        assert {"rdr__zombie-1__model-ctx__v1",
+                "rdr__zombie-2__model-ctx__v1",
                 "code__zombie-leak",
                 "code__live"} <= names
 
@@ -166,7 +166,7 @@ class TestCollectionGCCli:
         self._seed(
             t3_db, catalog_env, monkeypatch,
             zombie_collections=[
-                "rdr__zombie-a__voyage-context-3__v1",
+                "rdr__zombie-a__model-ctx__v1",
                 "docs__zombie-b",
             ],
             registered_collections=["code__live"],
@@ -182,7 +182,7 @@ class TestCollectionGCCli:
 
         names = {c["name"] for c in t3_db.list_collections()}
         # Zombies gone.
-        assert "rdr__zombie-a__voyage-context-3__v1" not in names
+        assert "rdr__zombie-a__model-ctx__v1" not in names
         assert "docs__zombie-b" not in names
         # Registered + non-empty preserved.
         assert "code__live" in names
@@ -220,7 +220,7 @@ class TestCollectionGCCli:
         and is being restored).
         """
         # Seed an empty T3 collection AND a documents row referencing it.
-        empty_referenced = "rdr__doc-referenced__voyage-context-3__v1"
+        empty_referenced = "rdr__doc-referenced__model-ctx__v1"
         t3_db._client.get_or_create_collection(empty_referenced)
         # Register a document referencing the collection. Was a raw INSERT at a
         # pinned tumbler "to skip the register flow"; the assertion only needs

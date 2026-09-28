@@ -7959,12 +7959,15 @@ def _pdf_stubs_in_collection(t3: object, name: str, page_size: int) -> tuple[dic
 
     Returns ``(source -> chunk count, truncated)``. The source is the
     catalog source URI, or ``"content_hash <prefix>"`` when the engine
-    resolves none: it returns null both for a chunk no manifest names and
-    for a document registered without a URI, so the two cannot be told
-    apart here. The engine filters on ``content_type`` and the literal empty
-    ``title`` the uploader writes; ``extraction_method`` is checked here,
-    because the vector bridge has no absent-key predicate. Raises on a read
-    failure; the caller names it.
+    resolves none. Since RDR-192 Step 5 (nexus-wbfpw.10) every chunk this
+    read returns has a live owner in its own collection -- a chunk with no
+    manifest row at all is invisible here, not merely unnamed -- so a null
+    source means the owning document was registered without a URI, never
+    "no manifest names this chunk"; a manifest-less stub is the RDR-192
+    reaper's business, not this check's. The engine filters on
+    ``content_type`` and the literal empty ``title`` the uploader writes;
+    ``extraction_method`` is checked here, because the vector bridge has no
+    absent-key predicate. Raises on a read failure; the caller names it.
     """
     # Not get_collection(): that re-lists every collection in the tenant to
     # prove existence, one extra stats round trip per collection, and the
@@ -8103,15 +8106,14 @@ def _check_pdf_stub_metadata() -> list[HealthResult]:
             parts.append(
                 f"{sum(unowned.values())} {'more ' if documents else ''}placeholder PDF chunk(s) resolve "
                 "to no catalog source URI, so they cannot be named for a "
-                "re-index: either no manifest names them, or their document "
-                f"was registered without a URI. {listing}{more}."
+                "re-index: their owning document was registered without one "
+                f"(RDR-192 Step 5, nexus-wbfpw.10: every chunk this check can "
+                f"see has a live owner, so this is never a manifest-less "
+                f"chunk). {listing}{more}."
             )
-            # No verb reclaims manifest-less chunks: purge-trash sweeps
-            # chunks whose documents are tombstoned, and `nx t3 gc`
-            # hard-deletes. RDR-192 is the design for them.
             fixes.append(
-                "no source URI: find the owning document first; if no manifest "
-                "names the chunks, see RDR-192 before any delete"
+                "no source URI: find the owning document (nx catalog show) "
+                "and update it with a file path or source URI"
             )
         return [HealthResult(
             label=label,
@@ -8475,6 +8477,247 @@ def _check_topics_doc_count_drift() -> list[HealthResult]:
             pass
 
 
+def _check_taxonomy_discover_health() -> list[HealthResult]:
+    """Name collections whose last taxonomy-discover attempt FAILED more
+    recently than it last succeeded (bead nexus-du6d0, qgc4b residual
+    staleness).
+
+    THE GAP. qgc4b's self-heal guard (``_taxonomy_incomplete`` /
+    ``_collections_without_topics`` in ``nexus.commands.index``) re-runs
+    discovery on a no-change ``nx index repo`` run only while a
+    collection has ZERO topics. Once a collection has produced >=1
+    topic, a LATER discover failure (credential expiry, quota, schema
+    drift) has no operator-visible signal on a repo whose files stopped
+    changing: ``run_collection_postprocessing`` only invokes discover at
+    all when ``files_changed>0`` or the zero-topic self-heal fires, and
+    neither holds on a maintenance-mode repo coincident with a failing
+    discover backend — the "no files changed — skipping discovery" line
+    (see ``nexus.commands.index``) reads as reassurance while the
+    taxonomy silently goes stale, indefinitely, with no operator signal.
+
+    THE FIX is client-side, deliberately: recording the attempt/outcome
+    needs no new engine column or changeset (an engine schema change is
+    Sam's decision, not this bead's) because T2's generic ``memory``
+    project/title store already serves this without one.
+    ``nexus.mcp_infra.record_taxonomy_discover_attempt`` upserts one T2
+    memory entry per collection (project
+    ``nexus_taxonomy_discover_health``) on EVERY discover attempt a
+    process makes, success and failure alike — independent of
+    ``taxonomy_meta.last_discover_at`` (the engine column, which only
+    advances on a SUCCESSFUL discover via ``record_discover_count``).
+    This check reads that project back; because each attempt UPSERTS
+    the same title, the stored record is always the most recent
+    attempt's outcome, so "last recorded outcome is failure" already
+    means "failed more recently than it last succeeded" without needing
+    to compare two separate timestamps. Run-independent: the warning
+    stays visible across `nx doctor` runs even when the repo that would
+    have retried discovery never indexes again.
+
+    Read-only, degrades internally. No entries recorded yet — a virgin
+    box, or a client predating this bead — reads not-applicable, never a
+    false clean pass masquerading as "checked and fine".
+
+    STALE ROWS (review round 2, nexus-du6d0): a collection deleted or
+    renamed after a failed attempt would otherwise warn forever — its T2
+    memory record never gets a follow-up write once the collection is
+    gone, so its ``last_outcome`` stays ``"failure"`` indefinitely. The
+    live collection list (:func:`nexus.db.make_t3` ``.list_collections()``,
+    ONE call, never one per entry) is read once and any entry whose
+    collection is not in it is dropped and counted, named in the detail
+    line rather than silently absorbed. A failure to read the live list
+    fails OPEN — no filtering is applied rather than risk swallowing a
+    genuine, still-live warning because liveness could not be checked.
+
+    DIVERGENCE WITH THE ENGINE — CLOSED (nexus-l3dg2, the du6d0 residual
+    review round 2 named): a T2-write failure right after a REAL
+    engine-side discover success (following a recorded failure) used to
+    keep warning forever, because this check only ever read the
+    client-recorded outcome. ``TaxonomyRepository.getLastDiscoverStamps``
+    / ``POST /meta/last_discover_batch`` (engine, Sam's decision) now
+    give a batched ``taxonomy_meta.last_discover_at`` read for the exact
+    set of FAILED collections in ONE round trip per <=300-collection page
+    (the engine's ``MAX_LAST_DISCOVER_BATCH`` cap) — see
+    :meth:`nexus.db.t2.http_taxonomy_store.HttpTaxonomyStore.get_last_discover_stamps`.
+    A collection whose engine stamp is newer than its recorded failure
+    is RECONCILED (dropped from the warning): the engine's own success
+    stamp is authoritative over the client-recorded outcome it exists to
+    corroborate. Best-effort: an engine that predates the route (404), or
+    any other reconcile failure, degrades to the PRE-nexus-l3dg2
+    behaviour (every recorded failure still warns) with one
+    "(engine reconcile unavailable)" note — never a crash, never a
+    swallowed warning.
+    """
+    label = "taxonomy.discover health"
+    try:
+        from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred: CLI startup cost
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
+            TAXONOMY_DISCOVER_HEALTH_PROJECT,
+            parse_taxonomy_discover_health,
+        )
+
+        store = HttpMemoryStore()  # self-resolves the endpoint, as t2/__init__ does
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_taxonomy_discover_health_check_failed", stage="connect", error=str(exc))
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable (no engine-backed T2 on this box)",
+        )]
+
+    try:
+        try:
+            entries = store.get_all(TAXONOMY_DISCOVER_HEALTH_PROJECT)
+        except Exception as exc:  # noqa: BLE001 — must not crash `nx doctor`; degrades to a named skip
+            _log.debug("doctor_taxonomy_discover_health_check_failed", stage="get_all", error=str(exc))
+            return [HealthResult(label=label, ok=True, detail="skipped (T2 memory store unavailable)")]
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 — best-effort close, never masks the check's own result
+            pass
+
+    if not entries:
+        return [HealthResult(
+            label=label, ok=True,
+            detail="not applicable (no taxonomy-discover attempts recorded yet)",
+        )]
+
+    # nexus-du6d0 fix round: drop entries for a collection that no longer
+    # exists (deleted or renamed since the recorded attempt) — ONE call,
+    # never one per entry. A failure to read the live list fails OPEN:
+    # `live_names = None` means "couldn't check, don't filter", never
+    # "assume everything is stale".
+    live_names: set[str] | None
+    try:
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+        live_names = {str(c.get("name", "")) for c in make_t3().list_collections()}
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_taxonomy_discover_health_check_failed", stage="list_collections", error=str(exc))
+        live_names = None
+
+    stale = 0
+    tracked = 0
+    failed: list[tuple[str, dict]] = []
+    for e in entries:
+        collection = str((e or {}).get("title", ""))
+        if live_names is not None and collection not in live_names:
+            stale += 1
+            continue
+        tracked += 1
+        record = parse_taxonomy_discover_health((e or {}).get("content", ""))
+        if record.get("last_outcome") == "failure":
+            failed.append((collection, record))
+
+    stale_note = (
+        f" ({stale} stale entr{'y' if stale == 1 else 'ies'} for a deleted/renamed collection ignored)"
+        if stale else ""
+    )
+
+    if tracked == 0:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"not applicable ({stale} recorded attempt(s) reference a deleted/renamed collection)",
+        )]
+
+    if not failed:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                f"{tracked} collection(s) tracked, most recent discover attempt "
+                f"succeeded for all{stale_note}"
+            ),
+        )]
+
+    def _pretty(item: tuple[str, dict]) -> str:
+        collection, record = item
+        when = record.get("last_attempt_at") or "unknown time"
+        err = record.get("error_class") or "unknown error"
+        return f"{collection} (failed {when}, {err})"
+
+    # nexus-l3dg2 (du6d0 residual, item 3): reconcile against the engine's own
+    # taxonomy_meta.last_discover_at, ONE round trip per <=300-collection page
+    # (paged transparently by get_last_discover_stamps at the engine's cap)
+    # for every failed collection, before warning. A best-effort T2 write
+    # failure right after
+    # a REAL engine-side discover success (that followed a recorded failure)
+    # must not keep this row warning indefinitely — the engine's own success
+    # stamp is authoritative over the client-recorded outcome it exists to
+    # corroborate. Best-effort: any reconcile failure (older engine
+    # predating the route -> 404, or any other transport error) degrades to
+    # the pre-nexus-l3dg2 behavior (every recorded failure still warns),
+    # named once rather than silently absorbed.
+    reconciled: set[str] = set()
+    reconcile_unavailable = False
+    try:
+        from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore  # noqa: PLC0415 — deferred: CLI startup cost
+
+        tax_store = HttpTaxonomyStore()
+        try:
+            stamps = tax_store.get_last_discover_stamps([c for c, _ in failed])
+        finally:
+            tax_store.close()
+        for collection, record in failed:
+            stamp = stamps.get(collection)
+            if not stamp:
+                continue
+            engine_at = stamp.get("last_discover_at")
+            failure_at = record.get("last_attempt_at")
+            # Lexicographic compare is sound: both sides are stamped
+            # "%Y-%m-%dT%H:%M:%SZ" (UTC, explicit seconds) — the engine's
+            # TaxonomyRepository.utcIso and mcp_infra.record_taxonomy_discover_attempt
+            # use the identical format, deliberately (avoids the
+            # elided-zero-seconds trap nexus-onjvy documents elsewhere).
+            #
+            # Strict ">" is deliberate (review round 1, nexus-l3dg2): an
+            # engine stamp equal to the recorded failure's timestamp, to
+            # the SECOND (this format's own resolution), is NOT proof the
+            # engine's discover ran AFTER the recorded failure -- it is
+            # equally consistent with the engine attempt that FAILED
+            # having itself advanced last_discover_at moments earlier in
+            # the same wall-clock second, or with the two clocks simply
+            # agreeing on a shared second. Treating an exact tie as
+            # "reconciled" would let a same-second failure silently clear
+            # its own warning; keeping it unreconciled is the conservative
+            # (never-silently-clear) reading a health check must default
+            # to. A newer engine stamp with SUB-second resolution would
+            # make this moot, but the wire format has none.
+            if engine_at and (not failure_at or engine_at > failure_at):
+                reconciled.add(collection)
+    except Exception as exc:  # noqa: BLE001 — best-effort reconcile; must not crash `nx doctor`
+        _log.debug("doctor_taxonomy_discover_health_check_failed", stage="engine_reconcile", error=str(exc))
+        reconcile_unavailable = True
+
+    still_failed = [item for item in failed if item[0] not in reconciled]
+    reconcile_note = " (engine reconcile unavailable)" if reconcile_unavailable else ""
+
+    if not still_failed:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=(
+                f"{tracked} collection(s) tracked; {len(reconciled)} reported a failed "
+                f"discover but the engine's last_discover_at is newer than the recorded "
+                f"failure, so the T2 write failure that followed a real success is "
+                f"reconciled{stale_note}"
+            ),
+        )]
+
+    reconciled_note = (
+        f" ({len(reconciled)} other collection(s) reconciled against a newer engine "
+        f"last_discover_at)" if reconciled else ""
+    )
+    names = "; ".join(_pretty(item) for item in still_failed[:10])
+    if len(still_failed) > 10:
+        names += f"; … {len(still_failed) - 10} more"
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"{len(still_failed)} collection(s) whose last taxonomy-discover attempt failed "
+            f"more recently than it last succeeded: {names}. Run `nx taxonomy discover "
+            f"--collection <name>` to retry.{stale_note}{reconciled_note}{reconcile_note}"
+        ),
+        fix_suggestions=["nx taxonomy discover --collection <name>"],
+    )]
+
+
 def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
@@ -8552,6 +8795,12 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # taxonomy-013's recompute triggers). Self-heals on the engine's next
     # restart (hygiene-007-1); silent until then, so reportable here.
     results.extend(_check_topics_doc_count_drift())
+    # nexus-du6d0 (qgc4b residual staleness): a collection whose taxonomy
+    # already has topics gets no self-heal retry on a no-change index run,
+    # so a discover backend that starts failing after an earlier success
+    # is invisible on a repo whose files stopped changing. Degrades
+    # internally (not-applicable with no recorded attempts).
+    results.extend(_check_taxonomy_discover_health())
 
     results.extend(_check_tools())
     results.extend(_check_mcp_entry_points())

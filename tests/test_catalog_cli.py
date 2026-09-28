@@ -751,6 +751,32 @@ class TestUpdateCommand:
         show = runner.invoke(main, ["catalog", "show", "1.1.1"])
         assert "x-devonthink-item://8EDC855D" in show.output
 
+    def test_update_source_uri_refused_in_batch_mode_with_owner(
+        self, initialized_catalog, catalog_env,
+    ):
+        """nexus-0ne1m critique (significant #3): --source-uri combined
+        with --owner (batch mode) is refused outright, not silently
+        fanning out one ETag-capture HEAD request per matched document
+        (or colliding every matched entry but one on the engine's
+        live-source_uri uniqueness constraint)."""
+        result = CliRunner().invoke(main, [
+            "catalog", "update", "--owner", "1.1",
+            "--source-uri", "https://example.com/doc", "--corpus", "x",
+        ])
+        assert result.exit_code != 0, result.output
+        assert "--source-uri cannot be combined with --owner/--search" in result.output
+        assert "backfill-etags" in result.output
+
+    def test_update_source_uri_refused_in_batch_mode_with_search(
+        self, initialized_catalog, catalog_env,
+    ):
+        result = CliRunner().invoke(main, [
+            "catalog", "update", "--search", "anything",
+            "--source-uri", "https://example.com/doc", "--corpus", "x",
+        ])
+        assert result.exit_code != 0, result.output
+        assert "--source-uri cannot be combined with --owner/--search" in result.output
+
     @_needs_diagnosis_nexus_02avu
     def test_update_source_uri_validates_scheme(
         self, initialized_catalog, catalog_env,
@@ -3133,7 +3159,15 @@ class TestWhh61MigrationCarve:
         the fix -- now carried through from the local variables the
         f-string ``target`` was built from, instead of being re-parsed
         back out of that rendered string via the retired
-        ``parse_conformant_collection_name``."""
+        ``parse_conformant_collection_name``.
+
+        nexus-aotql: the loop itself is now routed through
+        ``ensure_collection_registered`` instead of a direct
+        ``writer.register_collection`` call -- the seam calls
+        ``writer.register_collection(target, **kwargs)`` with the
+        IDENTICAL explicit kwargs this test already pinned, so the
+        assertion below is unchanged; only the writer double's spec
+        gained ``close`` (see below)."""
         from unittest.mock import MagicMock, patch
 
         from nexus.catalog.http_catalog_client import HttpCatalogClient
@@ -3147,7 +3181,14 @@ class TestWhh61MigrationCarve:
         # above's comment -- content_type comes from src_row directly.
         cat.get_collection.return_value = {"name": "docs__default", "content_type": "docs"}
         cat.list_by_collection.return_value = [entry]
-        writer = MagicMock(spec=list(CATALOG_WRITE_OPS))
+        # nexus-aotql: the registration now routes through
+        # ensure_collection_registered, which calls writer.close() once
+        # per registration (a documented no-op on the shared service-
+        # catalog handle) -- "close" is not itself a CATALOG_WRITE_OPS
+        # entry (it is connection lifecycle, not a catalog RPC), so the
+        # spec must name it explicitly or the seam's own finally block
+        # raises AttributeError against this restricted double.
+        writer = MagicMock(spec=[*CATALOG_WRITE_OPS, "close"])
         with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
                 patch("nexus.commands.catalog._get_catalog_writer", return_value=writer):
             result = CliRunner().invoke(
@@ -3161,6 +3202,52 @@ class TestWhh61MigrationCarve:
             embedding_model="voyage-context-3",
             model_version="v1",
         )
+
+    def test_migrate_fallback_profile_mismatch_raises_click_exception_with_remedy(self):
+        """nexus-aotql review round 2 (BLOCKER): the registration loop's
+        default ``--target-model`` is voyage-only (``voyage_model_for_
+        collection``), so a local-mode box whose engine profile is still
+        bge-shaped hits ``EmbeddingProfileMismatchError`` on the very
+        first target. Before this fix that escaped the loop as a raw
+        exception (a click.testing.CliRunner traceback); it must instead
+        render as a clean ClickException naming the collection, the
+        engine's ACTUAL profile model, and the remedy (pass
+        ``--target-model <profile model>``), and no document may be
+        re-pointed for a collection whose registration never landed."""
+        from unittest.mock import MagicMock, patch
+
+        import nexus.catalog.factory as factory_mod
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.cli import main
+
+        entry = MagicMock()
+        entry.tumbler = "1.1.1"
+        cat = MagicMock(spec=HttpCatalogClient)
+        cat.get_collection.return_value = {"name": "docs__default", "content_type": "docs"}
+        cat.list_by_collection.return_value = [entry]
+        writer = MagicMock(spec=[*CATALOG_WRITE_OPS, "close"])
+
+        class _BgeOnlyProfile:
+            def embedding_profile(self) -> list[dict]:
+                return [{
+                    "content_type": "docs",
+                    "embedding_model": "bge-base-en-v15-768",
+                    "dimension": 768,
+                }]
+
+        with patch("nexus.commands.catalog._get_catalog", return_value=cat), \
+                patch("nexus.commands.catalog._get_catalog_writer", return_value=writer), \
+                patch.object(factory_mod, "make_catalog_reader", lambda: _BgeOnlyProfile()):
+            result = CliRunner().invoke(
+                main, ["catalog", "migrate-fallback", "docs__default", "--yes"],
+            )
+
+        assert result.exit_code != 0, result.output
+        assert "Traceback (most recent call last)" not in result.output, result.output
+        assert "docs__1-1__voyage-context-3__v1" in result.output, result.output
+        assert "bge-base-en-v15-768" in result.output, result.output
+        assert "--target-model" in result.output, result.output
+        writer.update_documents_collection_batch.assert_not_called()
 
 
 class TestWhh61MaintenanceCarve:

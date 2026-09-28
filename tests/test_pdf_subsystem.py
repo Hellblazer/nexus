@@ -114,7 +114,7 @@ class TestPdfChunksMetadata:
         """
         content_hash = _sha256(simple_pdf)
         result = _pdf_chunks(
-            simple_pdf, content_hash, "voyage-context-3", "2026-01-01T00:00:00", "mybook"
+            simple_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "mybook"
         )
         assert result, "Expected at least one chunk from simple.pdf"
         for chunk_id, text, meta in result:
@@ -142,7 +142,7 @@ class TestPdfChunksMetadata:
             assert isinstance(meta["title"], str)
             # source_author: Docling does not expose XMP author; may be empty
             assert isinstance(meta["source_author"], str)
-            assert meta["embedding_model"] == "voyage-context-3"
+            assert meta["embedding_model"] == "model-ctx"
             assert isinstance(chunk_id, str) and chunk_id
             assert isinstance(text, str) and text.strip()
 
@@ -154,7 +154,7 @@ class TestPdfChunksMetadata:
         content_hash = _sha256(simple_pdf)
         override = "Self-Aware Vector Embeddings for Retrieval-Augmented Generation"
         result = _pdf_chunks(
-            simple_pdf, content_hash, "voyage-context-3", "2026-01-01T00:00:00", "mybook",
+            simple_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "mybook",
             title_override=override,
         )
         assert result, "Expected at least one chunk from simple.pdf"
@@ -165,7 +165,7 @@ class TestPdfChunksMetadata:
         """AC-S2: page_number values are drawn from {1, 2, 3}; no zeros present."""
         content_hash = _sha256(multipage_pdf)
         result = _pdf_chunks(
-            multipage_pdf, content_hash, "voyage-context-3", "2026-01-01T00:00:00", "test"
+            multipage_pdf, content_hash, "model-ctx", "2026-01-01T00:00:00", "test"
         )
         assert result
         page_numbers = {meta["page_number"] for _, _, meta in result}

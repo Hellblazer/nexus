@@ -18,6 +18,12 @@ Two genres exist. Never mix them in one document.
 
 History, earlier attempts, and design rationale belong in the essay, once. A how-to that narrates them was rejected by a reader ("a project development history lesson"); the same material in the essay genre was praised.
 
+**A how-to's numbered lessons are things the reader does.** Every lesson before the appendix has a `You might say` block and an action the reader takes. A lesson that would carry `reading only` is mechanism, and mechanism goes in the collapsed appendix. Count the lessons before review: one reading-only lesson ahead of an actionable one sends the page back. The first ci-board page (2026-09-26) opened with two reading-only lessons (the data path, then template capacity) and put the one command a reader runs fourth; Sam found the whole page hard to read.
+
+**One reader per page.** A `web/` page serves the person using the feature. Operator material (hosting, signature checks, tokens, duplicate handling, wire formats a reader never types) stays in the RDR or an operator page, and the how-to links to it in one sentence.
+
+**When the subject has an RDR, start from what the reader does, never from the RDR's outline.** An RDR is ordered for a reviewer judging a design: data flow, capacity, protocol, trust. Copying that order produces a design document with lessons numbered on it. List the questions a reader brings (is my push green, tell me when it changes), make each a lesson, and take from the RDR only what those lessons need.
+
 ## 2. Before drafting
 
 - Ask Sam for an exemplar paragraph in the voice he wants, before writing a full draft. In the 2026-09-15 coordination-page pilot this moved the voice further than any review round did.
@@ -26,12 +32,16 @@ History, earlier attempts, and design rationale belong in the essay, once. A how
 
 ## 3. Register (both genres)
 
-- Plain technical English for non-native readers. One idea per sentence, active voice, no semicolons, no idioms or phrasal verbs, one term per concept. Join related ideas with so / because / and. Do not atomise every sentence.
+- Plain technical English for non-native readers. Active voice, no semicolons, no idioms or phrasal verbs, one term per concept.
+- Sentence boundaries follow the logic. When one fact follows from another, join them with because / so / and in one sentence; start a new sentence for a new idea. A paragraph of four-to-ten-word sentences parses but loses the connectives that say why, and reads as a list with the bullets removed. Review pushes only toward shorter sentences (the long-sentence scan has no opposite), so §5's scan measures both directions.
+- Say each thing once. The lede, a figure caption and the body that narrate the same flow are three copies; keep the body, and let the caption name what the figure shows.
 - Every paragraph and every section opener starts with its claim. Never two setup sentences and then the point.
 - Headings are plain nouns or actions. No tropes ("The shape of the problem").
 - Motivate a new thing at the edge of what already exists and works. Name the existing mechanism, what it does well, where it stops, what the new thing adds there. Never "none of these can". Check every claimed gap against the tools Sam uses: harness messaging and teammate panes, hooks, T1/T2/T3, files.
 - When a word is both a verb and a noun, name the noun fully ("take operation").
 - No corpus counts, incident dates, or self-reference to this project's incidents on a `web/` page. Exploration essays may carry dates and RDR numbers.
+- No volume figures that drift with configuration: posts per push, jobs per run, pushes until full. They are wrong the next time a workflow changes. State the limit and its reason instead.
+- The terms table holds only words the lessons use. A word only the appendix needs is explained where it appears. More than about six terms means the page is organised around internals.
 - Placeholders as `<span class="ph">&lt;ORANGE CAPITALS&gt;</span>`. Prompts are examples, not scripts.
 - Rendered output blocks come from real tool or CLI output captured in the session, trimmed. Never invented.
 
@@ -45,6 +55,8 @@ History, earlier attempts, and design rationale belong in the essay, once. A how
 - Heading order never skips a level. A box title inside a section is `p.ttl`, not `h4`.
 
 ## 5. Review gate before publish
+
+The gate applies to every commit that changes prose under `web/**`, including a code commit that updates a page to match. A code change that edits page text runs at least the voice pass (3 below) on the changed section. On 2026-09-27 a `ci_status.py` change pasted its docstring's precedence rules into the ci-board page as three paragraphs with no review; each sentence was true, and the reader needed one table row and one sentence.
 
 Dispatch three passes in parallel, each with its own brief, then read the findings files yourself:
 
@@ -60,10 +72,10 @@ Do not edit the file while a reviewer is reading it. Apply all three passes' fin
 python3 .claude/skills/site-page/link_audit.py            # every href on every web/ page and README site links
 ```
 
-Sentence scan (flag > 25 words that are not lists):
+Sentence scan, both directions: sentences over 25 words, and runs of three or more sentences of 10 words or fewer, with a FRAGMENTED verdict above 5 runs per 100 sentences (calibration in the script's docstring). Both are prompts for judgement, not hard failures:
 
 ```bash
-awk '/<main>/{m=1} /<script>/{m=0} m' web/<page>.html | sed 's/<[^>]*>//g' | tr -s ' \n' ' ' | grep -oE '[^.!?]+[.!?]' | awk 'NF>25{print NF": "$0}'
+python3 .claude/skills/site-page/sentence_scan.py web/<page>.html
 ```
 
 ## 6. Publish

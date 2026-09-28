@@ -12,10 +12,14 @@ import dev.nexus.service.db.InstallPingSink;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
 import java.time.Clock;
+import java.util.HexFormat;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -43,6 +47,20 @@ import java.util.regex.Pattern;
  * logged; the client swallows every outcome, so nothing here is retried.
  *
  * <p>Additive wire change: a NEW route; see docs/wire-contract-pending.md.
+ *
+ * <p>nexus-5zv4j: a nullable {@code source_hash} column is computed here and
+ * never sent by the client (the payload above is unchanged) — an HMAC-SHA256
+ * of the same {@link #remoteAddress} the rate limiter keys on (keyed by
+ * {@link #HASH_KEY_ENV}; unset means NULL, never an unkeyed hash of the raw
+ * address, which is itself never stored or logged). NAT/CGNAT collapses many
+ * distinct installs onto one source_hash, and a single install's address
+ * changing (a new DHCP lease, a mobile network handoff) fragments its own
+ * history across hashes — this is a correlation signal, not a stable
+ * per-install identifier. That identity use also relies on the edge actually
+ * collapsing X-Forwarded-For to one vouched hop before this engine sees it:
+ * a self-hosted engine that sets {@link #TRUSTED_PROXIES_ENV} without a
+ * collapsing proxy in front of it lets a client pick its own X-Forwarded-For
+ * value, and therefore its own fingerprint.
  */
 public final class InstallPingHandler implements HttpHandler {
 
@@ -61,19 +79,47 @@ public final class InstallPingHandler implements HttpHandler {
     /** Trailing X-Forwarded-For hops appended by proxies this engine trusts; 0 = key on the socket peer. */
     static final String TRUSTED_PROXIES_ENV = "NX_INSTALL_PING_TRUSTED_PROXIES";
 
+    /** HMAC-SHA256 key for source_hash. Unset = the column stays NULL, never an unkeyed hash.
+     * Rotating this key changes every future source_hash: a hash computed under a new key is
+     * NOT comparable to one computed under an earlier key, so rotation silently starts a new
+     * correlation epoch rather than continuing the old one. */
+    static final String HASH_KEY_ENV = "NX_INSTALL_PING_HASH_KEY";
+    /** First N hex chars of the 32-byte HMAC-SHA256 digest kept as source_hash (8 of 32 bytes). */
+    static final int SOURCE_HASH_HEX_CHARS = 16;
+
     private final InstallPingSink sink;
     private final MintRateLimiter rateLimiter;
     private final int trustedProxies;
+    private final String hashKey;
 
+    /** Convenience: no source_hash (existing callers that predate nexus-5zv4j). */
     public InstallPingHandler(InstallPingSink sink, MintRateLimiter rateLimiter, int trustedProxies) {
+        this(sink, rateLimiter, trustedProxies, null);
+    }
+
+    public InstallPingHandler(InstallPingSink sink, MintRateLimiter rateLimiter, int trustedProxies,
+                               String hashKey) {
         this.sink = sink;
         this.rateLimiter = rateLimiter;
         this.trustedProxies = Math.max(0, trustedProxies);
+        this.hashKey = hashKey;
+        if (hashKey == null || hashKey.isBlank()) {
+            // Not a failure -- unset is a valid, supported posture (source_hash stays
+            // NULL forever) -- but a silent no-op here is easy to mistake for a bug
+            // report waiting to happen, so it gets one WARN at construction rather
+            // than being discoverable only by noticing every row's source_hash is
+            // NULL. No /version field: this is an operator-visible boot log, not a
+            // wire-contract capability.
+            log.warn("event=install_ping_hash_key_unset detail=\"NX_INSTALL_PING_HASH_KEY not set; "
+                    + "source_hash will be NULL for every ping\"");
+        }
     }
 
-    /** Production wiring: env-tuned limiter (same knobs as the mint route) and proxy count. */
+    /** Production wiring: env-tuned limiter (same knobs as the mint route), proxy count,
+     * and HMAC key. */
     public static InstallPingHandler fromEnv(InstallPingSink sink, Clock clock) {
-        return new InstallPingHandler(sink, MintRateLimiter.fromEnv(clock), trustedProxiesFromEnv());
+        return new InstallPingHandler(sink, MintRateLimiter.fromEnv(clock), trustedProxiesFromEnv(),
+                System.getenv(HASH_KEY_ENV));
     }
 
     @Override
@@ -133,8 +179,14 @@ public final class InstallPingHandler implements HttpHandler {
         }
 
         try {
-            sink.record(new InstallPingRepository.Ping(installId, version, mode, os, arch, python));
+            String sourceHash = sourceHash(hashKey, remote);
+            sink.record(new InstallPingRepository.Ping(
+                    installId, version, mode, os, arch, python, sourceHash));
         } catch (RuntimeException e) {
+            // sourceHash() is inside this same try (nexus-5zv4j round-2 fix): an
+            // IllegalStateException from a missing HmacSHA256 provider must degrade
+            // to the same logged 500 a sink failure gets, never escape handle()
+            // uncaught.
             log.warn("install_ping_record_failed", e);
             HttpUtil.send(ex, 500, "{\"error\":\"record failed\"}");
             return;
@@ -182,6 +234,31 @@ public final class InstallPingHandler implements HttpHandler {
             return Math.max(0, Integer.parseInt(raw.trim()));
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException(TRUSTED_PROXIES_ENV + " must be an integer, got: " + raw, e);
+        }
+    }
+
+    /**
+     * First {@link #SOURCE_HASH_HEX_CHARS} hex chars of HMAC-SHA256({@code key},
+     * {@code address}), or {@code null} when {@code key} is unset — never an
+     * unkeyed hash of the address (nexus-5zv4j). {@code address} is the SAME
+     * value {@link #remoteAddress} derived for the rate limiter; it is never
+     * itself stored or logged, only this digest.
+     */
+    static String sourceHash(String key, String address) {
+        if (key == null || key.isBlank()) {
+            return null;
+        }
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] digest = mac.doFinal(address.getBytes(StandardCharsets.UTF_8));
+            String hex = HexFormat.of().formatHex(digest);
+            return hex.substring(0, SOURCE_HASH_HEX_CHARS);
+        } catch (GeneralSecurityException e) {
+            // HmacSHA256 is a mandatory JCE algorithm on every JVM this engine ships
+            // on; a missing provider is a build/runtime defect, not a request-time
+            // condition to swallow into a silent NULL.
+            throw new IllegalStateException("HmacSHA256 unavailable", e);
         }
     }
 }

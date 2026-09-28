@@ -173,6 +173,49 @@ class StatusHandlerTest {
     }
 
     @Test
+    void racedEmbedsTotal_topLevelFieldReflectsTheGlobalCounterDelta() throws Exception {
+        // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: raced_embeds_total is a
+        // process-wide counter (dev.nexus.service.vectors.RacedEmbedActivity), not
+        // per-embedder — asserted here as a DELTA (never an absolute value), since
+        // other test classes sharing this JVM/fork may also record against it.
+        start(new StatusHandler(null));
+        long before = get().get("raced_embeds_total").asLong();
+
+        dev.nexus.service.vectors.RacedEmbedActivity.record(3);
+
+        long after = get().get("raced_embeds_total").asLong();
+        assertThat(after - before).isEqualTo(3L);
+    }
+
+    @Test
+    void processStartTime_reflectsTheExplicitlyProvidedInstant() throws Exception {
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2): production
+        // wiring (NexusService) passes VersionHandler's OWN processStartMillis()
+        // through the 3-arg constructor — asserted here against VersionHandler's
+        // own rendering (startTimeIso), never a second clock source or a second
+        // format.
+        long fixedMillis = 1_757_500_800_000L; // 2026-09-10T12:00:00Z, arbitrary fixed instant
+        start(new StatusHandler(null, null, fixedMillis));
+
+        JsonNode body = get();
+        assertThat(body.get("process_start_time").asText())
+            .isEqualTo(VersionHandler.startTimeIso(fixedMillis));
+    }
+
+    @Test
+    void processStartTime_defaultConstructorsStillReportAValidInstant() throws Exception {
+        // The 1-arg/2-arg constructors predate process_start_time and are used
+        // throughout this file's other tests — they fall back to this handler's
+        // own construction time rather than omitting the field, so every
+        // existing caller keeps compiling and keeps getting a real value.
+        start(new StatusHandler(null));
+        JsonNode body = get();
+        assertThat(body.get("process_start_time").isTextual()).isTrue();
+        // Parses as an ISO instant without throwing.
+        java.time.Instant.parse(body.get("process_start_time").asText());
+    }
+
+    @Test
     void nonGetMethodIsRejected() throws Exception {
         start(new StatusHandler(null));
         HttpResponse<String> resp = http.send(

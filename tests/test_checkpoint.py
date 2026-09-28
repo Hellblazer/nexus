@@ -16,7 +16,7 @@ from nexus.checkpoint import (
 _CK_DEFAULTS = dict(
     pdf="/data/book.pdf",
     collection="knowledge__art",
-    embedding_model="voyage-context-3",
+    embedding_model="model-ctx",
     total_chunks=500,
 )
 
@@ -38,7 +38,7 @@ def ckpt_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def test_checkpoint_data_fields() -> None:
     ck = _ck(content_hash="abc123", chunks_upserted=500)
     assert (ck.pdf, ck.collection, ck.content_hash) == ("/data/book.pdf", "knowledge__art", "abc123")
-    assert (ck.chunks_upserted, ck.total_chunks, ck.embedding_model) == (500, 500, "voyage-context-3")
+    assert (ck.chunks_upserted, ck.total_chunks, ck.embedding_model) == (500, 500, "model-ctx")
     assert ck.timestamp != ""
 
 

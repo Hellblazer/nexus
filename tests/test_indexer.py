@@ -392,8 +392,9 @@ def test_frecency_only_updates_frecency_score(tmp_path):
         _run_index_frecency_only(repo, _reg())
     kw = db.update_chunks.call_args_list[0].kwargs
     assert kw["ids"] == ["c1"]
-    assert kw["metadatas"][0]["frecency_score"] == 0.75
-    assert kw["metadatas"][0]["title"] == "main.py:1-1"
+    # nexus-vhyar: the write carries only the key this pass owns; echoing
+    # the read-back row (title included) re-asserted stale values.
+    assert kw["metadatas"] == [{"frecency_score": 0.75}]
     where = col.get.call_args.kwargs["where"]
     assert where == {"doc_id": "1.1.1"}
 
@@ -998,6 +999,13 @@ def _gc_db(per_collection_rows: dict[str, list[tuple[str, str]]]):
     # exactly like `upsert_chunks_with_embeddings = None` above.
     db.gc_quarantine_orphans = None
     db.gc_restore_rereferenced = None
+    # nexus-e8h5x: same reasoning as gc_restore_rereferenced above, one
+    # level down — both bounded_serverside wrappers are tried FIRST now,
+    # so they too must read as "no HTTP GC capability" or this fake
+    # `db`'s MagicMock auto-attrs would short-circuit the client-side
+    # algorithm under test exactly like the unbounded routes would have.
+    db.gc_restore_rereferenced_bounded = None
+    db.gc_quarantine_orphans_bounded = None
     db.gc_expire_quarantine = None
     return db, cols
 
@@ -1101,6 +1109,47 @@ def test_prune_collection_serverside_never_registers_the_quarantine_sibling(
 
     assert result is True
     assert calls == ["restore", "quarantine", "expire"]
+
+
+def test_prune_collection_serverside_logs_restored_count_even_when_nothing_quarantined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-brxnp: before this fix, the only log statement naming
+    ``restored`` was folded into ``gc_pruned_orphan_chunks_serverside``,
+    gated on ``moved`` being truthy -- a restore-only pass (a re-referenced
+    chash comes back, but nothing new was orphaned this walk) left NO log
+    trace of what it restored at all. This is exactly the shape a
+    restore-only end-of-walk leg produces (T2 ``nexus/debug-u6d93-brxnp``)."""
+    import nexus.catalog.chunk_quarantine as cq
+    from nexus.indexer import _prune_collection_serverside
+
+    monkeypatch.setattr(cq, "restore_rereferenced_serverside", lambda *a, **k: 3)
+    monkeypatch.setattr(cq, "quarantine_orphans_serverside", lambda *a, **k: (0, []))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: (0, 0))
+
+    origin = "code__nexus-1-1__voyage-code-3__v1"
+    qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"
+    with patch("nexus.indexer._log") as log:
+        result = _prune_collection_serverside(object(), origin, qname, "2026-01-01T00:00:00Z")
+
+    assert result is True
+    restored_calls = [
+        c for c in log.info.call_args_list
+        if c.args and c.args[0] == "gc_restored_rereferenced_chunks_serverside"
+    ]
+    assert len(restored_calls) == 1, (
+        f"expected exactly one restored-count log event on a restore-only pass, "
+        f"got {log.info.call_args_list!r}"
+    )
+    _, kwargs = restored_calls[0]
+    assert kwargs["count"] == 3
+    assert kwargs["collection"] == origin
+    # The quarantine event must NOT fire when nothing was moved (moved == 0) --
+    # the restored count must not be silently smuggled in there instead.
+    assert not any(
+        c.args and c.args[0] == "gc_pruned_orphan_chunks_serverside"
+        for c in log.info.call_args_list
+    )
 
 
 def test_prune_deleted_files_propagates_valueerror_from_serverside_prune(
@@ -2909,12 +2958,10 @@ def test_run_index_propagates_embedding_profile_mismatch_from_registration_loop(
     (repo / "main.py").write_text("x = 1\n")
 
     def _raise_mismatch(name, *, registrar=None, kwargs=None):
-        raise EmbeddingProfileMismatchError(
-            "content_type='code': this install's configured intent is "
-            "'voyage-code-3', but the engine's embedding_profile still says "
-            "'bge-base-en-v15-768'. A restart is required for the engine to "
-            "adopt this: `nx daemon service stop && nx daemon service start`."
-        )
+        # nexus-aotql: the exception now builds its own message from
+        # structured (content_type, configured_model, engine_profile_model)
+        # fields rather than taking a caller-composed string.
+        raise EmbeddingProfileMismatchError("code", "voyage-code-3", "bge-base-en-v15-768")
 
     db, col = _mock_db()
     with _patches(db, extra={

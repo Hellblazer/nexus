@@ -224,7 +224,19 @@ class JooqRecordReflectionFeatureTest {
     // feature/nexus-swam7-pin-cross-hnsw ahead of this bead) is likewise
     // CREATE OR REPLACE on the pre-existing assign_from_chashes_<dim>
     // functions, contributing zero.
-    private static final int EXPECTED_RECORD_TYPES = 104;
+    // 104 -> 105: nexus-wbfpw.9, vectors-018-chunk-live-owners-function.xml
+    // added nexus.chunk_live_owners, a RETURNS TABLE(doc_id text) function,
+    // one generated Record type (ChunkLiveOwnersRecord), +1.
+    // 105 -> 106: nexus-e8h5x, catalog-042-gc-restore-rereferenced-bounded.xml
+    // added nexus.gc_restore_rereferenced_bounded, a RETURNS TABLE(restored,
+    // remaining) function, one generated Record type
+    // (GcRestoreRereferencedBoundedRecord), +1.
+    // 106 -> 106: nexus-l46pu (follow-up to nexus-kk4ut), catalog-040-
+    // collection-aspects-enabled.xml added the aspects_enabled column to
+    // the pre-existing nexus.catalog_collections table -- a column-count
+    // change only, no new Record type (same shape as telemetry-012's and
+    // memory-004's column-only bumps above). No delta.
+    private static final int EXPECTED_RECORD_TYPES = 106;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

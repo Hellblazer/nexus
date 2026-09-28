@@ -112,6 +112,16 @@ class HnswScanCapExactFallbackIntegrationTest {
         rareChash = chash(RARE_TEXT);
         repo.upsertChunks(TENANT, COLLECTION, List.of(rareChash), List.of(RARE_TEXT),
                           List.of(Map.of("k", "rare")));
+
+        // RDR-192 Step 5 (nexus-wbfpw.10): searchWithTokens moved onto live(c) --
+        // own every row (the common rows included: the metadata filter's exclusion
+        // of them is the property under test, not a manifest gap).
+        List<String> allIds = new ArrayList<>(ids);
+        allIds.add(rareChash);
+        scope.withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, COLLECTION, allIds.toArray(new String[0]));
+            return null;
+        });
     }
 
     @AfterAll

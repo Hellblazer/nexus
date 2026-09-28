@@ -21,6 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+import contextlib
 import json
 import os
 import re
@@ -2429,6 +2430,8 @@ class PDFExtractor:
             # Short-lived per-batch worker (Gap 4 carve-out): DEVNULL stdio is a
             # judged choice — failure is returncode-detected by the caller
             # (killpg + the Gap 5 OOM classification below).
+            from nexus.util.process_group import contain, isolation_popen_kwargs  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
             proc = subprocess.Popen(
                 [
                     sys.executable, "-c", _MINERU_WORKER_SCRIPT,
@@ -2440,8 +2443,8 @@ class PDFExtractor:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                start_new_session=True,  # own process group
                 preexec_fn=preexec_fn,  # Linux-only RLIMIT_AS ceiling (or None)
+                **isolation_popen_kwargs(),  # own process group (POSIX) / job object (Windows)
             )
             # Use killpg(getpgid(pid)) rather than killpg(pid) directly —
             # with start_new_session=True the pgid equals pid at spawn time,
@@ -2460,16 +2463,33 @@ class PDFExtractor:
             # a 38-page fallback run. Sweeping by the recorded group id
             # reaches them whether or not the leader still exists.
             worker_pgid = proc.pid
+            # nexus-6y4e0: Windows job-object containment, assigned right
+            # after spawn. No-op (None) on POSIX -- the process group above
+            # already covers it.
+            worker_job = contain(proc)
 
             def _killpg_safe() -> None:
-                # Delegated to nexus.util.process_group.safe_killpg so
-                # the mock-guard + error-swallow contract is consistent
-                # across every subprocess cleanup site in the codebase.
-                from nexus.util.process_group import safe_killpg, safe_killpg_group  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+                # Delegated to nexus.util.process_group so the mock-guard +
+                # error-swallow contract is consistent across every
+                # subprocess cleanup site in the codebase.
+                from nexus.util.process_group import kill_tree, safe_killpg_group  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
 
-                # On Windows the group sweep refuses and only the worker
-                # itself is killed; its pool children survive (nexus-6y4e0).
-                safe_killpg(proc)
+                # On Windows, kill_tree closes the job (reaching the whole
+                # pool the worker spawned) when containment succeeded at
+                # spawn; otherwise it degrades to the direct worker only,
+                # exactly as before nexus-6y4e0. nexus-6y4e0 review
+                # (SIGNIFICANT): the return value used to be discarded --
+                # on Windows safe_killpg_group below is ALWAYS a no-op (no
+                # process groups there), so a failed close_job (job already
+                # gone, or a genuine API failure) left the worker itself
+                # running with nothing left to fall back to, and the
+                # TimeoutExpired branch's untimed proc.wait() right after
+                # this call would then hang on a worker that was never
+                # actually killed. Matches the fallback the other three
+                # contain() call sites already use.
+                if not kill_tree(proc, worker_job):
+                    with contextlib.suppress(Exception):
+                        proc.kill()
                 safe_killpg_group(worker_pgid)
 
             try:
@@ -2481,6 +2501,15 @@ class PDFExtractor:
                     f"MinerU subprocess timed out after {timeout_s}s "
                     f"(pages {start}–{end}, path={pdf_path})"
                 )
+            except BaseException:
+                # nexus-6y4e0 measurement review: any OTHER exception out of
+                # the wait (KeyboardInterrupt, a signal-driven interrupt)
+                # used to skip every cleanup path, leaving the worker's job
+                # open and its tree running until this process exited. The
+                # other three contain() sites release in an unconditional
+                # finally; this is that same guarantee for this site.
+                _killpg_safe()
+                raise
             if returncode != 0:
                 # Clean up any orphaned children in the process group
                 _killpg_safe()

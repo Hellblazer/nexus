@@ -319,11 +319,12 @@ def live_note_chashes(documents) -> set[str]:
     T3-deleting sweep must NEVER treat as orphans (nexus-39upx hazard 2
     / RDR-145).
 
-    ``catalog-003-soft-delete.xml``'s ``nexus.live_chunks`` view (and its
-    ``purge_trash`` sibling) encode the standing contract: "a chunk is
-    live if it has NO manifest rows at all (a note chunk written by MCP
-    ``store_put`` / ``nx store put``) OR has at least one live-doc
-    manifest row." A manifest-diff sweep (``orphaned_chashes`` above, or
+    Reads no longer show a manifest-less chunk (RDR-192 Step 5: every
+    engine read path uses live(c), which requires a live own-collection
+    owner), but a legacy note stored before ``nexus-b6enc`` may still have
+    no manifest row, so deleting sweeps keep this guard until RDR-192
+    Step 11 removes it once the legacy-note census reads zero. A
+    manifest-diff sweep (``orphaned_chashes`` above, or
     ``nx t3 gc``'s ``chashes_for_collection`` diff) only ever sees the
     SECOND half of that OR: both ``docs_for_chashes`` and
     ``chashes_for_collection`` query ``catalog_document_chunks``, so a

@@ -309,14 +309,17 @@ def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: A
     with no manifest, searchable and unlinked, so this deletes the pieces
     the call newly wrote and re-raises. A piece that existed before the
     call is identical text another note holds, and is left alone.
+
+    "Existed" means physically stored, whether or not it has a live owner, so
+    the probe is ``existing_ids`` rather than ``get_by_id``: since RDR-192
+    Step 5 a read returns only chunks with a live own-collection owner, and a
+    stored chunk without one (a superseded piece not yet reaped, a legacy
+    note) would otherwise read as absent and be deleted here.
     """
     if len(pieces) == 1:
         return [t3.put(collection=collection, content=pieces[0], **put_kwargs)]
-    preexisting = {
-        chash
-        for chash in (hashlib.sha256(p.encode()).hexdigest() for p in pieces)
-        if t3.get_by_id(collection, chash) is not None
-    }
+    chashes = [hashlib.sha256(p.encode()).hexdigest() for p in pieces]
+    preexisting = set(t3.existing_ids(collection, chashes))
     written: list[str] = []
     try:
         for piece in pieces:
@@ -366,9 +369,8 @@ def manifest_doc_index(
     for the whole collection: one ``list_by_collection``, one batched
     ``get_manifests``. A document with no manifest rows contributes nothing
     and its chunks fall through to per-chunk keying at the call site — which
-    is right for both a manifest-less note (live by design, the
-    ``catalog-003-soft-delete.xml`` ``live_chunks`` contract) and a
-    superseded chunk no sweep has reaped.
+    is right for both a manifest-less legacy note and a superseded chunk
+    no sweep has reaped.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
 
@@ -1063,6 +1065,18 @@ def catalog_store_hook_tracked(
         # actually the WINNER's row) instead of the previously-hardcoded
         # ``True`` — the exact gap rollback_minted_catalog_entry's KNOWN
         # RESIDUAL documented.
+        #
+        # nexus-r1tnx round 2 (code-review finding): this call requests
+        # ``with_created`` but deliberately does NOT run
+        # ``find_cross_owner_conflict``/``announce_cross_owner_mint``
+        # (path_ambiguity.py) the way the four file_path-keyed mint
+        # branches do. Not applicable here: a knowledge doc's identity is
+        # ``title`` + ``source_uri`` (this call passes no ``file_path`` at
+        # all — it defaults to ``""`` on the wire), and
+        # ``find_cross_owner_conflict`` is keyed on
+        # ``find_all_by_file_path``, which has nothing to search for
+        # against an empty path. There is no cross-OWNER file_path
+        # collision this call site could ever mint a second document over.
         tumbler, created = writer.register(
             owner=owner, title=title, content_type="knowledge",
             physical_collection=collection_name,
@@ -1958,7 +1972,16 @@ def _reap_superseded_note_chunks(
     )
 
     orphaned = orphaned_chashes(reader, catalog_doc_id, dropped, collection=collection)
+    shared = len(dropped) - len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: union guard cleared every candidate — every
+        # dropped chash is shared with another live document, nothing
+        # reaches the note lookup or a delete.
+        _log.info(
+            "superseded_sweep_kept", site="_reap_superseded_note_chunks",
+            collection=collection, doc_id=catalog_doc_id, dropped=len(dropped),
+            kept=shared, kept_notes=0,
+        )
         return
     try:
         documents = catalog_documents_for_collection(reader, collection)
@@ -1970,8 +1993,19 @@ def _reap_superseded_note_chunks(
             exc_info=True,
         )
         return
+    kept_notes = len(orphaned)
     orphaned = [h for h in orphaned if h not in notes]
+    kept_notes -= len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: note guard cleared every surviving candidate —
+        # each is itself a manifest-less note's own identity elsewhere in
+        # this collection. Same silence hazard as the union-guard return
+        # above.
+        _log.info(
+            "superseded_sweep_kept", site="_reap_superseded_note_chunks",
+            collection=collection, doc_id=catalog_doc_id, dropped=len(dropped),
+            kept=shared + kept_notes, kept_notes=kept_notes,
+        )
         return
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path

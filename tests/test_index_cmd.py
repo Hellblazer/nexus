@@ -345,12 +345,10 @@ def test_index_repo_profile_refusal_exits_nonzero_without_traceback(runner, repo
     from nexus.corpus import EmbeddingProfileMismatchError
 
     def _raise(*args, **kwargs):
-        raise EmbeddingProfileMismatchError(
-            "content_type='code': this install's configured intent is "
-            "'voyage-code-3', but the engine's embedding_profile still says "
-            "'bge-base-en-v15-768'. A restart is required for the engine to "
-            "adopt this: `nx daemon service stop && nx daemon service start`."
-        )
+        # nexus-aotql: the exception now builds its own message from
+        # structured (content_type, configured_model, engine_profile_model)
+        # fields rather than taking a caller-composed string.
+        raise EmbeddingProfileMismatchError("code", "voyage-code-3", "bge-base-en-v15-768")
 
     result, mock_idx = _invoke_repo(
         runner, [str(repo_dir)], mock_reg, index_side_effect=_raise,
@@ -512,12 +510,10 @@ def test_index_profile_refusal_exits_nonzero_without_traceback(
     fn_name = "index_pdf" if subcmd == "pdf" else "index_markdown"
 
     def _raise(*args, **kwargs):
-        raise EmbeddingProfileMismatchError(
-            "content_type='docs': this install's configured intent is "
-            "'voyage-context-3', but the engine's embedding_profile still says "
-            "'bge-base-en-v15-768'. A restart is required for the engine to "
-            "adopt this: `nx daemon service stop && nx daemon service start`."
-        )
+        # nexus-aotql: the exception now builds its own message from
+        # structured (content_type, configured_model, engine_profile_model)
+        # fields rather than taking a caller-composed string.
+        raise EmbeddingProfileMismatchError("docs", "voyage-context-3", "bge-base-en-v15-768")
 
     with patch(f"nexus.doc_indexer.{fn_name}", side_effect=_raise):
         result = runner.invoke(main, ["index", subcmd, str(fixture_path)])

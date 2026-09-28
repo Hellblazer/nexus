@@ -70,7 +70,7 @@ from nexus.db.t2.http_tuple_store import (
     _check_request_size,
     _raise_typed,
 )
-from nexus.db.t2.records import ParkStats, TupleRow, WaitResult, WaitSpec
+from nexus.db.t2.records import Announce, ParkStats, TupleRow, WaitResult, WaitSpec
 
 
 def _uniq(label: str) -> str:
@@ -1183,6 +1183,45 @@ class TestWait:
         specs = [WaitSpec(f"mailbox/{_uniq('x')}") for _ in range(_MAX_WAIT_SPECS)]
         results = store.wait(specs, timeout_s=0)
         assert results == []  # none of these addresses were ever written to
+
+
+class TestWaitPerSubscriberAnnounceSince:
+    """Bead nexus-n36sw (code-review round): a real-engine round trip of a
+    per-subscriber ``announce`` spec that also carries ``since``, proving
+    the id-less wire shape end to end -- ``_since_payload`` omitting the
+    ``id`` key for the empty-string sentinel, and ``TupleHandler
+    .readSinceWatermark`` accepting a bare ``created_at`` on the other
+    side -- against the real gate-jar engine, not the Python-side fake
+    ``tests/test_mcp_channel.py`` models it with."""
+
+    def test_since_excludes_a_pre_watermark_row_and_delivers_a_post_watermark_one(
+        self, t2_service_env,
+    ) -> None:
+        store = HttpTupleStore()
+        topic = _uniq("topic")
+        subscriber = _uniq("subscriber")
+
+        store.out(f"board/{topic}", {"topic": topic}, {"from": "writer"}, "before", nonce=_uniq("nonce"))
+
+        # The watermark: the "before" post's own created_at, read back from
+        # the real engine -- not a client-synthesized value. since is
+        # STRICTLY greater-than, so the row it came from is excluded too,
+        # exactly as one at or before the watermark should be.
+        watermark_row = store.rd(f"board/{topic}", n=1)[0]
+        since = (watermark_row.created_at, "")  # id-less: the wire shape readSinceWatermark accepts
+
+        store.out(f"board/{topic}", {"topic": topic}, {"from": "writer"}, "after", nonce=_uniq("nonce"))
+
+        spec = WaitSpec(
+            f"board/{topic}", since=since,
+            announce=Announce(interval_s=0, max=1, subscriber=subscriber),
+        )
+        results = store.wait([spec], timeout_s=0)
+
+        assert len(results) == 1, f"expected exactly one due row (the post-watermark one), got {results}"
+        assert [t.body for t in results[0].tuples] == ["after"], (
+            "the pre-watermark 'before' post must be excluded from the candidate set; only 'after' is due"
+        )
 
 
 class TestWaitAgainstAnOldEngine:

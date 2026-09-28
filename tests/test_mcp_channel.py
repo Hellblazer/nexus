@@ -49,6 +49,7 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pytest
 
+from nexus.db.t2.http_tuple_store import SchemaViolationError
 from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
 from nexus.mcp import channel
 
@@ -139,21 +140,32 @@ class _FakeTupleStore:
     the plain path): one append-only, creation-ordered table per
     subspace (`seed()` appends; nothing else adds rows).
 
-    A spec with NO `announce` (boards, always) gets the OLD `queryOnce`
-    contract unchanged: UNCONSUMED rows (claimed and dead-lettered
-    included, never filtered on `claim_state`) strictly after `since`,
-    capped at `n`, in `(created_at, id)` order.
+    A spec with NO `announce` gets the OLD `queryOnce` contract unchanged:
+    UNCONSUMED rows (claimed and dead-lettered included, never filtered on
+    `claim_state`) strictly after `since`, capped at `n`, in `(created_at,
+    id)` order. No spec this waiter ever builds takes this branch any
+    more (every board and mailbox spec carries `announce`); kept for the
+    same reason `rd` still exists on this fake -- modeling the plain path
+    a test can still probe directly.
 
-    A spec WITH `announce` (mailboxes, since bead nexus-vsipz) gets the
-    announce-mode contract instead: rows narrowed to CLAIMABLE (`consumed_at
-    IS NULL`, `claim_state` neither `claimed` nor `dead` -- this fake has
-    no lease to model a lapsed-claim exception to that, unlike the real
-    engine) and DUE (never announced, or last announced longer than
-    `interval_s` ago with `announce_count < max`), oldest `created_at`
-    first, capped at `n`, and STAMPED (`announced_at`/`announce_count`
-    incremented) on every row returned, in the SAME call -- `wait`'s
-    announce branch never reads a row back afterward to confirm the
-    stamp; the returned dataclass instance already carries it.
+    A spec WITH `announce` (every board spec, bead nexus-q82tk; every
+    mailbox spec, bead nexus-vsipz) gets the announce-mode contract
+    instead: rows narrowed to CLAIMABLE (`consumed_at IS NULL`,
+    `claim_state` neither `claimed` nor `dead` -- this fake has no lease
+    to model a lapsed-claim exception to that, unlike the real engine),
+    further narrowed by `since` when present (bead nexus-n36sw: a row at
+    or before the watermark is excluded from the candidate set BEFORE the
+    due check runs, mirroring `TupleRepository
+    .queryOnceAnnounceSubscriber`'s `created_at > since` predicate --
+    `_announce_rows`), and DUE (never announced, or last announced longer
+    than `interval_s` ago with `announce_count < max`), oldest
+    `created_at` first, capped at `n`, and STAMPED (`announced_at`/
+    `announce_count` incremented) on every row returned, in the SAME call
+    -- `wait`'s announce branch never reads a row back afterward to
+    confirm the stamp; the returned dataclass instance already carries
+    it. `refuse_since_with_announce` simulates an engine predating
+    nexus-n36sw instead: `since` alongside ANY `announce` is refused
+    outright, the shape `ChannelWaiter.tick`'s fallback detects.
 
     Both branches return immediately with whatever currently matches --
     no real blocking here, since honouring `timeout_s` with a genuine
@@ -190,6 +202,15 @@ class _FakeTupleStore:
         #: is honoured but `subscriber` is never read -- the stamp lands on
         #: the ROW and the result echoes no subscriber.
         self.ignore_subscriber = False
+        #: Bead nexus-n36sw: simulates an engine predating this bead, whose
+        #: `waitAny` refuses ANY spec combining `since` with `announce`
+        #: regardless of `subscriber` (the pre-nexus-n36sw validation,
+        #: unconditional). `wait()` raises the exact `SchemaViolationError`
+        #: shape `ChannelWaiter.tick`'s fallback detects, on every call
+        #: that still carries `since` -- which is only ever the FIRST call
+        #: from a waiter that has not yet learned this, since a real
+        #: client never resends `since` after that.
+        self.refuse_since_with_announce = False
         self._seq = 0
         self.wait_calls: list[tuple[list, int]] = []
         self.wait_raises: Exception | None = None
@@ -296,11 +317,41 @@ class _FakeTupleStore:
             return True
         return (time.monotonic() - last) >= announce.interval_s and row.announce_count < announce.max
 
-    def _announce_rows(self, subspace: str, n: int, announce: Announce) -> list[TupleRow]:
+    def _announce_rows(
+        self, subspace: str, n: int, announce: Announce, since: tuple[str, str] | None = None,
+    ) -> list[TupleRow]:
         claimable = [
             r for r in self._rows.get(subspace, [])
             if r.consumed_at is None and r.claim_state not in ("claimed", "dead")
         ]
+        if since is not None:
+            # Bead nexus-n36sw: mirrors `TupleRepository
+            # .queryOnceAnnounceSubscriber`'s `created_at > since` predicate
+            # -- a row at or before the watermark is excluded from the
+            # candidate set entirely, so it is never selected, stamped, or
+            # returned (never merely filtered from the result afterward).
+            # `since[1]` (the id) is never read here either, mirroring the
+            # engine's own per-subscriber path.
+            #
+            # Parsed as DATETIMES, not compared as raw strings: the real
+            # engine's `created_at` is a genuine Postgres timestamp column
+            # compared in SQL, never a string a client renders -- this
+            # fake's OWN `created_at` default (`seed`'s zero-padded
+            # sequence counter, deliberately not ISO-8601 so a test can
+            # probe "a row this waiter cannot parse the age of is kept",
+            # e.g. `test_a_row_whose_created_at_cannot_be_parsed_is_kept`)
+            # would otherwise sort lexicographically BEFORE any real
+            # `datetime.now(UTC)`-based watermark and be wrongly excluded
+            # here on every ordinary subscribe-then-seed test. Uses
+            # `channel._parse_created_at` -- the SAME parser
+            # `_deliver_board_rows`'s own fallback path uses, so "kept when
+            # unparseable" is one rule, not two that could drift.
+            watermark_dt = channel._parse_created_at(since[0])  # noqa: SLF001
+            if watermark_dt is not None:
+                claimable = [
+                    r for r in claimable
+                    if (created := channel._parse_created_at(r.created_at)) is None or created > watermark_dt  # noqa: SLF001
+                ]
         due = [r for r in claimable if self._announce_due(subspace, r, announce)]
         due = due[:n]
         stamped: list[TupleRow] = []
@@ -332,10 +383,14 @@ class _FakeTupleStore:
         self._check_max_calls()
         if self.wait_raises is not None:
             raise self.wait_raises
+        if self.refuse_since_with_announce and any(
+            spec.since is not None and spec.announce is not None for spec in specs
+        ):
+            raise SchemaViolationError("field 'since': must not be set together with announce")
         results = []
         for spec in specs:
             rows = (
-                self._announce_rows(spec.subspace, spec.n, spec.announce)
+                self._announce_rows(spec.subspace, spec.n, spec.announce, spec.since)
                 if spec.announce is not None
                 else self._unconsumed(spec.subspace, spec.since, spec.n)
             )
@@ -887,7 +942,7 @@ class TestChannelWaiterFakeStore:
         assert "cursor" not in expected_content
         specs, _timeout = fake.wait_calls[-1]
         board_spec = next(sp for sp in specs if sp.subspace == "board/release-notes")
-        assert board_spec.since is None
+        assert board_spec.since is not None, "bead nexus-n36sw: a real subscribe time now rides the wire"
         assert board_spec.announce == Announce(
             interval_s=0, max=channel.DEFAULT_BOARD_MAX_ANNOUNCES, subscriber=session_id,
             waiter=waiter.waiter_token,
@@ -1361,7 +1416,13 @@ class TestChannelWaiterRealEngine:
         t1.join()
         t2.join()
         assert len(written_ids) == 2 * rows_per_writer, "sanity: both writers must have completed all their writes"
-        seen = [m.get("tuple_id") for _c, m in sender.calls if m.get("subspace") == board]
+        # bead nexus-zxthy: a wait's rows fold into one notification whose
+        # meta lists every id it covers; a single post keeps `tuple_id`.
+        seen: list[str] = []
+        for _c, m in sender.calls:
+            if m.get("subspace") != board:
+                continue
+            seen.extend(m["tuple_ids"].split(",") if m.get("tuple_ids") else [m["tuple_id"]])
         missing = written_ids - set(seen)
         assert not missing, (
             f"STOP RULE VIOLATED: {len(missing)} of {len(written_ids)} posts were never announced to the "
@@ -1463,7 +1524,7 @@ class TestChannelWaiterRealEngine:
             wait_timeout_s=1, reannounce_interval_s=10_000.0, min_tick_interval_s=0.0,
         )
 
-        def _reverted_build_specs(self: "channel.ChannelWaiter") -> list[WaitSpec]:
+        def _reverted_build_specs(self: "channel.ChannelWaiter", entries=None) -> list[WaitSpec]:  # noqa: ARG001 -- the tick passes its snapshot (nexus-zxthy)
             # The bug: every mailbox spec's `announce` is dropped, so the
             # SAME already-referenced (and never excluded) row matches
             # again on every call -- the plain `queryOnce` path has no
@@ -2223,3 +2284,390 @@ def t2_ctx_factory():
     from nexus.mcp_infra import t2_ctx
 
     return t2_ctx
+
+
+# ── bead nexus-zxthy: start at now, cap, fold, coalesce ──────────────────
+
+
+def _iso(seconds_from_epoch: int) -> str:
+    return datetime.fromtimestamp(seconds_from_epoch, tz=UTC).isoformat()
+
+
+def _board_subs(session_id: str, topic: str, *, since: str | None):
+    """A subscription set whose board entry carries *since* (or none,
+    the pre-zxthy record shape), without waiting on a real clock."""
+    subs = _subs(session_id)
+    subs.subscribe(
+        topic, templates=[],
+        store_factory=lambda: (_ for _ in ()).throw(AssertionError("must not touch the store")),
+        state_dir=None,
+    )
+    subs._board[topic] = since  # noqa: SLF001 -- pin the start position for the test
+    return subs
+
+
+class TestBoardStartAtNowAndFold:
+    @pytest.mark.asyncio
+    async def test_a_board_spec_asks_for_a_bounded_batch(self) -> None:
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=None)
+        fake = _FakeTupleStore()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=_FakeSender())
+        await waiter.tick()
+        specs, _t = fake.wait_calls[-1]
+        board_spec = next(sp for sp in specs if sp.subspace == "board/ci/x")
+        assert board_spec.n == channel.DEFAULT_BOARD_WAIT_ROWS
+        assert board_spec.since is None, (
+            "no subscribe time was ever recorded for this topic (a pre-nexus-zxthy T1 record) -- "
+            "there is no watermark to send, same as WaitSpec.since's own unchanged 'no watermark' default"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_board_spec_now_sends_since_engine_owns_the_start_position(self) -> None:
+        """Bead nexus-n36sw: with a recorded subscribe time, `since` DOES
+        ride the wire now -- the engine, not this waiter, decides whether
+        a backlog row is ever selected or stamped (`TupleRepository
+        .queryOnceAnnounceSubscriber`'s own predicate). The wire value is
+        the subscribe time widened backwards by `board_start_skew_s`, the
+        SAME margin the pre-nexus-n36sw client-side compare applied --
+        moved to where the compare now runs, not a new margin."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=_FakeSender())
+        await waiter.tick()
+        specs, _t = fake.wait_calls[-1]
+        board_spec = next(sp for sp in specs if sp.subspace == "board/ci/x")
+        assert board_spec.since is not None
+        created_at, cursor_id = board_spec.since
+        assert cursor_id == "", "a board watermark carries no tuple id -- the engine compares created_at alone"
+        expected = (
+            datetime.fromisoformat(_iso(1_000_000)) - timedelta(seconds=waiter.board_start_skew_s)
+        ).isoformat()
+        assert created_at == expected
+
+    @pytest.mark.asyncio
+    async def test_an_engine_that_refuses_since_with_announce_falls_back_for_the_rest_of_the_waiters_life(
+        self,
+    ) -> None:
+        """Bead nexus-n36sw: an engine predating this bead refuses ANY
+        `since` alongside `announce` outright. The first tick's `wait()`
+        hits that refusal, `tick()` catches it, flips
+        `_board_since_supported` to `False`, and resends the SAME tick's
+        specs without `since` -- delivery still happens on this tick, not
+        the next one -- and every later tick never sends `since` again."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.refuse_since_with_announce = True
+        fake.seed("board/ci/x", "new1", "post", dims={"from": "github", "kind": "run"})
+        fake._mutate("board/ci/x", "new1", created_at=_iso(1_000_001))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+
+        await waiter.tick()
+
+        assert waiter.status()["board_since_supported"] is False
+        assert len(fake.wait_calls) == 2, "the refused call, then the same tick's retry without since"
+        retried_specs, _t = fake.wait_calls[-1]
+        retried_board_spec = next(sp for sp in retried_specs if sp.subspace == "board/ci/x")
+        assert retried_board_spec.since is None, "the retry must drop since, or it would be refused again"
+        assert sender.calls == [(
+            channel._board_notification_content("board/ci/x", "new1"),  # noqa: SLF001
+            {"subspace": "board/ci/x", "tuple_id": "new1", "from": "github", "kind": "run"},
+        )], "the post still gets delivered on the SAME tick the refusal happened on"
+
+        fake.seed("board/ci/x", "new2", "post2", dims={"from": "github", "kind": "run"})
+        fake._mutate("board/ci/x", "new2", created_at=_iso(1_000_002))  # noqa: SLF001
+        await waiter.tick()
+
+        assert len(fake.wait_calls) == 3, "no retry needed: the flag is already flipped"
+        later_specs, _t2 = fake.wait_calls[-1]
+        later_board_spec = next(sp for sp in later_specs if sp.subspace == "board/ci/x")
+        assert later_board_spec.since is None, "since is never sent again for the rest of this waiter's life"
+
+    @pytest.mark.asyncio
+    async def test_a_row_level_since_refusal_reraises_rather_than_flipping_the_flag(self) -> None:
+        """Code-review round, bead nexus-n36sw: `_is_old_engine_since_refusal`
+        requires every `since`-carrying spec in the FAILED batch to be
+        per-subscriber (`ChannelWaiter._build_specs`'s own invariant: a
+        mailbox spec never sets `since`). If that invariant were ever
+        violated -- a hypothetical future bug putting `since` on a
+        row-level (mailbox) spec -- the resulting `SchemaViolationError`
+        must propagate, never be swallowed as "an old engine" and used to
+        flip `_board_since_supported`, which would silently disable the
+        engine-owned watermark for every future board spec too."""
+        session_id = str(uuid.uuid4())
+        subs = _subs(session_id)  # mailbox only -- no board subscription needed
+        fake = _FakeTupleStore()
+        fake.refuse_since_with_announce = True
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=_FakeSender())
+
+        def _bad_build_specs(self: "channel.ChannelWaiter", entries=None):  # noqa: ARG001
+            # The hypothetical bug: since on a ROW-LEVEL (no subscriber)
+            # announce spec -- never something real code sends.
+            return [WaitSpec(
+                subspace=self.subs.session_mailbox, n=1, since=("2026-01-01T00:00:00+00:00", ""),
+                announce=Announce(interval_s=0, max=5),
+            )]
+
+        original = channel.ChannelWaiter._build_specs  # noqa: SLF001
+        channel.ChannelWaiter._build_specs = _bad_build_specs  # type: ignore[method-assign]
+        try:
+            with pytest.raises(SchemaViolationError):
+                await waiter.tick()
+        finally:
+            channel.ChannelWaiter._build_specs = original  # type: ignore[method-assign]
+
+        assert waiter._board_since_supported is True, (  # noqa: SLF001
+            "the flag must not flip on a refusal outside the per-subscriber invariant"
+        )
+
+    def test_a_since_free_batch_never_reads_as_an_old_engine_refusal(self) -> None:
+        """Fix-check finding, bead nexus-n36sw: with no spec carrying
+        `since`, the per-subscriber check is vacuously true, so a refusal
+        whose text names both words must still not be taken for the
+        old-engine refusal, or it would disable the watermark for a batch
+        that never asked for it."""
+        exc = SchemaViolationError("field 'since': must not be set together with announce")
+        no_since = [WaitSpec(subspace="mailbox/x", n=1, announce=Announce(interval_s=0, max=5))]
+        assert channel._is_old_engine_since_refusal(exc, no_since) is False  # noqa: SLF001
+        with_since = [WaitSpec(
+            subspace="board/ci/x", n=1, since=("2026-01-01T00:00:00+00:00", ""),
+            announce=Announce(interval_s=0, max=5, subscriber="s"),
+        )]
+        assert channel._is_old_engine_since_refusal(exc, with_since) is True  # noqa: SLF001
+
+    @pytest.mark.asyncio
+    async def test_backlog_older_than_the_subscribe_time_is_dropped_not_pushed(self) -> None:
+        """The 2026-09-27 incident: 282 backlog posts pushed one by one to
+        a fresh subscriber. Rows created before the topic's subscribe
+        time are dropped; the engine has stamped them, so they never
+        return; nothing is sent for them.
+
+        Bead nexus-n36sw: the drop now happens BEFORE the fake ever
+        selects or stamps these rows (`_announce_rows`'s own `since`
+        narrowing, mirroring the engine) -- `board_backlog_dropped` stays
+        0, not 5, because that counter is this waiter's OWN client-side
+        drop count (`_deliver_board_rows`), and the client-side path never
+        runs at all here: `results` never carries these rows in the first
+        place, exactly as a subspace with nothing due is simply ABSENT
+        (`WaitResult`'s own contract), not present-with-something-to-drop.
+        `test_an_engine_that_refuses_since_with_announce_falls_back_...`
+        above covers the fallback path where the OLD counter semantics
+        still apply."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        for i in range(5):
+            fake.seed("board/ci/x", f"old{i}", "backlog", dims={"from": "github", "kind": "job"})
+            fake._mutate("board/ci/x", f"old{i}", created_at=_iso(999_000 + i))  # 1000 s before subscribe, past the skew margin  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+
+        await waiter.tick()
+
+        assert sender.calls == []
+        assert waiter.status()["board_backlog_dropped"] == 0, (
+            "the engine (this fake) excluded these rows before selection -- there was nothing left "
+            "for this waiter's own client-side drop to count"
+        )
+        assert waiter.status()["board_batches"] == 0
+        await waiter.tick()
+        assert sender.calls == [], "stamped once per subscriber: the backlog never comes back"
+
+    @pytest.mark.asyncio
+    async def test_one_new_post_keeps_the_single_post_shape(self) -> None:
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "new1", "post", dims={"from": "github", "kind": "run"})
+        fake._mutate("board/ci/x", "new1", created_at=_iso(1_000_001))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+
+        await waiter.tick()
+
+        assert sender.calls == [(
+            channel._board_notification_content("board/ci/x", "new1"),  # noqa: SLF001
+            {"subspace": "board/ci/x", "tuple_id": "new1", "from": "github", "kind": "run"},
+        )]
+
+    @pytest.mark.asyncio
+    async def test_a_burst_in_one_wait_is_one_notification_with_identifiers_only(self) -> None:
+        """A develop push posts ~70 rows; a cluster that lands in one wait
+        is ONE notification carrying the subspace, the count, the first
+        and last tuple id and the read hint -- never a body, never a
+        `from` or `kind` in the content (Sam 2026-09-17, reference only)."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        for i in range(20):
+            kind = "run" if i % 10 == 0 else "job"
+            fake.seed("board/ci/x", f"p{i:02d}", f"secret body {i}", dims={"from": "github", "kind": kind})
+            fake._mutate("board/ci/x", f"p{i:02d}", created_at=_iso(1_000_001 + i))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+
+        await waiter.tick()
+
+        assert len(sender.calls) == 1
+        content, meta = sender.calls[0]
+        assert content == channel._board_batch_notification_content(  # noqa: SLF001
+            "board/ci/x", 20, "p00", "p19", None,
+        )
+        assert "secret body" not in content and "github" not in content and "job" not in content
+        assert 'tuple_rd("board/ci/x", n=20)' in content
+        assert meta == {
+            "subspace": "board/ci/x", "tuple_id": "p19", "first_tuple_id": "p00",
+            "count": "20", "kinds": "job=18,run=2", "from": "github",
+            "tuple_ids": ",".join(f"p{i:02d}" for i in range(20)),
+        }
+        assert waiter.status()["board_batches"] == 1
+        assert waiter._board_activity is True  # noqa: SLF001 -- run() settles before the next wait
+
+    @pytest.mark.asyncio
+    async def test_a_full_batch_notification_stays_small(self) -> None:
+        """Nothing caps a channel notification's size, and a batch now
+        carries up to `DEFAULT_BOARD_WAIT_ROWS` ids in meta. Pin the worst
+        case (real 64-hex ids) so raising the cap has to revisit this."""
+        import hashlib
+        import json
+
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        for i in range(channel.DEFAULT_BOARD_WAIT_ROWS):
+            tid = hashlib.sha256(f"post {i}".encode()).hexdigest()
+            fake.seed("board/ci/x", tid, "body", dims={"from": "github", "kind": "job"})
+            fake._mutate("board/ci/x", tid, created_at=_iso(1_000_001 + i))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        await waiter.tick()
+        [(content, meta)] = sender.calls
+        assert meta["count"] == str(channel.DEFAULT_BOARD_WAIT_ROWS)
+        assert len(content) < 1024
+        assert len(json.dumps(meta)) < 8192
+
+    @pytest.mark.asyncio
+    async def test_one_subscription_snapshot_serves_the_whole_tick(self) -> None:
+        """The subscribe/unsubscribe tools mutate the set from worker
+        threads; the spec builder and the result processor must read the
+        same list, so an unsubscribe landing mid-tick cannot make the
+        processor treat the fetched rows as position-less."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "old", "x")
+        fake._mutate("board/ci/x", "old", created_at=_iso(1))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        calls = {"n": 0}
+        real_entries = subs.entries
+
+        def _entries_then_unsubscribe():
+            calls["n"] += 1
+            out = real_entries()
+            if calls["n"] == 1:  # the tool fires between the two reads of the old shape
+                subs._board.pop("board/ci/x", None)  # noqa: SLF001
+            return out
+
+        subs.entries = _entries_then_unsubscribe  # type: ignore[method-assign]
+        await waiter.tick()
+        assert calls["n"] == 1, "one snapshot per tick"
+        assert sender.calls == [], "the backlog row was filtered by the snapshot's start position"
+
+    @pytest.mark.asyncio
+    async def test_the_next_batch_carries_the_read_cursor_of_the_last_delivered_post(self) -> None:
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "a1", "x")
+        fake._mutate("board/ci/x", "a1", created_at=_iso(1_000_001))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        await waiter.tick()
+        for i in range(3):
+            fake.seed("board/ci/x", f"b{i}", "y")
+            fake._mutate("board/ci/x", f"b{i}", created_at=_iso(1_000_010 + i))  # noqa: SLF001
+        await waiter.tick()
+
+        content, _meta = sender.calls[-1]
+        assert content == channel._board_batch_notification_content(  # noqa: SLF001
+            "board/ci/x", 3, "b0", "b2", (_iso(1_000_001), "a1"),
+        )
+        assert f'since_created_at="{_iso(1_000_001)}", since_id="a1"' in content
+
+    @pytest.mark.asyncio
+    async def test_a_record_without_a_start_position_still_delivers_old_posts(self) -> None:
+        """A subscription persisted before this bead has no `since`; it
+        keeps the behaviour it was written under rather than a position
+        invented at load time."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=None)
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "old", "x")
+        fake._mutate("board/ci/x", "old", created_at=_iso(1))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        await waiter.tick()
+        assert [m["tuple_id"] for _c, m in sender.calls] == ["old"]
+
+    @pytest.mark.asyncio
+    async def test_a_row_whose_created_at_cannot_be_parsed_is_kept(self) -> None:
+        """This defense lives in `_deliver_board_rows`'s CLIENT-SIDE drop,
+        which bead nexus-n36sw demotes to the fallback path: with the
+        engine owning the watermark (the default), a row's `created_at`
+        is a genuine Postgres timestamp compared in SQL, never a string
+        this waiter parses for filtering at all, so there is nothing here
+        to be unparseable FOR any more. The fallback path is where the
+        defense still matters -- an engine predating this bead, still
+        rendering whatever `created_at` shape it always did -- so this
+        test drives it explicitly rather than through the (real, but
+        separately covered) detection flow."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "odd", "x")  # the fake's zero-padded sequence is not ISO-8601
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(session_id, _fake_store_factory(fake), subs, sender=sender)
+        waiter._board_since_supported = False  # noqa: SLF001 -- isolate the fallback path directly
+        await waiter.tick()
+        assert [m["tuple_id"] for _c, m in sender.calls] == ["odd"]
+        assert waiter.status()["board_backlog_dropped"] == 0
+
+    @pytest.mark.asyncio
+    async def test_run_settles_after_board_activity_so_a_cluster_folds(self) -> None:
+        """Posts that arrive a moment apart: without the settle the first
+        wait returns one row and the second the rest, two notifications;
+        with it the loop sleeps `board_coalesce_s` and the next wait
+        scoops the cluster."""
+        session_id = str(uuid.uuid4())
+        subs = _board_subs(session_id, "board/ci/x", since=_iso(1_000_000))
+        fake = _FakeTupleStore()
+        fake.seed("board/ci/x", "c0", "x")
+        fake._mutate("board/ci/x", "c0", created_at=_iso(1_000_001))  # noqa: SLF001
+        sender = _FakeSender()
+        waiter = channel.ChannelWaiter(
+            session_id, _fake_store_factory(fake), subs, sender=sender,
+            board_coalesce_s=0.3, min_tick_interval_s=0.0, engine_version_probe=lambda: None,
+        )
+        waiter._catchup_mailbox_rows = _noop_coroutine  # type: ignore[method-assign]  # noqa: SLF001
+        task = asyncio.create_task(waiter.run())
+        try:
+            await _poll_until(lambda: len(sender.calls) == 1)
+            for i in range(1, 4):  # land during the settle window
+                fake.seed("board/ci/x", f"c{i}", "x")
+                fake._mutate("board/ci/x", f"c{i}", created_at=_iso(1_000_001 + i))  # noqa: SLF001
+            await _poll_until(lambda: len(sender.calls) == 2)
+            await asyncio.sleep(0.5)
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        assert len(sender.calls) == 2
+        assert sender.calls[1][1]["count"] == "3"
+
+
+async def _noop_coroutine(*_a, **_k) -> None:
+    return None

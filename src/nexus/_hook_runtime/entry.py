@@ -249,6 +249,33 @@ VERB_TABLE: dict[str, str] = {
     "pre-close-verification": "nexus.hooks.pre_close_verification",
     "subagent-stop": "nexus.hooks.subagent_stop",
     "auto-approve": "nexus.hooks.auto_approve",
+    # The RDR-184 ledger's two WRITERS (bead nexus-5l8i8), moved for a
+    # DIFFERENT reason than the three above: neither returns a verdict, so
+    # `mcp_tool`'s inability to decide anything was never the hazard here.
+    # The hazard is that an `mcp_tool` hook depends on this session's own
+    # `plugin:conexus:nexus` MCP server being connected, and the dispatch
+    # or subagent start it observes proceeds regardless of whether that
+    # server answers. Root-caused 2026-09-27 (nexus-5l8i8, from session
+    # 81d1d28b's transcript): the server disconnected for about three
+    # minutes; two Agent dispatches during that window each logged
+    # `hook_non_blocking_error PreToolUse:Agent "MCP server ... not
+    # connected"`, the dispatch proceeded, and no EXPECT row was written --
+    # while the matching SubagentStart fired after reconnect and DID write
+    # a START row. EXPECT lost, START kept: the retro audit reads the gap
+    # as an undeclared dispatch, which is the exact silent miss RDR-184
+    # exists to catch. The command tier has no such dependency: it is a
+    # plain subprocess the harness spawns directly, whether or not any MCP
+    # server is up.
+    #
+    # They keep their tool-tier registrations (`nexus.mcp.hooks.HOOK_TOOLS`),
+    # useful for diagnosis; only which tier `hooks.json` WIRES moved. They
+    # are NOT added to `nexus.mcp.hooks.DECIDING_HOOKS` -- neither emits a
+    # verdict, so that set's own rule (never wire on `mcp_tool`, because a
+    # verdict is discarded there) does not apply to them; this is a
+    # resilience move, not a decision-tier one, and the two rules are
+    # independent even though both land on the command tier.
+    "agent-dispatch-expect": "nexus.hooks.agent_dispatch_expect",
+    "subagent-start-stamp": "nexus.hooks.subagent_start_stamp",
     # The interactive MCP connection barrier (bead nexus-veh77, Sam's
     # 2026-09-23 ruling). SessionStart, `startup` matcher only: waits,
     # bounded and fail-open, for THIS session's nx-mcp to publish its
@@ -270,6 +297,23 @@ VERB_TABLE: dict[str, str] = {
     # finds alive, having previously been alive. A session that never
     # connected stays silent -- that is mcp-connect-wait's own job.
     "mcp-connect-check": "nexus.hooks.mcp_connect_check",
+    # The RDR-205 ledger's two PROJECTORS (bead nexus-egm7p), moved for the
+    # SAME reason as the RDR-184 writers above: an mcp_tool hook's
+    # invocation depends on this session's plugin:conexus:nexus MCP
+    # connection, and the SubagentStart/SubagentStop event it observes
+    # fires whether or not that connection exists. See
+    # nexus.hooks.subagent_start_tuple's own docstring for the full
+    # analysis, including why this calls tuple_ledger_project.project()
+    # directly rather than reusing tuple_projection.run_start/run_stop's
+    # daemon-thread detachment (that trick is for a long-lived nx-mcp
+    # server process; a command-tier verb's process IS the unit of work,
+    # and "async": true in hooks.json is what makes it non-blocking here).
+    #
+    # They keep their tool-tier registrations (nexus.mcp.hooks.HOOK_TOOLS),
+    # useful for diagnosis; only which tier hooks.json WIRES moved. Not
+    # added to DECIDING_HOOKS: neither emits a verdict.
+    "subagent-start-tuple": "nexus.hooks.subagent_start_tuple",
+    "subagent-stop-tuple": "nexus.hooks.subagent_stop_tuple",
 }
 
 #: Verbs whose exit code nx-hook must propagate from ``run()`` instead of

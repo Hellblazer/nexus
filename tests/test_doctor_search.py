@@ -305,8 +305,8 @@ def _stub_search_fn(dist_table):
 
 def _stub_model_for(col: str) -> str:
     if col.startswith(("docs__", "knowledge__", "rdr__")):
-        return "voyage-context-3"
-    return "voyage-code-3"
+        return "model-ctx"
+    return "model-code"
 
 
 class TestRetrievalQualityProbe:
@@ -320,7 +320,7 @@ class TestRetrievalQualityProbe:
             collections=["code__clean"],
             search_fn=_stub_search_fn({"code__clean": (5, 2)}),
             model_for=_stub_model_for,
-            metadata_fn=lambda col: {"embedding_model": "voyage-code-3"},
+            metadata_fn=lambda col: {"embedding_model": "model-code"},
         )
         assert len(results) == 1
         assert results[0].outcome == "matched"
@@ -335,7 +335,7 @@ class TestRetrievalQualityProbe:
             collections=["knowledge__empty"],
             search_fn=_stub_search_fn({"knowledge__empty": (0, 0)}),
             model_for=_stub_model_for,
-            metadata_fn=lambda col: {"embedding_model": "voyage-context-3"},
+            metadata_fn=lambda col: {"embedding_model": "model-ctx"},
         )
         assert results[0].outcome == "empty"
         assert results[0].raw_count == 0
@@ -349,7 +349,7 @@ class TestRetrievalQualityProbe:
             collections=["docs__dropped"],
             search_fn=_stub_search_fn({"docs__dropped": (4, 4)}),
             model_for=_stub_model_for,
-            metadata_fn=lambda col: {"embedding_model": "voyage-context-3"},
+            metadata_fn=lambda col: {"embedding_model": "model-ctx"},
         )
         assert results[0].outcome == "threshold_drop"
         assert results[0].raw_count == 4
@@ -364,14 +364,14 @@ class TestRetrievalQualityProbe:
             collections=["knowledge__drifted"],
             search_fn=_stub_search_fn({"knowledge__drifted": (3, 1)}),
             model_for=_stub_model_for,
-            # Expected voyage-context-3 for knowledge__, but metadata says voyage-code-3.
-            metadata_fn=lambda col: {"embedding_model": "voyage-code-3"},
+            # Expected model-ctx for knowledge__, but metadata says model-code.
+            metadata_fn=lambda col: {"embedding_model": "model-code"},
         )
         # Model drift overrides the match-class — it's a regression-level signal
         # even when the query happened to return results.
         assert results[0].outcome == "model_drift"
-        assert results[0].expected_model == "voyage-context-3"
-        assert results[0].actual_model == "voyage-code-3"
+        assert results[0].expected_model == "model-ctx"
+        assert results[0].actual_model == "model-code"
 
     def test_error_when_search_raises(self) -> None:
         from nexus.doctor_search import run_retrieval_quality_probe
@@ -384,7 +384,7 @@ class TestRetrievalQualityProbe:
             collections=["code__boom"],
             search_fn=_raise,
             model_for=_stub_model_for,
-            metadata_fn=lambda col: {"embedding_model": "voyage-code-3"},
+            metadata_fn=lambda col: {"embedding_model": "model-code"},
         )
         assert results[0].outcome == "error"
         assert results[0].error is not None
@@ -395,10 +395,10 @@ class TestRetrievalQualityProbe:
         from nexus.doctor_search import run_retrieval_quality_probe
 
         metas = {
-            "code__healthy":    {"embedding_model": "voyage-code-3"},
-            "docs__empty":      {"embedding_model": "voyage-context-3"},
-            "knowledge__drop":  {"embedding_model": "voyage-context-3"},
-            "docs__drifted":    {"embedding_model": "voyage-code-3"},  # wrong
+            "code__healthy":    {"embedding_model": "model-code"},
+            "docs__empty":      {"embedding_model": "model-ctx"},
+            "knowledge__drop":  {"embedding_model": "model-ctx"},
+            "docs__drifted":    {"embedding_model": "model-code"},  # wrong
         }
 
         def _search(query, collections, n_results, t3, *, diagnostics_out=None, **_):

@@ -628,20 +628,23 @@ class TestFailOpen:
         Found by mutation, not by inspection: the parse used ``IFS=$'\\t'
         read``, and tab is IFS *whitespace*, so bash COLLAPSES empty fields
         and shifts every later value one position left. ``tool_use_id`` is
-        deliberately set to the string ``"background"`` here — itself a
-        valid dispatch-mode value — so that a shift bug would produce a
-        row that LOOKS plausible (mode="background", i.e. the shifted
-        tool_use_id lands where mode is expected) instead of failing loud.
+        deliberately set to ``"toolu_background"`` here — itself
+        embedding a valid dispatch-mode value — so that a shift bug would
+        produce a row that LOOKS plausible (mode="background", i.e. the
+        shifted tool_use_id lands where mode is expected) instead of
+        failing loud. It has to be ``toolu_``-shaped now (nexus-5l8i8):
+        anything else is refused outright by the id-shape guard before the
+        shift this test is probing for would ever have a chance to occur.
         The delimiter is ``\\x1f`` (non-whitespace), which does not
         collapse empty fields, so no shift occurs and the row carries the
         DEFAULTED name in the subagent_type slot with the crafted
         tool_use_id still in the dispatch_id slot, unshifted."""
-        proc = _run(_pretooluse(subagent_type="", tool_use_id="background"), tmp_path)
+        proc = _run(_pretooluse(subagent_type="", tool_use_id="toolu_background"), tmp_path)
         assert proc.returncode == 0
         row = _expfile(tmp_path).read_text()
         assert "\tEXPECT\tgeneral-purpose\tbackground\t" in row, row
         fields = row.strip().split("\t")
-        assert fields[4] == "background", (
+        assert fields[4] == "toolu_background", (
             "dispatch_id must still carry the crafted tool_use_id, unshifted: " + row
         )
 

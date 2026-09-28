@@ -203,7 +203,14 @@ def collection_attributes(row: dict[str, Any]) -> CollectionAttributes:
 @dataclass(slots=True)
 class CollectionFacts:
     """Everything the checks read, joined from the catalog row, the vector
-    stats row, and the catalog document count."""
+    stats row, and the catalog document count.
+
+    ``chunk_count`` is the stored count (the stats row's ``stored_count``,
+    RDR-192 Step 5 amendment), not the live count: the shape audit asks what
+    a collection holds, and a collection of unowned chunks is not a ghost. An
+    engine older than the amendment sends no ``stored_count``, and
+    :func:`gather_facts` falls back to ``count``.
+    """
 
     name: str
     attrs: CollectionAttributes
@@ -245,7 +252,10 @@ def gather_facts(
             legacy_grandfathered=bool(row.get("legacy_grandfathered")),
             superseded_by=str(row.get("superseded_by") or ""),
             has_stats=st is not None,
-            chunk_count=int(st.get("count") or 0) if st else 0,
+            chunk_count=(
+                int(st["stored_count"]) if st and st.get("stored_count") is not None
+                else int(st.get("count") or 0) if st else 0
+            ),
             dim=int(st["dim"]) if st and st.get("dim") is not None else None,
             doc_count=int(doc_counts.get(name, 0) or 0),
         ))

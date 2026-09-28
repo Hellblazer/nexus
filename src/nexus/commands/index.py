@@ -1673,7 +1673,23 @@ def index_repo_cmd(
                     client=_t2_client, collections_without_topics=no_topics,
                 )
             else:
-                click.echo("  Taxonomy: no files changed — skipping discovery")
+                # nexus-du6d0: this line used to be unconditional reassurance
+                # even when the last real discover attempt for one of these
+                # collections FAILED — a maintenance-mode repo (no more file
+                # churn) coincident with a failing discover backend got zero
+                # further postprocessing invocations, hence zero warnings,
+                # forever. Name the failure here too, not just in `nx doctor`
+                # (taxonomy.discover health), since an operator watching an
+                # interactive `nx index repo` may never run doctor.
+                _failed_discover = _collections_with_failed_discover(collections)
+                if _failed_discover:
+                    click.echo(
+                        "  Taxonomy: no files changed — skipping discovery "
+                        f"(last discover attempt FAILED for {', '.join(sorted(_failed_discover))} "
+                        "— run `nx taxonomy discover --collection <name>` to retry)"
+                    )
+                else:
+                    click.echo("  Taxonomy: no files changed — skipping discovery")
             # nexus-iygza (indexing-brittleness P0.1): assign any chunk the
             # per-flush hook lost or deferred, derived from state. Runs on a
             # no-change run too, since that is exactly when an earlier run's
@@ -2048,6 +2064,92 @@ def _collections_without_topics(collections: list[str], *, client=None) -> set[s
         return set(collections)
 
 
+def _collections_with_failed_discover(collections: list[str]) -> set[str]:
+    """Subset of *collections* whose last recorded taxonomy-discover
+    attempt failed (nexus-du6d0, qgc4b residual staleness).
+
+    Read-only courtesy check for the "no files changed" skip line only —
+    it does not gate any discovery decision (`nx doctor`'s
+    ``taxonomy.discover health`` row is the authoritative,
+    run-independent surface for this; see
+    ``nexus.mcp_infra.record_taxonomy_discover_attempt``). This just
+    changes what an interactive `nx index repo` says about a no-change
+    run, so "skipping discovery" doesn't read as reassurance when the
+    last real attempt failed. Fails safe toward silence: a probe error
+    returns an empty set rather than raising or crashing the index run.
+
+    ONE round trip regardless of ``len(collections)`` (review round 2,
+    nexus-du6d0): a single ``HttpMemoryStore().get_all(...)`` fetches
+    every tracked collection's record — the SAME shape `nx doctor`'s
+    ``taxonomy.discover health`` row uses
+    (:func:`nexus.health._check_taxonomy_discover_health`) — filtered
+    here to *collections* rather than probed one collection at a time
+    via ``T2Database``. This runs on EVERY no-change ``nx index repo``
+    invocation, including the post-commit hook path, so it must stay one
+    round trip and must never fail the run: a filter to *collections*
+    (this repo's own currently-registered set) also means a stale entry
+    for a collection this repo no longer has is never even considered —
+    it isn't in *collections* to begin with.
+    """
+    if not collections:
+        return set()
+    from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred: CLI startup cost
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred to avoid circular import
+        TAXONOMY_DISCOVER_HEALTH_PROJECT,
+        parse_taxonomy_discover_health,
+    )
+
+    wanted = set(collections)
+    try:
+        store = HttpMemoryStore()  # self-resolves the endpoint, as t2/__init__ does
+    except Exception:  # noqa: BLE001 — probe is best-effort; on failure err toward silence, not a crash
+        _log.debug("taxonomy_discover_health_probe_failed", exc_info=True)
+        return set()
+    try:
+        entries = store.get_all(TAXONOMY_DISCOVER_HEALTH_PROJECT)
+    except Exception:  # noqa: BLE001 — probe is best-effort; on failure err toward silence, not a crash
+        _log.debug("taxonomy_discover_health_probe_failed", exc_info=True)
+        return set()
+    finally:
+        try:
+            store.close()
+        except Exception:  # noqa: BLE001 — best-effort close, never masks the probe's own result
+            pass
+
+    out: set[str] = set()
+    for e in entries:
+        collection = str((e or {}).get("title", ""))
+        if collection not in wanted:
+            continue
+        if parse_taxonomy_discover_health((e or {}).get("content", "")).get("last_outcome") == "failure":
+            out.add(collection)
+    return out
+
+
+def _record_discover_health(db: Any, collection: str, *, success: bool, error_class: str = "") -> None:
+    """Best-effort wrapper around
+    :func:`nexus.mcp_infra.record_taxonomy_discover_attempt` for the
+    per-collection discover loop in :func:`run_collection_postprocessing`.
+
+    Guards the ``db.memory`` ATTRIBUTE ACCESS too, not just the write
+    inside ``record_taxonomy_discover_attempt`` — a bare object standing
+    in for ``db`` in a test fixture (no ``.memory`` at all) raises
+    ``AttributeError`` evaluating the argument expression, before the
+    wrapped function's own internal try/except ever runs. That exception
+    previously escaped this call site directly into the discover loop's
+    ``except Exception as exc:`` handler (when raised from the success
+    branch) or past it entirely (when raised again from the failure
+    branch, which has no enclosing try of its own) — aborting the WHOLE
+    per-collection loop rather than just this one collection's
+    bookkeeping. A diagnostic write must never be able to do that.
+    """
+    from nexus.mcp_infra import record_taxonomy_discover_attempt  # noqa: PLC0415 — deferred to avoid circular import
+    try:
+        record_taxonomy_discover_attempt(db.memory, collection, success=success, error_class=error_class)
+    except Exception as exc:  # noqa: BLE001 — best-effort: a diagnostic write must never mask or abort the real discover outcome
+        _log.warning("taxonomy_discover_health_record_call_failed", collection=collection, error=str(exc))
+
+
 def _discover_subset(
     collections: list[str],
     files_changed_by_kind: dict | None,
@@ -2278,6 +2380,10 @@ def _spawn_deferred_labeling() -> bool:
         log_dir = nexus_config_dir() / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log = open(log_dir / "deferred_labeling.log", "ab")  # noqa: SIM115 — handed to the child for its lifetime
+        # nexus-6y4e0 surveyed this site and left it unwired: nothing ever
+        # kills this child by pid -- it is a pure fire-and-forget spawn
+        # (the caller returns immediately and never records the pid at
+        # all). There is no kill call site for containment to serve.
         subprocess.Popen(
             [sys.executable, "-m", "nexus.cli", "taxonomy", "label"],
             stdin=subprocess.DEVNULL,
@@ -2370,6 +2476,7 @@ def run_collection_postprocessing(
                 try:
                     n = _discover_taxonomy(col_name, db.taxonomy, t3, quiet=quiet)
                     total_topics += n
+                    _record_discover_health(db, col_name, success=True)
                 except Exception as exc:  # noqa: BLE001 — best-effort per-collection taxonomy discovery; failure logged and chain continues
                     # nexus-qgc4b: surface the failure. A silent debug-only log
                     # meant a persistently-failing discover was invisible; with
@@ -2381,6 +2488,14 @@ def run_collection_postprocessing(
                         f"  Taxonomy: discover FAILED for {col_name} ({type(exc).__name__}) "
                         f"— run `nx taxonomy discover` to retry"
                     )
+                    # nexus-du6d0: qgc4b's self-heal guard only covers a
+                    # collection that has never had a topic; once one
+                    # exists, this exception is the LAST signal a failing
+                    # discover backend gets on a repo whose files stop
+                    # changing (run_collection_postprocessing then never
+                    # runs again). Record it in T2 so `nx doctor` can warn
+                    # on it independent of whether this run recurs.
+                    _record_discover_health(db, col_name, success=False, error_class=type(exc).__name__)
             _say(f"  Taxonomy: discover done ({_time.monotonic() - _tax_t0:.1f}s)")
             if total_topics:
                 _say(

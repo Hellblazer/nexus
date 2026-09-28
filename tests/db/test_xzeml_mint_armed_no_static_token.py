@@ -75,7 +75,15 @@ def test_armed_box_runs_on_data_tokens_with_no_static_token(
             collection, ids=[chash], documents=[content], embeddings=[[0.1] * _DIM],
             metadatas=[{"title": "xzeml", "chunk_text_hash": chash}],
         )
-        present = client.get_collection(collection).get(ids=[chash], include=[])
+        # nexus-wbfpw.10 (RDR-192 Step 5 live(c), engine fc99baac9): this
+        # round trip proves data-token auth works with no static bearer, not
+        # a retrieval-relevance property -- the chunk has no catalog
+        # manifest owner, so read back with the maintenance
+        # include_non_live=True escape hatch (same rationale as the
+        # nexus-wrwb7 sibling in test_data_token_manager_e2e.py).
+        present = client.get_collection(collection).get(
+            ids=[chash], include=[], include_non_live=True,
+        )
         assert chash in (present.get("ids") or [])
 
         from nexus.db.t2.http_memory_store import HttpMemoryStore

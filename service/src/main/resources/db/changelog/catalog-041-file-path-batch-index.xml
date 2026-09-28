@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-1vc0n: index the read path the new bulk owner-agnostic file_path
+    lookup (CatalogRepository.documentsByFilePaths, POST /v1/catalog/list_by_file_paths)
+    depends on — ``file_path = ANY(?)`` over every live row, tenant-scoped.
+
+    catalog-001-baseline indexed source_uri (idx_catalog_documents_source_uri)
+    and collection (idx_catalog_documents_collection) for exactly this shape
+    of exact-match read, both LEADING with tenant_id (every RLS-scoped query
+    here filters by tenant first) — but never file_path itself: the
+    single-path reads (documentsByFilePath, documentsByOwnerAndFilePath)
+    predate this bead and were evidently fast enough unindexed at their call
+    volume (one row per per-document write, never a scan trigger). The
+    batched registrar this bead exists for changes that: one register_many
+    pass now issues ONE documentsByFilePaths call per batch's misses
+    (chunked at 300 paths client-side, src/nexus/db/limits.py
+    QUOTAS.MAX_RECORDS_PER_WRITE), so a cold index of a large repo runs this
+    query thousands of times, each scanning catalog_documents in full
+    without an index on file_path. This index follows the same
+    (tenant_id, X) leading-column convention as its two catalog-001
+    siblings.
+
+    BUILD-WINDOW DECISION: plain CREATE INDEX, not CONCURRENTLY — deliberate,
+    same family of reasoning as vectors-003 (populated-table case), a
+    DIFFERENT one than vectors-002 (pre-ETL empty tables). catalog_documents
+    is genuinely populated wherever this ships. Basis: measured on THIS
+    box's own local engine via ``mcp__plugin_conexus_nexus-catalog__stats``
+    (2026-09-27) — 23,299 live catalog_documents rows, order 10^4, one
+    tenant. A plain CREATE INDEX takes a SHARE lock on the table for the
+    duration of the build — blocking writes, not reads — and a narrow
+    two-column btree over 10^4 rows is the SAME shape vectors-003 already
+    measured "seconds" at 10^5-10^6, so the window here is smaller still,
+    sub-second. Liquibase runs the whole changelog in the boot-time
+    migration window before the engine serves traffic (same precondition
+    vectors-003 relies on), so even that sub-second SHARE lock blocks
+    nothing live. This box's count is a development install, not
+    production's — the actual production catalog_documents cardinality (and
+    therefore the real lock duration) is confirmed at deploy time by the
+    Liquibase walk rehearsal against a PITR fork of production (AGENTS.md
+    § Engine-service release, ``deploy/RESTORE.md`` in the conexus repo),
+    which this changeset rides like every other changeset-carrying engine
+    tag. If a future store is ever large enough that this stops being
+    negligible, build it manually as CREATE INDEX CONCURRENTLY outside
+    Liquibase, same escape hatch vectors-003 names.
+
+    PARTIAL, not full: ``WHERE deleted_at IS NULL`` matches the read's own
+    tombstone filter exactly (documentsByFilePaths, documentsByFilePath,
+    documentsByOwnerAndFilePath, documentsBySourceUri all carry the same
+    predicate) — a tombstoned row can never be a hit, so excluding it keeps
+    the index smaller and lets Postgres's planner recognise the index-only
+    match without re-checking visibility against dead rows.
+
+    NOT unique — catalog-016's own header already settled this for the
+    single-path form and the reasoning is unchanged for the batch form:
+    file_path is repo-ROOT-relative, so two owners legitimately share
+    "README.md". A unique index would refuse the exact normal steady state
+    nexus-yzij1 exists to accommodate.
+
+    catalog-040 is nexus-l46pu's (catalog_collections.aspects_enabled); the
+    two touch different tables and do not depend on each other.
+
+    DATA EFFECT: none — CREATE INDEX only, no row is read, written, or
+    otherwise touched. No FORCE-RLS toggle needed: unlike catalog-016-1's
+    UNIQUE index (whose creation validates the preceding dedup), a plain
+    non-unique index never scans for constraint violations across tenants
+    and needs no BYPASSRLS to complete correctly.
+
+    This whole header, this paragraph included, is a top-level XML comment
+    OUTSIDE the changeSet body — the same placement vectors-002's and
+    vectors-003's own BUILD-WINDOW DECISION paragraphs use, and the reason
+    editing it later is checksum-neutral: Liquibase's changeset checksum is
+    computed only from the <sql>/structured-change body inside a changeSet
+    (data_effect_lint.py's own docstring; it explicitly excludes <comment>,
+    <preConditions>, <rollback> and failOnError, and this text sits one
+    level further out than even those). This changeset has not shipped
+    anywhere yet, so no deployed cluster's checksum is at stake either way;
+    the note is here for whoever next edits this file's header.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-041-1" author="nexus-1vc0n">
+        <comment>Partial index on catalog_documents(file_path) for live rows, accelerating the new batch owner-agnostic file_path lookup (list_by_file_paths). DATA EFFECT: none -- CREATE INDEX only.</comment>
+        <sql splitStatements="true">
+CREATE INDEX idx_catalog_documents_file_path_live
+    ON nexus.catalog_documents (tenant_id, file_path)
+ WHERE deleted_at IS NULL;
+        </sql>
+        <rollback>
+            <sql>DROP INDEX IF EXISTS nexus.idx_catalog_documents_file_path_live;</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

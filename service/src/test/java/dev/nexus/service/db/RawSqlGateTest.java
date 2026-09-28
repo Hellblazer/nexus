@@ -905,7 +905,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 11),
         Map.entry("dev/nexus/service/CatalogEngineDefects70Test.java", 5),
         Map.entry("dev/nexus/service/CatalogFtsFilenameSearchTest.java", 3),
-        Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 8),
+        // nexus-brxnp fix round: 8 -> 10 (+2, insertManifestRowBypassingFk's
+        // two ALTER TABLE DROP/ADD CONSTRAINT execute() calls -- the same
+        // FK-bypass idiom GcRestoreRereferencedBoundedTest.java and
+        // PgVectorRepositoryGcQuarantineTest.java already carry entries for).
+        Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 10),
         Map.entry("dev/nexus/service/CatalogHandlerManifestEnvelopeTest.java", 1),
         Map.entry("dev/nexus/service/CatalogHandlerRenameTest.java", 4),
         Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 23),
@@ -920,6 +924,13 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 11),
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 17),
         Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 21),
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq): 2 raw-JDBC fixture sites,
+        // the same idiom CombinedWriteRepositoryTest's own seedChunk384/
+        // chunk384Exists use just below -- seedChunk's chunks INSERT (a
+        // chunk-row-only seed with NO manifest reference, required so the
+        // zero-row-reroute fixture's concurrent delete does not trip
+        // fk_catalog_chunks_chunk) and deleteChunk's chunks DELETE.
+        Map.entry("dev/nexus/service/CombinedWriteRacedEmbedCounterTest.java", 2),
         Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 6),
         // nexus-v4pj4 (round-2 review decision): 4 raw-JDBC fixture sites, the
         // same idiom TaxonomyAssignFromChashesRepositoryTest uses above --
@@ -929,6 +940,13 @@ class RawSqlGateTest {
         // dims) -- no jOOQ codegen for GRANT EXECUTE.
         Map.entry("dev/nexus/service/CrossPreviewRepositoryTest.java", 4),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 7),
+        // nexus-brxnp: new file at 3 -- metadataField's raw executeQuery
+        // (metadata->>key read, no jOOQ codegen shortcut used here) and
+        // insertManifestRowBypassingFk's two ALTER TABLE DROP/ADD CONSTRAINT
+        // execute() calls, the same FK-bypass idiom
+        // PgVectorRepositoryGcQuarantineTest.seedManifestBypassingFk already
+        // carries raw-SQL entries for below.
+        Map.entry("dev/nexus/service/GcRestoreRereferencedBoundedTest.java", 3),
         // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-f1pbh: 20 -> 21 (nexusDiagCanSelectTupleTables's count(diag, "SELECT count(*) FROM " + table) call).
@@ -1198,12 +1216,43 @@ class RawSqlGateTest {
         // (it asserts live_notes/rev_candidates materialize once and live_notes
         // uses idx_catalog_documents_collection_live), and the pg_proc
         // proleakproof probe for texteq and jsonb_object_field_text.
+        // RDR-192 Step 4 (bead nexus-wbfpw.9): 2 raw-SQL sites -- the
+        // EXISTS(chunk_live_owners(...))-filtered KNN query (chunkLiveOwnersFilteredKnn)
+        // and its EXPLAIN (ANALYZE, BUFFERS) twin (explainChunkLiveOwnersFilteredKnn).
+        // Both carry the vector-distance OPERATOR(nexus.<=>) ORDER BY, which has no
+        // jOOQ DSL operator (same reason GraphHopParityTest/
+        // TaxonomyAssignCrossLateralHnswTest use the identical raw-literal-SQL idiom
+        // for their own KNN plan-shape tests). Round-2 rework (T2
+        // nexus/review-wbfpw9-code): file renamed from ChunkIsLiveHnswExplainRecallIntegrationTest.java
+        // when the predicate itself was replaced with a set-returning function; same
+        // 2-site count, unchanged.
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersInlineRecallIntegrationTest.java", 2),
+        // RDR-192 Step 4 round 2 (bead nexus-wbfpw.9, critique T2 nexus/critique-wbfpw9
+        // Critical): 3 raw-SQL sites -- the controlled before/after harness
+        // (runProd/runExact, same text-literal vector binding for both predicates) and
+        // its EXPLAIN (ANALYZE, BUFFERS) twin (explainProd), reproducing nexus-msz9i's
+        // own 76k-chunk/57k-manifest-row/1k-doc fixture shape with a tombstone-fraction
+        // sweep. Same OPERATOR(nexus.<=>)-has-no-jOOQ-DSL-form reason as the sibling
+        // entry above. Round 3 (coordinator instruction: control the recall numbers
+        // with an unfiltered baseline + the shipped predicate's own oracle, and confirm
+        // before/after agree on the live population): 3 -> 5, +2 -- the new
+        // countMatching(String) call site (used for the before/after/no-predicate full-
+        // population live COUNT queries -- one Java call site, three SQL constants) and
+        // the inline current_setting('hnsw.max_scan_tuples') read in the new recall
+        // test (production code never sets this GUC, so its value is read directly to
+        // report it, per the coordinator's explicit request).
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 5),
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDeleteAntiJoinTest.java", 2),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDimGuardTest.java", 2),
-        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 11),
+        // nexus-brxnp: 11 -> 13 (+2, the new createdAt/backdateChunk helpers'
+        // raw executeQuery/execute -- the live-origin-row-wins regression
+        // test needs a per-chash created_at read and a targeted backdate,
+        // same raw idiom this file's existing chunkText/metadataField
+        // helpers already use).
+        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 13),
         // RDR-192 Step 1 (bead nexus-wbfpw.1): 1 raw-JDBC site -- seedCentroid384's
         // taxonomy_centroids INSERT, the identical shape
         // TaxonomyUnassignedChashesRepositoryTest#seedCentroid already carries (no
@@ -1569,7 +1618,26 @@ class RawSqlGateTest {
     // 3 -- see that entry's own comment).
     // nexus-wbfpw.4 round 4: 961 -> 963 (+2: that file 3 -> 5, the other-
     // collection seed INSERT and the proleakproof probe; see its entry).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 963;
+    // nexus-wbfpw.9 (RDR-192 Step 4): 963 -> 965 (+2: one new test file,
+    // vectors/ChunkIsLiveHnswExplainRecallIntegrationTest.java new at 2 -- see
+    // that entry's own comment).
+    // nexus-wbfpw.9 round 2 (critique T2 nexus/critique-wbfpw9): 965 -> 968 (+3:
+    // the round-1 file renamed to vectors/ChunkLiveOwnersInlineRecallIntegrationTest.java,
+    // same 2 sites, net 0; one new test file,
+    // vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java new at 3 -- see that
+    // entry's own comment).
+    // nexus-wbfpw.9 round 3 (coordinator instruction: control the recall numbers):
+    // 968 -> 970 (+2: that file 3 -> 5, the new countMatching(String) call site and
+    // the inline current_setting('hnsw.max_scan_tuples') read; see its entry).
+    // RDR-222 Phase 0 fix round (bead nexus-ulrjq): 970 -> 972 (+2: new test file
+    // CombinedWriteRacedEmbedCounterTest.java at 2 -- see that entry's own comment).
+    // nexus-brxnp: 972 -> 977 (+5: new test file GcRestoreRereferencedBoundedTest.java
+    // at 3, PgVectorRepositoryGcQuarantineTest.java 11 -> 13 (+2) -- see each
+    // entry's own comment).
+    // nexus-brxnp fix round: 977 -> 979 (+2: CatalogGcAuditProducersTest.java
+    // 8 -> 10, insertManifestRowBypassingFk's two ALTER TABLE execute() calls
+    // -- see that entry's own comment).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 979;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

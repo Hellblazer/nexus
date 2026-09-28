@@ -445,9 +445,9 @@ def gc_cmd(
 
     # nexus-39upx hazard 2 (RDR-145) + nexus-g6k6b (RUNFENCE precondition):
     # chashes_for_collection only sees chashes with a manifest row. A
-    # store_put / nx store put NOTE never gets one — RDR-145 defers
-    # manifest-backed identity for notes, and catalog-003-soft-delete.xml's
-    # live_chunks view treats a manifest-less chunk as live BY DESIGN — so
+    # legacy store_put / nx store put NOTE (stored before nexus-b6enc) may
+    # have none — reads hide such a chunk since RDR-192 Step 5, but this
+    # deleting sweep keeps the notes guard until RDR-192 Step 11 — so
     # a note's chash is indistinguishable from a chash that fell out of a
     # live document's manifest via re-index; both simply read "not
     # referenced" above. Separately, Hal's 2026-08-02 comment on this bead
@@ -937,6 +937,9 @@ def backfill_manifest_cmd(
     total_skipped_has_manifest = 0
     total_skipped_chash_divergent = 0
     total_skipped_fk_409 = 0
+    total_reverse_discovered = 0
+    total_cross_collection_forward_owner_skipped = 0
+    total_reverse_multi_piece_skipped = 0
     skipped_taxonomy = 0
     errors: list[str] = []
     docs_processed_overall = 0
@@ -1022,18 +1025,41 @@ def backfill_manifest_cmd(
             if result.docs_skipped_fk_409
             else ""
         )
+        # nexus-wbfpw.7: reverse-note discoveries -- reported separately
+        # from forward discovery, never folded into docs_processed alone.
+        reverse_part = (
+            f" ({result.docs_reverse_discovered} via reverse notes-guard)"
+            if result.docs_reverse_discovered
+            else ""
+        )
+        # nexus-wbfpw.7 fix-round-1: cross-collection forward-owner and
+        # multi-piece reverse skips -- never silent, same discipline as
+        # every other skip class above.
+        cross_collection_part = (
+            f" ({result.docs_cross_collection_forward_owner_skipped} skipped: "
+            f"cross_collection_forward_owner)"
+            if result.docs_cross_collection_forward_owner_skipped
+            else ""
+        )
+        reverse_multi_piece_part = (
+            f" ({result.docs_reverse_multi_piece_skipped} skipped: "
+            f"reverse_multi_piece)"
+            if result.docs_reverse_multi_piece_skipped
+            else ""
+        )
         print(
             f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
-            f"doc(s), {verb} {result.chunks_written} chunk manifest row(s)"
+            f"doc(s), {verb} {result.chunks_would_write if dry_run else result.chunks_written} chunk manifest row(s)"
             f"{skipped_part}{zero_chunks_part}{phase3_no_index_part}"
-            f"{has_manifest_part}{chash_divergent_part}{fk_409_part}",
+            f"{has_manifest_part}{chash_divergent_part}{fk_409_part}{reverse_part}"
+            f"{cross_collection_part}{reverse_multi_piece_part}",
             file=sys.stderr,
         )
 
         # Emit to stdout as well for the summary output.
         click.echo(
             f"  {coll_name}: processed {result.docs_processed} doc(s), "
-            f"{verb} {result.chunks_written} chunk manifest row(s)"
+            f"{verb} {result.chunks_would_write if dry_run else result.chunks_written} chunk manifest row(s)"
             + (
                 f" ({result.docs_skipped_no_t3} skipped: no T3 collection)"
                 if result.docs_skipped_no_t3
@@ -1064,16 +1090,38 @@ def backfill_manifest_cmd(
                 if result.docs_skipped_fk_409
                 else ""
             )
+            + (
+                f" ({result.docs_reverse_discovered} via reverse notes-guard)"
+                if result.docs_reverse_discovered
+                else ""
+            )
+            + (
+                f" ({result.docs_cross_collection_forward_owner_skipped} skipped: "
+                f"cross-collection forward owner)"
+                if result.docs_cross_collection_forward_owner_skipped
+                else ""
+            )
+            + (
+                f" ({result.docs_reverse_multi_piece_skipped} skipped: "
+                f"reverse multi-piece note)"
+                if result.docs_reverse_multi_piece_skipped
+                else ""
+            )
         )
 
         total_docs += result.docs_processed
-        total_chunks += result.chunks_written
+        total_chunks += result.chunks_would_write if dry_run else result.chunks_written
         total_skipped_no_t3 += result.docs_skipped_no_t3
         total_skipped_zero_chunks += result.docs_skipped_zero_chunks
         total_skipped_phase3_no_index += result.docs_skipped_phase3_no_index
         total_skipped_has_manifest += result.docs_skipped_has_manifest
         total_skipped_chash_divergent += result.docs_skipped_chash_divergent
         total_skipped_fk_409 += result.docs_skipped_fk_409
+        total_reverse_discovered += result.docs_reverse_discovered
+        total_cross_collection_forward_owner_skipped += (
+            result.docs_cross_collection_forward_owner_skipped
+        )
+        total_reverse_multi_piece_skipped += result.docs_reverse_multi_piece_skipped
         docs_processed_overall += result.docs_processed
 
         # SIG-6: periodic progress every _PROGRESS_INTERVAL docs.
@@ -1105,10 +1153,18 @@ def backfill_manifest_cmd(
         # already healed) rather than trusting a bare --resume to have
         # picked the residual up.
         if not dry_run:
+            # nexus-wbfpw.7 fix-round-1: cross-collection forward-owner and
+            # reverse multi-piece skips are unhealed gaps of the same kind
+            # as the three below -- a future fix (widened discovery, a
+            # re-put that re-splits the note) can make them recoverable, so
+            # a collection whose only gaps are these must also stay
+            # revisitable by --resume, not be marked done.
             residual = (
                 result.docs_skipped_fk_409
                 + result.docs_skipped_chash_divergent
                 + result.docs_skipped_zero_chunks
+                + result.docs_cross_collection_forward_owner_skipped
+                + result.docs_reverse_multi_piece_skipped
             )
             if residual > 0:
                 state[coll_name] = [
@@ -1116,12 +1172,17 @@ def backfill_manifest_cmd(
                     f"fk_409={result.docs_skipped_fk_409}",
                     f"chash_divergent={result.docs_skipped_chash_divergent}",
                     f"zero_chunks={result.docs_skipped_zero_chunks}",
+                    f"cross_collection_forward_owner={result.docs_cross_collection_forward_owner_skipped}",
+                    f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}",
                 ]
                 click.echo(
                     f"  {coll_name}: NOT marked done -- {residual} doc(s) "
                     f"skipped (fk_409={result.docs_skipped_fk_409}, "
                     f"chash_divergent={result.docs_skipped_chash_divergent}, "
-                    f"zero_chunks={result.docs_skipped_zero_chunks}); "
+                    f"zero_chunks={result.docs_skipped_zero_chunks}, "
+                    f"cross_collection_forward_owner="
+                    f"{result.docs_cross_collection_forward_owner_skipped}, "
+                    f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}); "
                     f"a future --resume will reprocess this collection"
                 )
             else:
@@ -1164,6 +1225,28 @@ def backfill_manifest_cmd(
         if total_skipped_fk_409
         else ""
     )
+    # nexus-wbfpw.7: reverse notes-guard discovery total -- reported
+    # separately from forward discovery in every summary, dry-run included.
+    reverse_discovered_part = (
+        f", {total_reverse_discovered} doc(s) manifested via reverse notes-guard"
+        if total_reverse_discovered
+        else ""
+    )
+    # nexus-wbfpw.7 fix-round-1: cross-collection forward-owner and reverse
+    # multi-piece skip totals -- never silent, same discipline as every
+    # other skip class above.
+    cross_collection_forward_owner_part = (
+        f", {total_cross_collection_forward_owner_skipped} chash(es) skipped "
+        f"(cross-collection forward owner)"
+        if total_cross_collection_forward_owner_skipped
+        else ""
+    )
+    reverse_multi_piece_part = (
+        f", {total_reverse_multi_piece_skipped} note(s) skipped "
+        f"(reverse multi-piece)"
+        if total_reverse_multi_piece_skipped
+        else ""
+    )
     click.echo(
         f"\nSummary: processed {total_docs} doc(s), "
         f"{verb} {total_chunks} manifest row(s)"
@@ -1173,6 +1256,9 @@ def backfill_manifest_cmd(
         + skipped_has_manifest_part
         + skipped_chash_divergent_part
         + skipped_fk_409_part
+        + reverse_discovered_part
+        + cross_collection_forward_owner_part
+        + reverse_multi_piece_part
         + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
         + (f", {len(errors)} error(s)" if errors else "")
     )
@@ -1389,11 +1475,9 @@ def reidentify_cmd(
 #
 # `nx t3 census-manifest-less` wraps the engine's read-only
 # `POST /v1/vectors/manifest-less-census` route (bead nexus-wbfpw.4,
-# `HttpVectorClient.manifest_less_census`). Sam's 2026-09-26 ruling on
-# nexus-wbfpw.5: this verb no longer gates the production census (that
-# runs as direct SQL, `scripts/sql/manifest_less_census.sql`) -- it still
-# ships, built and tested against a dev jar, in the client release paired
-# with the eventual RDR-192 engine tag.
+# `HttpVectorClient.manifest_less_census`). The route is first carried by
+# engine-service-v0.1.133; against an older engine the verb exits 4 and the
+# same census runs as direct SQL, `scripts/sql/manifest_less_census.sql`.
 
 #: Bucket names the manifest-less-census route returns (RDR-192 S2, bead
 #: nexus-wbfpw.4's response contract -- see that route's docstring and
@@ -1675,12 +1759,9 @@ def census_manifest_less_cmd(
     "require_zero_violations" (list of bucket names), and "exit_code".
 
     \b
-    This verb no longer gates the production census (Sam's 2026-09-26
-    ruling on nexus-wbfpw.5): that runs as direct SQL
-    (``scripts/sql/manifest_less_census.sql``) against production until
-    the rest of RDR-192 ships. This verb ships anyway, built and tested
-    against a dev jar, for the client release paired with the eventual
-    RDR-192 engine tag.
+    Needs engine-service-v0.1.133 or later; against an older engine it
+    exits 4, and the same census runs as direct SQL
+    (``scripts/sql/manifest_less_census.sql``).
     """
     if bool(collection) == bool(all_collections):
         raise click.UsageError(

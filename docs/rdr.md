@@ -10,7 +10,7 @@ The core insight: complex features are bigger than what fits in working memory, 
 
 1. `/conexus:rdr-create`: creates a new file with metadata prefilled, status set to Draft
 2. `/conexus:rdr-research add <id>`: appends a finding with an evidence classification tag
-3. `/conexus:rdr-gate <id>`: runs 3-layer validation (structure check, assumption audit, AI critique). Optional but recommended for irreversible decisions.
+3. `/conexus:rdr-gate <id>`: runs 3-layer validation (structure check, assumption audit, AI critique). Acceptance requires a PASSED gate (`accept` row of `src/nexus/tables/rdr-lifecycle.toml`); a draft that shipped without one closes via `close-unaccepted` with a stated reason.
 4. `/conexus:rdr-accept <id>`: locks the decision, sets status to Accepted
 5. `/conexus:rdr-close <id> --reason implemented`: archives the RDR, creates a post-mortem template, indexes to T3
 
@@ -114,7 +114,7 @@ The operational details of each lifecycle step.
      │
   [Draft] ◄── /conexus:rdr-research (repeat as needed)
      │
-     │ /conexus:rdr-gate (optional but recommended)
+     │ /conexus:rdr-gate (required before accept)
      │ ├─ BLOCKED → fix and re-gate
      │ └─ PASSED
      ▼

@@ -8,20 +8,36 @@ Covers:
   _stat_obsidian_uri() — via stat_source: BLOCKED_ROOTS guard, traversal, absent vs error
   _stat_scratch_uri()  — via stat_source: canonical session URI parsing, absent vs error
   _stat_chroma_uri()   — always-fresh content-addressed scheme
-  _stat_https_uri()    — Phase A: always StatOk(None) → fresh (not dangling)
+  _parse_http_date_to_mtime() — pure HTTP-date parser (nexus-oqenh leg 1)
+  _stat_https_uri()    — nexus-oqenh leg 1: real HEAD + Last-Modified via the
+                         injectable http_client seam (Last-Modified, ETag-only,
+                         neither, 404, 5xx, unparseable date, timeout)
 
-All tests use deterministic fixed mtimes or tmp_path; no network calls.
+All tests use deterministic fixed mtimes or tmp_path, or a real local loopback
+HTTP server for the https:// cases (never a mocked httpx); no calls to any
+real external host.
 """
 
+import datetime
+import http.server
 import os
+import threading
 from pathlib import Path
+from typing import Any
 
+import httpx
 import pytest
 
+from nexus import aspect_readers as ar_mod
 from nexus.aspect_readers import (
+    HTTPS_ETAG_META_KEY,
     StalenessSignal,
     StatFail,
     StatOk,
+    _parse_http_date_to_mtime,
+    _stat_https_uri,
+    capture_https_etag,
+    record_https_etag,
     staleness_signal,
     stat_source,
 )
@@ -393,27 +409,658 @@ class TestStatChromaUri:
         assert signal == "fresh"
 
 
-# ── https:// tests ────────────────────────────────────────────────────────────
+# ── https:// tests (nexus-oqenh leg 1: real HEAD + Last-Modified) ────────────
+
+
+class TestParseHttpDateToMtime:
+    """Pure-function tests for the RFC 7231 HTTP-date -> POSIX mtime parser."""
+
+    def test_parses_standard_rfc7231_date(self) -> None:
+        result = _parse_http_date_to_mtime("Wed, 21 Oct 2015 07:28:00 GMT")
+        expected = datetime.datetime(2015, 10, 21, 7, 28, 0, tzinfo=datetime.UTC).timestamp()
+        assert result == pytest.approx(expected)
+
+    def test_returns_none_for_unparseable_value(self) -> None:
+        assert _parse_http_date_to_mtime("not-a-date") is None
+
+    def test_returns_none_for_empty_string(self) -> None:
+        assert _parse_http_date_to_mtime("") is None
+
+
+class _StatHandler(http.server.BaseHTTPRequestHandler):
+    """Configurable HEAD-only handler for https:// stat tests.
+
+    Class attributes are set per-test before a request is made; ``do_HEAD``
+    replies with them.  Every test below sends a REAL HEAD request across a
+    real loopback socket to this handler — httpx itself is never mocked.
+    """
+
+    response_status: int = 200
+    response_headers: dict[str, str] = {}
+    delay: float = 0.0
+    #: Status for each successive request, overriding ``response_status``
+    #: while entries remain (a 404 then a 200, for the confirm-once path).
+    status_sequence: list[int] = []
+    #: HEAD requests received, so a test can pin the retry count.
+    request_count: int = 0
+
+    def do_HEAD(self) -> None:  # noqa: N802 — stdlib handler method name
+        type(self).request_count += 1
+        if self.delay:
+            import time as _time  # noqa: PLC0415 — test-local, avoids a module-level time import collision
+            _time.sleep(self.delay)
+        seq = type(self).status_sequence
+        self.send_response(seq.pop(0) if seq else self.response_status)
+        for key, value in self.response_headers.items():
+            self.send_header(key, value)
+        self.end_headers()
+
+    def log_message(self, *_args: object) -> None:
+        pass
+
+
+class _StatHTTPServer(http.server.ThreadingHTTPServer):
+    """Threaded so a slow (timeout-path) request never blocks the accept
+    loop, and daemonized so a lingering slow-handler thread never blocks
+    process/test-session exit."""
+
+    daemon_threads = True
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # A client that gave up on a slow/aborted request closes its socket
+        # under the still-sleeping handler; the resulting BrokenPipeError
+        # is expected in the timeout test and would otherwise print a scary
+        # (but harmless) traceback to stderr on every run.
+        pass
+
+
+@pytest.fixture
+def https_stat_server():
+    """Real local HTTP server for https:// stat tests. Yields
+    ``(base_url, handler_class)``; each test sets the handler's
+    response_status / response_headers / delay before building its own
+    ``httpx.Client(base_url=base_url, ...)`` — the injectable-client seam
+    ``_stat_https_uri`` exposes for tests.
+    """
+    _StatHandler.response_status = 200
+    _StatHandler.response_headers = {}
+    _StatHandler.delay = 0.0
+    _StatHandler.status_sequence = []
+    _StatHandler.request_count = 0
+    srv = _StatHTTPServer(("127.0.0.1", 0), _StatHandler)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_port}", _StatHandler
+    finally:
+        srv.shutdown()
+        thread.join(timeout=5)
 
 
 class TestStatHttpsUri:
-    """https:// stat is Phase A — StatOk(None) → fresh (check deferred to Phase B)."""
+    """nexus-oqenh leg 1: real HEAD request via the injectable http_client
+    seam.  Every case hits the real local server from ``https_stat_server``
+    over loopback — no mocked httpx, no calls to any real external host.
+    """
 
-    def test_https_returns_statok_none_mtime(self) -> None:
-        """Phase A: https:// can't check → StatOk(None) like chroma/scratch.
-        Phase B will replace this with a real HEAD + Last-Modified call.
-        """
-        result = stat_source("https://example.com/paper.pdf")
+    def test_last_modified_returns_real_mtime(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {"Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatOk)
+        expected = datetime.datetime(2015, 10, 21, 7, 28, 0, tzinfo=datetime.UTC).timestamp()
+        assert result.current_mtime == pytest.approx(expected)
+
+    def test_last_modified_drives_staleness_signal(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {"Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        mtime = datetime.datetime(2015, 10, 21, 7, 28, 0, tzinfo=datetime.UTC).timestamp()
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert staleness_signal(mtime + 10, result) == "fresh"
+        assert staleness_signal(mtime - 10, result) == "stale"
+
+    def test_etag_only_returns_statfail_naming_no_last_modified(self, https_stat_server) -> None:
+        """ETag with no Last-Modified and no recorded_etag passed to THIS
+        call: record_https_etag does capture an ETag at index time now
+        (nexus-0ne1m), but this call passes no recorded_etag baseline, so
+        there is nothing here to compare the current one against -- a
+        named StatFail, not a best-effort ETag comparison."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"ETag": '"abc123"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert "Last-Modified" in result.detail
+        assert "abc123" in result.detail
+
+    def test_etag_match_returns_fresh_statok(self, https_stat_server) -> None:
+        """nexus-0ne1m: a recorded ETag equal to the current one is fresh."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"ETag": '"abc123"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri(
+                "/paper.pdf", http_client=client, recorded_etag='"abc123"',
+            )
+        finally:
+            client.close()
+
         assert isinstance(result, StatOk)
         assert result.current_mtime is None
+        assert result.etag_stale is False
+        assert staleness_signal(0.0, result) == "fresh"
 
-    def test_https_produces_fresh_signal_in_phase_a(self) -> None:
-        """https:// in Phase A returns 'fresh' — NOT 'dangling'.
+    def test_etag_mismatch_returns_stale_statok(self, https_stat_server) -> None:
+        """nexus-0ne1m: a recorded ETag differing from the current one is stale."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"ETag": '"new-etag"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri(
+                "/paper.pdf", http_client=client, recorded_etag='"old-etag"',
+            )
+        finally:
+            client.close()
 
-        "Can't check yet" is indeterminate, not "confirmed absent."
-        Returning StatFail here would abort sweeps over https references
-        with the default allow_dangling=False — a false-dangling/abort trap.
+        assert isinstance(result, StatOk)
+        assert result.current_mtime is None
+        assert result.etag_stale is True
+        assert staleness_signal(1_000_000.0, result) == "stale"
+
+    def test_weak_etag_matches_the_equivalent_strong_one(self, https_stat_server) -> None:
+        """nexus-0ne1m critique (code review): W/"x" and "x" name the same
+        value under RFC 7232 SS2.3 weak comparison -- a leading W/ is
+        stripped from BOTH sides before comparing, so a server that
+        toggles between weak and strong validators for the same resource
+        does not read a false 'stale'."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"ETag": 'W/"x"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri(
+                "/paper.pdf", http_client=client, recorded_etag='"x"',
+            )
+        finally:
+            client.close()
+
+        assert isinstance(result, StatOk)
+        assert result.etag_stale is False
+        assert staleness_signal(0.0, result) == "fresh"
+
+    def test_weak_etag_on_the_recorded_side_also_matches(self, https_stat_server) -> None:
+        """The strip applies to whichever side carries the W/ prefix."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"ETag": '"x"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri(
+                "/paper.pdf", http_client=client, recorded_etag='W/"x"',
+            )
+        finally:
+            client.close()
+
+        assert isinstance(result, StatOk)
+        assert result.etag_stale is False
+
+    def test_last_modified_wins_over_mismatched_etag(self, https_stat_server) -> None:
+        """Last-Modified drives the verdict even when a recorded ETag would
+        say 'stale' — Last-Modified always wins when both are present."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {
+            "Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT",
+            "ETag": '"new-etag"',
+        }
+        mtime = datetime.datetime(2015, 10, 21, 7, 28, 0, tzinfo=datetime.UTC).timestamp()
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri(
+                "/paper.pdf", http_client=client, recorded_etag='"old-etag"',
+            )
+        finally:
+            client.close()
+
+        assert isinstance(result, StatOk)
+        assert result.current_mtime == pytest.approx(mtime)
+        # recorded_mtime AFTER the Last-Modified value reads fresh, even
+        # though the ETag comparison alone would have said stale.
+        assert staleness_signal(mtime + 10, result) == "fresh"
+
+    def test_neither_header_returns_statfail(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert "no Last-Modified" in result.detail
+
+    def test_unparseable_last_modified_returns_statfail(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {"Last-Modified": "not-a-date"}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/paper.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert "could not be parsed" in result.detail
+
+    def test_404_returns_statfail_absent(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 404
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/gone.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "absent"
+        assert "404" in result.detail
+        assert handler.request_count == 2, "a 404 is confirmed once before it is trusted"
+
+    def test_a_single_spurious_404_is_not_trusted(self, https_stat_server) -> None:
+        """A CDN edge can answer one 404 for a page that exists; the confirm
+        request sees the real answer, so the reference stays live."""
+        base_url, handler = https_stat_server
+        handler.status_sequence = [404]
+        handler.response_headers = {"Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/flaky.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatOk)
+        assert handler.request_count == 2
+
+    def test_404_produces_dangling_signal_when_allowed(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 404
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/gone.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert staleness_signal(0.0, result, allow_dangling=True) == "dangling"
+
+    def test_404_raises_without_allow_dangling(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 404
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/gone.pdf", http_client=client)
+        finally:
+            client.close()
+
+        with pytest.raises(ValueError, match="dangling reference"):
+            staleness_signal(0.0, result)
+
+    def test_5xx_returns_statfail_error_after_bounded_retry(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 503
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/broken.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert "503" in result.detail
+        assert handler.request_count == 3, "the bounded retry makes exactly three attempts"
+
+    def test_5xx_produces_unknown_signal_never_raises(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 503
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            result = _stat_https_uri("/broken.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert staleness_signal(1_000_000.0, result) == "unknown"
+
+    def test_slow_handler_times_out_and_returns_statfail(self, https_stat_server) -> None:
+        """The handler sleeps far longer than the client's own read timeout,
+        so every bounded-retry attempt times out client-side; this must
+        return promptly (bounded retry, never hang) with an indeterminate
+        StatFail rather than raising."""
+        base_url, handler = https_stat_server
+        handler.delay = 1.0
+        client = httpx.Client(base_url=base_url, timeout=0.1)
+        try:
+            result = _stat_https_uri("/slow.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(result, StatFail)
+        assert result.reason == "error"
+        assert staleness_signal(1_000_000.0, result) == "unknown"
+        assert handler.request_count == 3, "each timed-out attempt reached the server"
+
+    def test_an_injected_client_stays_open_for_the_next_call(self, https_stat_server) -> None:
+        """The injected-client seam exists so a sweep can reuse one client;
+        the handler must never close a client it did not create."""
+        base_url, handler = https_stat_server
+        handler.response_headers = {"Last-Modified": "Wed, 21 Oct 2015 07:28:00 GMT"}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            first = _stat_https_uri("/a.pdf", http_client=client)
+            second = _stat_https_uri("/b.pdf", http_client=client)
+        finally:
+            client.close()
+
+        assert isinstance(first, StatOk) and isinstance(second, StatOk)
+
+
+class TestStatSourceHttpsForwarding:
+    """stat_source threads http_client through to whichever handler is
+    registered for the https:// scheme.  Verified via the internal
+    dispatch registry — no network here; the real HEAD round-trip is
+    covered by TestStatHttpsUri above against a real local server."""
+
+    def test_forwards_http_client_kwarg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        captured: dict[str, Any] = {}
+
+        def _recorder(uri: str, *, http_client: Any = None, **_kw: Any) -> StatOk:
+            captured["uri"] = uri
+            captured["http_client"] = http_client
+            return StatOk(current_mtime=123.0)
+
+        monkeypatch.setitem(ar_mod._STAT_HANDLERS, "https", _recorder)
+        sentinel = object()
+
+        result = stat_source("https://example.com/doc", http_client=sentinel)
+
+        assert result == StatOk(current_mtime=123.0)
+        assert captured["uri"] == "https://example.com/doc"
+        assert captured["http_client"] is sentinel
+
+    def test_forwards_recorded_etag_kwarg(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """nexus-0ne1m: stat_source threads recorded_etag through to the
+        https:// handler, same seam as http_client above."""
+        captured: dict[str, Any] = {}
+
+        def _recorder(uri: str, *, recorded_etag: str | None = None, **_kw: Any) -> StatOk:
+            captured["uri"] = uri
+            captured["recorded_etag"] = recorded_etag
+            return StatOk(current_mtime=None, etag_stale=False)
+
+        monkeypatch.setitem(ar_mod._STAT_HANDLERS, "https", _recorder)
+
+        result = stat_source("https://example.com/doc", recorded_etag='"abc"')
+
+        assert result == StatOk(current_mtime=None, etag_stale=False)
+        assert captured["uri"] == "https://example.com/doc"
+        assert captured["recorded_etag"] == '"abc"'
+
+    def test_other_scheme_ignores_recorded_etag(self, tmp_path: Path) -> None:
+        """A scheme with no ETag concept (file://) accepts recorded_etag via
+        **_kw without erroring — it is simply irrelevant there."""
+        f = tmp_path / "chunk.txt"
+        f.write_text("hello")
+        result = stat_source(f.as_uri(), recorded_etag='"whatever"')
+        assert isinstance(result, StatOk)
+
+
+# ── capture_https_etag / record_https_etag tests (nexus-0ne1m) ──────────────
+
+
+class TestCaptureHttpsEtag:
+    """capture_https_etag: one bounded HEAD, best-effort, never raises."""
+
+    def test_non_https_scheme_returns_empty_without_network(self) -> None:
+        assert capture_https_etag("file:///tmp/x") == ""
+        assert capture_https_etag("chroma://col/doc") == ""
+        assert capture_https_etag("") == ""
+
+    def test_returns_etag_header_verbatim(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {"ETag": '"abc123"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            etag = capture_https_etag(f"{base_url}/paper.pdf", http_client=client)
+        finally:
+            client.close()
+        assert etag == '"abc123"'
+
+    def test_no_etag_header_returns_empty(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_headers = {}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            etag = capture_https_etag(f"{base_url}/paper.pdf", http_client=client)
+        finally:
+            client.close()
+        assert etag == ""
+
+    def test_error_status_returns_empty(self, https_stat_server) -> None:
+        base_url, handler = https_stat_server
+        handler.response_status = 404
+        handler.response_headers = {"ETag": '"abc123"'}
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            etag = capture_https_etag(f"{base_url}/gone.pdf", http_client=client)
+        finally:
+            client.close()
+        assert etag == ""
+
+    def test_network_failure_returns_empty_never_raises(self) -> None:
+        """A HEAD to an address nothing listens on must return '', not raise
+        — 'a failed HEAD at index time records nothing'."""
+        client = httpx.Client(timeout=0.5)
+        try:
+            etag = capture_https_etag(
+                "https://127.0.0.1:1/does-not-exist", http_client=client,
+            )
+        finally:
+            client.close()
+        assert etag == ""
+
+    def test_single_attempt_no_retry(self, https_stat_server) -> None:
+        """Unlike _stat_https_uri, capture is a write-path best-effort call:
+        exactly one HEAD, never the bounded read-time retry."""
+        base_url, handler = https_stat_server
+        handler.response_status = 503
+        client = httpx.Client(base_url=base_url, timeout=5.0)
+        try:
+            capture_https_etag(f"{base_url}/broken.pdf", http_client=client)
+        finally:
+            client.close()
+        assert handler.request_count == 1
+
+    def test_builds_its_own_client_with_the_tight_write_path_timeout(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-0ne1m critique (Critical): when no http_client is injected
+        (the real register/update/MCP call sites never inject one),
+        capture_https_etag must build its OWN client bounded to
+        HTTPS_ETAG_CAPTURE_TIMEOUT_S/HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S —
+        the tight write-path budget, NOT HTTPS_STAT_TIMEOUT_S's ~10s-per-
+        phase read-time budget a caller waiting synchronously must never
+        be exposed to."""
+        captured: dict[str, Any] = {}
+
+        class _FakeResponse:
+            status_code = 200
+            headers = {"etag": '"x"'}
+
+        class _FakeClient:
+            def __init__(self, *, timeout: Any, follow_redirects: bool) -> None:
+                captured["timeout"] = timeout
+                captured["follow_redirects"] = follow_redirects
+
+            def head(self, uri: str) -> _FakeResponse:
+                return _FakeResponse()
+
+            def close(self) -> None:
+                captured["closed"] = True
+
+        monkeypatch.setattr(httpx, "Client", _FakeClient)
+
+        etag = capture_https_etag("https://example.invalid/doc")
+
+        assert etag == '"x"'
+        assert captured["follow_redirects"] is True
+        assert captured["closed"] is True
+        timeout = captured["timeout"]
+        assert timeout.connect == pytest.approx(ar_mod.HTTPS_ETAG_CAPTURE_CONNECT_TIMEOUT_S)
+        assert timeout.read == pytest.approx(ar_mod.HTTPS_ETAG_CAPTURE_TIMEOUT_S)
+        # Sanity: the write-path budget is genuinely tighter than the
+        # read-time sweep's, so a future accidental swap is caught here.
+        assert ar_mod.HTTPS_ETAG_CAPTURE_TIMEOUT_S < ar_mod.HTTPS_STAT_TIMEOUT_S
+
+
+class _FakeHttpsResponse:
+    """Duck-typed response stub — just enough surface for capture_https_etag
+    (``.status_code``, ``.headers.get(...)``)."""
+
+    def __init__(self, status_code: int, headers: dict[str, str]) -> None:
+        self.status_code = status_code
+        self.headers = headers
+
+
+class _FakeHttpsClient:
+    """Duck-typed ``http_client`` stub for record_https_etag ORCHESTRATION
+    tests only — no real network I/O. capture_https_etag's own HTTP
+    mechanics (real HEAD, real header parsing) are exercised against the
+    real local server by TestCaptureHttpsEtag above; this class exists so a
+    guard-passing ``https://`` *source_uri* can be used here without
+    needing that literal scheme to resolve over a real TLS connection.
+    """
+
+    def __init__(self, status_code: int = 200, headers: dict[str, str] | None = None) -> None:
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.calls: list[str] = []
+
+    def head(self, uri: str) -> _FakeHttpsResponse:
+        self.calls.append(uri)
+        return _FakeHttpsResponse(self.status_code, self.headers)
+
+
+class TestRecordHttpsEtag:
+    """record_https_etag: capture + writer.update, best-effort, never raises."""
+
+    class _RecordingWriter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, dict]] = []
+
+        def update(self, tumbler: Any, **fields: Any) -> None:
+            self.calls.append((tumbler, fields))
+
+    class _RaisingWriter:
+        def update(self, tumbler: Any, **fields: Any) -> None:
+            raise RuntimeError("engine unreachable")
+
+    def test_non_https_source_uri_is_a_noop(self) -> None:
+        writer = self._RecordingWriter()
+        record_https_etag(writer, "1.2.3", "file:///tmp/x")
+        assert writer.calls == []
+
+    def test_env_opt_out_disables_capture_entirely(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-0ne1m critique (Critical): NX_REFERENCE_ETAG_CAPTURE=0
+        makes record_https_etag a pure no-op with NO network attempt at
+        all -- even a client injected by the caller must never be
+        touched.
+
+        Round-2 critique strengthening (nexus-0ne1m/nexus-tb2yj): the
+        original version of this test asserted only ``writer.calls ==
+        []``, which stays green even with the opt-out check deleted --
+        capture_https_etag's own except-and-return-"" swallows the
+        _ExplodingClient's AssertionError, so no etag is ever recorded
+        either way, coincidentally. Assert directly on a call counter set
+        INSIDE head() itself, before it raises, so this test can only
+        pass when head() was never invoked at all.
         """
-        result = stat_source("https://example.com/paper.pdf")
-        signal = staleness_signal(1_000_000.0, result)
-        assert signal == "fresh"
+        monkeypatch.setenv(ar_mod.NX_REFERENCE_ETAG_CAPTURE_ENV, "0")
+
+        head_calls: list[str] = []
+
+        class _ExplodingClient:
+            def head(self, uri: str):
+                head_calls.append(uri)
+                raise AssertionError("HEAD must not be attempted when opted out")
+
+        writer = self._RecordingWriter()
+        record_https_etag(
+            writer, "1.2.3", "https://example.invalid/doc", http_client=_ExplodingClient(),
+        )
+
+        assert head_calls == []
+        assert writer.calls == []
+
+    @pytest.mark.parametrize("value", ["1", "true", "", "no"])
+    def test_any_other_env_value_keeps_capture_enabled(
+        self, monkeypatch: pytest.MonkeyPatch, value: str,
+    ) -> None:
+        """Only the literal '0' opts out -- anything else (including an
+        empty string, which is what an unset var reads as) is enabled."""
+        monkeypatch.setenv(ar_mod.NX_REFERENCE_ETAG_CAPTURE_ENV, value)
+        assert ar_mod._https_etag_capture_enabled() is True
+
+    def test_https_reference_records_etag_via_writer_update(self) -> None:
+        writer = self._RecordingWriter()
+        client = _FakeHttpsClient(status_code=200, headers={"etag": '"abc123"'})
+        record_https_etag(
+            writer, "1.2.3", "https://example.com/paper.pdf", http_client=client,
+        )
+        assert client.calls == ["https://example.com/paper.pdf"]
+        assert writer.calls == [("1.2.3", {"meta": {HTTPS_ETAG_META_KEY: '"abc123"'}})]
+
+    def test_no_etag_in_response_is_a_noop(self) -> None:
+        writer = self._RecordingWriter()
+        client = _FakeHttpsClient(status_code=200, headers={})
+        record_https_etag(
+            writer, "1.2.3", "https://example.com/paper.pdf", http_client=client,
+        )
+        assert writer.calls == []
+
+    def test_head_failure_never_raises_and_records_nothing(self) -> None:
+        """A real client pointed at a closed port — genuine network failure,
+        not a fake — capture_https_etag must swallow it."""
+        writer = self._RecordingWriter()
+        client = httpx.Client(timeout=0.5)
+        try:
+            record_https_etag(
+                writer, "1.2.3", "https://127.0.0.1:1/gone", http_client=client,
+            )
+        finally:
+            client.close()
+        assert writer.calls == []
+
+    def test_writer_update_failure_never_raises(self) -> None:
+        """A failed catalog write during best-effort recording must not
+        propagate — this runs after the caller's own register/update has
+        already succeeded."""
+        writer = self._RaisingWriter()
+        client = _FakeHttpsClient(status_code=200, headers={"etag": '"abc123"'})
+        record_https_etag(
+            writer, "1.2.3", "https://example.com/paper.pdf", http_client=client,
+        )
+        # No exception propagated — the test reaching this line is the assertion.

@@ -107,7 +107,7 @@ class TestImp24RepoIdentityCacheReducesSubprocessCalls:
 
 class TestImp27ListSiblingCollectionsHandlesConformantNames:
     def test_conformant_4_segment_finds_siblings_by_owner_id(self, monkeypatch) -> None:
-        """RDR-103 conformant names (code__owner-1-2__voyage-code-3__v1)
+        """RDR-103 conformant names (code__owner-1-2__model-code__v1)
         should find siblings that share the same __owner_id__ segment.
         Pre-fix the function returned [] for all conformant names
         because the 8-char hash check failed on the trailing __v1."""
@@ -131,29 +131,29 @@ class TestImp27ListSiblingCollectionsHandlesConformantNames:
         # Stub t3 client with conformant + legacy names.
         t3 = MagicMock()
         t3.list_collections.return_value = [
-            MagicMock(name="code__myrepo-1-1__voyage-code-3__v1"),
-            MagicMock(name="docs__myrepo-1-1__voyage-context-3__v1"),
-            MagicMock(name="rdr__myrepo-1-1__voyage-context-3__v1"),
-            MagicMock(name="code__otherrepo-5-1__voyage-code-3__v1"),
-            MagicMock(name="taxonomy__myrepo-1-1__voyage-context-3__v1"),
+            MagicMock(name="code__myrepo-1-1__model-code__v1"),
+            MagicMock(name="docs__myrepo-1-1__model-ctx__v1"),
+            MagicMock(name="rdr__myrepo-1-1__model-ctx__v1"),
+            MagicMock(name="code__otherrepo-5-1__model-code__v1"),
+            MagicMock(name="taxonomy__myrepo-1-1__model-ctx__v1"),
         ]
         # Set the .name attribute correctly on each MagicMock.
         for stub_name in (
-            "code__myrepo-1-1__voyage-code-3__v1",
-            "docs__myrepo-1-1__voyage-context-3__v1",
-            "rdr__myrepo-1-1__voyage-context-3__v1",
-            "code__otherrepo-5-1__voyage-code-3__v1",
-            "taxonomy__myrepo-1-1__voyage-context-3__v1",
+            "code__myrepo-1-1__model-code__v1",
+            "docs__myrepo-1-1__model-ctx__v1",
+            "rdr__myrepo-1-1__model-ctx__v1",
+            "code__otherrepo-5-1__model-code__v1",
+            "taxonomy__myrepo-1-1__model-ctx__v1",
         ):
             pass
         # Rebuild the list with proper .name attrs.
         colls = []
         for n in (
-            "code__myrepo-1-1__voyage-code-3__v1",
-            "docs__myrepo-1-1__voyage-context-3__v1",
-            "rdr__myrepo-1-1__voyage-context-3__v1",
-            "code__otherrepo-5-1__voyage-code-3__v1",
-            "taxonomy__myrepo-1-1__voyage-context-3__v1",
+            "code__myrepo-1-1__model-code__v1",
+            "docs__myrepo-1-1__model-ctx__v1",
+            "rdr__myrepo-1-1__model-ctx__v1",
+            "code__otherrepo-5-1__model-code__v1",
+            "taxonomy__myrepo-1-1__model-ctx__v1",
         ):
             m = MagicMock()
             m.name = n
@@ -161,14 +161,14 @@ class TestImp27ListSiblingCollectionsHandlesConformantNames:
         t3.list_collections.return_value = colls
 
         siblings = list_sibling_collections(
-            "code__myrepo-1-1__voyage-code-3__v1", t3,
+            "code__myrepo-1-1__model-code__v1", t3,
         )
         # docs__ and rdr__ for the same owner are siblings.
         # code__ (input) and otherrepo are NOT.
         # taxonomy__ is excluded.
         assert siblings == [
-            "docs__myrepo-1-1__voyage-context-3__v1",
-            "rdr__myrepo-1-1__voyage-context-3__v1",
+            "docs__myrepo-1-1__model-ctx__v1",
+            "rdr__myrepo-1-1__model-ctx__v1",
         ]
 
     def test_legacy_2_segment_form_still_works(self) -> None:

@@ -142,9 +142,11 @@ class PgVectorRepositoryContractTest {
                 "code__exactvec__voyage-code-3__v1", "code__existsk__voyage-code-3__v1",
                 "code__getallmeta__voyage-code-3__v1", "code__getallmetaempty__voyage-code-3__v1",
                 "code__getallmetatenant__voyage-code-3__v1", "code__getallmetawhere__voyage-code-3__v1",
+                "code__getallmetanonlive__voyage-code-3__v1",
                 "code__getbyids__voyage-code-3__v1", "code__getoffset__voyage-code-3__v1",
                 "code__getrls__voyage-code-3__v1", "code__getwheregte__voyage-code-3__v1",
-                "code__getwherene__voyage-code-3__v1", "code__listpage__voyage-code-3__v1",
+                "code__getwherene__voyage-code-3__v1", "code__getwherenonlive__voyage-code-3__v1",
+                "code__listpage__voyage-code-3__v1",
                 "code__listrls__voyage-code-3__v1", "code__manifest__voyage-code-3__v1",
                 "code__manifestbroken__voyage-code-3__v1", "code__manifestrls__voyage-code-3__v1",
                 "code__manifestshared__voyage-code-3__v1",
@@ -464,6 +466,7 @@ class PgVectorRepositoryContractTest {
             List.of("c9659bbfeb7d33727401a1d85541e04af59f00574f3588e47ec0b55a6c74b60f"), List.of("version one"), List.of(Map.of("rev", "1")));
         repo1024.upsertChunks(TENANT_A, col,
             List.of("c9659bbfeb7d33727401a1d85541e04af59f00574f3588e47ec0b55a6c74b60f"), List.of("version two"), List.of(Map.of("rev", "2")));
+        own(TENANT_A, col, "c9659bbfeb7d33727401a1d85541e04af59f00574f3588e47ec0b55a6c74b60f");
 
         assertThat(superuserCount(1024, col))
             .as("re-upsert of the same chash must not create a second row")
@@ -522,6 +525,22 @@ class PgVectorRepositoryContractTest {
             List.of("3642f56d48b72b6bf43456f6c1a451d6625e9efc5bed097f381214eca5998b3e", "7335e096cdd5c417e4c2f31a9b58bdb93f2fa8a4c81acd9efd39c405f7e18f28", "8ecea065b8b1777ed87fa27510795344fcb20d7312c5be5965882374f971d014"),
             List.of("nearest text", "middle text", "farthest text"),
             List.of(Map.of("kind", "a"), Map.of("kind", "b"), Map.of("kind", "a")));
+        own(TENANT_A, col, "3642f56d48b72b6bf43456f6c1a451d6625e9efc5bed097f381214eca5998b3e", "7335e096cdd5c417e4c2f31a9b58bdb93f2fa8a4c81acd9efd39c405f7e18f28", "8ecea065b8b1777ed87fa27510795344fcb20d7312c5be5965882374f971d014");
+    }
+
+    /**
+     * Give {@code ids} a live owner in {@code col} for {@code tenant} (RDR-192 Step 5,
+     * bead nexus-wbfpw.10): {@link PgVectorRepository}'s read paths (search, get,
+     * getWhere, getEmbeddings, getAllMetadata, list) now require
+     * {@code EXISTS (SELECT 1 FROM nexus.chunk_live_owners(...))} — a chunk with no
+     * live own-collection manifest owner is invisible to them. A fixture that writes
+     * chunks and reads them back through one of those paths must give them one.
+     */
+    private void own(String tenant, String col, String... ids) {
+        tenantScope.withTenant(tenant, ctx -> {
+            PgContainerHelper.ownChunks(ctx, tenant, col, ids);
+            return null;
+        });
     }
 
     @Test
@@ -575,6 +594,7 @@ class PgVectorRepositoryContractTest {
             List.of(Map.of("kind", "a", "score", "high"),
                     Map.of("kind", "a", "score", "low"),
                     Map.of("kind", "b", "score", "high")));
+        own(TENANT_A, col, "cdf84c7df20ac7dad0f684d01d839a593947fd0e199468a7e9a88e840da8f6dc", "e41c8e6673a1a30b900633a26c531936f2fbd72600b9b596bd2ea39bc44b15a2", "e3aa05251298daa7e76e84d1842f6f8ea82f309e8b172bee27ea99d5afe0ef10");
 
         List<Map<String, Object>> rows = repo1024.search(
             TENANT_A, "search query", List.of(col), 10,
@@ -622,6 +642,8 @@ class PgVectorRepositoryContractTest {
                     // JSON-STRING year: must be excluded by a numeric operand
                     // WITHOUT aborting the query on the ::numeric cast.
                     Map.of("bib_year", "not-a-year")));
+        own(TENANT_A, col, "5fe59261ef2deb5a71a465d26a552dab0b6ed500a23ec72393d9fc7a7beb21b1", "aee331e61a5aef71a62ac8ae0dc96e5cbec121c9ca8399fabca6ae601aff2feb",
+            "fc926f894506caf7e314ee2d88ae6d5c9aeca62aa307e0d1608757f8cf70e06b", "16994366be46210ec48da3aba917a2b985b51c8c64561ed4d74a7ea0981b4c4e");
 
         List<Map<String, Object>> rows = repo1024.search(
             TENANT_A, "search query", List.of(col), 10,
@@ -643,6 +665,7 @@ class PgVectorRepositoryContractTest {
             List.of("b591079be72686a720fbe0651e73527918ba6e373fdaebfd379342083af038b4", "10790a4789f6239227283bdb50218cc6ee32776e07538994d29a6082be827469"),
             List.of("lex t1", "lex t2"),
             List.of(Map.of("rank", "9"), Map.of("rank", "10")));
+        own(TENANT_A, col, "b591079be72686a720fbe0651e73527918ba6e373fdaebfd379342083af038b4", "10790a4789f6239227283bdb50218cc6ee32776e07538994d29a6082be827469");
 
         List<Map<String, Object>> rows = repo1024.search(
             TENANT_A, "search query", List.of(col), 10,
@@ -672,6 +695,8 @@ class PgVectorRepositoryContractTest {
             List.of(Map.of("bib_year", 2021),
                     Map.of("bib_year", 2019),
                     Map.of("bib_year", "not-a-year")));
+        own(TENANT_A, col, "023b5a0797ab810e8a41d1fa6cf304ceb2e3efbcb18813340c3448f62870f65e", "49e273168c155793fabc9392608f4b6d9c40b050020b6ad8fcaf1e019e624eeb",
+            "dd8e3600d58b8dbb83bd696895333dcf153c0ff6ce27479f56925a1a2ba0c7b1");
 
         Map<String, Object> env = repo1024.getWhere(
             TENANT_A, col, Map.of("bib_year", Map.of("$gte", 2020)), 10, 0, false);
@@ -713,6 +738,8 @@ class PgVectorRepositoryContractTest {
             List.of("eq typing num", "eq typing str"),
             List.of(Map.of("year", 2020),      // JSON number
                     Map.of("year", "2020")));   // JSON string
+        own(TENANT_A, col, "c0f697c5882a7b89ad4df5916773ef043b00ba1fd1a6bfe058f56e1c7bf98b1b",
+            "3951f2235b88dca02fd70cf06f48499c4dd18370f0b326114dc8ae82b5f97a5e");
 
         List<Map<String, Object>> rows = repo1024.search(
             TENANT_A, "search query", List.of(col), 10, Map.of("year", 2020));
@@ -739,6 +766,8 @@ class PgVectorRepositoryContractTest {
             List.of("ne typing num", "ne typing other"),
             List.of(Map.of("year", 2020),      // JSON number, must be excluded
                     Map.of("year", "2021")));  // JSON string, non-matching, must be kept
+        own(TENANT_A, col, "fee047ffeec6cacb34fe65bbdd0260f6c2b6015e9d4ac7e2076e1867bf73cdf4",
+            "295bc5a5a2bcbef81fa6f5078dc53801858e93f1cac49c96dcf08ac9a656106b");
 
         List<Map<String, Object>> rows = repo1024.search(
             TENANT_A, "search query", List.of(col), 10, Map.of("year", Map.of("$ne", 2020)));
@@ -793,6 +822,7 @@ class PgVectorRepositoryContractTest {
             List.of("b51ac24c6bc45baa99e787042722c6b72826d006ac62e7b34e8edf2a50e1268d", "839dfe07d520ef67392aad6c4ed6fd1cf22ad8145df7430ef58f9f9154e3a036"),
             List.of("has key", "no key"),
             List.of(Map.of("section_type", "references"), Map.of("other", "x")));
+        own(TENANT_A, col, "b51ac24c6bc45baa99e787042722c6b72826d006ac62e7b34e8edf2a50e1268d", "839dfe07d520ef67392aad6c4ed6fd1cf22ad8145df7430ef58f9f9154e3a036");
 
         List<Map<String, Object>> rows = repo1024.search(
             TENANT_A, "search query", List.of(col), 10,
@@ -838,6 +868,7 @@ class PgVectorRepositoryContractTest {
             List.of("6064e40df1d4cc70c0a6a080696aa20b39ec6a2a59055c01759c40a00efdefb4", "9ba2c99c69294614a99cb03d29f1d5a69fcd960dc776384f06635c33b7511b9f"),
             List.of("gw a", "gw b"),
             List.of(Map.of("kind", "a"), Map.of("kind", "b")));
+        own(TENANT_A, col, "6064e40df1d4cc70c0a6a080696aa20b39ec6a2a59055c01759c40a00efdefb4", "9ba2c99c69294614a99cb03d29f1d5a69fcd960dc776384f06635c33b7511b9f");
 
         @SuppressWarnings("unchecked")
         List<String> ids = (List<String>) repo1024.getWhere(
@@ -846,6 +877,76 @@ class PgVectorRepositoryContractTest {
         assertThat(ids)
             .as("getWhere {kind:{$ne:b}} returns only the kind=a chunk")
             .containsExactly("6064e40df1d4cc70c0a6a080696aa20b39ec6a2a59055c01759c40a00efdefb4");
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10): {@code includeNonLive=true}
+     * answers "what is physically stored", ignoring {@code liveChunksCondition}
+     * entirely -- a plain getWhere (includeNonLive=false) hides the unowned
+     * chunk (live(c)), the physical scan reports it, and the envelope carries
+     * ids+metadata ONLY (never documents).
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void getWhere_includeNonLive_returnsUnownedChunk_idsAndMetadataOnly() {
+        String col = "code__getwherenonlive__voyage-code-3__v1";
+        embedder1024.register("gwnl a", 1.0f, 0.0f);
+        embedder1024.register("gwnl b", 0.8f, 0.6f);
+        String ownedId = "6a" + "0".repeat(62);
+        String unownedId = "7a" + "0".repeat(62);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(ownedId, unownedId),
+            List.of("gwnl a", "gwnl b"),
+            List.of(Map.of("kind", "a"), Map.of("kind", "a")));
+        own(TENANT_A, col, ownedId);
+        // unownedId deliberately left with no manifest owner.
+
+        Map<String, Object> plain = repo1024.getWhere(
+            TENANT_A, col, Map.of("kind", "a"), 100, 0);
+        assertThat((List<String>) plain.get("ids"))
+            .as("a plain getWhere hides the unowned chunk (live(c))")
+            .containsExactly(ownedId);
+
+        Map<String, Object> nonLive = repo1024.getWhere(
+            TENANT_A, col, Map.of("kind", "a"), 100, 0, false, true);
+        assertThat((List<String>) nonLive.get("ids"))
+            .as("includeNonLive reports both chunks, owned or not")
+            .containsExactlyInAnyOrder(ownedId, unownedId);
+        assertThat(nonLive)
+            .as("ids and metadatas only, never documents")
+            .containsOnlyKeys("ids", "metadatas");
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10), {@code getAllMetadata} sibling
+     * of the {@code getWhere} case above: {@code nx t3 gc}'s orphan-candidate
+     * listing and {@code --force}'s T3 orphan cleanup both read through this
+     * method and must see a chunk with no live own-collection manifest owner.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void getAllMetadata_includeNonLive_returnsUnownedChunk() {
+        String col = "code__getallmetanonlive__voyage-code-3__v1";
+        embedder1024.register("gamnl a", 1.0f, 0.0f);
+        embedder1024.register("gamnl b", 0.8f, 0.6f);
+        String ownedId = "8a" + "0".repeat(62);
+        String unownedId = "9a" + "0".repeat(62);
+        repo1024.upsertChunks(TENANT_A, col,
+            List.of(ownedId, unownedId),
+            List.of("gamnl a", "gamnl b"),
+            List.of(Map.of("chunk_text_hash", ownedId), Map.of("chunk_text_hash", unownedId)));
+        own(TENANT_A, col, ownedId);
+
+        Map<String, Object> plain = repo1024.getAllMetadata(TENANT_A, col, null);
+        assertThat((List<String>) plain.get("ids"))
+            .as("a plain getAllMetadata hides the unowned chunk (live(c))")
+            .containsExactly(ownedId);
+
+        Map<String, Object> nonLive = repo1024.getAllMetadata(TENANT_A, col, null, true);
+        assertThat((List<String>) nonLive.get("ids"))
+            .as("includeNonLive reports both chunks, owned or not")
+            .containsExactlyInAnyOrder(ownedId, unownedId);
+        assertThat(nonLive).doesNotContainKey("documents");
     }
 
     @Test
@@ -863,6 +964,8 @@ class PgVectorRepositoryContractTest {
             List.of("gam a", "gam b", "gam c"),
             List.of(Map.of("chunk_text_hash", "ha"), Map.of("chunk_text_hash", "hb"),
                     Map.of("chunk_text_hash", "hc")));
+        own(TENANT_A, col, "7086d8172bf21e7bafab4a9e75ae641ab02fad3766cc46dc3f92d4ec21f01ef2", "9275ef20511b0558b912abcc5233b7572125d0d8546302ebccf7d791d16ca722",
+            "1e280e2fcca5f0a0c390aebb98a906c9b9b97aaa486f02b74022dafbe809ca44");
 
         var result = repo1024.getAllMetadata(TENANT_A, col, null);
 
@@ -888,6 +991,7 @@ class PgVectorRepositoryContractTest {
             List.of("7a7811b3e36783ce46ffb0719820d6df5fb9c6f082aed0265eaca5c5c2ab7724", "e6e16fbe4391c1f117e404b2f64c3fe18c4de74f381d330d0603286470ceaca5"),
             List.of("gamw a", "gamw b"),
             List.of(Map.of("kind", "a"), Map.of("kind", "b")));
+        own(TENANT_A, col, "7a7811b3e36783ce46ffb0719820d6df5fb9c6f082aed0265eaca5c5c2ab7724", "e6e16fbe4391c1f117e404b2f64c3fe18c4de74f381d330d0603286470ceaca5");
 
         @SuppressWarnings("unchecked")
         List<String> ids = (List<String>) repo1024.getAllMetadata(
@@ -905,6 +1009,8 @@ class PgVectorRepositoryContractTest {
             List.of("e13b98527d51d094e2844dabad9621679e6da3e7af4b20c5bfe11063f8b031e8"), List.of("gamt a"), List.of(Map.of()));
         repo1024.upsertChunks(TENANT_B, col,
             List.of("37dc922045704dde983f53067a0b6b4e108cbb533b66cd4df45a677edd701a61"), List.of("gamt b"), List.of(Map.of()));
+        own(TENANT_A, col, "e13b98527d51d094e2844dabad9621679e6da3e7af4b20c5bfe11063f8b031e8");
+        own(TENANT_B, col, "37dc922045704dde983f53067a0b6b4e108cbb533b66cd4df45a677edd701a61");
 
         @SuppressWarnings("unchecked")
         List<String> idsA = (List<String>) repo1024.getAllMetadata(TENANT_A, col, null).get("ids");
@@ -945,6 +1051,8 @@ class PgVectorRepositoryContractTest {
             List.of(Map.of(), Map.of()));
         repo1024.upsertChunks(TENANT_A, colY,
             List.of("4be89caf1def5bb4c8a00538a6d0588a35bc64a0940e79d82b44e1c03be6d434"), List.of("y mid"), List.of(Map.of()));
+        own(TENANT_A, colX, "ae82004549f8d15bc982e6241e8e457e86fc64419f4085aacde5955d5e6ce310", "dbefc10c312a22493703ac60b85c1328be6705505787da3c48af6a6ca0a7b369");
+        own(TENANT_A, colY, "4be89caf1def5bb4c8a00538a6d0588a35bc64a0940e79d82b44e1c03be6d434");
 
         List<Map<String, Object>> rows = repo1024.search(
             TENANT_A, "search query", List.of(colX, colY), 10, null);
@@ -1012,6 +1120,7 @@ class PgVectorRepositoryContractTest {
         repo1024.upsertChunks(TENANT_A, registeredCol,
             List.of("d05e5c769f6fe13644037dd902ef42faf7a9cecc9830dc2d5c8c4e116b3e4849"),
             List.of("fanout hit"), List.of(Map.of()));
+        own(TENANT_A, registeredCol, "d05e5c769f6fe13644037dd902ef42faf7a9cecc9830dc2d5c8c4e116b3e4849");
         String neverRegistered = "code__fanoutskip-ghost__voyage-code-3__v1";
 
         var logger = (ch.qos.logback.classic.Logger)
@@ -1071,6 +1180,7 @@ class PgVectorRepositoryContractTest {
             List.of("7f64f08894a0f056e76277f5754f0fcbacc466e4b54d69e73d524b18f76b1534", "e72bc85c6d674d98ac4a49bc4bdbb624e18b20e971cf63028e0b1d991b83ed8e"),
             List.of("get text one", "get text two"),
             List.of(Map.of("m", "1"), Map.of("m", "2")));
+        own(TENANT_A, col, "7f64f08894a0f056e76277f5754f0fcbacc466e4b54d69e73d524b18f76b1534", "e72bc85c6d674d98ac4a49bc4bdbb624e18b20e971cf63028e0b1d991b83ed8e");
 
         Map<String, Object> got = repo1024.get(
             TENANT_A, col, List.of("7f64f08894a0f056e76277f5754f0fcbacc466e4b54d69e73d524b18f76b1534", "e72bc85c6d674d98ac4a49bc4bdbb624e18b20e971cf63028e0b1d991b83ed8e", "f2318f74905dd169f2832e369cde730cf93957ef73a9965e14a982f85fcd8be7"), 10, 0);
@@ -1104,6 +1214,7 @@ class PgVectorRepositoryContractTest {
             List.of(chashSecond, chashFirst),
             List.of("offset text z", "offset text a"),
             List.of(Map.of(), Map.of()));
+        own(TENANT_A, col, chashSecond, chashFirst);
 
         Map<String, Object> got = repo1024.get(
             TENANT_A, col, List.of(chashSecond, chashFirst), 1, 1);
@@ -1137,6 +1248,7 @@ class PgVectorRepositoryContractTest {
         repo1024.upsertChunks(TENANT_A, col, allIds,
             List.of("t1", "t2", "t3", "t4", "t5"),
             List.of(Map.of(), Map.of(), Map.of(), Map.of(), Map.of()));
+        own(TENANT_A, col, allIds.toArray(new String[0]));
 
         @SuppressWarnings("unchecked")
         List<String> page1 = (List<String>) repo1024.list(TENANT_A, col, 3, 0).get("ids");
@@ -1260,6 +1372,7 @@ class PgVectorRepositoryContractTest {
         embedder1024.register("frecency text", 0.6f, 0.8f);
         repo1024.upsertChunks(TENANT_A, col,
             List.of("7a52d407bbf717ca55a9ca6b0f65b28821febc86d097b8275e4157a2fc2b4dc9"), List.of("frecency text"), List.of(Map.of("frecency_score", "0.1")));
+        own(TENANT_A, col, "7a52d407bbf717ca55a9ca6b0f65b28821febc86d097b8275e4157a2fc2b4dc9");
 
         repo1024.updateMetadata(TENANT_A, col,
             List.of("7a52d407bbf717ca55a9ca6b0f65b28821febc86d097b8275e4157a2fc2b4dc9"), List.of(Map.of("frecency_score", "0.9")));
@@ -1298,6 +1411,7 @@ class PgVectorRepositoryContractTest {
         String col = "code__updatemeta-rls__voyage-code-3__v1";
         repo1024.upsertChunks(TENANT_A, col,
             List.of("b87a8c2c61b0a1391df30e59598767aa8291f3a6ea89ef8d77b367eb27efa804"), List.of("owned text"), List.of(Map.of("v", "e9941e196dc41bcf2e7288f58b96ac6a33041c5d7b3955f3c3db25869510ddad")));
+        own(TENANT_A, col, "b87a8c2c61b0a1391df30e59598767aa8291f3a6ea89ef8d77b367eb27efa804");
 
         // tenant-b attempts to overwrite tenant-a's metadata: RLS makes the row
         // invisible, so the update affects nothing (frecency path, nexus-enehl —
@@ -1346,6 +1460,7 @@ class PgVectorRepositoryContractTest {
             List.of(chash), List.of("merge probe text"),
             List.of(Map.of("frecency_score", "0.9")),
             /* forceReEmbed */ true);
+        own(TENANT_A, col, chash);
 
         Map<String, Object> got = repo1024.get(TENANT_A, col, List.of(chash), 10, 0);
         @SuppressWarnings("unchecked")
@@ -1368,6 +1483,7 @@ class PgVectorRepositoryContractTest {
         repo1024.upsertChunks(TENANT_A, col,
             List.of(chash), List.of("delete-keys probe text"),
             List.of(Map.of("quality_gate_overridden", true, "title", "Degraded Doc")));
+        own(TENANT_A, col, chash);
 
         var outcome = repo1024.updateMetadataWithMissing(TENANT_A, col,
             List.of(chash), List.of(Map.of("extraction_method", "mineru")),
@@ -1394,6 +1510,7 @@ class PgVectorRepositoryContractTest {
         String chash = "3333333333333333333333333333333333333333333333333333333333333333";
         repo1024.upsertChunks(TENANT_A, col,
             List.of(chash), List.of("delete-keys noop probe text"), List.of(Map.of("title", "T")));
+        own(TENANT_A, col, chash);
 
         var outcome = repo1024.updateMetadataWithMissing(TENANT_A, col,
             List.of(chash), List.of(Map.of("frecency_score", "0.5")),
@@ -1431,6 +1548,7 @@ class PgVectorRepositoryContractTest {
         //    ON CONFLICT DO UPDATE branch on every write in this test).
         repo1024.upsertChunks(TENANT_A, col,
             List.of(chash), List.of("late-commit probe text"), List.of(stubMetadata), true);
+        own(TENANT_A, col, chash);
 
         // 2. Enrichment write (the post-pass, via the HTTP update-metadata path).
         repo1024.updateMetadataWithMissing(TENANT_A, col,
@@ -1471,6 +1589,7 @@ class PgVectorRepositoryContractTest {
         String chash = "6666666666666666666666666666666666666666666666666666666666666666";
         repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe one"),
             List.of(Map.of("title", "Degraded", "quality_gate_overridden", true)), true);
+        own(TENANT_A, col, chash);
 
         // Clean --force --re-embed rewrite: normalize dropped the False value, so the
         // dict has no key at all; the writer names it in deleteKeys instead.
@@ -1493,6 +1612,7 @@ class PgVectorRepositoryContractTest {
         String chash = "7777777777777777777777777777777777777777777777777777777777777777";
         repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe two"),
             List.of(Map.of("title", "Degraded", "quality_gate_overridden", true)));
+        own(TENANT_A, col, chash);
 
         repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe two"),
             List.of(Map.of("title", "Clean")), false, List.of("quality_gate_overridden"));
@@ -1513,6 +1633,7 @@ class PgVectorRepositoryContractTest {
         String chash = "8888888888888888888888888888888888888888888888888888888888888888";
         repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe three"),
             List.of(Map.of("title", "Degraded", "quality_gate_overridden", true)));
+        own(TENANT_A, col, chash);
 
         repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe three"),
             List.of(Map.of("title", "Clean")));
@@ -1530,6 +1651,7 @@ class PgVectorRepositoryContractTest {
         String chash = "9999999999999999999999999999999999999999999999999999999999999999";
         repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe four"),
             List.of(Map.of("section_title", "Old Section")), true);
+        own(TENANT_A, col, chash);
 
         repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("upsert delete probe four"),
             List.of(Map.of("section_title", "New Section")), true, List.of("section_title"));
@@ -1548,6 +1670,7 @@ class PgVectorRepositoryContractTest {
         String chash = "aaaa" + "a".repeat(60);
         repo1024.upsertChunks(TENANT_A, col, List.of(chash), List.of("batch replace probe"),
             List.of(Map.of("title", "Degraded", "quality_gate_overridden", true)));
+        own(TENANT_A, col, chash);
 
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(1024);
         List<Integer> zero = tenantScope.withTenant(TENANT_A, ctx ->
@@ -1577,6 +1700,7 @@ class PgVectorRepositoryContractTest {
         repo1024.upsertChunks(TENANT_A, col,
             List.of(chash), List.of("late-commit explicit-empty probe text"),
             List.of(stubMetadataWithExplicitEmptyTitle), true);
+        own(TENANT_A, col, chash);
         repo1024.updateMetadataWithMissing(TENANT_A, col,
             List.of(chash), List.of(Map.of("title", "Real Title", "extraction_method", "mineru")),
             List.of());

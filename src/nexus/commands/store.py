@@ -950,6 +950,8 @@ def import_cmd(
     )
     if result.get("skipped_count"):
         click.echo(f"  Skipped {result['skipped_count']} existing records (--skip-existing).")
+    if result.get("owned_count"):
+        click.echo(f"  Registered catalog owners for {result['owned_count']} records.")
     if result.get("rehashed_count"):
         click.echo(
             f"  Re-hashed {result['rehashed_count']} non-conformant legacy "

@@ -142,6 +142,19 @@ class DenseGateScanBudgetIntegrationTest {
                 + "  ('[' || (SELECT string_agg(random()::text, ',') "
                 + "            FROM generate_series(1, 384 + (g - g))) || ']')::nexus.vector "
                 + "FROM generate_series(1, " + MATCHING + ") g");
+            // RDR-192 Step 5 (nexus-wbfpw.10): hybridSearch now requires a live
+            // own-collection manifest owner -- own every one of the MATCHING rows in
+            // bulk (the noise rows never pass the text gate regardless of ownership,
+            // so they are deliberately left manifest-less: nothing under test reads
+            // them). One owning document, one manifest row per matching chash,
+            // computed in Java with the SAME expression as the INSERT above,
+            // sha256 of the UTF-8 text.
+            String[] matchingChashes = new String[MATCHING];
+            for (int g = 1; g <= MATCHING; g++) {
+                matchingChashes[g - 1] = sha256Hex("gpu batch row " + g);
+            }
+            PgContainerHelper.ownChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, COL_TARGET,
+                matchingChashes);
             // Calibrate the scan budget to the CLOUD's ratio at test scale:
             // their failing queries sit at ~329 gate matches in a table where
             // the default 20k-tuple budget yields ~9 expected hits (the exact
@@ -192,5 +205,16 @@ class DenseGateScanBudgetIntegrationTest {
                 + gateMatches + " rows vector-far from the query "
                 + "(BUG-0148 contract pin)")
             .hasSize(10);
+    }
+
+    /** sha256 of {@code text}'s UTF-8 bytes as lowercase hex, the same value the
+     *  seed INSERT's {@code sha256(convert_to(text, 'UTF8'))} stores. */
+    private static String sha256Hex(String text) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(text.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
     }
 }

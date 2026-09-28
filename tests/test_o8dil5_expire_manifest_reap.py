@@ -95,16 +95,25 @@ def _seed_ttl_lapsed_note(client, cat, content: str, title: str) -> str:
 
 
 def _chunk_present(client, chash: str) -> bool:
+    """Physical presence, not visibility (RDR-192 Step 5 amendment,
+    nexus-wbfpw.10): several fixtures below deliberately seed the TTL chunk
+    with NO catalog manifest row of its own (the h7nax cross-collection-twin
+    case), so a live(c)-filtered ``get(ids=...)`` would report it absent
+    even though it is physically stored -- exactly the wrong answer for a
+    "does the chunk still exist" control/post-expire check. ``existing_ids``
+    answers physical presence regardless of ownership, and still correctly
+    reports absence once ``expire()`` has genuinely deleted the row.
+    """
     from nexus.errors import CollectionNotFoundError
 
     try:
-        result = client.get_collection(_COLLECTION).get(ids=[chash], include=[])
+        found = client.existing_ids(_COLLECTION, [chash])
     except CollectionNotFoundError:
         # An emptied collection (its last chunk just got reclaimed) is not
         # listed by list_collections() at all -- absence of the collection
         # means absence of the chunk, not an error.
         return False
-    return chash in (result.get("ids") or [])
+    return chash in found
 
 
 def test_expire_reclaims_ttl_lapsed_chunk_whose_manifest_still_references_it(t2_service_env):

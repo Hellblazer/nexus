@@ -127,6 +127,19 @@ class PgVectorRepositoryGetAllMetadataCapBoundaryTest {
             metas.add(Map.of("i", String.valueOf(i)));
         }
         repo.upsertChunks(TENANT, collection, ids, texts, metas);
+        own(collection, ids);
+    }
+
+    /**
+     * Give {@code ids} a live owner in {@code collection} for {@code TENANT}
+     * (RDR-192 Step 5, bead nexus-wbfpw.10): {@code getAllMetadata} now requires a
+     * live own-collection manifest owner.
+     */
+    private void own(String collection, List<String> ids) {
+        tenantScope.withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, collection, ids.toArray(new String[0]));
+            return null;
+        });
     }
 
     /**
@@ -213,6 +226,7 @@ class PgVectorRepositoryGetAllMetadataCapBoundaryTest {
             metas.add(Map.of("i", String.valueOf(i)));
         }
         prodRepo.upsertChunks(TENANT, col, ids, texts, metas);
+        own(col, ids);
 
         var result = prodRepo.getAllMetadata(TENANT, col, null);
 

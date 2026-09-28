@@ -216,6 +216,41 @@ class PgVectorServingContractTest {
         return MAPPER.readValue(resp.body(), MAP_TYPE);
     }
 
+    /**
+     * Give {@code ids} a live owner in {@code COL} for {@code TENANT_A} (RDR-192
+     * Step 5, bead nexus-wbfpw.10): search/get/getWhere/getAllMetadata/list and
+     * collection_vector_stats now require a live own-collection manifest owner;
+     * this suite's HTTP-upserted fixture writes none.
+     */
+    private void own(String... ids) {
+        tenantScope.withTenant(TENANT_A, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT_A, COL, ids);
+            return null;
+        });
+    }
+
+    /**
+     * Remove {@code ids}' manifest rows in {@code COL} for {@code TENANT_A} — the
+     * counterpart to {@link #own}. {@link PgVectorRepository#delete} refuses to
+     * delete a still-referenced (manifest-owned) chunk regardless of its owning
+     * document's tombstone state, so a chash this suite's lifecycle walk goes on
+     * to delete (Order 11) must be un-owned first, exactly like RDR-192 Step 9's
+     * reaper un-manifesting a chunk before it becomes eligible for GC.
+     */
+    private void unown(String... ids) {
+        tenantScope.withTenant(TENANT_A, ctx -> {
+            for (String id : ids) {
+                ctx.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS)
+                   .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT_A))
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(COL))
+                   .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHASH.eq(
+                       dev.nexus.service.db.Chash.fromHex(id).toBytes()))
+                   .execute();
+            }
+            return null;
+        });
+    }
+
     // ---------------------------------------------------------------------------
     // Lifecycle walk — every serving op against exactly-known pgvector state
     // ---------------------------------------------------------------------------
@@ -250,6 +285,7 @@ class PgVectorServingContractTest {
                     .isEqualTo(3L);
             }
         }
+        own(C1, C2, C3);
     }
 
     @Test
@@ -307,6 +343,7 @@ class PgVectorServingContractTest {
         assertThat(resp.get("id"))
             .as("store-put envelope {\"id\": ...} preserved")
             .isEqualTo(PUT1);
+        own(PUT1);
     }
 
     @Test
@@ -328,6 +365,40 @@ class PgVectorServingContractTest {
         assertThat(metas.get(1).get("kind")).isEqualTo("put");
     }
 
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10): {@code include_non_live} answers
+     * physical presence. With C2's owner removed, a plain store-get hides it (live(c))
+     * and the include_non_live probe still reports it, ids only. C2 is re-owned after,
+     * so later steps see the fixture unchanged.
+     */
+    @Test
+    @Order(4)
+    void storeGet_includeNonLive_reportsStoredIdsIgnoringLiveness() throws Exception {
+        unown(C2);
+        try {
+            Map<String, Object> plain = postOk("/v1/vectors/store-get", TOKEN_A, Map.of(
+                "collection", COL, "ids", List.of(C1, C2)));
+            assertThat((List<Object>) plain.get("ids"))
+                .as("a plain store-get hides the unowned C2").containsExactly(C1);
+
+            Map<String, Object> present = postOk("/v1/vectors/store-get", TOKEN_A, Map.of(
+                "collection", COL, "ids", List.of(C1, C2, "f".repeat(64)),
+                "include_non_live", true));
+            assertThat((List<Object>) present.get("ids"))
+                .as("include_non_live reports every stored id, owned or not, and omits an unstored one")
+                .containsExactlyInAnyOrder(C1, C2);
+            assertThat(present).as("ids and metadata, never content").containsOnlyKeys("ids", "metadatas");
+            assertThat((List<Object>) present.get("metadatas"))
+                .as("one metadata map per stored id, aligned with ids").hasSize(2);
+
+            var noIds = post("/v1/vectors/store-get", TOKEN_A, Map.of(
+                "collection", COL, "include_non_live", true));
+            assertThat(noIds.statusCode()).as("include_non_live requires an ids list").isEqualTo(400);
+        } finally {
+            own(C2);
+        }
+    }
+
     @Test
     @Order(5)
     void get_whereEquality_filtersOnMetadata() throws Exception {
@@ -340,6 +411,77 @@ class PgVectorServingContractTest {
             .as("plain-equality where filter (the incremental-sync staleness "
                 + "check's shape) returns exactly the matching chunk")
             .containsExactly(C2);
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10): {@code /v1/vectors/get}'s
+     * {@code include_non_live} answers a physical where-scan, ignoring live(c).
+     * With C2's owner removed, a plain {@code /get} hides it and the
+     * include_non_live probe still reports it, ids+metadata only. C2 is
+     * re-owned after, so later steps see the fixture unchanged.
+     */
+    @Test
+    @Order(5)
+    void get_includeNonLive_reportsPhysicalRowsIgnoringLiveness() throws Exception {
+        unown(C2);
+        try {
+            Map<String, Object> plain = postOk("/v1/vectors/get", TOKEN_A, Map.of(
+                "collection", COL, "where", Map.of("lang", "py"), "limit", 10));
+            assertThat((List<Object>) plain.get("ids"))
+                .as("a plain /get hides the unowned C2 (live(c))")
+                .isEmpty();
+
+            Map<String, Object> nonLive = postOk("/v1/vectors/get", TOKEN_A, Map.of(
+                "collection", COL, "where", Map.of("lang", "py"), "limit", 10,
+                "include_non_live", true));
+            assertThat((List<Object>) nonLive.get("ids"))
+                .as("include_non_live reports the physically stored, unowned chunk")
+                .containsExactly(C2);
+            assertThat(nonLive)
+                .as("ids and metadatas only, never documents")
+                .containsOnlyKeys("ids", "metadatas");
+
+            var rejected = post("/v1/vectors/get", TOKEN_A, Map.of(
+                "collection", COL, "include_non_live", true, "include", List.of("documents")));
+            assertThat(rejected.statusCode())
+                .as("include_non_live cannot be combined with an include of documents")
+                .isEqualTo(400);
+        } finally {
+            own(C2);
+        }
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10): {@code /v1/vectors/get-all-metadata}
+     * gets the same {@code include_non_live} probe as {@code /get} above — the
+     * {@code nx t3 gc} orphan-candidate listing's actual route.
+     */
+    @Test
+    @Order(5)
+    void getAllMetadata_includeNonLive_reportsPhysicalRowsIgnoringLiveness() throws Exception {
+        unown(C2);
+        try {
+            Map<String, Object> plain = postOk("/v1/vectors/get-all-metadata", TOKEN_A, Map.of(
+                "collection", COL, "where", Map.of("lang", "py")));
+            assertThat((List<Object>) plain.get("ids"))
+                .as("a plain get-all-metadata hides the unowned C2 (live(c))")
+                .isEmpty();
+
+            Map<String, Object> nonLive = postOk("/v1/vectors/get-all-metadata", TOKEN_A, Map.of(
+                "collection", COL, "where", Map.of("lang", "py"), "include_non_live", true));
+            assertThat((List<Object>) nonLive.get("ids"))
+                .as("include_non_live reports the physically stored, unowned chunk")
+                .containsExactly(C2);
+            assertThat(nonLive).doesNotContainKey("documents");
+
+            var rejected = post("/v1/vectors/get-all-metadata", TOKEN_A, Map.of(
+                "collection", COL, "include_non_live", true, "include", List.of("embeddings")));
+            assertThat(rejected.statusCode())
+                .as("include_non_live cannot be combined with an include of embeddings")
+                .isEqualTo(400);
+        } finally {
+            own(C2);
+        }
     }
 
     @Test
@@ -470,7 +612,9 @@ class PgVectorServingContractTest {
         // RDR-156 P3 (nexus-70r3c.12): GET /v1/vectors/stats serves
         // nexus.collection_vector_stats — one round-trip, all collections,
         // tombstone-filtered live counts. State here: 4 chunks in COL
-        // (3 upserted + 1 store-put), all manifest-less → all live.
+        // (3 upserted + 1 store-put), each given a live own-collection manifest
+        // owner (RDR-192 Step 5, nexus-wbfpw.10: collection_vector_stats now
+        // requires live(c) too — a manifest-less chunk no longer counts).
         var resp = get("/v1/vectors/stats", TOKEN_A);
         assertThat(resp.statusCode())
             .as("stats must serve 200 from pgvector (got: %s)", resp.body())
@@ -483,6 +627,10 @@ class PgVectorServingContractTest {
                            "stats must contain " + COL + " (got: " + stats + ")"));
         assertThat(((Number) col.get("count")).longValue())
             .as("live chunk_count must be exactly 4 (3 upserted + 1 put, no tombstones)")
+            .isEqualTo(4L);
+        assertThat(((Number) col.get("stored_count")).longValue())
+            .as("stored_count is the physical count, live or not (RDR-192 Step 5 amendment); "
+                + "every chunk here is owned, so it equals count")
             .isEqualTo(4L);
         assertThat(((Number) col.get("dim")).intValue())
             .as("voyage-context-3 collection routes to embedding_1024")
@@ -524,6 +672,13 @@ class PgVectorServingContractTest {
         assertThat(((Number) foreign.get("deleted")).intValue())
             .as("cross-tenant delete affects exactly 0 rows under RLS")
             .isEqualTo(0);
+
+        // RDR-192 Step 5 (nexus-wbfpw.10): delete() refuses a still-referenced
+        // (manifest-owned) chunk regardless of its owner's tombstone state — C3/PUT1
+        // were given a live owner above so the read tests could see them; un-own them
+        // first, exactly as RDR-192 Step 9's reaper un-manifests a chunk before it
+        // becomes eligible for GC.
+        unown(C3, PUT1);
 
         // Owner deletes for real.
         Map<String, Object> owner = postOk("/v1/vectors/store-delete", TOKEN_A, Map.of(

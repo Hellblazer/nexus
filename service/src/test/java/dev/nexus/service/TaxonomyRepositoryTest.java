@@ -537,6 +537,96 @@ class TaxonomyRepositoryTest {
         assertThat(repo.getLastDiscoverDocCount(TENANT_A, COL_A)).contains(100);
     }
 
+    // nexus-l3dg2 (du6d0 residual): getLastDiscoverStamps batched read.
+
+    @Test @Order(30)
+    void getLastDiscoverStamps_returnsRowsForKnownCollectionsOnly() {
+        String colKnown1 = "knowledge__l3dg2-known-1-" + System.nanoTime();
+        String colKnown2 = "knowledge__l3dg2-known-2-" + System.nanoTime();
+        String colUnknown = "knowledge__l3dg2-unknown-" + System.nanoTime();
+        registerReal(TENANT_A, colKnown1);
+        registerReal(TENANT_A, colKnown2);
+        registerReal(TENANT_A, colUnknown);  // registered, but NEVER discovered
+        repo.recordDiscoverCount(TENANT_A, colKnown1, 7, "2026-09-01T00:00:00Z");
+        repo.recordDiscoverCount(TENANT_A, colKnown2, 13, "2026-09-15T00:00:00Z");
+
+        List<Map<String, Object>> rows = repo.getLastDiscoverStamps(
+            TENANT_A, List.of(colKnown1, colKnown2, colUnknown));
+
+        assertThat(rows).hasSize(2);
+        var byCollection = rows.stream().collect(
+            java.util.stream.Collectors.toMap(r -> (String) r.get("collection"), r -> r));
+        assertThat(byCollection).containsKey(colKnown1);
+        assertThat(byCollection).containsKey(colKnown2);
+        assertThat(byCollection).doesNotContainKey(colUnknown);
+        assertThat(byCollection.get(colKnown1).get("last_discover_at")).isEqualTo("2026-09-01T00:00:00Z");
+        assertThat(byCollection.get(colKnown1).get("last_discover_doc_count")).isEqualTo(7);
+        assertThat(byCollection.get(colKnown2).get("last_discover_at")).isEqualTo("2026-09-15T00:00:00Z");
+        assertThat(byCollection.get(colKnown2).get("last_discover_doc_count")).isEqualTo(13);
+    }
+
+    @Test @Order(31)
+    void getLastDiscoverStamps_emptyOrAllUnknown_returnsEmpty() {
+        assertThat(repo.getLastDiscoverStamps(TENANT_A, List.of())).isEmpty();
+
+        String colUnknown = "knowledge__l3dg2-empty-" + System.nanoTime();
+        registerReal(TENANT_A, colUnknown);
+        assertThat(repo.getLastDiscoverStamps(TENANT_A, List.of(colUnknown))).isEmpty();
+    }
+
+    @Test @Order(32)
+    void getLastDiscoverStamps_tenantIsolated() {
+        String col = "knowledge__l3dg2-tenant-iso-" + System.nanoTime();
+        registerReal(TENANT_A, col);
+        registerReal(TENANT_B, col);
+        repo.recordDiscoverCount(TENANT_A, col, 5, "2026-01-01T00:00:00Z");
+        repo.recordDiscoverCount(TENANT_B, col, 999, "2026-02-02T00:00:00Z");
+
+        List<Map<String, Object>> rowsA = repo.getLastDiscoverStamps(TENANT_A, List.of(col));
+        assertThat(rowsA).hasSize(1);
+        assertThat(rowsA.get(0).get("last_discover_doc_count")).isEqualTo(5);
+        assertThat(rowsA.get(0).get("last_discover_at")).isEqualTo("2026-01-01T00:00:00Z");
+
+        List<Map<String, Object>> rowsB = repo.getLastDiscoverStamps(TENANT_B, List.of(col));
+        assertThat(rowsB).hasSize(1);
+        assertThat(rowsB.get(0).get("last_discover_doc_count")).isEqualTo(999);
+        assertThat(rowsB.get(0).get("last_discover_at")).isEqualTo("2026-02-02T00:00:00Z");
+    }
+
+    /**
+     * code-review-expert significant finding (nexus-l3dg2 review round 1): a
+     * taxonomy_meta row can exist with a NULL last_discover_at — the column is
+     * nullable, and {@link TaxonomyRepository#importTaxonomyMeta} preserves a
+     * source record's null verbatim (fidelity ETL, never synthesizes a
+     * timestamp) — so "has a row" and "has a row with a real stamp" are
+     * different conditions. Before the fix, such a row surfaced as
+     * {@code last_discover_at: null}, breaking the javadoc's own claim
+     * ("mirroring detectHubsData's absent-means-never-discovered convention")
+     * and reopening exactly the false-warning failure mode nexus-l3dg2 exists
+     * to close: an engine-side null read as "the engine has an opinion" when
+     * it does not.
+     */
+    @Test @Order(33)
+    void getLastDiscoverStamps_omitsRowWithNullStamp() {
+        String colNullStamp = "knowledge__l3dg2-null-stamp-" + System.nanoTime();
+        String colRealStamp = "knowledge__l3dg2-real-stamp-" + System.nanoTime();
+        registerReal(TENANT_A, colNullStamp);
+        registerReal(TENANT_A, colRealStamp);
+        // importTaxonomyMeta with a null lastDiscoverAt: a taxonomy_meta row
+        // EXISTS for colNullStamp (doc_count=3), but its stamp is NULL --
+        // the exact shape a fidelity ETL import of a never-discovered source
+        // record produces.
+        repo.importTaxonomyMeta(TENANT_A, colNullStamp, 3, null);
+        repo.recordDiscoverCount(TENANT_A, colRealStamp, 8, "2026-09-22T00:00:00Z");
+
+        List<Map<String, Object>> rows = repo.getLastDiscoverStamps(
+            TENANT_A, List.of(colNullStamp, colRealStamp));
+
+        assertThat(rows).hasSize(1);
+        assertThat(rows.get(0).get("collection")).isEqualTo(colRealStamp);
+        assertThat(rows.get(0).get("last_discover_at")).isEqualTo("2026-09-22T00:00:00Z");
+    }
+
     // ── Links ──────────────────────────────────────────────────────────────────
 
     @Test @Order(191)

@@ -13,7 +13,7 @@ its diagnostics go to stderr, and :class:`HookResult`'s ``stdout`` stays
 ``None`` throughout. A stray byte on stdout is a malformed hook decision.
 
 **Every path returns cleanly.** The bash exits 0 unconditionally, and the
-four skip paths each emit one verbatim stderr line naming why no row was
+skip paths each emit one verbatim stderr line naming why no row was
 written. Those lines are reproduced exactly: they are what an operator
 reads when the ledger is missing a dispatch, and the whole RDR-184 guard
 is built on the ledger being complete.
@@ -24,11 +24,31 @@ placeholder** (nexus-a795d). The harness genuinely starts a
 else would put a row in the ledger under a type no START will ever carry,
 which reads later as an expected-but-never-started dispatch.
 ``docs/cli-reference.md`` documents this and must stay true.
+
+**``tool_use_id`` must look like one (nexus-5l8i8, hypothesis (b)).**
+Session 81d1d28b's retro also carried two HAND-WRITTEN EXPECT rows,
+created by calling the ``hook_agent_dispatch_expect`` MCP tool directly
+with ``tool_use_id`` of ``"probe-dict"``/``"probe-str"`` while diagnosing
+the close gate. A hand-written row inflates the credit pool the same way
+a duplicate does (see ``_already_written``'s own docstring), and unlike a
+duplicate it CANNOT be told apart from a real dispatch by id alone unless
+the id is shape-checked — a genuine PreToolUse(Agent|Task) firing always
+carries the tool-use block's own ``id``, measured across this session's
+own transcripts (2026-09-27) as ``toolu_`` followed by a run of
+alphanumeric characters, never anything else. So a ``tool_use_id`` that
+does not match that shape is refused with a named skip, the same as the
+other four paths below — this is the HOOK's own guard, and it does NOT
+touch ``nx-hook expectations_expect`` or ``expectations_expect()``
+themselves, which stay exactly as permissive as AGENTS.md's sanctioned
+hand-path requires (a dispatch this hook cannot see is keyed on subagent
+type, never on a tool-use id, so there is nothing of this shape for that
+path to check in the first place).
 """
 
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -42,6 +62,15 @@ __all__ = ["run"]
 #: a named diagnostic rather than silently, because a hook wired to the
 #: wrong matcher should say so.
 _DISPATCH_TOOLS = ("Agent", "Task")
+
+#: The one shape Claude Code's own tool-use ``id`` ever takes for a REAL
+#: PreToolUse(Agent|Task) firing, measured against this session's own
+#: transcripts (2026-09-27, ~61.7k sampled ids, 100% ``toolu_`` + 24
+#: alphanumeric characters). Deliberately NOT pinned to that exact length
+#: -- the prefix is the load-bearing invariant a hand-written probe id
+#: (``"probe-dict"``, ``"probe-str"``) can never satisfy, and a future,
+#: longer real id must not start failing this check the length would.
+_TOOL_USE_ID_RE = re.compile(r"^toolu_[A-Za-z0-9]+$")
 
 #: Field scrub: these characters would reshape the TSV row or the
 #: bash reader's own \x1f-delimited decode.
@@ -161,6 +190,18 @@ def run(payload: dict | None) -> HookResult:
         _skip(
             "agent-dispatch-expect: empty/unparseable session_id — EXPECT row NOT "
             f"written for this dispatch (tool_use_id={shown_id})"
+        )
+        return HookResult()
+    if not _TOOL_USE_ID_RE.match(dispatch_id):
+        _skip(
+            f"agent-dispatch-expect: tool_use_id '{shown_id}' is not toolu_-shaped "
+            f"— EXPECT row NOT written for this dispatch (subagent_type="
+            f"{subagent_type}). A genuine PreToolUse(Agent|Task) firing always "
+            f"carries Claude Code's own tool-use id; anything else is a "
+            f"hand-invoked call to this hook (or its registered MCP tool), which "
+            f"inflates the RDR-184 credit pool rather than recording a real "
+            f"dispatch. Use `nx-hook expectations_expect` for a dispatch this "
+            f"hook cannot see."
         )
         return HookResult()
     if not subagent_type:

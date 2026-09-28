@@ -46,6 +46,7 @@ from nexus.doctor_assignments import (
     format_report,
     probe_collection,
 )
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
 
 _SRC = "knowledge__v4pj4-src__bge-base-en-v15-768__v1"
 _DST = "knowledge__v4pj4-dst__bge-base-en-v15-768__v1"
@@ -92,6 +93,10 @@ def _seed_src_with_two_dst_topics(t3, tax) -> tuple[list[str], int, int]:
         collection_name=_SRC, ids=ids, documents=_TEXTS,
         embeddings=[[] for _ in ids], metadatas=[{}] * len(ids),
     )
+    # RDR-192 Step 5 (nexus-wbfpw.10): get_embeddings and the probe's own
+    # col.get() are live-visibility gated; a raw upsert with no catalog
+    # manifest has no live owner in its own collection.
+    give_chunks_a_live_owner(_SRC, ids)
     real = t3.get_embeddings(_SRC, ids)
 
     topic_a = tax.import_topic(
@@ -623,6 +628,8 @@ def test_a_topic_added_after_assignment_does_not_alarm(t2_service_env) -> None:
         collection_name=_SRC, ids=ids, documents=_TEXTS,
         embeddings=[[] for _ in ids], metadatas=[{}] * len(ids),
     )
+    # RDR-192 Step 5 (nexus-wbfpw.10): see the sibling fixture above.
+    give_chunks_a_live_owner(_SRC, ids)
     real = t3.get_embeddings(_SRC, ids)
 
     topic_old = tax.import_topic(
@@ -672,6 +679,11 @@ def test_a_collection_with_no_live_foreign_centroid_is_not_applicable(t2_service
         documents=[f"v4pj4 bare chunk {i}" for i in range(3)],
         embeddings=[[] for _ in ids], metadatas=[{}] * len(ids),
     )
+    # RDR-192 Step 5 (nexus-wbfpw.10): without a live owner the live count
+    # this probe samples over is 0, so the run never reaches cross_preview
+    # at all (0 candidate ids) and reads INCONCLUSIVE rather than the
+    # NOT_APPLICABLE this test is actually about.
+    give_chunks_a_live_owner(_BARE, ids)
 
     run_check_assignments(sample=20, collections=(_BARE,), seed=1)  # must not raise SystemExit
 
@@ -689,6 +701,8 @@ def test_an_engine_without_cross_preview_is_named_not_applicable(t2_service_env,
         documents=[f"v4pj4 old-engine chunk {i}" for i in range(3)],
         embeddings=[[] for _ in ids], metadatas=[{}] * len(ids),
     )
+    # RDR-192 Step 5 (nexus-wbfpw.10): see the sibling fixture above.
+    give_chunks_a_live_owner(_SRC, ids)
 
     def _404(self, collection, chashes):
         req = httpx.Request("POST", "http://engine/v1/taxonomy/assignments/cross-preview")

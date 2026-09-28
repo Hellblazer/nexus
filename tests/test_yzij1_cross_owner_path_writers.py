@@ -31,7 +31,14 @@ from click.testing import CliRunner
 from structlog.testing import capture_logs
 
 from nexus import indexer as indexer_mod
-from nexus.catalog.path_ambiguity import announce_cross_owner_mint
+from nexus.catalog.path_ambiguity import (
+    announce_cross_owner_mint,
+    announce_cross_owner_resolve,
+    created_from_register_result,
+    find_cross_owner_conflict,
+    reconcile_stale_physical_collection,
+    tumbler_from_register_result,
+)
 from nexus.commands import catalog as _cat_cmd
 from nexus.commands.catalog_cmds import report as report_mod
 from nexus.commands.dt import _stamp_dt_uri_on_entry
@@ -44,6 +51,7 @@ def _entry(tumbler: str, **kw):
         year=kw.get("year", 0),
         content_type=kw.get("content_type", "paper"),
         file_path=kw.get("file_path", ""),
+        physical_collection=kw.get("physical_collection", ""),
     )
 
 
@@ -164,13 +172,43 @@ class _AnnounceReader:
         return list(self._matches)
 
 
-class TestAnnounceCrossOwnerMint:
+class TestFindCrossOwnerConflict:
+    """The pre-register query half of the split (nexus-r1tnx)."""
+
     def test_it_names_every_existing_document(self) -> None:
         reader = _AnnounceReader(matches=[_entry("3.1"), _entry("3.2")])
 
+        assert find_cross_owner_conflict(reader, "a/b.md") == ["3.1", "3.2"]
+
+    def test_a_genuinely_new_path_is_none(self) -> None:
+        assert find_cross_owner_conflict(_AnnounceReader(matches=[]), "a/new.md") is None
+
+    def test_a_failing_catalog_never_propagates(self) -> None:
+        """Reporting must not convert a successful index into a failed one."""
+        assert find_cross_owner_conflict(_AnnounceReader(raises=True), "a/b.md") is None
+
+    def test_a_reader_without_the_method_is_tolerated(self) -> None:
+        """Several catalog doubles predate ``find_all_by_file_path``."""
+        assert find_cross_owner_conflict(SimpleNamespace(), "a/b.md") is None
+
+
+class TestAnnounceCrossOwnerMint:
+    """The post-register announcement half of the split (nexus-r1tnx).
+
+    Every case here is gated on BOTH a non-empty conflict list AND
+    ``created=True`` — the pre-fix code fired the warning off the conflict
+    list alone, before ``register()`` had even run, so it warned
+    "registering an ADDITIONAL document" on runs where ``register()``
+    resolved to the pre-existing tumbler and minted nothing (observed
+    2026-09-26, twice, re-indexing a PDF that reconciled onto its existing
+    catalog row).
+    """
+
+    def test_it_names_every_existing_document_when_created(self) -> None:
         with capture_logs() as logs:
             announce_cross_owner_mint(
-                reader, "a/b.md", owner="4.0", context="unit",
+                ["3.1", "3.2"], file_path="a/b.md", owner="4.0",
+                context="unit", created=True,
             )
 
         events = [e for e in logs
@@ -181,27 +219,41 @@ class TestAnnounceCrossOwnerMint:
         assert events[0]["owner"] == "4.0"
         assert events[0]["context"] == "unit"
 
+    def test_register_resolving_to_the_existing_doc_is_silent(self) -> None:
+        """PRE-FIX (nexus-r1tnx): this fired the warning even though
+        ``register()`` minted nothing — reproduces the exact false
+        positive: a real conflict list, but ``created=False`` because
+        ``register()`` reconciled onto the pre-existing row instead of
+        minting a second document."""
+        with capture_logs() as logs:
+            announce_cross_owner_mint(
+                ["3.1", "3.2"], file_path="a/b.md", owner="4.0",
+                context="unit", created=False,
+            )
+
+        assert not [e for e in logs
+                    if e.get("event") == "catalog_mint_over_existing_file_path"], (
+            "created=False means register() did not mint an additional "
+            "document — the pre-existing conflict list must not be enough "
+            "to warn on its own"
+        )
+
     def test_a_genuinely_new_path_is_silent(self) -> None:
         """Without this, the warning could fire on every mint and the test
         above would still pass — making the signal worthless."""
         with capture_logs() as logs:
             announce_cross_owner_mint(
-                _AnnounceReader(matches=[]), "a/new.md", owner="4.0", context="unit",
+                None, file_path="a/new.md", owner="4.0", context="unit",
+                created=True,
             )
 
         assert not [e for e in logs
                     if e.get("event") == "catalog_mint_over_existing_file_path"]
 
-    def test_a_failing_catalog_never_propagates(self) -> None:
-        """Reporting must not convert a successful index into a failed one."""
+    def test_no_conflict_and_no_mint_is_silent(self) -> None:
         announce_cross_owner_mint(
-            _AnnounceReader(raises=True), "a/b.md", owner="4.0", context="unit",
-        )
-
-    def test_a_reader_without_the_method_is_tolerated(self) -> None:
-        """Several catalog doubles predate ``find_all_by_file_path``."""
-        announce_cross_owner_mint(
-            SimpleNamespace(), "a/b.md", owner="4.0", context="unit",
+            None, file_path="a/new.md", owner="4.0", context="unit",
+            created=False,
         )
 
 
@@ -408,10 +460,18 @@ class TestTheMintSitesActuallyCallIt:
     is stated as such rather than dressed up as coverage it is not.
     """
 
-    def test_register_or_lookup_doc_id_announces_before_minting(
+    def test_register_or_lookup_doc_id_announces_after_minting(
         self, monkeypatch, tmp_path,
     ) -> None:
-        """The behavioural arm: a real mint through the doc_indexer pre-flight."""
+        """The behavioural arm: a real mint through the doc_indexer pre-flight.
+
+        nexus-r1tnx: the announcement now runs AFTER ``register()`` — it
+        needs register()'s own ``created`` signal to know whether this call
+        actually minted anything, rather than assuming it did the moment an
+        owner-scoped lookup missed (see ``test_every_mint_site_is_wired``
+        below for the source-order pin, and ``TestAnnounceCrossOwnerMint``
+        for the false-positive this fixes).
+        """
         from nexus import doc_indexer as di
 
         md = tmp_path / "shared.md"
@@ -450,7 +510,7 @@ class TestTheMintSitesActuallyCallIt:
         )
         monkeypatch.setattr(
             "nexus.catalog.path_ambiguity.announce_cross_owner_mint",
-            lambda reader, fp, **kw: announced.append((fp, kw)),
+            lambda conflict, **kw: announced.append((kw.get("file_path"), kw)),
         )
 
         di._register_or_lookup_doc_id(
@@ -459,21 +519,127 @@ class TestTheMintSitesActuallyCallIt:
 
         assert registered, "the test must reach the mint, or it proves nothing"
         assert len(announced) == 1, (
-            "the mint branch must announce before registering; "
+            "the mint branch must announce after registering; "
             f"registered={registered} announced={announced}"
         )
         assert announced[0][0] == registered[0], (
             "the announced path must be the one actually registered — "
             "announcing a different path would report on the wrong file"
         )
+        # writer.register's fake returns a bare tumbler (no with_created
+        # support), so the defensive "no tuple -> created=True" fallback
+        # must have kicked in.
+        assert announced[0][1]["created"] is True
 
     def test_every_mint_site_is_wired(self) -> None:
-        """The wiring arm. Deleting any of the four call statements reds this.
+        """The wiring arm. Deleting any of the call statements below reds this.
 
-        Each entry names the function whose mint must be preceded by the
-        announce. Asserting POSITION (announce before register, inside the
-        same function body) is what makes this more than a grep for the
-        string somewhere in the file.
+        Each entry names the function whose mint must be preceded by a
+        conflict CHECK and followed by an ANNOUNCE (nexus-r1tnx: the check
+        has to run before ``register()`` — querying after would see the
+        just-minted row too — while the announcement has to run after, so
+        it can see register()'s own ``created`` signal). Asserting POSITION
+        is what makes this more than a grep for the strings somewhere in
+        the file.
+
+        Every site shares one call shape (``find_cross_owner_conflict(`` +
+        ``.register(``) EXCEPT ``indexer._catalog_hook``, which carries TWO
+        independent mint call sites in one function body (nexus-1vc0n):
+        the batched ``register_many()`` fast path, fed by the bulk owner-
+        agnostic twin ``find_all_by_file_paths()`` (via the nested
+        ``_page_conflicts`` helper) instead of the per-doc
+        ``find_cross_owner_conflict()`` that per-doc cost would have made
+        an N+1; and the per-file ``.register()`` fallback below it (reached
+        only when ``register_many()`` itself raised), which uses the same
+        shape every other site above uses. A single whole-function
+        first-occurrence scan conflates the two: both sites call
+        ``announce_cross_owner_mint(`` under the SAME literal name, so a
+        plain ``src.find(...)`` for that marker always lands on the
+        batched site's own (earlier) call and reports the fallback's
+        later, but correctly-ordered, call as an inversion. Each entry
+        below instead names its OWN conflict/register marker pair; the
+        register marker's position anchors a bounded search — the nearest
+        conflict check AT OR BEFORE it, the nearest announce AT OR AFTER
+        it — so two call sites sharing one function, and one substring,
+        are checked independently rather than smeared into one another.
+        """
+        import inspect
+
+        from nexus import doc_indexer as di
+        from nexus import pipeline_stages as ps
+        from nexus.commands import catalog as cat_cmd
+
+        announce_marker = "announce_cross_owner_mint("
+        # (module, function name, this site's conflict-check marker, this
+        # site's register-call marker)
+        sites = [
+            (ps, "_catalog_pdf_hook", "find_cross_owner_conflict(", ".register("),
+            (di, "_register_or_lookup_doc_id", "find_cross_owner_conflict(", ".register("),
+            (di, "_catalog_markdown_hook", "find_cross_owner_conflict(", ".register("),
+            (cat_cmd, "_backfill_per_file_from_t3", "find_cross_owner_conflict(", ".register("),
+            # nexus-1vc0n: the batched register_many() fast path -- proves
+            # the batched site itself announces, not just its fallback.
+            (indexer_mod, "_catalog_hook", "find_all_by_file_paths(", "register_many("),
+            # the per-file register() fallback below it, on register_many()
+            # failure -- same shape every other site above uses.
+            (indexer_mod, "_catalog_hook", "find_cross_owner_conflict(", ".register("),
+        ]
+        missing = []
+        for mod, fname, conflict_marker, register_marker in sites:
+            raw = inspect.getsource(getattr(mod, fname))
+            # Comments in these functions discuss ``cat.register()`` in prose;
+            # a naive search finds the PROSE first and reports a correctly
+            # ordered call site as inverted.
+            src = "\n".join(
+                line.split("#", 1)[0] for line in raw.splitlines()
+            )
+            label = f"{mod.__name__}.{fname} [{register_marker!r}]"
+            r = src.find(register_marker)
+            if r == -1:
+                missing.append(f"{label}: no register call ({register_marker!r}) found at all")
+                continue
+            c = src.rfind(conflict_marker, 0, r)
+            if c == -1:
+                missing.append(
+                    f"{label}: no conflict check ({conflict_marker!r}) before the register",
+                )
+            # Bound the announce search at the NEXT mint site's register
+            # call in this same function (code review, batch 3): both
+            # indexer sites call announce_cross_owner_mint( by the same
+            # name, so an unbounded forward search from the batched site
+            # found the fallback's announce and passed with the batched
+            # site's own call deleted.
+            later = [
+                pos for other_mod, other_fname, _, other_marker in sites
+                if other_mod is mod and other_fname == fname
+                and other_marker != register_marker
+                and (pos := src.find(other_marker, r + 1)) != -1
+            ]
+            a = src.find(announce_marker, r, min(later) if later else len(src))
+            if a == -1:
+                missing.append(
+                    f"{label}: announce ({announce_marker!r}) missing, or comes BEFORE "
+                    "the register (it needs register()'s created signal)",
+                )
+        assert not missing, (
+            "every path-keyed mint must check before, and announce after, "
+            "it registers: " + "; ".join(missing)
+        )
+
+    def test_every_mint_site_calls_reconcile_stale_physical_collection(self) -> None:
+        """Sibling to ``test_every_mint_site_is_wired`` (nexus-r1tnx round 4,
+        fix-check finding): that test only pins
+        find_cross_owner_conflict/announce_cross_owner_mint/register()
+        ORDERING — nothing checked whether
+        ``reconcile_stale_physical_collection`` itself was ever called, so
+        round 3 skipped ``indexer._catalog_hook``'s per-file fallback
+        entirely and nothing here noticed.
+
+        ``indexer._catalog_hook`` carries TWO independent call sites (the
+        batched ``register_many`` success path and its per-file fallback,
+        reached only when the batch call itself raised) — each closes the
+        SAME nexus-2t63u exposure for a different failure mode of the same
+        register attempt, so both must be present.
         """
         import inspect
 
@@ -482,32 +648,23 @@ class TestTheMintSitesActuallyCallIt:
         from nexus.commands import catalog as cat_cmd
 
         sites = [
-            (ps, "_catalog_pdf_hook"),
-            (di, "_register_or_lookup_doc_id"),
-            (di, "_catalog_markdown_hook"),
-            (cat_cmd, "_backfill_per_file_from_t3"),
+            (ps, "_catalog_pdf_hook", 1),
+            (di, "_register_or_lookup_doc_id", 1),
+            (di, "_catalog_markdown_hook", 1),
+            (cat_cmd, "_backfill_per_file_from_t3", 1),
+            (indexer_mod, "_catalog_hook", 2),
         ]
         missing = []
-        for mod, fname in sites:
+        for mod, fname, expected in sites:
             raw = inspect.getsource(getattr(mod, fname))
-            # Comments in these functions discuss ``cat.register()`` in prose;
-            # a naive search finds the PROSE first and reports a correctly
-            # ordered call site as inverted.
-            src = "\n".join(
-                line.split("#", 1)[0] for line in raw.splitlines()
-            )
-            a = src.find("announce_cross_owner_mint(")
-            r = src.find(".register(")
-            if a == -1:
-                missing.append(f"{mod.__name__}.{fname}: no announce at all")
-            elif r != -1 and a > r:
+            src = "\n".join(line.split("#", 1)[0] for line in raw.splitlines())
+            count = src.count("reconcile_stale_physical_collection(")
+            if count < expected:
                 missing.append(
-                    f"{mod.__name__}.{fname}: announce comes AFTER the register",
+                    f"{mod.__name__}.{fname}: expected >= {expected} "
+                    f"reconcile_stale_physical_collection call(s), found {count}",
                 )
-        assert not missing, (
-            "every path-keyed mint must announce before it registers: "
-            + "; ".join(missing)
-        )
+        assert not missing, "; ".join(missing)
 
 
 # ── the collector, and the run summary that reads it ────────────────────────
@@ -530,8 +687,8 @@ class TestTheAnnouncementReachesTheOperator:
         from nexus.catalog.path_ambiguity import get_mints_over_existing_path
 
         announce_cross_owner_mint(
-            _AnnounceReader(matches=[_entry("3.1"), _entry("3.2")]),
-            "a/b.md", owner="4.0", context="unit",
+            ["3.1", "3.2"], file_path="a/b.md", owner="4.0", context="unit",
+            created=True,
         )
 
         rows = get_mints_over_existing_path()
@@ -544,7 +701,19 @@ class TestTheAnnouncementReachesTheOperator:
         from nexus.catalog.path_ambiguity import get_mints_over_existing_path
 
         announce_cross_owner_mint(
-            _AnnounceReader(matches=[]), "a/new.md", owner="4.0", context="unit",
+            None, file_path="a/new.md", owner="4.0", context="unit", created=True,
+        )
+
+        assert get_mints_over_existing_path() == []
+
+    def test_a_non_mint_records_nothing_even_with_a_conflict(self) -> None:
+        """nexus-r1tnx: a real conflict list, but register() didn't mint —
+        must not reach the collector any more than the log line."""
+        from nexus.catalog.path_ambiguity import get_mints_over_existing_path
+
+        announce_cross_owner_mint(
+            ["3.1", "3.2"], file_path="a/b.md", owner="4.0", context="unit",
+            created=False,
         )
 
         assert get_mints_over_existing_path() == []
@@ -556,8 +725,7 @@ class TestTheAnnouncementReachesTheOperator:
         )
 
         announce_cross_owner_mint(
-            _AnnounceReader(matches=[_entry("3.1")]),
-            "a/b.md", owner="4.0", context="unit",
+            ["3.1"], file_path="a/b.md", owner="4.0", context="unit", created=True,
         )
         assert get_mints_over_existing_path()
 
@@ -588,3 +756,268 @@ class TestTheAnnouncementReachesTheOperator:
         assert emitter.index("_emit_cross_owner_mint_summary()") > emitter.index(
             "def _emit_cross_owner_mint_summary",
         ), "the emitter must be defined before it is called"
+
+
+# ── unwrap helpers (nexus-r1tnx round 2, code-review minor finding) ─────────
+
+
+class TestRegisterResultUnwrapHelpers:
+    def test_created_from_a_tuple(self) -> None:
+        assert created_from_register_result(("1.1", True)) is True
+        assert created_from_register_result(("1.1", False)) is False
+
+    def test_created_from_a_bare_value_defaults_true(self) -> None:
+        """A test double predating with_created (several exist) returns a
+        bare tumbler/string. Treated as created=True, same as
+        HttpCatalogClient.register treats an older engine's missing field."""
+        assert created_from_register_result("1.1") is True
+
+    def test_tumbler_from_a_tuple(self) -> None:
+        assert tumbler_from_register_result(("1.1", True)) == "1.1"
+        assert tumbler_from_register_result(("1.1", False)) == "1.1"
+
+    def test_tumbler_from_a_bare_value(self) -> None:
+        assert tumbler_from_register_result("1.1") == "1.1"
+
+
+# ── resolved-onto-existing (nexus-r1tnx round 2, substantive-critic finding) ─
+
+
+class TestAnnounceCrossOwnerResolve:
+    """The ``created=False`` counterpart to ``TestAnnounceCrossOwnerMint``.
+
+    Pre-round-2, a resolve onto another owner's document got NO signal at
+    all once the false "ADDITIONAL document" claim was removed — the exact
+    scenario the original bug report came from (owner 1.14 resolving onto
+    1.12.25). These tests pin the replacement signal.
+    """
+
+    def test_a_resolve_with_a_conflict_is_announced(self) -> None:
+        with capture_logs() as logs:
+            announce_cross_owner_resolve(
+                ["1.12.25"], file_path="a/b.pdf", owner="1.14",
+                context="unit", created=False,
+            )
+
+        events = [e for e in logs
+                  if e.get("event") == "catalog_mint_resolved_existing_document"]
+        assert len(events) == 1
+        assert events[0]["existing_tumblers"] == ["1.12.25"]
+        assert events[0]["owner"] == "1.14"
+        assert events[0]["context"] == "unit"
+
+    def test_a_genuine_mint_is_not_reported_as_a_resolve(self) -> None:
+        """The mirror-image false positive: created=True means register()
+        DID mint, so this function (the resolve-side signal) must stay
+        silent — announce_cross_owner_mint owns that case."""
+        with capture_logs() as logs:
+            announce_cross_owner_resolve(
+                ["1.12.25"], file_path="a/b.pdf", owner="1.14",
+                context="unit", created=True,
+            )
+
+        assert not [e for e in logs
+                    if e.get("event") == "catalog_mint_resolved_existing_document"]
+
+    def test_a_resolve_with_no_conflict_is_silent(self) -> None:
+        """Without this, the signal could fire on every resolve — same-owner
+        idempotency hits included — making it worthless noise."""
+        with capture_logs() as logs:
+            announce_cross_owner_resolve(
+                None, file_path="a/b.pdf", owner="1.14",
+                context="unit", created=False,
+            )
+
+        assert not [e for e in logs
+                    if e.get("event") == "catalog_mint_resolved_existing_document"]
+
+
+# ── physical_collection reconciliation for a cross-owner resolve ───────────
+
+
+class _ReconcileReader:
+    def __init__(self, entry=None, raises: bool = False):
+        self._entry = entry
+        self._raises = raises
+
+    def resolve(self, tumbler):
+        if self._raises:
+            raise RuntimeError("catalog unreachable")
+        return self._entry
+
+
+class _ReconcileWriter:
+    def __init__(self, raises: bool = False):
+        self.updates: list[tuple] = []
+        self._raises = raises
+
+    def update(self, tumbler, **kw):
+        if self._raises:
+            raise RuntimeError("write failed")
+        self.updates.append((str(tumbler), kw))
+
+
+class TestReconcileStalePhysicalCollection:
+    """Mirrors the SAME-owner branches' own compare-and-repoint (nexus-2t63u),
+    extracted so the cross-owner resolve paths can reuse it (substantive
+    critique finding 1b)."""
+
+    def setup_method(self):
+        from nexus.mcp_infra import reset_reconciled_collections_count
+        reset_reconciled_collections_count()
+
+    def test_a_stale_collection_is_repointed_and_logged(self) -> None:
+        """The stale-physical_collection reproduction the critique asked
+        for: a SAME-owner resolve onto a row still stamped with its OLD
+        collection must repoint it, exactly like the same-owner branch.
+        Tumbler ``1.12.25`` belongs to owner ``1.12`` (its own prefix) —
+        the caller here IS that owner."""
+        from nexus.mcp_infra import get_reconciled_collections_count
+
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection="docs__old"))
+        writer = _ReconcileWriter()
+
+        with capture_logs() as logs:
+            result = reconcile_stale_physical_collection(
+                reader, writer, tumbler="1.12.25",
+                target_collection="docs__new", file_path="a/b.pdf",
+                owner="1.12",
+            )
+
+        assert result is True
+        assert writer.updates == [
+            ("1.12.25", {"physical_collection": "docs__new"}),
+        ]
+        events = [e for e in logs if e.get("event") == "doc_physical_collection_reconciled"]
+        assert len(events) == 1
+        assert events[0]["old_collection"] == "docs__old"
+        assert events[0]["new_collection"] == "docs__new"
+        assert get_reconciled_collections_count() == 1
+
+    def test_a_matching_collection_is_left_alone(self) -> None:
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection="docs__new"))
+        writer = _ReconcileWriter()
+
+        with capture_logs() as logs:
+            result = reconcile_stale_physical_collection(
+                reader, writer, tumbler="1.12.25",
+                target_collection="docs__new", file_path="a/b.pdf",
+                owner="1.12",
+            )
+
+        assert result is False
+        assert writer.updates == []
+        assert not [e for e in logs if e.get("event") == "doc_physical_collection_reconciled"]
+
+    def test_a_ghost_row_with_no_collection_is_left_alone(self) -> None:
+        """Mirrors the same-owner branches' identical ghost exemption —
+        nothing to compare a never-indexed row's collection against."""
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection=""))
+        writer = _ReconcileWriter()
+
+        result = reconcile_stale_physical_collection(
+            reader, writer, tumbler="1.12.25",
+            target_collection="docs__new", file_path="a/b.pdf",
+            owner="1.12",
+        )
+
+        assert result is False
+        assert writer.updates == []
+
+    def test_an_unresolvable_tumbler_is_left_alone(self) -> None:
+        reader = _ReconcileReader(entry=None)
+        writer = _ReconcileWriter()
+
+        result = reconcile_stale_physical_collection(
+            reader, writer, tumbler="1.12.25",
+            target_collection="docs__new", file_path="a/b.pdf",
+            owner="1.12",
+        )
+
+        assert result is False
+        assert writer.updates == []
+
+    def test_a_failing_resolve_probe_never_propagates(self) -> None:
+        """Advisory by construction: the caller already has a resolved
+        tumbler from register() — a repoint PROBE failure must not touch
+        that."""
+        reader = _ReconcileReader(raises=True)
+        writer = _ReconcileWriter()
+
+        result = reconcile_stale_physical_collection(
+            reader, writer, tumbler="1.12.25",
+            target_collection="docs__new", file_path="a/b.pdf",
+            owner="1.12",
+        )
+
+        assert result is False
+        assert writer.updates == []
+
+    def test_a_failing_repoint_write_never_propagates(self) -> None:
+        """nexus-ir68m fail-open contract: an already-resolved tumbler must
+        never be discarded because the follow-up repoint write failed."""
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection="docs__old"))
+        writer = _ReconcileWriter(raises=True)
+
+        with capture_logs() as logs:
+            result = reconcile_stale_physical_collection(
+                reader, writer, tumbler="1.12.25",
+                target_collection="docs__new", file_path="a/b.pdf",
+                owner="1.12",
+            )
+
+        assert result is False
+        events = [
+            e for e in logs
+            if e.get("event") == "doc_physical_collection_reconcile_write_failed"
+        ]
+        assert len(events) == 1
+        assert events[0]["old_collection"] == "docs__old"
+        assert events[0]["new_collection"] == "docs__new"
+
+    def test_a_foreign_owners_document_is_left_alone_and_logged(self) -> None:
+        """nexus-r1tnx round 4 (fix-check CRITICAL): the resolved document
+        ``1.12.25`` belongs to owner ``1.12`` -- a DIFFERENT owner than
+        this caller (``9.9``). Repointing its physical_collection to this
+        unrelated caller's own target would reassign owner 1.12's storage
+        based on owner 9.9's intent; must not write, only log the
+        divergence."""
+        reader = _ReconcileReader(_entry("1.12.25", physical_collection="docs__old"))
+        writer = _ReconcileWriter()
+
+        with capture_logs() as logs:
+            result = reconcile_stale_physical_collection(
+                reader, writer, tumbler="1.12.25",
+                target_collection="docs__new", file_path="a/b.pdf",
+                owner="9.9",
+            )
+
+        assert result is False, "must never write to a document another owner holds"
+        assert writer.updates == [], (
+            f"a foreign owner's document must not be repointed: {writer.updates}"
+        )
+        events = [
+            e for e in logs
+            if e.get("event") == "catalog_physical_collection_reconcile_skipped_foreign_owner"
+        ]
+        assert len(events) == 1, f"expected exactly one divergence log, got {logs}"
+        assert events[0]["owner"] == "9.9"
+        assert events[0]["resolved_tumbler"] == "1.12.25"
+        assert events[0]["existing_collection"] == "docs__old"
+        assert events[0]["target_collection"] == "docs__new"
+
+    def test_a_same_owner_child_tumbler_still_repoints(self) -> None:
+        """The owner-gate boundary: a resolved document under a DEEPER
+        tumbler than the bare owner prefix (a real document, not the
+        owner row itself) still counts as same-owner and repoints."""
+        reader = _ReconcileReader(_entry("1.12.99", physical_collection="docs__old"))
+        writer = _ReconcileWriter()
+
+        result = reconcile_stale_physical_collection(
+            reader, writer, tumbler="1.12.99",
+            target_collection="docs__new", file_path="a/b.pdf",
+            owner="1.12",
+        )
+
+        assert result is True
+        assert writer.updates == [("1.12.99", {"physical_collection": "docs__new"})]

@@ -183,12 +183,22 @@ def transcript_trouble(paths: list[pathlib.Path]) -> list[str]:
 #: The mcp_tool handlers one subagent-dispatch turn provokes (SHAKEOUT_HOOK_PROBE,
 #: nexus-wauo1.37): PreToolUse on the Agent tool, the three SubagentStart
 #: entries, SubagentStop, and the turn's own Stop.
+#:
+#: Two of the original six -- ``hook_agent_dispatch_expect`` and
+#: ``hook_subagent_start_stamp`` -- were removed at bead nexus-5l8i8, which
+#: moved both off the mcp_tool tier onto the command tier (an MCP-server
+#: outage was dropping the RDR-184 ledger rows they write). Neither is
+#: called as an MCP tool by an ordinary dispatch turn any more, so they
+#: would never appear in ``mcp-stdin.jsonl`` and this probe would report
+#: them PROBE FAILED forever, correctly and uselessly.
+#:
+#: ``hook_subagent_start_tuple`` and ``hook_subagent_stop_tuple`` -- the
+#: RDR-205 ledger's two projectors -- were removed the same way at bead
+#: nexus-egm7p, for the identical MCP-disconnect hazard nexus-5l8i8 fixed
+#: for the RDR-184 writers. What remains: ``hook_subagent_start`` (still
+#: mcp_tool) and the turn's own ``hook_stop_verification``.
 PROBE_HOOKS: tuple[str, ...] = (
-    "hook_agent_dispatch_expect",
     "hook_subagent_start",
-    "hook_subagent_start_stamp",
-    "hook_subagent_start_tuple",
-    "hook_subagent_stop_tuple",
     "hook_stop_verification",
 )
 

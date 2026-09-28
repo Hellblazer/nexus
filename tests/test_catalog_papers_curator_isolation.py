@@ -99,7 +99,7 @@ class TestCatalogPapersCuratorIsolation:
             content_type="paper",
             file_path="/papers/sovereign-grossberg2019.pdf",
             physical_collection=(
-                "knowledge__art-grossberg-papers__voyage-context-3__v1"
+                "knowledge__art-grossberg-papers__model-ctx__v1"
             ),
         )
         assert _scan_for_paper_rows_in_knowledge_knowledge(cat) == []

@@ -59,6 +59,7 @@ REAL engine substrate (``t2_service_env``, autouse) accordingly.
 """
 from __future__ import annotations
 
+import hashlib
 import uuid
 
 import pytest
@@ -67,6 +68,7 @@ from nexus.corpus import _write_intent_embedding_model
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.errors import SearchEmbeddingProfileMismatchError
 from nexus.search_engine import search_cross_corpus
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
 
 # EmbedderRouter.resolveEmbedderStrict's exact wording (see module
 # docstring) for a voyage-context-3-registered collection queried by an
@@ -202,8 +204,14 @@ def t3(t2_service_env):
 def test_matched_pair_searches_normally(t3) -> None:
     model = _write_intent_embedding_model("knowledge")
     name = _unique("knowledge__vply6") + f"__{model}__v1"
-    t3.put(collection=name, content="the quick brown fox jumps over the lazy dog",
-           title="quick brown fox")
+    content = "the quick brown fox jumps over the lazy dog"
+    t3.put(collection=name, content=content, title="quick brown fox")
+    # RDR-192 Step 5 (nexus-wbfpw.10): search_cross_corpus's search() is a
+    # live-visibility gated read. t3.put() is called directly here, bypassing
+    # the MCP store_hook chain that normally registers a catalog document
+    # for a store_put write, so the chunk has no live owner in its own
+    # collection.
+    give_chunks_a_live_owner(name, [hashlib.sha256(content.encode()).hexdigest()])
 
     results = search_cross_corpus("quick brown fox", [name], n_results=5, t3=t3)
 

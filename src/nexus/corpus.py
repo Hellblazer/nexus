@@ -304,15 +304,34 @@ class EmbeddingProfileMismatchError(RuntimeError):
     Technical Design 1a's "profile-as-data" honoured at the point a
     catalog client is already in hand and the model is about to be
     committed, an EARLY, more actionable diagnostic layered on top of
-    the engine's own register-time 422 on a mismatch (which remains the
-    correctness guard for every OTHER registration call site this seam
-    does not yet cover — those still get the engine's late refusal, not
-    this early one, until nexus-aotql consolidates them through this
-    same funnel — see :func:`ensure_collection_registered`'s own
-    docstring for the current site list; the prior tracker,
-    nexus-ft04v.27, CLOSED on 164fc06b2 with a census that predates one
-    of those sites).
+    the engine's own register-time 422 on a mismatch, which remains the
+    correctness guard of last resort for any future call site that
+    bypasses the seam (nexus-aotql, 2026-09-27, consolidated every
+    production ``register_collection`` call site through this seam —
+    see :func:`ensure_collection_registered`'s own docstring for the
+    current site list).
+
+    Exposes ``content_type``/``configured_model``/``engine_profile_model``
+    as public attributes (nexus-aotql fix round) so a caller that wants
+    to name a remedy (e.g. ``migrate_fallback_cmd``'s "pass --target-model
+    <profile model>") does not have to regex the message string apart.
     """
+
+    def __init__(
+        self, content_type: str, configured_model: str, engine_profile_model: str,
+    ) -> None:
+        self.content_type = content_type
+        self.configured_model = configured_model
+        self.engine_profile_model = engine_profile_model
+        super().__init__(
+            f"content_type={content_type!r}: this install's "
+            f"configured intent is {configured_model!r}, but the "
+            f"engine's embedding_profile still says {engine_profile_model!r}. "
+            "The engine reads local.embed_model and voyage_api_key only "
+            "at spawn, so a config change after the service started "
+            "leaves the two disagreeing until it restarts. A restart is "
+            f"required for the engine to adopt this: `{_SERVICE_RESTART_COMMAND}`."
+        )
 
 
 class CatalogReaderUnavailableError(RuntimeError):
@@ -1618,6 +1637,18 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
     }
 
 
+class QuarantineSiblingNotRegisteredError(LookupError):
+    """A write named a ``quarantine-<type>__...`` collection the engine has
+    not registered. The client never registers one (nexus-ny7j4), so the
+    registration retry in :func:`write_with_registration_retry` cannot
+    repair it and names the reason instead."""
+
+
+def _is_quarantine_sibling(name: str) -> bool:
+    from nexus.catalog.chunk_quarantine import is_quarantine_sibling_name  # noqa: PLC0415 — circular-dep avoidance (catalog imports corpus)
+    return is_quarantine_sibling_name(name)
+
+
 #: Per-process cache of collection names already registered by
 #: :func:`ensure_collection_registered` through the AMBIENT (default)
 #: registrar — see that function's docstring. Untouched by a scoped
@@ -1759,27 +1790,75 @@ def ensure_collection_registered(
     engine, :class:`~nexus.catalog.http_catalog_client.
     EmbeddingProfileRouteMissingError` propagates uncaught. This is an
     EARLY, more actionable diagnostic layered on top of the engine's
-    own register-time 422 on a mismatch, which remains the correctness
-    guard on its own for every registration call site OUTSIDE this
-    funnel (``commands/index.py``, ``commands/collection.py``'s
-    ``reindex_cmd``, ``commands/catalog_cmds/collections.py``'s
-    backfill/rename, ``db/t3.py``'s row synthesis — all call
-    :func:`collection_registration_kwargs` directly and register
-    without going through this function) until nexus-aotql
-    consolidates them through one funnel. ``nexus-ft04v.27`` (the prior
-    tracker for this consolidation) CLOSED on 164fc06b2 with a census
-    predating the site below, so it never carried a live count for it;
-    nexus-aotql is the current tracker. ``indexer.py``'s
-    ``index_repository`` pre-staleness-sweep registration loop
-    (nexus-bd44g) is a FIFTH related site, added after that census —
-    unlike the four above it already calls THIS function (no bypass,
-    same profile check), but it is a fifth place that independently
-    decides WHEN to register a name, so it is tracked alongside the
-    other four under nexus-aotql for the same eventual single-authority
-    design.
+    own register-time 422 on a mismatch, which is the correctness guard
+    of last resort for any FUTURE call site that manages to reintroduce
+    a bypass. nexus-aotql (2026-09-27) closed out the last two: every
+    production ``register_collection`` call in this tree now goes
+    through this function. The full site list (grep ``ensure_collection_
+    registered(`` across ``src/nexus`` to re-verify — this enumeration is
+    kept exact, not aspirational, so a future audit has something
+    concrete to check against):
+
+    - T3 chunk writes / aspects / taxonomy persist/rebuild/import
+      (:func:`write_with_registration_retry`, this function's own
+      primary caller — ``HttpVectorClient.put``/``.upsert_chunks``,
+      ``HttpDocumentAspectsStore.upsert``, ``HttpTaxonomyStore``'s
+      ``assign_topic``/``persist_discovered_topics``/
+      ``persist_rebuild_topics``/``import_topic``/``import_topic_link``/
+      ``record_discover_count``).
+    - ``db/t2/http_taxonomy_store.py``'s ``HttpTaxonomyStore.
+      persist_assignments`` — a DIRECT call (not via
+      ``write_with_registration_retry``): pre-registers every distinct
+      ``source_collection`` a batch references, once each, before the
+      single ``/assignments/assign_many`` POST.
+    - ``doc_indexer.py``'s ``_register_before_read`` — registers a
+      collection immediately before the incremental-sync pre-check READ,
+      through the SAME registrar the write path would use, so a
+      Phase-2+ engine's 422-on-unregistered-read never fires ahead of
+      the first write's own registration.
+    - ``catalog/http_catalog_client.py``'s ``HttpCatalogClient.
+      write_manifest_many`` — a DIRECT call: registers ONCE before the
+      page loop rather than wrapping each page in
+      :func:`write_with_registration_retry` (whose retry re-invokes the
+      whole write_fn, which would re-send an already-uploaded page's
+      chunks on a stale-registration retry).
+    - ``indexer.py``'s ``index_repository`` pre-staleness-sweep
+      registration loop (nexus-bd44g) and its ``_migrate_legacy_
+      collections`` post-rename registration (nexus-aotql).
+    - ``commands/index.py``'s ``_CatalogBackedRegistry.update`` (the
+      ``--corpus knowledge`` reroute).
+    - ``commands/collection.py``'s ``reindex_cmd`` (re-registration
+      after ``purge_collection_cascade``).
+    - ``commands/catalog_cmds/collections.py``'s ``backfill_collections_cmd``
+      and ``rename_collection_cmd``.
+    - ``commands/catalog_cmds/migration.py``'s ``migrate_fallback_cmd``
+      (nexus-aotql).
+
+    Several of these pass an EXPLICIT *kwargs* override rather than
+    relying on this function's own :func:`collection_registration_kwargs`
+    name-derivation — see each site's own comment for why (typically: a
+    mint-time or re-registration-after-row-deletion name has no row to
+    read the real owner/model from yet, so the site's own already-correct
+    derivation — a real owner lookup or a preserved existing segment,
+    never a fresh name parse — is passed through unchanged rather than
+    recomputed here). ``db/t3.py``'s ``list_collections`` row synthesis is
+    NOT a registration call site at all (it derives display fields for a
+    read-time listing on the retired, TEST-ONLY Chroma-era substrate,
+    which has no catalog to register against) — it was a stale reference
+    in an earlier revision of this docstring, corrected here.
     """
     scope = getattr(registrar, "scope", None)
     if _registration_cache_contains(scope, name):
+        return
+    if kwargs is None and _is_quarantine_sibling(name):
+        # The sibling exists by construction (the engine registered it
+        # from the origin's row when it quarantined the first chunk) and
+        # its name carries no content type to derive fields from; a write
+        # to an unregistered sibling still 422s at the engine, and
+        # write_with_registration_retry propagates that after one retry.
+        # A caller holding row-derived *kwargs* (backfill, rename) still
+        # registers explicitly; only the name-derived path skips.
+        _log.debug("collection_registration_skipped_quarantine_sibling", name=name)
         return
     with _REGISTERED_COLLECTIONS_LOCK:
         if _registration_cache_contains(scope, name):
@@ -1789,13 +1868,7 @@ def ensure_collection_registered(
         profile_model = _profile_model_for_content_type(kwargs["content_type"])
         if profile_model is not None and profile_model != kwargs["embedding_model"]:
             raise EmbeddingProfileMismatchError(
-                f"content_type={kwargs['content_type']!r}: this install's "
-                f"configured intent is {kwargs['embedding_model']!r}, but the "
-                f"engine's embedding_profile still says {profile_model!r}. "
-                "The engine reads local.embed_model and voyage_api_key only "
-                "at spawn, so a config change after the service started "
-                "leaves the two disagreeing until it restarts. A restart is "
-                f"required for the engine to adopt this: `{_SERVICE_RESTART_COMMAND}`."
+                kwargs["content_type"], kwargs["embedding_model"], profile_model,
             )
         if registrar is None:
             from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (catalog)
@@ -1965,6 +2038,17 @@ def write_with_registration_retry(
     except Exception as exc:  # noqa: BLE001 — narrowed immediately below; anything else re-raised unchanged
         if not _looks_like_stale_registration_error(exc):
             raise
+        if _is_quarantine_sibling(name):
+            # The funnel never registers a sibling (see
+            # ensure_collection_registered), so a retry cannot repair
+            # this; name the reason instead of the engine's bare 422.
+            raise QuarantineSiblingNotRegisteredError(
+                f"{name!r} is not registered and the client never registers "
+                "a quarantine sibling: the engine's GC function registers it "
+                "from the origin collection's row when it first quarantines a "
+                "chunk, so a sibling that does not exist has nothing to "
+                "write into. Check the origin collection and `nx t3 gc`."
+            ) from exc
         _log.info(
             "collection_registration_stale_after_boot_sweep_retry",
             name=name,

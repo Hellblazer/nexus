@@ -1527,6 +1527,69 @@ class CatalogRepositoryTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // documentsByFilePaths — batch owner-agnostic file_path lookup (nexus-1vc0n)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    @Test @Order(59)
+    void documentsByFilePaths_returnsDocumentsAcrossOwnersForExistingPaths() {
+        // Two distinct owners (tumbler prefixes vc0na / vc0nb) share one
+        // file_path -- the normal steady state nexus-yzij1 accommodates -- plus
+        // a second, unrelated path under a third owner. The bulk lookup must
+        // return every live document for each requested path, owner-agnostic.
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0na.1", "title", "Owner A copy",
+            "content_type", "code", "corpus", "code", "file_path", "shared/one.py"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0nb.1", "title", "Owner B copy",
+            "content_type", "code", "corpus", "code", "file_path", "shared/one.py"));
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0nc.1", "title", "Owner C solo",
+            "content_type", "code", "corpus", "code", "file_path", "shared/two.py"));
+
+        var result = repo.documentsByFilePaths(TENANT_A, List.of("shared/one.py", "shared/two.py"));
+
+        assertThat(result).containsOnlyKeys("shared/one.py", "shared/two.py");
+        assertThat(result.get("shared/one.py").stream().map(d -> d.get("tumbler")))
+            .containsExactlyInAnyOrder("vc0na.1", "vc0nb.1");
+        assertThat(result.get("shared/two.py").stream().map(d -> d.get("tumbler")))
+            .containsExactly("vc0nc.1");
+    }
+
+    @Test @Order(59)
+    void documentsByFilePaths_omitsUnknownPaths() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0nd.1", "title", "Known",
+            "content_type", "code", "corpus", "code", "file_path", "vc0n/known.py"));
+
+        var result = repo.documentsByFilePaths(TENANT_A, List.of("vc0n/known.py", "vc0n/no-such-path.py"));
+
+        assertThat(result).containsOnlyKeys("vc0n/known.py");
+    }
+
+    @Test @Order(59)
+    void documentsByFilePaths_excludesTombstonedRows() {
+        repo.upsertDocument(TENANT_A, Map.of("tumbler", "vc0ne.1", "title", "Will be tombstoned",
+            "content_type", "code", "corpus", "code", "file_path", "vc0n/gone.py"));
+        assertThat(repo.deleteDocument(TENANT_A, "vc0ne.1"))
+            .as("precondition: the delete must actually tombstone one row").isEqualTo(1);
+
+        var result = repo.documentsByFilePaths(TENANT_A, List.of("vc0n/gone.py"));
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(59)
+    void documentsByFilePaths_tenantIsolation() {
+        repo.upsertDocument(TENANT_B, Map.of("tumbler", "vc0nf.1", "title", "Tenant B Doc",
+            "content_type", "code", "corpus", "code", "file_path", "vc0n/tenant-b.py"));
+
+        var result = repo.documentsByFilePaths(TENANT_A, List.of("vc0n/tenant-b.py"));
+
+        assertThat(result).isEmpty();
+    }
+
+    @Test @Order(59)
+    void documentsByFilePaths_emptyInput_returnsEmptyMap() {
+        assertThat(repo.documentsByFilePaths(TENANT_A, List.of())).isEmpty();
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // COLLECTIONS
     // ══════════════════════════════════════════════════════════════════════════
 
@@ -4411,6 +4474,8 @@ class CatalogRepositoryTest {
             .as("documentsByCollection — the bead's own repro").containsExactly(live);
         assertThat(tumblersOf(repo.documentsByFilePath(tenant, "/abs/dead.py", 0, 0)))
             .as("documentsByFilePath").isEmpty();
+        assertThat(repo.documentsByFilePaths(tenant, List.of("/abs/dead.py")))
+            .as("documentsByFilePaths (nexus-1vc0n)").isEmpty();
         assertThat(tumblersOf(repo.documentsBySourceUri(tenant, "file:///abs/dead.py", 0, 0)))
             .as("documentsBySourceUri").isEmpty();
         assertThat(tumblersOf(repo.documentsByOwner(tenant, "9", 0, 0)))
@@ -4720,5 +4785,125 @@ class CatalogRepositoryTest {
             .filter(o -> "1".equals(o.get("tumbler_prefix"))).findFirst();
         assertThat(b).isPresent();
         assertThat(b.get().get("deactivated_at")).isNull();
+    }
+
+    // ── nexus-l46pu (follow-up to nexus-kk4ut): catalog_collections.aspects_enabled ──
+
+    @Test @Order(330)
+    void collection_aspectsEnabled_isNullForANewRegistration() {
+        // catalog-040 round-2 fix (Finding A, T2 critique-nexus-l46pu-
+        // round2-2026-09-27): BOOLEAN NULL with NO default -- an untouched
+        // row means "nobody has ever set this," which must NOT read the
+        // same as an explicit false (an operator-issued --disable). A
+        // NOT NULL DEFAULT FALSE column could not make that distinction: it
+        // would have read every existing docs__ collection as an explicit
+        // engine opinion the instant this migration ran, silently
+        // overriding any machine's local aspects.docs_collections opt-in.
+        // A brand-new upsertCollection() call never sets ASPECTS_ENABLED
+        // explicitly (see upsertCollection's INSERT column list), so this
+        // is exactly the "row never touched this column" case.
+        String name = "docs__aspects-default__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-default", "embedding_model", "voyage-context-3"));
+        var coll = repo.getCollection(TENANT_A, name);
+        assertThat(coll.get("aspects_enabled")).isNull();
+    }
+
+    @Test @Order(331)
+    void collection_aspectsEnabled_carriedByGetCollectionAndListCollections() {
+        String name = "docs__aspects-shape__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-shape", "embedding_model", "voyage-context-3"));
+        repo.setCollectionAspectsEnabled(TENANT_A, name, true);
+
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
+        var listed = repo.listCollections(TENANT_A).stream()
+            .filter(c -> name.equals(c.get("name"))).findFirst();
+        assertThat(listed).isPresent();
+        assertThat(listed.get().get("aspects_enabled")).isEqualTo(true);
+    }
+
+    @Test @Order(332)
+    void collection_setAspectsEnabled_updatesTheRow() {
+        String name = "docs__aspects-set__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-set", "embedding_model", "voyage-context-3"));
+        // An untouched row is null (no opinion), not false -- see
+        // collection_aspectsEnabled_isNullForANewRegistration.
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isNull();
+
+        int updated = repo.setCollectionAspectsEnabled(TENANT_A, name, true);
+        assertThat(updated).isEqualTo(1);
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
+
+        // Flip back -- a plain boolean flag, not an append-only chain like
+        // superseded_by, so re-setting to the opposite value is a normal op.
+        updated = repo.setCollectionAspectsEnabled(TENANT_A, name, false);
+        assertThat(updated).isEqualTo(1);
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(false);
+    }
+
+    @Test @Order(333)
+    void collection_setAspectsEnabled_noMatchingRowUpdatesNothing() {
+        int updated = repo.setCollectionAspectsEnabled(
+            TENANT_A, "docs__does-not-exist-l46pu__voyage-context-3__v1", true);
+        assertThat(updated).isEqualTo(0);
+    }
+
+    @Test @Order(334)
+    void collection_setAspectsEnabled_rlsIsolation_cannotSetAnotherTenantsCollection() {
+        final String TA = "cat-tenant-l46pu-rls-a";
+        final String TB = "cat-tenant-l46pu-rls-b";
+        String name = "docs__aspects-rls__voyage-context-3__v1";
+        repo.upsertCollection(TB, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-rls", "embedding_model", "voyage-context-3"));
+
+        // TENANT A attempting to set TENANT B's collection must affect nothing --
+        // FORCE ROW LEVEL SECURITY scopes the UPDATE's WHERE to tenant A's own
+        // rows, so the cross-tenant name simply matches no row.
+        int updated = repo.setCollectionAspectsEnabled(TA, name, true);
+        assertThat(updated).isEqualTo(0);
+
+        // Tenant B's row is untouched -- still null (nobody has set it),
+        // not false.
+        assertThat(repo.getCollection(TB, name).get("aspects_enabled")).isNull();
+    }
+
+    @Test @Order(335)
+    void collection_aspectsEnabled_explicitFalseIsDistinctFromNeverSet() {
+        // Companion to collection_aspectsEnabled_isNullForANewRegistration
+        // (round-2 fix, Finding A): an OPERATOR-ISSUED false must read back
+        // as exactly false, not collapse into the same null a never-touched
+        // row carries -- these are different facts (see this column's own
+        // javadoc, CatalogRepository#collRowWithAspects).
+        String name = "docs__aspects-explicit-false__voyage-context-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-explicit-false", "embedding_model", "voyage-context-3"));
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isNull();
+
+        repo.setCollectionAspectsEnabled(TENANT_A, name, false);
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(false);
+    }
+
+    @Test @Order(336)
+    void collection_aspectsEnabled_survivesAReRegisterOfTheSameCollection() {
+        // Round-3 critique: every indexer run re-upserts its collection, so
+        // an upsert that reset this column would silently undo an operator's
+        // --enable on the next index. upsertCollection's ON CONFLICT SET
+        // list must leave aspects_enabled alone.
+        String name = "docs__aspects-survives-upsert__voyage-context-3__v1";
+        Map<String, Object> row = Map.of(
+            "name", name, "content_type", "docs",
+            "owner_id", "aspects-survives-upsert", "embedding_model", "voyage-context-3");
+        repo.upsertCollection(TENANT_A, row);
+        repo.setCollectionAspectsEnabled(TENANT_A, name, true);
+
+        repo.upsertCollection(TENANT_A, row);
+        assertThat(repo.getCollection(TENANT_A, name).get("aspects_enabled")).isEqualTo(true);
     }
 }

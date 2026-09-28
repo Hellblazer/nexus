@@ -28,7 +28,7 @@ def make_ctx(tmp_path: Path):
         defaults = dict(
             col=MagicMock(), db=MagicMock(), voyage_key="key",
             voyage_client=MagicMock(), repo_path=tmp_path,
-            corpus="code__test", embedding_model="voyage-code-3",
+            corpus="code__test", embedding_model="model-code",
             git_meta={}, now_iso="2026-01-01T00:00:00+00:00", force=False,
         )
         defaults.update(overrides)
@@ -57,9 +57,9 @@ def test_index_context_score_mutability(make_ctx):
 # ── check_staleness ──────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("stored_hash,stored_model,query_hash,query_model,expected", [
-    ("abc123", "voyage-code-3", "abc123", "voyage-code-3", True),   # current
-    ("old_hash", "voyage-code-3", "new_hash", "voyage-code-3", False),  # stale hash
-    ("abc123", "old-model", "abc123", "voyage-code-3", False),       # model mismatch
+    ("abc123", "model-code", "abc123", "model-code", True),   # current
+    ("old_hash", "model-code", "new_hash", "model-code", False),  # stale hash
+    ("abc123", "old-model", "abc123", "model-code", False),       # model mismatch
 ])
 def test_check_staleness(tmp_path, stored_hash, stored_model, query_hash, query_model, expected):
     mock_col = MagicMock()
@@ -73,7 +73,7 @@ def test_check_staleness(tmp_path, stored_hash, stored_model, query_hash, query_
 def test_check_staleness_no_existing_chunks(tmp_path):
     mock_col = MagicMock()
     mock_col.get.return_value = {"metadatas": [], "ids": []}
-    assert check_staleness(mock_col, tmp_path / "foo.py", "abc123", "voyage-code-3") is False
+    assert check_staleness(mock_col, tmp_path / "foo.py", "abc123", "model-code") is False
 
 
 def test_check_staleness_uses_content_hash_when_provided(tmp_path):
@@ -86,12 +86,12 @@ def test_check_staleness_uses_content_hash_when_provided(tmp_path):
     mock_col.get.return_value = {
         "metadatas": [{
             "content_hash": "abc",
-            "embedding_model": "voyage-code-3",
+            "embedding_model": "model-code",
         }],
         "ids": ["id1"],
     }
     result = check_staleness(
-        mock_col, tmp_path / "shared.py", "abc", "voyage-code-3",
+        mock_col, tmp_path / "shared.py", "abc", "model-code",
         doc_id="ART-deadbeef",
     )
     assert result is True
@@ -120,7 +120,7 @@ def test_check_staleness_no_content_hash_returns_stale_source_path_fallback_dele
     """
     mock_col = MagicMock()
     file_path = tmp_path / "foo.py"
-    result = check_staleness(mock_col, file_path, "", "voyage-code-3")
+    result = check_staleness(mock_col, file_path, "", "model-code")
     assert result is False
     mock_col.get.assert_not_called()
 
@@ -131,12 +131,12 @@ def test_check_staleness_passes_when_chunk_has_matching_content_hash(tmp_path):
     mock_col.get.return_value = {
         "metadatas": [{
             "content_hash": "abc",
-            "embedding_model": "voyage-code-3",
+            "embedding_model": "model-code",
         }],
         "ids": ["chunk-0"],
     }
     result = check_staleness(
-        mock_col, tmp_path / "foo.py", "abc", "voyage-code-3",
+        mock_col, tmp_path / "foo.py", "abc", "model-code",
         doc_id="ART-deadbeef",
     )
     assert result is True
@@ -263,7 +263,7 @@ def test_index_code_file_skips_current_file(tmp_path, make_ctx):
         ids=["id1"],
         documents=["print('hello')"],
         metadatas=[{
-            "content_hash": h, "embedding_model": "voyage-code-3",
+            "content_hash": h, "embedding_model": "model-code",
             "source_path": str(py_file),
         }],
     )
@@ -306,7 +306,7 @@ def test_index_code_file_fresh_skip_stays_a_plain_zero_no_exception(tmp_path, ma
         ids=["id1"],
         documents=["print('hello again')"],
         metadatas=[{
-            "content_hash": h, "embedding_model": "voyage-code-3",
+            "content_hash": h, "embedding_model": "model-code",
             "source_path": str(py_file),
         }],
     )
@@ -527,12 +527,12 @@ def test_index_prose_file_skips_current_file(tmp_path, make_ctx):
         ids=["id1"],
         documents=["# Hello\n\nSome content here."],
         metadatas=[{
-            "content_hash": h, "embedding_model": "voyage-context-3",
+            "content_hash": h, "embedding_model": "model-ctx",
             "source_path": str(md_file),
         }],
     )
     ctx = make_ctx(col=col, corpus="docs__test",
-                   embedding_model="voyage-context-3")
+                   embedding_model="model-ctx")
 
     assert index_prose_file(ctx, md_file) == 0
 
@@ -557,7 +557,7 @@ def test_index_prose_file_non_markdown_uses_line_chunk(tmp_path, make_ctx):
     # False → indexer proceeds.
     ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
                    db=mock_db, embed_fn=fake_embed_fn,
-                   corpus="docs__test", embedding_model="voyage-context-3")
+                   corpus="docs__test", embedding_model="model-ctx")
 
     result = index_prose_file(ctx, txt_file)
 
@@ -586,7 +586,7 @@ def test_index_prose_file_raises_for_undecodable_content(tmp_path, make_ctx):
     bin_file = tmp_path / "binary.txt"
     bin_file.write_bytes(b"\xff\xfe not valid utf-8 \x00\x01")
     ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
-                   corpus="docs__test", embedding_model="voyage-context-3")
+                   corpus="docs__test", embedding_model="model-ctx")
 
     with pytest.raises(UnextractableContentError, match="decode"):
         index_prose_file(ctx, bin_file)
@@ -607,7 +607,7 @@ def test_index_prose_file_undecodable_content_fence_fails_when_doc_id_known(
     bin_file.write_bytes(b"\xff\xfe not valid utf-8 \x00\x01")
     ctx = make_ctx(
         col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
-        corpus="docs__test", embedding_model="voyage-context-3",
+        corpus="docs__test", embedding_model="model-ctx",
         doc_id_resolver=lambda p: "1.1.7",
     )
 
@@ -629,7 +629,7 @@ def test_index_prose_file_raises_for_empty_markdown(tmp_path, make_ctx):
     md_file = tmp_path / "empty.md"
     md_file.write_text("---\ntitle: nothing here\n---\n")
     ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
-                   corpus="docs__test", embedding_model="voyage-context-3")
+                   corpus="docs__test", embedding_model="model-ctx")
 
     with pytest.raises(UnextractableContentError):
         index_prose_file(ctx, md_file)
@@ -644,7 +644,7 @@ def test_index_prose_file_raises_for_empty_non_markdown(tmp_path, make_ctx):
     txt_file = tmp_path / "blank.txt"
     txt_file.write_text("   \n\n   \n")
     ctx = make_ctx(col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
-                   corpus="docs__test", embedding_model="voyage-context-3")
+                   corpus="docs__test", embedding_model="model-ctx")
 
     with pytest.raises(UnextractableContentError):
         index_prose_file(ctx, txt_file)
@@ -671,12 +671,12 @@ def test_index_prose_file_fresh_skip_stays_a_plain_zero_no_exception(
         ids=["id1"],
         documents=["# Hello\n\nSome content here."],
         metadatas=[{
-            "content_hash": h, "embedding_model": "voyage-context-3",
+            "content_hash": h, "embedding_model": "model-ctx",
             "source_path": str(md_file),
         }],
     )
     ctx = make_ctx(col=col, corpus="docs__test",
-                   embedding_model="voyage-context-3")
+                   embedding_model="model-ctx")
 
     with patch("nexus.doc_indexer._fence_fail") as fence_fail, \
          patch("nexus.doc_indexer._fence_begin") as fence_begin:
@@ -714,7 +714,7 @@ def test_index_prose_file_begins_fence_before_chunking(tmp_path, make_ctx):
 
     ctx = make_ctx(
         col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
-        corpus="docs__test", embedding_model="voyage-context-3",
+        corpus="docs__test", embedding_model="model-ctx",
         embed_fn=lambda texts: [[0.1] * 8 for _ in texts],
         doc_id_resolver=lambda p: "1.1.9",
     )
@@ -745,7 +745,7 @@ def test_index_prose_file_fence_begin_failure_does_not_abort(tmp_path, make_ctx)
 
     ctx = make_ctx(
         col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
-        corpus="docs__test", embedding_model="voyage-context-3",
+        corpus="docs__test", embedding_model="model-ctx",
         embed_fn=lambda texts: [[0.1] * 8 for _ in texts],
         doc_id_resolver=lambda p: "1.1.10",
     )
@@ -816,7 +816,7 @@ def test_index_prose_file_markdown_does_not_emit_source_path(
     ctx = make_ctx(
         col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
         db=mock_db, embed_fn=lambda texts: [[0.1] * 128 for _ in texts],
-        corpus="docs__phase-b-md", embedding_model="voyage-context-3",
+        corpus="docs__phase-b-md", embedding_model="model-ctx",
     )
 
     result = index_prose_file(ctx, md_file)
@@ -851,7 +851,7 @@ def test_index_prose_file_line_chunk_does_not_emit_source_path(
     ctx = make_ctx(
         col=_real_col("docs__t_" + uuid.uuid4().hex[:12]),
         db=mock_db, embed_fn=lambda texts: [[0.1] * 128 for _ in texts],
-        corpus="docs__phase-b-txt", embedding_model="voyage-context-3",
+        corpus="docs__phase-b-txt", embedding_model="model-ctx",
     )
 
     result = index_prose_file(ctx, txt_file)

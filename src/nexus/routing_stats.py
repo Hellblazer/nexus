@@ -24,6 +24,8 @@ import pathlib
 from dataclasses import dataclass, field, asdict
 from typing import Any, Iterable
 
+from nexus.plugin_registry import known_plugins
+
 
 def default_log_path() -> pathlib.Path:
     """Return the routing log path, honoring ``NX_ROUTING_LOG_PATH``."""
@@ -263,7 +265,13 @@ _VERB_RULE_NAMES: dict[str, str] = {
 }
 
 
-def registered_rules(hooks_json: pathlib.Path | None = None) -> set[str] | None:
+def registered_rules(
+    hooks_json: pathlib.Path | None = None,
+    *,
+    plugins: Iterable[str] | None = None,
+    marketplace_dir: pathlib.Path | None = None,
+    repo_root: pathlib.Path | None = None,
+) -> set[str] | None:
     """Rule names currently registered in the plugin's hooks.json.
 
     The registration surface is hooks.json, NOT registry.yaml (which is
@@ -272,14 +280,20 @@ def registered_rules(hooks_json: pathlib.Path | None = None) -> set[str] | None:
     when no hooks.json can be located/parsed (the caller should then skip
     the cross-check rather than mark everything unregistered).
 
-    BOTH plugins are probed and their rules UNIONED — conexus and sn each
-    own routing rules (RDR-125 per-plugin ownership) writing to the same
-    log, so a conexus-only probe would mark legitimately-registered
-    sn rules "(unregistered)" (mzvwa.9 critique H2). Resolution per
-    plugin: the installed marketplace copy
-    (``~/.claude/plugins/marketplaces/nexus-plugins/<plugin>/hooks/hooks.json``),
-    then the repo-relative ``<plugin>/hooks/hooks.json`` (dev checkout).
-    Returns the union when AT LEAST ONE hooks.json was readable.
+    EVERY plugin marketplace.json currently lists is probed and their
+    rules UNIONED (nexus-smsau: this used to be a fixed ``("conexus",
+    "sn")`` pair, so a routing rule shipped by a third plugin would
+    silently never be aggregated) — each plugin can own routing rules
+    (RDR-125 per-plugin ownership) writing to the same log, so probing
+    only some of them would mark a legitimately-registered rule
+    "(unregistered)" (mzvwa.9 critique H2, the same failure a two-plugin
+    fixed pair already fixed once for sn). ``plugins`` overrides the
+    derived set (test seam; see :mod:`nexus.plugin_registry`). Resolution
+    per plugin: the installed marketplace copy
+    (``~/.claude/plugins/marketplaces/nexus-plugins/<plugin>/hooks/hooks.json``,
+    or ``marketplace_dir`` when given), then the repo-relative
+    ``<plugin>/hooks/hooks.json`` (dev checkout, or ``repo_root`` when
+    given). Returns the union when AT LEAST ONE hooks.json was readable.
     """
     def _rules_from(cand: pathlib.Path) -> set[str] | None:
         try:
@@ -339,14 +353,15 @@ def registered_rules(hooks_json: pathlib.Path | None = None) -> set[str] | None:
     if hooks_json is not None:
         return _rules_from(hooks_json)
 
-    marketplace = (
+    marketplace = marketplace_dir or (
         pathlib.Path.home()
         / ".claude" / "plugins" / "marketplaces" / "nexus-plugins"
     )
-    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    root = repo_root or pathlib.Path(__file__).resolve().parents[2]
+    plugin_names = plugins if plugins is not None else known_plugins()
     found: set[str] | None = None
-    for plugin in ("conexus", "sn"):
-        for base in (marketplace, repo_root):
+    for plugin in plugin_names:
+        for base in (marketplace, root):
             rules = _rules_from(base / plugin / "hooks" / "hooks.json")
             if rules is not None:
                 found = (found or set()) | rules

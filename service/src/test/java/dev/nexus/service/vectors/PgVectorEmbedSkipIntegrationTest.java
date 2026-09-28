@@ -164,6 +164,7 @@ class PgVectorEmbedSkipIntegrationTest {
         assertThat(secondVector)
                 .as("the stored embedding must be UNCHANGED — proves no re-embed happened")
                 .isEqualTo(firstVector);
+        own(col, chash);
 
         Map<String, Object> got = repo.get(TENANT_A, col, List.of(chash), 10, 0);
         @SuppressWarnings("unchecked")
@@ -219,6 +220,7 @@ class PgVectorEmbedSkipIntegrationTest {
         assertThat(superuserEmbedding(col, chashOld2))
                 .as("chashOld2's vector must be untouched by the metadata-only refresh")
                 .isEqualTo(oldVec2);
+        own(col, chashOld1, chashOld2, chashNew);
 
         Map<String, Object> got = repo.get(TENANT_A, col,
                 List.of(chashOld1, chashOld2, chashNew), 10, 0);
@@ -390,6 +392,7 @@ class PgVectorEmbedSkipIntegrationTest {
                 .as("the CountingEmbedder tags each call's vector with a distinct serial — a genuine "
                     + "re-embed must produce a DIFFERENT stored vector, not reuse the old one")
                 .isNotEqualTo(firstVector);
+        own(col, chash);
 
         Map<String, Object> got = repo.get(TENANT_A, col, List.of(chash), 10, 0);
         @SuppressWarnings("unchecked")
@@ -429,6 +432,7 @@ class PgVectorEmbedSkipIntegrationTest {
         assertThat(storedVector)
                 .as("the passthrough-supplied vector must be stored verbatim, replacing the original")
                 .isNotEqualTo(originalVector);
+        own(col, chash);
 
         Map<String, Object> got = repo.get(TENANT_A, col, List.of(chash), 10, 0);
         @SuppressWarnings("unchecked")
@@ -481,6 +485,7 @@ class PgVectorEmbedSkipIntegrationTest {
                 .as("the chunk must still land in the DB — a failed existence check must never "
                     + "be read as \"everything already has a vector\", which would silently drop it")
                 .isEqualTo(1L);
+        own(col, chash);
 
         Map<String, Object> got = failsafeRepo.get(TENANT_A, col, List.of(chash), 10, 0);
         @SuppressWarnings("unchecked")
@@ -591,6 +596,7 @@ class PgVectorEmbedSkipIntegrationTest {
         assertThat(secondVector)
                 .as("the stored embedding must be UNCHANGED under the CCE collection too")
                 .isEqualTo(firstVector);
+        own(col, chash);
 
         Map<String, Object> got = repo.get(TENANT_A, col, List.of(chash), 10, 0);
         @SuppressWarnings("unchecked")
@@ -604,6 +610,18 @@ class PgVectorEmbedSkipIntegrationTest {
     // ---------------------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------------------
+
+    /**
+     * Give {@code ids} a live owner in {@code col} for {@code TENANT_A} (RDR-192
+     * Step 5, bead nexus-wbfpw.10): {@code repo.get} now requires a live
+     * own-collection manifest owner; these fixtures write chunks with none.
+     */
+    private void own(String col, String... ids) {
+        tenantScope.withTenant(TENANT_A, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT_A, col, ids);
+            return null;
+        });
+    }
 
     private long superuserCount(String collection) throws SQLException {
         try (Connection su = pg.createConnection("");

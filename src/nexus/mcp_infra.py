@@ -410,6 +410,102 @@ def load_acknowledged_chashes(collection: str) -> set[str]:
     return acknowledged_chashes(entries, collection)
 
 
+# ── Discover health bookkeeping (nexus-du6d0, qgc4b residual) ────────────────
+#
+# qgc4b's self-heal guard (``_taxonomy_incomplete`` /
+# ``_collections_without_topics`` in ``nexus.commands.index``) re-runs
+# taxonomy discovery on a no-change ``nx index repo`` run only while a
+# collection has ZERO topics. Once a collection has produced >=1 topic, a
+# LATER discover failure (credential expiry, quota, schema drift) has no
+# operator-visible signal: ``taxonomy_meta.last_discover_at`` (the engine
+# column stamped by ``record_discover_count``, see
+# ``HttpTaxonomyStore.persist_discovered_topics`` /
+# ``persist_rebuild_topics``) only advances on a SUCCESSFUL discover, and
+# ``run_collection_postprocessing`` only invokes discover at all when
+# ``files_changed>0`` or the zero-topic self-heal fires -- neither holds on
+# a maintenance-mode repo (file churn stopped) coincident with a failing
+# discover backend, so "no files changed — skipping discovery" reads as
+# reassurance while the taxonomy silently goes stale.
+#
+# Fix, client-side (no new engine column/changeset — an engine schema
+# change is Sam's decision, not this bead's): one T2 memory entry per
+# collection, upserted on EVERY discover attempt (success and failure
+# alike). ``nx doctor``'s ``taxonomy.discover health`` row reads it back,
+# independent of whether indexing ever runs again for that repo.
+
+#: T2 memory project holding per-collection discover-health bookkeeping;
+#: titles are collection names, content is a JSON blob
+#: ``{"last_attempt_at": iso, "last_outcome": "success"|"failure",
+#: "error_class": str}``. Overwritten (upserted) on each attempt, so the
+#: stored record is always the MOST RECENT attempt's outcome — a success
+#: after a failure clears it, matching "last success newer than last
+#: failure" without needing two separate timestamps to compare.
+TAXONOMY_DISCOVER_HEALTH_PROJECT = "nexus_taxonomy_discover_health"
+
+
+def taxonomy_discover_health_title(collection: str) -> str:
+    """T2 memory title for *collection*'s discover-health record."""
+    return collection
+
+
+def parse_taxonomy_discover_health(content: str) -> dict[str, Any]:
+    """Best-effort JSON parse of a discover-health entry's content.
+
+    Malformed, empty, or non-object content parses to ``{}`` — callers
+    treat a missing ``last_outcome`` key as "no signal recorded", never
+    as a failure (fail toward silence, not toward a false warning).
+    """
+    import json  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    try:
+        parsed = json.loads(content or "{}")
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def record_taxonomy_discover_attempt(
+    memory: Any,
+    collection: str,
+    *,
+    success: bool,
+    error_class: str = "",
+    at: str | None = None,
+) -> None:
+    """Persist the outcome of one taxonomy-discover attempt for *collection*.
+
+    *memory* is the caller's already-open memory store (``db.memory`` off
+    an open ``T2Database`` — only ``.put`` is used), so this reuses the
+    caller's open T2 connection rather than opening a second one. *at*
+    lets tests pin the timestamp; ``None`` (the default) stamps
+    ``datetime.now(UTC)``.
+
+    Best-effort: a write failure here is logged and swallowed, never
+    raised — this is a diagnostic signal, not a gate on the indexing run
+    that is calling it.
+    """
+    import json  # noqa: PLC0415 — stdlib, only this helper needs it
+    from datetime import UTC, datetime  # noqa: PLC0415 — stdlib, only this helper needs it
+
+    stamp = at or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload: dict[str, Any] = {
+        "last_attempt_at": stamp,
+        "last_outcome": "success" if success else "failure",
+        "error_class": "" if success else (error_class or ""),
+    }
+    try:
+        memory.put(
+            TAXONOMY_DISCOVER_HEALTH_PROJECT,
+            taxonomy_discover_health_title(collection),
+            json.dumps(payload),
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort: a diagnostic write must not fail the indexing run
+        import structlog  # noqa: PLC0415 — structlog deferred to function scope (lazy logger init)
+        structlog.get_logger().warning(
+            "taxonomy_discover_health_record_failed", collection=collection, error=str(exc),
+        )
+
+
 _taxonomy_deferral = ""
 _taxonomy_breaker_armed = False
 _taxonomy_deferral_lock = threading.Lock()
@@ -2624,8 +2720,9 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     NOTE GUARD (nexus-39upx hazard 2 / RDR-145): ``docs_for_chashes`` only
     sees MANIFESTED references, so it cannot tell a chash that fell out of
     THIS document's manifest from a chash that never had one at all — a
-    manifest-less ``store_put`` / ``nx store put`` note, live by design
-    (``catalog-003-soft-delete.xml``'s ``live_chunks`` contract). Surviving
+    manifest-less legacy ``store_put`` / ``nx store put`` note (reads hide
+    it since RDR-192 Step 5, but deleting sweeps keep it until Step 11
+    removes this guard). Surviving
     union-guard candidates are additionally checked against
     ``notes_provider()`` (typically ``nexus.indexer_utils.live_note_chashes``
     over a ``CollectionDocumentsCache``-memoized document list — round 2
@@ -2671,6 +2768,14 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     orphaned = orphaned_chashes(reader, doc_id, dropped, collection=collection)
     shared = len(dropped) - len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: union guard cleared every candidate — every
+        # dropped chash is shared with another live document, nothing
+        # reaches the note lookup or a delete. Log the kept count so this
+        # is not indistinguishable, in the logs, from "nothing to do".
+        structlog.get_logger().info(
+            "superseded_sweep_kept", site="_sweep_superseded_vectors",
+            collection=collection, doc_id=doc_id, dropped=len(dropped),
+            kept=shared, kept_notes=0)
         return
     try:
         notes = notes_provider()
@@ -2685,6 +2790,14 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     orphaned = [h for h in orphaned if h not in notes]
     kept_notes -= len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: note guard cleared every surviving candidate —
+        # each is itself a manifest-less note's own identity elsewhere in
+        # this collection. Same silence hazard as the union-guard return
+        # above.
+        structlog.get_logger().info(
+            "superseded_sweep_kept", site="_sweep_superseded_vectors",
+            collection=collection, doc_id=doc_id, dropped=len(dropped),
+            kept=shared + kept_notes, kept_notes=kept_notes)
         return
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path
@@ -2820,6 +2933,13 @@ def _sweep_superseded_vectors_many(
     orphaned = orphaned_chashes(reader, _batch_label, candidates, collection=collection)
     shared = len(candidates) - len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: batch sibling of the per-doc union-guard return
+        # above — every candidate in the whole batch is shared with
+        # another live document.
+        structlog.get_logger().info(
+            "superseded_sweep_kept", site="_sweep_superseded_vectors_many",
+            collection=collection, doc_id=_batch_label, dropped=len(candidates),
+            kept=shared, kept_notes=0)
         return
     try:
         notes = notes_provider()
@@ -2835,6 +2955,13 @@ def _sweep_superseded_vectors_many(
     orphaned = [h for h in orphaned if h not in notes]
     kept_notes -= len(orphaned)
     if not orphaned:
+        # nexus-wbfpw.12: batch sibling of the per-doc note-guard return
+        # above — every candidate that survived the union guard is itself
+        # a manifest-less note's own identity.
+        structlog.get_logger().info(
+            "superseded_sweep_kept", site="_sweep_superseded_vectors_many",
+            collection=collection, doc_id=_batch_label, dropped=len(candidates),
+            kept=shared + kept_notes, kept_notes=kept_notes)
         return
     try:
         from nexus.db import make_t3  # noqa: PLC0415 — deferred: hot path

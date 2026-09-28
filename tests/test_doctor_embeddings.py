@@ -28,6 +28,7 @@ from nexus.doctor_embeddings import (
     probe_collection,
     window_offsets,
 )
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
 
 _CLEAN = "knowledge__f9duo-clean__bge-base-en-v15-768__v1"
 _DRIFT = "knowledge__f9duo-drift__bge-base-en-v15-768__v1"
@@ -45,10 +46,14 @@ def _ids(prefix: str, n: int) -> list[str]:
 
 
 def _seed_clean(t3) -> None:
+    ids = _ids("a", len(_TEXTS))
     t3.upsert_chunks_with_embeddings(
-        _CLEAN, ids=_ids("a", len(_TEXTS)), documents=_TEXTS, embeddings=[],
+        _CLEAN, ids=ids, documents=_TEXTS, embeddings=[],
         metadatas=[{"content_type": "prose", "title": "t"}] * len(_TEXTS),
     )
+    # RDR-192 Step 5 (nexus-wbfpw.10): a raw upsert with no catalog manifest
+    # has no live owner, so `probe_collection`'s reads would see nothing.
+    give_chunks_a_live_owner(_CLEAN, ids)
 
 
 def _seed_drift(t3) -> None:
@@ -61,10 +66,12 @@ def _seed_drift(t3) -> None:
     _seed_clean(t3)
     shifted = _TEXTS[1:] + _TEXTS[:1]
     wrong = t3.embed_for_collection(_CLEAN, shifted)
+    ids = _ids("b", len(_TEXTS))
     t3.upsert_chunks(
-        _DRIFT, ids=_ids("b", len(_TEXTS)), documents=_TEXTS, embeddings=wrong,
+        _DRIFT, ids=ids, documents=_TEXTS, embeddings=wrong,
         metadatas=[{"content_type": "prose", "title": "t"}] * len(_TEXTS),
     )
+    give_chunks_a_live_owner(_DRIFT, ids)
 
 
 # ── pure parts ────────────────────────────────────────────────────────────────

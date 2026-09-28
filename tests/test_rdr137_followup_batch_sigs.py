@@ -52,6 +52,7 @@ from nexus.corpus import _write_intent_embedding_model
 # at module collection time).
 _CODE_MODEL = _write_intent_embedding_model("code")
 _DOCS_MODEL = _write_intent_embedding_model("docs")
+_KNOWLEDGE_MODEL = _write_intent_embedding_model("knowledge")
 
 from nexus.commands.index import _CatalogBackedRegistry
 
@@ -99,7 +100,7 @@ class TestSig10UpdateReturnsSuccessFlag:
         adapter.add(repo)
         ok = adapter.update(
             repo,
-            docs_collection="knowledge__myrepo-1-1__voyage-context-3__v1",
+            docs_collection=f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
         )
         assert ok is True
 
@@ -119,7 +120,7 @@ class TestSig10UpdateReturnsSuccessFlag:
         ):
             ok = adapter.update(
                 repo,
-                docs_collection="knowledge__myrepo-1-1__voyage-context-3__v1",
+                docs_collection=f"knowledge__myrepo-1-1__{_KNOWLEDGE_MODEL}__v1",
             )
         assert ok is False
 
@@ -154,7 +155,7 @@ class TestSig14ContextDoesNotSynthesizeMissingRdr:
     ) -> None:
         """When the catalog has the owner + code/docs collections but
         no rdr__*, _repo_collections should NOT synthesize a
-        rdr__owner__voyage-context-3__v1 name and add it to the
+        4-segment rdr__owner__<model>__v1 name and add it to the
         allowed set. Pre-fix the synthesis achieved nothing when no
         rdr topics exist + carried latent collision risk."""
         owner = cat.ensure_owner_for_repo(repo)

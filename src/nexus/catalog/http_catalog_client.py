@@ -89,6 +89,7 @@ from nexus.catalog.types import CatalogEntry, CatalogLink
 from nexus.catalog.catalog_spans import parse_chash_span
 from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
+from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
 from nexus.errors import CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
 
@@ -157,6 +158,20 @@ _MANIFEST_GET_MANY_PAGE = 1000
 #: cap (nexus-9dvqy). ~24 columns/row keeps a full page under PostgreSQL's
 #: 32767 bind-parameter ceiling.
 _REGISTER_MANY_PAGE = 1000
+
+#: Page size for find_all_by_file_paths POSTs (nexus-1vc0n). Deliberately the
+#: generic QUOTAS.MAX_RECORDS_PER_WRITE (300), not the 1000 the other batch
+#: endpoints here use — the bead's own instruction was to respect the
+#: project-wide batch ceiling (src/nexus/db/limits.py) for this new route
+#: rather than reuse the engine's higher per-endpoint MAX_BATCH_DOC_IDS cap.
+_FILE_PATHS_LOOKUP_PAGE = QUOTAS.MAX_RECORDS_PER_WRITE
+
+#: One-shot flag: an engine with no /list_by_file_paths route (pre-nexus-1vc0n)
+#: degrades find_all_by_file_paths to a per-path find_all_by_file_path loop —
+#: the SAME behaviour a batched hook paid before this bead — logged ONCE per
+#: process rather than once per 404'd page, so a long cold-index run against
+#: an old engine doesn't spam.
+_find_all_by_file_paths_404_warned: bool = False
 
 # nexus-y9t08: the combined write (write_manifest_many's ``chunks=``
 # branch) makes the engine run a SYNCHRONOUS server-side embed inside the
@@ -1979,6 +1994,68 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         docs = result.get("documents", []) if result else []
         return [_to_entry(d) for d in docs if d.get("file_path") == file_path]
 
+    def find_all_by_file_paths(
+        self, file_paths: list[str],
+    ) -> dict[str, list[CatalogEntry]]:
+        """Bulk owner-agnostic file_path lookup (nexus-1vc0n): N paths -> every
+        live document for each, in ONE round trip per page.
+
+        The batched twin of :meth:`find_all_by_file_path`. Backs
+        ``indexer._catalog_hook``'s batched ``register_many`` registrar,
+        which cannot afford :func:`nexus.catalog.path_ambiguity.
+        announce_cross_owner_mint`'s one-owner-agnostic-``/list``-per-mint
+        cost inside a batch loop (that module's own docstring). This method
+        pays ONE ``POST /list_by_file_paths`` per page of
+        ``QUOTAS.MAX_RECORDS_PER_WRITE`` paths instead — the indexer's
+        batched registrar then drives
+        :func:`~nexus.catalog.path_ambiguity.announce_cross_owner_mint` and
+        :func:`~nexus.catalog.path_ambiguity.announce_cross_owner_resolve`
+        off the result.
+
+        Returns ``{file_path: [CatalogEntry, ...]}``; a path with no live
+        document anywhere is absent from the result (same "absent means no
+        match" contract as :meth:`resolve_many`).
+
+        Engine-floor fallback (nexus-1vc0n): a 404 (an engine that predates
+        this route) degrades to one :meth:`find_all_by_file_path` call per
+        path in the 404'd page — today's per-document behaviour, unchanged —
+        logged at WARNING exactly once per process so a long run against an
+        old engine does not spam. Any other transport failure propagates.
+        """
+        global _find_all_by_file_paths_404_warned
+        if not file_paths:
+            return {}
+        result: dict[str, list[CatalogEntry]] = {}
+        for start in range(0, len(file_paths), _FILE_PATHS_LOOKUP_PAGE):
+            batch = file_paths[start : start + _FILE_PATHS_LOOKUP_PAGE]
+            try:
+                resp = self._post(
+                    "/list_by_file_paths", {"file_paths": batch}, mutates=False,
+                )
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 404:
+                    if not _find_all_by_file_paths_404_warned:
+                        _log.warning(
+                            "catalog_list_by_file_paths_engine_floor",
+                            detail="engine has no /list_by_file_paths route "
+                                   "(pre-nexus-1vc0n); falling back to one "
+                                   "find_all_by_file_path call per path for "
+                                   "this and every subsequent page",
+                        )
+                        _find_all_by_file_paths_404_warned = True
+                    for path in batch:
+                        entries = self.find_all_by_file_path(path)
+                        if entries:
+                            result[path] = entries
+                    continue
+                raise
+            documents = resp.get("documents", {}) if resp else {}
+            for path, docs in documents.items():
+                entries = [_to_entry(d) for d in docs if d.get("tumbler")]
+                if entries:
+                    result[path] = entries
+        return result
+
     def by_owner(self, owner: Tumbler | str) -> list[CatalogEntry]:
         return self._docs_from(self._get("/list", owner=str(owner)))
 
@@ -2933,6 +3010,26 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     def is_legacy_collection(self, name: str) -> bool:
         coll = self.get_collection(name)
         return bool(coll.get("legacy_grandfathered", False)) if coll else False
+
+    def set_collection_aspects_enabled(self, name: str, enabled: bool) -> int:
+        """POST ``/v1/catalog/collections/set_aspects_enabled`` — set the
+        engine's tenant-wide ``catalog_collections.aspects_enabled``
+        attribute for ``name`` (nexus-l46pu, follow-up to nexus-kk4ut: moves
+        the docs__ aspect-extraction opt-in off each machine's local
+        ``aspects.docs_collections`` config.yml list onto the collection
+        row, so every machine indexing the same shared collection makes the
+        same decision — T2 critique
+        nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1).
+
+        Returns the row-updated count (always ``1`` on success). The engine
+        404s on an unregistered ``name``, which raises
+        ``httpx.HTTPStatusError`` here like any other catalog call; a
+        caller that wants a soft "not found" catches it itself.
+        """
+        result = self._post("/collections/set_aspects_enabled", {
+            "name": name, "aspects_enabled": bool(enabled),
+        })
+        return int((result or {}).get("updated", 0))
 
     def embedding_profile(self) -> list[dict[str, Any]]:
         """The calling tenant's install-scoped embedding profile, one row per

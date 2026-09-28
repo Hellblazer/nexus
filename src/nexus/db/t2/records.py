@@ -294,9 +294,17 @@ class WaitSpec:
     first-or-repeat announcement and stamps ``announced_at``/
     ``announce_count`` on every row it returns, in the same statement --
     see ``TupleRepository.WaitSpec.Announce``'s own javadoc for the full
-    mechanism. ``since`` and ``announce`` together are refused by the
-    engine (``SchemaViolation``): announce mode tracks position on the
-    ROW itself, never via a client-supplied cursor.
+    mechanism. ``since`` and a ROW-LEVEL ``announce`` (no ``subscriber``,
+    the mailbox shape) together are refused by the engine
+    (``SchemaViolation``): that mode tracks position on the ROW itself,
+    never via a client-supplied cursor. ``since`` alongside a
+    PER-SUBSCRIBER ``announce`` (``announce.subscriber`` set, bead
+    nexus-n36sw, follow-up to nexus-zxthy) is the one exception, and is
+    HONOURED: the engine additionally excludes any row at or before
+    ``since`` from ever being selected or stamped, on top of its own
+    per-subscriber due tracking -- ``ChannelWaiter._build_specs`` is the
+    one caller today, sending a board topic's subscribe-time watermark so
+    a fresh subscription never walks the topic's backlog.
 
     ``wait`` is an internal transport method: the session's own MCP server
     lifespan waiter (:mod:`nexus.mcp.channel`) is its only caller (RDR-211

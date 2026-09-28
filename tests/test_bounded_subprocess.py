@@ -238,6 +238,70 @@ def test_windows_branch_reports_process_reach_without_raising(
     )
 
 
+def test_windows_branch_with_a_job_closes_it_for_group_reach(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-6y4e0: with a job handle (from ``process_group.contain`` at
+    spawn), the Windows branch closes the JOB rather than killing only the
+    direct child, and reports the stronger ``"group"`` reach -- the
+    tree-kill this bead adds. Windows-shaped via a fake kernel32 (see
+    tests/test_win_job.py); no real Windows box involved.
+    """
+    from nexus.util import win_job
+    from tests.test_win_job import _FakeKernel32
+
+    monkeypatch.delattr(os, "killpg", raising=True)
+    monkeypatch.setattr(win_job, "IS_WINDOWS", True)
+    fake = _FakeKernel32()
+    monkeypatch.setattr(win_job, "_kernel32", fake)
+
+    killed: list[bool] = []
+
+    class _FakeProc:
+        pid = 4321
+        args = ["fake"]
+
+        def kill(self) -> None:
+            killed.append(True)
+
+    job = fake._mint()
+    assert kill_child_and_descendants(_FakeProc(), job) == "group"  # type: ignore[arg-type]
+    assert job in fake.closed_handles
+    assert killed == [], (
+        "the direct child must NOT be separately .kill()ed when the job "
+        "close already reached the whole tree"
+    )
+
+
+def test_windows_branch_falls_back_to_process_when_job_close_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job handle that fails to close (already gone, or a genuine API
+    failure) must not be treated as success -- fall back to killing the
+    direct child, same as having no job at all."""
+    from nexus.util import win_job
+    from tests.test_win_job import _FakeKernel32
+
+    monkeypatch.delattr(os, "killpg", raising=True)
+    monkeypatch.setattr(win_job, "IS_WINDOWS", True)
+    fake = _FakeKernel32()
+    fake.close_ok = False
+    monkeypatch.setattr(win_job, "_kernel32", fake)
+
+    killed: list[bool] = []
+
+    class _FakeProc:
+        pid = 4321
+        args = ["fake"]
+
+        def kill(self) -> None:
+            killed.append(True)
+
+    job = fake._mint()
+    assert kill_child_and_descendants(_FakeProc(), job) == "process"  # type: ignore[arg-type]
+    assert killed == [True]
+
+
 def test_already_dead_child_reports_none(monkeypatch: pytest.MonkeyPatch) -> None:
     class _GoneProc:
         pid = 4321
@@ -279,3 +343,104 @@ def test_input_is_delivered() -> None:
 def test_input_and_stdin_together_is_refused() -> None:
     with pytest.raises(ValueError, match="not both"):
         run_bounded(["true"], timeout=1, input="x", stdin=subprocess.DEVNULL)
+
+
+# nexus-6y4e0 review (critic + code-review, commits 0373d414e..165390205):
+# contain()'s job handle must close on EVERY outcome, not only the
+# except-TimeoutExpired branch. run_bounded's own body called
+# kill_child_and_descendants(proc, job) ONLY on TimeoutExpired, so the
+# success and non-zero-return paths -- which never raise it -- leaked the
+# handle every time. These drive run_bounded() ITSELF, end to end, against
+# a real subprocess, Windows-shaped via a fake kernel32 (real Windows
+# containment is verified on qwentescence separately -- see nexus-6y4e0's
+# closing report for what that could and could not cover).
+
+
+@pytest.fixture
+def windows_shaped_real_spawn(monkeypatch: pytest.MonkeyPatch):
+    """Route contain()/kill_tree() through win_job's Windows branch via a
+    fake kernel32, while keeping the ACTUAL Popen spawn kwargs empty --
+    this box is not Windows, so ``creationflags=`` would raise
+    ``ValueError``, and the subject under test here is the job-HANDLE
+    lifecycle, not platform spawn-kwarg selection (already covered by
+    TestIsolationPopenKwargsWindowsShaped in
+    tests/test_process_group_safety.py).
+    """
+    from nexus.util import process_group as pg
+    from nexus.util import win_job
+    from tests.test_win_job import _FakeKernel32
+
+    monkeypatch.delattr(os, "killpg", raising=False)
+    monkeypatch.delattr(os, "getpgid", raising=False)
+    monkeypatch.setattr(win_job, "IS_WINDOWS", True)
+    fake = _FakeKernel32()
+    monkeypatch.setattr(win_job, "_kernel32", fake)
+    monkeypatch.setattr(pg, "isolation_popen_kwargs", lambda: {})
+    return fake
+
+
+def _job_handle_from(fake) -> int:
+    assign_call = next(c for c in fake.calls if c[0] == "AssignProcessToJobObject")
+    return assign_call[1]
+
+
+class TestJobHandleClosesOnEveryOutcome:
+    def test_success_closes_the_job_exactly_once(
+        self, windows_shaped_real_spawn,
+    ) -> None:
+        fake = windows_shaped_real_spawn
+        run_bounded([sys.executable, "-c", "print('ok')"], timeout=10)
+        job = _job_handle_from(fake)
+        assert fake.closed_handles.count(job) == 1, (
+            f"job {job} closed {fake.closed_handles.count(job)} times on the "
+            "success path (want exactly 1) -- closed_handles="
+            f"{fake.closed_handles}"
+        )
+
+    def test_nonzero_exit_closes_the_job_exactly_once(
+        self, windows_shaped_real_spawn,
+    ) -> None:
+        fake = windows_shaped_real_spawn
+        run_bounded(
+            [sys.executable, "-c", "import sys; sys.exit(3)"], timeout=10,
+        )
+        job = _job_handle_from(fake)
+        assert fake.closed_handles.count(job) == 1, (
+            f"job {job} closed {fake.closed_handles.count(job)} times on a "
+            "non-zero exit (want exactly 1) -- closed_handles="
+            f"{fake.closed_handles}"
+        )
+
+    def test_timeout_closes_the_job_exactly_once(
+        self, windows_shaped_real_spawn,
+    ) -> None:
+        fake = windows_shaped_real_spawn
+        with pytest.raises(subprocess.TimeoutExpired):
+            run_bounded(
+                [sys.executable, "-c", "import time; time.sleep(999)"],
+                timeout=0.2,
+            )
+        job = _job_handle_from(fake)
+        assert fake.closed_handles.count(job) == 1, (
+            f"job {job} closed {fake.closed_handles.count(job)} times on "
+            "timeout (want exactly 1) -- closed_handles="
+            f"{fake.closed_handles}"
+        )
+
+
+def test_run_bounded_still_succeeds_when_win_job_raises(
+    windows_shaped_real_spawn,
+) -> None:
+    """nexus-6y4e0 review: contain()'s degrade-on-exception contract must
+    hold from run_bounded's own vantage point too -- a raising kernel32
+    must not turn "containment failed" into "the whole dispatch failed".
+    The spawn and the wait/communicate below are real; only job-object
+    containment is faked and made to fail as loudly as ctypes can."""
+    fake = windows_shaped_real_spawn
+    fake.raise_from.add("CreateJobObjectW")
+    result = run_bounded([sys.executable, "-c", "print('ok')"], timeout=10)
+    assert result.stdout == "ok\n"
+    assert not any(c[0] == "AssignProcessToJobObject" for c in fake.calls), (
+        "contain() should never reach AssignProcessToJobObject once "
+        "CreateJobObjectW itself raised"
+    )

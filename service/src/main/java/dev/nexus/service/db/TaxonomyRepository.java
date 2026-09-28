@@ -1492,6 +1492,73 @@ public final class TaxonomyRepository {
         });
     }
 
+    /** Upper bound on collections accepted by {@code /meta/last_discover_batch}
+     * (nexus-l3dg2, du6d0 residual) — the project convention batch cap. */
+    public static final int MAX_LAST_DISCOVER_BATCH = 300;
+
+    /**
+     * Batched taxonomy_meta discover-stamp read for a LIST of collections, in
+     * ONE round trip per call — up to {@value #MAX_LAST_DISCOVER_BATCH}
+     * collections; a caller with more pages across several calls, never one
+     * request per collection (nexus-l3dg2 — closes the du6d0 residual:
+     * {@code nx doctor}'s {@code taxonomy.discover health} row needs the
+     * engine's own success stamp to reconcile a best-effort T2 write failure
+     * that follows a real discover success, and reconciling one collection
+     * at a time would trade that row's existing batched-round-trip property
+     * for a per-entry N+1 read on every {@code nx doctor} run).
+     *
+     * <p>Returns ONE row per collection that HAS a {@code taxonomy_meta} row
+     * WITH A NON-NULL {@code last_discover_at} — a collection with no row at
+     * all (never discovered under this tenant, or an unknown/typo'd name)
+     * AND a collection whose row exists but whose stamp is NULL (reachable
+     * via {@code importTaxonomyMeta}: the column is nullable, and ETL fidelity
+     * import preserves a source record's null verbatim) are both simply
+     * OMITTED, never a null/zero placeholder row, mirroring
+     * {@link #detectHubsData}'s identical "absent means never discovered"
+     * convention (that method's own {@code discoverAt} map is built the same
+     * way: only non-null values are kept, so "no taxonomy_meta row" and "row
+     * with a null stamp" both read as "never discovered" to its caller too).
+     * Each row: {@code {"collection": str, "last_discover_at": ISO-8601,
+     * "last_discover_doc_count": int}} — {@code last_discover_at} is NEVER
+     * null in a returned row, rendered via {@link #utcIso} (explicit-seconds
+     * UTC), the same wire format {@code detectHubsData}'s
+     * {@code max_last_discover_at} already uses, so a client comparing it
+     * lexicographically against its own {@code %Y-%m-%dT%H:%M:%SZ}-stamped
+     * record never hits the elided-seconds trap that method's javadoc
+     * documents.
+     *
+     * <p>NO NEW INDEX: {@code taxonomy_meta}'s PRIMARY KEY is
+     * {@code (tenant_id, collection)} — RLS pins {@code tenant_id} to one
+     * value per call, so the {@code collection IN (...)} predicate is
+     * answered by the existing PK b-tree's second column; a request for up to
+     * {@value #MAX_LAST_DISCOVER_BATCH} collections is a single index range
+     * scan, not a sequential scan. The added {@code IS NOT NULL} filter is a
+     * plain predicate on a non-indexed column, evaluated against the already
+     * narrow (<= 300-row) result of that scan — it does not change the scan
+     * shape.
+     */
+    public List<Map<String, Object>> getLastDiscoverStamps(String tenant, List<String> collections) {
+        if (collections == null || collections.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            List<Map<String, Object>> out = new ArrayList<>();
+            for (var r : ctx.select(
+                        TAXONOMY_META.COLLECTION,
+                        TAXONOMY_META.LAST_DISCOVER_AT,
+                        TAXONOMY_META.LAST_DISCOVER_DOC_COUNT)
+                    .from(TAXONOMY_META)
+                    .where(TAXONOMY_META.COLLECTION.in(collections))
+                    .and(TAXONOMY_META.LAST_DISCOVER_AT.isNotNull())
+                    .fetch()) {
+                var m = new LinkedHashMap<String, Object>();
+                m.put("collection", r.get(TAXONOMY_META.COLLECTION));
+                m.put("last_discover_at", utcIso(r.get(TAXONOMY_META.LAST_DISCOVER_AT)));
+                m.put("last_discover_doc_count", r.get(TAXONOMY_META.LAST_DISCOVER_DOC_COUNT));
+                out.add(m);
+            }
+            return out;
+        });
+    }
+
     // ── Topic links ────────────────────────────────────────────────────────────
 
     /** Get topic link pairs for a set of topic ids. */

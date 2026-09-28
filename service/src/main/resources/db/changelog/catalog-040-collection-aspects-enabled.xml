@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    Bead nexus-l46pu, follow-up to nexus-kk4ut (T2 critique
+    nexus/critique-nexus-kk4ut-docs-opt-in-substantive item 1): moves the
+    docs__ aspect-extraction opt-in off each machine's local config.yml
+    (``aspects.docs_collections``) onto this tenant-wide row, so two
+    machines indexing the same shared collection make the same decision
+    instead of giving partial document_aspects coverage.
+
+    Single-step ADD COLUMN, no walk (unlike catalog-036-4's nullable
+    dimension/lifecycle_state columns, which needed a separate backfill
+    walk because those two columns encode a fact every EXISTING row
+    already had but nobody had computed yet): a docs__ collection's
+    opt-in state is a fact nobody has computed for ANY row until an
+    operator explicitly runs the `nx collection aspects` enable, disable,
+    or sync-from-config CLI verb — there is no backfill to walk, only an
+    absence of an opinion.
+
+    EDITED IN PLACE (round-2 critique-nexus-l46pu-round2-2026-09-27
+    Finding A, ship-blocker): this changeset has not shipped anywhere
+    (no develop merge, no engine tag) as of this fix, so it is corrected
+    here rather than superseded by a catalog-041 follow-up.
+    `BOOLEAN NOT NULL DEFAULT FALSE` could not distinguish "nobody has
+    ever set this" from "explicitly disabled" — both read back as a
+    plain `false`, so the client's presence-only opinion test
+    (`"aspects_enabled" in row`) would read EVERY existing docs__
+    collection as an explicit, engine-authoritative `false` the instant
+    a tenant's engine crossed this migration, silently overriding any
+    machine's local `aspects.docs_collections` opt-in tenant-wide, on an
+    ordinary engine upgrade, with no CLI action by anyone. `BOOLEAN NULL`
+    with no default keeps that distinction on the wire: NULL is "no
+    opinion yet" (falls back to the local list, exactly today's
+    behaviour for a row nobody has touched), and an explicit
+    `true`/`false` is written ONLY by `set_aspects_enabled` — the two
+    read paths (`getCollection`/`listCollections`) pass the raw value
+    through as JSON `null`/`true`/`false` rather than coercing a `null`
+    read to `false` (see `CatalogRepository.collRowWithAspects`
+    /`collRowWithLifecycle`); the client's opinion test becomes "the
+    value is a bool", not "the key is present". No DATA EFFECT line: no
+    existing row's OBSERVABLE behaviour changes either way — a row
+    nothing reads as opted-in today (NULL, "no opinion") stays exactly
+    that; only the WIRE REPRESENTATION of "not opted in" changed, from a
+    coerced `false` to an honest `null`.
+
+    Changeset id: catalog-040 is the next unused number in the catalog
+    family (family maximum at HEAD: catalog-039-gc-restore-audit.xml).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="catalog-040-1" author="nexus-l46pu">
+        <comment>catalog_collections.aspects_enabled: tenant-wide docs__ aspect-extraction opt-in (nexus-l46pu, engine half of the nexus-kk4ut follow-up). BOOLEAN NULL with no default — NULL means "nobody has set this yet" (falls back to the local aspects.docs_collections list), distinct from an explicit true/false written only by set_aspects_enabled. No backfill walk needed, no DATA EFFECT (round-2 fix: a NOT NULL DEFAULT FALSE column cannot make this distinction — see the file header).</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.catalog_collections
+    ADD COLUMN aspects_enabled BOOLEAN NULL;
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.catalog_collections DROP COLUMN IF EXISTS aspects_enabled;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

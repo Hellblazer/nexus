@@ -229,6 +229,22 @@ public final class PgSession {
     }
 
     /**
+     * Bounds for one bounded restore batch ({@code gc_restore_rereferenced_bounded},
+     * nexus-e8h5x), mirroring {@link #DEFAULT_GC_QUARANTINE_BOUNDED_STATEMENT_TIMEOUT_MS}
+     * / {@link #DEFAULT_GC_QUARANTINE_BOUNDED_LOCK_TIMEOUT_MS} for the opposite
+     * direction — set as their OWN statement before the call for the identical
+     * reason: the function body's own {@code set_config('statement_timeout', ...)}
+     * is inert for the statement already running it.
+     */
+    public static final int DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS = 25_000;
+    public static final int DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS = 2_000;
+
+    public static void setGcRestoreBoundedBounds(DSLContext ctx) {
+        setStatementAndLockBounds(ctx, DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                  DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
+    }
+
+    /**
      * Bound every later statement in this transaction to {@code statementTimeoutMs}
      * and every lock wait to {@code lockTimeoutMs}. Two {@code set_config} calls,
      * each its own top-level statement, so the statement bound applies to the

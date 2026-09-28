@@ -35,6 +35,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.vectors.RacedEmbedActivity;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.DeleteConditionStep;
@@ -3203,6 +3204,53 @@ public final class CatalogRepository {
         );
     }
 
+    /**
+     * Batch owner-agnostic file_path lookup (nexus-1vc0n): for each of N
+     * file_paths, EVERY live document that names it, in one round trip.
+     *
+     * <p>Backs the batched {@code nx index repo} registrar's cross-owner
+     * mint announcement. The per-document announce
+     * ({@code nexus.catalog.path_ambiguity.announce_cross_owner_mint}, one
+     * owner-agnostic {@code /list?file_path=} per MINT) is deliberately NOT
+     * called inside {@code indexer._catalog_hook}'s batched
+     * {@code register_many} loop — that would turn one round trip into
+     * N+1. This route is what makes the bulk form possible: one request
+     * carrying every path in the batch's misses, one response naming every
+     * existing document per path.
+     *
+     * <p>Owner-agnostic and tombstone-filtered, same read contract as
+     * {@link #documentsByFilePath} — several documents legitimately share
+     * one file_path (one file catalogued under two owners is a normal
+     * steady state, nexus-yzij1), so each entry in the result is a LIST,
+     * not a single winner. The caller
+     * ({@code HttpCatalogClient.find_all_by_file_paths}) decides what to
+     * do with more than one, exactly as {@code find_all_by_file_path}
+     * does for the single-path form.
+     *
+     * @return {@code {file_path -> [document rows]}}; a file_path with no
+     *         live document is absent from the map.
+     */
+    public Map<String, List<Map<String, Object>>> documentsByFilePaths(
+            String tenant, List<String> filePaths) {
+        if (filePaths == null || filePaths.isEmpty()) return Map.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var rows = ctx.select(documentFields()).from(CATALOG_DOCUMENTS)
+                          .where(CATALOG_DOCUMENTS.FILE_PATH.in(filePaths)
+                              .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                          .orderBy(CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.TUMBLER)
+                          .fetch();
+            Map<String, List<Map<String, Object>>> result = new LinkedHashMap<>();
+            for (var r : rows) {
+                Map<String, Object> doc = docRowFromRecord(r.intoMap());
+                String filePath = (String) doc.get("file_path");
+                if (filePath != null) {
+                    result.computeIfAbsent(filePath, k -> new ArrayList<>()).add(doc);
+                }
+            }
+            return result;
+        });
+    }
+
     /** Documents by content_type. {@code limit <= 0} is unbounded (nexus-xoimv). */
     public List<Map<String, Object>> documentsByContentType(
             String tenant, String contentType, int limit, int offset) {
@@ -4962,7 +5010,7 @@ public final class CatalogRepository {
 
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, List<Map<String, Object>> rows) {
-        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null);
+        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null);
     }
 
     /**
@@ -4995,6 +5043,18 @@ public final class CatalogRepository {
      *        rows actually written for this doc (the {@code chunks_written}
      *        response echo's per-doc contribution). Untouched when {@code
      *        resolvedChunks} is null.
+     * @param writtenThisRequest RDR-222 Phase 0 fix round (bead nexus-ulrjq):
+     *        chashes already WRITTEN by an EARLIER doc of this same {@code
+     *        writeManifestMany} call — excluded from that doc's raced-embed
+     *        count (a sibling doc's own recent write, not a race with another
+     *        writer). {@code null} treated as empty. Ignored when {@code
+     *        resolvedChunks} is null.
+     * @param writtenChashesOut single-cell output: the chashes THIS doc's
+     *        {@link #upsertManifestChunkVectors} call actually wrote — the
+     *        caller ({@link #writeManifestMany}) merges this into the
+     *        request-scoped set ONLY after this doc's transaction commits,
+     *        never from inside it. Untouched when {@code resolvedChunks} is
+     *        null.
      * @return {@code collection}, unchanged — kept as the return type so the
      *         post-commit sweep step ({@link #runSweepTransaction},
      *         {@link #writeManifestMany}) has the collection to sweep
@@ -5003,7 +5063,9 @@ public final class CatalogRepository {
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, List<Map<String, Object>> rows,
                                           Map<String, ResolvedChunk> resolvedChunks,
-                                          int[] chunksWrittenOut) {
+                                          int[] chunksWrittenOut,
+                                          Set<String> writtenThisRequest,
+                                          List<String>[] writtenChashesOut) {
         requireNonBlank(collection, "collection");
         // Case-1 duty only (RDR-191): does docId exist at all? A ghost
         // document (exists, no physical_collection) is no longer a special
@@ -5031,7 +5093,8 @@ public final class CatalogRepository {
         // reader can only ever observe both or neither, never one without
         // the other.
         if (resolvedChunks != null) {
-            int written = upsertManifestChunkVectors(ctx, tenant, collection, rows, resolvedChunks);
+            int written = upsertManifestChunkVectors(ctx, tenant, collection, rows, resolvedChunks,
+                    writtenThisRequest == null ? Set.of() : writtenThisRequest, writtenChashesOut);
             if (chunksWrittenOut != null) {
                 chunksWrittenOut[0] = written;
             }
@@ -5092,8 +5155,15 @@ public final class CatalogRepository {
      *        PgVectorRepository}'s {@code toJson} convention — serialized
      *        once by the caller, not re-serialized per doc that references
      *        a shared chash).
+     * @param originalAbsent RDR-222 Phase 0 (bead nexus-ulrjq): {@code true} iff
+     *        {@code CombinedWriteService}'s existence-partition found this chash
+     *        ABSENT (not merely content-divergent, and not the zero-row-UPDATE
+     *        reroute) — the same original-absentee distinction {@code
+     *        PgVectorRepository.NeedEmbedResolution} makes on the direct
+     *        upsert-chunks path. Only {@code true} entries feed {@link
+     *        #upsertManifestChunkVectors}'s raced-embed count.
      */
-    public record ResolvedChunk(String text, float[] embedding, String metadataJson) {}
+    public record ResolvedChunk(String text, float[] embedding, String metadataJson, boolean originalAbsent) {}
 
     /**
      * nexus-kl2z6 increment 1 (design memo §0/§1.4): upsert THIS doc's chunk
@@ -5128,13 +5198,26 @@ public final class CatalogRepository {
      * per-doc catch, landing in {@code failed}/{@code failed_doc_ids}) —
      * a manifest row must never reference a chunk that does not exist.
      *
+     * @param writtenThisRequest chashes already written by an earlier doc of
+     *        this same request (RDR-222 Phase 0 fix round, bead nexus-ulrjq)
+     *        — excluded from the raced-embed count below; never mutated here.
+     * @param writtenChashesOut single-cell output: set to the exact chashes
+     *        this call wrote ({@code toWrite}), unconditionally, on every
+     *        return path — {@code null} entries are never left unset so a
+     *        caller reading it after a zero-row call sees an empty list, not
+     *        a stale value from a previous call.
      * @return count of chash rows actually written (INSERT ... ON CONFLICT)
      *         — this doc's contribution to the {@code chunks_written}
      *         response echo.
      */
     private static int upsertManifestChunkVectors(DSLContext ctx, String tenant, String collection,
                                                    List<Map<String, Object>> rows,
-                                                   Map<String, ResolvedChunk> resolved) {
+                                                   Map<String, ResolvedChunk> resolved,
+                                                   Set<String> writtenThisRequest,
+                                                   List<String>[] writtenChashesOut) {
+        if (writtenChashesOut != null) {
+            writtenChashesOut[0] = List.of();
+        }
         if (rows == null || rows.isEmpty()) return 0;
         // (1.4.1) dedupe — first occurrence wins, matches
         // PgVectorRepository.upsertChunksInternal's `Set<String> seen` discipline.
@@ -5180,6 +5263,27 @@ public final class CatalogRepository {
         // per-doc transaction grain.
         Collections.sort(toWrite);
 
+        // RDR-222 Phase 0 (bead nexus-ulrjq): the chashes CombinedWriteService's own
+        // existence-partition found genuinely ABSENT (ResolvedChunk#originalAbsent) —
+        // the subset that feeds the raced-embed count below. See
+        // PgVectorRepository.NeedEmbedResolution's javadoc for why a content-divergent
+        // or zero-row-reroute chash is excluded.
+        //
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq, code-review CRITICAL): ALSO
+        // excludes writtenThisRequest — a chash a SIBLING doc of this SAME
+        // writeManyCombined call already wrote (committed) moments earlier hits ON
+        // CONFLICT here for an entirely mundane reason (this request's own RDR-108
+        // shared-chash fan-out across two docs), not because a DIFFERENT writer
+        // raced this call. Without this exclusion, one call writing the same shared
+        // chash from two docs always reports raced=1 on the second doc, even with
+        // zero concurrency anywhere.
+        Set<String> originalAbsentChashes = new HashSet<>();
+        for (String c : toWrite) {
+            if (resolved.get(c).originalAbsent() && !writtenThisRequest.contains(c)) {
+                originalAbsentChashes.add(c);
+            }
+        }
+
         var insert = ctx.insertInto(ch.table(),
                 ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
         for (String c : toWrite) {
@@ -5187,12 +5291,48 @@ public final class CatalogRepository {
             insert = insert.values(tenant, collection, c, rc.text(),
                     Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
         }
-        insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+        long raced = 0;
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #1): a bounded sample
+        // of the raced chashes themselves (already hex — ch.chash()'s Java binding),
+        // capped at 8 per event. The direct upsert-chunks path carries no doc id at
+        // all; this path's own event line carries no doc id either (per-doc calls
+        // share one log statement shape with the direct path by design). The chash
+        // is what lets an operator join afterward against catalog_document_chunks
+        // and tell a genuine cross-writer retry race (one owner) apart from RDR-108
+        // shared chunk text landing from two independent documents (multiple
+        // owners) — a decomposition aid, not a new counter.
+        List<String> racedChashSample = new ArrayList<>();
+        // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): same (xmax = 0) RETURNING idiom as
+        // PgVectorRepository.upsertChunksInternal's final INSERT — see that call
+        // site's comment for the RawSqlGateTest rationale.
+        var returned = insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
               .doUpdate()
               .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
               .set(ch.embedding(), DSL.excluded(ch.embedding()))
               .set(ch.metadata(),  DSL.excluded(ch.metadata()))
-              .execute();
+              .returningResult(ch.chash(), DSL.field(
+                  DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
+              .fetch();
+        for (var r : returned) {
+            if (!Boolean.TRUE.equals(r.value2()) && originalAbsentChashes.contains(r.value1())) {
+                raced++;
+                if (racedChashSample.size() < 8) {
+                    racedChashSample.add(r.value1());
+                }
+            }
+        }
+        if (raced > 0) {
+            // RDR-222 Phase 0: another writer committed one of this combined write's
+            // originally-absent chashes between CombinedWriteService's existence
+            // partition and this per-doc INSERT — this write paid a duplicate embed
+            // for it.
+            log.info("event=upsert_embed_raced collection={} raced={} embedded={} raced_chashes={}",
+                    collection, raced, toWrite.size(), String.join(",", racedChashSample));
+            RacedEmbedActivity.record(raced);
+        }
+        if (writtenChashesOut != null) {
+            writtenChashesOut[0] = toWrite;
+        }
         return toWrite.size();
     }
 
@@ -5363,6 +5503,20 @@ public final class CatalogRepository {
         List<Map<String, Object>> failedDetail = new ArrayList<>();
         List<Map<String, Object>> completeRefused = new ArrayList<>();
         List<Map<String, Object>> sweepDetail = new ArrayList<>();
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq, code-review CRITICAL): chashes
+        // already WRITTEN (committed) by an earlier doc of THIS SAME call. A doc's
+        // own per-doc INSERT hitting ON CONFLICT against a chash a SIBLING doc of
+        // this same writeManyCombined/writeManifestMany call already wrote moments
+        // earlier is not a race with another WRITER — it is this request's own
+        // RDR-108 shared-chash fan-out (CombinedWriteService's existence-partition
+        // ran ONCE, before any per-doc write, so every doc referencing a shared
+        // chash sees it as absent identically). Populated ONLY after a doc's
+        // tenantScope.withTenant call returns (i.e. after that doc's transaction
+        // COMMITS, see the writtenChashesHolder merge below) — a doc whose write
+        // throws and lands in `failed` never contributes, and a hypothetical future
+        // retry-wrapped attempt could not double-contribute either, since only a
+        // call that actually returns normally merges into this set.
+        Set<String> requestWrittenChashes = new HashSet<>();
         if (docs != null) {
             for (Map<String, Object> d : docs) {
                 String docId = s(d, "doc_id");
@@ -5381,6 +5535,7 @@ public final class CatalogRepository {
                 Map<String, Object>[] sweepOutcome = new Map[1];
                 Set<String>[] beforeHolder = new Set[1];
                 int[] chunksWrittenHolder = new int[1];
+                List<String>[] newlyWrittenChashesHolder = new List[1];
                 try {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
@@ -5416,7 +5571,8 @@ public final class CatalogRepository {
                         boolean beforeReadFailed = sweep && beforeRead == null;
                         long tWriteStart = tBeforeReadEnd;
                         writeManifestRows(ctx, tenant, docId, collection, rows,
-                                resolvedChunks, chunksWrittenHolder);
+                                resolvedChunks, chunksWrittenHolder,
+                                requestWrittenChashes, newlyWrittenChashesHolder);
                         if (beforeReadFailed) {
                             // Nothing to compute — the before-read itself is what
                             // failed, so `dropped` was never determined. Reported
@@ -5438,6 +5594,14 @@ public final class CatalogRepository {
                         writeNanosTotal[0] += (System.nanoTime() - tWriteStart);
                         return null;
                     });
+                    // RDR-222 Phase 0 fix round (bead nexus-ulrjq): merge THIS doc's
+                    // newly-written chashes into the request-scoped set only NOW that
+                    // its transaction has committed (tenantScope.withTenant returned
+                    // normally) — never inside the lambda above, which runs BEFORE
+                    // commit.
+                    if (newlyWrittenChashesHolder[0] != null) {
+                        requestWrittenChashes.addAll(newlyWrittenChashesHolder[0]);
+                    }
                     okDocs++;
                     totalRows += rows.size();
                     totalChunksWritten += chunksWrittenHolder[0];
@@ -5737,9 +5901,14 @@ public final class CatalogRepository {
                 boolean stagingActive = stagingHasRowsForTenant(ctx, tenant);
                 List<String> sweptChashes = sweepChunks(ctx, tenant, collection, dropped, stagingActive);
                 int swept = sweptChashes.size();
+                int kept = dropped.size() - swept;
+                // nexus-wbfpw.13: unconditional — a run that keeps every
+                // candidate (swept=0) used to log nothing at all, even though
+                // the response map below always carries `kept`. One line per
+                // sweep run, every run.
+                log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={} kept={}",
+                          tenant, docId, collection, dropped.size(), swept, kept);
                 if (swept > 0) {
-                    log.info("event=write_manifest_many_swept tenant={} doc_id={} collection={} dropped={} swept={}",
-                              tenant, docId, collection, dropped.size(), swept);
                     // nexus-sybbh: audit the reap IN THE SAME TRANSACTION as the sweep
                     // DELETE above (same ctx, not yet committed) — this is the exact
                     // codepath the 233 lost store_put chunks (nexus-3n7pr) went through
@@ -5753,7 +5922,7 @@ public final class CatalogRepository {
                 out.put("doc_id", docId);
                 out.put("dropped", dropped.size());
                 out.put("swept", swept);
-                out.put("kept", dropped.size() - swept);
+                out.put("kept", kept);
                 out.put("errored", false);
                 return out;
             });
@@ -7224,14 +7393,23 @@ public final class CatalogRepository {
         });
     }
 
-    /** Get a collection by name. Returns null if not found. */
+    /**
+     * Get a collection by name. Returns null if not found.
+     *
+     * <p>Carries {@code aspects_enabled} (RDR bead nexus-l46pu, follow-up to
+     * nexus-kk4ut) since this is exactly the caller-facing single-row read
+     * the client's opt-in decision consults; see {@link #collRowWithAspects}.
+     * {@link #collectionForTuple} is a routing lookup, not a caller-facing
+     * row read, and keeps {@link #collRow}'s original 10-key shape.
+     */
     public Map<String, Object> getCollection(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
             var r = ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
-                               CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT)
+                               CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
+                               CATALOG_COLLECTIONS.ASPECTS_ENABLED)
                        .from(CATALOG_COLLECTIONS).where(CATALOG_COLLECTIONS.NAME.eq(name)).fetchOne();
-            return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
-                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
+            return r != null ? collRowWithAspects(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
+                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10(), r.value11()) : null;
         });
     }
 
@@ -7324,9 +7502,11 @@ public final class CatalogRepository {
      *
      * <p>Each row also now carries {@code dimension} and {@code lifecycle_state} —
      * columns that did not exist when {@link #collRow} was first written — via
-     * {@link #collRowWithLifecycle}. {@link #getCollection} and {@link
-     * #collectionForTuple} are NOT touched by this bead and keep {@link #collRow}'s
-     * original 10-key shape.
+     * {@link #collRowWithLifecycle}, which also carries {@code aspects_enabled}
+     * (RDR bead nexus-l46pu). {@link #collectionForTuple} is NOT touched by
+     * either bead and keeps {@link #collRow}'s original 10-key shape; {@link
+     * #getCollection} carries {@code aspects_enabled} too (see its own javadoc)
+     * but not {@code dimension}/{@code lifecycle_state}.
      *
      * @param contentType    exact-match filter on {@code catalog_collections.content_type},
      *                       or {@code null}/blank for no filter
@@ -7345,11 +7525,11 @@ public final class CatalogRepository {
             }
             return ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                            CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
-                           CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                           CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.ASPECTS_ENABLED)
                        .from(CATALOG_COLLECTIONS).where(cond).orderBy(CATALOG_COLLECTIONS.NAME).fetch()
                        .map(r -> collRowWithLifecycle(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                                        r.value6(), r.value7(), r.value8(), r.value9(), r.value10(),
-                                                       r.value11(), r.value12()));
+                                                       r.value11(), r.value12(), r.value13()));
         });
     }
 
@@ -7605,6 +7785,32 @@ public final class CatalogRepository {
                    // THIRD value underneath an observed read once this CAS is in place.
                    .and(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")
                        .or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq(supersededBy))))
+               .execute()
+        );
+    }
+
+    /**
+     * Set {@code catalog_collections.aspects_enabled} for one row (RDR bead
+     * nexus-l46pu, follow-up to nexus-kk4ut): the tenant-wide, engine-hosted
+     * home for the docs__ aspect-extraction opt-in previously local-only per
+     * machine (T2 critique nexus/critique-nexus-kk4ut-docs-opt-in-substantive
+     * item 1). A pure UPDATE by {@code (tenant, name)} — same shape as {@link
+     * #supersedeCollection}, minus that method's CAS conjunct (there is no
+     * concurrent-writer race to guard here: two concurrent sets simply leave
+     * the LAST writer's value, which is the correct outcome for a plain
+     * boolean flag, unlike supersede's append-only chain). The handler's own
+     * guard (row must exist) lives in {@code CatalogHandler
+     * .handleCollectionSetAspectsEnabled}, matching the sibling verb {@code
+     * handleCollectionSupersede}'s guard-in-the-handler placement.
+     *
+     * @return the number of rows updated (0 means no matching {@code (tenant, name)} row)
+     */
+    public int setCollectionAspectsEnabled(String tenant, String name, boolean enabled) {
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.update(CATALOG_COLLECTIONS)
+               .set(CATALOG_COLLECTIONS.ASPECTS_ENABLED, enabled)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)
+                   .and(CATALOG_COLLECTIONS.NAME.eq(name)))
                .execute()
         );
     }
@@ -10314,11 +10520,14 @@ public final class CatalogRepository {
 
     /**
      * {@link #collRow} plus {@code dimension} and {@code lifecycle_state} (RDR-204
-     * Phase 2, bead nexus-ft04v.24) — used ONLY by {@link #listCollections(String,
-     * String, String)}. {@link #getCollection} and {@link #collectionForTuple} are
-     * out of this bead's scope and keep {@link #collRow}'s original 10-key shape;
-     * every key {@link #collRow} already sets is untouched here, this only appends
-     * two new keys at the end.
+     * Phase 2, bead nexus-ft04v.24) plus {@code aspects_enabled} (RDR bead
+     * nexus-l46pu) — used ONLY by {@link #listCollections(String, String,
+     * String)}. {@link #collectionForTuple} is out of both beads' scope and
+     * keeps {@link #collRow}'s original 10-key shape; every key {@link #collRow}
+     * already sets is untouched here, this only appends three keys at the end.
+     * {@link #getCollection} carries {@code aspects_enabled} too, via the
+     * sibling helper {@link #collRowWithAspects}, but not {@code dimension}/
+     * {@code lifecycle_state}.
      *
      * @param dimension      {@code catalog_collections.dimension} — nullable (a
      *                       collection can be registered before its stats dimension
@@ -10327,14 +10536,49 @@ public final class CatalogRepository {
      * @param lifecycleState {@code catalog_collections.lifecycle_state} — NOT NULL
      *                       on any real row since hygiene-002, but {@code nne()}'d
      *                       for defensive consistency with every other string field here
+     * @param aspectsEnabled {@code catalog_collections.aspects_enabled} — {@code BOOLEAN
+     *                       NULL}, no default, since catalog-040's round-2 fix (Finding A,
+     *                       T2 critique-nexus-l46pu-round2-2026-09-27): {@code null} means
+     *                       "nobody has set this yet" and is passed through AS {@code null}
+     *                       on the wire, never coerced to {@code false} — coercing it would
+     *                       make an untouched row indistinguishable from an explicit
+     *                       {@code false}, which is exactly the ship-blocker this column
+     *                       shape exists to avoid. The client's opinion test keys on the
+     *                       value being a bool, not on key presence.
      */
     private static Map<String, Object> collRowWithLifecycle(String name, String ctype, String owner,
                                                  String embd, String mver, String dname,
                                                  Boolean legcy, String supBy, String supAt, String crAt,
-                                                 Integer dimension, String lifecycleState) {
+                                                 Integer dimension, String lifecycleState,
+                                                 Boolean aspectsEnabled) {
         Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
         m.put("dimension",       dimension);
         m.put("lifecycle_state", nne(lifecycleState));
+        m.put("aspects_enabled", aspectsEnabled);
+        return m;
+    }
+
+    /**
+     * {@link #collRow} plus {@code aspects_enabled} (RDR bead nexus-l46pu,
+     * follow-up to nexus-kk4ut: the tenant-wide docs__ aspect-extraction
+     * opt-in) — used by {@link #getCollection}. Kept as its own helper rather
+     * than folded into {@link #collRowWithLifecycle} because {@code
+     * getCollection} deliberately does NOT carry {@code dimension}/{@code
+     * lifecycle_state} (those stay {@link #listCollections(String, String,
+     * String)}-only, per that method's own javadoc) — {@code aspects_enabled}
+     * is the one field both single-row and list reads now share.
+     *
+     * <p>{@code aspectsEnabled} is passed through AS-IS, {@code null} included
+     * (see {@link #collRowWithLifecycle}'s javadoc for why: coercing a
+     * {@code null} read to {@code false} was the round-2 ship-blocker, Finding
+     * A, T2 critique-nexus-l46pu-round2-2026-09-27).
+     */
+    private static Map<String, Object> collRowWithAspects(String name, String ctype, String owner,
+                                                 String embd, String mver, String dname,
+                                                 Boolean legcy, String supBy, String supAt, String crAt,
+                                                 Boolean aspectsEnabled) {
+        Map<String, Object> m = collRow(name, ctype, owner, embd, mver, dname, legcy, supBy, supAt, crAt);
+        m.put("aspects_enabled", aspectsEnabled);
         return m;
     }
 

@@ -121,6 +121,18 @@ class ResolveHandlerTest {
         if (pg      != null) pg.stop();
     }
 
+    /**
+     * Give {@code chash} a live owner in {@link #COLLECTION} for {@link #TENANT_A}
+     * (RDR-192 Step 5, bead nexus-wbfpw.10): {@code pgRepo.get}, which {@code
+     * resolveByChash} calls, now requires a live own-collection manifest owner.
+     */
+    private void own(String chash) {
+        new TenantScope(svcDs).withTenant(TENANT_A, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT_A, COLLECTION, chash);
+            return null;
+        });
+    }
+
     private HttpResponse<String> post(String token, Object body) throws Exception {
         var req = HttpRequest.newBuilder()
             .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/vectors/resolve"))
@@ -175,6 +187,7 @@ class ResolveHandlerTest {
         repo.upsertReferenceOnlyChunk(TENANT_A, COLLECTION, refChash,
             StubEmbedder.unitVector(1024),
             Map.of("source_uri", fullUri));
+        own(refChash);
 
         var resp = post(TOKEN_A, Map.of("collection", COLLECTION, "chash", refChash));
 
@@ -197,6 +210,7 @@ class ResolveHandlerTest {
         repo.upsertChunks(TENANT_A, COLLECTION,
             List.of(chash), List.of("full content with no source_uri in its metadata"),
             List.of(Map.of()));
+        own(chash);
 
         var resp = post(TOKEN_A, Map.of("collection", COLLECTION, "chash", chash));
 

@@ -5242,3 +5242,102 @@ class TestIsolatedHermeticChild:
         assert "--strict-mcp-config" in argv
         assert "--allowedTools" not in argv
         assert "--mcp-config" not in argv
+
+
+# nexus-6y4e0 review: _dispatch_job (contain()'s handle, assigned right
+# after spawn) was closed only inside the except-asyncio.TimeoutError
+# branch, so success and a non-zero exit -- neither of which raises it --
+# leaked the handle. claude_dispatch hardcodes its argv to the "claude"
+# binary (no _argv override like aspect_extractor's), so these drive it
+# with a fake asyncio.subprocess.Process (this file's own _make_proc()
+# pattern) rather than a real end-to-end subprocess; the mock's .pid is
+# set to a real int so contain() reaches the fake kernel32 exactly as it
+# would for a real process.
+
+
+@pytest.fixture
+def windows_shaped_dispatch(monkeypatch):
+    import os as _os
+
+    from nexus.util import win_job
+    from tests.test_win_job import _FakeKernel32
+
+    monkeypatch.delattr(_os, "killpg", raising=False)
+    monkeypatch.delattr(_os, "getpgid", raising=False)
+    monkeypatch.setattr(win_job, "IS_WINDOWS", True)
+    fake = _FakeKernel32()
+    monkeypatch.setattr(win_job, "_kernel32", fake)
+    return fake
+
+
+def _job_handle_from(fake) -> int:
+    assign_call = next(c for c in fake.calls if c[0] == "AssignProcessToJobObject")
+    return assign_call[1]
+
+
+class TestJobHandleClosesOnEveryOutcome:
+    @pytest.mark.asyncio
+    async def test_success_closes_the_job_exactly_once(
+        self, windows_shaped_dispatch,
+    ) -> None:
+        from nexus.operators.dispatch import claude_dispatch
+
+        fake = windows_shaped_dispatch
+        proc = _make_proc(
+            stdout=b'{"structured_output": {"result": "ok"}}', returncode=0,
+        )
+        proc.pid = 4321
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=5)
+        job = _job_handle_from(fake)
+        assert fake.closed_handles.count(job) == 1, (
+            f"job {job} closed {fake.closed_handles.count(job)} times on the "
+            f"success path (want exactly 1) -- closed_handles={fake.closed_handles}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_closes_the_job_exactly_once(
+        self, windows_shaped_dispatch,
+    ) -> None:
+        from nexus.operators.dispatch import claude_dispatch, OperatorError
+
+        fake = windows_shaped_dispatch
+        proc = _make_proc(stdout=b"", returncode=1)
+        proc.pid = 4321
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorError):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=5)
+        job = _job_handle_from(fake)
+        assert fake.closed_handles.count(job) == 1, (
+            f"job {job} closed {fake.closed_handles.count(job)} times on a "
+            f"non-zero exit (want exactly 1) -- closed_handles={fake.closed_handles}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_timeout_closes_the_job_exactly_once(
+        self, windows_shaped_dispatch,
+    ) -> None:
+        from nexus.operators.dispatch import claude_dispatch, OperatorTimeoutError
+
+        fake = windows_shaped_dispatch
+        proc = _make_proc()
+        proc.pid = 4321
+        call_count = {"n": 0}
+
+        async def hang(n: int = -1) -> bytes:
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                await asyncio.sleep(999)
+            return b""
+
+        proc.stdout.read = hang
+        proc.stderr.read = hang
+
+        with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)):
+            with pytest.raises(OperatorTimeoutError):
+                await claude_dispatch("prompt", _SIMPLE_SCHEMA, timeout=0.01)
+        job = _job_handle_from(fake)
+        assert fake.closed_handles.count(job) == 1, (
+            f"job {job} closed {fake.closed_handles.count(job)} times on "
+            f"timeout (want exactly 1) -- closed_handles={fake.closed_handles}"
+        )

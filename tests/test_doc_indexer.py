@@ -1769,11 +1769,12 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
     # nexus-w94eo: this captures the streaming uploader's chunk-time STUB,
     # which omits title/source_author (unknown until the post-pass) rather
     # than stamping "" placeholders a late duplicate could re-merge.
-    missing = (
-        (_BASE_REQUIRED_FIELDS | _PDF_EXTRA_FIELDS) - {"title", "source_author"}
-    ) - captured[0].keys()
+    # nexus-vhyar: it also omits frecency_score, which the frecency-only
+    # reindex owns.
+    stub_omits = {"title", "source_author", "frecency_score"}
+    missing = ((_BASE_REQUIRED_FIELDS | _PDF_EXTRA_FIELDS) - stub_omits) - captured[0].keys()
     assert not missing, f"Missing PDF metadata fields: {missing}"
-    assert "title" not in captured[0] and "source_author" not in captured[0]
+    assert not stub_omits & captured[0].keys()
 
 
 def test_sha256_does_not_call_read_bytes(tmp_path: Path):

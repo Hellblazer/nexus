@@ -161,6 +161,45 @@ def _t3_gc_candidate(runner: CliRunner, collection: str, chash: str) -> bool:
     return chash in result.output
 
 
+def _rollback_decision(client, catalog_doc_id: str, collection: str, chash: str) -> str:
+    """``store_hook.rollback_uncataloged_chunk_write``'s own composed
+    verdict for one chash (nexus-wbfpw.8, T2 nexus/review-rdr-192-phase1-
+    code finding 4): the code review found this composition -- the union
+    guard (``orphaned_chashes``) plus the notes guard (``live_note_
+    chashes``) plus self-exclusion of the rolled-back call's OWN document
+    -- built directly on top of two of this file's own pinned primitives,
+    yet never itself pinned against the SAME R1-R8 rows.
+
+    Called as though the rolled-back write belonged to *catalog_doc_id*,
+    an UNRELATED document -- never the row's own owner -- so self-
+    exclusion is exercised as a genuine no-op for every row here (the
+    self-collision it exists to prevent is covered separately by
+    ``test_b6enc_store_put_ghost_compensation.py``; this table's purpose
+    is pinning the ordinary cross-row composition, not the self-collision
+    edge case).
+
+    DESTRUCTIVE: a 'delete' verdict really deletes the T3 row via the
+    engine's own delete call. Must be the LAST predicate read for its
+    row -- every other column for this row must already be captured
+    before this is called.
+
+    Returns 'delete' when *chash* lands in the outcome's ``attempted``
+    tuple, 'protect' when it lands in ``protected`` instead -- one or the
+    other always holds; nothing else is a valid outcome for a chash that
+    was actually written (see ``ChunkRollbackOutcome``'s own contract).
+    """
+    from nexus.catalog.store_hook import rollback_uncataloged_chunk_write
+
+    outcome = rollback_uncataloged_chunk_write(
+        client, [chash], collection=collection, catalog_doc_id=catalog_doc_id,
+    )
+    if chash in outcome.attempted:
+        assert chash not in outcome.protected, outcome
+        return "delete"
+    assert chash in outcome.protected, outcome
+    return "protect"
+
+
 def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     """Build R1-R8 through real client write paths, then pin today's
     verdict of every client-observable liveness predicate as a table."""
@@ -175,6 +214,15 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     runner = CliRunner()
 
     owner = cat.register_owner("wbfpw2-owner", "curator")
+
+    # An UNRELATED document, never any row's own owner -- passed as
+    # rollback_uncataloged_chunk_write's catalog_doc_id for every row's
+    # probe below so self-exclusion is exercised as a genuine no-op (see
+    # _rollback_decision's own docstring).
+    unrelated_doc = str(cat.register(
+        owner, "wbfpw2-rollback-unrelated-doc", content_type="knowledge",
+        physical_collection=_coll("rollback-unrelated"),
+    ))
 
     rows: dict[str, dict] = {}
 
@@ -299,8 +347,17 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
             "live_note_chashes": _live_note(reader, fx["collection"], fx["chash"]),
             "t3_gc_candidate": _t3_gc_candidate(runner, fx["collection"], fx["chash"]),
         }
+        # DESTRUCTIVE -- must come last: a "delete" verdict really removes
+        # the chash from T3, so nothing above may re-read this row's chunk
+        # afterward. See _rollback_decision's own docstring.
+        observed[row]["rollback"] = _rollback_decision(
+            client, unrelated_doc, fx["collection"], fx["chash"],
+        )
 
-    _PREDICATES = ("search", "get", "orphaned_chashes", "live_note_chashes", "t3_gc_candidate")
+    _PREDICATES = (
+        "search", "get", "orphaned_chashes", "live_note_chashes",
+        "t3_gc_candidate", "rollback",
+    )
     _ROWS = ("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8")
 
     # Non-vacuity (mandatory per the bead's own acceptance criteria): the
@@ -310,13 +367,20 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     for row, cols in observed.items():
         assert set(cols) == set(_PREDICATES), f"{row} is missing a predicate column: {set(_PREDICATES) - set(cols)}"
 
-    # TODAY's verdict, pinned by a real run against the dev jar
-    # (2026-09-26). Rationale per row, matching the RDR-192 predicate
-    # families (T2 nexus/rdr-192-reverification-2026-09-26):
+    # TODAY's verdict, pinned by a real run against the dev jar. Rationale
+    # per row, matching the RDR-192 predicate families (T2 nexus/rdr-192-
+    # reverification-2026-09-26).
     #
-    # R1 manifest-less -> visible under predicate 1 (own-collection join
-    #    finds no manifest row at all, so nothing hides it); orphaned by
-    #    both client guards and t3 gc (nothing protects it anywhere).
+    # RDR-192 Step 5 (nexus-wbfpw.10, migrated onto live(c)): search/get now
+    # AGREE with orphaned_chashes on every manifest-less-in-this-collection
+    # row (R1/R4/R6/R8) -- live(c) requires a live own-collection manifest
+    # owner, so a chunk with none is HIDDEN from content reads too, not just
+    # flagged deletable by the union guard. Only R3 (a tombstoned owner)
+    # still disagrees across predicates -- see its own rationale below.
+    #
+    # R1 manifest-less -> HIDDEN under predicate 1/live(c) (no live
+    #    own-collection manifest owner at all); orphaned by both client
+    #    guards and t3 gc (nothing protects it anywhere).
     # R2 a live own-collection owner -> visible, protected everywhere.
     # R3 own-collection manifest row(s) all point at a TOMBSTONED owner ->
     #    HIDDEN under predicate 1 (search/get correctly treat it as dead),
@@ -345,23 +409,44 @@ def test_client_liveness_matrix_pins_todays_verdict(t2_service_env):
     # R8 the legacy shape: no manifest row anywhere, but a live document's
     #    meta.doc_id names this chash -> live_note_chashes protects it
     #    (True) even though it is otherwise indistinguishable from R1/R4/R6
-    #    to every OTHER predicate; search/get and orphaned_chashes read it
-    #    exactly like R1 (manifest-less-is-vacuously-live / no protective
-    #    reference respectively) since neither of those consult
-    #    live_note_chashes on its own -- t3 gc DOES consult it (t3.py
-    #    unions referenced with live_note_chashes before deciding
-    #    candidacy), so R8 is the one row where live_note_chashes=True
+    #    to every OTHER predicate; search/get and orphaned_chashes now read
+    #    it exactly like R1 (HIDDEN by live(c) / no protective reference
+    #    respectively) since neither of those consult live_note_chashes on
+    #    its own -- t3 gc DOES consult it (t3.py unions referenced with
+    #    live_note_chashes before deciding candidacy, and its own listing
+    #    is now the physical, non-live-filtered scan per the RDR-192
+    #    amendment), so R8 is the one row where live_note_chashes=True
     #    changes t3_gc_candidate from what R1/R4/R6's shape would
     #    otherwise produce.
+    #
+    # rollback (nexus-wbfpw.8, finding 4): store_hook.rollback_uncataloged_
+    # chunk_write's own composed verdict -- the union guard alone decides
+    # UNLESS the notes guard also protects it, in which case notes wins.
+    # Written as literal per-row expectations, not derived from the
+    # orphaned_chashes/live_note_chashes columns above, so a future change
+    # to either predicate that this table's own asserts would catch is
+    # ALSO independently caught here if it silently changed rollback's
+    # actual delete/protect decision.
+    #   R1 delete  -- union guard alone: nothing references it anywhere.
+    #   R2 protect -- union guard alone: still referenced (own manifest).
+    #   R3 delete  -- union guard alone: tombstoned owner does not protect.
+    #   R4 delete  -- union guard alone: stranded, nothing references it.
+    #   R5 protect -- union guard alone: the OTHER document still does.
+    #   R6 delete  -- union guard alone: the B-only manifest can't reach A.
+    #   R7 protect -- union guard alone: its own manifest still references it.
+    #   R8 protect -- union guard says deletable, but the notes guard
+    #      rescues it (a live document's own meta.doc_id still names it) --
+    #      the ONE row where the two guards disagree and the notes guard's
+    #      own composition, not the union guard alone, decides the outcome.
     EXPECTED = {
-        "R1": {"search": True, "get": True, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True},
-        "R2": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False},
-        "R3": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": False},
-        "R4": {"search": True, "get": True, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True},
-        "R5": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False},
-        "R6": {"search": True, "get": True, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True},
-        "R7": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": True, "t3_gc_candidate": False},
-        "R8": {"search": True, "get": True, "orphaned_chashes": True, "live_note_chashes": True, "t3_gc_candidate": False},
+        "R1": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
+        "R2": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False, "rollback": "protect"},
+        "R3": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": False, "rollback": "delete"},
+        "R4": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
+        "R5": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": False, "t3_gc_candidate": False, "rollback": "protect"},
+        "R6": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": False, "t3_gc_candidate": True, "rollback": "delete"},
+        "R7": {"search": True, "get": True, "orphaned_chashes": False, "live_note_chashes": True, "t3_gc_candidate": False, "rollback": "protect"},
+        "R8": {"search": False, "get": False, "orphaned_chashes": True, "live_note_chashes": True, "t3_gc_candidate": False, "rollback": "protect"},
     }
     assert observed == EXPECTED, f"today's verdict changed:\n  observed={observed}\n  expected={EXPECTED}"
 

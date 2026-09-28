@@ -13,6 +13,7 @@ import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.db.UnregisteredCollectionException;
 import org.jooq.DSLContext;
+import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Record;
 import org.jooq.Result;
@@ -22,6 +23,7 @@ import org.jooq.impl.SQLDataType;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_768;
@@ -38,6 +40,7 @@ import static dev.nexus.service.jooq.nexus.Tables.COLLECTION_VECTOR_STATS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_EXPIRE_QUARANTINE;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_QUARANTINE_ORPHANS_BOUNDED;
+import static dev.nexus.service.jooq.nexus.Tables.GC_RESTORE_REREFERENCED_BOUNDED;
 import dev.nexus.service.jooq.nexus.Routines;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_GRAPH_HOP_384;
@@ -87,6 +90,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 /**
@@ -233,6 +237,36 @@ public final class PgVectorRepository {
      */
     public void setAfterExistencePartitionHookForTests(Runnable hook) {
         this.afterExistencePartitionHookForTests = hook;
+    }
+
+    /**
+     * Test-only interleaving seam (RDR-222 Phase 0 fix round, bead nexus-ulrjq,
+     * finding 2): an optional callback invoked in {@link #upsertChunksInternal}
+     * immediately after {@link #resolveNeedEmbedIdx} returns — {@code insertIdx}
+     * and the original-absentee set are finalized, but embedding and the final
+     * INSERT have not run yet — so a test can force a chash resolved via the
+     * ZERO-ROW have-vector reroute (present at the existence SELECT, deleted
+     * before the have-vector UPDATE, self-healed into need-embed) to hit a REAL
+     * {@code ON CONFLICT} on the final INSERT below: recreate the row here, from
+     * a second connection, while this thread is paused. Proves the raced-embed
+     * count excludes that chash (it was never in the original-absentee set — see
+     * {@link NeedEmbedResolution}) even though its INSERT genuinely conflicts.
+     * No equivalent hook is needed for the content-divergent case: a
+     * content-divergent chash's final INSERT conflicts DETERMINISTICALLY (the
+     * chash already exists, by definition), no interleaving required.
+     *
+     * <p>Default {@code null} (no-op), same shape as {@link
+     * #afterExistencePartitionHookForTests}. Never read or written by
+     * production code.
+     */
+    private volatile Runnable afterNeedEmbedResolvedHookForTests;
+
+    /**
+     * Test-only: install (or clear with {@code null}) the post-need-embed-
+     * resolution pause hook — see {@link #afterNeedEmbedResolvedHookForTests}.
+     */
+    public void setAfterNeedEmbedResolvedHookForTests(Runnable hook) {
+        this.afterNeedEmbedResolvedHookForTests = hook;
     }
 
     /**
@@ -681,15 +715,22 @@ public final class PgVectorRepository {
         // short transaction) is FULLY handled there and excluded from insertIdx —
         // re-inserting it would be redundant: its vector is untouched, which is the
         // whole point of the optimization.
-        List<Integer> insertIdx = null;
+        NeedEmbedResolution resolution = null;
         if (dedupProvided == null && !dedupIds.isEmpty() && !forceReEmbed) {
             // RDR-181 (bead nexus-f0r8p.3): forceReEmbed bypasses the existence
             // check entirely — the rare model-drift-within-collection recompute,
             // and the escape for the (0%-hit) first-index path so it never pays
             // for the existence SELECT with no offsetting benefit.
-            insertIdx = resolveNeedEmbedIdx(tenant, collection, dim, dedupIds, dedupDocs, dedupMetas,
+            resolution = resolveNeedEmbedIdx(tenant, collection, dim, dedupIds, dedupDocs, dedupMetas,
                     deleteKeys);
         }
+        List<Integer> insertIdx = resolution != null ? resolution.needEmbedIdx() : null;
+        // RDR-222 Phase 0 (bead nexus-ulrjq): the original-absentee subset feeds the
+        // raced-embed count below. No partition ran (passthrough/forceReEmbed/empty
+        // batch) or it failed fail-safe — either way there is no absentee/present
+        // distinction to measure, so raced-embed counting is simply skipped for this
+        // call (empty set), never guessed at.
+        Set<Integer> originalAbsentIdx = resolution != null ? resolution.originalAbsentIdx() : Set.of();
         if (insertIdx == null) {
             // Passthrough, forceReEmbed, an empty batch, or the existence-check
             // transaction itself failing (fail-safe: a SELECT/UPDATE error must never
@@ -698,6 +739,13 @@ public final class PgVectorRepository {
             // exactly as today.
             insertIdx = new ArrayList<>(dedupIds.size());
             for (int i = 0; i < dedupIds.size(); i++) insertIdx.add(i);
+        }
+        // Test-only interleaving seam (RDR-222 Phase 0 fix round) — see
+        // afterNeedEmbedResolvedHookForTests javadoc. Fires AFTER insertIdx/
+        // originalAbsentIdx are finalized and BEFORE embedding. No-op in production.
+        Runnable needEmbedResolvedHook = afterNeedEmbedResolvedHookForTests;
+        if (needEmbedResolvedHook != null) {
+            needEmbedResolvedHook.run();
         }
         List<String> docsToEmbed = new ArrayList<>(insertIdx.size());
         for (int idx : insertIdx) docsToEmbed.add(dedupDocs.get(idx));
@@ -788,6 +836,15 @@ public final class PgVectorRepository {
         // identity fallback), so javac sees more than one assignment statement and
         // refuses to treat it as effectively final even though exactly one runs.
         final List<Integer> finalInsertIdx = insertIdx;
+        // RDR-222 Phase 0 (bead nexus-ulrjq): the chashes (not indices — finalInsertIdx's
+        // index space is dedupIds', which the RETURNING rows below cannot be matched
+        // against positionally without assuming Postgres preserves multi-row VALUES
+        // order, an implementation detail this does not rely on) that were ORIGINAL
+        // absentees per resolveNeedEmbedIdx's partition — see NeedEmbedResolution.
+        final Set<String> finalOriginalAbsentChashes = new HashSet<>();
+        for (int idx : originalAbsentIdx) {
+            finalOriginalAbsentChashes.add(dedupIds.get(idx));
+        }
         // RDR-181 (bead nexus-f0r8p.2): when the existence-partition resolved every
         // chash via the have-vector metadata-only UPDATE (a pure re-index-with-no-
         // content-change batch), finalInsertIdx is empty and there is NOTHING left to
@@ -797,7 +854,24 @@ public final class PgVectorRepository {
         // ChashVectorConcurrencyTest), an unconditional extra checkout per call is
         // real, avoidable contention.
         if (!finalInsertIdx.isEmpty()) {
+            // RDR-222 Phase 0: read/reset OUTSIDE the retry lambda so a value survives
+            // DeadlockRetry.run's return, but explicitly zeroed at the TOP of each
+            // attempt below — a retried attempt re-runs the INSERT from scratch (the
+            // prior attempt's transaction is already rolled back by Postgres), so its
+            // raced count must never accumulate onto a discarded attempt's count.
+            final AtomicLong racedThisWrite = new AtomicLong();
+            // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #1): a bounded
+            // sample of the raced chashes themselves, capped at 8 per event, so an
+            // operator can join afterward against catalog_document_chunks and tell
+            // a genuine cross-request retry race (single owner) apart from RDR-108
+            // shared chunk text landing from independent callers (multiple owners)
+            // — a decomposition aid, not a new counter. Same per-attempt reset
+            // discipline as racedThisWrite: a fresh list every attempt, read only
+            // after DeadlockRetry.run returns.
+            final List<String>[] racedChashSampleHolder = new List[]{List.of()};
             DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
+                racedThisWrite.set(0);
+                racedChashSampleHolder[0] = new ArrayList<>();
                 // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
                 // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
                 // round trips. The old per-row loop held this transaction's connection
@@ -855,9 +929,37 @@ public final class PgVectorRepository {
                       // from this statement's column list); this only needs stating for
                       // the conflict branch.
                       .set(ch.retention(), "full")
-                      .execute();
+                      // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): (xmax = 0) is the
+                      // standard Postgres RETURNING idiom for "this row was genuinely
+                      // INSERTed, not reached via the ON CONFLICT DO UPDATE branch" —
+                      // same DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)
+                      // form CatalogRepository#upsertLink already uses (RawSqlGateTest:
+                      // a typed dynamic-column reference, not a raw SQL string, so it
+                      // needs no SANCTIONED_STATEMENTS entry).
+                      .returningResult(ch.chash(), DSL.field(
+                          DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
+                      .fetch()
+                      .forEach(r -> {
+                          if (!Boolean.TRUE.equals(r.value2())
+                                  && finalOriginalAbsentChashes.contains(r.value1())) {
+                              racedThisWrite.incrementAndGet();
+                              if (racedChashSampleHolder[0].size() < 8) {
+                                  racedChashSampleHolder[0].add(r.value1());
+                              }
+                          }
+                      });
                 return null;
             }));
+            long raced = racedThisWrite.get();
+            if (raced > 0) {
+                // RDR-222 Phase 0: another writer committed one of THIS request's
+                // originally-absent chashes between the existence partition and this
+                // INSERT — this request paid a duplicate embed for it (RDR-181's
+                // existence-check-then-embed window, M-b).
+                log.info("event=upsert_embed_raced collection={} raced={} embedded={} raced_chashes={}",
+                        collection, raced, finalInsertIdx.size(), String.join(",", racedChashSampleHolder[0]));
+                RacedEmbedActivity.record(raced);
+            }
         }
         log.debug("event=upsert_chunks_done collection={} table={} count={} embedded={} metadata_only={}",
                 collection, table, dedupIds.size(), insertIdx.size(), embedSkipped);
@@ -1585,6 +1687,39 @@ public final class PgVectorRepository {
         return enrichGetEnvelope(tenant, envelope, includeSourceUri);
     }
 
+    /**
+     * The rows among {@code ids} physically stored in {@code collection}, in chash
+     * order, ignoring liveness: {@code {ids, metadatas}}, never content. RDR-192
+     * Step 5 amendment (nexus-wbfpw.10, Sam 2026-09-27: split inventory from
+     * liveness): every read that returns content uses live(c) ({@link
+     * #liveChunksCondition}), but a caller whose question is "is this chunk stored
+     * here, and what does its metadata say" (existing_ids: catalog verify, the
+     * migration ETL, skip-existing, the put_note_pieces delete guard; the manifest
+     * backfill's reverse lookup) must see a stored chunk whether or not it has a
+     * live owner. The where-scan reads offer the same with {@code includeNonLive}.
+     */
+    public Map<String, Object> presentRows(String tenant, String collection, List<String> ids) {
+        if (ids == null || ids.isEmpty()) {
+            return Map.of("ids", List.of(), "metadatas", List.of());
+        }
+        int dim = dimForCollection(tenant, collection);
+        DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
+        var rows = tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ch.chash(), ch.metadata())
+               .from(ch.table())
+               .where(ch.collection().eq(collection).and(ch.chash().in(ids)))
+               .orderBy(ch.chash().asc())
+               .fetch());
+        List<String> outIds = new ArrayList<>(rows.size());
+        List<Map<String, Object>> outMetas = new ArrayList<>(rows.size());
+        for (var rec : rows) {
+            outIds.add(rec.value1());
+            JSONB meta = rec.value2();
+            outMetas.add(fromJson(meta != null ? meta.data() : null));
+        }
+        return Map.of("ids", outIds, "metadatas", outMetas);
+    }
+
     /** Backward-compat 5-arg overload of {@link #get} (source_uri not included). */
     public Map<String, Object> get(String tenant, String collection,
                                    List<String> ids, int limit, int offset) {
@@ -1704,6 +1839,30 @@ public final class PgVectorRepository {
                                         Map<String, Object> where,
                                         int limit, int offset,
                                         boolean includeSourceUri) {
+        return getWhere(tenant, collection, where, limit, offset, includeSourceUri, false);
+    }
+
+    /**
+     * {@link #getWhere(String, String, Map, int, int, boolean)} with the RDR-192
+     * Step 5 amendment (nexus-wbfpw.10, Sam 2026-09-27: split inventory from
+     * liveness) physical-scan mode. {@code includeNonLive=true} answers "what is
+     * physically stored matching {@code where}", ignoring {@link
+     * #liveChunksCondition} entirely — the maintenance shape ({@code nx catalog
+     * reconcile} / {@code nx index}'s manifest self-heal, the legacy
+     * doc_id-keyed misclassified-chunk prune) that must see a chunk with no live
+     * own-collection manifest owner, exactly the population it exists to find.
+     *
+     * <p>Envelope under {@code includeNonLive=true} is {@code {ids, metadatas}}
+     * ONLY — never {@code documents} or embeddings, so a physical scan cannot be
+     * used to read content live(c) would otherwise hide. Enforced at the HTTP
+     * boundary ({@code VectorHandler}), not here: this method simply never
+     * selects {@code chunk_text} on that branch.
+     */
+    public Map<String, Object> getWhere(String tenant, String collection,
+                                        Map<String, Object> where,
+                                        int limit, int offset,
+                                        boolean includeSourceUri,
+                                        boolean includeNonLive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         org.jooq.Condition cond = ch.collection().eq(collection);
@@ -1713,6 +1872,25 @@ public final class PgVectorRepository {
             }
         }
         org.jooq.Condition finalCond = cond;
+
+        if (includeNonLive) {
+            var nonLiveResult = tenantScope.withTenant(tenant, ctx ->
+                ctx.select(ch.chash(), ch.metadata())
+                   .from(ch.table())
+                   .where(finalCond)
+                   .orderBy(ch.chash().asc())
+                   .limit(limit).offset(offset)
+                   .fetch());
+            List<String> nonLiveIds = new ArrayList<>(nonLiveResult.size());
+            List<Map<String, Object>> nonLiveMetas = new ArrayList<>(nonLiveResult.size());
+            for (var rec : nonLiveResult) {
+                nonLiveIds.add(rec.value1());
+                JSONB meta = rec.value2();
+                nonLiveMetas.add(fromJson(meta != null ? meta.data() : null));
+            }
+            return new LinkedHashMap<>(Map.of("ids", nonLiveIds, "metadatas", nonLiveMetas));
+        }
+
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(ch.chash(), ch.chunkText(), ch.metadata())
                .from(ch.table())
@@ -1790,6 +1968,23 @@ public final class PgVectorRepository {
      */
     public Map<String, Object> getAllMetadata(String tenant, String collection,
                                               Map<String, Object> where) {
+        return getAllMetadata(tenant, collection, where, false);
+    }
+
+    /**
+     * {@link #getAllMetadata(String, String, Map)} with the RDR-192 Step 5
+     * amendment (nexus-wbfpw.10, Sam 2026-09-27: split inventory from liveness)
+     * physical-scan mode. {@code includeNonLive=true} skips {@link
+     * #liveChunksCondition} — the {@code nx t3 gc} orphan-candidate listing and
+     * {@code --force}'s T3 orphan cleanup (RDR-192 amendment call sites) must
+     * enumerate every physically stored chunk matching {@code where}, owned or
+     * not; a manifest owner living elsewhere is exactly the "orphan" shape both
+     * exist to find. Ids + metadata only, unchanged either way — this method
+     * never returns {@code documents}.
+     */
+    public Map<String, Object> getAllMetadata(String tenant, String collection,
+                                              Map<String, Object> where,
+                                              boolean includeNonLive) {
         int dim = dimForCollection(tenant, collection);
         DimTables.ChunkTable ch = DimTables.CHUNKS.get(dim);
         int cap = getAllMetadataMaxRows;
@@ -1800,16 +1995,22 @@ public final class PgVectorRepository {
             }
         }
         org.jooq.Condition finalCond = cond;
-        var result = tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ch.chash(), ch.metadata())
+        var result = tenantScope.withTenant(tenant, ctx -> {
+            // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
+            // this staleness-cache-build read was structurally invisible to the
+            // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
+            // includeNonLive (nexus-wbfpw.10) deliberately skips this predicate —
+            // see the method javadoc.
+            org.jooq.Condition scanCond = includeNonLive
+                ? finalCond
+                : finalCond.and(liveChunksCondition(ctx, ch));
+            return ctx.select(ch.chash(), ch.metadata())
                .from(ch.table())
-               // nexus-8j1zx: exclude tombstoned docs' chunks (RDR-156 Decision 6);
-               // this staleness-cache-build read was structurally invisible to the
-               // nexus-3ck2g searchWithTokens/hybridSearch fix and its gate.
-               .where(finalCond.and(liveChunksCondition(ctx, ch)))
+               .where(scanCond)
                .orderBy(ch.chash().asc())
                .limit(cap + 1)
-               .fetch());
+               .fetch();
+        });
 
         if (result.size() > cap) {
             throw new IllegalStateException(
@@ -2491,7 +2692,8 @@ public final class PgVectorRepository {
             ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
                        COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE,
                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
-                       CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+                       CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
+                       COLLECTION_VECTOR_STATS.STORED_COUNT)
                .from(COLLECTION_VECTOR_STATS)
                .leftJoin(CATALOG_COLLECTIONS)
                .on(CATALOG_COLLECTIONS.TENANT_ID.eq(COLLECTION_VECTOR_STATS.TENANT_ID)
@@ -2505,6 +2707,11 @@ public final class PgVectorRepository {
             row.put("name",  rec.value1());
             row.put("dim",   rec.value2());
             row.put("count", rec.value3());
+            // RDR-192 Step 5 amendment (nexus-wbfpw.10): count is the live(c) count,
+            // stored_count every stored chunk, live or not. A row exists for every
+            // collection that physically holds chunks, so an inventory reader asks
+            // stored_count whether a collection is empty; a routing reader asks count.
+            row.put("stored_count", rec.value9());
             var lastWrite = rec.value4();
             if (lastWrite != null) {
                 row.put("last_write", lastWrite.toString());
@@ -2681,9 +2888,9 @@ public final class PgVectorRepository {
 -- the engine route (POST /v1/vectors/manifest-less-census,
 -- PgVectorRepository.MANIFEST_LESS_CENSUS_SQL) and this file execute the
 -- IDENTICAL text -- ManifestLessCensusSqlIdentityTest pins them equal, so
--- there is no second copy that can drift. No engine tag carries the route
--- until the rest of RDR-192 ships (Sam, 2026-09-26); until then, run this
--- file directly against production (psql), substituting each positional
+-- there is no second copy that can drift. engine-service-v0.1.133 and
+-- later carry the route; against an older engine, or to census without the
+-- engine, run this file directly (psql), substituting each positional
 -- placeholder below with its literal value in this exact order:
 --   1. tenant_id   (text)                -- live_notes scope
 --   2. collection  (text)                -- live_notes scope (physical_collection)
@@ -3359,6 +3566,57 @@ FROM scope s
     }
 
     /**
+     * One bounded restore batch (nexus-e8h5x), mirroring {@link
+     * #QuarantineBoundedOutcome} for the opposite direction. {@code remaining}
+     * is what is still eligible after this call COMMITTED, so the caller
+     * loops on it exactly as {@link #quarantineOrphansBounded} does.
+     */
+    public record RestoreBoundedOutcome(long restored, long remaining) {}
+
+    /**
+     * nexus-e8h5x: restore at most {@code rowLimit} re-referenced chunks per
+     * call, one transaction, one commit — mirrors {@link #quarantineOrphansBounded}
+     * for the opposite direction. {@link #restoreRereferenced} restores every
+     * eligible row in one unbounded transaction, which on a large quarantine
+     * collection (about 36,000 code__1-1 rows, 2026-09-16) has the same
+     * edge-deadline exposure catalog-037 fixed for the quarantine direction.
+     * The unbounded form stays for the indexer's small incremental restore;
+     * this is for draining a large quarantine collection under a deadline.
+     *
+     * <p>{@code rowLimit <= 0} is refused by the SQL function, not defaulted
+     * to unbounded — silently removing the bound would hand back the
+     * transaction this exists to prevent.
+     *
+     * <p>The statement bound is set HERE, as its own statement before the
+     * call ({@link PgSession#setGcRestoreBoundedBounds}), for the identical
+     * reason {@link #quarantineOrphansBounded} does: the function body's own
+     * {@code set_config('statement_timeout', ...)} cannot bound the
+     * statement already running it.
+     */
+    public RestoreBoundedOutcome restoreRereferencedBounded(String tenant, String quarantineCollection,
+                                                             String originCollection, int rowLimit) {
+        return restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit,
+                                          PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                          PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
+    }
+
+    /** Explicit-bound form, for tests that need a bound shorter than the default. */
+    public RestoreBoundedOutcome restoreRereferencedBounded(String tenant, String quarantineCollection,
+                                                             String originCollection, int rowLimit,
+                                                             int statementTimeoutMs, int lockTimeoutMs) {
+        int dim = dimForCollection(tenant, originCollection);
+        var rec = tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            return ctx.selectFrom(GC_RESTORE_REREFERENCED_BOUNDED.call(
+                    dim, tenant, quarantineCollection, originCollection, rowLimit))
+               .fetchOne();
+        });
+        long restored = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.RESTORED);
+        long remaining = rec.get(GC_RESTORE_REREFERENCED_BOUNDED.REMAINING);
+        return new RestoreBoundedOutcome(restored, remaining);
+    }
+
+    /**
      * RDR-191 Phase 1: hard-deletes quarantine rows past the grace window —
      * {@code chunk_quarantine.py}'s {@code expire_quarantine}, server-side.
      * Carries the nexus-mr89x safety floor verbatim (see the catalog-023
@@ -3752,6 +4010,21 @@ FROM scope s
     public record ExistencePartition(List<Integer> needEmbedIdx, List<Integer> haveVectorIdx) {}
 
     /**
+     * Result of {@link #resolveNeedEmbedIdx} (RDR-222 Phase 0, bead nexus-ulrjq):
+     * {@code needEmbedIdx} is the full finalized set this call will embed and write
+     * (original absentees, content-divergent have-vector chashes, and the zero-row
+     * have-vector reroute); {@code originalAbsentIdx} is the STRICT SUBSET that was
+     * absent at the existence SELECT (i.e. {@code partition.needEmbedIdx()} before
+     * the content-divergent/zero-row additions below mutate it). Only that subset
+     * feeds the raced-embed count on the final INSERT's {@code RETURNING} — a
+     * content-divergent or zero-row-reroute chash is EXPECTED to hit ON CONFLICT
+     * (the caller's own prior text/UPDATE already told it the row exists or existed
+     * moments ago), so counting it as "raced" would conflate an ordinary re-write
+     * with a genuine concurrent-writer collision.
+     */
+    private record NeedEmbedResolution(List<Integer> needEmbedIdx, Set<Integer> originalAbsentIdx) {}
+
+    /**
      * Pure partition of a chash batch into need-embed vs have-vector indices
      * (RDR-181), given the set of chashes {@link #selectExistingChashesOrEmpty}
      * found present. No DB dependency — deliberately kept separate from the
@@ -3823,13 +4096,14 @@ FROM scope s
      *
      * @return the finalized need-embed indices (original absentees, any have-vector
      *         chash whose stored text differs from the incoming text, plus any
-     *         have-vector chash whose metadata-only UPDATE affected 0 rows), or
-     *         {@code null} if the existence-check transaction itself failed —
-     *         fail-safe: the caller must treat {@code null} exactly like "skip the
-     *         optimization, embed everything" (today's behavior), never as "nothing
-     *         needs embedding"
+     *         have-vector chash whose metadata-only UPDATE affected 0 rows), paired
+     *         with the ORIGINAL-absentee subset alone (RDR-222 Phase 0, bead
+     *         nexus-ulrjq — see {@link NeedEmbedResolution}), or {@code null} if the
+     *         existence-check transaction itself failed — fail-safe: the caller must
+     *         treat {@code null} exactly like "skip the optimization, embed
+     *         everything" (today's behavior), never as "nothing needs embedding"
      */
-    private List<Integer> resolveNeedEmbedIdx(String tenant, String collection, int dim,
+    private NeedEmbedResolution resolveNeedEmbedIdx(String tenant, String collection, int dim,
                                                List<String> dedupIds,
                                                List<String> dedupDocs,
                                                List<Map<String, Object>> dedupMetas,
@@ -3864,6 +4138,11 @@ FROM scope s
                 // the reroute step ("if 0 rows, move that chash into need-embed") is a
                 // mutation partition.needEmbedIdx() cannot express directly.
                 List<Integer> needEmbedIdx = new ArrayList<>(partition.needEmbedIdx());
+                // RDR-222 Phase 0 (bead nexus-ulrjq): snapshot the ORIGINAL absentee
+                // set before the content-divergent/zero-row reroutes below mutate
+                // needEmbedIdx further — see NeedEmbedResolution's javadoc for why
+                // only this subset counts toward the raced-embed counter.
+                Set<Integer> originalAbsentIdx = new HashSet<>(partition.needEmbedIdx());
                 // nexus-6yps0: split have-vector into "content-divergent" (routed
                 // straight to need-embed below, exactly as before — no UPDATE issued;
                 // the insert path rewrites chunk_text/embedding/metadata together) vs
@@ -3897,7 +4176,7 @@ FROM scope s
                 needEmbedIdx.addAll(
                     batchUpdateMetadata(ctx, ch, collection, dedupIds, dedupMetas, unchangedIdx,
                             deleteKeys == null ? List.of() : deleteKeys));
-                return needEmbedIdx;
+                return new NeedEmbedResolution(needEmbedIdx, originalAbsentIdx);
             });
         } catch (RuntimeException e) {
             log.warn("event=existence_partition_failed collection={} count={} fail_safe=embed_all err={}",
@@ -4146,110 +4425,33 @@ FROM scope s
     }
 
     /**
-     * Typed-jOOQ live_chunks condition (nexus-8j1zx, found during nexus-3ck2g's round-1
-     * substantive critique): a chunk row is live iff it carries NO manifest row at all (a
-     * manifest-less MCP/{@code store_put} note chunk, RDR-145) OR at least one manifest row
-     * whose owning document is not tombstoned — expressed as a typed
-     * {@link org.jooq.Condition} against {@code ch}'s own tenant/chash fields, for the four
-     * get-family reads ({@link #get}, {@link #getWhere}, {@link #getEmbeddings},
-     * {@link #getAllMetadata}) that go through {@link DimTables.ChunkTable}. This is the
-     * SAME dead-set live-chunk semantics {@code plain_search_<dim>}/
-     * {@code text_gated_search_<dim>}'s own inlined SQL predicate carries (vectors-009/010
-     * — nexus-zrcj7 retired this class's former literal-SQL-text twin, {@code
-     * liveChunksPredicate(String alias)}, along with searchWithTokens/hybridSearch's raw
-     * SQL that used it) — the get-family reads here go through a DIFFERENT typed jOOQ path
-     * ({@link DimTables.ChunkTable} rather than a generated function table), so they still
-     * need this Java-side condition; nothing else about this method changed.
+     * Typed-jOOQ live(c) condition for the get-family reads ({@link #get},
+     * {@link #getWhere}, {@link #getEmbeddings}, {@link #getAllMetadata}, {@link #list}):
+     * a chunk row is live iff it has at least one live owner in its OWN collection,
+     * {@code EXISTS (SELECT 1 FROM nexus.chunk_live_owners(tenant, collection, chash))}
+     * (RDR-192 Step 4, vectors-018; wired here by Step 5, nexus-wbfpw.10). The search
+     * functions ({@code plain_search_<dim>}, {@code text_gated_search_*_<dim>},
+     * {@code search_topic_scoped_<dim>}) and {@code nexus.live_chunks} call the same
+     * function (vectors-019), so every read path shares one definition of liveness.
      *
-     * <p>Both {@code CATALOG_DOCUMENT_CHUNKS.CHASH} and {@code ch.chash()} are hex-carried
-     * via {@link ChashHex} (bytea columns, RDR-180), so the comparison is the same
-     * converted-type equality {@code CatalogRepository.strandedChunkCount} uses.
+     * <p>A chunk with no manifest row in its own collection is NOT live. The dead-set
+     * form this replaces (nexus-msz9i, collection-scoped by GH #1546 / nexus-ky9ps)
+     * hid a chunk only when an owning tombstoned row existed, so a manifest-less chunk
+     * stayed visible (RDR-192 Gap 1).
      *
-     * <p>Subqueries use {@code ctx.selectOne()} — mirrors {@link
-     * dev.nexus.service.db.CatalogRepository}'s {@code strandedChunkCount}/{@code
-     * hasLiveManifest} helper — which is deliberately OUTSIDE {@code
-     * TombstoneFilterGateTest}'s general {@code CATALOG_DOCUMENTS}/{@code
-     * CATALOG_DOCUMENT_CHUNKS} statement scan (keyed off {@code .select(}/{@code
-     * .selectFrom(}/{@code .selectCount(}/{@code .selectDistinct(}, never {@code
-     * .selectOne(}). This predicate is instead policed by the gate's dedicated {@code
-     * scanTypedChunksSites} check, which requires every named get-family method to call
-     * this helper by name.
+     * <p>{@code chunk_live_owners} is a set-returning {@code LANGUAGE sql STABLE
+     * SECURITY INVOKER} function, so the planner inlines it into a semi-join with a
+     * per-candidate index probe on {@code catalog_document_chunks}; its changeset
+     * header carries the EXPLAIN evidence. The chash argument is the raw
+     * {@code bytea} column, never its hex rendering, so the probe stays on the index.
      *
-     * <p><strong>RDR-191 Phase 4 (nexus-o8dil.16/.18): deliberately UNCHANGED</strong> —
-     * the {@code ch} parameter's {@link DimTables.ChunkTable#tenantId()}/
-     * {@link DimTables.ChunkTable#chash()} accessors already resolve against whichever
-     * table {@code ch} was built from ({@code nexus.chunks} post-repoint), so this
-     * condition needed no edit for the unification; only the caller's
-     * {@code DimTables.CHUNKS.get(dim)} lookup (D1's scope) determines which table/columns
-     * {@code ch} carries.
-     *
-     * <p><strong>GH #1546 (nexus-ky9ps):</strong> both manifest matches below are now
-     * scoped to {@code ch}'s OWN collection ({@code
-     * CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection())} on the outer join, {@code
-     * m2.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION)} on the inner {@code
-     * noLiveParent} re-check) — mirroring the identical fix applied to {@code
-     * plain_search_<dim>}/{@code text_gated_search_<dim>}'s own inlined SQL (vectors-
-     * 017-1) and {@code nexus.purge_trash} (vectors-017-3). Before this fix, a chash
-     * shared by a chunk row in THIS collection (whose only manifest row here points at a
-     * tombstoned document) and an identical chash under a LIVE document in a completely
-     * DIFFERENT collection would resolve {@code noLiveParent} to {@code false} — the
-     * live manifest row elsewhere satisfied it regardless of collection — so this
-     * predicate never fired and the tombstoned-in-THIS-collection chunk stayed visible
-     * to the get-family reads forever.
+     * <p>{@code TombstoneFilterGateTest.scanTypedChunksSites} requires every named
+     * get-family method to call this helper by name; keep the name.
      */
     private static org.jooq.Condition liveChunksCondition(DSLContext ctx, DimTables.ChunkTable ch) {
-        // nexus-msz9i: the DEAD-SET form, the typed twin of the same rewrite
-        // plain_search_<dim>/text_gated_search_<dim>'s own inlined SQL predicate
-        // carries (vectors-009/010). See vectors-009's changeset header for the full
-        // derivation and the
-        // FK-dependent equivalence argument (fk_catalog_chunks_catalog_doc, validated,
-        // makes a manifest row with no owning document impossible — the single input on
-        // which this form and the old one disagree).
-        //
-        // WHY THIS PATH MATTERED MORE, NOT LESS, THAN hybridSearch. The old shape
-        // (hasManifest.not().or(hasLiveManifest)) made PostgreSQL build two hashed
-        // SubPlans that seq-scan the ENTIRE catalog_document_chunks manifest — a cost
-        // FIXED per query and independent of how few rows the caller asked for. That tax
-        // is a rounding error on a ~1.4s hybrid query but it IS the whole cost of a cheap
-        // point lookup. Measured on the msz9i fixture (76k chunks / 57k manifest rows) by
-        // EXPLAIN (ANALYZE, BUFFERS) of the jOOQ-RENDERED production SQL — each shape
-        // against its own run's no-filter baseline:
-        //     OLD shape: get()  200 ids  0.270 ms -> 27.329 ms (101x), buffers 723 -> 2,715
-        //                list() 100 rows 0.037 ms -> 27.331 ms (739x), buffers 125 -> 2,121
-        //     THIS form: get()  200 ids  0.080 ms ->  0.917 ms, list() 0.037 ms -> 1.059 ms
-        // i.e. ~30x and ~26x faster than the old shape respectively. The planner drives this
-        // form as a Nested Loop Anti Join with per-candidate index probes (loops = rows
-        // actually fetched, not the manifest) — the per-candidate indexed lookup this filter
-        // was always meant to be.
-        //
-        // The aliases below (lcc_m2 / lcc_d2) exist so the inner NOT EXISTS can correlate on
-        // the OUTER subquery's chash without shadowing it. Their presence is load-bearing:
-        // an earlier probe that spliced an UNALIASED raw-SQL dead-set into the rendered
-        // list() query measured only 27.3 -> 25.1 ms, because the planner built the dead set
-        // with a manifest-wide hash join instead of per-candidate probes. The typed form
-        // below does not reproduce that; do not "simplify" the aliasing without re-running
-        // the plan probe.
-        var m2 = CATALOG_DOCUMENT_CHUNKS.as("lcc_m2");
-        var d2 = CATALOG_DOCUMENTS.as("lcc_d2");
-        org.jooq.Condition noLiveParent = DSL.notExists(
-            ctx.selectOne().from(m2)
-               .join(d2)
-                 .on(d2.TENANT_ID.eq(m2.TENANT_ID)
-                     .and(d2.TUMBLER.eq(m2.DOC_ID)))
-               .where(m2.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                      .and(m2.COLLECTION.eq(CATALOG_DOCUMENT_CHUNKS.COLLECTION))
-                      .and(ChashHex.hex(m2.CHASH).eq(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH)))
-                      .and(d2.DELETED_AT.isNull())));
-        return DSL.notExists(
-            ctx.selectOne().from(CATALOG_DOCUMENT_CHUNKS)
-               .join(CATALOG_DOCUMENTS)
-                 .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                     .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
-               .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(ch.tenantId())
-                      .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(ch.collection()))
-                      .and(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH).eq(ch.chash()))
-                      .and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull())
-                      .and(noLiveParent)));
+        Field<byte[]> rawChash = ch.table().field("chash", byte[].class);
+        return DSL.exists(ctx.selectOne().from(
+            CHUNK_LIVE_OWNERS.call(ch.tenantId(), ch.collection(), rawChash)));
     }
 
     /** Strip NUL (0x00) — unstorable in Postgres {@code text}/{@code jsonb} (nexus-rvfwj). */

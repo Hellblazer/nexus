@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import fnmatch
 import hashlib
 import sys
 from collections.abc import Callable
@@ -236,6 +237,210 @@ def info_cmd(name: str) -> None:
     click.echo(f"Indexed:     {last_indexed}")
 
 
+def _require_docs_collection(row: dict, name: str) -> None:
+    """Refuse a non-``docs__`` collection (round-2 critic decision item 4):
+    ``aspects_enabled`` only ever gates the docs__ prose-extraction path
+    (``knowledge__``/``rdr__`` are always extracted; other prefixes are
+    never extracted at all), so setting or even showing it on anything
+    else is a no-op dressed up as a real setting."""
+    content_type = row.get("content_type")
+    if content_type != "docs":
+        raise click.ClickException(
+            f"{name!r} is not a docs__ collection (content_type={content_type!r}); "
+            "aspects_enabled only applies to docs__ collections"
+        )
+
+
+@collection.command("aspects")
+@click.argument("name", required=False, default=None)
+@click.option(
+    "--enable/--disable", "enable", default=None,
+    help="Opt this docs__ collection in to (or out of) engine-side aspect "
+         "extraction, tenant-wide. Omit to show the current value.",
+)
+@click.option(
+    "--from-config", "from_config", is_flag=True, default=False,
+    help="Sync every registered docs__ collection matching this machine's "
+         "local aspects.docs_collections onto the engine (sets "
+         "aspects_enabled=True there). Cannot be combined with NAME or "
+         "--enable/--disable.",
+)
+@click.option(
+    "--dry-run", "dry_run", is_flag=True, default=False,
+    help="With --from-config, report what would change without writing.",
+)
+@click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
+def aspects_cmd(
+    name: str | None, enable: bool | None, from_config: bool, dry_run: bool, yes: bool,
+) -> None:
+    """Show or set a collection's engine-side ``aspects_enabled`` attribute.
+
+    nexus-l46pu (follow-up to nexus-kk4ut): the tenant-wide, engine-hosted
+    home for the docs__ aspect-extraction opt-in, read by every machine
+    indexing this collection. Round-2 critic decision (T2 critique-nexus-
+    l46pu-tenant-wide-aspects-enabled item 1): the ENGINE IS AUTHORITATIVE
+    once it carries an opinion — a local ``aspects.docs_collections``
+    config.yml entry is consulted only as a fallback for an engine that has
+    none yet (see ``nexus.aspect_extractor.docs_collection_opted_in``).
+    ``--from-config`` is the migration path off the local-only list.
+
+    Bare ``nx collection aspects NAME`` shows the current value;
+    ``--enable``/``--disable`` sets it, tenant-wide, for every machine —
+    each write prompts for confirmation unless ``--yes``/``-y`` is given.
+    """
+    if from_config:
+        if name is not None or enable is not None:
+            raise click.ClickException(
+                "--from-config cannot be combined with NAME or --enable/--disable"
+            )
+        _aspects_from_config(dry_run=dry_run, yes=yes)
+        return
+    if name is None:
+        raise click.ClickException("NAME is required unless --from-config is given")
+
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reader = make_catalog_reader()
+    row = reader.get_collection(name) if reader is not None else None
+    if row is None:
+        raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
+    _require_docs_collection(row, name)
+
+    if enable is None:
+        current = row.get("aspects_enabled")
+        if current is None:
+            # round-2 fix round item 5a: "no opinion" now covers both an old
+            # engine (never sends the key) AND an untouched row on a current
+            # one (catalog-040's column is nullable, no default) — the two
+            # are deliberately indistinguishable, and both fall back to the
+            # SAME local answer, so show what that fallback actually
+            # resolves to instead of leaving the operator to check it by hand.
+            from nexus.aspect_extractor import docs_collection_opted_in  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+            local_answer = docs_collection_opted_in(name)
+            click.echo(
+                f"{name}: aspects_enabled has no opinion on this engine yet "
+                "(never set, or an engine older than nexus-l46pu) — falling "
+                f"back to local config.yml, which resolves to {local_answer} "
+                "for this machine"
+            )
+        else:
+            click.echo(f"{name}: aspects_enabled={bool(current)}")
+        return
+
+    # nexus-l46pu round-2 item 3: state the blast radius and the cost at
+    # EXECUTION time, not only in --help — this is a tenant-wide setting
+    # (every machine indexing this collection agrees the instant it lands),
+    # and enabling it means an LLM call per changed prose document from now on.
+    click.echo(
+        f"Setting aspects_enabled={enable} for {name!r} on the ENGINE — "
+        "tenant-wide: every machine indexing this collection will see this "
+        "value." + (
+            " Prose documents will cost an LLM call each time they change."
+            if enable else
+            " No further extraction after this; existing document_aspects "
+            "rows are left in place (see: nx enrich delete)."
+        )
+    )
+    if not yes:
+        click.confirm(f"Set aspects_enabled={enable} for {name!r} on the engine?", abort=True)
+
+    writer = make_catalog_writer()
+    updated = writer.set_collection_aspects_enabled(name, enable)
+    if not updated:
+        raise click.ClickException(f"collection not found: {name!r}")
+
+    from nexus.aspect_extractor import invalidate_engine_aspects_enabled_cache  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    invalidate_engine_aspects_enabled_cache(name)
+    _log.info("collection_aspects_enabled_set", collection=name, aspects_enabled=enable, tenant_wide=True)
+    click.echo(f"{name}: aspects_enabled={enable}")
+
+
+def _aspects_from_config(*, dry_run: bool, yes: bool = False) -> None:
+    """``nx collection aspects --from-config`` (round-2 critic item 1a):
+    sync every registered docs__ collection this machine's LOCAL
+    ``aspects.docs_collections`` list matches onto the engine's
+    ``aspects_enabled`` attribute, so the engine becomes authoritative for
+    it (see ``docs_collection_opted_in``'s new precedence) instead of the
+    decision living only in this machine's config.yml.
+
+    Never turns a collection OFF (a local list is opt-IN only, by
+    construction; there is nothing in it that means "disable"). Prints
+    what it changed (or would change, under ``--dry-run``) and nothing
+    when the local list is empty or matches nothing registered.
+
+    ``yes``: skip the confirmation prompt (round-2 fix round item 4,
+    blast-radius confirmation). Prompted once for the whole batch, not once
+    per collection — this is one operator decision ("sync everything my
+    local list already opted in"), not N independent ones. Never prompts
+    under ``--dry-run`` (nothing is written) or when nothing would change.
+    """
+    from nexus.aspect_extractor import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        _docs_opt_in_patterns,
+        invalidate_engine_aspects_enabled_cache,
+    )
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    patterns = _docs_opt_in_patterns()
+    if not patterns:
+        click.echo("aspects.docs_collections is empty on this machine; nothing to sync.")
+        return
+
+    reader = make_catalog_reader()
+    rows = reader.list_collections() if reader is not None else []
+    matched = [
+        r for r in rows
+        if r.get("content_type") == "docs"
+        and any(fnmatch.fnmatchcase(r["name"], p) for p in patterns)
+    ]
+    if not matched:
+        click.echo(
+            "No registered docs__ collection matches this machine's "
+            "aspects.docs_collections."
+        )
+        return
+
+    to_change = [r for r in matched if r.get("aspects_enabled") is not True]
+    if not dry_run and to_change and not yes:
+        # Name what will change before asking (round-3 critique): a bare
+        # count gives the operator nothing to check against.
+        for r in to_change[:20]:
+            click.echo(f"  will enable: {r['name']}")
+        if len(to_change) > 20:
+            click.echo(f"  ... and {len(to_change) - 20} more")
+        click.confirm(
+            f"Set aspects_enabled=True on the ENGINE for {len(to_change)} "
+            "docs__ collection(s), tenant-wide — every machine indexing "
+            "them will see this, and prose documents will cost an LLM call "
+            "each time they change. Proceed?",
+            abort=True,
+        )
+
+    # nexus-l46pu round-2 fix round item 5b: hoisted out of the loop — a
+    # lightweight proxy over a shared handle, not a new connection per row.
+    writer = make_catalog_writer()
+
+    changed = 0
+    for row in matched:
+        name = row["name"]
+        if row.get("aspects_enabled") is True:
+            click.echo(f"{name}: already aspects_enabled=True on the engine (no change)")
+            continue
+        if dry_run:
+            click.echo(f"{name}: would set aspects_enabled=True (dry run)")
+            changed += 1
+            continue
+        writer.set_collection_aspects_enabled(name, True)
+        invalidate_engine_aspects_enabled_cache(name)
+        _log.info("collection_aspects_enabled_set", collection=name, aspects_enabled=True, tenant_wide=True, source="from_config")
+        click.echo(f"{name}: aspects_enabled=True")
+        changed += 1
+
+    click.echo(
+        f"{'Would change' if dry_run else 'Changed'} {changed} of "
+        f"{len(matched)} matching collection(s)."
+    )
+
+
 @collection.command("delete")
 @click.argument("name")
 @click.option("--yes", "-y", "--confirm", is_flag=True, help="Skip interactive confirmation prompt")
@@ -431,7 +636,9 @@ def _find_dimension_mismatched_collections(
                 "declared_model": token,
                 "declared_dim": declared_dim,
                 "active_dim": active_dim,
-                "count": c.get("count", 0),
+                # RDR-192 Step 5 amendment: prune deletes every stored chunk,
+                # so the count shown before it is the stored count.
+                "count": c.get("stored_count", c.get("count", 0)),
             })
     return mismatches, skipped, active_label
 

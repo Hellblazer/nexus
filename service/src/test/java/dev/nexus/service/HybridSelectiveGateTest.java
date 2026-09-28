@@ -148,6 +148,13 @@ class HybridSelectiveGateTest {
             PgContainerHelper.insertCollection(DSL.using(su0, SQLDialect.POSTGRES), TENANT, COLL);
         }
         repo.upsertChunks(TENANT, COLL, ids, texts, metas);
+        // RDR-192 Step 5 (nexus-wbfpw.10): hybridSearch moved onto live(c) -- own
+        // every row (filler included: the gate's exclusion of the filler is the
+        // property under test, not a manifest gap).
+        tenantScope.withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, COLL, ids.toArray(new String[0]));
+            return null;
+        });
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);

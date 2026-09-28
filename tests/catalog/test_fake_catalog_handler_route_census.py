@@ -206,6 +206,18 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "entirely; delete_collection() is unit-tested against a mocked "
         "_post, not the live fake server"
     ),
+    "/collections/set_aspects_enabled": (
+        "nexus-l46pu: backs HttpCatalogClient.set_collection_aspects_enabled(), "
+        "a _SERVICE_ONLY_WRITE_OPS entry (src/nexus/catalog/factory.py) with "
+        "no canonical Catalog/CatalogWriter counterpart — the tenant-wide "
+        "docs__ aspect-extraction opt-in on catalog_collections did not exist "
+        "before this bead, same disposition as update_many/delete_many above. "
+        "Round-tripped end to end against the REAL engine substrate in "
+        "tests/test_collection_aspects_cmd.py (no catalog mocking, per that "
+        "file's own docstring), not this harness's fake server; the wire "
+        "shape (400/404 mapping, the docs-only content_type guard) is pinned "
+        "Java-side by CatalogHandlerSetAspectsEnabledTest"
+    ),
     "/update_many": (
         "HttpCatalogClient-only batch optimization (nexus-xedhp) with no "
         "Catalog equivalent method, so it is outside the shared-surface "
@@ -259,6 +271,19 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
     "/manifest/resync": (
         "backs HttpCatalogClient.resync_chunk_count_cache() via raw _post "
         "— unit-tested against a mocked _post, not the live fake server"
+    ),
+    "/list_by_file_paths": (
+        "nexus-1vc0n: backs HttpCatalogClient.find_all_by_file_paths(), which "
+        "IS on the shared Catalog/HttpCatalogClient surface (catalog_protocol.py) "
+        "— but its owner-agnostic batch semantics (N paths -> live docs across "
+        "every owner, feeding indexer._catalog_hook's announce_cross_owner_mint "
+        "at O(1) round trips per page instead of the O(N) a per-document lookup "
+        "would cost) are round-tripped against the REAL engine substrate in "
+        "tests/catalog/test_1vc0n_bulk_file_path_lookup.py, not this harness's "
+        "fake server. The one-shot 404-engine-floor warning "
+        "(_find_all_by_file_paths_404_warned) and the per-page batching are "
+        "exercised there; a FakeCatalogHandler branch would need to fabricate "
+        "multi-owner resolution the fake's single-tenant model does not carry"
     ),
     "/owners/sweep_next_seq_drift": (
         "admin one-shot converge verb (nexus-0ehwe item 5, engine commit "

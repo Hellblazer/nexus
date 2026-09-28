@@ -490,7 +490,12 @@ def test_on_conflict_idempotency(
         "ON CONFLICT DO UPDATE produced a duplicate instead of updating the row."
     )
 
-    # Metadata refresh: the stored chunk must now carry v2 metadata
+    # Metadata refresh: the stored chunk must now carry v2 metadata. Give it a
+    # live owner first: since RDR-192 Step 5 (nexus-wbfpw.10) get_by_id returns
+    # only chunks with a live own-collection owner, and this test writes none.
+    from tests._catalog_fixture_ops import give_chunks_a_live_owner
+
+    give_chunks_a_live_owner(coll, ids)
     entry = client.get_by_id(coll, ids[0])
     assert entry is not None, "get_by_id returned None for a just-upserted chunk"
     # The content field carries the chunk text (flat T3Database shape)
@@ -566,6 +571,11 @@ def test_nul_bytes_sanitized_server_side(
     found = client.existing_ids(coll, [chunk_id])
     assert found == {chunk_id}, "NUL-bearing chunk was not stored under its chash"
 
+    # get_by_id returns only chunks with a live own-collection owner (RDR-192
+    # Step 5, nexus-wbfpw.10); this test writes none, so give it one.
+    from tests._catalog_fixture_ops import give_chunks_a_live_owner
+
+    give_chunks_a_live_owner(coll, [chunk_id])
     entry = client.get_by_id(coll, chunk_id)
     assert entry is not None, "get_by_id returned None for the NUL-sanitized chunk"
     stored = entry.get("content", "")

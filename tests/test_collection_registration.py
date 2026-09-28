@@ -210,6 +210,44 @@ def test_registers_once_then_caches(monkeypatch: pytest.MonkeyPatch) -> None:
     writer.close.assert_called_once()
 
 
+def test_a_quarantine_sibling_is_never_registered_by_the_client(
+    monkeypatch: pytest.MonkeyPatch, cloud_mode: None,
+) -> None:
+    """nexus-ny7j4: ``nx collection re-embed`` on a quarantine sibling died
+    in this funnel deriving registration fields from a name whose first
+    segment is ``quarantine-code``, not a content type. The engine's GC
+    function registers the sibling from the origin's row; the client
+    skips it and never calls the registrar. cloud_mode because the names
+    carry voyage tokens (the RDR-109 mode lint)."""
+    writer = _fake_writer()
+    name = "quarantine-code__1-41__voyage-code-3__v1"
+
+    with pytest.raises(ValueError, match="unknown content_type 'quarantine-code'"):
+        collection_registration_kwargs(name)  # the derivation itself still refuses
+    ensure_collection_registered(name, registrar=lambda: writer)  # the funnel does not reach it
+
+    writer.register_collection.assert_not_called()
+    assert name not in corpus._REGISTERED_COLLECTIONS
+
+
+def test_a_quarantine_sibling_write_that_422s_names_the_reason_instead_of_retrying(cloud_mode: None) -> None:
+    """A stale-registration 422 on a quarantine sibling is not retried:
+    the client cannot register a sibling, so the retry could only fail
+    the same way. The error names that, with the engine's 422 chained."""
+    writer = _fake_writer()
+    name = "quarantine-docs__1-7__voyage-context-3__v1"
+    resp = httpx.Response(422, text="collection quarantine-docs__1-7__voyage-context-3__v1 is not registered",
+                          request=httpx.Request("POST", "http://x"))
+    write_fn = MagicMock(side_effect=httpx.HTTPStatusError("422", request=resp.request, response=resp))
+
+    with pytest.raises(corpus.QuarantineSiblingNotRegisteredError, match="never registers a quarantine sibling") as info:
+        write_with_registration_retry(name, write_fn, registrar=lambda: writer)
+
+    assert isinstance(info.value.__cause__, httpx.HTTPStatusError)
+    assert write_fn.call_count == 1
+    writer.register_collection.assert_not_called()
+
+
 def test_registrar_receives_the_derived_kwargs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -763,9 +801,11 @@ class TestEnsureCollectionRegisteredExplicitKwargsOverride:
         one of the canonical types cannot derive an embedding model under
         cloud mode and raises ValueError -- why a caller holding the real
         fields passes them instead of letting the name be parsed
-        (nexus-ft04v.28 C1 was this failure, swallowed)."""
+        (nexus-ft04v.28 C1 was this failure, swallowed). The example is
+        a made-up type, not a quarantine sibling: that name is now the
+        one shape this funnel skips without deriving (nexus-ny7j4)."""
         with pytest.raises(ValueError, match="unknown content_type"):
-            ensure_collection_registered("quarantine-code__myrepo__voyage-code-3__v1")
+            ensure_collection_registered("scratch__myrepo__voyage-code-3__v1")
 
 
 class TestEnsureCollectionRegisteredInvalidatesCollectionsCache:
@@ -878,16 +918,18 @@ class TestRegisterCollectionCallSitesRouteThroughTheSeam:
     #: nexus-ft04v.28's scope. A NEW entry here requires a documented
     #: reason, same discipline as every other census allowlist in this
     #: suite (tests/test_collection_name_parse_census.py's own doctrine).
+    #:
+    #: nexus-aotql (2026-09-27, review round 2) removed the last two
+    #: entries this allowlist ever carried, ``src/nexus/indexer.py``
+    #: (``_migrate_legacy_collections``'s post-rename registration) and
+    #: ``src/nexus/commands/catalog_cmds/migration.py``
+    #: (``migrate_fallback_cmd``'s registration loop) -- both routed
+    #: through ``ensure_collection_registered`` now, with the same
+    #: explicit kwargs they derived before. THIS is the census the bead
+    #: meant: it now pins the FULL consolidation (empty allowlist bar the
+    #: one string-literal exception below), not just the four sites
+    #: nexus-ft04v.29 originally named.
     _ACCEPTED_NON_SEAM_SITES = frozenset({
-        # indexer.py:792/800 -- RDR-103 Phase 4 migration rename-cascade:
-        # best-effort, non-fatal registration immediately after a
-        # legacy->conformant data-plane rename, inside its own dedicated
-        # try/except (phase4_register_collection_failed_after_rename).
-        # Not one of the four sites nexus-ft04v.29's finding named.
-        "src/nexus/indexer.py",
-        # commands/catalog_cmds/migration.py:190 -- legacy migration
-        # command, not one of the four named sites.
-        "src/nexus/commands/catalog_cmds/migration.py",
         # commands/catalog_cmds/doctor.py:454 -- a STRING inside an
         # error-message remediation suggestion
         # ("w.register_collection('<TARGET>'); ..."), never a real call;
@@ -932,3 +974,17 @@ class TestRegisterCollectionCallSitesRouteThroughTheSeam:
             "src/nexus/commands/index.py",
         }
         assert not (named_before_the_fix & self._ACCEPTED_NON_SEAM_SITES)
+
+    def test_the_last_two_sites_are_gone_from_the_offender_set(self) -> None:
+        """Non-vacuity for nexus-aotql's OWN consolidation (review round
+        2): ``indexer.py`` and ``commands/catalog_cmds/migration.py``
+        used to sit in ``_ACCEPTED_NON_SEAM_SITES`` as reviewed-accepted
+        bypasses -- this pin fails loud if either is ever re-added there
+        (a regression re-introducing the bypass, or the allowlist
+        drifting stale again the way it did for these exact two entries
+        between the nexus-ft04v.28 and nexus-aotql fix rounds)."""
+        closed_by_aotql = {
+            "src/nexus/indexer.py",
+            "src/nexus/commands/catalog_cmds/migration.py",
+        }
+        assert not (closed_by_aotql & self._ACCEPTED_NON_SEAM_SITES)

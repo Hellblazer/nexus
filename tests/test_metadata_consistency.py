@@ -66,7 +66,7 @@ def test_factory_emits_full_keyset_for_code() -> None:
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-code-3",
+        embedding_model="model-code",
     )
     expected = _expected_keys_for_content_type("code")
     assert set(meta.keys()) >= expected, (
@@ -80,7 +80,7 @@ def test_factory_emits_full_keyset_for_pdf() -> None:
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-context-3",
+        embedding_model="model-ctx",
     )
     expected = _expected_keys_for_content_type("pdf")
     assert set(meta.keys()) >= expected, (
@@ -94,7 +94,7 @@ def test_factory_emits_full_keyset_for_markdown() -> None:
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-context-3",
+        embedding_model="model-ctx",
     )
     expected = _expected_keys_for_content_type("markdown")
     assert set(meta.keys()) >= expected, (
@@ -108,7 +108,7 @@ def test_factory_emits_full_keyset_for_prose() -> None:
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-context-3",
+        embedding_model="model-ctx",
     )
     expected = _expected_keys_for_content_type("prose")
     assert set(meta.keys()) >= expected, (
@@ -123,7 +123,7 @@ def test_factory_drops_bib_when_empty() -> None:
         content_type="pdf",
         chunk_text_hash="a"*64, content_hash="b"*64,
         indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-context-3",
+        embedding_model="model-ctx",
     )
     for k in ("bib_year", "bib_authors", "bib_venue", "bib_citation_count"):
         assert k not in meta
@@ -135,7 +135,7 @@ def test_factory_keeps_bib_when_populated() -> None:
         content_type="pdf",
         chunk_text_hash="a"*64, content_hash="b"*64,
         indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-context-3",
+        embedding_model="model-ctx",
         bib_year=2026,
     )
     assert meta["bib_year"] == 2026
@@ -213,7 +213,7 @@ def test_pdf_indexer_emits_full_keyset(tmp_repo: Path) -> None:
 
     from nexus.doc_indexer import _pdf_chunks
     prepared = _pdf_chunks(
-        pdf, content_hash="x" * 64, target_model="voyage-context-3",
+        pdf, content_hash="x" * 64, target_model="model-ctx",
         now_iso="2026-04-26T00:00:00+00:00", corpus="test",
     )
     assert prepared, "fixture PDF should produce at least one chunk"
@@ -252,10 +252,12 @@ def test_pipeline_pdf_emits_full_keyset() -> None:
         content_hash="x" * 64,
         pdf_path="/x.pdf",
         corpus="test",
-        embedding_model="voyage-context-3",
+        embedding_model="model-ctx",
         now_iso="2026-04-26T00:00:00+00:00",
     )
-    expected = _full_keyset_minus_optional() - {"title", "source_author"}
+    # nexus-vhyar: frecency_score is omitted at its 0.0 default for the same
+    # reason; the frecency-only reindex owns it.
+    expected = _full_keyset_minus_optional() - {"title", "source_author", "frecency_score"}
     missing = expected - set(meta.keys())
     assert not missing, (
         f"streaming pipeline dropped: {missing}; got keys {sorted(meta.keys())}"
@@ -267,6 +269,9 @@ def test_pipeline_pdf_emits_full_keyset() -> None:
     assert "source_author" not in meta, (
         "nexus-w94eo: source_author is unknown at streaming chunk-time and "
         "must be omitted, not stamped as an empty-string placeholder"
+    )
+    assert "frecency_score" not in meta, (
+        "nexus-vhyar: the stub must not carry the frecency-only reindex's key"
     )
 
 
@@ -291,7 +296,7 @@ def test_t3_put_emits_full_keyset_for_mcp_stored_doc() -> None:
         chunk_start_char=0,
         chunk_end_char=len(content),
         indexed_at="2026-04-26T00:00:00+00:00",
-        embedding_model="voyage-context-3",
+        embedding_model="model-ctx",
         title="My Note",
         tags="user",
         category="note",

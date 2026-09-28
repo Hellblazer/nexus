@@ -832,20 +832,55 @@ def _migrate_legacy_collections(
             # this point onward any failure is non-fatal for the caller's
             # write path: ``conformant`` is the right name to use.
             try:
-                from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+                from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
+                    ensure_collection_registered,
+                    is_conformant_collection_name,
+                )
+                # nexus-aotql: routed through the registration seam
+                # (ensure_collection_registered) instead of a direct
+                # writer.register_collection call -- gets the seam's early
+                # EmbeddingProfileMismatchError diagnostic and per-process
+                # idempotency cache this post-rename registration
+                # previously bypassed, matching every other registration
+                # call site. registrar=lambda: w reuses this function's own
+                # writer (the SAME pattern as every other seam-routed
+                # site's loop-safe registrar); ``w``'s ``.close()`` (called
+                # once per name by the seam) is a documented no-op on the
+                # shared service-catalog handle it wraps.
+                #
+                # nexus-ft04v.27 / nexus-aotql fix round: reuse the
+                # CollectionName the render above already built instead of
+                # parsing the very name it just rendered back apart --
+                # BOTH branches below, never only the conformant one.
+                # EXPLICIT kwargs, never bare name-derivation: the generic
+                # seam derivation would recompute embedding_model via the
+                # CURRENT write-intent, which can disagree with the model
+                # this SAME migration just resolved via resolve_write_
+                # embedding_model above. is_conformant_collection_name
+                # decides nothing about WHICH kwargs to pass (both
+                # branches pass the identical explicit set); it exists
+                # only to name the shape distinction, since a pathological
+                # owner_id CollectionName.__post_init__ does not validate
+                # could in principle render a string the regex rejects
+                # even though conformant_name itself is a valid,
+                # fully-derived object -- the code review round 2 fix
+                # (nexus-aotql) closed the actual defect, a bare
+                # register_collection(conformant) in this else branch that
+                # dropped back to name-parsing.
+                register_kwargs = {
+                    "content_type": conformant_name.content_type,
+                    "owner_id": conformant_name.owner_id,
+                    "embedding_model": conformant_name.embedding_model,
+                    "model_version": f"v{conformant_name.model_version}",
+                }
                 if is_conformant_collection_name(conformant):
-                    # nexus-ft04v.27: reuse the CollectionName the render
-                    # above already built instead of parsing the very name
-                    # it just rendered back apart.
-                    w.register_collection(
-                        conformant,
-                        content_type=conformant_name.content_type,
-                        owner_id=conformant_name.owner_id,
-                        embedding_model=conformant_name.embedding_model,
-                        model_version=f"v{conformant_name.model_version}",
+                    ensure_collection_registered(
+                        conformant, registrar=lambda: w, kwargs=register_kwargs,
                     )
                 else:
-                    w.register_collection(conformant)
+                    ensure_collection_registered(
+                        conformant, registrar=lambda: w, kwargs=register_kwargs,
+                    )
             except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 _log.warning(
                     "phase4_register_collection_failed_after_rename",
@@ -1637,6 +1672,37 @@ def _catalog_hook(
         _stage_s["pass1b_update_many"] = time.monotonic() - _stage_mark
         _stage_mark = time.monotonic()
 
+        # nexus-1vc0n: the bulk owner-agnostic twin of
+        # ``find_cross_owner_conflict``, one round trip PER PAGE, taken
+        # immediately BEFORE that page's register_many call for the
+        # identical reason find_cross_owner_conflict's own docstring gives
+        # for running before register(): querying after would also see
+        # this run's own just-minted rows and misreport an uncontested path
+        # as conflicting with itself. Per page rather than once per batch
+        # (critique round, nexus-1vc0n): a cold index spans many pages,
+        # each paying a round trip plus the fairness backoff, and a
+        # batch-wide snapshot went stale across them, missing a conflict
+        # a concurrent indexer minted meanwhile or naming a tumbler since
+        # tombstoned. The per-doc ``find_cross_owner_conflict`` cost that
+        # path_ambiguity.py's module docstring rules out of this loop (one
+        # owner-agnostic ``/list?file_path=`` per doc) becomes one bulk
+        # ``find_all_by_file_paths`` call per register_many page instead.
+        def _page_conflicts(page_docs: list[dict]) -> dict[str, list[str]]:
+            try:
+                existing = cat.find_all_by_file_paths(
+                    [d["file_path"] for d in page_docs],
+                )
+            except Exception:  # noqa: BLE001 — announce must never fail the write
+                _log.debug(
+                    "catalog_bulk_conflict_lookup_failed",
+                    repo=repo_name, exc_info=True,
+                )
+                return {}
+            return {
+                fp: [str(e.tumbler) for e in entries]
+                for fp, entries in existing.items()
+            }
+
         # Pass 2: batch-register the NEW docs. The RDR-146 fairness yield moves
         # from per-file to a per-PAGE check — a page is ONE register_many round-
         # trip (one multi-row INSERT server-side), not 1000 serial writes, so the
@@ -1645,6 +1711,24 @@ def _catalog_hook(
         # is 1:1-or-raise; the client already degrades a failed batch to per-doc
         # register() internally, and if even that raises we fall back here to a
         # per-file register with the same ghost-class isolation as pass 1.
+        #
+        # nexus-r1tnx round 2 (code-review finding): a cross-owner path
+        # collision IS possible here (a repo file this owner is registering
+        # can already be catalogued under a DIFFERENT owner — the exact
+        # nexus-yzij1 population this whole module exists to make audible).
+        # nexus-1vc0n closes it: the per-page ``_page_conflicts`` lookup
+        # feeds ``announce_cross_owner_mint``/``announce_cross_owner_
+        # resolve`` below exactly like the per-file fallback's
+        # ``find_cross_owner_conflict`` answer feeds the SAME two
+        # functions — one round trip per page, not one per doc.
+        #
+        # nexus-r1tnx round 3: ``reconcile_stale_physical_collection`` is a
+        # DIFFERENT cost shape and DOES run in this batched loop, at the
+        # ``reconciled.append`` site below — it costs one resolve() plus a
+        # conditional update(), paid only for a doc THIS batch's own
+        # ``created=False`` pairs already singled out, not the whole page,
+        # so it never reintroduces the N+1 that ruled out the per-doc
+        # conflict check above.
         for _start in range(0, len(new_batch), _CATALOG_REGISTER_PAGE):
             if _batch_producer and await_fair_window(
                 writer.is_interactive_write_pending, on_locked,
@@ -1658,6 +1742,7 @@ def _catalog_hook(
                 break
             page = new_batch[_start : _start + _CATALOG_REGISTER_PAGE]
             page_docs = [doc for _, doc in page]
+            _conflicts_by_path = _page_conflicts(page_docs)
             _page_t0 = time.monotonic()
             _page_ok = False
             try:
@@ -1673,6 +1758,8 @@ def _catalog_hook(
                     )
                 for (path, doc), (tum, created) in zip(page, pairs):
                     file_to_doc_id[path] = str(tum)
+                    _fp = doc.get("file_path", "")
+                    _conflict = _conflicts_by_path.get(_fp) or None
                     if created:
                         new_tumblers.append(tum)
                         new_content_types.add(doc.get("content_type", ""))
@@ -1681,6 +1768,19 @@ def _catalog_hook(
                                 (doc.get("meta") or {}).get("content_hash", ""),
                                 doc.get("physical_collection", ""),
                             )
+                        # nexus-1vc0n: the bulk-lookup twin of the per-file
+                        # fallback's announce_cross_owner_mint call below —
+                        # silent unless _conflict actually names another
+                        # owner's document at this path (the bulk answer
+                        # computed above), matching the single-path
+                        # contract exactly.
+                        from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+                            announce_cross_owner_mint,
+                        )
+                        announce_cross_owner_mint(
+                            _conflict, file_path=_fp, owner=owner,
+                            context="indexer._catalog_hook", created=created,
+                        )
                         continue
                     # The owner-scoped snapshot had no row for this path,
                     # yet the server reconciled onto a live row by
@@ -1691,8 +1791,41 @@ def _catalog_hook(
                     reconciled.append((path, str(tum)))
                     _log.warning(
                         "catalog_register_reconciled_onto_existing_row",
-                        repo=repo_name, rel_path=doc.get("file_path", ""),
+                        repo=repo_name, rel_path=_fp,
                         tumbler=str(tum), owner=str(owner),
+                    )
+                    # nexus-r1tnx round 3: find_cross_owner_conflict stays
+                    # OUT of this batched loop (documented above — one
+                    # /list?file_path= per doc would turn this page's ONE
+                    # register_many round trip into N+1), but
+                    # reconcile_stale_physical_collection is a DIFFERENT
+                    # cost shape: one resolve() + a conditional update(),
+                    # paid only for a doc that already reconciled — a
+                    # subset this batch's own pairs already singled out,
+                    # not the whole page. Closes the same nexus-2t63u
+                    # stale-physical_collection exposure the per-file
+                    # fallback below already closes, without reintroducing
+                    # the N+1 the conflict check was kept out for.
+                    #
+                    # nexus-1vc0n: announce_cross_owner_resolve is the
+                    # created=False counterpart, fed by the SAME bulk
+                    # _conflict answer as the created=True branch above —
+                    # the batched fast path's own reconciled branch had no
+                    # signal for this at all before (only the per-file
+                    # fallback below called it).
+                    from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+                        announce_cross_owner_resolve,
+                        reconcile_stale_physical_collection,
+                    )
+                    announce_cross_owner_resolve(
+                        _conflict, file_path=_fp, owner=owner,
+                        context="indexer._catalog_hook", created=created,
+                    )
+                    reconcile_stale_physical_collection(
+                        reader, writer, tumbler=tum,
+                        target_collection=doc.get("physical_collection", ""),
+                        file_path=_fp,
+                        owner=owner,
                     )
             except Exception:  # noqa: BLE001 — batch unrecoverable; per-file isolation fallback
                 _log.warning(
@@ -1701,6 +1834,19 @@ def _catalog_hook(
                 )
                 for path, doc in page:
                     try:
+                        # nexus-r1tnx round 2: one register() call per doc
+                        # here (register_many already failed), so this is
+                        # exactly the per-document write path
+                        # find_cross_owner_conflict is costed for — unlike
+                        # the batched fast path above, this pays no extra
+                        # round trip by wiring it.
+                        from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+                            announce_cross_owner_mint,
+                            announce_cross_owner_resolve,
+                            find_cross_owner_conflict,
+                            reconcile_stale_physical_collection,
+                        )
+                        _conflict = find_cross_owner_conflict(reader, doc.get("file_path", ""))
                         # with_created here too, or this fallback re-opens the
                         # nexus-53cae miscount for every doc it handles
                         # (review [24413] Major).
@@ -1717,12 +1863,32 @@ def _catalog_hook(
                                     (doc.get("meta") or {}).get("content_hash", ""),
                                     doc.get("physical_collection", ""),
                                 )
+                            announce_cross_owner_mint(
+                                _conflict, file_path=doc.get("file_path", ""),
+                                owner=owner, context="catalog_hook_per_file_fallback",
+                                created=created,
+                            )
                         else:
                             reconciled.append((path, str(tum)))
                             _log.warning(
                                 "catalog_register_reconciled_onto_existing_row",
                                 repo=repo_name, rel_path=doc.get("file_path", ""),
                                 tumbler=str(tum), owner=str(owner),
+                            )
+                            announce_cross_owner_resolve(
+                                _conflict, file_path=doc.get("file_path", ""),
+                                owner=owner, context="catalog_hook_per_file_fallback",
+                                created=created,
+                            )
+                            # nexus-r1tnx round 4: this per-file fallback
+                            # never got the reconcile call in round 2 or 3
+                            # (fix-check finding) — wired now, with the
+                            # same owner gate the batched path above uses.
+                            reconcile_stale_physical_collection(
+                                reader, writer, tumbler=tum,
+                                target_collection=doc.get("physical_collection", ""),
+                                file_path=doc.get("file_path", ""),
+                                owner=owner,
                             )
                     except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
                         skipped_files.append((path, str(exc)))
@@ -2540,9 +2706,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                 natural_ids = [r.chash for r in manifest if r.chash]  # RDR-180: full digest
                 if natural_ids:
                     try:
-                        present = col.get(
-                            ids=natural_ids, include=["metadatas"],
-                        )
+                        present = col.get(ids=natural_ids, include=[])
                     except Exception:  # noqa: BLE001 — boundary catch of undocumented third-party exceptions; non-fatal
                         present = None
                     if present and present.get("ids"):
@@ -2570,7 +2734,7 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
                 where = {"doc_id": doc_id}
                 try:
                     existing = _paginated_get(
-                        col, include=["metadatas"], where=where,
+                        col, include=[], where=where,
                     )
                 except Exception:  # noqa: BLE001 — nexus-ou4tb: isolate this FILE, not the run
                     # The client fails loud now (a degraded service no longer
@@ -2587,9 +2751,14 @@ def _run_index_frecency_only(repo: Path, registry: "object") -> None:
             if not existing["ids"]:
                 continue  # not yet indexed — needs full nx index repo
 
+            # nexus-vhyar: send only the key this pass owns. The engine
+            # merges, so the rest of the row is untouched; echoing back the
+            # metadata read above ({**m, ...}) re-asserted every key as it
+            # stood at read time over any write that committed in between
+            # (the read-modify-write race nexus-w94eo removed from the PDF
+            # post-pass).
             updated_metadatas = [
-                {**m, "frecency_score": float(score)}
-                for m in existing["metadatas"]
+                {"frecency_score": float(score)} for _ in existing["ids"]
             ]
             db.update_chunks(collection=collection_name, ids=existing["ids"], metadatas=updated_metadatas)
 
@@ -3120,6 +3289,7 @@ def _paginated_get(
     where: dict | None = None,
     *,
     on_page: Callable[[int, int], None] | None = None,
+    include_non_live: bool = False,
 ) -> dict:
     """Fetch all matching chunks from *col* by paginating in _CHROMA_PAGE_SIZE batches.
 
@@ -3131,6 +3301,15 @@ def _paginated_get(
     was previously a black hole (427.5s unbroken on a 96-page collection,
     nexus-vatx) with no way for a caller to surface real progress.
     ``page_num`` is 1-based; ``scanned_so_far`` is the cumulative id count.
+
+    ``include_non_live`` (RDR-192 Step 5 amendment, nexus-wbfpw.10): forwarded
+    to ``col.get(...)`` ONLY when true, so a caller that never asks for it
+    (every content read) sees zero change and a backend whose ``get()`` has
+    no such parameter is never handed an unexpected keyword. The two
+    maintenance callers that need it (the manifest self-heal / catalog
+    reconcile fetch, the legacy doc_id-keyed misclassified-chunk prune) pass
+    it explicitly because a live(c)-filtered scan structurally cannot see
+    the manifest-less/wrong-owner chunks they exist to find.
 
     Returns a dict with ``"ids"`` and, when ``"metadatas"`` is in *include*,
     a ``"metadatas"`` key — matching the shape returned by col.get().
@@ -3146,6 +3325,8 @@ def _paginated_get(
         kwargs: dict = {"include": include, "limit": _CHROMA_PAGE_SIZE, "offset": offset}
         if where is not None:
             kwargs["where"] = where
+        if include_non_live:
+            kwargs["include_non_live"] = True
         batch = _vector_with_retry(col.get, **kwargs)
         batch_ids: list[str] = batch["ids"] or []
         all_ids.extend(batch_ids)
@@ -3169,6 +3350,31 @@ def _paginated_get(
 # the full rationale. _paginated_get (above) stays — it has other,
 # unrelated callers.
 
+
+def _present_ids(col: object, ids: list[str]) -> set[str]:
+    """The subset of *ids* physically present in *col*, ignoring liveness
+    where the backend distinguishes it (RDR-192 Step 5 amendment,
+    nexus-wbfpw.10): the service-mode collection stub's live(c)-filtered
+    ``get()`` hides a chunk with no live own-collection manifest owner —
+    exactly the misclassified-copy shape ``_prune_misclassified_in_collection``
+    exists to find in the WRONG collection. ``existing_ids``, when the
+    backend is the real service-mode stub, answers physical presence
+    regardless of ownership; every other backend (the in-memory test
+    double, a ``MagicMock``, or any other duck-typed fake with no liveness
+    concept at all) falls back to the historical ``get(ids=..., include=[])``
+    presence probe unchanged.
+
+    Deliberately an ``isinstance`` check, not ``hasattr``/``getattr``:
+    ``MagicMock()`` auto-creates ANY attribute access (including
+    ``existing_ids``) as a truthy child mock, so a duck-typed presence
+    check would silently route every MagicMock-backed test onto a branch
+    that then fails trying to ``set()`` an un-iterable mock return value.
+    """
+    from nexus.db.http_vector_client import _ServiceCollectionStub  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+
+    if isinstance(col, _ServiceCollectionStub):
+        return set(col.existing_ids(ids))
+    return set(col.get(ids=ids, include=[]).get("ids") or [])
 
 
 def _batched_delete(col: object, ids: list[str]) -> int:
@@ -3492,14 +3698,24 @@ def _prune_misclassified_in_collection(
                     if row.chash:
                         chash_to_docs.setdefault(row.chash, set()).add(did)
         all_natural_ids: list[str] = list(chash_to_docs.keys())
-        # Batched ``col.get`` to fetch the present subset, then batched
-        # delete. _CHROMA_PAGE_SIZE caps the ids list per call.
+        # Batched presence probe, then batched delete. _CHROMA_PAGE_SIZE
+        # caps the ids list per call.
         for i in range(0, len(all_natural_ids), _CHROMA_PAGE_SIZE):
             batch_ids = all_natural_ids[i : i + _CHROMA_PAGE_SIZE]
             if not batch_ids:
                 continue
             try:
-                present = col.get(ids=batch_ids, include=[])
+                # nexus-wbfpw.10 (RDR-192 Step 5 amendment): the whole point
+                # of this manifest-chash path is finding a chash physically
+                # present in the WRONG collection, which by definition has
+                # no live own-collection manifest owner there -- a
+                # live(c)-filtered col.get(ids=...) can never see it.
+                # existing_ids(), when the backend supports it, answers
+                # physical presence regardless of ownership; a backend with
+                # no liveness concept (the in-memory test double) has no
+                # such method and falls back to the historical
+                # col.get(ids=..., include=[]) presence probe unchanged.
+                present_ids = list(_present_ids(col, batch_ids))
             except Exception:  # noqa: BLE001 — best-effort path; error surfaced via log, must not crash caller
                 # nexus-8g79.4: same class — log so a recurring chroma
                 # outage during prune doesn't hide silently behind a
@@ -3512,7 +3728,6 @@ def _prune_misclassified_in_collection(
                     exc_info=True,
                 )
                 continue
-            present_ids = present.get("ids") or []
             if present_ids:
                 n = _guarded_delete(list(present_ids))
                 pruned += n
@@ -3538,8 +3753,13 @@ def _prune_misclassified_in_collection(
             if not batch:
                 continue
             try:
+                # nexus-wbfpw.10 (RDR-192 Step 5 amendment): this legacy
+                # doc_id-keyed copy, like the manifest-chash path above, is
+                # by definition a chunk with no live own-collection manifest
+                # owner in the WRONG collection -- live(c) hides it.
                 existing = _paginated_get(
                     col, include=[], where={"doc_id": {"$in": batch}},
+                    include_non_live=True,
                 )
             except VectorServiceError as exc:
                 # nexus-ou4tb walk: a degraded service is NOT "no
@@ -3729,9 +3949,12 @@ def _prune_collection_serverside(
     from datetime import UTC, datetime, timedelta  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
+        GC_AUDIT_MAX_CHASHES,
         expire_quarantine_serverside,
         quarantine_days,
+        quarantine_orphans_bounded_serverside,
         quarantine_orphans_serverside,
+        restore_rereferenced_bounded_serverside,
         restore_rereferenced_serverside,
     )
 
@@ -3747,13 +3970,55 @@ def _prune_collection_serverside(
     # empty sibling projection row on every zero-orphan pass -- the
     # nexus-syfes class `nx catalog doctor --collections-drift` flags and
     # the shakeout's Phase E fails on.
-    restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
+    #
+    # nexus-e8h5x: try the BOUNDED restore first (mirrors catalog-037/
+    # nexus-a6mon's bounded quarantine sweep, for the opposite direction —
+    # about 36,000 code__1-1 rows left quarantine via one unbounded restore
+    # call on 2026-09-16, the same edge-deadline exposure). A ``None``
+    # return means the CLIENT OBJECT lacks the capability (a non-HTTP db,
+    # e.g. the in-memory unit-test double) rather than "nothing to
+    # restore" -- fall back to the unbounded call before giving up; a real
+    # engine has both routes together (they ship in the same changeset),
+    # so this fallback is defensive, not expected to fire in practice.
+    restored = restore_rereferenced_bounded_serverside(db, quarantine_name, collection_name)
+    if restored is None:
+        restored = restore_rereferenced_serverside(db, quarantine_name, collection_name)
     if restored is None:
         return False  # route unavailable — client-side path handles restore too
 
-    quarantined = quarantine_orphans_serverside(
-        db, collection_name, quarantine_name, quarantined_at, sample_limit=20,
+    # nexus-brxnp: logged unconditionally on this pass's own restored count,
+    # not folded into the quarantine event below (which only fires when
+    # `moved` is truthy) — a restore-only pass (nothing to quarantine this
+    # walk) previously left no log trace of what it restored at all.
+    if restored:
+        _log.info(
+            "gc_restored_rereferenced_chunks_serverside",
+            collection=collection_name, count=restored, mode="restore-serverside",
+        )
+
+    # nexus-e8h5x review round 2: same bounded-then-fallback shape as
+    # restore above, for the direction catalog-037/nexus-a6mon's engine
+    # route was ORIGINALLY added for. The engine route shipped in
+    # v0.1.124/125 with no client caller anywhere in this tree until this
+    # line -- the 41,032-row code__1-1 quarantine call that ran 58s past
+    # the ~30s edge deadline (the a6mon incident this route exists to fix)
+    # was still fully reproducible end-to-end before this change.
+    #
+    # nexus-brxnp: sample_limit raised from a bare 20 to the engine's own
+    # GC_AUDIT_MAX_CHASHES ceiling -- a caller-supplied value above it is
+    # silently clamped anyway (VectorHandler.clampSampleLimit /
+    # gc_quarantine_orphans's own LEAST(...,5000)), so 20 only threw away
+    # forensic detail for free. This is exactly what starved the production
+    # investigation into the restore-clobber bug this bead fixes: a
+    # 41,032-row quarantine pass audited only its first 20 chashes (T2
+    # nexus/debug-u6d93-brxnp).
+    quarantined = quarantine_orphans_bounded_serverside(
+        db, collection_name, quarantine_name, quarantined_at, sample_limit=GC_AUDIT_MAX_CHASHES,
     )
+    if quarantined is None:
+        quarantined = quarantine_orphans_serverside(
+            db, collection_name, quarantine_name, quarantined_at, sample_limit=GC_AUDIT_MAX_CHASHES,
+        )
     if quarantined is None:
         return False  # route unavailable
     moved, sample = quarantined

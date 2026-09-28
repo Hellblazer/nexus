@@ -200,12 +200,24 @@ def test_no_wired_hook_outlasts_the_budget_hooks_json_gives_it() -> None:
 
     This replaces an earlier version of this check that compared every spec
     against a single 180s ceiling, the largest budget any conexus hook has.
-    Eight of the nine wired hooks run at 5s or 10s, so that check passed
+    Six of the seven wired hooks run at 5s or 10s, so that check passed
     while every one of them carried a 30s bound it could never reach: a
     ceiling wide enough to admit the defect it was written to catch.
+
+    9 -> 7 at bead nexus-5l8i8, which moved ``agent_dispatch_expect`` and
+    ``subagent_start_stamp`` off the ``mcp_tool`` tier onto the command tier
+    (via the ``nx-hook`` shim): an MCP-server outage was dropping the RDR-184
+    ledger's EXPECT/START rows the same way an inert ``mcp_tool`` verdict
+    dropped a decision at bead nexus-17i1n, and the command tier does not
+    depend on this session's MCP server being connected. A deliberate
+    migration off the tier, same reading as that bead's own floor move.
+
+    7 -> 5 at bead nexus-egm7p, same reason and same reading: the RDR-205
+    ledger's two projectors (``subagent_start_tuple``, ``subagent_stop_tuple``)
+    move off the ``mcp_tool`` tier for the identical MCP-disconnect hazard.
     """
     wired = _wired_mcp_tool_timeouts()
-    assert len(wired) >= 8, (
+    assert len(wired) >= 5, (
         f"hooks.json yielded {len(wired)} mcp_tool entries; the parse has lost "
         "its grip on the file rather than the entries having gone"
     )
@@ -224,4 +236,4 @@ def test_no_wired_hook_outlasts_the_budget_hooks_json_gives_it() -> None:
             "tears the transport down (nexus-dgvsz). It has to land inside."
         )
         checked += 1
-    assert checked >= 8, f"only {checked} wired hooks compared"
+    assert checked >= 5, f"only {checked} wired hooks compared"

@@ -312,7 +312,7 @@ class TestChunkerLoop:
             MC.return_value.chunk.return_value = ci
             chunker_loop("h1", db, threading.Event(), embed_fn=_embed,
                          extraction_done=done_event, pdf_path="/a.pdf",
-                         corpus="test", target_model="voyage-context-3")
+                         corpus="test", target_model="model-ctx")
         out = db.read_ready_chunks("h1")
         assert len(out) == 2
         meta = json.loads(out[0]["metadata_json"])
@@ -322,7 +322,7 @@ class TestChunkerLoop:
         # time identity / routing fields.
         for k, v in [("content_type", "pdf"),
                      ("content_hash", "h1"),
-                     ("embedding_model", "voyage-context-3"),
+                     ("embedding_model", "model-ctx"),
                      ("page_number", 1)]:
             assert meta[k] == v
         for dropped in ("source_path", "store_type", "corpus", "git_meta"):
@@ -1426,8 +1426,10 @@ _REQUIRED_META = {
     # see test_streaming_metadata_omits_title_and_source_author below.
     "section_title", "section_type", "tags", "category",
     "content_type", "embedding_model",
-    # Lifecycle
-    "indexed_at", "ttl_days", "frecency_score", "source_agent", "session_id",
+    # Lifecycle. ``frecency_score`` is NOT required (nexus-vhyar): the stub
+    # omits its 0.0 default so a late duplicate cannot reset a score the
+    # frecency-only reindex bumped; readers default a missing score to 0.0.
+    "indexed_at", "ttl_days", "source_agent", "session_id",
     # bib_* intentionally omitted (drop-when-empty by normalize)
 }
 
@@ -1442,7 +1444,7 @@ def test_streaming_metadata_has_all_batch_fields(db, done_event) -> None:
                                "chunk_start_char": 0, "chunk_end_char": 10}))
         chunker_loop("h1", db, threading.Event(), embed_fn=_embed,
                      extraction_done=done_event, pdf_path="/doc.pdf",
-                     corpus="mycorpus", target_model="voyage-context-3")
+                     corpus="mycorpus", target_model="model-ctx")
     meta = json.loads(db.read_ready_chunks("h1")[0]["metadata_json"])
     assert _REQUIRED_META - set(meta.keys()) == set()
     # nexus-w94eo: title/source_author must be ABSENT, not present as "".
@@ -1476,7 +1478,7 @@ def test_streaming_metadata_omits_title_and_source_author(db, done_event) -> Non
                                "chunk_start_char": 0, "chunk_end_char": 10}))
         chunker_loop("h1", db, threading.Event(), embed_fn=_embed,
                      extraction_done=done_event, pdf_path="/doc.pdf",
-                     corpus="mycorpus", target_model="voyage-context-3")
+                     corpus="mycorpus", target_model="model-ctx")
     meta = json.loads(db.read_ready_chunks("h1")[0]["metadata_json"])
     assert "title" not in meta, (
         f"streaming chunk-time metadata must omit title, not stamp it \"\"; got {meta!r}"
@@ -1499,7 +1501,35 @@ def test_update_chunk_metadata(get_exc, upd_exc, expected) -> None:
         col.get.return_value = {"ids": ["id1"], "metadatas": [{"chunk_type": "text"}]}
     if upd_exc:
         t3.update_chunks.side_effect = upd_exc
-    assert _update_chunk_metadata(t3, col, "docs__test", "abc123", lambda m: True) is expected
+
+    def _tag(m: dict) -> bool:
+        m["chunk_type"] = "table_page"
+        return True
+
+    assert _update_chunk_metadata(t3, col, "docs__test", "abc123", _tag) is expected
+
+
+def test_update_chunk_metadata_writes_only_the_changed_keys() -> None:
+    """nexus-vhyar: the post-pass sends the keys update_fn changed, not the row
+    it read. Echoing the read-back row re-asserted stale values over any write
+    that committed between the read and this write (the engine merges)."""
+    t3, col = MagicMock(), MagicMock()
+    col.get.return_value = {
+        "ids": ["id1", "id2"],
+        "metadatas": [
+            {"chunk_type": "text", "title": "stale", "page_number": 3},
+            {"chunk_type": "table_page", "title": "stale", "page_number": 3},
+        ],
+    }
+
+    def _tag(m: dict) -> bool:
+        if m["chunk_type"] == "table_page":
+            return False
+        m["chunk_type"] = "table_page"
+        return True
+
+    assert _update_chunk_metadata(t3, col, "docs__test", "abc123", _tag) is True
+    t3.update_chunks.assert_called_once_with("docs__test", ["id1"], [{"chunk_type": "table_page"}])
 
 
 # nexus-tbkk1: test_prune_stale_chunks (a parametrized unit test of the

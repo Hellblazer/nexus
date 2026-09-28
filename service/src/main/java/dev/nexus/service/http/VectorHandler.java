@@ -39,9 +39,13 @@ import java.util.Map;
  *   POST /v1/vectors/search-graph-hop        combined graph-hop query (catalog BFS + rank) — RDR-156 P4
  *   POST /v1/vectors/search-aspect-scoped    combined aspect-filtered query (vector rank + document_aspects predicate) — RDR-156 D5
  *   POST /v1/vectors/store-put       single-chunk put (MCP store_put path)
- *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check)
- *   POST /v1/vectors/get-all-metadata  ids+metadata for an ENTIRE collection in one round trip (nexus-duoak)
- *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many)
+ *   POST /v1/vectors/get             get chunks by metadata where-filter (incremental-sync staleness check);
+ *                                    include_non_live=true returns ids+metadata physically stored, ignoring
+ *                                    live(c) (RDR-192 Step 5 amendment, nexus-wbfpw.10)
+ *   POST /v1/vectors/get-all-metadata  ids+metadata for an ENTIRE collection in one round trip (nexus-duoak);
+ *                                    include_non_live=true per the same RDR-192 amendment as /get above
+ *   POST /v1/vectors/store-get       fetch chunks by IDs (MCP store_get/store_get_many);
+ *                                    include_non_live=true returns ids+metadatas of the rows physically stored
  *   POST /v1/vectors/get-embeddings  fetch stored vectors by IDs (migration/audit)
  *   POST /v1/vectors/store-list      list collection (MCP store_list)
  *   POST /v1/vectors/store-delete    delete by IDs (MCP store_delete)
@@ -759,14 +763,22 @@ public final class VectorHandler implements HttpHandler {
      * {
      *   "collection": "...",
      *   "where":      {"source_key": "..."},  // optional plain-equality metadata filter
-     *   "include":    ["metadatas"],    // optional, ignored — always returns ids+docs+metadatas
-     *                                   // (P4a.2 decision, recorded on nexus-1k8s1)
+     *   "include":    ["metadatas"],    // optional, ignored for content shape — always
+     *                                   // returns ids+docs+metadatas (P4a.2 decision,
+     *                                   // recorded on nexus-1k8s1); still checked against
+     *                                   // include_non_live (see below)
      *   "limit":      10,              // optional, default 10
-     *   "offset":     0               // optional, default 0
+     *   "offset":     0,              // optional, default 0
+     *   "include_non_live": false     // RDR-192 Step 5 amendment (nexus-wbfpw.10):
+     *                                   // physical where-scan, ignoring live(c) — envelope
+     *                                   // becomes {"ids":[...], "metadatas":[...]} ONLY,
+     *                                   // never documents. 400 if "include" names
+     *                                   // "documents"/"embeddings" alongside it.
      * }
      * </pre>
      *
-     * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}
+     * <p>Response 200: {"ids":[...], "documents":[...], "metadatas":[...]}, or, under
+     * {@code include_non_live=true}, {"ids":[...], "metadatas":[...]} only.
      */
     private void handleGet(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -781,9 +793,43 @@ public final class VectorHandler implements HttpHandler {
         int limit                      = optInt(body, "limit", 10);
         int offset                     = optInt(body, "offset", 0);
         boolean includeSourceUri       = optBool(body, "include_source_uri", false);
+        boolean includeNonLive         = optBool(body, "include_non_live", false);
 
-        var result = repo.getWhere(tenant, collection, where, limit, offset, includeSourceUri);
+        if (rejectContentWithNonLive(ex, body, includeNonLive)) {
+            return;
+        }
+
+        var result = repo.getWhere(tenant, collection, where, limit, offset, includeSourceUri, includeNonLive);
         HttpUtil.send(ex, 200, json(result));
+    }
+
+    /**
+     * RDR-192 Step 5 amendment (nexus-wbfpw.10): {@code include_non_live} answers
+     * physical presence/inventory, never content — refuse a request that asks for
+     * both. Shared by {@link #handleGet} and {@link #handleGetAllMetadata}
+     * (get-all-metadata never returns documents/embeddings either way, but a
+     * caller naming them alongside {@code include_non_live} is a request this
+     * handler cannot satisfy honestly, so it is refused the same way rather than
+     * silently ignored).
+     *
+     * @return true if a 400 was sent (caller must return immediately)
+     */
+    private static boolean rejectContentWithNonLive(HttpExchange ex, Map<String, Object> body,
+                                                      boolean includeNonLive) throws IOException {
+        if (!includeNonLive) {
+            return false;
+        }
+        Object includeRaw = body.get("include");
+        if (includeRaw instanceof List<?> includeList) {
+            for (Object item : includeList) {
+                if ("documents".equals(item) || "embeddings".equals(item)) {
+                    HttpUtil.send(ex, 400, "{\"error\":\"include_non_live cannot be combined "
+                        + "with include of documents/embeddings\"}");
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**
@@ -796,7 +842,10 @@ public final class VectorHandler implements HttpHandler {
      * only needs metadata) and no pagination — see
      * {@link PgVectorRepository#getAllMetadata}.
      *
-     * <p>Request: {"collection": "...", "where": {...}}  (where optional)
+     * <p>Request: {"collection": "...", "where": {...}, "include_non_live": false}
+     *   (where optional; include_non_live per the RDR-192 Step 5 amendment,
+     *   nexus-wbfpw.10 — physical scan ignoring live(c), same envelope shape
+     *   either way since this route never returns documents)
      * <p>Response 200: {"ids": [...], "metadatas": [...]}
      * <p>Response 422: row count exceeds {@link PgVectorRepository#GET_ALL_METADATA_MAX_ROWS}
      *   — caller falls back to paginated {@code /get}.
@@ -808,8 +857,13 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String collection         = requireString(body, "collection");
         Map<String, Object> where = optMap(body, "where");
+        boolean includeNonLive    = optBool(body, "include_non_live", false);
 
-        var result = repo.getAllMetadata(tenant, collection, where);
+        if (rejectContentWithNonLive(ex, body, includeNonLive)) {
+            return;
+        }
+
+        var result = repo.getAllMetadata(tenant, collection, where, includeNonLive);
         HttpUtil.send(ex, 200, json(result));
     }
 
@@ -854,6 +908,18 @@ public final class VectorHandler implements HttpHandler {
 
         if (ids != null && ids.size() > MAX_BATCH_IDS) {
             HttpUtil.send(ex, 400, "{\"error\":\"too many ids (max " + MAX_BATCH_IDS + ")\"}");
+            return;
+        }
+
+        // RDR-192 Step 5 amendment (nexus-wbfpw.10): include_non_live asks which ids
+        // are physically stored, ignoring live(c). Ids and metadata, never content,
+        // and only for an explicit ids list.
+        if (optBool(body, "include_non_live", false)) {
+            if (ids == null) {
+                HttpUtil.send(ex, 400, "{\"error\":\"include_non_live requires ids\"}");
+                return;
+            }
+            HttpUtil.send(ex, 200, json(repo.presentRows(tenant, collection, ids)));
             return;
         }
 
@@ -1115,8 +1181,21 @@ public final class VectorHandler implements HttpHandler {
     /**
      * POST /v1/vectors/gc/restore-rereferenced (RDR-191 Phase 1)
      *
-     * <p>Request: {"quarantine_collection": "...", "origin_collection": "..."}
-     * <p>Response 200: {"restored": N}
+     * <p>Request:
+     * <pre>
+     * {
+     *   "quarantine_collection": "...",
+     *   "origin_collection": "...",
+     *   "row_limit": 2000            // optional (nexus-e8h5x): the BOUNDED restore
+     * }
+     * </pre>
+     * <p>Response 200 without {@code row_limit} (unbounded, one transaction over
+     * every re-referenced row; the indexer's small incremental restore):
+     * {"restored": N}
+     * <p>Response 200 with {@code row_limit} (at most that many rows restored, one
+     * commit, statement bound 25 s and gate-lock bound 2 s set by the engine):
+     * {"restored": N, "remaining": R, "row_limit": L} — loop while
+     * {@code remaining > 0}; {@code row_limit <= 0} is a 400, never "unbounded".
      */
     private void handleGcRestoreRereferenced(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1125,6 +1204,20 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String quarantineCollection = requireString(body, "quarantine_collection");
         String originCollection     = requireString(body, "origin_collection");
+
+        // nexus-e8h5x: an optional `row_limit` selects the BOUNDED restore,
+        // mirroring handleGcQuarantineOrphans's identical routing (nexus-a6mon).
+        // Additive: a request without it is the unbounded form exactly as
+        // before, so no released client changes behaviour.
+        int rowLimit = resolveRowLimit(body);
+        if (rowLimit > 0) {
+            var bounded = repo.restoreRereferencedBounded(tenant, quarantineCollection, originCollection, rowLimit);
+            HttpUtil.send(ex, 200, json(Map.of(
+                "restored", bounded.restored(),
+                "remaining", bounded.remaining(),
+                "row_limit", rowLimit)));
+            return;
+        }
 
         long restored = repo.restoreRereferenced(tenant, quarantineCollection, originCollection);
         HttpUtil.send(ex, 200, json(Map.of("restored", restored)));
@@ -1180,10 +1273,9 @@ public final class VectorHandler implements HttpHandler {
      * OWN-COLLECTION manifest row into exactly one of five buckets (superseded,
      * legacy-unmanifested, dead-owner, no-owner, unclassified) — see {@link
      * PgVectorRepository#MANIFEST_LESS_CENSUS_SQL}'s header comment for the full
-     * bucket definitions. Sam's ruling 2026-09-26: no engine tag carries this
-     * route until the rest of RDR-192 ships; the production census runs the
-     * identical text ({@code scripts/sql/manifest_less_census.sql}) directly
-     * until then.
+     * bucket definitions. First carried by engine-service-v0.1.133; the same
+     * text ({@code scripts/sql/manifest_less_census.sql}) runs directly under
+     * psql against an older engine.
      *
      * <p>Request:
      * <pre>

@@ -229,7 +229,7 @@ def test_force_bypasses_staleness_prose_file(tmp_path: Path) -> None:
 
     mock_col = MagicMock()
     mock_col.get.return_value = {
-        "metadatas": [{"content_hash": h, "embedding_model": "voyage-context-3"}]
+        "metadatas": [{"content_hash": h, "embedding_model": "model-ctx"}]
     }
     db = _make_db()
 
@@ -242,7 +242,7 @@ def test_force_bypasses_staleness_prose_file(tmp_path: Path) -> None:
         file=f,
         repo=tmp_path,
         collection_name="docs__test",
-        target_model="voyage-context-3",
+        target_model="model-ctx",
         col=mock_col,
         db=db,
         voyage_key="fake-key",
@@ -276,7 +276,7 @@ def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
 
     mock_col = MagicMock()
     mock_col.get.return_value = {
-        "metadatas": [{"content_hash": content_hash_hex, "embedding_model": "voyage-context-3"}]
+        "metadatas": [{"content_hash": content_hash_hex, "embedding_model": "model-ctx"}]
     }
     db = _make_db()
 
@@ -288,7 +288,7 @@ def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
             "source_title": "Test Paper",
             "page_number": 1,
             "content_hash": content_hash_hex,
-            "embedding_model": "voyage-context-3",
+            "embedding_model": "model-ctx",
         },
     )
     # nexus-sghyo (2026-08-06): embed_fn is the supported injection point
@@ -302,7 +302,7 @@ def test_force_bypasses_staleness_pdf_file(tmp_path: Path) -> None:
             file=f,
             repo=tmp_path,
             collection_name="docs__test",
-            target_model="voyage-context-3",
+            target_model="model-ctx",
             col=mock_col,
             db=db,
             voyage_key="fake-key",

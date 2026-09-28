@@ -284,10 +284,10 @@ class HookToolSpec:
 HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     HookToolSpec(
         name="agent_dispatch_expect",
-        # PreToolUse wires this at 10s in hooks.json; the bound sits a
-        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
-        # margin exists (nexus-dgvsz: a late answer tears down the transport).
-        timeout_s=9.0,
+        # No timeout_s override (nexus-5l8i8): hooks.json no longer wires
+        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
+        # bound below is what a direct tool call gets, and there is no
+        # wired hooks.json budget left to sit a second under.
         run=_run_agent_dispatch_expect,
         fields=("session_id", "tool_name", "tool_use_id", "tool_input"),
         structured_fields=frozenset({"tool_input"}),
@@ -337,10 +337,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="subagent_start_stamp",
-        # SubagentStart wires this at 10s in hooks.json; the bound sits a
-        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
-        # margin exists (nexus-dgvsz: a late answer tears down the transport).
-        timeout_s=9.0,
+        # No timeout_s override (nexus-5l8i8): hooks.json no longer wires
+        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
+        # bound below is what a direct tool call gets, and there is no
+        # wired hooks.json budget left to sit a second under.
         run=_run_subagent_start_stamp,
         fields=("session_id", "agent_id", "agent_type"),
         field_docs={
@@ -510,10 +510,10 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="subagent_start_tuple",
-        # SubagentStart wires this at 10s in hooks.json; the bound sits a
-        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
-        # margin exists (nexus-dgvsz: a late answer tears down the transport).
-        timeout_s=9.0,
+        # No timeout_s override (nexus-egm7p): hooks.json no longer wires
+        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
+        # bound below is what a direct tool call gets, and there is no
+        # wired hooks.json budget left to sit a second under.
         run=_run_subagent_start_tuple,
         fields=("session_id", "agent_id", "agent_type", "task"),
         field_docs={
@@ -539,12 +539,12 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
     ),
     HookToolSpec(
         name="subagent_stop_tuple",
-        # SubagentStop wires this at 10s in hooks.json; the bound sits a
-        # second under that — see DEFAULT_HOOK_TOOL_TIMEOUT_S for why the
-        # margin exists (nexus-dgvsz: a late answer tears down the transport).
-        timeout_s=9.0,
+        # No timeout_s override (nexus-egm7p): hooks.json no longer wires
+        # this as an mcp_tool, so the DEFAULT_HOOK_TOOL_TIMEOUT_S-derived
+        # bound below is what a direct tool call gets, and there is no
+        # wired hooks.json budget left to sit a second under.
         run=_run_subagent_stop_tuple,
-        fields=("session_id", "agent_id", "agent_type"),
+        fields=("session_id", "agent_id", "agent_type", "agent_transcript_path"),
         field_docs={
             "session_id": "Names the ledger the projection writes beside.",
             "agent_id": (
@@ -554,6 +554,15 @@ HOOK_TOOLS: tuple[HookToolSpec, ...] = (
                 "needs no cooperation from the stopping agent."
             ),
             "agent_type": "Recorded on the tuple as the dispatch's declared type.",
+            # nexus-egm7p: added so a direct diagnostic call through this
+            # tool no longer reproduces the fixed transport bug — the
+            # retired hooks.json mcp_tool wiring never forwarded this
+            # field, so every REPORT row it ever produced read
+            # verify=absent regardless of the real transcript.
+            "agent_transcript_path": (
+                "Feeds the VERIFY-line extraction that fills the report's "
+                "commit/t2_ref/verify dims."
+            ),
         },
         summary=(
             "projects the RDR-205 ledger REPORT tuple for a subagent that "

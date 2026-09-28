@@ -121,7 +121,7 @@ class TestFix1SearchClientSideEmbed:
         db = T3Database(_client=mock_client, _ef_override=mock_ef)
         assert db._local_mode is False
 
-        db.search("hello", collection_names=["code__owner__voyage-code-3__v1"])
+        db.search("hello", collection_names=["code__owner__model-code__v1"])
 
         kwargs = spy_col.query.call_args.kwargs
         assert "query_texts" in kwargs, (
@@ -196,7 +196,7 @@ class TestFix2WriteClientSideEmbed:
         assert db._local_mode is False
 
         db.upsert_chunks(
-            "code__owner__voyage-code-3__v1",
+            "code__owner__model-code__v1",
             ids=["x"],
             documents=["cloud doc"],
             metadatas=[{"content_type": "code"}],
@@ -297,8 +297,8 @@ class TestFix3AllSkippedErrorEvent:
             with patch("nexus.db.t3._log") as mock_log:
                 results = db.search(
                     "test",
-                    collection_names=["knowledge__a__voyage-context-3__v1",
-                                      "knowledge__b__voyage-context-3__v1"],
+                    collection_names=["knowledge__a__model-ctx__v1",
+                                      "knowledge__b__model-ctx__v1"],
                 )
 
         assert results == [], "should return empty, not raise"
@@ -322,7 +322,7 @@ class TestFix3AllSkippedErrorEvent:
         db = T3Database(_client=mock_client, _ef_override=MagicMock())
 
         with patch("nexus.db.t3._log") as mock_log:
-            results = db.search("test", collection_names=["code__owner__voyage-code-3__v1"])
+            results = db.search("test", collection_names=["code__owner__model-code__v1"])
 
         assert results == []
         error_calls = [c for c in mock_log.error.call_args_list
@@ -397,8 +397,8 @@ class TestFix3AllSkippedErrorEvent:
 
         with patch("nexus.db.t3._log") as mock_log:
             db.search("test", collection_names=[
-                "code__a__voyage-code-3__v1",
-                "code__b__voyage-code-3__v1",
+                "code__a__model-code__v1",
+                "code__b__model-code__v1",
             ])
 
         error_calls = [c for c in mock_log.error.call_args_list
@@ -418,7 +418,7 @@ class TestFix4DisplayAlias:
     must return the model token from the name, not voyage fallback."""
 
     def test_conformant_bge_name_displays_bge_token(self) -> None:
-        """Fix 4: conformant bge collection shows bge token, not voyage-code-3."""
+        """Fix 4: conformant bge collection shows bge token, not a cloud fallback."""
         from nexus.corpus import embedding_model_for_collection
         result = embedding_model_for_collection(
             "code__owner__bge-base-en-v15-768__v1"

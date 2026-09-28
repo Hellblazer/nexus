@@ -300,18 +300,27 @@ Cross-walk against:
 
 Update any drift before bumping version. Doc audit is what catches "we changed the wire format but forgot to document it."
 
-### 3. Bump version in ALL SEVEN bump targets
+### 3. Bump version in ALL EIGHT bump targets
 
-CI enforces parity. Missing any one of these fails the marketplace-version-matches-pyproject test, the marketplace-source-ref-matches-pyproject test, or the mcpb-manifest-version-matches-pyproject test.
+CI enforces parity on all but one of these (`conexus/PENDING_RELEASE.md` is a drift
+ledger, not a version field — see `AGENTS.md` § Release cadence policy rule 6 and
+`docs/contributing.md` § Release Process Step 7 for the exact enumeration these
+agree on, nexus-smsau 2026-09-27). Missing any one of the seven CI-enforced ones
+fails the marketplace-version-matches-pyproject test, the
+marketplace-source-ref-matches-pyproject test, the
+mcpb-manifest-version-matches-pyproject test, the
+every-plugins-own-plugin-json-version-matches-pyproject test (covers BOTH conexus
+and sn, plus any plugin added later — no longer sn-only), or the
+uv-lock-version-matches-pyproject test.
 
 - `pyproject.toml`: `version = "X.Y.Z"` (canonical source of truth)
 - `mcpb/pyproject.toml`: `version` **and** the `conexus[local]>=X.Y.Z` dependency pin (the `[local]` extra is required — without it the .mcpb's venv resolves without `fastembed` and `LocalEmbeddingFunction` silently falls back to the 384-dim ONNX MiniLM against 768/1024-dim collections; `tests/test_plugin_structure.py::test_mcpb_pins_conexus_local_extra` enforces the pin tracks the version. T2 [22511] gap 11 — this line previously said `conexus>=X.Y.Z`, missing the extra.)
 - `mcpb/manifest.json`: `version`
-- `.claude-plugin/marketplace.json`: **both `version` fields** (one for conexus, one for sn)
-- `.claude-plugin/marketplace.json`: **both `plugins[].source.ref` fields** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
-- `conexus/PENDING_RELEASE.md`: **empty the pending list.** Advancing `source.ref` is exactly what makes those plugin changes live, so the ledger's entries stop being pending at this step. `tests/test_plugin_release_drift_ledger.py` FAILS on a stale entry, so a forgotten clear blocks the release rather than rotting silently. The list you are deleting is also the honest "what becomes active in this release" note for the CHANGELOG (nexus-mk3tw / the 2026-07-25 inert-guard incident: three guards were merged, closed as "mechanized", and protecting nothing because the pin had not moved).
-- `conexus/.claude-plugin/plugin.json`: `version`
-- `sn/.claude-plugin/plugin.json`: `version`
+- `.claude-plugin/marketplace.json`: **`plugins[].version` for every plugin the file lists** (today conexus and sn; a loop, not a fixed pair)
+- `.claude-plugin/marketplace.json`: **`plugins[].source.ref` for every plugin the file lists** — must be `"vX.Y.Z"` (the tag form). Easy to forget. This is what decouples installed users from main HEAD: plugin installs follow the pinned tag, not whatever main currently is. **CRITICAL: nexus-mkj6u 2026-05-23**
+- `uv.lock`: `version` — pinned exact versions the release publishes from
+- every plugin's own `<plugin>/.claude-plugin/plugin.json`: `version` (today `conexus/.claude-plugin/plugin.json` **and** `sn/.claude-plugin/plugin.json` — bump each file the marketplace lists; `test_every_plugins_own_plugin_json_version_matches_pyproject` loops over all of them, so a plugin added there is covered with no test edit)
+- `conexus/PENDING_RELEASE.md`: **empty the pending list.** Not a version field (nothing here equals `X.Y.Z`) — a drift LEDGER. Advancing `source.ref` is exactly what makes those plugin changes live, so the ledger's entries stop being pending at this step. `tests/test_plugin_release_drift_ledger.py` FAILS on a stale entry, so a forgotten clear blocks the release rather than rotting silently. The list you are deleting is also the honest "what becomes active in this release" note for the CHANGELOG (nexus-mk3tw / the 2026-07-25 inert-guard incident: three guards were merged, closed as "mechanized", and protecting nothing because the pin had not moved).
 
 Optional but recommended: also bump `plugins[].source.sha` to the 40-char SHA of the release commit, for protection against tag force-push. Add post-commit (Step 8a, see below).
 
@@ -323,6 +332,20 @@ Semver: MAJOR for breaking, MINOR for new features, PATCH for bug fixes.
 
 - `CHANGELOG.md` (root): move `## [Unreleased]` content into a new `## [X.Y.Z] - YYYY-MM-DD` section. Leave a fresh empty `## [Unreleased]` at the top.
 - `conexus/CHANGELOG.md` (plugin changelog): always update, even if no plugin changes (note: "Plugin version aligned with conexus X.Y.Z. No plugin-side changes." is acceptable).
+
+### 4a. Set the privacy-policy effective date (nexus-5zv4j)
+
+`docs/privacy-policy.md` line 3 carries the effective date. If it reads
+`_Effective: RELEASE-DATE (set when the release carrying nexus-5zv4j is
+cut)_` (or, on a later release, any line starting `_Effective:
+RELEASE-DATE`), replace it with `_Effective: <release date YYYY-MM-DD>_`
+using the SAME `YYYY-MM-DD` the CHANGELOG section above just used — the
+placeholder exists precisely because nexus-5zv4j's own bead landed with no
+known release date yet. If the line already carries a real date (a prior
+release already stamped it), leave it alone; this step is a no-op past the
+release that first stamps it. `tests/test_privacy_policy_release_date.py`
+fails a tagged release tree (pyproject version == the newest `v*` tag) that
+still carries the placeholder.
 
 ### 5. Refresh `uv.lock`
 
@@ -422,8 +445,8 @@ git checkout develop && git pull
 git checkout -b release/vX.Y.Z
 
 # PRE-MERGE MAIN FIRST (added 2026-07-04, learned on v6.3.1): a release branch
-# based on develop ALWAYS conflicts with main's release-only files (all seven
-# version manifests, both changelogs, the engine pin, uv.lock) because release
+# based on develop ALWAYS conflicts with main's release-only files (the eight
+# bump targets from Step 3, both changelogs, the engine pin) because release
 # bumps land on main and never merge back to develop. GitHub cannot build the
 # PR merge ref while CONFLICTING, so PR checks silently never run ("no checks
 # reported") — the conflict must be resolved BEFORE the bumps, or you resolve
@@ -438,8 +461,8 @@ git merge origin/main   # resolve: changelogs = union (fold main's released
 # (they were never bumped on develop) — Step 3 bumps from whatever is present,
 # so bump by pattern, not by exact-previous-version string match.
 
-# Stage ALL SEVEN bump targets from Step 3, plus uv.lock, both changelogs and
-# the cleared PENDING_RELEASE.md ledger. mcpb/pyproject.toml and
+# Stage ALL EIGHT bump targets from Step 3 (uv.lock among them), both
+# changelogs and the cleared PENDING_RELEASE.md ledger. mcpb/pyproject.toml and
 # mcpb/manifest.json are the easy-to-miss pair here, and omitting either fails
 # CI's mcpb-manifest-version parity check.
 git add pyproject.toml uv.lock CHANGELOG.md conexus/CHANGELOG.md \
@@ -473,13 +496,13 @@ Run from the release branch BEFORE pushing:
 git diff --name-only main..HEAD          # all release files must appear
 nx --version                             # must NOT yet print X.Y.Z (reinstall happens post-tag)
 grep '^version' pyproject.toml           # must equal X.Y.Z
-grep '"version"' .claude-plugin/marketplace.json    # both must equal X.Y.Z
+grep '"version"' .claude-plugin/marketplace.json    # every plugin entry must equal X.Y.Z
 grep '"version"' conexus/.claude-plugin/plugin.json # must equal X.Y.Z
 grep '"version"' sn/.claude-plugin/plugin.json      # must equal X.Y.Z
-grep '"ref"' .claude-plugin/marketplace.json        # both must equal "vX.Y.Z"
+grep '"ref"' .claude-plugin/marketplace.json        # every plugin entry must equal "vX.Y.Z"
 ```
 
-The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity checks (version field AND `source.ref` field) fail the build if any mismatch.
+The version+ref strings must all line up. CI's `TestMarketplaceVersion` parity checks (version field AND `source.ref` field, looped over EVERY plugin marketplace.json lists — not a fixed count) fail the build if any mismatch. Add one more `grep '"version"' <plugin>/.claude-plugin/plugin.json` line here for each plugin marketplace.json gains; the two shown are today's set (conexus, sn), not a ceiling.
 
 ### 8a. Optional: bump source.sha post-merge (defends against tag force-push)
 
@@ -488,7 +511,7 @@ After Step 7's merge lands on main, the release commit has a known SHA. Optional
 ```bash
 git checkout main && git pull
 RELEASE_SHA=$(git rev-parse HEAD)        # the merge commit (or the chore(release) commit if merged via merge-commit)
-# Edit .claude-plugin/marketplace.json: add "sha": "$RELEASE_SHA" alongside "ref": "vX.Y.Z" for both plugins
+# Edit .claude-plugin/marketplace.json: add "sha": "$RELEASE_SHA" alongside "ref": "vX.Y.Z" for every plugin the file lists
 git add .claude-plugin/marketplace.json
 git commit -m "chore(release): pin sha for vX.Y.Z"
 git push
@@ -660,7 +683,88 @@ the published-bytes counterpart.
 
 Dispatch one trivial agent in a live Claude Code session on each box class (managed cloud, local supervisor), then run `tests/e2e/post-publish-dispatch-check.sh` against that session; must end `POST-PUBLISH DISPATCH CHECK PASSED` on both — a hook that never runs in one deployment mode (e.g. the tuple-ledger projector, dead on every cloud box at 7.41.0) ships green through every gate that only ever tests a consistent pair or a fixture.
 
-**Where the session id comes from (nexus-7m6uc):** run the script with NO argument first. It auto-discovers the session id from ledgers under `~/.local/state/nexus/orchestration/` with recent agent-dispatch activity, and uses it automatically when exactly one such ledger exists — which is the common case right after a single dispatch. It refuses (exit 2, naming every candidate) rather than guess when the box has more than one recent ledger (a peer session's dispatch, a prior release's leftover), so pass a session id explicitly only then. Do NOT reach for the harness's own session id (the one in its task/output paths) — JDR-001 names three distinct T1 scopes on this box, and the ledger is written under the id leased at MCP-server spawn, which is routinely a different string. If a NAMED session id turns up no ledger, the script lists every ledger that DOES exist, newest first with mtime and START/REPORTED counts, as its own exit-2 diagnostic — read that listing before re-guessing.
+**Managed-cloud box class:** dispatch and check by hand as described above,
+in whichever live Claude Code session is running on a cloud-mode box for
+this release.
+
+**Local-supervisor box class is MECHANIZED (nexus-u0mcx), run from this Mac
+— ONE command passes even when the box carries other recent activity,
+because it never uses auto-discovery for its own dispatch:**
+
+```bash
+uv run python scripts/qwentescence_local_supervisor_gate.py X.Y.Z
+```
+
+Omit the version to use the currently-published PyPI version instead. This
+one command holds the qwentescence WSL2 distro open for the run (its idle
+shutdown ~15s after the last `wsl` session is the historical cause of a
+~30s restart loop that reads as an outage — never retry through it, see the
+script's own module docstring), confirms the `nexus-service` systemd
+`--user` unit is active with `Linger=yes`, asserts the storage-service
+lease port is stable across two reads, confirms the installed `conexus`
+matches X.Y.Z, MINTS its own session id and FORCES it into a real,
+interactive Claude Code session on the box (`claude --session-id`, driven
+through the repo's own `tests/e2e/lib.sh` tmux harness — never `claude -p`,
+which both nexus-xii3o's bead and the check script's own docstring exclude
+by name), then runs `tests/e2e/post-publish-dispatch-check.sh` on the box
+with that SAME id passed explicitly. Because the id is minted and forced
+rather than discovered, a concurrent session's ledger on the shared box can
+never make the result ambiguous — this is what makes "one command passes"
+true even when qwentescence is not exclusively this run's.
+
+**Four distinct exit codes, four distinct operator actions** (never fold a
+driver-side flake and a real ledger finding into one generic FAILED — that
+is exactly the ambiguity the script's own "never retry a transient
+failure" rule exists to prevent, one layer up):
+
+| Exit | Verdict | What it means | Operator action |
+|---|---|---|---|
+| 0 | `QWENTESCENCE LOCAL-SUPERVISOR 11d GATE PASSED` | The check script ran and confirmed the dispatch. | Done. |
+| 1 | `... FAILED -- LEDGER MISS` | The check script ran to completion and reported a real miss. | **Investigate — this is a real finding, do not just rerun.** |
+| 2 | `... FAILED -- PREREQUISITE ABSENT` | Nothing was checkable at all: box unreachable, an unsafe argument value, the unit wouldn't activate (or needed `--allow-enable-unit`), the version wouldn't converge (or needed `--allow-reinstall`/`--allow-downgrade`), lease port unstable, or the check script's own exit 2. | Fix the named prerequisite and rerun; not evidence either way about the dispatch. |
+| 3 | `... FAILED -- DRIVER FAILURE` | The interactive session itself never reached a checkable state (`claude_start` never reached the main prompt, the busy indicator never appeared, or the debounced idle wait timed out) — it never even reached the check script. | **Rerun once — a UI-timing flake is the common cause.** Investigate only if it recurs; a recurring driver failure may mean Claude Code's UI text changed (the script's own `DRIVER_FAILED` diagnostic names the pattern and the constant to update). |
+
+Manual per-box-class dispatch (the paragraph above) remains the fallback
+if the box is unreachable from this Mac.
+
+**Live-provisioning actions are gated behind explicit flags, off by
+default, and EACH ONE NEEDS SAM'S EXPLICIT GO FOR THAT SPECIFIC RUN before
+it is passed** — "off by default" states the script's own posture, it does
+not by itself authorize a human to flip one on unattended (Sam has not
+authorized an unattended reinstall or unit-enable on qwentescence, and
+this was raised and left open once already before round 3 made it
+explicit): `--allow-reinstall` (required whenever the installed version
+does not already match X.Y.Z — without it the gate refuses rather than
+running `uv tool install`), `--allow-downgrade` (required IN ADDITION
+whenever X.Y.Z is older than what is installed), `--allow-enable-unit`
+(required whenever the systemd unit is found inactive — without it the
+gate refuses rather than running `systemctl --user enable --now
+nexus-service`). On a box already converged to X.Y.Z with the unit active
+(the common case), none of the three is needed — ask Sam before passing
+any of them, do not treat "off by default" as blanket pre-authorization
+the moment one is actually needed.
+
+**Manual rerun (`--skip-dispatch --session-id <SID>`), used together, never
+apart:** reuses an already-completed dispatch's evidence without issuing a
+new one — `--skip-dispatch` alone is refused (it requires a session id to
+check), and `--session-id` alone without `--skip-dispatch` is ALSO refused
+(the live-dispatch path always mints and forces its own id; accepting a
+caller-supplied one there would reopen exactly the ambiguity minting
+exists to close). Find the id to pass from a prior run's own report line
+(`session id: <SID> (minted)`), or, for a genuinely manual dispatch
+(nexus-7m6uc): run `tests/e2e/post-publish-dispatch-check.sh` on the box
+with NO argument first — it auto-discovers the session id from ledgers
+under `~/.local/state/nexus/orchestration/` with recent agent-dispatch
+activity, and uses it automatically when exactly one such ledger exists.
+It refuses (exit 2, naming every candidate) rather than guess when the box
+has more than one recent ledger, so pass a session id explicitly only
+then. Do NOT reach for the harness's own session id (the one in its
+task/output paths) — JDR-001 names three distinct T1 scopes on this box,
+and the ledger is written under the id leased at MCP-server spawn, which
+is routinely a different string. If a NAMED session id turns up no ledger,
+the script lists every ledger that DOES exist, newest first with mtime and
+START/REPORTED counts, as its own exit-2 diagnostic — read that listing
+before re-guessing.
 
 ### 12. Reinstall local tool and verify
 

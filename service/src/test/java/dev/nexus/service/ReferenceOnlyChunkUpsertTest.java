@@ -31,6 +31,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.SERVICE_TOKENS;
 
 /**
@@ -241,9 +243,38 @@ class ReferenceOnlyChunkUpsertTest {
      * vectors-015-retention-search-return.xml) — the additive field a reference-aware
      * consumer reads to distinguish this row from an ordinary full-content hit.
      */
+    /**
+     * Gives the reference-only row a live owner in {@link #COL}, idempotently. Since
+     * RDR-192 Step 5 (nexus-wbfpw.10) search returns only chunks with a live
+     * own-collection owner, so an unowned row would be hidden for that reason alone and
+     * the hybrid-exclusion test below would pass without exercising the NULL-text gate.
+     */
+    private void ownReferenceOnlyChunk() {
+        try (Connection conn = ds.getConnection()) {
+            DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
+            ctx.insertInto(CATALOG_DOCUMENTS)
+               .columns(CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                        CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .values(TENANT, "refonly-owner", "reference-only owner", COL)
+               .onConflictDoNothing()
+               .execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS)
+               .columns(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                        CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(TENANT, "refonly-owner", 0,
+                       dev.nexus.service.db.Chash.fromHex(REFONLY_CHASH).toBytes(), COL)
+               .onConflictDoNothing()
+               .execute();
+        } catch (java.sql.SQLException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
     @Test
     void referenceOnlyOnNewChash_succeeds_andSearchReturnsNullContentAndRetention() {
         repo.upsertReferenceOnlyChunk(TENANT, COL, REFONLY_CHASH, REFONLY_VEC, Map.of("k", "v"));
+        ownReferenceOnlyChunk();
 
         List<Map<String, Object>> rows = repo.search(TENANT, REFONLY_QUERY, List.of(COL), 10, null);
         Map<String, Object> row = rows.stream()
@@ -277,6 +308,7 @@ class ReferenceOnlyChunkUpsertTest {
         // Ensure the row exists regardless of JUnit method ordering within the class
         // (PER_CLASS lifecycle does not guarantee declaration order across test runners).
         repo.upsertReferenceOnlyChunk(TENANT, COL, REFONLY_CHASH, REFONLY_VEC, Map.of("k", "v"));
+        ownReferenceOnlyChunk();
 
         List<Map<String, Object>> hybridRows =
             repo.hybridSearch(TENANT, REFONLY_QUERY, List.of(COL), 10, null);

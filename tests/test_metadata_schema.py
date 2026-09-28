@@ -530,7 +530,7 @@ class TestDocIdRetiredFromChunkSchema:
                 chunk_text_hash="abc",
                 content_hash="def",
                 indexed_at="2026-05-09T00:00:00Z",
-                embedding_model="voyage-code-3",
+                embedding_model="model-code",
                 doc_id="1.1.42",
             )
 
@@ -593,7 +593,7 @@ def test_make_chunk_metadata_rejects_source_path_kwarg() -> None:
             chunk_text_hash="abc",
             content_hash="def",
             indexed_at="2026-05-02T00:00:00Z",
-            embedding_model="voyage-code-3",
+            embedding_model="model-code",
             store_type="code",
         )
 
@@ -612,7 +612,7 @@ def test_make_chunk_metadata_does_not_emit_source_path() -> None:
         chunk_text_hash="abc",
         content_hash="def",
         indexed_at="2026-05-02T00:00:00Z",
-        embedding_model="voyage-code-3",
+        embedding_model="model-code",
     )
     assert "source_path" not in meta, (
         f"source_path must not appear in chunk metadata after Phase B; "
@@ -668,7 +668,7 @@ class TestPhase5cSchemaRemoval:
                 "content_type": "code",
                 "chunk_text_hash": "abc", "content_hash": "def",
                 "indexed_at": "2026-05-03T00:00:00Z",
-                "embedding_model": "voyage-code-3",
+                "embedding_model": "model-code",
                 "title": "src/foo.py:1-10",
                 "corpus": "nexus",
                 "store_type": "code",
@@ -696,7 +696,7 @@ class TestPhase5cSchemaRemoval:
             content_type="code",
             chunk_text_hash="abc", content_hash="def",
             indexed_at="2026-05-03T00:00:00Z",
-            embedding_model="voyage-code-3",
+            embedding_model="model-code",
         )
         for kwarg, value in [
             ("corpus", "nexus"),
@@ -717,7 +717,7 @@ class TestPhase5cSchemaRemoval:
             "content_type": "code",
             "chunk_text_hash": "abc", "content_hash": "def",
             "indexed_at": "2026-05-03T00:00:00Z",
-            "embedding_model": "voyage-code-3",
+            "embedding_model": "model-code",
         }
         for dropped in ("corpus", "store_type", "git_meta"):
             with pytest.raises(MetadataSchemaError):
@@ -779,7 +779,7 @@ class TestPhase3SchemaRemoval:
                 "content_hash": "x",
                 "chunk_text_hash": "y",
                 "indexed_at": "2026-05-09T00:00:00Z",
-                "embedding_model": "voyage-code-3",
+                "embedding_model": "model-code",
                 "doc_id": "1.1.42",
                 "chunk_index": 7,
                 "chunk_count": 99,
@@ -804,7 +804,7 @@ class TestPhase3SchemaRemoval:
             chunk_text_hash="abc",
             content_hash="def",
             indexed_at="2026-05-09T00:00:00Z",
-            embedding_model="voyage-code-3",
+            embedding_model="model-code",
         )
         for kwarg, value in [
             ("doc_id", "1.1.42"),
@@ -824,7 +824,7 @@ class TestPhase3SchemaRemoval:
             "chunk_text_hash": "abc",
             "content_hash": "def",
             "indexed_at": "2026-05-09T00:00:00Z",
-            "embedding_model": "voyage-code-3",
+            "embedding_model": "model-code",
         }
         for dropped in self.PHASE_3_DROPPED:
             with pytest.raises(MetadataSchemaError):
@@ -841,7 +841,7 @@ class TestPhase3SchemaRemoval:
             chunk_text_hash="abc",
             content_hash="def",
             indexed_at="2026-05-09T00:00:00Z",
-            embedding_model="voyage-code-3",
+            embedding_model="model-code",
         )
         for k in self.PHASE_3_DROPPED:
             assert k not in meta, (

@@ -293,3 +293,160 @@ def test_kill_signal_is_sigkill_on_posix():
     from nexus.util.process_group import KILL_SIGNAL
 
     assert KILL_SIGNAL == signal.SIGKILL
+
+
+# nexus-6y4e0: real Windows containment via a Job Object. isolation_popen_kwargs
+# / contain / kill_tree dispatch on os.killpg's presence, exactly like the rest
+# of this module -- monkeypatching it away (in-process; these three read it
+# dynamically at call time, unlike KILL_SIGNAL's import-time binding above)
+# forces the Windows branch without a real Windows box. The win_job half of
+# that branch (the actual ctypes calls) is exercised by tests/test_win_job.py;
+# this file only pins the DISPATCH -- which function calls which win_job
+# primitive, and with what.
+
+
+class TestIsolationPopenKwargsPosix:
+    def test_returns_start_new_session_true(self):
+        from nexus.util.process_group import isolation_popen_kwargs
+
+        assert isolation_popen_kwargs() == {"start_new_session": True}
+
+
+class TestIsolationPopenKwargsWindowsShaped:
+    def test_returns_create_new_process_group_creationflags(self, monkeypatch):
+        from nexus.util import process_group as pg
+        from nexus.util import win_job
+
+        monkeypatch.delattr(os, "killpg", raising=False)
+        assert isinstance(pg.isolation_popen_kwargs(), dict)
+        assert pg.isolation_popen_kwargs() == {
+            "creationflags": win_job.CREATE_NEW_PROCESS_GROUP,
+        }
+
+
+class TestContainPosix:
+    def test_returns_none_without_touching_win_job(self, monkeypatch):
+        """On POSIX, start_new_session=True already contains the tree via a
+        process group -- contain() must be a pure no-op, never reaching for
+        win_job at all."""
+        from nexus.util import process_group as pg
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            pg.win_job, "create_job", lambda: calls.append("create_job") or None,
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(10)"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            assert pg.contain(proc) is None
+            assert calls == []
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+
+class TestContainAndKillTreeWindowsShaped:
+    """Force the Windows branch by deleting os.killpg for the duration of
+    the test (restored by monkeypatch's own teardown), and fake win_job's
+    kernel32 so no real Windows API is needed."""
+
+    def _windows_shaped(self, monkeypatch):
+        from nexus.util import process_group as pg
+        from nexus.util import win_job
+        from tests.test_win_job import _FakeKernel32
+
+        monkeypatch.delattr(os, "killpg", raising=False)
+        monkeypatch.setattr(win_job, "IS_WINDOWS", True)
+        fake = _FakeKernel32()
+        monkeypatch.setattr(win_job, "_kernel32", fake)
+        return pg, fake
+
+    def test_contain_creates_job_and_assigns_pid(self, monkeypatch):
+        pg, fake = self._windows_shaped(monkeypatch)
+        job = pg.contain(4242)
+        assert job is not None
+        assign_call = next(
+            c for c in fake.calls if c[0] == "AssignProcessToJobObject"
+        )
+        assert assign_call[1] == job
+
+    def test_contain_reads_pid_off_a_proc_like_object(self, monkeypatch):
+        pg, fake = self._windows_shaped(monkeypatch)
+        proc = MagicMock()
+        proc.pid = 4242
+        job = pg.contain(proc)
+        assert job is not None
+        assign_call = next(
+            c for c in fake.calls if c[0] == "AssignProcessToJobObject"
+        )
+        assert assign_call[2] in fake.closed_handles
+
+    def test_contain_refuses_non_positive_and_non_int_pids(self, monkeypatch):
+        pg, fake = self._windows_shaped(monkeypatch)
+        assert pg.contain(0) is None
+        assert pg.contain(-1) is None
+        assert pg.contain(True) is None
+        assert pg.contain(MagicMock()) is None
+        assert fake.calls == []
+
+    def test_contain_returns_none_when_job_creation_fails(self, monkeypatch):
+        pg, fake = self._windows_shaped(monkeypatch)
+        fake.create_ok = False
+        assert pg.contain(4242) is None
+
+    def test_contain_closes_job_when_assignment_fails(self, monkeypatch):
+        pg, fake = self._windows_shaped(monkeypatch)
+        fake.assign_ok = False
+        assert pg.contain(4242) is None
+        # The job handle created for a failed assignment must not leak.
+        job_call = next(c for c in fake.calls if c[0] == "CreateJobObjectW")
+        del job_call  # the handle itself isn't returned to us on this path
+        assert len(fake.closed_handles) >= 1
+
+    def test_contain_degrades_when_win_job_raises(self, monkeypatch):
+        """nexus-6y4e0 review: win_job's own exception guard covers its
+        three functions individually; this pins that contain() -- the
+        caller one level up -- sees only the degraded None/False return
+        and never a propagated exception, end to end."""
+        pg, fake = self._windows_shaped(monkeypatch)
+        fake.raise_from.add("CreateJobObjectW")
+        assert pg.contain(4242) is None
+
+    def test_kill_tree_with_a_job_closes_it_and_never_calls_safe_killpg(
+        self, monkeypatch,
+    ):
+        pg, fake = self._windows_shaped(monkeypatch)
+        job = pg.contain(4242)
+        assert job is not None
+
+        killpg_calls: list = []
+        monkeypatch.setattr(
+            pg, "safe_killpg", lambda *a, **kw: killpg_calls.append((a, kw)) or True,
+        )
+        assert pg.kill_tree(4242, job) is True
+        assert job in fake.closed_handles
+        assert killpg_calls == []
+
+    def test_kill_tree_without_a_job_falls_back_to_safe_killpg(self, monkeypatch):
+        pg, _fake = self._windows_shaped(monkeypatch)
+        calls: list = []
+        monkeypatch.setattr(
+            pg, "safe_killpg", lambda *a, **kw: calls.append((a, kw)) or True,
+        )
+        assert pg.kill_tree(4242, None) is True
+        assert calls == [((4242,), {})] or calls[0][0][0] == 4242
+
+
+def test_kill_tree_on_posix_with_no_job_delegates_to_safe_killpg(monkeypatch):
+    from nexus.util import process_group as pg
+
+    calls: list = []
+    monkeypatch.setattr(
+        pg, "safe_killpg", lambda *a, **kw: calls.append((a, kw)) or True,
+    )
+    assert pg.kill_tree(4242, None) is True
+    assert calls

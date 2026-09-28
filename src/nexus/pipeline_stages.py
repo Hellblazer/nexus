@@ -265,6 +265,11 @@ def _build_chunk_metadata(
     # untouched.
     meta.pop("title", None)
     meta.pop("source_author", None)
+    # nexus-vhyar: same reason for the default frecency_score. The
+    # frecency-only reindex owns that key, and a late stub duplicate carrying
+    # 0.0 would reset a score it had bumped. Readers default a missing score
+    # to 0.0 (scoring.py), so omitting it changes nothing on a fresh chunk.
+    meta.pop("frecency_score", None)
     return meta
 
 
@@ -818,12 +823,22 @@ def _catalog_pdf_hook(
             # nexus-yzij1: the lookup above is owner-scoped (and the
             # source_uri leg missed, or there was no URI), so this mint can
             # be the second document for a path another owner already holds.
-            # That is allowed; going unremarked is not.
-            from nexus.catalog.path_ambiguity import announce_cross_owner_mint  # noqa: PLC0415 - circular-dep avoidance (nexus.catalog)
-            announce_cross_owner_mint(
-                reader, file_path_str, owner=owner, context="catalog_pdf_hook",
+            # That is allowed; going unremarked is not. nexus-r1tnx: the
+            # conflict check runs BEFORE register() (querying after would
+            # see the just-minted row too), but the announcement itself
+            # waits until AFTER, gated on register()'s own created signal —
+            # register() can resolve to the pre-existing row instead of
+            # minting a new one, and that is not an additional document.
+            from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 - circular-dep avoidance (nexus.catalog)
+                announce_cross_owner_mint,
+                announce_cross_owner_resolve,
+                created_from_register_result,
+                find_cross_owner_conflict,
+                reconcile_stale_physical_collection,
+                tumbler_from_register_result,
             )
-            writer.register(
+            _conflict = find_cross_owner_conflict(reader, file_path_str)
+            _write_result = writer.register(
                 owner=owner, title=effective_title, content_type="paper",
                 author=author, year=year, corpus=corpus,
                 physical_collection=collection_name,
@@ -831,7 +846,29 @@ def _catalog_pdf_hook(
                 file_path=file_path_str,
                 source_mtime=source_mtime,
                 source_uri=source_uri,
+                with_created=True,
             )
+            _created = created_from_register_result(_write_result)
+            announce_cross_owner_mint(
+                _conflict, file_path=file_path_str, owner=owner,
+                context="catalog_pdf_hook", created=_created,
+            )
+            if not _created:
+                # nexus-r1tnx round 2: register() resolved onto an existing
+                # row instead of minting one — the same reconciliation the
+                # ``if existing:`` branch above already does, closing the
+                # nexus-2t63u stale-physical_collection exposure for this
+                # (previously unreconciled) resolve path too.
+                announce_cross_owner_resolve(
+                    _conflict, file_path=file_path_str, owner=owner,
+                    context="catalog_pdf_hook", created=_created,
+                )
+                reconcile_stale_physical_collection(
+                    reader, writer,
+                    tumbler=tumbler_from_register_result(_write_result),
+                    target_collection=collection_name, file_path=file_path_str,
+                    owner=owner,
+                )
     except Exception as exc:  # noqa: BLE001 - best-effort catalog PDF hook; logged + audited, cleanup in finally
         # nexus-ou4tb: an indexed PDF that never reached the catalog is
         # invisible to every catalog-routed query. WARNING + audit row.
@@ -890,7 +927,13 @@ def _force_t3_orphan_cleanup(t3: Any, collection: str, content_hash: str) -> int
     reflects reality rather than the requested count.
     """
     col = t3.get_or_create_collection(collection)
-    orphan_meta = col.get_all_metadata(where={"content_hash": content_hash})
+    # nexus-wbfpw.10 (RDR-192 Step 5 amendment): an "orphan" chunk this
+    # cleanup exists to find is, by definition, one with no live
+    # own-collection manifest owner -- live(c) would hide exactly the
+    # population being cleaned up.
+    orphan_meta = col.get_all_metadata(
+        where={"content_hash": content_hash}, include_non_live=True,
+    )
     orphan_ids = orphan_meta.get("ids", []) or []
     if not orphan_ids:
         _log.info(
@@ -1595,6 +1638,14 @@ def _update_chunk_metadata(
 
     Paginates the T3 query to handle documents with 300+ chunks.
     Returns True on success, False on failure (nexus-f8it).
+
+    nexus-vhyar: *update_fn* mutates a copy of the row it was given, and only
+    the keys it added or changed are written. The engine merges, so the rest
+    of the row is untouched; writing the whole row back re-asserted every key
+    as it stood at read time over any write that committed in between (the
+    read-modify-write race nexus-w94eo removed from the enrichment post-pass).
+    A key *update_fn* deletes is not written and so not removed; no caller
+    deletes one today.
     """
     try:
         all_ids: list[str] = []
@@ -1620,9 +1671,12 @@ def _update_chunk_metadata(
     ids_to_update: list[str] = []
     updated_metas: list[dict] = []
     for cid, meta in zip(all_ids, all_metas):
+        before = dict(meta)
         if update_fn(meta):
-            ids_to_update.append(cid)
-            updated_metas.append(meta)
+            delta = {k: v for k, v in meta.items() if k not in before or before[k] != v}
+            if delta:
+                ids_to_update.append(cid)
+                updated_metas.append(delta)
 
     if ids_to_update:
         try:

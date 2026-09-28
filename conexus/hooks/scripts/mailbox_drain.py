@@ -952,6 +952,14 @@ def _drain_address(base_url: str, token: str, address: str, *, is_local: bool,
         delivered = 0
         while delivered < _MAX_DELIVER:
             if time.monotonic() >= deadline:
+                # Said out loud (nexus-3lc5s): every other budget stop in this
+                # hook logs, and this one returning silently made "mail seen,
+                # none claimed" read as an empty mailbox: exit 0, both streams
+                # empty.
+                _log_skip(
+                    f"mailbox/{address}: drain budget of {_TOTAL_BUDGET_S}s spent "
+                    f"after {delivered} delivered; the rest keeps until the next prompt",
+                )
                 return "budget"
             claim = _post(base_url, token, "/v1/tuples/in", {
                 "subspace": f"mailbox/{address}",

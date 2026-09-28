@@ -54,7 +54,7 @@ def test_make_chunk_metadata_defaults_to_file_and_drops_it() -> None:
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-05-30T00:00:00Z",
-        embedding_model="voyage-context-3",
+        embedding_model="model-ctx",
     )
     assert "extraction_source" not in meta  # default file -> dropped
 
@@ -65,7 +65,7 @@ def test_make_chunk_metadata_stamps_dt_source() -> None:
         chunk_text_hash="a" * 64,
         content_hash="b" * 64,
         indexed_at="2026-05-30T00:00:00Z",
-        embedding_model="voyage-context-3",
+        embedding_model="model-ctx",
         extraction_source="dt_content",
     )
     assert meta["extraction_source"] == "dt_content"

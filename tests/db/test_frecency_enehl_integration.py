@@ -322,6 +322,34 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
         f"Failed to seed chunk: {upsert_result}"
     )
 
+    # RDR-192 Step 5 live(c) (nexus-wbfpw.10, engine fc99baac9): a T3 chunk
+    # with no catalog_document_chunks manifest row owned by a live
+    # catalog_documents row in the same collection is invisible to every
+    # content read -- including the store-get in step 5 and the search in
+    # step 6 below, both of which this test depends on to prove the
+    # frecency update actually landed. Register a real catalog document for
+    # this chunk and write its manifest row the way the real indexing path
+    # does (mirrors tests/test_wbfpw2_client_liveness_matrix.py's
+    # catalog_store_hook_tracked + store_put_manifest_direct pattern),
+    # rather than reading back via a maintenance include_non_live escape
+    # hatch -- steps 5 and 6 exercise genuine retrieval, not just
+    # write-acceptance, so the fixture must be a realistically-owned chunk.
+    from nexus.catalog.store_hook import (
+        catalog_store_hook_tracked,
+        single_chunk_manifest_metadata,
+        store_put_manifest_direct,
+    )
+    manifest_doc_id, manifest_metadatas = single_chunk_manifest_metadata(chunk_text)
+    assert manifest_doc_id == chunk_id
+    owner_tumbler, _created = catalog_store_hook_tracked(
+        title="frecency-enehl-test", doc_id=manifest_doc_id, collection_name=collection,
+    )
+    assert owner_tumbler, (
+        "catalog document registration must succeed against the real "
+        "engine substrate before the manifest write below"
+    )
+    store_put_manifest_direct(owner_tumbler, manifest_metadatas, collection=collection)
+
     # Step 2: Build a fake registry pointing to this collection
     fake_registry = MagicMock()
     fake_registry.get.return_value = {

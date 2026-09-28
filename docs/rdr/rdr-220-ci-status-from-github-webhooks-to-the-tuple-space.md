@@ -2,12 +2,12 @@
 title: "CI Status From GitHub Webhooks to the Tuple Space"
 id: RDR-220
 type: Architecture
-status: draft
+status: accepted
 priority: medium
 author: Sam
 reviewed-by: self
 created: 2026-09-26
-accepted_date:
+accepted_date: 2026-09-27
 related_issues: [nexus-dotwy, nexus-r3ur5]
 related_rdrs: [RDR-205, RDR-211, RDR-208]
 ---

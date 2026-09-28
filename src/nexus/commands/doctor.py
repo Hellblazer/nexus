@@ -2,6 +2,7 @@
 """nx doctor — health check for all required services."""
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,11 +11,40 @@ from typing import Any
 import click
 import structlog
 
+from nexus.aspect_readers import (
+    HTTPS_STAT_MAX_ATTEMPTS,
+    HTTPS_STAT_RETRY_DELAYS_S,
+    HTTPS_STAT_TIMEOUT_S,
+)
 from nexus.bounded_subprocess import run_bounded
+from nexus.doctor_references import DEFAULT_SAMPLE as _REFERENCES_DEFAULT_SAMPLE
+from nexus.doctor_references import MAX_CONCURRENCY as _REFERENCES_MAX_CONCURRENCY
+from nexus.doctor_references import estimated_worst_case_s as _references_estimated_worst_case_s
 from nexus.redact import redact_credentials
 
 
 _log = structlog.get_logger(__name__)
+
+#: Worst-case wall time (seconds) for ONE --check-references https:// stat,
+#: derived from aspect_readers' own bounded-retry constants (nexus-tb2yj):
+#: httpx applies its timeout to connect/read/write/pool separately, so one
+#: attempt can take up to 2x HTTPS_STAT_TIMEOUT_S; HTTPS_STAT_MAX_ATTEMPTS
+#: attempts plus the backoff between them is the same "~61.5s" figure
+#: aspect_readers._stat_https_uri's own module comment states. Computed
+#: here (not hand-typed into the --check-references help text below) so it
+#: cannot silently drift from the constants it describes.
+_REFERENCES_HTTPS_WORST_CASE_S: float = (
+    HTTPS_STAT_MAX_ATTEMPTS * 2 * HTTPS_STAT_TIMEOUT_S + sum(HTTPS_STAT_RETRY_DELAYS_S)
+)
+#: Whole-run worst case AT THE DEFAULT SAMPLE, concurrency-aware
+#: (nexus-0ne1m critique, significant #1): doctor_references.check_references
+#: runs up to MAX_CONCURRENCY stats in parallel, so the naive
+#: sample * per_call_bound overstated the bound by ~MAX_CONCURRENCY-fold.
+#: doctor_references.estimated_worst_case_s is the single source of truth
+#: for this arithmetic; a run's own printed estimate uses the same function.
+_REFERENCES_WORST_CASE_AT_DEFAULT_SAMPLE_S: float = _references_estimated_worst_case_s(
+    _REFERENCES_DEFAULT_SAMPLE, _REFERENCES_MAX_CONCURRENCY,
+)
 
 _CHECK = "✓"
 _WARN = "✗"
@@ -2165,6 +2195,16 @@ def _run_check_mineru() -> None:
 #                                          | see doctor_assignments.py's
 #                                          | module docstring for the full
 #                                          | round-1/round-2 design history.
+#   --check-references            | NO        | one HTTP HEAD per sampled
+#                                          | https:// document (no other
+#                                          | scheme costs network at all),
+#                                          | bounded per aspect_readers'
+#                                          | own retry constants but real
+#                                          | wall time on a large tenant
+#                                          | (nexus-tb2yj: the first
+#                                          | production caller of
+#                                          | stat_source/staleness_signal,
+#                                          | RDR-169 Gap 6 leg 3).
 #   --check-wal-retention         | NO        | explicitly "Always exit 0:
 #                                          | this is informational" by its
 #                                          | own docstring -- no failure
@@ -2229,7 +2269,62 @@ def _run_check_mineru() -> None:
 _SUPPLEMENTARY_CHECK_NAMES: tuple[str, ...] = (
     "resources", "plan-library", "taxonomy", "aspect-queue", "t1", "engine-activity",
     "index-failures", "fanout-floor", "tuple-projection", "ghost-sweep", "harness-grant",
+    "docs-aspects-config",
 )
+
+
+def _run_check_docs_aspects_config() -> None:
+    """Warn when a local ``aspects.docs_collections`` pattern matches a
+    registered docs__ collection whose engine ``aspects_enabled`` is still
+    not True (nexus-l46pu round-2 critic item 1b, T2 critique-nexus-l46pu-
+    tenant-wide-aspects-enabled). The engine is authoritative once it
+    carries an opinion (``docs_collection_opted_in``), so a local match
+    that has never been synced is silent drift: this machine's config.yml
+    says the collection is opted in while the engine -- and every OTHER
+    machine reading it -- disagrees. Remedy named in the warning:
+    ``nx collection aspects --from-config``.
+
+    A virgin box with no ``docs_collections`` entries is NOT-APPLICABLE
+    (project convention: a new doctor row is N/A on a virgin box, decided
+    after reading the config, never allowlisted up front) -- nothing to
+    warn about, no engine call made.
+    """
+    from nexus.aspect_extractor import _docs_opt_in_patterns  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+    patterns = _docs_opt_in_patterns()
+    if not patterns:
+        click.echo("docs-aspects-config: N/A (aspects.docs_collections is empty on this machine)")
+        return
+
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to keep CLI startup fast
+
+        reader = make_catalog_reader()
+        rows = reader.list_collections() if reader is not None else []
+    except Exception as exc:  # noqa: BLE001 — best-effort diagnostic; never crash the sweep
+        click.echo(f"docs-aspects-config: catalog unreachable ({_exc_detail(exc)}); skipped")
+        return
+
+    drifted = [
+        r["name"] for r in rows
+        if r.get("content_type") == "docs"
+        and any(fnmatch.fnmatchcase(r["name"], p) for p in patterns)
+        and r.get("aspects_enabled") is not True
+    ]
+    if not drifted:
+        click.echo(
+            "docs-aspects-config: OK (every docs__ collection this machine's "
+            "local list matches is already synced to the engine)"
+        )
+        return
+    click.echo(
+        f"docs-aspects-config: {len(drifted)} docs__ collection(s) match this "
+        "machine's local aspects.docs_collections but are NOT opted in on the "
+        "engine -- other machines indexing them get no aspect extraction. "
+        "Remedy: nx collection aspects --from-config"
+    )
+    for name in drifted[:20]:
+        click.echo(f"  {name}")
 
 #: The remaining opt-in-only flags -- named in the summary line at the end
 #: of the supplementary section so the operator knows what a default
@@ -2242,7 +2337,7 @@ _OPT_IN_ONLY_CHECKS: tuple[str, ...] = (
     "--check-mcp-logs", "--check-tier-discipline",
     "--check-storage-boundary", "--check-post-store-hooks",
     "--check-mineru", "--check-wal-retention", "--check-collection-shape",
-    "--check-embeddings", "--check-assignments",
+    "--check-embeddings", "--check-assignments", "--check-references",
 )
 
 
@@ -2271,6 +2366,7 @@ def _run_supplementary_checks() -> None:
         "tuple-projection": _run_check_tuple_projection,
         "ghost-sweep": _run_check_ghost_sweep,
         "harness-grant": _run_check_harness_grant,
+        "docs-aspects-config": _run_check_docs_aspects_config,
     }
     click.echo(
         "\nSupplementary checks (cheap/read-only subset of the opt-in "
@@ -2617,6 +2713,53 @@ def _run_supplementary_checks() -> None:
          "date as YYYYMMDD, printed in the result so a run can be repeated.",
 )
 @click.option(
+    "--check-references",
+    "check_references",
+    is_flag=True,
+    default=False,
+    help="Sample reference-only catalog documents (source_uri names an "
+         "external, non-file:// resource) and stat each one's CURRENT "
+         "source against its RECORDED mtime/ETag (nexus-tb2yj, RDR-169 "
+         "Gap 6 leg 3). Every scheme but https:// is a cheap local check; "
+         f"the https:// HEAD is bounded to {_REFERENCES_HTTPS_WORST_CASE_S:.1f}s "
+         "worst case per document (aspect_readers.HTTPS_STAT_MAX_ATTEMPTS "
+         "attempts, each up to twice HTTPS_STAT_TIMEOUT_S since httpx "
+         "applies that timeout to connect/read/write/pool separately, "
+         "plus HTTPS_STAT_RETRY_DELAYS_S backoff). Up to "
+         f"{_REFERENCES_MAX_CONCURRENCY} stats run concurrently sharing one "
+         "httpx.Client, so the whole run's worst case is "
+         "ceil(sample / min(concurrency, sample)) * that per-call bound -- "
+         f"~{_REFERENCES_WORST_CASE_AT_DEFAULT_SAMPLE_S:.0f}s at the default "
+         f"sample of {_REFERENCES_DEFAULT_SAMPLE} if every sampled document "
+         "were https:// and every one exhausted its retries (a run also "
+         "prints its own estimate for the --references-sample it was given, "
+         "as its first line). Exits 1 when any sampled document reads "
+         "'stale' or 'dangling'; 'unknown' never fails this check alone. "
+         "Not applicable (exit 0) on a box with no reference-only "
+         "documents. Remedy for a document stuck at 'unknown' because it "
+         "predates ETag capture: `nx catalog backfill-etags`. Residual "
+         "limitation backfill-etags does NOT fix: a host that mints a "
+         "fresh ETag on every response reads 'stale' on every run "
+         "regardless of real content change -- treat repeated stale "
+         "against the same host as unknown, not a real signal.",
+)
+@click.option(
+    "--references-sample",
+    "references_sample",
+    type=click.IntRange(min=1, max=300),
+    default=_REFERENCES_DEFAULT_SAMPLE,
+    show_default=True,
+    help="Reference-only catalog documents sampled by --check-references.",
+)
+@click.option(
+    "--references-seed",
+    "references_seed",
+    type=int,
+    default=None,
+    help="Sampling seed for --check-references. Default: today's UTC date "
+         "as YYYYMMDD, printed in the result so a run can be repeated.",
+)
+@click.option(
     "--check-wal-retention",
     "check_wal_retention",
     is_flag=True,
@@ -2696,6 +2839,9 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                assignments_sample: int,
                assignments_collections: tuple[str, ...],
                assignments_seed: int | None,
+               check_references: bool,
+               references_sample: int,
+               references_seed: int | None,
                check_wal_retention: bool,
                check_engine_activity: bool,
                check_index_failures: bool,
@@ -2725,6 +2871,7 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-collection-shape": check_collection_shape,
             "--check-embeddings": check_embeddings,
             "--check-assignments": check_assignments,
+            "--check-references": check_references,
             "--check-wal-retention": check_wal_retention,
             "--check-engine-activity": check_engine_activity,
             "--check-index-failures": check_index_failures,
@@ -2818,6 +2965,14 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             sample=assignments_sample,
             collections=assignments_collections,
             seed=assignments_seed,
+        )
+        return
+
+    if check_references:
+        from nexus.doctor_references import run_check_references  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+        run_check_references(
+            sample=references_sample,
+            seed=references_seed,
         )
         return
 
@@ -3287,6 +3442,35 @@ def _run_check_tuple_projection() -> None:
     check cannot tell "transient" from "the whole session was dead"
     without re-deriving the post-publish-dispatch-check's STOP/START
     correlation -- that correlation stays the e2e gate's job (leg (c)).
+
+    **"no SKIPs recorded" means "no failure logged," not "the projector
+    definitely ran" (bead nexus-egm7p).** Before this bead, an
+    ``mcp_tool``-wired ``SubagentStart``/``SubagentStop`` entry whose
+    ``plugin:conexus:nexus`` MCP server was disconnected never reached
+    ``project()`` at all -- a silent drop this check could not see,
+    because nothing ever wrote a line to log. Moving both entries to the
+    command tier (``nx-hook subagent-start-tuple`` / ``subagent-stop-tuple``,
+    via ``nx_hook_shim.py``) closes exactly that hole: the command tier
+    has no MCP-connection dependency, so ``project()`` is reached
+    regardless of this session's own MCP state. What this check still
+    cannot rule out is the SAME class of gap at a different address --
+    an installed ``nx`` CLI that predates these two verbs makes
+    ``nx_hook_shim.py`` skip the call with a stderr notice and exit 0,
+    writing no log line either (see that shim's own module docstring).
+    That gap has always existed for every ``nx-hook``-wired hook and is
+    not specific to tuple projection; it is named here only so "no SKIPs"
+    is read as "nothing went wrong that reached project()," not as
+    "the hook definitely fired."
+
+    **A third gap, now closed (nexus-wgalh):** nexus-egm7p first wired both
+    command-tier entries ``"async": true``, and Claude Code kills a
+    still-running async command hook at ``claude -p`` teardown, which would
+    drop a projection mid-POST with no SKIP line. Both entries now run
+    synchronously (Sam, 2026-09-27; measured under ``claude -p``), so a
+    projection either lands, logs a SKIP, or is cut by the hook's 20 s
+    timeout inside the hook's own lifetime.
+    The RDR-184 ``.expectations`` TSV ledger stays the authoritative record
+    of whether an agent reported.
     """
     from nexus.hooks.tuple_ledger_project import _default_state_dir  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
     from nexus.session import resolve_active_session_id  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps

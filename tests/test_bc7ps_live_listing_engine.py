@@ -59,8 +59,12 @@ def test_quarantine_collection_is_inventory_but_never_routing(t2_service_env) ->
     qname = quarantine_collection_name(coll)
 
     # Non-vacuity: the sibling exists, holds chunks, and is registered non-live.
+    # A quarantine sibling never has manifests (RDR-192 Step 5 amendment), so
+    # its live count is 0; `stored_count` is the physical-inventory figure
+    # that proves the 6 orphans actually landed there.
     full = {r["name"]: r for r in db.list_collections()}
-    assert qname in full and full[qname]["count"] == 6, full.get(qname)
+    assert qname in full and full[qname]["stored_count"] == 6, full.get(qname)
+    assert full[qname]["count"] == 0, full.get(qname)
     assert full[qname]["lifecycle_state"] == "quarantine"
     assert full[coll]["lifecycle_state"] == "live"
 

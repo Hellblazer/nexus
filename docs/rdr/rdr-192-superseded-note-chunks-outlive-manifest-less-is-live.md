@@ -361,16 +361,17 @@ Five changes, ordered so the non-destructive ones land first, the shared
 predicate lands before anything depends on it, and the destructive step
 lands last, behind a completed backfill:
 
-1. **Define `live(c)` once, in the engine, and use it everywhere search or
-   get answers "is this chunk visible"** (Gap 1, Gap 2, part of Gap 5).
+1. **One engine `live(c)`**: define it once, in the engine, and use it
+   everywhere search or get answers "is this chunk visible" (Gap 1, Gap 2,
+   part of Gap 5).
    Replaces predicates 1 and 2 above and collection-scopes `live_chunks`
    (predicate 2) at the same time.
-2. **Define `reapable(c)` once, in the engine, and use it for every
-   candidate-selection predicate** (part of Gap 1, feeds Gap 4). Replaces
+2. **One engine `reapable(c)`**: define it once, in the engine, and use it
+   for every candidate-selection predicate (part of Gap 1, feeds Gap 4). Replaces
    predicates 7, 8, and 9's manifest-less handling with one rule, and backs
    a new state-derived reaper described below.
-3. **Replace the post-commit sweep's persisted drop set with a
-   state-derived engine reaper for `knowledge__*`** (Gap 4; this is
+3. **State-derived reaper**: replace the post-commit sweep's persisted
+   drop set with a state-derived engine reaper for `knowledge__*` (Gap 4; this is
    `nexus-2x9xa`'s content — see that bead for the day-to-day tracking).
    Instead of trying harder to retry a specific failed sweep, recompute
    "manifest-less and `reapable`" from state at each reaper run, following
@@ -416,6 +417,27 @@ manifest-less chunks. Replacing predicates 1 and 2 (search/get visibility,
 `nexus.live_chunks`) with `live(c)` also collection-scopes `live_chunks` for
 free, since the predicate itself is collection-scoped — this closes Gap 5 as
 a side effect of the Gap 1 fix rather than as a separate change.
+
+**The predicate must be a set-returning function, not a scalar one.** A
+scalar SQL function declared `RETURNS boolean`, with a body of the shape
+`SELECT EXISTS (subquery)`, is never inlined by PostgreSQL: the planner's
+scalar inliner requires the function's own body to have no subquery and to
+touch no other table, and an `EXISTS` subquery already disqualifies it,
+regardless of how the function is otherwise declared (`LANGUAGE sql`,
+`STABLE`, `SECURITY INVOKER`, no `SET` clause are all necessary conditions
+for inlining, none of them sufficient on their own). The shape that
+actually inlines is a set-returning function, declared `RETURNS TABLE` or
+`RETURNS SETOF`, whose body is the join above, called as `EXISTS (SELECT 1
+FROM chunk_live_owners(tenant, collection, chash))`. PostgreSQL inlines a
+set-returning function used this way and folds the resulting `EXISTS` into
+the same semi-join shape `plain_search_<dim>` already uses for its own
+anti-join today. This distinction is not stylistic. Bead nexus-wbfpw.9's
+first implementation shipped the scalar form; the engine review that
+followed captured an `EXPLAIN` plan proving it never inlined at all, and
+traced a measured latency regression directly to that opaque, per-row
+function call. The shipped implementation is the set-returning form; the
+definition of `live(c)` above states what the predicate means, the
+set-returning shape is what lets the engine evaluate it fast.
 
 **`reapable(c)`.** A chunk is a garbage-collection candidate, independent of
 whether it is currently live:
@@ -756,7 +778,14 @@ by this census — they are the no-owner and dead-owner buckets respectively.
 
 Gate: a follow-up census of the same class reads zero before Step 5 ships.
 The census is an engine route plus an `nx` verb, not a one-off SQL script,
-because it is re-run before Steps 5, 8, 9 and 11 (Sam, 2026-09-26).
+because it is re-run before Steps 5, 8, 9 and 11 (Sam, 2026-09-26). The
+route runs one standalone statement, `scripts/sql/manifest_less_census.sql`,
+byte-identical to the route's text. Sam decided (2026-09-26, option 1) that
+the production census and every pre-merge re-check run that statement
+directly, in psql as `nexus_svc`, until the final RDR-192 engine tag
+deploys; the route shipped in `engine-service-v0.1.133` and the verb
+(`nx t3 census-manifest-less`) is on `develop`, so later re-checks may use
+either.
 
 #### Step 3a: `store_put` leaves no manifest-less chunk on a failed catalog or manifest write
 
@@ -768,7 +797,10 @@ cataloged" with the chunk left behind. Each of these writes a new current
 note with no manifest row, which Step 5 would hide from search and Step 9
 would later reap. On a failed catalog or manifest write, `store_put`
 deletes the chunk it just wrote and returns an error (Sam, 2026-09-26:
-rollback, not a marker column).
+rollback, not a marker column). As implemented (`nexus-wbfpw.28`,
+`nexus-k54nk`), the rollback deletes only when a read-back confirms the
+write did not land; an unknown outcome never deletes; and it keeps any
+chunk another live document or a legacy note still owns.
 
 #### Step 3b: A failed indexer manifest hook fails the `nx index` run
 
@@ -778,11 +810,64 @@ instead. Steps 3a and 3b ship in a client release before the engine tag
 carrying Step 5 is deployed, and the census covers every collection except
 `quarantine-*`, not only `knowledge__*`.
 
+The two steps leave different traces. After 3a, a confirmed write
+failure through `store_put`, `nx store put`, `nx memory promote` or a
+recovery-bundle import removes its chunk, so a new manifest-less chunk
+in `knowledge__*` is an anomaly to investigate. After 3b, a failed
+`nx index` run leaves its chunks manifest-less and exits non-zero, so a
+manifest-less chunk in `docs__*`, `code__*` or `rdr__*` can be the
+residue of a failed run that the next successful run manifests.
+
+#### Phase 1 result (2026-09-27)
+
+Census on the live tenant, all 95 non-quarantine collections (not only
+`knowledge__*`): 542 manifest-less chunks of 337,499; superseded 139,
+no-owner 395, dead-owner 7, legacy-unmanifested 1, unclassified 0 (T2
+`nexus/rdr-192-census-2026-09-27`). The 147 of 2026-09-24 are the
+superseded, dead-owner and legacy rows; the 395 no-owner rows are two
+indexed run logs whose manifest writes were lost in the 2026-09-24
+embed incident. The backfill closed the legacy row; a full re-run reads
+legacy-unmanifested 0 and unclassified 0 everywhere (T2
+`nexus/rdr-192-census-zero-2026-09-27`). Sam's dispositions: no-owner and
+dead-owner are reaped (T2 `nexus/rdr-192-dispositions-2026-09-27`).
+
 ### Phase 2: `live(c)` and search-side migration (non-destructive)
 
 #### Step 4: Ship `live(c)` as an inlinable engine predicate; re-EXPLAIN against the `msz9i` fixture and HNSW-filtered recall
 
 #### Step 5: Migrate predicates 1 and 2 (search/get, `nexus.live_chunks`) to `live(c)`, collection-scoping `live_chunks` in the same change
+
+Amendment (Sam, 2026-09-27, found implementing `nexus-wbfpw.10`): split
+inventory from liveness. `nexus.collection_vector_stats` is also the
+collection inventory (`list_collections`, `get_collection`, `census --all`,
+the ghost sweep's dormant check), and some callers ask whether a chunk is
+stored rather than whether it is visible (`existing_ids`, the
+`put_note_pieces` delete guard). Moving those onto `live(c)` made a
+quarantine sibling vanish from the inventory, made a collection whose first
+chunk is not yet manifested read as missing, and let the delete guard treat
+a stored shared chunk as absent. So:
+
+- Content reads (search, hybrid, topic-scoped search, the get family,
+  `store-list`, `live_chunks`) use `live(c)`.
+- `collection_vector_stats` keeps one row per collection that physically
+  holds chunks. `chunk_count` and `last_write` count live chunks; a new
+  `stored_count` counts every stored chunk. Inventory readers decide
+  emptiness on `stored_count`, routing readers use the live count, and the
+  ghost sweep still marks a collection dormant only when it has no row.
+- `store-get` with `include_non_live` returns the rows physically stored,
+  ids and metadata, never content. `existing_ids` sends it, and
+  `put_note_pieces` uses `existing_ids`.
+- Maintenance paths enumerate stored chunks the same way (found after the
+  first push by the integration-marked tests): `/v1/vectors/get` and
+  `get-all-metadata` accept `include_non_live`, returning ids and metadata
+  over every stored row. Manifest heal and `nx catalog reconcile`,
+  `nx t3 gc`'s candidate listing, the misclassified prune, `expire`, the
+  forced orphan cleanup and the manifest backfill use it, because each
+  exists to handle chunks that have no live owner.
+
+An old client against this engine loses the presence probe and the
+emptiness check, so the pairing is not additive: the client release carrying
+these halves, and `nexus-wbfpw.31`, ships before this engine deploys.
 
 #### Step 6: Close the silent skip (Gap 3) — log `kept`/`kept_notes` at every client site named above, **and** add an unconditional log line to the engine's `runSweepTransaction` (`CatalogRepository.java:5740-5742`), which has the same gate-on-`swept>0` gap
 
@@ -936,3 +1021,9 @@ To be completed at gate (Layer 3 AI critique).
   the census, the census is a route plus a verb, a failed `store_put` write
   rolls back. Defaults recorded: 30-day grace window, hourly reaper at 300
   chunks per collection per pass, the narrow Step 14 reading.
+- 2026-09-27: Step 5 amended during `nexus-wbfpw.10` (Sam): inventory is
+  split from liveness. `collection_vector_stats` keeps a row per stored
+  collection with a live `chunk_count` and a physical `stored_count`, and
+  `store-get` gains an `include_non_live` presence probe used by
+  `existing_ids`. `.nxexp` imports register an owner first
+  (`nexus-wbfpw.31`).

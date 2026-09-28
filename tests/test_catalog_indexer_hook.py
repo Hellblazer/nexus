@@ -707,11 +707,17 @@ class TestCatalogHookBatchedServiceMode:
 
         priority = "interactive"
 
-        def __init__(self, *, update_many_raises: bool = False):
+        def __init__(self, *, update_many_raises: bool = False, reconcile_tumbler: str = "1.10.41"):
             self.register_calls: list[dict] = []
             self.update_calls: list[dict] = []
             self.update_many_calls: list[list[dict]] = []
             self._update_many_raises = update_many_raises
+            # nexus-r1tnx round 4: parametrized so a test can choose a
+            # SAME-owner tumbler (e.g. "1.1.55", under this fixture's own
+            # owner "1.1") instead of the default "1.10.41", which belongs
+            # to a DIFFERENT owner ("1.10") -- the two shapes now exercise
+            # reconcile_stale_physical_collection's owner gate differently.
+            self._reconcile_tumbler = reconcile_tumbler
 
         def register(self, *args, **kw):
             from nexus.catalog.tumbler import Tumbler
@@ -719,7 +725,7 @@ class TestCatalogHookBatchedServiceMode:
             with_created = kw.pop("with_created", False)
             self.register_calls.append(kw)
             if kw.get("file_path") in getattr(self, "reconcile_paths", ()):
-                pair = (Tumbler.parse("1.10.41"), False)
+                pair = (Tumbler.parse(self._reconcile_tumbler), False)
             else:
                 pair = (Tumbler.parse("1.1.99"), True)
             return pair if with_created else pair[0]
@@ -733,7 +739,7 @@ class TestCatalogHookBatchedServiceMode:
                 # holds" under another owner (nexus-53cae) -- reconciled, not
                 # created, and handed back under that owner's tumbler.
                 if d.get("file_path") in getattr(self, "reconcile_paths", ()):
-                    out.append((Tumbler.parse("1.10.41"), False))
+                    out.append((Tumbler.parse(self._reconcile_tumbler), False))
                 else:
                     out.append((Tumbler.parse("1.1.99"), True))
             if with_created:
@@ -764,13 +770,36 @@ class TestCatalogHookBatchedServiceMode:
         def close(self) -> None:
             pass
 
-    def _http_client_and_log(self, monkeypatch, docs: list[dict]):
-        """Real HttpCatalogClient over a MockTransport serving *docs*."""
+    def _http_client_and_log(
+        self, monkeypatch, docs: list[dict], *, show_responses: dict[str, dict] | None = None,
+        list_by_file_paths_response: dict[str, list[dict]] | None = None,
+    ):
+        """Real HttpCatalogClient over a MockTransport serving *docs*.
+
+        ``show_responses`` (nexus-r1tnx round 3): optional
+        ``{tumbler: document_dict}`` map answering ``/v1/catalog/show``
+        (``reader.resolve(tumbler)``) — the resolve probe
+        ``reconcile_stale_physical_collection`` makes for a batched
+        ``created=False`` pair. Absent/unmatched tumblers fall through to
+        the existing empty-``{}`` response (``resolve()`` reads that as
+        "not found" and reconciliation is a no-op), so every test that
+        predates this parameter is unaffected.
+
+        ``list_by_file_paths_response`` (nexus-1vc0n): optional
+        ``{file_path: [document_dict, ...]}`` map answering
+        ``POST /v1/catalog/list_by_file_paths`` — the bulk
+        ``find_all_by_file_paths`` call ``_catalog_hook`` now makes once
+        per register page, BEFORE that page's ``register_many``. Absent means empty (no
+        cross-owner conflict anywhere), the pre-nexus-1vc0n behaviour every
+        test that predates this parameter still gets.
+        """
         import httpx
 
         from nexus.catalog.http_catalog_client import HttpCatalogClient
 
         requests: list[tuple[str, dict]] = []
+        _show_responses = show_responses or {}
+        _list_by_file_paths_response = list_by_file_paths_response or {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             params = dict(request.url.params)
@@ -779,6 +808,12 @@ class TestCatalogHookBatchedServiceMode:
                 return httpx.Response(200, json={"tumbler_prefix": "1.1"})
             if request.url.path == "/v1/catalog/list":
                 return httpx.Response(200, json={"documents": docs})
+            if request.url.path == "/v1/catalog/show":
+                doc = _show_responses.get(params.get("tumbler", ""))
+                if doc is not None:
+                    return httpx.Response(200, json=doc)
+            if request.url.path == "/v1/catalog/list_by_file_paths" and request.method == "POST":
+                return httpx.Response(200, json={"documents": _list_by_file_paths_response})
             return httpx.Response(200, json={})
 
         monkeypatch.setenv("NX_SERVICE_TOKEN", "test-token")
@@ -789,11 +824,18 @@ class TestCatalogHookBatchedServiceMode:
         )
         return client, requests
 
-    def _run_hook(self, tmp_path, monkeypatch, docs, head_hash, *, writer=None, files=None):
+    def _run_hook(
+        self, tmp_path, monkeypatch, docs, head_hash, *, writer=None, files=None,
+        show_responses: dict[str, dict] | None = None,
+        list_by_file_paths_response: dict[str, list[dict]] | None = None,
+    ):
         from nexus.indexer import _catalog_hook
 
         monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
-        client, requests = self._http_client_and_log(monkeypatch, docs)
+        client, requests = self._http_client_and_log(
+            monkeypatch, docs, show_responses=show_responses,
+            list_by_file_paths_response=list_by_file_paths_response,
+        )
         writer = writer if writer is not None else self._StubWriter()
 
         import nexus.catalog.factory as factory
@@ -1607,6 +1649,195 @@ class TestCatalogHookReconciledIsNotNew:
         events = [e for e in logs if e["event"] == "catalog_register_reconciled_onto_existing_row"]
         assert len(events) == 1 and events[0]["tumbler"] == "1.10.41" and events[0]["rel_path"] == "b.py"
 
+    def test_a_foreign_owners_reconciled_row_is_never_repointed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-r1tnx round 4 (fix-check CRITICAL): b.py resolves onto
+        1.10.41, which belongs to owner ``1.10`` -- a DIFFERENT owner than
+        this fixture's own (``1.1``, from the ``by_repo`` mock). The
+        engine's source_uri idempotency leg that produces this resolve is
+        NOT owner-scoped, so this is the REAL shape a cross-owner
+        ``created=False`` batched resolve takes: repointing 1.10.41's
+        physical_collection to THIS run's target would reassign owner
+        1.10's document based on owner 1.1's intent. Must not write."""
+        from nexus.mcp_infra import (
+            get_reconciled_collections_count,
+            reset_reconciled_collections_count,
+        )
+        reset_reconciled_collections_count()
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter()
+        writer.reconcile_paths = {"b.py"}
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _, writer, _ = t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+                show_responses={
+                    "1.10.41": {"tumbler": "1.10.41", "physical_collection": "code__OLD"},
+                },
+            )
+
+        assert writer.update_calls == [], (
+            f"a foreign owner's document must not be repointed: {writer.update_calls}"
+        )
+        assert get_reconciled_collections_count() == 0
+        events = [
+            e for e in logs
+            if e["event"] == "catalog_physical_collection_reconcile_skipped_foreign_owner"
+        ]
+        assert len(events) == 1, f"expected exactly one divergence log, got {logs}"
+        assert events[0]["resolved_tumbler"] == "1.10.41"
+        assert events[0]["owner"] == "1.1"
+
+    def test_a_same_owners_reconciled_rows_stale_physical_collection_is_repointed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The genuine nexus-2t63u case: b.py resolves onto 1.1.55, a
+        document under THIS fixture's own owner (1.1) -- reached via a
+        source_uri/file_path match plain-owner-scoped lookup missed, not a
+        cross-owner collision. The BATCHED ``register_many`` fast path's
+        own ``created=False`` branch must still reconcile
+        ``physical_collection`` here, exactly like the per-file fallback
+        and the same-owner branches already do."""
+        from nexus.mcp_infra import (
+            get_reconciled_collections_count,
+            reset_reconciled_collections_count,
+        )
+        reset_reconciled_collections_count()
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter(reconcile_tumbler="1.1.55")
+        writer.reconcile_paths = {"b.py"}
+
+        _, writer, _ = t._run_hook(
+            tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+            show_responses={
+                "1.1.55": {"tumbler": "1.1.55", "physical_collection": "code__OLD"},
+            },
+        )
+
+        assert {"tumbler": "1.1.55", "physical_collection": "code__nexus"} in writer.update_calls, (
+            f"the same-owner reconciled row's stale physical_collection was "
+            f"never repointed: update_calls={writer.update_calls}"
+        )
+        assert get_reconciled_collections_count() == 1
+
+    def test_a_batched_mint_over_an_existing_path_is_announced(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-1vc0n: the batched fast path's own ``created=True`` branch
+        must announce a genuine cross-owner mint, fed by the bulk
+        ``find_all_by_file_paths`` answer computed BEFORE ``register_many``
+        -- the same event ``announce_cross_owner_mint`` fires for the
+        per-file fallback, at one round trip per register page instead
+        of one per doc."""
+        import structlog.testing
+
+        t = TestCatalogHookBatchedServiceMode()
+        a = tmp_path / "a.py"
+        a.write_text("a = 1\n")
+
+        with structlog.testing.capture_logs() as logs:
+            t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", files=[a],
+                list_by_file_paths_response={
+                    "a.py": [{"tumbler": "1.10.7", "title": "a.py (other owner)",
+                              "content_type": "code", "file_path": "a.py"}],
+                },
+            )
+
+        events = [e for e in logs if e["event"] == "catalog_mint_over_existing_file_path"]
+        assert len(events) == 1, f"expected exactly one mint announcement, got {logs}"
+        assert events[0]["file_path"] == "a.py"
+        assert events[0]["existing_tumblers"] == ["1.10.7"]
+
+    def test_a_conflict_minted_between_pages_is_seen_by_the_later_page(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-1vc0n critique round: the bulk lookup runs once PER PAGE,
+        just before that page's register_many, not once for the whole
+        batch. A concurrent indexer that mints b.py under another owner
+        after page 1 registered must still be announced on page 2. With a
+        batch-wide snapshot taken before page 1 this event never fires."""
+        import structlog.testing
+
+        monkeypatch.setattr("nexus.indexer._CATALOG_REGISTER_PAGE", 1)
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        # Non-empty so the fixture keeps THIS dict (it substitutes a fresh
+        # one for a falsy argument); an empty entry list is "no conflict".
+        live = {"unrelated.py": []}
+        writer = t._StubWriter()
+        inner = writer.register_many
+        pages: list[int] = []
+
+        def register_many(owner, docs, *, with_created=False):
+            pages.append(len(docs))
+            out = inner(owner, docs, with_created=with_created)
+            if len(pages) == 1:  # a concurrent indexer, after page 1
+                live["b.py"] = [{"tumbler": "1.10.9", "title": "b.py (other owner)",
+                                 "content_type": "code", "file_path": "b.py"}]
+            return out
+
+        writer.register_many = register_many
+
+        with structlog.testing.capture_logs() as logs:
+            t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer,
+                files=[a, b], list_by_file_paths_response=live,
+            )
+
+        assert pages == [1, 1], f"expected two one-doc pages, got {pages}"
+        events = [e for e in logs if e["event"] == "catalog_mint_over_existing_file_path"]
+        assert [e["file_path"] for e in events] == ["b.py"], logs
+        assert events[0]["existing_tumblers"] == ["1.10.9"]
+
+    def test_a_batched_reconcile_onto_another_owner_is_announced(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-1vc0n: the ``created=False`` counterpart. b.py reconciles
+        onto 1.10.41 (owner ``1.10``, a DIFFERENT owner than this
+        fixture's own ``1.1``) -- the batched fast path's reconciled
+        branch had NO signal for this at all before nexus-1vc0n (only the
+        per-file fallback called ``announce_cross_owner_resolve``); the
+        bulk lookup now feeds it here too, silent unless created is False
+        AND a real conflict was found."""
+        import structlog.testing
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter()
+        writer.reconcile_paths = {"b.py"}
+
+        with structlog.testing.capture_logs() as logs:
+            t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+                list_by_file_paths_response={
+                    "b.py": [{"tumbler": "1.10.41", "title": "b.py (other owner)",
+                              "content_type": "code", "file_path": "b.py"}],
+                },
+            )
+
+        events = [e for e in logs if e["event"] == "catalog_mint_resolved_existing_document"]
+        assert len(events) == 1, f"expected exactly one resolve announcement, got {logs}"
+        assert events[0]["file_path"] == "b.py"
+        assert events[0]["existing_tumblers"] == ["1.10.41"]
+        # The created=True mint announce must NOT also fire for this doc.
+        mint_events = [e for e in logs if e["event"] == "catalog_mint_over_existing_file_path"]
+        assert not mint_events, f"a reconciled (created=False) doc must not also mint-announce: {mint_events}"
+
     def test_all_created_keeps_the_plain_line(self, tmp_path, monkeypatch, capsys) -> None:
         t = TestCatalogHookBatchedServiceMode()
         a = tmp_path / "a.py"
@@ -1638,3 +1869,91 @@ class TestCatalogHookReconciledIsNotNew:
         err = capsys.readouterr().err
         assert "Catalog: 1 new, 0 updated, 1 reconciled onto rows outside this owner" in err, err
         assert mapping[b] == "1.10.41" and mapping[a] == "1.1.99"
+
+    def test_the_per_file_fallbacks_same_owner_resolve_is_repointed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """nexus-r1tnx round 5 (fix-check2 gap): the per-file fallback's
+        own ``reconcile_stale_physical_collection`` call (reached only
+        when ``register_many`` itself raises) had no BEHAVIORAL test of
+        its owner gate -- only the static call-count wiring test. b.py
+        resolves onto 1.1.55, a document under THIS fixture's own owner
+        (1.1) -- the genuine nexus-2t63u same-owner case -- so the
+        fallback must still repoint its stale physical_collection."""
+        from nexus.mcp_infra import (
+            get_reconciled_collections_count,
+            reset_reconciled_collections_count,
+        )
+        reset_reconciled_collections_count()
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter(reconcile_tumbler="1.1.55")
+        writer.reconcile_paths = {"b.py"}
+
+        def boom(*a, **k):
+            raise RuntimeError("batch endpoint down")
+
+        writer.register_many = boom
+        _, writer, _ = t._run_hook(
+            tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+            show_responses={
+                "1.1.55": {"tumbler": "1.1.55", "physical_collection": "code__OLD"},
+            },
+        )
+
+        assert {"tumbler": "1.1.55", "physical_collection": "code__nexus"} in writer.update_calls, (
+            f"the per-file fallback's same-owner resolve was never repointed: "
+            f"update_calls={writer.update_calls}"
+        )
+        assert get_reconciled_collections_count() == 1
+
+    def test_the_per_file_fallbacks_cross_owner_resolve_is_never_repointed(
+        self, tmp_path, monkeypatch,
+    ) -> None:
+        """The owner-gate mirror of the test above: b.py resolves onto
+        1.10.41, which belongs to owner 1.10 -- a DIFFERENT owner than
+        this fixture's own (1.1). The per-file fallback's reconcile call
+        must not write to that foreign document; it must only log the
+        divergence, exactly like the batched path's own owner gate."""
+        from nexus.mcp_infra import (
+            get_reconciled_collections_count,
+            reset_reconciled_collections_count,
+        )
+        reset_reconciled_collections_count()
+
+        t = TestCatalogHookBatchedServiceMode()
+        a, b = tmp_path / "a.py", tmp_path / "b.py"
+        a.write_text("a = 1\n")
+        b.write_text("b = 2\n")
+        writer = t._StubWriter()
+        writer.reconcile_paths = {"b.py"}
+
+        def boom(*a, **k):
+            raise RuntimeError("batch endpoint down")
+
+        writer.register_many = boom
+
+        import structlog.testing
+        with structlog.testing.capture_logs() as logs:
+            _, writer, _ = t._run_hook(
+                tmp_path, monkeypatch, docs=[], head_hash="h1", writer=writer, files=[a, b],
+                show_responses={
+                    "1.10.41": {"tumbler": "1.10.41", "physical_collection": "code__OLD"},
+                },
+            )
+
+        assert writer.update_calls == [], (
+            f"the per-file fallback must not repoint a foreign owner's "
+            f"document: {writer.update_calls}"
+        )
+        assert get_reconciled_collections_count() == 0
+        events = [
+            e for e in logs
+            if e["event"] == "catalog_physical_collection_reconcile_skipped_foreign_owner"
+        ]
+        assert len(events) == 1, f"expected exactly one divergence log, got {logs}"
+        assert events[0]["resolved_tumbler"] == "1.10.41"
+        assert events[0]["owner"] == "1.1"

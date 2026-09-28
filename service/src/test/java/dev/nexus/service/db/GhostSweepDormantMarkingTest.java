@@ -66,9 +66,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * sense, but it still proves the same property the bead's TESTS section asks
  * for (the row survives the sweep), and the coupling is a real schema fact, not
  * a fixture shortcut. Both cases are also, for that reason, UNCHANGED rather
- * than dormant (a live {@code chunks} row means {@code
- * nexus.collection_vector_stats} has a row too — see {@code live_chunks},
- * vectors-005-1: a chunk row with NO manifest reference at all counts as live).
+ * than dormant (a {@code chunks} row means {@code
+ * nexus.collection_vector_stats} has a row too: the view is the collection
+ * inventory, one row per collection that physically holds chunks, whether or not
+ * any is live; RDR-192 Step 5 amendment, vectors-019-5).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)

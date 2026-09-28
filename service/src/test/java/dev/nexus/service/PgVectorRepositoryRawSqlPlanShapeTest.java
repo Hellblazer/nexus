@@ -292,6 +292,13 @@ class PgVectorRepositoryRawSqlPlanShapeTest {
                     + "('[1' || repeat(',0', " + (dim - 1) + ") || ']')::nexus.vector)");
                 if (dim == 1024) {
                     nearestChash1024 = nearestChash;
+                    // RDR-192 Step 5 (nexus-wbfpw.10): searchWithTokens now requires a
+                    // live own-collection manifest owner -- own only the target row
+                    // (the filler rows are never asserted on and staying unowned costs
+                    // nothing: searchWithTokens_realCall_findsNearestRowByCorrectDimColumn
+                    // still gets exactly its one expected row back).
+                    PgContainerHelper.ownChunks(
+                        DSL.using(su, SQLDialect.POSTGRES), TENANT, coll, nearestChash);
                 }
                 PgContainerHelper.analyzeTable(su, CHUNKS);
             }

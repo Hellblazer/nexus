@@ -313,6 +313,7 @@ from nexus.commands.catalog_cmds import gc_audit as _gc_audit_cmds  # noqa: E402
 from nexus.commands.catalog_cmds import recovery as _recovery_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import trash as _trash_cmds  # noqa: E402 — must follow the `catalog` group definition above
 from nexus.commands.catalog_cmds import ghost_sweep as _ghost_sweep_cmds  # noqa: E402 — must follow the `catalog` group definition above
+from nexus.commands.catalog_cmds import footnotes as _footnotes_cmds  # noqa: E402 — must follow the `catalog` group definition above
 
 _owners_cmds.register(catalog)
 _backfill_cmds.register(catalog)
@@ -332,6 +333,7 @@ _gc_audit_cmds.register(catalog)
 _recovery_cmds.register(catalog)
 _trash_cmds.register(catalog)
 _ghost_sweep_cmds.register(catalog)
+_footnotes_cmds.register(catalog)
 
 
 @catalog.command("init", hidden=True)
@@ -604,7 +606,16 @@ def register_cmd(
     title: str, owner: str, author: str, year: int,
     content_type: str, file_path: str, source_uri: str, corpus: str,
 ) -> None:
-    """Register a document in the catalog."""
+    """Register a document in the catalog.
+
+    For an https:// --source-uri, this also makes ONE real outbound HEAD
+    request afterward to capture the resource's ETag for later staleness
+    checks (nx doctor --check-references): a few seconds at most, one
+    attempt, best-effort -- a slow, failed, or ETag-less response never
+    fails this call and records nothing. Every other scheme makes no
+    network call at all. Set NX_REFERENCE_ETAG_CAPTURE=0 to disable this
+    HEAD entirely.
+    """
     from nexus.catalog.types import make_relative  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     cat = _get_catalog()
@@ -661,6 +672,11 @@ def register_cmd(
             corpus=corpus, author=author, year=year,
             source_uri=source_uri,
         )
+        # nexus-0ne1m: best-effort ETag capture for an https:// reference —
+        # no-op for every other scheme, never raises, never fails this call.
+        from nexus.aspect_readers import record_https_etag  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        record_https_etag(writer, tumbler, source_uri)
     except ValueError as exc:
         # P3.1 register-boundary validation surfaced a malformed URI.
         # Hard error rather than silent persistence.
@@ -683,7 +699,10 @@ def register_cmd(
     default="",
     help="Catalog source identity URI (e.g. x-devonthink-item://<UUID>). "
          "Recovery path for entries whose DT-URI stamp failed during "
-         "nx dt index, or for manual reassignment of catalog identity.",
+         "nx dt index, or for manual reassignment of catalog identity. "
+         "For an https:// URI, also makes ONE real outbound HEAD request "
+         "afterward to capture its ETag (same best-effort budget as "
+         "register; NX_REFERENCE_ETAG_CAPTURE=0 disables it).",
 )
 @click.option(
     "--file-path",
@@ -723,7 +742,10 @@ def update_cmd(
     recover an entry whose DT-URI stamp failed during 'nx dt index'
     (the entry will carry source_uri=file://… instead of x-devonthink-
     item://<UUID>). The URI is validated against the same scheme allowlist
-    as register-time.
+    as register-time. For an https:// URI, this also makes ONE real
+    outbound HEAD request afterward to capture the resource's ETag (same
+    best-effort, few-seconds-at-most budget as `register`; set
+    NX_REFERENCE_ETAG_CAPTURE=0 to disable it).
 
     --file-path sets or replaces the catalog file_path column. Use this to
     repoint an entry whose recorded path is dead (moved/renamed on disk)
@@ -770,6 +792,29 @@ def update_cmd(
     if not fields:
         raise click.ClickException("No fields to update")
 
+    if source_uri and (owner or search_query):
+        # nexus-0ne1m critique (significant #3): refused outright, on two
+        # independent grounds. (1) source_uri is a PER-DOCUMENT identity
+        # (ux_catalog_documents_live_source_uri, catalog-016) -- setting
+        # the SAME literal URI across a batch would have every entry but
+        # the first lose the race to the engine's own unique index, a
+        # confusing partial-batch failure with no clean per-entry report.
+        # (2) even if source_uri varied per entry (it cannot, from one
+        # CLI flag), best-effort ETag capture firing once per matched
+        # document turns a metadata edit into an uncontrolled-fan-out
+        # network sweep -- exactly the "silent network call" shape this
+        # critique's Critical finding is about, multiplied by batch size.
+        # `nx catalog backfill-etags` is the bounded, purpose-built sweep
+        # for capturing ETags across many documents at once.
+        raise click.ClickException(
+            "--source-uri cannot be combined with --owner/--search: "
+            "source_uri is a per-document identity, and batching would "
+            "either collide on the engine's live-source_uri uniqueness "
+            "constraint or silently fan out one ETag-capture HEAD request "
+            "per matched document. Update one tumbler at a time, or run "
+            "`nx catalog backfill-etags` to capture ETags in bulk."
+        )
+
     # Batch mode
     if owner or search_query:
         entries = []
@@ -806,6 +851,13 @@ def update_cmd(
     t = _resolve_tumbler(cat, tumbler)
     try:
         writer.update(t, **fields)
+        if source_uri:
+            # nexus-0ne1m: --source-uri is the "refresh" path (recovering a
+            # dead/replaced identity) — best-effort ETag capture, no-op for
+            # every non-https scheme, never raises.
+            from nexus.aspect_readers import record_https_etag  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+            record_https_etag(writer, t, source_uri)
     except ValueError as exc:
         # nexus-fb6x: same UX-cleanup as the batch path.
         raise click.ClickException(str(exc)) from exc
@@ -1624,18 +1676,53 @@ def _backfill_per_file_from_t3(
         # nexus-yzij1: owner-scoped miss, about to mint. The backfill walks
         # T3 chunks, so it reaches files other indexers have already
         # catalogued under their own owners more often than most writers.
-        from nexus.catalog.path_ambiguity import announce_cross_owner_mint  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
-        announce_cross_owner_mint(
-            cat, rel, owner=owner, context="backfill_per_file_from_t3",
+        # nexus-r1tnx: the conflict check runs before register() (querying
+        # after would see the just-minted row too), the announcement runs
+        # after, gated on register()'s own created signal — a resolve onto
+        # an existing row is not an additional document.
+        from nexus.catalog.path_ambiguity import (  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog)
+            announce_cross_owner_mint,
+            announce_cross_owner_resolve,
+            created_from_register_result,
+            find_cross_owner_conflict,
+            reconcile_stale_physical_collection,
+            tumbler_from_register_result,
         )
+        _conflict = find_cross_owner_conflict(cat, rel)
         try:
-            w.register(
+            _write_result = w.register(
                 owner=owner,
                 title=Path(rel).name or rel,
                 content_type=content_type,
                 physical_collection=collection,
                 file_path=rel,
+                with_created=True,
             )
+            _created = created_from_register_result(_write_result)
+            announce_cross_owner_mint(
+                _conflict, file_path=rel, owner=owner,
+                context="backfill_per_file_from_t3", created=_created,
+            )
+            if not _created:
+                # nexus-r1tnx round 2: no same-owner reconcile branch exists
+                # in this function to mirror (a fresh owner-scoped miss has
+                # no prior row of its own). round 4: the resolve usually
+                # lands on ANOTHER owner's document (the engine's source_uri
+                # idempotency leg is not owner-scoped) — reconcile_stale_
+                # physical_collection's own owner gate now refuses to write
+                # in that case and only logs; it repoints only in the rare
+                # same-owner shape (this owner's own row, reached via a
+                # source_uri/file_path match plain by_file_path missed).
+                announce_cross_owner_resolve(
+                    _conflict, file_path=rel, owner=owner,
+                    context="backfill_per_file_from_t3", created=_created,
+                )
+                reconcile_stale_physical_collection(
+                    cat, w,
+                    tumbler=tumbler_from_register_result(_write_result),
+                    target_collection=collection, file_path=rel,
+                    owner=owner,
+                )
             registered += 1
         except ValueError as exc:
             # Cross-project anchor rejection from nexus-3e4s: the chunk

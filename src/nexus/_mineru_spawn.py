@@ -185,6 +185,17 @@ def spawn_server_process(port: int) -> subprocess.Popen | None:
     # so unlike the daemon precedent (self._config_dir) None is correct here.
     server_log = open_child_log_or_devnull("mineru_server")
     try:
+        # nexus-6y4e0 surveyed this site and left it unwired: the server is
+        # stopped by a LATER, separate ``nx mineru stop`` invocation reading
+        # this pid from the pid file (see _write_pid_file below), not by
+        # this process. A Windows job-object handle lives only in the
+        # process that created it, so containment here needs a NAMED job
+        # (CreateJobObjectW with a name a later ``stop`` process opens by
+        # that same name) -- part of nexus-6y4e0's remaining Windows scope
+        # (see its comments), not forced in here, and not verifiable until
+        # qwentescence has a native Windows Python (nexus-6y4e0's own
+        # closing report: only a broken uv trampoline and the Microsoft
+        # Store install-alias stub are present there today).
         proc = subprocess.Popen(
             cmd,
             env=_server_env(output_root),

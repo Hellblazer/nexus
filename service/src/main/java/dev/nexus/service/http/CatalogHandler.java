@@ -63,6 +63,7 @@ import java.util.*;
  *   POST  /v1/catalog/index-run/complete FAIL-CLOSED verify-then-stamp index_state='complete'
  *   POST  /v1/catalog/index-run/fail     stamp index_state='failed'
  *   POST  /v1/catalog/resolve_many       batch-resolve multiple doc_ids to entries (nexus-7lm3q)
+ *   POST  /v1/catalog/list_by_file_paths batch owner-agnostic file_path lookup, N paths -> live docs (nexus-1vc0n)
  *   POST  /v1/catalog/owners/upsert      upsert owner
  *   GET   /v1/catalog/owners/list        list all owners
  *   POST  /v1/catalog/owners/sweep_next_seq_drift  floor every drifted owner's next_seq (nexus-0ehwe item 5)
@@ -221,6 +222,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/collections/upsert"    -> handleCollectionUpsert(exchange, tenant, method);
                 case "/collections/list"      -> handleCollectionList(exchange, tenant, method);
                 case "/collections/get"       -> handleCollectionGet(exchange, tenant, method);
+                case "/collections/set_aspects_enabled" -> handleCollectionSetAspectsEnabled(exchange, tenant, method);
                 case "/collections/supersede" -> handleCollectionSupersede(exchange, tenant, method);
                 case "/collections/rename"    -> handleCollectionRename(exchange, tenant, method);
                 case "/collections/rehome"    -> handleCollectionRehome(exchange, tenant, method);
@@ -257,6 +259,7 @@ public final class CatalogHandler implements HttpHandler {
 
                 // ── Batch resolve endpoints (nexus-7lm3q) ────────────────────
                 case "/resolve_many"          -> handleResolveMany(exchange, tenant, method);
+                case "/list_by_file_paths"    -> handleListByFilePaths(exchange, tenant, method);
 
                 // ── Span / chash resolution (nexus-njrcn.4) ──────────────────
                 case "/resolve_span"          -> handleResolveSpan(exchange, tenant, method);
@@ -1582,6 +1585,43 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /**
+     * POST /v1/catalog/list_by_file_paths (nexus-1vc0n)
+     *
+     * <p>Batch owner-agnostic file_path lookup: N paths -> every LIVE
+     * document for each, in one round trip. Backs the batched
+     * {@code nx index repo} registrar's cross-owner mint announcement —
+     * see {@link CatalogRepository#documentsByFilePaths}'s javadoc for the
+     * full rationale.
+     *
+     * <p>Request body:  {@code {"file_paths": ["path1", "path2", ...]}}
+     * Response body:   {@code {"documents": {"path1": [doc...], "path2": [doc...]}}}
+     *
+     * <p>Paths with no live document are absent from the response map.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleListByFilePaths(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("file_paths");
+        List<String> filePaths = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (filePaths.isEmpty()) {
+            HttpUtil.send(exchange, 200, "{\"documents\":{}}"); return;
+        }
+        // Same cap + rationale as handleManifestGetMany/handleResolveMany: well
+        // under PostgreSQL's 32767-parameter Bind limit. The Python client pages
+        // at 300 (src/nexus/db/limits.py QUOTAS.MAX_RECORDS_PER_WRITE) but the
+        // endpoint must not trust the caller.
+        if (filePaths.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many file_paths (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var documents = repo.documentsByFilePaths(tenant, filePaths);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("documents", documents)));
+    }
+
+    /**
      * POST /v1/catalog/manifest/resync
      *
      * <p>Recomputes {@code documents.chunk_count} for a given document by counting
@@ -1806,6 +1846,53 @@ public final class CatalogHandler implements HttpHandler {
         var coll = repo.getCollection(tenant, name);
         if (coll == null) { HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}"); return; }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(coll));
+    }
+
+    /**
+     * {@code POST /v1/catalog/collections/set_aspects_enabled} (RDR bead
+     * nexus-l46pu, follow-up to nexus-kk4ut): set {@code catalog_collections
+     * .aspects_enabled} for one row. Body: {@code {name, aspects_enabled}}.
+     * 400 on a missing/blank name or a non-boolean {@code aspects_enabled};
+     * 404 when the collection is not registered (same guard-in-the-handler
+     * shape as the sibling verb {@link #handleCollectionSupersede}, whose
+     * 404 comment nexus-hz785 this mirrors) — a set on a typo'd name must
+     * fail loud, not silently update zero rows. 400 (round-2 critic item 4,
+     * T2 critique-nexus-l46pu-tenant-wide-aspects-enabled) when the row's
+     * {@code content_type} is not {@code docs} — {@code aspects_enabled}
+     * only ever gates the docs__ prose-extraction path, so setting it on
+     * anything else is a no-op dressed up as a real setting. Logs a
+     * structured {@code event=collection_aspects_enabled_set} line on every
+     * successful write (round-2 fix round item 4, audit trail) — this is a
+     * tenant-wide setting with no other durable record of who changed it.
+     */
+    private void handleCollectionSetAspectsEnabled(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        String name = (String) body.get("name");
+        Object enabledObj = body.get("aspects_enabled");
+        if (name == null || name.isBlank() || !(enabledObj instanceof Boolean enabled)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"name and aspects_enabled (boolean) required\"}"); return;
+        }
+        Map<String, Object> row = repo.getCollection(tenant, name);
+        if (row == null) {
+            HttpUtil.send(exchange, 404,
+                "{\"error\":" + MAPPER.writeValueAsString("collection not found: " + name) + "}"); return;
+        }
+        Object contentType = row.get("content_type");
+        if (!"docs".equals(contentType)) {
+            HttpUtil.send(exchange, 400,
+                "{\"error\":" + MAPPER.writeValueAsString(
+                    "aspects_enabled only applies to content_type=docs collections; '" + name
+                    + "' has content_type '" + contentType + "'") + "}"); return;
+        }
+        int updated = repo.setCollectionAspectsEnabled(tenant, name, enabled);
+        // nexus-l46pu round-2 fix (item 4, audit trail): every write is a
+        // tenant-wide setting with no other durable record of who changed it
+        // or when -- log it structurally so a later "why is this on/off"
+        // question has an answer beyond the row's current value.
+        log.info("event=collection_aspects_enabled_set tenant={} collection={} aspects_enabled={}",
+            tenant, name, enabled);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("updated", updated)));
     }
 
     private void handleCollectionSupersede(HttpExchange exchange, String tenant, String method) throws IOException {

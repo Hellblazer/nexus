@@ -129,6 +129,145 @@ class TestStart:
             exp.expectations_start(*args)
 
 
+# ── nexus-xxvv3: SendMessage-resumed agents ───────────────────────────────
+
+class TestResume:
+    def test_a_resumed_row_is_appended(self, state):
+        exp.expectations_resume("s", "a1", "general-purpose", "origin-sess", "worktree-developer")
+        rows = _rows(Path(exp.expectations_file("s")))
+        assert rows[0][1:6] == [
+            "RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess",
+        ]
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ("s", "", "t", "o", "ot"),
+            ("s", "a", "", "o", "ot"),
+            ("s", "tab\tid", "t", "o", "ot"),
+            ("s", "a", "tab\ttype", "o", "ot"),
+        ],
+    )
+    def test_invalid_input_raises_the_usage_error(self, state, args):
+        with pytest.raises(exp.ExpectationsUsageError):
+            exp.expectations_resume(*args)
+
+    def test_empty_origin_fields_are_accepted(self, state):
+        """A caller with no origin info in hand may pass empty strings; the
+        row is still well-formed and every downstream reader still
+        classifies it correctly by verb alone."""
+        exp.expectations_resume("s", "a1", "general-purpose", "", "")
+        rows = _rows(Path(exp.expectations_file("s")))
+        assert rows[0][1:4] == ["RESUMED", "a1", "general-purpose"]
+
+
+class TestResumeOrigin:
+    """:func:`expectations_find_resume_origin` -- the cross-ledger lookup
+    that tells a genuine SendMessage resume apart from an ordinary
+    same-session repeat call of the SubagentStart hook."""
+
+    def test_a_prior_start_in_another_sessions_ledger_is_found(self, state):
+        exp.expectations_start("origin-sess", "a1", "worktree-developer")
+        origin = exp.expectations_find_resume_origin("new-sess", "a1")
+        assert origin == ("origin-sess", "worktree-developer")
+
+    def test_no_match_anywhere_returns_none(self, state):
+        assert exp.expectations_find_resume_origin("new-sess", "never-seen") is None
+
+    def test_an_agent_id_seen_only_in_the_current_sessions_own_ledger_is_not_a_resume(
+        self, state
+    ):
+        """Non-vacuity: the scan must exclude the CALLING session's own
+        file, or the very first START of a fresh session would read as if
+        it already had a prior life the instant the hook fired twice."""
+        exp.expectations_start("this-sess", "a1", "worktree-developer")
+        assert exp.expectations_find_resume_origin("this-sess", "a1") is None
+
+    def test_a_resumed_row_is_never_itself_treated_as_the_origin(self, state):
+        """A chain of resumes (A dispatches, B resumes, C resumes B's
+        resume) must resolve back to the ORIGINAL dispatch (A), not the
+        most recent hop (B) -- B's ledger holds a RESUMED row for this
+        agent_id, never a START, so it must not match."""
+        exp.expectations_start("sess-a", "a1", "worktree-developer")
+        exp.expectations_resume("sess-b", "a1", "general-purpose", "sess-a", "worktree-developer")
+        origin = exp.expectations_find_resume_origin("sess-c", "a1")
+        assert origin == ("sess-a", "worktree-developer")
+
+    def test_the_archive_dir_is_also_searched(self, state, monkeypatch):
+        """A background agent can outlive its dispatching session long
+        enough that the session's own ledger has already been archived by
+        the time it resumes."""
+        exp.expectations_start("archived-sess", "a1", "worktree-developer")
+        live = Path(exp.expectations_file("archived-sess"))
+        archived = exp._archive_dir() / live.name
+        archived.write_bytes(live.read_bytes())
+        live.unlink()
+        origin = exp.expectations_find_resume_origin("new-sess", "a1")
+        assert origin == ("archived-sess", "worktree-developer")
+
+    def test_a_blank_agent_id_returns_none_without_touching_disk(self, state):
+        assert exp.expectations_find_resume_origin("s", "") is None
+
+    def test_the_scan_is_bounded_by_file_count(self, state, monkeypatch):
+        """The cap is a real bound, not a formality: a match sitting in a
+        ledger older than the cap's window is missed, which is the
+        deliberate tradeoff that keeps the hook's added cost flat as the
+        state dir grows without limit."""
+        monkeypatch.setattr(exp, "_RESUME_SCAN_MAX_FILES", 2)
+        # Three ledgers, oldest to newest; only the two NEWEST are in the
+        # capped window. The real match sits in the OLDEST.
+        exp.expectations_start("old-sess", "a1", "worktree-developer")
+        old_file = Path(exp.expectations_file("old-sess"))
+        now = time.time()
+        os.utime(old_file, (now - 300, now - 300))
+        for i, name in enumerate(("mid-sess", "new-sess")):
+            exp.expectations_start(name, f"other{i}", "conexus:developer")
+            os.utime(
+                Path(exp.expectations_file(name)), (now - 100 + i, now - 100 + i)
+            )
+        assert exp.expectations_find_resume_origin("caller-sess", "a1") is None, (
+            "the oldest ledger is outside the capped window and must be missed"
+        )
+
+    def test_a_match_within_the_capped_window_is_still_found(self, state, monkeypatch):
+        monkeypatch.setattr(exp, "_RESUME_SCAN_MAX_FILES", 2)
+        exp.expectations_start("recent-sess", "a1", "worktree-developer")
+        origin = exp.expectations_find_resume_origin("caller-sess", "a1")
+        assert origin == ("recent-sess", "worktree-developer")
+
+    def test_the_scan_examines_at_most_the_capped_file_count(self, state, monkeypatch):
+        """IMPORTANT 2 (code review): a DETERMINISTIC bound on the mechanism
+        itself, not a timing assertion -- counts actual file reads against
+        the cap directly, in each of the two scanned directories, on a
+        guaranteed-miss (worst case: no match, so nothing short-circuits
+        the scan early)."""
+        cap = 3
+        monkeypatch.setattr(exp, "_RESUME_SCAN_MAX_FILES", cap)
+        for i in range(cap * 3):
+            exp.expectations_start(f"live-sess-{i}", f"other{i}", "conexus:developer")
+            archived_copy = exp._archive_dir() / f"archived-sess-{i}.expectations"
+            archived_copy.write_text(
+                f"2026-01-01T00:00:00Z\tSTART\tother-archived{i}\tconexus:developer\n"
+            )
+
+        read_calls: list[Path] = []
+        real_read_text = Path.read_text
+
+        def _counting_read_text(self, *a, **k):
+            read_calls.append(self)
+            return real_read_text(self, *a, **k)
+
+        monkeypatch.setattr(Path, "read_text", _counting_read_text)
+        assert exp.expectations_find_resume_origin("caller-sess", "never-seen") is None
+        # One counted read per candidate file actually opened, capped at
+        # `cap` per directory (live + archive), never at the full
+        # cap*3-per-directory population created above.
+        assert len(read_calls) <= cap * 2, (
+            f"expected at most {cap * 2} file reads (cap={cap} per directory, "
+            f"2 directories), got {len(read_calls)}: {read_calls!r}"
+        )
+
+
 # ── the atomic credit claim: the invariant three rounds failed to hold ────
 
 class TestCreditClaimIsAtomic:
@@ -704,6 +843,105 @@ class TestUndeclaredWorkflowSubagentBucket:
         assert r.lines.index("WORKFLOW\tchecked=1") < len(r.lines) - 1
 
 
+# ── nexus-xxvv3: 'RESUMED' gets its own bucket, undeclared side ──────────
+
+class TestUndeclaredResumedBucket:
+    """The bug this bead fixes: a SendMessage-resumed background worktree
+    agent re-STARTs under a new session id as ``general-purpose`` with no
+    matching EXPECT row. Before the fix that reads UNDECLARED; after it,
+    the SubagentStart stamp hook writes a RESUMED row instead of a START,
+    and this class exercises the reader side of that contract directly
+    (independent of the hook -- ``_seed`` writes the row by hand)."""
+
+    def test_a_resumed_start_is_credited_not_undeclared(self, state):
+        _seed("s", [("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess")])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 0
+        assert not [ln for ln in r.lines if ln.startswith("UNDECLARED")]
+        assert "RESUMED\tchecked=1" in r.lines
+        # `checked` DOES count it (nexus-xxvv3 CRITICAL fix): it was
+        # genuinely examined, just credited elsewhere. Never `recognized`
+        # (no EXPECT row in THIS session was ever meant for it).
+        assert "SUMMARY\tchecked=1 recognized=0 unrecognized=1 undeclared=0" in r.lines
+
+    def test_the_reviewers_exact_reproduction_no_longer_false_blindspots(self, state):
+        """CRITICAL (code review): a pending, not-yet-started EXPECT plus a
+        RESUMED row must NOT read as code 1 (BLINDSPOT) -- the SubagentStart
+        stamp hook demonstrably ran (it wrote the RESUMED row), so "the
+        audit walked nothing, check the stamp hook is registered" would be
+        actively wrong advice. The first cut of this fix (excluding RESUMED
+        from `checked` entirely) produced exactly this false BLINDSPOT."""
+        _seed("s", [
+            ("EXPECT", "conexus:developer", "background"),
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+        ])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 0, (
+            "must not be 1 (BLINDSPOT) -- the resumed row proves the stamp "
+            f"hook ran; got lines={r.lines!r}"
+        )
+        assert not [ln for ln in r.lines if ln.startswith("BLINDSPOT")]
+        assert "RESUMED\tchecked=1" in r.lines
+
+    def test_a_resumed_row_never_spends_another_starts_credit(self, state):
+        """The credit pool for 'general-purpose' must stay untouched by the
+        resumed row, so a genuinely undeclared general-purpose START in the
+        SAME session is still caught -- the non-vacuity half of this fix."""
+        _seed("s", [
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+            ("START", "rogue", "general-purpose"),
+        ])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 2
+        assert "UNDECLARED\trogue\tgeneral-purpose" in r.lines
+        assert not [ln for ln in r.lines if ln.startswith("UNDECLARED") and "a1" in ln]
+        assert "RESUMED\tchecked=1" in r.lines
+        # checked now counts BOTH the resumed row and the real rogue START.
+        assert "SUMMARY\tchecked=2 recognized=0 unrecognized=2 undeclared=1" in r.lines
+
+    def test_a_resumed_row_does_not_consume_a_real_expect_credit_either(self, state):
+        """Even with a real EXPECT row for the re-STARTed type present, the
+        resumed row must not spend it -- that credit belongs to whatever
+        THIS session actually dispatched, not to a resume of something
+        dispatched elsewhere."""
+        _seed("s", [
+            ("EXPECT", "general-purpose", "background"),
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+            ("START", "real-dispatch", "general-purpose"),
+        ])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 0, "the one real EXPECT credit must still cover the one real START"
+        assert "RESUMED\tchecked=1" in r.lines
+
+    def test_a_resumed_only_session_is_clean_not_blindspot(self, state):
+        _seed("s", [("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess")])
+        r = exp.expectations_undeclared("s")
+        assert r.code == 0
+        assert not [ln for ln in r.lines if ln.startswith("BLINDSPOT")]
+
+    def test_no_resumed_line_when_there_are_no_resumed_starts(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
+        r = exp.expectations_undeclared("s")
+        assert not [ln for ln in r.lines if ln.startswith("RESUMED")]
+
+    def test_duplicate_resumed_agent_ids_are_counted_once(self, state):
+        _seed("s", [
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+        ])
+        r = exp.expectations_undeclared("s")
+        assert "RESUMED\tchecked=1" in r.lines
+
+    def test_the_resumed_line_precedes_summary(self, state):
+        _seed("s", [
+            ("EXPECT", "t", "background"), ("START", "a1", "t"),
+            ("RESUMED", "r1", "general-purpose", "worktree-developer", "origin-sess"),
+        ])
+        r = exp.expectations_undeclared("s")
+        assert r.lines[-1].startswith("SUMMARY\t")
+        assert r.lines.index("RESUMED\tchecked=1") < len(r.lines) - 1
+
+
 # ── owes_report: the consult rule, and both disclosed causes ─────────────
 
 #: Retained for :class:`TestTheDualImplementationParamDiesWithTheLibrary`
@@ -826,6 +1064,46 @@ class TestOwesReportSurvivesTheLockBeingDisabled:
         assert owed.count(True) == 2, "two units of credit, two debits, no more"
         consumed = [r for r in _rows(Path(exp.expectations_file("s"))) if r[1] == "CONSUMED"]
         assert len(consumed) == 2
+
+
+class TestOwesReportResumedAgents:
+    """IMPORTANT 1 (code review, nexus-xxvv3): a RESUMED agent_id must never
+    reach the credit consult at all, or it can claim a same-type EXPECT
+    credit slot a genuinely dispatched agent of the same type still needs,
+    silently masking that agent's own report obligation."""
+
+    def test_a_resumed_agent_never_owes(self, state):
+        _seed("s", [("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess")])
+        assert exp.expectations_owes_report("s", "a1", "general-purpose").owes is False
+
+    def test_the_coordinators_exact_reproduction_a_resumed_agent_cannot_steal_a_dispatched_agents_credit(
+        self, state
+    ):
+        """One dispatched general-purpose agent plus one resumed agent in
+        the same session; the resumed one stopping FIRST must not consume
+        the dispatched one's credit."""
+        _seed("s", [
+            ("EXPECT", "general-purpose", "background"),
+            ("RESUMED", "resumed-agent", "general-purpose", "worktree-developer", "origin-sess"),
+        ])
+        resumed_verdict = exp.expectations_owes_report("s", "resumed-agent", "general-purpose")
+        assert resumed_verdict.owes is False
+        dispatched_verdict = exp.expectations_owes_report(
+            "s", "dispatched-agent", "general-purpose"
+        )
+        assert dispatched_verdict.owes is True, (
+            "the one real EXPECT credit must still be available for the "
+            "genuinely dispatched agent"
+        )
+
+    def test_a_resumed_agent_writes_no_consumed_row(self, state):
+        _seed("s", [
+            ("EXPECT", "general-purpose", "background"),
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+        ])
+        exp.expectations_owes_report("s", "a1", "general-purpose")
+        consumed = [r for r in _rows(Path(exp.expectations_file("s"))) if r[1] == "CONSUMED"]
+        assert consumed == []
 
 
 # ── census: the scripted retro count, and its 0/1-only vocabulary ────────
@@ -976,6 +1254,101 @@ class TestCensusWorkflowSubagentBucket:
         assert lines.index("WORKFLOW\tchecked=1") < boundary
 
 
+class TestCensusResumedBucket:
+    """The census's own vocabulary for the rule (nexus-xxvv3): a RESUMED row
+    gets a REAL AGENT line (terminal classified, declared='resumed') and
+    counts toward `checked` -- NARROWER than the workflow bucket's full
+    exclusion. Only its declared status and credit participation differ
+    from an ordinary agent; see expectations_census's own docstring for the
+    two code-review/substantive-review findings that shaped this (a false
+    BLINDSPOT from the first cut's full exclusion, and census losing the
+    reported-vs-stuck signal an operator needs)."""
+
+    def test_a_resumed_agent_gets_an_agent_line_declared_resumed(self, state):
+        _seed("s", [("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess")])
+        lines = exp.expectations_census("s").lines
+        assert "AGENT\ta1\tgeneral-purpose\tNO_TERMINAL\tresumed" in lines
+        assert "RESUMED\tchecked=1" in lines
+        assert any(
+            "undeclared=0" in ln and "no_terminal=1" in ln
+            for ln in lines if ln.startswith("CLASSIFIED")
+        )
+
+    def test_a_resumed_agents_terminal_state_is_classified(self, state):
+        """SUBSTANTIVE 1 (substantive review): census must still tell a
+        REPORTED resumed agent from a stuck (NO_TERMINAL) one -- only the
+        declared field changes to 'resumed', never the terminal
+        classification, so `nx-hook expectations_census` stays the
+        documented never-hand-count tool for this class too."""
+        _seed("s", [
+            ("RESUMED", "r1", "general-purpose", "worktree-developer", "origin-sess"),
+            ("REPORTED", "r1"),
+        ])
+        lines = exp.expectations_census("s").lines
+        assert "AGENT\tr1\tgeneral-purpose\tREPORTED\tresumed" in lines
+        assert not [ln for ln in lines if ln.startswith("AGENT\tr1\t-")]
+
+    def test_a_stuck_resumed_agent_reads_no_terminal_not_reported(self, state):
+        _seed("s", [("RESUMED", "r1", "general-purpose", "worktree-developer", "origin-sess")])
+        lines = exp.expectations_census("s").lines
+        assert "AGENT\tr1\tgeneral-purpose\tNO_TERMINAL\tresumed" in lines
+
+    def test_the_reviewers_exact_reproduction_no_longer_false_blindspots(self, state):
+        """CRITICAL (code review), census side: a pending EXPECT plus a
+        RESUMED row and zero real STARTs must give code 0, not 1. The first
+        cut's full RESUMED exclusion left `checked` at 0 here despite the
+        SubagentStart stamp hook demonstrably having run."""
+        _seed("s", [
+            ("EXPECT", "conexus:developer", "background"),
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+        ])
+        r = exp.expectations_census("s")
+        assert r.code == 0, f"must not be 1 (BLINDSPOT); got lines={r.lines!r}"
+        assert any(ln == "BLINDSPOT\tchecked=1 recognized=0 unrecognized=1" for ln in r.lines)
+
+    def test_a_resumed_start_does_not_satisfy_expected_no_start_for_the_same_type(self, state):
+        """The deliberate divergence from the workflow bucket: a real
+        EXPECT for 'general-purpose' with no matching real START must still
+        be flagged EXPECTED_NO_START, even though a resumed agent
+        re-STARTed as exactly that type in the same ledger."""
+        _seed("s", [
+            ("EXPECT", "general-purpose", "background"),
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+        ])
+        lines = exp.expectations_census("s").lines
+        assert "EXPECTED_NO_START\tgeneral-purpose" in lines, (
+            "a resumed row must not count toward start_count for its "
+            "re-STARTed type"
+        )
+
+    def test_a_resumed_row_does_not_consume_a_real_expect_credit_either(self, state):
+        """A resumed row sitting alongside a real EXPECT + real START of the
+        SAME type must not steal that credit -- the real dispatch is still
+        'declared', never 'undeclared'."""
+        _seed("s", [
+            ("EXPECT", "general-purpose", "background"),
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+            ("START", "real-dispatch", "general-purpose"),
+        ])
+        lines = exp.expectations_census("s").lines
+        assert "AGENT\treal-dispatch\tgeneral-purpose\tNO_TERMINAL\tdeclared" in lines
+        assert "AGENT\ta1\tgeneral-purpose\tNO_TERMINAL\tresumed" in lines
+
+    def test_no_resumed_line_when_there_are_no_resumed_starts(self, state):
+        _seed("s", [("EXPECT", "t", "background"), ("START", "a1", "t")])
+        lines = exp.expectations_census("s").lines
+        assert not [ln for ln in lines if ln.startswith("RESUMED")]
+
+    def test_the_resumed_line_precedes_the_rows_classified_blindspot_tail(self, state):
+        _seed("s", [("RESUMED", "r1", "general-purpose", "worktree-developer", "origin-sess")])
+        lines = exp.expectations_census("s").lines
+        boundary = max(
+            i for i, ln in enumerate(lines)
+            if ln.startswith(("ROWS\t", "CLASSIFIED\t", "BLINDSPOT\t"))
+        )
+        assert lines.index("RESUMED\tchecked=1") < boundary
+
+
 # ── reconcile: the harness's own ground truth ────────────────────────────
 
 def _payload(*tasks, transcript_path: str | None = None) -> str:
@@ -1054,6 +1427,35 @@ class TestReconcile:
         r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}, {"no": "id"}))
         summary = [ln for ln in r.lines if ln.startswith("SUMMARY")][0]
         assert "harness_tasks=2 unidentified=1" in summary
+
+
+# ── nexus-xxvv3: RESUMED rows on reconcile -- treated like START, NOT ─────
+# excluded the way WORKFLOW rows are (see the docstring for why).
+
+class TestReconcileResumedRows:
+    def test_a_resumed_agent_the_harness_still_tracks_is_clean(self, state):
+        _seed("s", [("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess")])
+        r = exp.expectations_reconcile("s", _payload({"agent_id": "a1"}))
+        assert r.code == 0
+        assert not [ln for ln in r.lines if ln.startswith("STRANDED")]
+
+    def test_a_resumed_agent_the_harness_forgot_is_stranded(self, state):
+        """Unlike a workflow-subagent START, a resumed agent's identity IS
+        expected to appear in THIS session's own background_tasks (it was
+        just resumed into it), so a missing entry is a real silent death,
+        not an artifact of container-level tracking."""
+        _seed("s", [("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess")])
+        r = exp.expectations_reconcile("s", _payload())
+        assert r.code == 4
+        assert "STRANDED\ta1\tgeneral-purpose" in r.lines
+
+    def test_a_terminated_resumed_agent_is_not_outstanding(self, state):
+        _seed("s", [
+            ("RESUMED", "a1", "general-purpose", "worktree-developer", "origin-sess"),
+            ("REPORTED", "a1"),
+        ])
+        r = exp.expectations_reconcile("s", _payload())
+        assert r.code == 0
 
 
 # ── nexus-silj0 follow-up: measured, 'workflow-subagent' on reconcile ─────

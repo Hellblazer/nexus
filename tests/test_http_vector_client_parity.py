@@ -1360,6 +1360,16 @@ class TestT3GcPrimitives:
             ("/v1/vectors/store-delete", {"collection": "c", "ids": ["a", "b", "c"]}),
         ]
 
+    def test_delete_by_chunk_ids_reports_the_servers_deleted_count(self, monkeypatch):
+        # The engine skips an id a live manifest still references (RDR-191 F10c)
+        # and reports what it actually removed; the client must report that
+        # number, not the batch size, or nx t3 gc overstates its deletions.
+        def fake_post(path, body, **kw):
+            return {"deleted": 1}
+
+        monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+        assert HttpVectorClient().delete_by_chunk_ids("c", ["a", "b"]) == 1
+
     def test_delete_by_chunk_ids_empty_is_noop(self, monkeypatch):
         def fake_post(path, body, **kw):  # pragma: no cover — must not be called
             raise AssertionError("no HTTP call expected")

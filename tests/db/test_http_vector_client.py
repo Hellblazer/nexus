@@ -385,7 +385,7 @@ class TestListCollections:
             lambda p, **kw: fake
         )
         result = client.list_collections()
-        assert result == [{"name": "knowledge__nexus__model__v1", "count": 7}]
+        assert result == [{"name": "knowledge__nexus__model__v1", "count": 7, "stored_count": 7}]
 
         def raise_err(p, **kw):
             raise VectorServiceError("error")
@@ -1235,7 +1235,7 @@ class TestResolveCollectionRowTenantScoping:
 
         client = HttpVectorClient(tenant="tenant-a")
         row = client._resolve_collection_row("knowledge__x__model-ctx__v1")
-        assert row == {"name": "knowledge__x__model-ctx__v1", "count": 2, "content_type": "knowledge"}
+        assert row == {"name": "knowledge__x__model-ctx__v1", "count": 2, "stored_count": 2, "content_type": "knowledge"}
         assert get_calls == [("/v1/vectors/stats", "tenant-a")]
 
     def test_two_clients_of_different_tenants_resolve_through_their_own_tenant(self, monkeypatch):

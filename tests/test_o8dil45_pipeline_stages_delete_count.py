@@ -26,7 +26,7 @@ class _FakeColFullDelete:
         self._ids = list(ids)
         self.delete_calls: list[list[str]] = []
 
-    def get_all_metadata(self, where: dict | None = None) -> dict:
+    def get_all_metadata(self, where: dict | None = None, *, include_non_live: bool = False) -> dict:
         return {"ids": list(self._ids)}
 
     def delete(self, ids: list[str]) -> int:
@@ -44,7 +44,7 @@ class _FakeColPartialDelete:
         self.refuse = set(refuse)
         self.delete_calls: list[list[str]] = []
 
-    def get_all_metadata(self, where: dict | None = None) -> dict:
+    def get_all_metadata(self, where: dict | None = None, *, include_non_live: bool = False) -> dict:
         return {"ids": list(self._ids)}
 
     def delete(self, ids: list[str]) -> int:
@@ -86,7 +86,7 @@ def test_returns_actual_deleted_count_not_requested_on_partial_anti_join():
 
 def test_no_orphans_returns_zero_without_calling_delete():
     class _EmptyCol:
-        def get_all_metadata(self, where=None):
+        def get_all_metadata(self, where=None, *, include_non_live=False):
             return {"ids": []}
 
         def delete(self, ids):

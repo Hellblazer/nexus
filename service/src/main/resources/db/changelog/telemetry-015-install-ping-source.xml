@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-5zv4j — install_pings gains source_hash, so an install's approximate
+    origin can be correlated without joining 11 days of edge ALB access logs
+    by received_at (T2 install-pings-source-ip-map-2026-09-18).
+
+    Nullable, computed entirely by InstallPingHandler at write time; the
+    client sends nothing new (install_ping.py's payload is unchanged — see
+    docs/wire-contract-pending.md): first 16 hex chars of
+    HMAC-SHA256(NX_INSTALL_PING_HASH_KEY, remoteAddress), remoteAddress
+    derived by the SAME trusted-proxy XFF rule MintRateLimiter uses
+    (InstallPingHandler.remoteAddress). NX_INSTALL_PING_HASH_KEY unset ->
+    NULL, never an unkeyed hash of the raw address. The raw address itself is
+    never stored or logged — install_ping.py promises an anonymous ping, and
+    a raw IP beside a stable install_id would break that; the ALB bucket
+    already keeps the raw address 365d. NAT/CGNAT collapses many distinct
+    installs onto one source_hash, and one install's address changing
+    fragments its own history across hashes — a correlation signal, not a
+    stable per-install identifier. That identity use also relies on the edge
+    actually collapsing X-Forwarded-For to one vouched hop: a self-hosted
+    engine that sets NX_INSTALL_PING_TRUSTED_PROXIES without a collapsing
+    proxy in front of it lets a client choose its own fingerprint.
+
+    No RLS change: this table has none (see telemetry-014's own header). No
+    grant change: grants-nexus-svc.xml's ALL TABLES IN SCHEMA nexus grant
+    already covers new columns on an existing table. No index: source_hash is
+    a nullable correlation key over a small population and the existing
+    idx_install_pings_received already orders the one read query this table
+    serves — add one if a source_hash-keyed read pattern actually shows up.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="telemetry-015-1" author="nexus-5zv4j">
+        <comment>Add nullable install_pings.source_hash — additive, no effect on existing rows</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.install_pings ADD COLUMN source_hash TEXT;
+        </sql>
+        <rollback>
+ALTER TABLE nexus.install_pings DROP COLUMN IF EXISTS source_hash;
+        </rollback>
+    </changeSet>
+</databaseChangeLog>

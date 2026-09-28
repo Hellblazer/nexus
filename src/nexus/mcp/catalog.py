@@ -315,6 +315,13 @@ def catalog_list(
 # to auto-derive file://<abspath> from file_path; pass an explicit URI
 # (a custom scheme, https://, nx-scratch://) to store verbatim. Malformed
 # URIs raise at register-time.
+#
+# HISTORY (nexus-0ne1m critique, 9727a80cc Critical): record_https_etag
+# below adds one bounded, best-effort outbound HEAD for an https:// source_uri
+# -- see its own docstring (nexus.aspect_readers) for the full contract. The
+# tool's own docstring states the side effect in caller-facing terms; this
+# comment carries the incident/bead history instead, per the description
+# shape rule (nexus-cnzei.5) that keeps bead ids/dates out of wire text.
 @mcp.tool(
     name="register",
     title="Register Document in Catalog",
@@ -345,6 +352,14 @@ def catalog_register(
     its metadata needs to change. Returns `{"tumbler": ..., "title": ...}`,
     or `{"error": ...}` naming why registration was refused (e.g. an
     ephemeral worktree/tempdir path with no owning repo_root).
+
+    For an `https://` source_uri, this also makes ONE real outbound HEAD
+    request afterward to capture the resource's ETag for later staleness
+    checks: a few seconds at most, one attempt, best-effort (a slow,
+    failed, or ETag-less response never fails this call and records
+    nothing). Every other scheme makes no network call at all. Set
+    NX_REFERENCE_ETAG_CAPTURE=0 in the server's environment to disable
+    this HEAD entirely.
     """
     cat, err = _require_catalog()
     if err:
@@ -422,6 +437,11 @@ def catalog_register(
             meta=_json.loads(meta) if meta else None,
             source_uri=source_uri,
         )
+        # nexus-0ne1m: best-effort ETag capture for an https:// reference —
+        # no-op for every other scheme, never raises, never fails this call.
+        from nexus.aspect_readers import record_https_etag  # noqa: PLC0415 — deferred local import — avoids import-time cost / circular deps
+
+        record_https_etag(writer, tumbler, source_uri)
         return {"tumbler": str(tumbler), "title": title}
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}

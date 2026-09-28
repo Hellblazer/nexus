@@ -150,7 +150,7 @@ def test_pdf_chunk_chars_wiring(tmp_path, chunk_chars, expected_call) -> None:
         fake_chunk = MagicMock(text="Content.", chunk_index=0, metadata={})
         mock_chunker_cls.return_value = MagicMock(chunk=MagicMock(return_value=[fake_chunk]))
         kwargs = {"chunk_chars": chunk_chars} if chunk_chars is not None else {}
-        _pdf_chunks(pdf, "abc123", "voyage-context-3", "2026-01-01", "test", **kwargs)
+        _pdf_chunks(pdf, "abc123", "model-ctx", "2026-01-01", "test", **kwargs)
     expected_call(mock_chunker_cls)
 
 
@@ -163,7 +163,7 @@ def test_index_pdf_file_passes_chunk_chars(tmp_path) -> None:
         "source_date": "", "corpus": "docs__test", "store_type": "pdf",
         "page_count": 1, "page_number": 1, "section_title": "", "format": "",
         "extraction_method": "", "chunk_index": 0, "chunk_count": 1,
-        "chunk_start_char": 0, "chunk_end_char": 10, "embedding_model": "voyage-context-3",
+        "chunk_start_char": 0, "chunk_end_char": 10, "embedding_model": "model-ctx",
         "indexed_at": "2026-01-01", "content_hash": "abc123", "pdf_subject": "",
         "pdf_keywords": "", "is_image_pdf": False,
     })
@@ -172,7 +172,7 @@ def test_index_pdf_file_passes_chunk_chars(tmp_path) -> None:
     # here, it needs an explicit embed_fn (the deleted _embed_with_fallback
     # used to provide this via a mock).
     with patch("nexus.doc_indexer._pdf_chunks", return_value=[fake_chunk]) as mock_pdf_chunks:
-        _index_pdf_file(pdf, tmp_path, "docs__test", "voyage-context-3",
+        _index_pdf_file(pdf, tmp_path, "docs__test", "model-ctx",
                         MagicMock(get=MagicMock(return_value={"ids": [], "metadatas": []})),
                         MagicMock(), "voyage-key", {}, "2026-01-01", 0.5, chunk_chars=800,
                         embed_fn=lambda texts: [[0.1] * 10 for _ in texts])

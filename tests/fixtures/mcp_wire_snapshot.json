@@ -481,6 +481,17 @@
             ],
             "default": null
           },
+          "agent_transcript_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "agent_type": {
             "anyOf": [
               {

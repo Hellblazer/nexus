@@ -45,6 +45,22 @@ Two independent halves live here:
   engine's own claimable filter already excludes a dead-lettered row) --
   it renders whatever the engine hands it and stops.
 
+  Bead nexus-n36sw (follow-up to nexus-zxthy): a fresh board subscription
+  still had no start position of its own before this bead -- the engine
+  stamped and returned EVERY retained post the very first time a new
+  subscriber asked, and this waiter's own client-side drop
+  (:meth:`ChannelWaiter._deliver_board_rows`) only hid the ones it judged
+  older than the topic's subscribe time from the NOTIFICATION, after the
+  engine had already exhausted them. A board spec now also sends
+  ``since`` (:meth:`ChannelWaiter._build_specs`), which
+  ``TupleRepository.queryOnceAnnounceSubscriber`` folds into its own
+  candidate predicate: a row at or before the watermark is never
+  selected, stamped, or returned in the first place. An engine predating
+  this bead refuses ``since`` alongside ANY ``announce`` outright;
+  :meth:`ChannelWaiter.tick` detects that refusal on first contact and
+  falls back to the pre-nexus-n36sw client-side drop for the rest of the
+  waiter's life, so a new client against an old engine still works.
+
 RDR-211 gated every mailbox claim on proof that the channel was live for
 this session (a parent command-line read, or a probe notification the
 session had to answer), because a claim held for a session that could
@@ -103,7 +119,7 @@ import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -111,6 +127,7 @@ import httpx
 import structlog
 
 from nexus.db.limits import MAX_QUERY_RESULTS
+from nexus.db.t2.http_tuple_store import SchemaViolationError
 from nexus.db.t2.records import Announce, TupleRow, WaitResult, WaitSpec
 
 if TYPE_CHECKING:
@@ -142,6 +159,46 @@ DEFAULT_MAX_ANNOUNCES = 5
 #: and a re-announce budget would only wake the session again for a post
 #: it already saw. The old cursor announced a post once too.
 DEFAULT_BOARD_MAX_ANNOUNCES = 1
+#: Bead nexus-zxthy: rows one board spec asks for per wait. The engine's
+#: own default is 1, which turned a backlog into one notification per
+#: tick (282 in 80 s on 2026-09-27). Bounded like a consumer's in-flight
+#: cap (Reactive Streams demand, MQTT Receive Maximum, NATS
+#: max_ack_pending); the rows of one wait fold into ONE notification.
+DEFAULT_BOARD_WAIT_ROWS: int = 100
+#: Bead nexus-zxthy: seconds `run()` settles after a tick that returned
+#: board rows before the next wait, so a cluster of posts (a CI push
+#: starts ~20 jobs together) lands in one wait and one notification
+#: instead of one per tick. Also the bound on how much a mailbox
+#: reference can be delayed behind a board burst.
+DEFAULT_BOARD_COALESCE_S: float = 3.0
+#: Bead nexus-zxthy (widened nexus-n36sw): the start-position filter
+#: compares the ENGINE's `created_at` with the CLIENT's subscribe time, two
+#: clocks. A post made just after subscribing on an engine whose clock runs
+#: behind this box would otherwise read as backlog and be dropped; a
+#: margin this wide costs at most one folded notification of recent posts
+#: on subscribe. Bead nexus-n36sw moved the comparison itself onto the
+#: engine (`WaitSpec.since` alongside a per-subscriber `announce`), so this
+#: margin is now subtracted from the watermark BEFORE it is sent
+#: (`_build_specs`), not applied to a client-side compare after the fact --
+#: same margin, same reason, moved to where the compare now runs.
+#:
+#: SECOND THING THIS MARGIN COVERS (critic finding, bead nexus-n36sw round
+#: 2): a writer's `created_at` is Postgres's `now()`/`transaction_timestamp()`
+#: -- fixed at the WRITER's transaction start, not its commit
+#: (`TupleRepository.writeOut`) -- so a post whose transaction began just
+#: before this margin's floor but committed after it would otherwise be
+#: excluded, permanently, by the engine's own `created_at > since` compare
+#: (`TupleRepository.queryOnceAnnounceSubscriber`'s own javadoc names this
+#: the identical way; `TupleAnnounceTest
+#: .subscriberAnnounce_sinceWatermarkExclusion_isACommitVisibilityRace_
+#: boundedByTheWriterTransactionsOwnDuration` is the pin). `TupleRepository
+#: .out()`'s own production transaction is one bounded sequence of
+#: synchronous round trips with nothing in it that can block on anything
+#: external, so BEGIN-to-COMMIT is single-digit milliseconds in practice --
+#: this margin's 30 seconds is several orders of magnitude wider than that,
+#: not a coincidence: it is sized to make this race unreachable by a real
+#: writer, the same way it already absorbed clock skew above.
+DEFAULT_BOARD_START_SKEW_S: float = 30.0
 #: Seconds `run()` sleeps after a tick fails for a reason other than
 #: "engine without wait" (a transient HTTP or store error) before the next
 #: tick. The loop never dies on one bad round-trip.
@@ -364,6 +421,42 @@ def _board_notification_content(subspace: str, tuple_id: str) -> str:
     )
 
 
+def _board_batch_notification_content(
+    subspace: str, count: int, first_id: str, last_id: str, since: tuple[str, str] | None,
+) -> str:
+    """Bead nexus-zxthy: ONE notification for *count* posts of one wait.
+    Identifiers only, as the single-post shape (Sam, 2026-09-17, T2
+    nexus_rdr/211-decision-push-reference-2026-09-17): the subspace, the
+    count, the first and last tuple id, and how to read them. *since* is
+    the ``(created_at, id)`` of the last post this waiter delivered for
+    the topic before this batch, when it knows one, so the read hint is
+    exact; otherwise the hint is the newest *count* rows."""
+    if since is not None:
+        read = (
+            f'tuple_rd("{subspace}", n={count}, since_created_at="{since[0]}", '
+            f'since_id="{since[1]}")'
+        )
+    else:
+        read = f'tuple_rd("{subspace}", n={count})'
+    return (
+        f"nexus board posts: subspace {subspace}, {count} new posts, tuples {first_id} "
+        f"to {last_id}. Read them with {read}. Posts are never claimed."
+    )
+
+
+def _parse_created_at(value: str | None) -> datetime | None:
+    """ISO-8601 as the wire renders ``created_at``, or ``None`` when absent
+    or not parseable (a row the start-position filter then keeps: an
+    unknown age is delivered, never silently dropped)."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def _parse_announced_at(value: str | None) -> datetime | None:
     """``TupleRow.announced_at`` as the wire actually sends it -- an
     ISO-8601 timestamp string, or ``None`` for a row nothing has ever
@@ -397,6 +490,43 @@ def _mint_waiter_token() -> str:
     now = max(time.time_ns(), _last_waiter_token_ns + 1)
     _last_waiter_token_ns = now
     return f"{now}-{uuid.uuid4().hex}"
+
+
+def _is_old_engine_since_refusal(exc: "SchemaViolationError", specs: list[WaitSpec]) -> bool:
+    """Bead nexus-n36sw (code-review round): is *exc* the SPECIFIC refusal an
+    engine predating this bead raises for ANY ``since`` alongside ``announce``,
+    regardless of ``subscriber``? Two checks, both required, since either
+    alone is too loose:
+
+    1. The message names BOTH ``since`` and ``announce`` -- not just
+       ``since`` (the field name alone also appears in `TupleRepository
+       .MAX_WAIT_SUBSPACES`-adjacent or other unrelated `SchemaViolation`
+       messages a future engine could add; anchoring on the pair is the
+       same shape the engine's own two refusal messages share: "must not
+       be set together with announce" (old, unconditional) and "must not
+       be set together with a row-level announce" (new, narrower) both
+       contain both words).
+    2. Every spec in THIS batch that carries `since` is per-subscriber
+       (`announce.subscriber` set) -- `ChannelWaiter._build_specs` never
+       sends `since` on a mailbox spec (see its own invariant comment), so
+       a `since`-carrying spec that is NOT per-subscriber here would mean
+       OUR OWN code sent a `since` it should not have: a bug to surface by
+       re-raising, never a shape this fallback should silently swallow and
+       misattribute to engine age.
+    3. At least one spec in THIS batch actually carries `since`. Without
+       it, check 2 is vacuously true, and an unrelated refusal whose text
+       happens to name both words would permanently disable the watermark
+       for a batch that never asked for it (fix-check finding).
+    """
+    msg = str(exc)
+    if "since" not in msg or "announce" not in msg:
+        return False
+    if not any(spec.since is not None for spec in specs):
+        return False
+    return all(
+        spec.since is None or (spec.announce is not None and spec.announce.subscriber is not None)
+        for spec in specs
+    )
 
 
 def _probe_serving_engine_version() -> tuple[int, int, int] | None:
@@ -525,6 +655,9 @@ class ChannelWaiter:
         tick_error_backoff_s: float = DEFAULT_TICK_ERROR_BACKOFF_S,
         min_tick_interval_s: float = DEFAULT_MIN_TICK_INTERVAL_S,
         engine_version_probe: Callable[[], tuple[int, int, int] | None] = _probe_serving_engine_version,
+        board_wait_rows: int = DEFAULT_BOARD_WAIT_ROWS,
+        board_coalesce_s: float = DEFAULT_BOARD_COALESCE_S,
+        board_start_skew_s: float = DEFAULT_BOARD_START_SKEW_S,
     ) -> None:
         self.session_id = session_id
         self.store_factory = store_factory
@@ -546,6 +679,44 @@ class ChannelWaiter:
         self.max_announces = max_announces
         self.tick_error_backoff_s = tick_error_backoff_s
         self.min_tick_interval_s = min_tick_interval_s
+        self.board_wait_rows = board_wait_rows
+        self.board_coalesce_s = board_coalesce_s
+        self.board_start_skew_s = board_start_skew_s
+        #: Bead nexus-zxthy: subspace -> `(created_at, id)` of the LAST
+        #: board post this waiter delivered for it, the read hint the next
+        #: batch notification carries. Memory only: the engine's stamp is
+        #: the delivery record, this is a rendering aid.
+        self._board_last_delivered: dict[str, tuple[str, str]] = {}
+        #: Bead nexus-zxthy: set by `_process_results` when a tick returned
+        #: board rows (kept or dropped), read and cleared by `run()` to
+        #: settle `board_coalesce_s` before the next wait.
+        self._board_activity = False
+        #: Cumulative counts for `status()` (bead nexus-zxthy).
+        self._board_batches = 0
+        self._board_backlog_dropped = 0
+        #: Bead nexus-n36sw: optimistic default -- `_build_specs` sends the
+        #: topic's subscribe-time watermark as `since` on every board spec
+        #: until proven unsupported. An engine predating this bead refuses
+        #: ANY `since` alongside `announce` (its refusal does not look at
+        #: `subscriber`), so the first such refusal flips this to `False`
+        #: for the REST OF THIS WAITER'S LIFE (never re-tried -- there is no
+        #: live-upgrade case for one running process) and `tick()` falls
+        #: back to today's behaviour: no `since` on the wire, the client-side
+        #: drop in `_deliver_board_rows` does the filtering instead, exactly
+        #: as it did before this bead.
+        #:
+        #: REMOVAL BOUND (critic finding, bead nexus-n36sw): this flag, the
+        #: `SchemaViolationError` catch in `tick()` that flips it, and the
+        #: client-side drop it falls back to (`_deliver_board_rows`'s
+        #: `since_by_topic` branch in `_process_results`) exist ONLY for an
+        #: engine below the floor this bead needs. Once `REQUIRED_ENGINE_VERSION`
+        #: (`nexus.engine_version`) passes `(0, 1, 135)` -- the floor every
+        #: local install enforces, per AGENTS.md's "ONE engine identity per
+        #: release" rule -- no supported engine can ever raise this refusal
+        #: again, and this flag, that catch, and that fallback branch should
+        #: all be deleted together: always send `since`, never catch, never
+        #: fall back.
+        self._board_since_supported = True
         #: Consecutive ticks in `run()`'s loop faster than
         #: `min_tick_interval_s` -- the floor's own bookkeeping, not the
         #: fix (see `DEFAULT_MIN_TICK_INTERVAL_S`).
@@ -641,6 +812,16 @@ class ChannelWaiter:
             "announced": self._announced_total,
             "pending": len(active),
             "oldest_pending_age_s": oldest_pending_age_s,
+            # bead nexus-zxthy: board notifications sent (one per topic per
+            # wait with new posts) and backlog rows dropped as older than
+            # their topic's subscribe time.
+            "board_batches": self._board_batches,
+            "board_backlog_dropped": self._board_backlog_dropped,
+            # bead nexus-n36sw: whether this waiter is sending `since` to the
+            # engine on board specs (the engine-owned start position) or has
+            # fallen back to the client-side drop for an engine that refuses
+            # the combination.
+            "board_since_supported": self._board_since_supported,
         }
 
     def _publish_status(self) -> None:
@@ -702,6 +883,17 @@ class ChannelWaiter:
                     )
                     await asyncio.sleep(self.tick_error_backoff_s)
                     continue  # the backoff above already paces this tick; the floor below is redundant for it
+                if self._board_activity:
+                    # bead nexus-zxthy: settle so a cluster of posts folds
+                    # into the next wait instead of one notification per tick.
+                    # The fast-tick floor's bookkeeping is reset here on
+                    # purpose: this sleep paces the loop itself, and a tick
+                    # that returned rows is a genuine wake, not a fast one.
+                    self._board_activity = False
+                    self._fast_tick_streak = 0
+                    self._warned_fast_ticks = False
+                    await asyncio.sleep(self.board_coalesce_s)
+                    continue
                 elapsed = time.monotonic() - tick_started
                 if elapsed < self.min_tick_interval_s:
                     self._fast_tick_streak += 1
@@ -860,13 +1052,30 @@ class ChannelWaiter:
         simply asks for up to `wait_timeout_s` and lets the engine decide
         when (or whether) anything is due before that. Exposed (not
         folded into :meth:`run`) so tests can drive iterations directly
-        instead of a real timed loop."""
-        live_subspaces = {e["subspace"] for e in self.subs.entries()}
+        instead of a real timed loop.
+
+        Bead nexus-n36sw: a board spec optimistically carries `since`
+        (`_build_specs`, gated on `_board_since_supported`). An engine
+        predating this bead refuses ANY `since` alongside `announce`
+        (`SchemaViolationError`, wire code `SchemaViolation`, naming the
+        `since` field) regardless of `subscriber` -- its refusal predates
+        the per-subscriber carve-out this bead adds. The FIRST such
+        refusal this waiter ever sees flips `_board_since_supported` to
+        `False` for its whole remaining life and rebuilds+resends this
+        SAME tick's specs without `since`, so this tick still delivers
+        rather than waiting for the next one; every later tick's
+        `_build_specs` call already omits it once the flag is flipped."""
+        # One snapshot of the subscription list per tick (bead nexus-zxthy,
+        # review): the subscribe/unsubscribe tools mutate the set from
+        # worker threads, so the spec builder and the result processor
+        # read the SAME list rather than two that may differ.
+        entries = self.subs.entries()
+        live_subspaces = {e["subspace"] for e in entries}
         for subspace in list(self._last_seen):
             if subspace not in live_subspaces:
                 del self._last_seen[subspace]
 
-        specs = self._build_specs()
+        specs = self._build_specs(entries)
         try:
             results: list[WaitResult] = await asyncio.to_thread(
                 self._call, lambda t: t.wait(specs, self.wait_timeout_s),
@@ -879,6 +1088,17 @@ class ChannelWaiter:
                 self._stop_no_wait_support()
                 return
             raise  # any other status is a transient fault: `run()` logs, backs off and ticks again
+        except SchemaViolationError as exc:
+            if not (self._board_since_supported and _is_old_engine_since_refusal(exc, specs)):
+                raise  # a schema violation this bead does not explain: a real request defect
+            self._board_since_supported = False
+            _log.warning(
+                "channel_waiter_board_since_unsupported", session_id=self.session_id, error=str(exc),
+            )
+            specs = self._build_specs(entries)
+            results = await asyncio.to_thread(
+                self._call, lambda t: t.wait(specs, self.wait_timeout_s),
+            )
         if any(result.superseded for result in results):
             self._stop_superseded()
             return
@@ -888,7 +1108,7 @@ class ChannelWaiter:
         if self._engine_ignores_subscriber(results):
             self._stop_no_subscriber_support()
             return
-        await self._process_results(results)
+        await self._process_results(results, entries)
         self._last_wake = datetime.now(UTC)
         self._publish_status()
 
@@ -957,29 +1177,66 @@ class ChannelWaiter:
         self._stopped_reason = "no_subscriber_support"
         _log.warning("channel_waiter_no_subscriber_support", session_id=self.session_id)
 
-    def _build_specs(self) -> list[WaitSpec]:
+    def _build_specs(self, entries: list[dict[str, Any]] | None = None) -> list[WaitSpec]:
         """Every subscription -- board or mailbox -- enters the spec
         every tick. The spec is NEVER empty. A board's spec (bead
         nexus-q82tk) carries `announce` with `subscriber` set to this
         session's id and `max=DEFAULT_BOARD_MAX_ANNOUNCES`, so the engine
         returns each post to this session once, from a per-subscriber
-        stamp, with no client cursor to skip a late commit. A mailbox's
+        stamp, with no client cursor to skip a late commit, and asks for
+        up to `board_wait_rows` rows per wait (bead nexus-zxthy) that
+        `_process_results` folds into one notification. A mailbox's
         spec (bead nexus-vsipz, RDR-213 engine half) asks for `n=1` and
         an `announce` field carrying this waiter's `reannounce_interval_s`/
         `max_announces` -- the engine, not this waiter, decides whether
-        anything is due."""
+        anything is due.
+
+        Bead nexus-n36sw: a board spec ALSO carries `since` -- the topic's
+        subscribe-time watermark (`entry["since"]`, `SubscriptionSet
+        .entries`'s own ISO string), widened backwards by
+        `board_start_skew_s` exactly as the pre-nexus-n36sw client-side
+        compare was (this is a MOVE of that margin's application point, not
+        a new one) -- gated on `_board_since_supported`: `True` (the
+        default, and every tick after this bead's own engine has proven
+        itself) sends it, so the engine excludes a backlog row from ever
+        being selected or stamped; `False` (an engine that refused the
+        combination on some earlier tick, `tick`'s own catch) omits it,
+        restoring the pre-nexus-n36sw wire shape so an old engine still
+        answers. Never sent when the topic has no recorded subscribe time
+        (a `SubscriptionSet` restored from a pre-nexus-zxthy T1 record) --
+        `since=None` (the field's own default) is `WaitSpec`'s unchanged
+        "no watermark" case on both client and engine."""
         specs: list[WaitSpec] = []
-        for entry in self.subs.entries():
+        for entry in (self.subs.entries() if entries is None else entries):
             subspace = entry["subspace"]
             if subspace.startswith("board/"):
+                since: tuple[str, str] | None = None
+                if self._board_since_supported:
+                    start = _parse_created_at(entry.get("since"))
+                    if start is not None:
+                        watermark = start - timedelta(seconds=self.board_start_skew_s)
+                        # bead nexus-n36sw: the engine's per-subscriber since
+                        # compare is `created_at` alone (no tuple id to pair
+                        # it with at subscribe time) -- see
+                        # `TupleRepository.queryOnceAnnounceSubscriber`'s own
+                        # javadoc for why. The second element is a sentinel
+                        # `_since_payload` renders as an omitted `id` key,
+                        # never read by the engine's per-subscriber path.
+                        since = (watermark.isoformat(), "")
                 specs.append(WaitSpec(
-                    subspace=subspace,
+                    subspace=subspace, n=self.board_wait_rows, since=since,
                     announce=Announce(
                         interval_s=int(self.reannounce_interval_s), max=DEFAULT_BOARD_MAX_ANNOUNCES,
                         subscriber=self.session_id, waiter=self.waiter_token,
                     ),
                 ))
             else:
+                # INVARIANT (code-review round, bead nexus-n36sw): a mailbox
+                # spec never sets `since`. `_is_old_engine_since_refusal`
+                # relies on this to tell "an old engine refusing our own
+                # correctly-shaped per-subscriber since" from "a bug that
+                # put since on a row-level spec" -- the latter must re-raise,
+                # never flip `_board_since_supported` and swallow it.
                 specs.append(WaitSpec(
                     subspace=subspace, n=1,
                     announce=Announce(
@@ -989,7 +1246,9 @@ class ChannelWaiter:
                 ))
         return specs
 
-    async def _process_results(self, results: list[WaitResult]) -> None:
+    async def _process_results(
+        self, results: list[WaitResult], entries: list[dict[str, Any]] | None = None,
+    ) -> None:
         """Board posts (bead nexus-q82tk): deliver each; the engine has
         already stamped the per-subscriber delivery row, so there is no
         cursor to advance and nothing to persist. Mailboxes (bead
@@ -1000,21 +1259,94 @@ class ChannelWaiter:
         claimable filter excludes a dead-lettered row before this waiter
         ever sees it. Every returned mailbox row is referenced, claimed
         or not (the notification text already covers an empty
-        `tuple_in`)."""
+        `tuple_in`).
+
+        Bead nexus-n36sw: `since_by_topic` is now a FALLBACK, only live when
+        `_board_since_supported` is `False` -- the engine already excluded
+        anything at or before the watermark from ever being selected or
+        stamped when it IS supported (the common case), so re-deriving and
+        re-applying the same compare here would be redundant work finding
+        nothing (every row `_deliver_board_rows` would drop is already
+        absent from `results`). `None` for every topic in that case is
+        `_deliver_board_rows`'s own existing "keep everything" branch --
+        unchanged code, a plain no-op here rather than a special case."""
+        since_by_topic: dict[str, datetime | None] = {}
+        if self._board_since_supported:
+            for e in (self.subs.entries() if entries is None else entries):
+                since_by_topic[e["subspace"]] = None
+        else:
+            skew = timedelta(seconds=self.board_start_skew_s)
+            for e in (self.subs.entries() if entries is None else entries):
+                start = _parse_created_at(e.get("since"))
+                since_by_topic[e["subspace"]] = (start - skew) if start is not None else None
         for result in results:
             if result.subspace.startswith("board/"):
-                for row in result.tuples:
-                    await self._deliver_board_post(result.subspace, row)
+                await self._deliver_board_rows(
+                    result.subspace, result.tuples, since_by_topic.get(result.subspace),
+                )
                 continue
             for row in result.tuples:  # n=1 caps this to at most one row
                 await self._reference_mailbox_row(result.subspace, row)
 
-    async def _deliver_board_post(self, subspace: str, row: TupleRow) -> None:
-        meta = {"subspace": subspace, "tuple_id": row.id}
-        for key in ("from", "kind"):
-            if row.dims.get(key):
-                meta[key] = row.dims[key]
-        await self.sender(_board_notification_content(subspace, row.id), meta)
+    async def _deliver_board_rows(
+        self, subspace: str, rows: list[TupleRow], since: datetime | None,
+    ) -> None:
+        """Bead nexus-zxthy. Drop rows created before the topic's subscribe
+        time (*since*, already widened by `board_start_skew_s`; a row
+        whose `created_at` cannot be parsed is kept),
+        then send ONE notification for what is left: the unchanged single-
+        post shape for one row, the batch shape for more. The engine has
+        already stamped every row here for this subscriber, dropped or
+        not, so a dropped backlog row is never returned again; the start
+        position only decides what is pushed, never what `tuple_rd` can
+        read."""
+        if not rows:
+            return
+        self._board_activity = True
+        kept: list[TupleRow] = []
+        for row in rows:
+            created = _parse_created_at(row.created_at)
+            if since is not None and created is not None and created < since:
+                self._board_backlog_dropped += 1
+                continue
+            kept.append(row)
+        if not kept:
+            return
+        if len(kept) == 1:
+            row = kept[0]
+            meta = {"subspace": subspace, "tuple_id": row.id}
+            for key in ("from", "kind"):
+                if row.dims.get(key):
+                    meta[key] = row.dims[key]
+            await self.sender(_board_notification_content(subspace, row.id), meta)
+        else:
+            first, last = kept[0], kept[-1]
+            kinds: dict[str, int] = {}
+            senders: set[str] = set()
+            for row in kept:
+                if row.dims.get("kind"):
+                    kinds[row.dims["kind"]] = kinds.get(row.dims["kind"], 0) + 1
+                if row.dims.get("from"):
+                    senders.add(row.dims["from"])
+            meta = {
+                "subspace": subspace, "tuple_id": last.id, "first_tuple_id": first.id,
+                "count": str(len(kept)),
+                # every id this one notification covers, so a reader can
+                # account for each post without a second read
+                "tuple_ids": ",".join(row.id for row in kept),
+            }
+            if kinds:
+                meta["kinds"] = ",".join(f"{k}={n}" for k, n in sorted(kinds.items()))
+            if senders:
+                meta["from"] = ",".join(sorted(senders))
+            content = _board_batch_notification_content(
+                subspace, len(kept), first.id, last.id, self._board_last_delivered.get(subspace),
+            )
+            await self.sender(content, meta)
+        self._board_batches += 1
+        last = kept[-1]
+        if last.created_at:
+            self._board_last_delivered[subspace] = (last.created_at, last.id)
 
     async def _reference_mailbox_row(self, subspace: str, row: TupleRow) -> None:
         """Send ONE reference for *row* (claimed or not -- the

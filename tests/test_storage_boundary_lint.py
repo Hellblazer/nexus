@@ -627,6 +627,12 @@ def test_dual_population_baseline_locked():
     # 28 since nexus-iygza: `nx index repo`'s unassigned-chunk drain lists
     # pages through a third read-only construction in commands/index.py, on
     # the command's shared client; its assigns go through t2_index_write.
+    # nexus-du6d0 review round 1 briefly added a fourth construction here
+    # (_collections_with_failed_discover, a per-collection T2Database
+    # probe); review round 2 replaced it with a direct
+    # HttpMemoryStore().get_all(...) call -- ONE round trip, and not a
+    # T2Database/T3Database construction at all (BANNED_CONSTRUCTORS is
+    # exactly those two names), so the count stays at 28.
     assert result.t2database_constructions == sum(
         T2DATABASE_CONSTRUCTION_ALLOWLIST.values()
     ), (

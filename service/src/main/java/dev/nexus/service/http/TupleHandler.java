@@ -48,7 +48,11 @@ import java.util.Optional;
  *                                   announce: {interval_s, max, subscriber?, waiter?} -- subscriber (bead nexus-q82tk)
  *                                   keys the stamp per reader in nexus.tuple_deliveries; absent, the stamp
  *                                   is the row's own announced_at/announce_count (bead nexus-vsipz); waiter
- *                                   (bead nexus-rxuiq) is the reader's supersession token, newest wins
+ *                                   (bead nexus-rxuiq) is the reader's supersession token, newest wins;
+ *                                   since alongside a row-level announce (no subscriber) is refused -- alongside
+ *                                   a PER-SUBSCRIBER announce (bead nexus-n36sw) it is honoured as a subscriber
+ *                                   start watermark and {@code created_at} alone is enough ({@code id} may be
+ *                                   omitted; the general rd/rdp since still requires both)
  *                                    -&gt; {"results": [{"subspace", "tuples": [...], "subscriber"?, "superseded"?}, ...]}
  *                                    subscriber echoes the announce.subscriber the engine honoured (nexus-q82tk);
  *                                    superseded:true means a newer waiter owns the spec, nothing was stamped
@@ -290,8 +294,17 @@ public final class TupleHandler implements HttpHandler {
             String subspace = requireString(spec, "subspace");
             Map<String, String> pattern = stringMap((Map<String, Object>) spec.get("keys_pattern"));
             int n = intOrDefault(spec.get("n"), 1);
-            TupleRepository.ReadCursor since = readCursor(spec.get("since"));
             TupleRepository.WaitSpec.Announce announce = readAnnounce(spec.get("announce"));
+            // bead nexus-n36sw: a per-subscriber announce (a board arm) honours since
+            // as a bare created_at watermark -- the client (SubscriptionSet) records
+            // only the topic's subscribe TIME, never a tuple id to pair it with, so
+            // the general readCursor()'s both-fields-required parse would silently
+            // drop it. Every other spec keeps the strict parse: rd/rdp's own since and
+            // a row-level announce's refusal both depend on a missing id meaning "no
+            // cursor", not "cursor with an absent id".
+            TupleRepository.ReadCursor since = (announce != null && announce.perSubscriber())
+                    ? readSinceWatermark(spec.get("since"))
+                    : readCursor(spec.get("since"));
             specs.add(new TupleRepository.WaitSpec(subspace, pattern, n, since, announce));
         }
         long timeoutS = longOrDefault(body.get("timeout_s"), 0);
@@ -783,10 +796,54 @@ public final class TupleHandler implements HttpHandler {
         if (createdAtRaw == null || idRaw == null) {
             return null;
         }
-        OffsetDateTime createdAt = OffsetDateTime.parse(String.valueOf(createdAtRaw));
+        OffsetDateTime createdAt = parseCreatedAtStrict(createdAtRaw);
         byte[] id = HEX.parseHex(String.valueOf(idRaw));
         return new TupleRepository.ReadCursor(createdAt, id);
     }
+
+    /**
+     * Strict {@code created_at} parse (code-review round, bead nexus-n36sw),
+     * the same convention {@code CatalogRepository.parseCreatedAtBeforeStrict}
+     * uses: {@link OffsetDateTime#parse} throws {@link DateTimeParseException}
+     * on a malformed value, which is NOT an {@link IllegalArgumentException} and
+     * would otherwise fall through this class's generic catch-all to a bare 500
+     * -- a caller-supplied field that fails to parse is a caller error and must
+     * 400, exactly like every other malformed-field case this handler already
+     * maps via {@link IllegalArgumentException}.
+     */
+    private static OffsetDateTime parseCreatedAtStrict(Object createdAtRaw) {
+        try {
+            return OffsetDateTime.parse(String.valueOf(createdAtRaw));
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new IllegalArgumentException("created_at: not a parseable timestamp: " + createdAtRaw, e);
+        }
+    }
+
+    /** {@code since} on a PER-SUBSCRIBER announce spec (bead nexus-n36sw): {@code
+     *  created_at} alone, {@code id} never required and never read even when
+     *  present. Unlike {@link #readCursor}, a bare {@code created_at} is not
+     *  silently dropped -- the caller (a board subscriber's subscribe-time
+     *  watermark) has no tuple id to pair it with by construction, so requiring
+     *  one would make the feature unreachable from its one real caller. The
+     *  returned {@link TupleRepository.ReadCursor#id()} is an empty array,
+     *  never read by {@link TupleRepository}'s per-subscriber path (it compares
+     *  only {@code createdAt}), kept solely so this method can still produce the
+     *  existing {@code ReadCursor} type rather than a parallel one-field record. */
+    private static TupleRepository.ReadCursor readSinceWatermark(Object raw) {
+        if (raw == null) {
+            return null;
+        }
+        @SuppressWarnings("unchecked")
+        Map<String, Object> m = (Map<String, Object>) raw;
+        Object createdAtRaw = m.get("created_at");
+        if (createdAtRaw == null) {
+            return null;
+        }
+        OffsetDateTime createdAt = parseCreatedAtStrict(createdAtRaw);
+        return new TupleRepository.ReadCursor(createdAt, EMPTY_ID);
+    }
+
+    private static final byte[] EMPTY_ID = new byte[0];
 
     /** {@code announce: {interval_s, max}} on one {@code wait} spec (bead
      *  nexus-vsipz, RDR-213 engine half) -- {@code null} (the field absent) is

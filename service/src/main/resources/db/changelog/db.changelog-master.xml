@@ -1538,6 +1538,20 @@
     <include file="db/changelog/hygiene-008-gc-bounded-registration-from-origin-row.xml"/>
 
     <!--
+        RDR-192 Step 4 (bead nexus-wbfpw.9): nexus.chunk_live_owners(tenant,
+        collection, chash) — the RDR's live(c) predicate, expressed as a
+        set-returning function (RETURNS TABLE) so EXISTS(SELECT 1 FROM ...)
+        actually inlines — a scalar RETURNS-boolean form does not (round-1
+        code review finding; see the included file's own header for the
+        full derivation and the corrected reasoning). Non-destructive: no
+        call site is migrated onto it here (Step 5, nexus-wbfpw.10). Placed
+        after hygiene-008-gc-bounded-registration-from-origin-row.xml
+        (current tail) and before the grants-nexus-svc.xml runAlways block,
+        matching the established late-append convention (D0.1).
+    -->
+    <include file="db/changelog/vectors-018-chunk-live-owners-function.xml"/>
+
+    <!--
         RDR-192 Step 2 round-2 fix (bead nexus-wbfpw.4, code-review Important)
         added idx_catalog_documents_live_note_doc_id here (catalog-038), a
         partial expression index meant to serve PgVectorRepository
@@ -1558,6 +1572,78 @@
         metadata ->> 'doc_id' INDEX"). The changeset was never released, so no
         counter-migration is needed.
     -->
+
+    <!--
+        RDR-192 Step 5 (bead nexus-wbfpw.10): every read-visibility predicate
+        (plain/text-gated/hybrid/topic-scoped search functions and
+        nexus.live_chunks) moves onto live(c) from vectors-018. Generated from
+        the previous bodies; see the included file's header. Non-destructive.
+        Placed after vectors-018 (current tail) and before the
+        grants-nexus-svc.xml runAlways block (D0.1 late-append convention).
+    -->
+    <include file="db/changelog/vectors-019-live-c-read-visibility.xml"/>
+
+    <!--
+        nexus-gt03d: nexus.gc_restore_rereferenced now audits its restore the
+        same way catalog-033 audited gc_quarantine_orphans/
+        sweep_superseded_chunks — see the included file's own header. Placed
+        after vectors-019 (the tail when it landed) and before the grants-nexus-svc.xml
+        runAlways block, matching the established late-append convention.
+    -->
+    <include file="db/changelog/catalog-039-gc-restore-audit.xml"/>
+
+    <!--
+        nexus-5zv4j: install_pings gains a nullable source_hash column (see
+        the included file's own header for the derivation and why it is not
+        a wire-contract change). Placed after catalog-039 (current tail) and
+        before the grants-nexus-svc.xml runAlways block, matching the
+        established late-append convention (D0.1).
+    -->
+    <include file="db/changelog/telemetry-015-install-ping-source.xml"/>
+
+    <!--
+        Bead nexus-l46pu (follow-up to nexus-kk4ut): nexus.catalog_collections
+        gains aspects_enabled BOOLEAN NULL (no default: NULL means nobody set
+        it, so the local config.yml opt-in still applies), the tenant-wide home
+        for the docs__ aspect-extraction opt-in. See the included file's own
+        header for why it is nullable. Placed after catalog-039
+        (the tail when it landed) and before the grants-nexus-svc.xml runAlways
+        block, matching the established late-append convention.
+    -->
+    <include file="db/changelog/catalog-040-collection-aspects-enabled.xml"/>
+
+    <!--
+        nexus-1vc0n: partial (tenant_id, file_path) index for the new bulk
+        owner-agnostic file_path lookup (documentsByFilePaths,
+        POST /v1/catalog/list_by_file_paths) — see the included file's own
+        header. catalog-040 is nexus-l46pu's (included just above).
+        Placed after catalog-039 (the tail when this landed) and before the
+        grants-nexus-svc.xml runAlways block, matching the established
+        late-append convention.
+    -->
+    <include file="db/changelog/catalog-041-file-path-batch-index.xml"/>
+
+    <!--
+        nexus-e8h5x: nexus.gc_restore_rereferenced_bounded, a bounded restore
+        sweep mirroring catalog-037's gc_quarantine_orphans_bounded
+        (nexus-a6mon) for the opposite direction — see the included file's
+        own header. Placed after telemetry-015 (the tail when this landed)
+        and before the grants-nexus-svc.xml runAlways block, matching the
+        established D0.1 late-append convention. catalog-040 (nexus-l46pu)
+        and catalog-041 (nexus-1vc0n) are independent of this file.
+    -->
+    <include file="db/changelog/catalog-042-gc-restore-rereferenced-bounded.xml"/>
+
+    <!--
+        nexus-brxnp / nexus-u6d93: nexus.gc_restore_rereferenced and
+        nexus.gc_restore_rereferenced_bounded now leave a LIVE origin row
+        alone (ON CONFLICT DO NOTHING) instead of overwriting it with an
+        older quarantine copy — see the included file's own header. Placed
+        after catalog-042 (the tail when this landed) and before the
+        grants-nexus-svc.xml runAlways block, matching the established D0.1
+        late-append convention.
+    -->
+    <include file="db/changelog/catalog-043-gc-restore-rereferenced-live-origin-wins.xml"/>
 
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".

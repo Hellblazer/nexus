@@ -5,7 +5,7 @@
 Root cause (see the bead / debugger report): ``search_graph_hop`` and
 ``search_metadata_scoped`` resolve a multi-prefix corpus (e.g. ``code,docs``)
 to a FLAT collection list that can span two embedding models
-(``voyage-code-3`` + ``voyage-context-3``, both 1024-dim) and pass the whole
+(``model-code`` + ``model-ctx``, both 1024-dim) and pass the whole
 list to the service in ONE call. The service
 (``PgVectorRepository.searchGraphHopWithTokens``) guards only *dimension*
 homogeneity (``requireHomogeneousDim``) and then embeds the query with
@@ -28,10 +28,10 @@ from nexus.corpus import embedding_model_for_collection_name
 from nexus.mcp import core
 
 # Two conformant collections, SAME dimension (1024), DIFFERENT embedding model.
-# This is the exact shape of the live repro: prefix `code` -> voyage-code-3,
-# prefix `docs` -> voyage-context-3.
-CODE_COL = "code__acme-1-1__voyage-code-3__v1"
-DOCS_COL = "docs__acme-1-1__voyage-context-3__v1"
+# This is the exact shape of the live repro: prefix `code` -> model-code,
+# prefix `docs` -> model-ctx.
+CODE_COL = "code__acme-1-1__model-code__v1"
+DOCS_COL = "docs__acme-1-1__model-ctx__v1"
 
 
 def _model(coll: str) -> str:
@@ -93,10 +93,10 @@ def _max_models_per_call(calls: list[list[str]]) -> int:
 
 class TestSearchGraphHopMultiModel:
     def test_multimodel_corpus_does_not_drop_the_hit(self, monkeypatch):
-        # Seed 1.9.80's reachable hit lives in the DOCS (voyage-context-3) group,
+        # Seed 1.9.80's reachable hit lives in the DOCS (model-ctx) group,
         # while `_resolve_corpus_target("code,docs")` puts the CODE
-        # (voyage-code-3) collection first -> the single mixed-model call embeds
-        # the query with voyage-code-3 and never retrieves the docs hit.
+        # (model-code) collection first -> the single mixed-model call embeds
+        # the query with model-code and never retrieves the docs hit.
         hit = {"id": "1.9.80", "content": "reachable doc", "distance": 0.2,
                "collection": DOCS_COL, "chash": "a" * 32}
         t3 = _ModelAwareServiceT3([hit])
@@ -372,15 +372,15 @@ class TestGroupCollectionsByModelReadsTheRowNotTheName:
         import nexus.mcp_infra as mi
         from nexus.mcp.core import _group_collections_by_model
 
-        # The NAME says voyage-code-3 (a code__ collection); the ROW (the
-        # exact drift class GH #667 came from) says voyage-context-3 --
+        # The NAME says model-code (a code__ collection); the ROW (the
+        # exact drift class GH #667 came from) says model-ctx --
         # the row must win.
-        name = "code__acme__voyage-code-3__v1"
+        name = "code__acme__model-code__v1"
         monkeypatch.setattr(
             mi, "get_collection_row",
             lambda n: {
                 "content_type": "code", "owner_id": "acme",
-                "embedding_model": "voyage-context-3", "lifecycle_state": "live",
+                "embedding_model": "model-ctx", "lifecycle_state": "live",
             } if n == name else None,
         )
 
@@ -389,26 +389,26 @@ class TestGroupCollectionsByModelReadsTheRowNotTheName:
         assert groups == [[name]]
         # Non-vacuity: prove the row's model, not the name's, is what
         # decided the single group -- a SECOND collection whose NAME
-        # says voyage-context-3 (the CCE model) but whose ROW ALSO says
-        # voyage-context-3 (agreeing with the row-disagreeing first
+        # says model-ctx (the CCE model) but whose ROW ALSO says
+        # model-ctx (agreeing with the row-disagreeing first
         # collection, disagreeing with ITS OWN name's sibling story)
         # must land in the SAME group as the first, which name-based
         # grouping would never do (their names claim two different
         # models).
-        other = "docs__acme__voyage-context-3__v1"
+        other = "docs__acme__model-ctx__v1"
         monkeypatch.setattr(
             mi, "get_collection_row",
             lambda n: {
                 "content_type": "code" if n == name else "docs",
                 "owner_id": "acme",
-                "embedding_model": "voyage-context-3",
+                "embedding_model": "model-ctx",
                 "lifecycle_state": "live",
             },
         )
         groups = _group_collections_by_model([name, other])
         assert groups == [[name, other]], (
-            "both collections' ROWS agree on voyage-context-3 despite "
-            "the first collection's NAME claiming voyage-code-3 -- "
+            "both collections' ROWS agree on model-ctx despite "
+            "the first collection's NAME claiming model-code -- "
             f"name-based grouping would have split them; got {groups!r}"
         )
 
@@ -422,9 +422,9 @@ class TestGroupCollectionsByModelReadsTheRowNotTheName:
 
         rows = {
             CODE_COL: {"content_type": "code", "owner_id": "acme-1-1",
-                       "embedding_model": "voyage-code-3", "lifecycle_state": "live"},
+                       "embedding_model": "model-code", "lifecycle_state": "live"},
             DOCS_COL: {"content_type": "docs", "owner_id": "acme-1-1",
-                       "embedding_model": "voyage-context-3", "lifecycle_state": "live"},
+                       "embedding_model": "model-ctx", "lifecycle_state": "live"},
         }
         monkeypatch.setattr(mi, "get_collection_row", lambda n: rows.get(n))
 
