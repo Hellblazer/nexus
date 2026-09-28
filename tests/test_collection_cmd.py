@@ -319,6 +319,20 @@ def test_info_says_when_the_row_and_name_models_disagree(runner, env_creds, mock
     assert "bge-base-en-v15-768 (catalog row; the name says minilm-l6-v2-384)" in result.output, result.output
 
 
+def test_info_does_not_invent_a_disagreement_for_a_subject_name(runner, env_creds, mock_db, monkeypatch) -> None:
+    """A subject name encodes no model, so it cannot disagree with the row."""
+    name = "knowledge__distributed-systems"
+    _mock_db_for_info(mock_db, name, 3, [{}])
+    mock_db.list_collections.return_value = [
+        {"name": name, "count": 3, "embedding_model": "bge-base-en-v15-768"},
+    ]
+    _catalog_with_documents(monkeypatch, [])
+    result = _invoke(runner, mock_db, ["info", name])
+    assert result.exit_code == 0, result.output
+    assert "Index model: bge-base-en-v15-768\n" in result.output, result.output
+    assert "the name says" not in result.output
+
+
 def test_info_prints_the_rows_model_not_the_local_embedder(runner, env_creds, mock_db, monkeypatch) -> None:
     """nexus-sis0m F8: a local install printed its local embedder's name for
     every collection. The row's embedding_model is the truth."""

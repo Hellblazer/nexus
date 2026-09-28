@@ -219,8 +219,13 @@ def info_cmd(name: str) -> None:
         idx_model = index_model_for_collection(name)
     else:
         # The row and the name can disagree (a disputed row, RDR-204); say so
-        # rather than print one of them as the whole truth.
-        named = index_model_for_collection(name)
+        # rather than print one of them as the whole truth. Only a name that
+        # encodes a model can disagree: for a subject name
+        # (knowledge__distributed-systems) the name-derived model is a
+        # prefix-table guess, not something the name says.
+        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        named = index_model_for_collection(name) if is_conformant_collection_name(name) else ""
         if named and named != idx_model:
             idx_model = query_model = f"{idx_model} (catalog row; the name says {named})"
 
