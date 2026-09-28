@@ -2721,14 +2721,23 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if len(ids) <= 1:
             topics = [self.get_topic_by_id(t) for t in ids]
         else:
-            try:
-                with ThreadPoolExecutor(max_workers=min(_LABEL_FETCH_WORKERS, len(ids))) as pool:
-                    topics = list(pool.map(self.get_topic_by_id, ids))
-            except Exception:  # noqa: BLE001 — retried serially below
-                # The client's self-heal (re-resolve on a 401 or reset) is
-                # unlocked and retries once per call; several pool workers
-                # failing together can each exhaust their retry where the
-                # serial loop heals on the first (review of 791bc1a81). Fall
-                # back to it; a genuine failure still raises from there.
-                topics = [self.get_topic_by_id(t) for t in ids]
+            # The client's self-heal (re-resolve on a 401 or reset) is
+            # unlocked and retries once per call; several pool workers
+            # failing together can each exhaust their retry where the serial
+            # loop heals on the first (review of 791bc1a81). So the ids that
+            # failed in the pool are retried serially, and only those (a
+            # blanket re-fetch doubled the load at exactly that moment;
+            # review of 80fdf540c). A genuine failure still raises.
+            fetched: dict[int, Any] = {}
+            failed: list[int] = []
+            with ThreadPoolExecutor(max_workers=min(_LABEL_FETCH_WORKERS, len(ids))) as pool:
+                futures = {tid: pool.submit(self.get_topic_by_id, tid) for tid in ids}
+            for tid, fut in futures.items():
+                try:
+                    fetched[tid] = fut.result()
+                except Exception:  # noqa: BLE001 — retried serially below
+                    failed.append(tid)
+            for tid in failed:
+                fetched[tid] = self.get_topic_by_id(tid)
+            topics = [fetched[t] for t in ids]
         return {tid: t["label"] for tid, t in zip(ids, topics) if t}

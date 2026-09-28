@@ -129,3 +129,28 @@ def test_a_failing_concurrent_label_fetch_falls_back_to_the_serial_loop() -> Non
 
     store.get_topic_by_id = get_topic_by_id
     assert store.get_labels_for_ids([1, 2, 3]) == {1: "topic 1", 2: "topic 2", 3: "topic 3"}
+
+
+def test_the_serial_retry_refetches_only_the_ids_that_failed() -> None:
+    """Review of 80fdf540c: re-fetching every id doubled the load during
+    exactly the failure the fallback exists for."""
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+
+    store = object.__new__(HttpTaxonomyStore)
+    seen: list[int] = []
+    lock = threading.Lock()
+    failed_once = {"done": False}
+
+    def get_topic_by_id(tid):
+        with lock:
+            seen.append(tid)
+            fail = tid == 2 and not failed_once["done"]
+            if fail:
+                failed_once["done"] = True
+        if fail:
+            raise RuntimeError("connection reset")
+        return {"id": tid, "label": f"topic {tid}"}
+
+    store.get_topic_by_id = get_topic_by_id
+    assert store.get_labels_for_ids([1, 2, 3]) == {1: "topic 1", 2: "topic 2", 3: "topic 3"}
+    assert sorted(seen) == [1, 2, 2, 3], seen

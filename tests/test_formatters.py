@@ -534,3 +534,18 @@ def test_an_empty_prose_chunk_never_prints_line_zero() -> None:
     r = SearchResult(id="r1", content="", distance=0.1, collection="docs__x",
                      metadata={"source_path": "/no/such.md"})
     assert format_compact([r])[0] == "/no/such.md:1:"
+
+
+def test_a_repo_relative_display_path_falls_back_to_the_absolute_source_path(tmp_path, monkeypatch) -> None:
+    """Review of d41e47c1f: a catalog _display_path is often repo-relative
+    and does not open from another cwd; the chunk's absolute source_path
+    still locates the line."""
+    doc = tmp_path / "docs" / "architecture.md"
+    doc.parent.mkdir()
+    doc.write_text("a\nb\nc\nd\nthe line\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    r = SearchResult(id="r1", content="the line", distance=0.1, collection="docs__x",
+                     metadata={"_display_path": "docs/architecture.md", "source_path": str(doc)})
+    assert format_vimgrep([r])[0] == "docs/architecture.md:5:0:the line"

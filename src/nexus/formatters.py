@@ -325,22 +325,31 @@ def _file_line_no(
     """
     if "line_start" in r.metadata:
         return int(r.metadata["line_start"]) + best_idx
-    path = _display_path(r.metadata)
-    if not path:
+    shown = _display_path(r.metadata)
+    if not shown:
         return best_idx + 1
-    if path not in file_lines:
-        try:
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                file_lines[path] = [line.strip() for line in fh]
-        except OSError:
-            file_lines[path] = None
-    lines = file_lines[path]
+    # The printed path first. A catalog _display_path is often REPO-RELATIVE
+    # and only opens from the repo root (review of d41e47c1f), so the chunk's
+    # own source_path / file_path, which the indexer writes absolute, are
+    # tried next. Either way the text itself must match, so a stale copy
+    # elsewhere cannot answer for the printed file unless it holds the line.
+    candidates = list(dict.fromkeys(
+        p for p in (shown, r.metadata.get("source_path"), r.metadata.get("file_path")) if p
+    ))
     wanted = text.strip()
-    if lines is not None and wanted:
-        try:
-            return lines.index(wanted) + 1
-        except ValueError:
-            pass
+    for path in candidates:
+        if path not in file_lines:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    file_lines[path] = [line.strip() for line in fh]
+            except OSError:
+                file_lines[path] = None
+        lines = file_lines[path]
+        if lines is not None and wanted:
+            try:
+                return lines.index(wanted) + 1
+            except ValueError:
+                pass
     return 1
 
 
