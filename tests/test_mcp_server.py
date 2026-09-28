@@ -2794,4 +2794,15 @@ def test_search_refuses_a_limit_past_the_documented_cap():
     assert text.startswith("Error: limit must be between 1 and 300, got 301")
     assert "offset" in text
     assert search(query="zdzm5 limit probe", corpus="code__test", limit=0,
-                  structured=True)["error"].startswith("Error: limit must be")
+                  structured=True)["error"].startswith("limit must be")
+
+
+def test_search_error_is_marked_in_structured_content():
+    """nexus-zdzm5: a failed search rode out as empty ids in a success-shaped
+    structuredContent, the error only in the text block, so a client that
+    reads structuredContent (nexus's own does) saw "no hits"."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    result = search(query="zdzm5 error probe", corpus="no_such_corpus_zz")
+    assert result.isError is True
+    assert "no_such_corpus_zz" in result.structuredContent["error"]
+    assert result.structuredContent["ids"] == []

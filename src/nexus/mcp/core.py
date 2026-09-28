@@ -2904,9 +2904,9 @@ def search(
     from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches this module's convention
 
     if not 1 <= limit <= MAX_QUERY_RESULTS:
-        msg = (f"Error: limit must be between 1 and {MAX_QUERY_RESULTS}, got {limit}. "
+        msg = (f"limit must be between 1 and {MAX_QUERY_RESULTS}, got {limit}. "
                "Page with offset for more.")
-        return {"error": msg} if structured else msg
+        return {"error": msg} if structured else f"Error: {msg}"
     result = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
@@ -2945,9 +2945,18 @@ def search(
         # whichever representation the client chooses to read.
         "text": result,
     }
+    # nexus-zdzm5: in structured mode _search_render returns a string only
+    # for an error (an unmatched corpus, or the tool's error boundary). It
+    # used to ride out as empty ids in a success-shaped structuredContent,
+    # the error visible only in the text block, so a structuredContent
+    # reader saw "no hits" for a failed call.
+    is_error = isinstance(data, str)
+    if is_error:
+        structured_content["error"] = data
     return CallToolResult(
         content=[TextContent(type="text", text=result)],
         structuredContent=structured_content,
+        isError=is_error,
     )
 
 
@@ -4236,7 +4245,17 @@ def query(
                             r for r in seed_entries_svc
                             if author.lower() in (r.author or "").lower()
                         ]
-                    seed_tumblers = [str(r.tumbler) for r in seed_entries_svc if r.tumbler]
+                    all_seed_tumblers = [str(r.tumbler) for r in seed_entries_svc if r.tumbler]
+                    # Same cap and disclosure as the subtree branch above:
+                    # find_all (nexus-3bafq) made the author seed list
+                    # complete, so a broad author or content_type could hand
+                    # the graph hop an unbounded seed list.
+                    seed_tumblers = all_seed_tumblers[:_MAX_GRAPH_HOP_SEEDS]
+                    seed_scope = {
+                        "total": len(all_seed_tumblers),
+                        "used": len(seed_tumblers),
+                        "truncated": len(all_seed_tumblers) > _MAX_GRAPH_HOP_SEEDS,
+                    }
                 else:
                     # follow_links only: use question as catalog seed
                     seed_results_svc = cat.find(question)
@@ -4314,11 +4333,11 @@ def query(
                     return empty_result
                 if seed_scope is not None and seed_scope["truncated"]:
                     return (
-                        f"[WARNING: subtree seed list capped at "
+                        f"[WARNING: graph-hop seed list capped at "
                         f"{seed_scope['used']} of {seed_scope['total']} "
-                        f"documents for graph-hop traversal — results may "
-                        f"be INCOMPLETE. Narrow `subtree` or split into "
-                        f"multiple queries.]\n{_no_docs_msg}"
+                        f"documents — results may be INCOMPLETE. Narrow "
+                        f"`subtree`, `author` or `content_type`, or split "
+                        f"into multiple queries.]\n{_no_docs_msg}"
                     )
                 return _no_docs_msg
 
@@ -4375,11 +4394,11 @@ def query(
                 # nexus-descendants-seed-cap: never silent — see
                 # _MAX_GRAPH_HOP_SEEDS.
                 lines_svc.append(
-                    f"[WARNING: subtree seed list capped at "
+                    f"[WARNING: graph-hop seed list capped at "
                     f"{seed_scope['used']} of {seed_scope['total']} "
-                    f"documents for graph-hop traversal — results may be "
-                    f"INCOMPLETE. Narrow `subtree` or split into multiple "
-                    f"queries.]"
+                    f"documents — results may be INCOMPLETE. Narrow "
+                    f"`subtree`, `author` or `content_type`, or split into "
+                    f"multiple queries.]"
                 )
             lines_svc.append(f"{routing_note_svc}\n{header_svc}")
             lines_svc.append(_READER_INSTRUCTION_LINE())
@@ -6982,7 +7001,7 @@ def tuple_rd(
             )
         return [_tuple_row_to_dict(r) for r in rows]
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return [{"error": _mcp_tool_error("tuple_rd", e)}]
+        return [{"error": _mcp_tool_error("tuple_rd", e).removeprefix("Error: ")}]
 
 
 @mcp.tool(
@@ -7026,7 +7045,7 @@ def tuple_in(
         row, claim_id = result
         return {"tuple": _tuple_row_to_dict(row), "claim_id": claim_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_in", e)}
+        return {"error": _mcp_tool_error("tuple_in", e).removeprefix("Error: ")}
 
 
 _REPLY_FIELDS: frozenset[str] = frozenset(ReplySpec.__dataclass_fields__)
@@ -7163,7 +7182,7 @@ def tuple_renew(
         )
         return {"lease_until": lease_until.isoformat()}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_renew", e)}
+        return {"error": _mcp_tool_error("tuple_renew", e).removeprefix("Error: ")}
 
 
 @mcp.tool(
@@ -7216,7 +7235,7 @@ def tuple_registry() -> dict:
         with _t2_ctx() as db:
             return db.tuples.registry()
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_registry", e)}
+        return {"error": _mcp_tool_error("tuple_registry", e).removeprefix("Error: ")}
 
 
 @mcp.tool(
@@ -7256,7 +7275,7 @@ def tuple_list(
             out.append({"_pagination": {"next_cursor": next_cursor}})
         return out
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return [{"error": _mcp_tool_error("tuple_list", e)}]
+        return [{"error": _mcp_tool_error("tuple_list", e).removeprefix("Error: ")}]
 
 
 @mcp.tool(
@@ -7281,7 +7300,7 @@ def tuple_stats(
             c = db.tuples.subspace_stats(subspace)
         return _tuple_census_to_dict(c)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_stats", e)}
+        return {"error": _mcp_tool_error("tuple_stats", e).removeprefix("Error: ")}
 
 
 @mcp.tool(
@@ -7352,7 +7371,7 @@ def mailbox_send(
         tuple_id, address, address_kind = _t2_index_write(_send, op="mailbox_send")
         return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("mailbox_send", e)}
+        return {"error": _mcp_tool_error("mailbox_send", e).removeprefix("Error: ")}
 
 
 def _current_subscription_session_id() -> str:
@@ -7484,7 +7503,7 @@ def tuple_subscriptions() -> list[dict]:
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         return subs.entries()
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return [{"error": _mcp_tool_error("tuple_subscriptions", e)}]
+        return [{"error": _mcp_tool_error("tuple_subscriptions", e).removeprefix("Error: ")}]
 
 
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────

@@ -962,14 +962,16 @@ class TestTopicBoost:
         assert r2.topic_boost == pytest.approx(_TOPIC_SAME_BOOST * 0.2, abs=1e-9)
         assert (r1.distance, r2.distance) == (0.5, 0.3)
 
-    def test_equal_distances_get_no_credit(self) -> None:
-        """nexus-2yshe: with no spread there is no order to break ties in."""
-        from nexus.scoring import apply_topic_boost
+    def test_equal_distances_take_the_constants_as_absolute_credit(self) -> None:
+        """nexus-2yshe: an all-equal set is one tie, the case a tie-break is
+        for; with no distance difference to overturn, the constants apply
+        (tests/test_ekn9n_topic_link_pairs_contract.py pins the linked one)."""
+        from nexus.scoring import _TOPIC_SAME_BOOST, apply_topic_boost
 
         r1 = self._make_result(doc_id="doc-a", distance=0.5)
         r2 = self._make_result(doc_id="doc-b", distance=0.5)
         apply_topic_boost([r1, r2], {"doc-a": 1, "doc-b": 1})
-        assert (r1.topic_boost, r2.topic_boost) == (0.0, 0.0)
+        assert (r1.topic_boost, r2.topic_boost) == (_TOPIC_SAME_BOOST, _TOPIC_SAME_BOOST)
 
     def test_combined_same_and_linked_boost(self) -> None:
         """Results get both same-topic and linked-topic distance reduction."""

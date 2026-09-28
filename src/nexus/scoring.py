@@ -541,15 +541,15 @@ def apply_topic_boost(
     credit is relative to how far apart the candidates actually are
     (nexus-2yshe; see the constants). Boost is applied once per
     relationship type (not per partner). A set whose distances are all
-    equal gets no credit: there is no order for it to break ties in.
+    equal is one tie, the case a tie-break exists for, so ``spread`` is
+    taken as 1.0 there and the constants apply as absolute credit: with no
+    distance difference to overturn, any credit only orders the tie.
     """
     if not topic_assignments or len(results) < 2:
         return results
 
     distances = [r.distance for r in results]
-    spread = max(distances) - min(distances)
-    if spread <= 0.0:
-        return results
+    spread = (max(distances) - min(distances)) or 1.0
     same_credit = _TOPIC_SAME_BOOST * spread
     linked_credit = _TOPIC_LINKED_BOOST * spread
 
