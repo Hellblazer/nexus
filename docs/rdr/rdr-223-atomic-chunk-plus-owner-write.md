@@ -121,6 +121,27 @@ stamped into chunk metadata and nowhere else. The MCP path registers the
 catalog document BEFORE the chunk write (`mcp/core.py:4906`), so the owner
 exists when the chunks land. The owner row just is not written with them.
 
+### F-5. What import needs that the other paths do not (nexus-76 review)
+
+- **Its embeddings are the payload.** `.nxexp` carries each chunk's vector.
+  The gate-xr789 self-export (conexus-sdyq) exists to keep the June
+  embeddings byte-identical, and its oracle and fingerprint are keyed on them.
+  `CombinedWriteService` always embeds new chashes server-side, so moving
+  import onto it unchanged would re-embed about 116k chunks, change the
+  vectors and pay Voyage for it. `upsert-chunks` already has a client-vector
+  passthrough (`upsertChunksWithVectors`); the combined routes have none.
+- **Its order is chash-page order, not document order.** One document's
+  chunks are scattered across the file, and one 300-record page can touch
+  hundreds of documents. Import therefore needs append to take the file's
+  explicit manifest positions (not assign max+1), a multi-document form so a
+  page is one request rather than one per (page, document), and per-document
+  first-seen state across the file so that a re-import's first sighting of a
+  document is the replace. PDF and the oversize fallbacks are document-ordered
+  and need none of this.
+- **Legacy `doc_id` records** go through the owner path since nexus-wbfpw.31,
+  including `--skip-existing` records (the gate-xr789 297); that logic moves
+  with import and must keep them owned.
+
 ## Proposed Solution
 
 One rule: every chunk the engine inserts is written in the same transaction
@@ -128,7 +149,8 @@ as at least one owner row. The client never needs two requests to make a
 chunk owned.
 
 1. **Append with chunks (engine, closes Gap 1).** `POST
-   /v1/catalog/manifest/append` accepts an optional inline `chunks` array,
+   /v1/catalog/manifest/append` accepts an optional inline `chunks` array
+   and explicit per-row positions (upsert by position, as append already does),
    deduped, existence-partitioned and embedded through `CombinedWriteService`
    exactly as `write_many` does, then written by `upsertManifestChunkVectors`
    inside `appendManifestChunks`'s transaction. A multi-batch document writes
@@ -136,19 +158,33 @@ chunk owned.
    append plus chunks. Each request commits its own chunks and their owner
    rows together. A crash mid-document leaves a document with some of its
    batches (on the indexing paths the index fence reports it incomplete) and
-   never an ownerless chunk.
-2. **Client migration (closes Gaps 1 and 2).** Move each split path onto
+   never an ownerless chunk. A multi-document form (`append_many`) carries
+   several documents' rows and chunks in one request, one transaction per
+   document as `write_many` does (F-5).
+2. **Client-supplied embeddings (engine, needed by import).** Both combined
+   routes (`write_many` and append with chunks) accept an optional embedding
+   per chunk, taken as-is after a dimension and embedding-profile check
+   against the collection, with no server embed for that chunk. A mismatch
+   refuses the request. This is the combined-route twin of
+   `upsertChunksWithVectors`.
+3. **Client migration (closes Gaps 1 and 2).** Move each split path onto
    `write_many` plus chunks, or append plus chunks for later batches: streaming
    PDF, the three oversize fallbacks, `_index_document`, `store_put`, `nx store
    put`, `nx memory promote`, recovery-bundle import and `.nxexp` import. For
    the note paths, a note is one document of a few pieces, so `write_many` plus
    chunks may cover it with no engine change; whether it returns the token
-   usage `store-put` reports is Open Question 2.
-3. **Retire ownerless writes (closes Gap 3), last.** Once no client path
+   usage `store-put` reports is Open Question 2. The note's catalog document
+   is still registered by a separate request before the chunk write, so a
+   failed first put leaves a registered zero-chunk document: a catalog-side
+   orphan instead of a chunk-side one. nexus-wbfpw.28's rollback of that
+   registration stays; migration beads must not delete it as obsolete unless
+   registration moves into the same transaction (Open Question 5). A failed
+   re-put by title leaves the old manifest intact, which is correct.
+4. **Retire ownerless writes (closes Gap 3), last.** Once no client path
    uses them, `/v1/vectors/upsert-chunks` and `/v1/vectors/store-put` refuse
    writes that do not name an owner. A version window keeps old clients
    working until the refusal lands.
-4. **Decide Gap 4** (Open Question 3): register identity-less files as ghost
+5. **Decide Gap 4** (Open Question 3): register identity-less files as ghost
    documents so their chunks have an owner, or stop writing them at all.
 
 ## Alternatives Considered
@@ -175,16 +211,27 @@ feed it too.
 
 ## Implementation Plan
 
-- Phase 1 (engine): append with chunks, wire-ledger `[additive]` entry,
-  tests. Rides the next engine tag after it lands.
+- Phase 1 (engine): append with chunks (explicit positions, `append_many`),
+  client-supplied embeddings on both combined routes, wire-ledger
+  `[additive]` entries, tests. Rides the next engine tag after it lands.
 - Phase 2 (client): migrate the paths in traffic order: streaming PDF, MCP
   `store_put`, `_index_document`, the oversize fallbacks, then the rest. Each
   migration is its own bead. `.nxexp` import moves last; nexus-76 owns it.
 - Phase 3 (engine): refuse ownerless writes once the client floor carrying
-  Phase 2 is `REQUIRED_ENGINE_VERSION`'s pair; delete the dead paths.
-- Exit: the weekly `live(c)` census (`scripts/sql/livec_census.sql`) reads
-  zero new orphans over a week, and conexus retires its FINDING path
-  (conexus-ekg5).
+  Phase 2 is `REQUIRED_ENGINE_VERSION`'s pair; delete the dead paths. Before
+  the refusal, give tests that seed orphan and manifest-less states on purpose
+  (the `livec_census` tests, the nexus-wbfpw.31 import tests, the RDR-192
+  reaper and census tests) another way to build them, such as direct SQL in
+  the substrate, so the reaper stays testable. Candidate cleanup, not
+  immediate removal: the notes-guard reverse lookup (metadata `doc_id` to
+  note, in the sweep and in `manifest_less_census.sql`) becomes redundant once
+  notes carry manifests, but old notes stay manifest-less until reaped.
+- Exit: the weekly `live(c)` census (`scripts/sql/livec_census.sql`) shows no
+  growth, week over week, in its no-manifest and other-collection-only
+  buckets, net of known dispositions; conexus then retires its FINDING path
+  (conexus-ekg5). Quarantine and tombstoned-owner rows (12,740 and 881 on
+  production, 2026-09-28) are permanent, correct residents and never read
+  zero.
 
 ## Test Plan
 
@@ -196,6 +243,12 @@ feed it too.
   has the same manifest and chunks as one write_many of the whole document.
 - Each migrated client path: an end-to-end test that kills the client after
   the first request and asserts no ownerless chunk.
+- Import: a gate-xr789-shaped fixture imported through append plus chunks
+  keeps its vectors byte-identical and invokes the embedder zero times;
+  scattered positions land in manifest order; a re-import replaces.
+- Client-supplied embedding with the wrong dimension or profile is refused.
+- Phase 3: seeding helpers still build orphan and manifest-less states after
+  the refusal.
 - Phase 3: `upsert-chunks` without an owner is refused with a message naming
   the replacement route.
 
@@ -207,8 +260,15 @@ feed it too.
 3. Gap 4: ghost-document ownership for identity-less files, or stop writing
    them?
 4. Own RDR, as drafted, or fold into RDR-222?
+5. Note paths: keep nexus-wbfpw.28's registration rollback, or move catalog
+   registration into the chunk-and-manifest transaction?
 
 ## Revision History
+
+- 2026-09-28: nexus-76's store-path and import review folded in: F-5,
+  client-supplied embeddings, explicit positions and `append_many`, the
+  note-path registration orphan (Open Question 5), the census-based exit
+  criterion, and Phase 3 test seeding.
 
 - 2026-09-28: created from the path inventory (T2
   `nexus/chunk-owner-write-path-inventory-2026-09-28`) and nexus-76's
