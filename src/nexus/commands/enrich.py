@@ -123,7 +123,7 @@ def _build_catalog_doc_id_lookup() -> Callable[[str, str], str] | None:
                 # doc_id and tumbler are identical in the catalog contract.
                 return tumbler
             # Try title search as fallback.
-            hits = cat.find(source_id)
+            hits = cat.find_all(source_id)
             for hit in hits:
                 if hit.physical_collection == collection:
                     return str(hit.tumbler)

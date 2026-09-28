@@ -4220,7 +4220,7 @@ def query(
                     if content_type and not author:
                         seed_entries_svc = cat.by_content_type(content_type)
                     else:
-                        seed_entries_svc = cat.find(author, content_type=content_type or None)
+                        seed_entries_svc = cat.find_all(author, content_type=content_type or None)
                         seed_entries_svc = [
                             r for r in seed_entries_svc
                             if author.lower() in (r.author or "").lower()

@@ -3898,6 +3898,78 @@ async def test_deadline_cuts_a_slow_retrieval_step_mid_flight(kind: str) -> None
 
 
 @pytest.mark.asyncio
+async def test_over_budget_retrievals_do_not_starve_the_default_executor() -> None:
+    """A cut retrieval thread cannot be killed. A burst of them must neither
+    run unbounded nor occupy the loop's default executor, which unrelated
+    tools share (reviewer + coordinator finding on 8f31f90f9)."""
+    import asyncio
+    import threading
+    import time as _time
+    from unittest.mock import patch
+
+    from nexus.plans import runner as runner_mod
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x", "corpus": "knowledge"}}]}
+    started = 0
+    lock = threading.Lock()
+
+    def slow_search(**kwargs):
+        nonlocal started
+        with lock:
+            started += 1
+        _time.sleep(2.0)
+        return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+
+    from nexus.mcp import core as mcp_core
+
+    n_calls = 3 * runner_mod._RETRIEVAL_EXECUTOR_WORKERS
+    t0 = _time.monotonic()
+    with patch.object(mcp_core, "search", slow_search):
+        results = await asyncio.gather(*[
+            plan_run(_match(plan), {}, deadline=_time.monotonic() + 0.2)
+            for _ in range(n_calls)
+        ])
+        cut_elapsed = _time.monotonic() - t0
+        probe_t0 = _time.monotonic()
+        await asyncio.to_thread(lambda: None)
+        probe_elapsed = _time.monotonic() - probe_t0
+
+    assert all(r.budget_exhausted_at_step == 1 for r in results)
+    assert cut_elapsed < 1.5, f"{n_calls} cut calls took {cut_elapsed:.2f}s"
+    assert probe_elapsed < 0.5, f"default executor blocked {probe_elapsed:.2f}s"
+    assert started <= runner_mod._RETRIEVAL_EXECUTOR_WORKERS, (
+        f"{started} abandoned searches ran; queued ones must be cancelled"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_deadline_reaches_the_retrieval_worker_thread() -> None:
+    """call_deadline is set in the loop's context; the worker must see it,
+    or search_cross_corpus's stage checks can never fire."""
+    import time as _time
+    from unittest.mock import patch
+
+    from nexus import call_deadline
+    from nexus.plans.runner import plan_run
+
+    plan = {"steps": [{"tool": "search", "args": {"query": "x", "corpus": "knowledge"}}]}
+    seen: list = []
+
+    def search_that_reads_the_deadline(**kwargs):
+        seen.append(call_deadline.get())
+        return {"ids": [], "tumblers": [], "distances": [], "collections": []}
+
+    from nexus.mcp import core as mcp_core
+
+    deadline = _time.monotonic() + 30.0
+    with patch.object(mcp_core, "search", search_that_reads_the_deadline):
+        await plan_run(_match(plan), {}, deadline=deadline)
+    assert seen == [deadline]
+    assert call_deadline.get() is None, "the deadline leaked past the step"
+
+
+@pytest.mark.asyncio
 async def test_no_deadline_preserves_default_fields() -> None:
     """``deadline=None`` (the default) must leave the new PlanResult
     fields at their inert defaults — proves the a4 param does not

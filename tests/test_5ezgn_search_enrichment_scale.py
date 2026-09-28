@@ -104,3 +104,28 @@ def test_cap_ranks_rerank_scored_rows_ahead_of_unscored() -> None:
 def test_cap_is_a_no_op_under_the_limit() -> None:
     rows = [_row("a", 0.1), _row("b", 0.2)]
     assert _cap_enrichment_pool(rows, set(), cap=2) is rows
+
+
+def test_pool_cap_scales_with_the_requested_page() -> None:
+    """A caller asking for more than MAX_QUERY_RESULTS (nx search -m 1000)
+    must get a pool at least that large (critic finding on 8f31f90f9)."""
+    t3 = _WideT3()
+    results = search_cross_corpus("q", _cols(), n_results=100, t3=t3)
+    assert len(results) == 400
+
+
+def test_search_stops_at_a_stage_boundary_once_its_deadline_passes() -> None:
+    """An abandoned search (nx_answer's budget cut) stops instead of making
+    its remaining round trips: no embedding fetch runs after the deadline."""
+    import pytest
+
+    from nexus import call_deadline
+
+    t3 = _WideT3()
+    token = call_deadline.set_deadline(time.monotonic() - 1.0)
+    try:
+        with pytest.raises(call_deadline.DeadlineExceeded):
+            search_cross_corpus("q", _cols(), n_results=10, t3=t3)
+    finally:
+        call_deadline.reset(token)
+    assert t3.embedding_ids == []

@@ -48,24 +48,40 @@ import json
 import os as _os
 import re
 import time
-from contextvars import ContextVar
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 import structlog
 
+from nexus import call_deadline
 from nexus.plans.match import Match
 
 _log = structlog.get_logger(__name__)
 
-#: nexus-5ezgn: set by :func:`plan_run` around a retrieval step's dispatch
-#: while a ``deadline`` is active. :func:`_default_dispatcher` reads it to
-#: run a SYNC tool in a worker thread, because a sync call made directly on
-#: the event loop blocks it and no ``wait_for`` can cut it: one search step
-#: ran 310 s against a 120 s budget that way.
-_RETRIEVAL_DEADLINE: ContextVar[float | None] = ContextVar(
-    "_RETRIEVAL_DEADLINE", default=None,
-)
+#: nexus-5ezgn: a SYNC retrieval tool called directly on the event loop
+#: blocks it, and no ``wait_for`` can cut it: one search step ran 310 s
+#: against a 120 s budget that way. While a deadline is armed
+#: (:mod:`nexus.call_deadline`, set by :func:`plan_run` around the
+#: dispatch), :func:`_default_dispatcher` runs the tool on this executor
+#: instead. Its OWN pool, not the loop's default executor: a cut thread
+#: cannot be killed, and abandoned searches must not be able to starve the
+#: default executor that T1 minting and channel waits share. Bounded, so
+#: a burst of over-budget calls queues here; a queued call whose wait is
+#: cut is cancelled before it starts. A running one stops at its next
+#: ``call_deadline.check`` (search_cross_corpus checks between stages).
+_RETRIEVAL_EXECUTOR_WORKERS: int = 4
+_retrieval_executor: ThreadPoolExecutor | None = None
+
+
+def _get_retrieval_executor() -> ThreadPoolExecutor:
+    global _retrieval_executor
+    if _retrieval_executor is None:
+        _retrieval_executor = ThreadPoolExecutor(
+            max_workers=_RETRIEVAL_EXECUTOR_WORKERS,
+            thread_name_prefix="nx-retrieval",
+        )
+    return _retrieval_executor
 
 __all__ = [
     "PlanResult",
@@ -2268,10 +2284,17 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # subprocess StreamReader objects, which are loop-bound.
     if inspect.iscoroutinefunction(fn):
         result = await fn(**args)
-    elif _RETRIEVAL_DEADLINE.get() is not None:
-        # nexus-5ezgn: off the loop, so plan_run's wait_for can cut it. The
-        # abandoned thread finishes its read in the background.
-        result = await asyncio.to_thread(fn, **args)
+    elif call_deadline.get() is not None:
+        # nexus-5ezgn: off the loop, so plan_run's wait_for can cut it; in a
+        # copy of this context, so the deadline reaches the worker and a cut
+        # search stops at its next stage boundary. See _retrieval_executor.
+        import contextvars  # noqa: PLC0415 — deadline path only
+        import functools  # noqa: PLC0415 — deadline path only
+
+        ctx = contextvars.copy_context()
+        result = await asyncio.get_running_loop().run_in_executor(
+            _get_retrieval_executor(), functools.partial(ctx.run, fn, **args),
+        )
     else:
         result = fn(**args)
     # Most MCP tools return str (human-readable summary); the runner
@@ -3141,13 +3164,14 @@ async def plan_run(
             _step_usage: list[Any] = []
             # nexus-5ezgn: an operator step gets its remaining budget as a
             # ``timeout`` kwarg above. A retrieval step gets it here, as a
-            # wait_for around its dispatch; _RETRIEVAL_DEADLINE tells the
-            # default dispatcher to run the sync tool off the event loop so
-            # the wait can actually fire. Operator steps stay out of this:
+            # wait_for around its dispatch; the call_deadline it sets tells
+            # the default dispatcher to run the sync tool off the event loop
+            # (so the wait can fire) and lets the tool stop itself at a stage
+            # boundary (DeadlineExceeded). Operator steps stay out of this:
             # cancelling their coroutine mid-read would strand the
             # persistent operator pool's pipes.
             _cut_retrieval = deadline is not None and not is_operator_tool(tool)
-            _deadline_token = _RETRIEVAL_DEADLINE.set(deadline) if _cut_retrieval else None
+            _deadline_token = call_deadline.set_deadline(deadline) if _cut_retrieval else None
             try:
                 with _dispatch_mod.ambient_usage_sink(_step_usage):
                     raw = dispatch(tool, resolved)
@@ -3160,7 +3184,7 @@ async def plan_run(
                             result = await raw
                     else:
                         result = raw
-            except asyncio.TimeoutError:
+            except (asyncio.TimeoutError, call_deadline.DeadlineExceeded):
                 if not _cut_retrieval:
                     raise
                 _log.warning(
@@ -3252,7 +3276,7 @@ async def plan_run(
                 continue
             finally:
                 if _deadline_token is not None:
-                    _RETRIEVAL_DEADLINE.reset(_deadline_token)
+                    call_deadline.reset(_deadline_token)
             if not isinstance(result, dict):
                 # Tool authors must follow the documented output contract;
                 # surface non-dict returns explicitly rather than letting

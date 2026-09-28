@@ -1907,6 +1907,26 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             params["limit"] = limit
         return self._docs_from(self._get("/search", **params))
 
+    def find_all(
+        self, query: str, *, content_type: str | None = None,
+    ) -> list[CatalogEntry]:
+        """EVERY full-text match for *query*, not the first 50.
+
+        For a caller that filters, counts, or pages the matches: over a
+        capped page any of those reports absence or a short count for rows
+        past the cap (nexus-3bafq; ``nx catalog update --search`` updated
+        only the first 50 matches). The engine honours an explicit limit
+        with no ceiling, so grow the request until a page comes back short.
+        That terminates at the size of the match set, which is at most the
+        catalog.
+        """
+        want = 500
+        while True:
+            rows = self.find(query, content_type=content_type, limit=want)
+            if len(rows) < want:
+                return rows
+            want *= 4
+
     def find_by_title_exact(
         self, title: str, *, content_type: str | None = None
     ) -> list[CatalogEntry]:
@@ -1924,7 +1944,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         whose tokens match more documents than that, resolve by identity
         (:meth:`by_source_uri` / :meth:`by_file_path`) instead.
         """
-        return [e for e in self.find(title, content_type=content_type) if e.title == title]
+        return [e for e in self.find_all(title, content_type=content_type) if e.title == title]
 
     def by_file_path(
         self, owner: Tumbler | str, file_path: str

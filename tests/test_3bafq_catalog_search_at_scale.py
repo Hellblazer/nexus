@@ -104,3 +104,37 @@ def test_query_pages_past_the_engine_default_cap(big) -> None:
     rows = catalog_search(query="scale", limit=10, offset=100)
     assert len(_tumblers(rows)) == 10
     assert rows[-1] == {"_pagination": {"next_offset": 110, "limit": 10}}
+
+
+# Siblings of the same cap (critic finding on 43cc2820b): callers that filter,
+# count, or write over cat.find() saw at most the engine's 50-row default.
+
+
+def test_find_all_returns_every_match(big) -> None:
+    cat = ActiveCatalog()
+    assert len(cat.find("scale")) == 50, "the cap this bead is about"
+    assert len(cat.find_all("scale")) == N_FILLER + 2
+    assert [str(e.tumbler) for e in cat.find_by_title_exact("scale doc target")] == [big["target"]]
+
+
+def test_catalog_update_search_writes_every_match(big) -> None:
+    """``nx catalog update --search`` is a WRITE: over the capped page it
+    updated the first 50 of 1,202 matches and reported success."""
+    from click.testing import CliRunner
+
+    from nexus.commands.catalog import catalog
+
+    result = CliRunner().invoke(catalog, ["update", "--search", "scale", "--corpus", "bulk-3bafq"])
+    assert result.exit_code == 0, result.output
+    assert len(ActiveCatalog().by_corpus("bulk-3bafq")) == N_FILLER + 2
+
+
+def test_catalog_search_cli_pages_past_fifty(big) -> None:
+    from click.testing import CliRunner
+
+    from nexus.commands.catalog import catalog
+
+    result = CliRunner().invoke(catalog, ["search", "scale", "--limit", "10", "--offset", "100"])
+    assert result.exit_code == 0, result.output
+    assert len([ln for ln in result.output.splitlines() if ln.startswith("1.1.")]) == 10
+    assert "Next page: --offset 110" in result.output

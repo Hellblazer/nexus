@@ -131,6 +131,11 @@ class _FakeReader:
     def find(self, query, *, content_type=None):
         return []
 
+    def find_all(self, query, *, content_type=None):
+        # The real find_all is find() without the 50-row cap; the fakes
+        # have no cap, so delegating keeps each subclass's find() override.
+        return self.find(query, content_type=content_type)
+
     def list_trash(self, *, limit: int = 200, offset: int = 0) -> list[dict]:
         self.calls.append({"limit": limit, "offset": offset})
         if self._raise is not None:

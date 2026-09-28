@@ -10,6 +10,7 @@ from typing import Any
 
 import structlog
 
+from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, load_config
 from nexus.corpus import embedding_model_for_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
@@ -1062,6 +1063,10 @@ def search_cross_corpus(
         with ThreadPoolExecutor(max_workers=workers) as pool:
             batch_results = list(pool.map(_search_batch, batches))
     partials = [part for batch in batch_results for part in batch]
+    # nexus-5ezgn: a caller that has abandoned this call (nx_answer's
+    # budget cut) stops it here and between the enrichment legs below,
+    # rather than letting it run its remaining round trips for nothing.
+    call_deadline.check("search_cross_corpus:after_retrieval")
 
     # nexus-9tsdf (GH #1113): a stale, orphaned dimension-mismatched
     # collection (leftover from a prior embedder generation) can never be
@@ -1226,7 +1231,11 @@ def search_cross_corpus(
     # answer (plan 473's threshold=2.0 over knowledge,code,docs,rdr: 80
     # collections, 54 s of enrichment even with the embedding fetch
     # parallel). No caller can show more than MAX_QUERY_RESULTS.
-    all_results = _cap_enrichment_pool(all_results, pool_lexical_ids)
+    all_results = _cap_enrichment_pool(
+        all_results, pool_lexical_ids,
+        cap=max(QUOTAS.MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM),
+    )
+    call_deadline.check("search_cross_corpus:before_doc_ids")
 
     # nexus-rehf (RDR-108 Phase 4 review D-H1+H2): resolve doc_id via
     # the catalog manifest and inject into result metadata BEFORE any
@@ -1243,6 +1252,7 @@ def search_cross_corpus(
 
     # Compute topic assignments once for both boost and grouping (RDR-070)
     _topic_assignments: dict[str, int] | None = None
+    call_deadline.check("search_cross_corpus:before_topics")
     if all_results and taxonomy is not None:
         try:
             result_ids = [r.id for r in all_results]
@@ -1259,7 +1269,9 @@ def search_cross_corpus(
     fetched_embeddings = None
     failed_indices: set[int] = set()
     if needs_embeddings:
+        call_deadline.check("search_cross_corpus:before_embeddings")
         fetched_embeddings, failed_indices = _fetch_embeddings_for_results(all_results, t3)
+        call_deadline.check("search_cross_corpus:after_embeddings")
 
     # Contradiction detection (RDR-057 Phase 3a). Default-on; opt out via
     # search.contradiction_check=false in .nexus.yml.
@@ -1488,6 +1500,12 @@ def apply_file_diversity_cap(
     return kept + overflow
 
 
+#: nexus-5ezgn: the enrichment pool keeps this many candidates per
+#: requested row (floored at MAX_QUERY_RESULTS), so a caller's page is never
+#: larger than the pool it is cut from.
+_ENRICHMENT_POOL_HEADROOM: int = 4
+
+
 def _cap_enrichment_pool(
     results: list[SearchResult],
     lexical_ids: set[str],
@@ -1495,14 +1513,24 @@ def _cap_enrichment_pool(
 ) -> list[SearchResult]:
     """Keep at most *cap* non-lexical rows of *results*, best first.
 
-    ``cap`` defaults to ``QUOTAS.MAX_QUERY_RESULTS``, the largest page any
-    caller may ask for. "Best" is the order a caller ranks by: rows carrying
-    a server ``rerank_score`` by that score, ahead of unscored rows, which go
-    by vector distance. A lexical row is always kept: it is threshold-exempt
+    ``cap`` defaults to ``QUOTAS.MAX_QUERY_RESULTS``; search_cross_corpus
+    passes ``max(MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM)``.
+    "Best" is the order a caller ranks by: rows carrying a server
+    ``rerank_score`` by that score, ahead of unscored rows, which go by
+    vector distance. A lexical row is always kept: it is threshold-exempt
     because its vector distance is usually the worst in the window, so a
     distance cut would drop exactly what that leg exists to find. Kept rows
     stay in their input order, so every step after this sees the same
-    sequence it did before, minus rows that could not reach a page.
+    sequence it did before, minus the dropped rows.
+
+    The trade-off, stated: the client-side boosts (link, topic, and the
+    caller's hybrid/frecency/quality scoring) run after this cut, so none of
+    them can promote a row from beyond it. With the default headroom a row
+    would have to climb from past rank ``4 * n`` (at least 300) into the
+    top ``n`` on boosts alone. The cap only binds when the pool exceeds it,
+    which a thresholded search rarely does (the 7.64.1 case pooled 7,805
+    rows at threshold 2.0; the same query at the default threshold pooled
+    70).
     """
     from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local search helper import
 
@@ -1568,17 +1596,26 @@ def _fetch_embeddings_for_results(
     def _fetch(item: tuple[str, list[int]]) -> "np.ndarray | Exception":
         col, indices = item
         try:
+            call_deadline.check("search_cross_corpus:embedding_fetch")
             return t3.get_embeddings(col, [results[i].id for i in indices])
         except Exception as exc:  # noqa: BLE001 — per-collection isolation; reported by the merge loop below
             return exc
+
+    import contextvars  # noqa: PLC0415 — branch-local; only when embeddings are fetched
 
     items = list(col_groups.items())
     workers = min(8, len(items))
     if workers <= 1:
         fetched = [_fetch(it) for it in items]
     else:
+        # Each worker runs in a copy of this context so call_deadline
+        # reaches it (a pool thread starts with an empty context).
+        ctx = contextvars.copy_context()
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            fetched = list(pool.map(_fetch, items))
+            fetched = list(pool.map(lambda it: ctx.copy().run(_fetch, it), items))
+    for f in fetched:
+        if isinstance(f, call_deadline.DeadlineExceeded):
+            raise f
 
     col_fetched: dict[str, "np.ndarray"] = {}
     emb_dim: int | None = None

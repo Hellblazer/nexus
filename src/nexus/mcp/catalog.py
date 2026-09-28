@@ -75,20 +75,6 @@ def _file_path_matches(entry_path: str, wanted: str) -> bool:
     return long_.endswith("/" + short_)
 
 
-def _find_all(cat, query: str, content_type: str) -> list:
-    """Every full-text match for *query*, not the engine's default 50.
-
-    The engine honours an explicit ``limit`` with no ceiling, so grow the
-    request until a page comes back short.
-    """
-    want = 500
-    while True:
-        rows = cat.find(query, content_type=content_type or None, limit=want)
-        if len(rows) < want:
-            return rows
-        want *= 4
-
-
 def _file_path_candidates(cat, wanted: str) -> list:
     """Every catalog document *wanted* can name under :func:`_file_path_matches`.
 
@@ -182,7 +168,7 @@ def catalog_search(
             if owner or corpus or file_path or author:
                 # Post-filtering a capped page reports absence for matches
                 # past the cap, so take every full-text match first.
-                matches = [e for e in _find_all(cat, query, content_type) if _keep(e)]
+                matches = [e for e in cat.find_all(query, content_type=content_type or None) if _keep(e)]
             else:
                 matches = cat.find(
                     query, content_type=content_type or None, limit=offset + limit + 1,
