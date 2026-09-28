@@ -787,6 +787,12 @@ def _post_via_urllib(
         raise _Skip(f"engine returned HTTP {status} posting to {url}")
 
 
+#: What :func:`project` returns when it drops a harness-internal stop, so a
+#: caller that logs outcomes can say so instead of reporting a projection
+#: that never happened as ok (nexus-uzntx follow-up).
+DROPPED_ORPHAN: str = "dropped_orphan"
+
+
 def _transcript_exists(transcript_path: str) -> bool:
     """True when *transcript_path* names an existing file. Never raises."""
     if not transcript_path:
@@ -797,7 +803,7 @@ def _transcript_exists(transcript_path: str) -> bool:
         return False
 
 
-def project(kind: str, payload: dict[str, Any] | None) -> None:
+def project(kind: str, payload: dict[str, Any] | None) -> str | None:
     """Project one RDR-205 ``ledger/<session_id>`` tuple write. Never
     raises; every failure path is logged to the per-session log file and
     this function returns normally either way.
@@ -834,7 +840,7 @@ def project(kind: str, payload: dict[str, Any] | None) -> None:
     # nexus-0zsmg tolerance). START presence is not consulted: it is a GET, as
     # costly as the POST this saves. The hook's interpreter start remains.
     if kind == "report" and not agent_type and not _transcript_exists(transcript_path):
-        return
+        return DROPPED_ORPHAN
 
     # kind=="report" otherwise tolerates a missing agent_type (nexus-0zsmg):
     # the ledger.yaml template's agent_type dimension is declared WITHOUT

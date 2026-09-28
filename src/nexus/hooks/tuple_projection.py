@@ -101,11 +101,11 @@ def _project(verb: str, payload: dict) -> None:
     docstring's "ONE PROPERTY PRESERVED" section for why this bound moved
     here rather than disappearing when the subprocess did.
     """
-    outcome: dict[str, BaseException] = {}
+    outcome: dict[str, object] = {}
 
     def _run() -> None:
         try:
-            tuple_ledger_project.project(verb, payload)
+            outcome["result"] = tuple_ledger_project.project(verb, payload)
         except Exception as exc:  # noqa: BLE001 — a projection must never reach the hook
             outcome["error"] = exc
 
@@ -123,6 +123,12 @@ def _project(verb: str, payload: dict) -> None:
     # cleanly and a thread that never started are the same absence in the
     # hook log, which is the distinction the docstring above says this
     # logging exists to draw (nexus-q02nx.24).
+    # A dropped harness-internal stop is its own event: logging it as ok read
+    # as "the report was posted" and sent a gate diagnosis after a tuple-id
+    # collision that did not exist (nexus-uzntx follow-up).
+    if outcome.get("result") == tuple_ledger_project.DROPPED_ORPHAN:
+        _emit("info", "tuple_projection_dropped_orphan", verb=verb)
+        return
     _emit("info", "tuple_projection_ok", verb=verb)
 
 

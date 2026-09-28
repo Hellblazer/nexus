@@ -483,10 +483,17 @@ for t in threading.enumerate():
 PY
 }
 
+# The stop carries what a real dispatch's SubagentStop carries: its agent_type
+# and a transcript file on disk. The projector drops a stop with neither as a
+# harness-internal event (nexus-uzntx: 1468 of 1530 report rows on one ledger
+# were that shape, and every real one had both), so a bare stop here would
+# project nothing and fail this leg for the right reason.
+HOOK_TRANSCRIPT="$(mktemp "${TMPDIR:-/tmp}/cloudgate-hook-transcript.XXXXXX")"
 printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","hook_event_name":"SubagentStart"}' \
     "$HOOK_SID" "$HOOK_AGENT" | _drive_projection start
-printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}' \
-    "$HOOK_SID" "$HOOK_AGENT" | _drive_projection stop
+printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","agent_transcript_path":"%s","hook_event_name":"SubagentStop"}' \
+    "$HOOK_SID" "$HOOK_AGENT" "$HOOK_TRANSCRIPT" | _drive_projection stop
+rm -f "$HOOK_TRANSCRIPT"
 
 # The join above means the POST has normally already completed by here --
 # but poll anyway rather than assume: the join has its own timeout, and a
