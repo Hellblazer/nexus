@@ -114,9 +114,11 @@ class _StorageBackendGuardGroup(click.Group):
             # endpoint naming a port nothing answers on. The vector client
             # re-raises the raw error on purpose (its retry keys on the
             # type), so the process boundary is where it becomes one line.
+            notes = "; ".join(getattr(exc, "__notes__", []) or [])
             raise click.ClickException(
-                f"a service this command needs did not answer ({exc}). "
-                "If it is the local nexus service, start it with "
+                f"a service this command needs did not answer ({exc}"
+                + (f"; {notes}" if notes else "")
+                + "). If it is the local nexus service, start it with "
                 "'nx daemon service start'; 'nx doctor' checks every endpoint."
             ) from exc
         except TokenAdminAuthError as exc:

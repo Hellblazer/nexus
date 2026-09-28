@@ -51,3 +51,12 @@ def test_check_mcp_logs_that_scanned_nothing_is_not_a_pass(tmp_path, monkeypatch
     assert "No silent-death" not in result.output, result.output
     assert "nothing was checked" in result.output, result.output
     assert str(empty_project) in result.output
+
+
+def test_a_check_mode_and_a_fix_mode_are_refused_together():
+    """Review of 2896b2507: --fix, --fix-paths, --trim-telemetry and the
+    --clean-* modes sit in the same run-and-return chain, so
+    `nx doctor --check-schema --fix` silently dropped --fix."""
+    result = CliRunner().invoke(main, ["doctor", "--check-schema", "--fix"])
+    assert result.exit_code == 2, result.output
+    assert "--check-schema" in result.output and "--fix" in result.output

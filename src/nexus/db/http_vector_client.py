@@ -1712,8 +1712,22 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         # the original error and flow unchanged.
         remedy = _managed_remedy()
         if remedy is None:
+            # Type unchanged (callers' retries key on it); the note names the
+            # request for whoever renders the failure (nexus-sis0m.1).
+            _note_request(e, "POST", path)
             raise
         raise VectorServiceError(f"POST {path} failed: {e}\n{remedy}") from e
+
+
+def _note_request(exc: BaseException, method: str, path: str) -> None:
+    """Attach ``<method> <endpoint><path>`` to *exc* as an exception note
+    (PEP 678), leaving its type and message alone. A connection failure's
+    own text names neither host, port nor route."""
+    try:
+        base = (_lease_cache or (None, None))[0] or ""
+    except Exception:  # noqa: BLE001 — a diagnostic note must never raise
+        base = ""
+    exc.add_note(f"request: {method} {base}{path}")
 
 
 def _get(path: str, *, tenant: str = "default") -> Any:
@@ -1742,6 +1756,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         remedy = _managed_remedy()
         if remedy is None:
+            _note_request(e, "GET", path)
             raise
         raise VectorServiceError(f"GET {path} failed: {e}\n{remedy}") from e
 

@@ -68,6 +68,9 @@ def test_a_read_verb_names_a_service_that_does_not_answer(lease_points_at_a_stop
         f"{argv}: {type(result.exception).__name__} escaped as a traceback"
     )
     assert "did not answer" in result.output, result.output
+    # The request that failed is named (host, port and route), not only
+    # "[Errno 61] Connection refused" (critique of 22edf2fb5).
+    assert "request: " in result.output and "127.0.0.1:9/v1/" in result.output, result.output
     assert "Collection not found" not in result.output, result.output
 
 

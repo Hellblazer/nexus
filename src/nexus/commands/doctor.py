@@ -532,9 +532,14 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
     # not a pass (shakeout 7.64.1 Surface E F5: from /tmp this printed
     # "No silent-death ... signatures found" at rc 0 after scanning 0 files).
     nothing_checked_msg = (
-        f"nothing was checked: Claude Code has no MCP client log for this "
-        f"directory in the last {hours}h under {cache_dir}. Run from the "
-        f"project directory Claude Code works in."
+        f"nothing was checked: Claude Code has never logged an MCP client "
+        f"session for this directory ({cache_dir} does not exist). Run from "
+        f"the project directory Claude Code works in."
+    )
+    stale_window_msg = (
+        f"nothing was checked: {cache_dir} holds no MCP client log newer "
+        f"than {hours}h. Widen the window with --mcp-log-hours, or run again "
+        f"after a Claude Code session here."
     )
     if not cache_dir.exists():
         platform_has_cache = cache_dir.parent.exists()
@@ -593,7 +598,7 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
         f"{cache_dir} (last {hours}h)."
     )
     if payload["nothing_checked"]:
-        click.echo(nothing_checked_msg)
+        click.echo(stale_window_msg)
         raise SystemExit(1)
     if not payload["silent_deaths"] and not payload["tool_failures"]:
         click.echo("No silent-death or tool-failure signatures found.")
@@ -2944,12 +2949,18 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
             "--check-engine-activity": check_engine_activity,
             "--check-index-failures": check_index_failures,
             "--check-tier-discipline": check_tier_discipline,
+            # The non-check modes share the same run-and-return chain.
+            "--trim-telemetry": trim_telemetry,
+            "--fix": fix,
+            "--fix-paths": fix_paths,
+            "--clean-checkpoints": clean_checkpoints,
+            "--clean-pipelines": clean_pipelines,
         }.items() if requested
     ]
     if len(_modes_requested) > 1:
         raise click.UsageError(
-            f"{', '.join(_modes_requested)}: nx doctor runs one --check-* mode "
-            "per invocation; run each separately."
+            f"{', '.join(_modes_requested)}: nx doctor runs one mode per "
+            "invocation; run each separately."
         )
 
     if check_storage_boundary:
