@@ -68,6 +68,8 @@ jobs:
           ls -ld "$(brew --prefix 2>/dev/null)" 2>&1 || true
           echo "-- flex/bison already present? --"
           brew list flex bison 2>&1 || echo "flex/bison not yet installed (brew install would run at build time)"
+          echo "-- attempting 'brew install -q flex bison' as the ghrunner user (what build_pg_bundle.sh runs) --"
+          brew install -q flex bison && echo "brew install flex bison: OK" || echo "brew install flex bison: FAILED (rc=$?)"
           echo "=== RUNNER_TOOL_CACHE (setup-graalvm/setup-uv persistence across jobs) ==="
           echo "RUNNER_TOOL_CACHE=${RUNNER_TOOL_CACHE:-<unset>}"
           [ -n "${RUNNER_TOOL_CACHE:-}" ] && ls -ld "$RUNNER_TOOL_CACHE" 2>&1
