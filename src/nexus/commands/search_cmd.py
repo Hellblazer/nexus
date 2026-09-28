@@ -128,9 +128,17 @@ def _maybe_emit_silent_zero_note(
     collections_with_drops = diag.collections_with_drops()
     threshold_str = f"{threshold:.3f}" if threshold is not None else "n/a"
     top_distance_str = f"{top_distance:.3f}"
-    suggested = (
+    # nexus-zdzm5 (surface A A4): the filter drops a candidate whose
+    # distance is ABOVE the threshold, so a suggestion below top_distance
+    # surfaces nothing ("--threshold 0.1" suggested 0.300 against a top
+    # distance of 0.452). Never suggest less than the top distance, rounded
+    # UP so the printed value still admits it.
+    import math  # noqa: PLC0415 — branch-local, silent-zero path only
+
+    suggested = max(
         (threshold if threshold is not None else top_distance)
-        + _THRESHOLD_SUGGESTION_OFFSET
+        + _THRESHOLD_SUGGESTION_OFFSET,
+        math.ceil(top_distance * 1000) / 1000,
     )
     click.echo(
         f"note: {diag.total_dropped} candidates dropped across "
@@ -410,6 +418,7 @@ def search_cmd(
         )
     tuning = get_tuning_config()
 
+    hybrid_flag = hybrid  # what the user typed, before the config default
     # Apply per-project hybrid default if --hybrid was not explicitly passed
     if not hybrid:
         hybrid = config.get("search", {}).get("hybrid_default", False)
@@ -590,6 +599,15 @@ def search_cmd(
     results = apply_ranking_boosts(
         results, hybrid=hybrid, tuning=tuning, catalog=_scoring_cat,
     )
+    # nexus-zdzm5 (surface A A8): scoring logs this at debug; a CLI user who
+    # typed --hybrid gets a plain note instead of a raw structlog line.
+    if hybrid_flag and results:
+        from nexus.mcp_infra import get_collection_row  # noqa: PLC0415 — deferred, as elsewhere in this command
+
+        if not any((get_collection_row(c) or {}).get("content_type") == "code"
+                   for c in {r.collection for r in results}):
+            click.echo("note: --hybrid has no effect here: no code collection in the results.",
+                       err=True)
 
     # RDR-188 (nexus-9o6y2.8): consume SERVER rerank scores. The engine's
     # fused stage scored the fan-out rows; scores are query-relevance values,

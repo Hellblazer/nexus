@@ -146,10 +146,11 @@ def test_hybrid_scoring_code_detection_pinned(coll: str, is_code_like: bool, mon
     r = _r(coll=coll, dist=0.2, frecency=0.8)
     with patch("nexus.scoring._log") as mock_log:
         results = apply_hybrid_scoring([r], hybrid=True)
+    # nexus-zdzm5: a debug event now; nx search prints the user-facing note.
     warned = any(
-        call.kwargs.get("event") == "--hybrid has no effect — no code corpus in scope"
-        or (call.args and call.args[0] == "--hybrid has no effect — no code corpus in scope")
-        for call in mock_log.warning.call_args_list
+        call.kwargs.get("event") == "hybrid_no_code_corpus_in_scope"
+        or (call.args and call.args[0] == "hybrid_no_code_corpus_in_scope")
+        for call in mock_log.debug.call_args_list
     )
     assert warned == (not is_code_like)
     assert results[0].hybrid_score is not None

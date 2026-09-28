@@ -299,6 +299,31 @@ def _plain_fallback(results: list[SearchResult]) -> str:
     return "\n".join(lines)
 
 
+def _file_line_no(r: SearchResult, best_idx: int, text: str) -> int:
+    """The FILE line of chunk line *best_idx*, as a 1-based line number.
+
+    Code chunks carry ``line_start``; prose chunks do not, and adding the
+    chunk-relative index to a default of 0 reported a position inside the
+    chunk as a file line (an RDR's frontmatter line, for text from its
+    middle; nexus-zdzm5, 7.64.1 shakeout surface A A5). Without
+    ``line_start``, find the line's text in the source file when that file is
+    readable; otherwise report line 1, which is at least a real line.
+    """
+    if "line_start" in r.metadata:
+        return int(r.metadata["line_start"]) + best_idx
+    path = r.metadata.get("source_path") or r.metadata.get("file_path") or ""
+    wanted = text.strip()
+    if path and wanted:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for n, line in enumerate(fh, start=1):
+                    if line.strip() == wanted:
+                        return n
+        except OSError:
+            pass
+    return 1
+
+
 def format_compact(
     results: list[SearchResult],
     query: str | None = None,
@@ -327,7 +352,7 @@ def format_compact(
             best_idx = 0
 
         best_idx = min(best_idx, len(chunk_lines) - 1)
-        line_no = line_start + best_idx
+        line_no = _file_line_no(r, best_idx, chunk_lines[best_idx])
         output.append(f"{source_path}:{line_no}:{chunk_lines[best_idx]}")
     return output
 
@@ -354,11 +379,10 @@ def format_vimgrep(results: list[SearchResult], query: str | None = None) -> lis
         if query and chunk_lines:
             matches = _find_matching_lines(content, query)
             best_idx = min(matches[0], len(chunk_lines) - 1)
-            line_no = line_start + best_idx
-            text = chunk_lines[best_idx]
         else:
-            line_no = line_start
-            text = chunk_lines[0]
+            best_idx = 0
+        text = chunk_lines[best_idx]
+        line_no = _file_line_no(r, best_idx, text)
 
         lines.append(f"{source_path}:{line_no}:0:{text}")
     return lines

@@ -302,7 +302,9 @@ def apply_hybrid_scoring(
     has_code = any(is_code_by_collection[r.collection] for r in results)
 
     if hybrid and not has_code:
-        _log.warning("--hybrid has no effect — no code corpus in scope")
+        # Debug, not warning: a library warning reaches a CLI user as a raw
+        # structlog line. nx search prints its own note (nexus-zdzm5).
+        _log.debug("hybrid_no_code_corpus_in_scope")
 
     # nexus-tox2m: ONE pooled window across every result, computed over
     # CALIBRATED distances — see this function's docstring "Normalization

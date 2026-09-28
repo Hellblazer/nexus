@@ -354,3 +354,21 @@ def test_diversity_cap_applies_on_fallback_round_robin_path(runner, cloud_env):
     distinct = {it.get("source_path") for it in items}
     assert dom_count <= 2, f"expected <=2 dominant-file rows, got {dom_count}: {items}"
     assert len(distinct) >= 9, f"expected >=9 distinct files, got {len(distinct)}: {items}"
+
+
+def test_hybrid_on_a_prose_only_search_prints_a_plain_note(runner, cloud_env):
+    """nexus-zdzm5 (7.64.1 shakeout surface A A8): --hybrid with no code
+    collection in the results printed a raw structlog warning line on
+    stderr. It is a plain note now, and only when --hybrid was typed."""
+    mock_t3 = _t3_mock(["knowledge__test"])
+    results = [_result("a", "knowledge__test", 0.1)]
+
+    typed = _invoke(runner, mock_t3, _fake_retrieval(results),
+                    ["search", "query", "--corpus", "knowledge", "--hybrid"])
+    assert typed.exit_code == 0, typed.output
+    assert "note: --hybrid has no effect here: no code collection in the results." in typed.output
+    assert "event=" not in typed.output
+
+    plain = _invoke(runner, mock_t3, _fake_retrieval(results),
+                    ["search", "query", "--corpus", "knowledge"])
+    assert "--hybrid has no effect" not in plain.output

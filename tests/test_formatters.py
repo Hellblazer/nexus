@@ -488,3 +488,23 @@ def test_bat_line_range_is_relative_to_the_stdin_start(monkeypatch) -> None:
     assert argv_seen, "bat must have been invoked"
     cmd = argv_seen[0]
     assert cmd[cmd.index("--line-range") + 1] == "1:3", cmd
+
+
+# nexus-zdzm5 (7.64.1 shakeout surface A A5): prose chunks carry no
+# line_start, and vimgrep/compact added the chunk-relative index to 0, so a
+# line from the middle of an RDR pointed at its frontmatter.
+
+
+def test_a_prose_line_is_located_in_its_file(tmp_path) -> None:
+    doc = tmp_path / "rdr-223.md"
+    doc.write_text("---\ntitle: x\n---\n# Heading\n\nPositive: atomic chunk plus owner write\n")
+    r = SearchResult(id="r1", content="# Heading\n\nPositive: atomic chunk plus owner write",
+                     distance=0.1, collection="rdr__x", metadata={"source_path": str(doc)})
+    assert format_vimgrep([r], query="atomic chunk owner")[0].split(":")[1] == "6"
+    assert format_compact([r], query="atomic chunk owner")[0].split(":")[1] == "6"
+
+
+def test_a_prose_line_whose_file_is_unreadable_reports_line_one() -> None:
+    r = SearchResult(id="r1", content="a\nb", distance=0.1, collection="rdr__x",
+                     metadata={"source_path": "/no/such/file.md"})
+    assert format_vimgrep([r])[0].split(":")[1] == "1"
