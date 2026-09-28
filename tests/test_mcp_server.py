@@ -2026,6 +2026,36 @@ def test_search_structured_true_wire_call_unchanged():
     assert "truncated_chars" not in result
 
 
+def test_search_structured_tumblers_carry_the_attached_doc_id():
+    """nexus-kkqv7: every structured row's tumbler was "" because the
+    envelope read metadata["tumbler"] while search_cross_corpus attaches the
+    catalog tumbler as metadata["doc_id"]. A plan step reading
+    $stepN.tumblers (plan 473's traverse seeds) got empties. This runs the
+    REAL attach step, so the test fails whenever the two sides disagree on
+    the key, not just when this read changes."""
+    from nexus.search_engine import _attach_doc_ids_from_catalog
+
+    _mock_t3([{"name": "code__test", "count": 1}])
+
+    class _Catalog:
+        def docs_for_chashes(self, chashes):
+            return {c: ["1.1.4830"] for c in chashes}
+
+    def _cross_corpus(*a, **kw):
+        rows = [SearchResult(id="r1", content="x", distance=0.1,
+                             collection="code__test",
+                             metadata={"chunk_text_hash": "a" * 64})]
+        _attach_doc_ids_from_catalog(rows, _Catalog())
+        return rows
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        # A query no other test uses: the page-turn cache (nexus-e4srp) is
+        # process-wide and would serve another test's rows for query="x".
+        result = search(query="kkqv7 tumbler probe", corpus="code__test", structured=True)
+    assert result["tumblers"] == ["1.1.4830"]
+
+
 def test_search_structured_partial_mismatch_carries_warnings_key():
     """nexus-vply6 fix round 2, point 2: a call that DID return results
     but also skipped a collection (the SAME SearchDiagnostics.

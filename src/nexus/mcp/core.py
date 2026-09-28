@@ -2659,7 +2659,10 @@ def _search_render(
             # dict literal directly at the return statement.
             return {
                 "ids": [r.id for r in page],
-                "tumblers": [r.metadata.get("tumbler", "") for r in page],
+                # nexus-kkqv7: search_cross_corpus attaches the catalog
+                # tumbler as ``doc_id`` (_attach_doc_ids_from_catalog);
+                # nothing sets ``tumbler``, so this read every row as "".
+                "tumblers": [r.metadata.get("tumbler") or r.metadata.get("doc_id", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 # The page is ORDERED by hybrid_score, so withholding it left
                 # the consumer reading one number and being served another
@@ -2671,7 +2674,9 @@ def _search_render(
                 # has to read distance; a caller wanting to know why this row
                 # is above that one has to read hybrid_score.
                 "hybrid_scores": [float(r.hybrid_score) for r in page],
-                "collections": list({r.collection for r in page}),
+                # Sorted like query()'s: list(set) was nondeterministic and
+                # read as if aligned with ids (zdzm5 F8).
+                "collections": sorted({r.collection for r in page}),
                 "chunk_collections": [r.collection for r in page],
                 "chunk_text_hash": [
                     r.metadata.get("chunk_text_hash", "") for r in page
@@ -4501,7 +4506,10 @@ def query(
             page = results[:limit]
             structured_result: dict = {
                 "ids": [r.id for r in page],
-                "tumblers": [r.metadata.get("tumbler", "") for r in page],
+                # nexus-kkqv7: search_cross_corpus attaches the catalog
+                # tumbler as ``doc_id`` (_attach_doc_ids_from_catalog);
+                # nothing sets ``tumbler``, so this read every row as "".
+                "tumblers": [r.metadata.get("tumbler") or r.metadata.get("doc_id", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 # This page came out of apply_ranking_boosts, which sorts
                 # descending by hybrid_score -- so a structured caller was
