@@ -6382,8 +6382,9 @@ def memory_search(
         description=(
             "Plain-text search query, matched against title, content, and "
             "tags. Not a query grammar — no operators. A query made entirely "
-            "of English stopwords (e.g. \"and\") is reported as an error, "
-            "not a silent empty result."
+            "of English stopwords (e.g. \"and\") can only match through titles "
+            "and tags, which keep stopwords; when nothing matches that way it "
+            "is reported as an error, not a silent empty result."
         ),
     )],
     project: Annotated[str, Field(description="Optional project filter; \"\" searches every project.")] = "",
@@ -7363,7 +7364,9 @@ def tuple_stats(
 
     Use `tuple_list` instead to enumerate subspaces by prefix. Returns
     `{subspace, total, available, claimed, dead, consumed,
-    expired_unpurged, oldest_created_at, newest_created_at}`.
+    expired_unpurged, oldest_created_at, newest_created_at}`. `total`
+    counts rows not yet consumed; consumed rows are counted only in
+    `consumed`.
     """
     try:
         with _t2_ctx() as db:
@@ -7810,7 +7813,8 @@ async def operator_rank(
     """Rank items by a natural-language criterion, via an LLM subprocess.
 
     Use `operator_filter` instead for a keep/reject decision rather than an
-    ordering. Returns items in ranked order with a rationale.
+    ordering. Returns a `ranked` list: the items in ranked order, best
+    first. No per-item rationale is returned.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 

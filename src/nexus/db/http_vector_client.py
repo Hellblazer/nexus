@@ -1671,6 +1671,9 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         # nexus-8ooxn: a 401/403 body can echo the rejected credential;
         # redact where it enters the message so every renderer sees it gone.
         msg = f"POST {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"
+        _unregistered = _unregistered_collection_message(e.code, err)
+        if _unregistered:
+            msg = f"POST {path} → HTTP 422: {_unregistered}"
         # RDR-195 (nexus-kmtlp.11): a STRUCTURED error body — the engine's
         # 422 for Voyage TOO_MANY_TOKENS_IN_BATCH carries detail/sub_requests/
         # batch_size/model — must reach the caller intact. Keeping only the
@@ -1733,6 +1736,30 @@ def _note_request(exc: BaseException, method: str, path: str) -> None:
     exc.add_note(f"request: {method} {base}{path}")
 
 
+def _unregistered_collection_message(code: int, err: Any) -> str | None:
+    """A readable message for the engine's typed "not registered" 422, or None.
+
+    The engine's text ends "register it first via POST
+    /v1/catalog/collections/upsert", which is right for a writer that skipped
+    registration and wrong for everyone who reaches it through a read tool
+    or a typo: store_list, store_get and search all surfaced it, advising a
+    write endpoint for a collection name that simply does not exist
+    (nexus-zdzm5, 7.64.1 shakeout surface C F9 / surface E F10).
+    """
+    if code != 422 or not isinstance(err, dict):
+        return None
+    name = err.get("collection")
+    if not name or "is not registered" not in str(err.get("error", "")):
+        return None
+    # Keep the words "not registered": corpus._looks_like_stale_registration_error
+    # detects this 422 by them to drive write_with_registration_retry.
+    return (
+        f"collection {name!r} is not registered in this tenant, so it does not "
+        "exist here. Check the name with `nx collection list`; a collection is "
+        "created by the nx command that first writes to it."
+    )
+
+
 def _get(path: str, *, tenant: str = "default") -> Any:
     """GET from the service endpoint, return parsed response body."""
     import urllib.error  # noqa: PLC0415 — deferred import — branch-local, avoids module-load cost
@@ -1746,6 +1773,9 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"GET {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"
+        _unregistered = _unregistered_collection_message(e.code, err)
+        if _unregistered:
+            msg = f"GET {path} → HTTP 422: {_unregistered}"
         edge_server = _edge_server(e.headers)  # nexus-1jtob — see _post
         if edge_server:
             remedy: str | None = _edge_refusal_remedy(edge_server, e.code)
