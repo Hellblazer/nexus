@@ -512,6 +512,8 @@ per-path beads.
 
 ## Revision History
 
+- 2026-09-28: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `642e8f42f`; critique `nexus_rdr/223-gate-critique-2026-09-28-r2`.
+
 - 2026-09-28: restructured to the RDR template for the gate: Context,
   Relationship to Prior RDRs, Critical Assumptions, Trade-offs, Finalization
   Gate and a `### Phase` / `#### Step` Implementation Plan; findings recorded
