@@ -438,6 +438,14 @@ def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_s
     )
     assert _resolve_import_owner_tumbler(slug, reader, writer) == owner_tumbler
 
+    # What real writers store: the name's hyphenated owner segment ("1-1").
+    hyphen = f"code__wbfpw33hyphen-row__{_MODEL}__v1"
+    writer.register_collection(
+        hyphen, content_type="code",
+        owner_id=owner_segment_for_tumbler(str(owner_tumbler)), embedding_model=_MODEL,
+    )
+    assert _resolve_import_owner_tumbler(hyphen, reader, writer) == owner_tumbler
+
     curator = writer.register_owner("knowledge", "curator")
     seg = owner_segment_for_tumbler(str(owner_tumbler))
     unregistered = f"code__{seg}__{_MODEL}__v1-unregistered"

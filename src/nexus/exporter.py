@@ -48,7 +48,6 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import (
     embedding_model_for_collection_name,
     index_model_for_collection,
-    is_conformant_collection_name,
 )
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
@@ -538,13 +537,15 @@ def _resolve_import_owner_tumbler(collection_name: str, reader: Any, writer: Any
     tumbler-derived (``code__arcaneum-2ad2825c__...``), and a name with a
     non-canonical model segment does not even parse.
 
-    * A registered, non-knowledge collection whose row names an owner
-      that exists in the catalog: that owner, the one the indexer
-      registered its documents under.
+    * A non-knowledge collection whose row's ``owner_id`` is a registered
+      owner: that owner. Writers store it in the name's hyphenated form
+      (``1-1``), and ``upsertCollection`` overwrites it from the name on
+      every chunk write (nexus-7tys2), so both the stored value and its
+      hyphens-as-dots form are tried, and either is used only when the
+      catalog confirms it is a registered owner. A slug
+      (``arcaneum-2ad2825c``) matches no owner and falls through.
     * Otherwise, for a non-knowledge collection, the owner of a live
-      document already in it. The chunk write path rewrites the row's
-      ``owner_id`` from the name's owner segment, so on a real tenant a
-      row can hold a slug (``arcaneum-2ad2825c``) that is no owner at all.
+      document already in it.
     * Everything else (a knowledge collection, or a collection with no
       usable row and no documents, such as gate-xr789's): the
       ``knowledge`` curator, the owner ``catalog_store_hook_tracked``
@@ -554,13 +555,14 @@ def _resolve_import_owner_tumbler(collection_name: str, reader: Any, writer: Any
     row = reader.get_collection(collection_name) or {}
     if row.get("content_type") != "knowledge":
         owner_id = str(row.get("owner_id") or "")
-        if owner_id and reader.get_owner_by_prefix(owner_id) is not None:
-            try:
-                return Tumbler.parse(owner_id)
-            except Exception:  # noqa: BLE001 — an unparseable owner id falls through
-                _log.warning(
-                    "import_owner_row_unparseable", collection=collection_name, owner_id=owner_id,
-                )
+        for candidate in dict.fromkeys((owner_id, owner_id.replace("-", "."))):
+            if candidate and reader.get_owner_by_prefix(candidate) is not None:
+                try:
+                    return Tumbler.parse(candidate)
+                except Exception:  # noqa: BLE001 — an unparseable owner id falls through
+                    _log.warning(
+                        "import_owner_row_unparseable", collection=collection_name, owner_id=candidate,
+                    )
         existing = reader.list_by_collection(collection_name, limit=1)
         if existing:
             return existing[0].tumbler.owner_address()
