@@ -75,6 +75,28 @@ def _file_path_matches(entry_path: str, wanted: str) -> bool:
     return long_.endswith("/" + short_)
 
 
+def _parse_user_tumbler(raw: str, field: str):
+    """Parse a caller-supplied tumbler, or raise a ValueError that says why.
+
+    ``Tumbler.parse`` leaks int()'s "invalid literal for int() with base 10"
+    for anything that is not dotted integers; every tool here that took a
+    tumbler from its caller returned that text (nexus-zdzm5; ``resolve`` had
+    its own fix, now shared). The dashed form ``nx doctor`` prints
+    ("1-2188") is a physical collection prefix, not a tumbler.
+    """
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
+
+    try:
+        return Tumbler.parse(raw)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"{field}={raw!r}: not a dotted tumbler (e.g. '1.2.3'). "
+            f"If you have a physical collection prefix like "
+            f"'1-2188' from `nx doctor`, that is NOT a tumbler. "
+            f"underlying: {exc}"
+        ) from exc
+
+
 def _file_path_candidates(cat, wanted: str) -> list:
     """Every catalog document *wanted* can name under :func:`_file_path_matches`.
 
@@ -147,7 +169,7 @@ def catalog_search(
     try:
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
 
-        owner_prefix = f"{Tumbler.parse(owner)}." if owner else ""
+        owner_prefix = f"{_parse_user_tumbler(owner, 'owner')}." if owner else ""
 
         def _keep(e) -> bool:
             # Every filter, applied to every candidate regardless of which
@@ -179,7 +201,7 @@ def catalog_search(
             # and filtered it, so file_path or author alone saw the first
             # ~21 of 23,334 rows and reported absence for the rest).
             if owner:
-                candidates = cat.by_owner(Tumbler.parse(owner))
+                candidates = cat.by_owner(_parse_user_tumbler(owner, "owner"))
             elif corpus:
                 candidates = cat.by_corpus(corpus)
             elif content_type:
@@ -227,7 +249,7 @@ def catalog_show(
 
         entry = None
         if tumbler:
-            t = Tumbler.parse(tumbler)
+            t = _parse_user_tumbler(tumbler, "tumbler")
             # nexus-v3w9n: catalog-034 grammar makes tumbler depth
             # unambiguous — an owner prefix is EXACTLY 2 segments, a
             # document tumbler is >= 3. cat.resolve() never consults
@@ -288,7 +310,7 @@ def catalog_list(
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deliberate function-local import
 
         if owner:
-            entries = cat.by_owner(Tumbler.parse(owner))
+            entries = cat.by_owner(_parse_user_tumbler(owner, "owner"))
             if content_type:
                 entries = [e for e in entries if e.content_type == content_type]
             entries = entries[offset:offset + limit + 1]
@@ -438,7 +460,7 @@ def catalog_register(
             }
 
         tumbler = writer.register(
-            Tumbler.parse(owner), title,
+            _parse_user_tumbler(owner, "owner"), title,
             content_type=content_type, file_path=fp,
             corpus=corpus, author=author, year=year,
             physical_collection=physical_collection,
@@ -512,10 +534,10 @@ def catalog_update(
         if meta:
             fields["meta"] = _json.loads(meta)
         if alias_of:
-            fields["alias_of"] = str(Tumbler.parse(alias_of))
+            fields["alias_of"] = str(_parse_user_tumbler(alias_of, "alias_of"))
         if not fields:
             return {"error": "No fields to update"}
-        writer.update(Tumbler.parse(tumbler), **fields)
+        writer.update(_parse_user_tumbler(tumbler, "tumbler"), **fields)
         return {"tumbler": tumbler, "updated": list(fields.keys())}
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}
@@ -710,20 +732,9 @@ def catalog_resolve(
         # physical-collection prefix shape, NOT a tumbler. Tumbler.parse
         # used to leak its int() ValueError to the caller; catch and
         # surface an actionable diagnostic instead.
-        def _parse_tumbler_or_raise(raw: str, field: str) -> Tumbler:
-            try:
-                return Tumbler.parse(raw)
-            except (ValueError, TypeError) as exc:
-                raise ValueError(
-                    f"{field}={raw!r}: not a dotted tumbler (e.g. '1.2.3'). "
-                    f"If you have a physical collection prefix like "
-                    f"'1-2188' from `nx doctor`, that is NOT a tumbler. "
-                    f"underlying: {exc}"
-                ) from exc
-
         collections: set[str] = set()
         if tumbler:
-            entry = cat.resolve(_parse_tumbler_or_raise(tumbler, "tumbler"))
+            entry = cat.resolve(_parse_user_tumbler(tumbler, "tumbler"))
             if entry and entry.physical_collection:
                 collections.add(entry.physical_collection)
         if owner:
@@ -735,7 +746,7 @@ def catalog_resolve(
                 owner_tumbler = resolve_owner_scope(cat, owner)
             except OwnerScopeError as exc:
                 raise ValueError(f"owner {exc}") from exc
-            entries = cat.by_owner(_parse_tumbler_or_raise(owner_tumbler, "owner"))
+            entries = cat.by_owner(_parse_user_tumbler(owner_tumbler, "owner"))
             for e in entries:
                 if e.physical_collection:
                     collections.add(e.physical_collection)

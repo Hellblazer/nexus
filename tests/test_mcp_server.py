@@ -2785,3 +2785,13 @@ def test_resolve_corpus_target_funnel_pinned(monkeypatch):
         "rgcache,quarantine-docs__x,code__myrepo__voyage-code-3__v1", t3=None,
     )
     assert target == all_names
+
+
+def test_search_refuses_a_limit_past_the_documented_cap():
+    """nexus-zdzm5: limit=301 returned 301 rows (118 KB) though the tool
+    documents limit <= 300. It is refused, with the paging remedy."""
+    text = search(query="zdzm5 limit probe", corpus="code__test", limit=301)
+    assert text.startswith("Error: limit must be between 1 and 300, got 301")
+    assert "offset" in text
+    assert search(query="zdzm5 limit probe", corpus="code__test", limit=0,
+                  structured=True)["error"].startswith("Error: limit must be")

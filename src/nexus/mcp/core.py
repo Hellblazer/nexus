@@ -2822,7 +2822,7 @@ def _truncated_chars_dropped(capped_text: str, tool: str) -> tuple[bool, int]:
     structured_output=False,
 )
 def search(
-    query: Annotated[str, Field(description="Search query text, up to 256 characters.")],
+    query: Annotated[str, Field(description="Search query text.")],
     corpus: Annotated[str, Field(
         description=(
             "Corpus prefixes or full collection names, comma-separated; \"all\" for "
@@ -2896,6 +2896,17 @@ def search(
       within a page: text applies a per-file diversity cap, structuredContent
       does not.
     """
+    # nexus-zdzm5: the documented page cap was not enforced; limit=301
+    # returned 301 rows (118 KB). Refuse, and say how to page instead.
+    # (The description's old "up to 256 characters" query limit was never
+    # enforced by anything and the engine embeds longer queries, and nx_answer
+    # passes whole questions here, so that claim is dropped, not enforced.)
+    from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches this module's convention
+
+    if not 1 <= limit <= MAX_QUERY_RESULTS:
+        msg = (f"Error: limit must be between 1 and {MAX_QUERY_RESULTS}, got {limit}. "
+               "Page with offset for more.")
+        return {"error": msg} if structured else msg
     result = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
@@ -8161,16 +8172,16 @@ def traverse(
     vector-ranked in one call. Accepts either `link_types` or `purpose`,
     never both.
 
-    Returns `{"tumblers": [...], "ids": [], "collections": [...]}` for
-    `$stepN.tumblers`/`$stepN.collections` references, or the same shape
-    plus a `"warning"` key
-    (`{"tumblers": [...], "ids": [], "collections": [...], "warning": "..."}`)
-    when `purpose` does not resolve to a known name.
+    Returns `{"tumblers": [...], "ids": [...], "collections": [...]}`:
+    the reachable document tumblers, the chunk ids (chashes) of those
+    documents' manifests, and their collections (sorted). `$stepN.ids` with
+    `$stepN.collections` hydrates through `store_get_many`. A `"warning"`
+    key is added when `purpose` does not resolve to a known name.
 
     Constraints:
-    - `ids` is ALWAYS an empty list — this tool returns document tumblers,
-      not chunk ids; do not feed `$stepN.ids` from this tool into
-      id-keyed hydration. Use `$stepN.tumblers` instead.
+    - `ids` is capped at 300 (a two-hop walk from one note reached 1,196
+      chunks); when capped, an `"ids_truncated": {"total": N, "kept": 300}`
+      key says so. `tumblers` is not capped.
     - `link_types` and `purpose` are mutually exclusive.
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -8226,7 +8237,7 @@ def traverse(
 
     nodes = result.get("nodes") or []
     tumblers = [str(n.tumbler) for n in nodes if hasattr(n, "tumbler")]
-    collections = list({
+    collections = sorted({
         n.physical_collection
         for n in nodes
         if hasattr(n, "physical_collection") and n.physical_collection
@@ -8254,7 +8265,16 @@ def traverse(
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass  # catalog manifest unavailable — ids stays empty
 
-    return {"tumblers": tumblers, "ids": chunk_ids, "collections": collections}
+    # nexus-zdzm5: the docstring said ids was always empty while it carried
+    # every manifest chash of every reachable document, uncapped (1,196 ids,
+    # 86 KB, from one two-hop walk in the 7.64.1 shakeout). Cap it, and say so.
+    from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, like this function's other imports
+
+    out: dict = {"tumblers": tumblers, "ids": chunk_ids[:MAX_QUERY_RESULTS],
+                 "collections": collections}
+    if len(chunk_ids) > MAX_QUERY_RESULTS:
+        out["ids_truncated"] = {"total": len(chunk_ids), "kept": MAX_QUERY_RESULTS}
+    return out
 
 
 # ── nx_answer helpers (RDR-080) ───────────────────────────────────────────────

@@ -102,6 +102,13 @@ def parse_where(
         key, op_str, raw_value = m.group(1), m.group(2), m.group(3)
         if not raw_value:
             raise ValueError(f"empty value in where clause: {pair!r}")
+        if raw_value[0] in "=<>!":
+            # nexus-zdzm5: "score>>1" parsed as score > ">1", a well-formed
+            # filter that matches nothing, and search answered "No results."
+            raise ValueError(
+                f"Invalid where operator in {pair!r}: the value starts with "
+                f"{raw_value[0]!r}. Operators are =, >=, <=, >, <, !=."
+            )
         chroma_op = _OP_MAP[op_str]
         if chroma_op in _RANGE_OPS:
             value = _coerce_range_operand(key, raw_value, strict=strict)

@@ -278,3 +278,31 @@ def test_manifest_failure_degrades_to_empty_ids_not_an_exception():
     assert result["ids"] == []
     assert result["tumblers"] == ["1.1.1"]
     assert result["collections"] == ["code__x__v1"]
+
+
+def test_ids_are_capped_and_the_cap_is_reported():
+    """nexus-zdzm5: the docstring said ``ids`` is always empty; since
+    nexus-bm8dd it carried every manifest chash of every reachable
+    document, uncapped. The 7.64.1 shakeout's two-hop walk from one note
+    returned 1,196 ids (86 KB, over the client's token cap) with no sign
+    anything was large. Reach 1,200 chunks and check the cap is applied
+    and said out loud."""
+    from types import SimpleNamespace
+
+    from nexus.mcp.core import traverse
+
+    nodes = [SimpleNamespace(tumbler=f"1.1.{i}", physical_collection=f"knowledge__c{i % 3}")
+             for i in range(12)]
+    cat = MagicMock()
+    cat.graph.return_value = {"nodes": nodes, "edges": []}
+    cat.get_manifests.return_value = {
+        str(n.tumbler): [SimpleNamespace(chash=f"{i:04d}{j:060d}") for j in range(100)]
+        for i, n in enumerate(nodes)
+    }
+    with patch("nexus.mcp.core._get_catalog", return_value=cat):
+        result = traverse(seeds="1.1.0", depth=2)
+
+    assert len(result["tumblers"]) == 12
+    assert len(result["ids"]) == 300
+    assert result["ids_truncated"] == {"total": 1200, "kept": 300}
+    assert result["collections"] == ["knowledge__c0", "knowledge__c1", "knowledge__c2"]
