@@ -111,3 +111,27 @@ def test_a_hanging_t2_write_is_abandoned_at_the_bound(owned_session, monkeypatch
         release.set()
     assert time.monotonic() - started < 5
     assert order == ["t2:t1_teardown_flush", "lease_cleared", "token_closed"], order
+
+
+def test_a_hanging_store_lookup_is_bounded_too(owned_session, monkeypatch) -> None:
+    """Resolving the store and listing flagged entries are network calls as
+    well; they sit inside the bound, not before it (review of c4312a874)."""
+    import threading  # noqa: PLC0415 — test-local import
+    import time  # noqa: PLC0415 — test-local import
+
+    _, order = owned_session
+    release = threading.Event()
+
+    def _hang():
+        release.wait(30)
+        raise RuntimeError("never reached in time")
+
+    monkeypatch.setattr(mcp_infra, "get_t1", _hang)
+    monkeypatch.setattr(core, "_TEARDOWN_FLUSH_TIMEOUT_S", 0.3)
+    started = time.monotonic()
+    try:
+        core._t1_session_shutdown()
+    finally:
+        release.set()
+    assert time.monotonic() - started < 5
+    assert order == ["lease_cleared", "token_closed"], order

@@ -1944,51 +1944,60 @@ _TEARDOWN_FLUSH_TIMEOUT_S: float = 5.0
 def _flush_flagged_t1_entries(session_id: str) -> int:
     """Write this session's flagged T1 scratch entries to T2; return how
     many. Never raises: a teardown step must not stop the lease clear and
-    token revoke that follow it (nexus-mgu1k)."""
+    token revoke that follow it (nexus-mgu1k).
+
+    Bounded as a whole: this runs inside _sigterm_handler's synchronous
+    chain, and a slow or unreachable engine must not delay the lease clear
+    and token revoke past the harness's shutdown grace, which would turn
+    SIGTERM into SIGKILL and skip both (the nexus-c8yvj leak). Every network
+    step (resolving the store, listing flagged entries, the T2 writes) runs
+    in one daemon thread joined for at most _TEARDOWN_FLUSH_TIMEOUT_S; work
+    still in flight at the bound is abandoned to that thread."""
     import structlog  # noqa: PLC0415 — branch-local logging in a best-effort teardown path
     _log = structlog.get_logger(__name__)
-    try:
-        from nexus.mcp_infra import get_t1, t2_index_write  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+    outcome: dict[str, Any] = {}
 
-        t1, _ = get_t1()
-        entries = list(t1.flagged_entries())
-        if not entries:
-            return 0
+    def _work() -> None:
+        try:
+            from nexus.mcp_infra import get_t1, t2_index_write  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
 
-        def _put_all(db) -> int:
-            for entry in entries:
-                db.memory.put(
-                    project=entry["flush_project"],
-                    title=entry["flush_title"],
-                    content=entry["content"],
-                    tags=entry.get("tags", ""),
-                    ttl=None,
-                )
-            return len(entries)
+            t1, _ = get_t1()
+            entries = list(t1.flagged_entries())
+            outcome["pending"] = len(entries)
+            if not entries:
+                outcome["flushed"] = 0
+                return
 
-        # Bounded: this runs inside _sigterm_handler's synchronous chain, and a
-        # slow or unreachable engine must not delay the lease clear and token
-        # revoke past the harness's shutdown grace, which would turn SIGTERM
-        # into SIGKILL and skip both (the nexus-c8yvj leak). A write still in
-        # flight at the bound is abandoned to its daemon thread.
-        result: list[int] = []
-        worker = threading.Thread(
-            target=lambda: result.append(t2_index_write(_put_all, op="t1_teardown_flush")),
-            name="t1-teardown-flush", daemon=True,
-        )
-        worker.start()
-        worker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
-        if not result:
-            _log.warning(
-                "t1_teardown_flush_incomplete", session_id=session_id,
-                pending=len(entries), timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
-            )
-            return 0
-        _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=result[0])
-        return result[0]
-    except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
-        _log.warning("t1_teardown_flush_failed", session_id=session_id, error=str(exc))
+            def _put_all(db) -> int:
+                for entry in entries:
+                    db.memory.put(
+                        project=entry["flush_project"],
+                        title=entry["flush_title"],
+                        content=entry["content"],
+                        tags=entry.get("tags", ""),
+                        ttl=None,
+                    )
+                return len(entries)
+
+            outcome["flushed"] = t2_index_write(_put_all, op="t1_teardown_flush")
+        except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
+            outcome["error"] = str(exc)
+
+    worker = threading.Thread(target=_work, name="t1-teardown-flush", daemon=True)
+    worker.start()
+    worker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
+    if "error" in outcome:
+        _log.warning("t1_teardown_flush_failed", session_id=session_id, error=outcome["error"])
         return 0
+    if "flushed" not in outcome:
+        _log.warning(
+            "t1_teardown_flush_incomplete", session_id=session_id,
+            pending=outcome.get("pending"), timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
+        )
+        return 0
+    if outcome["flushed"]:
+        _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=outcome["flushed"])
+    return outcome["flushed"]
 
 
 def _t1_shutdown() -> None:
