@@ -1,0 +1,57 @@
+# nexus-yd9po: one-shot verification probe for the "hellmini" self-hosted
+# GitHub Actions runner (Mac mini M5 Pro, macOS arm64) before wiring it into
+# the release workflows below. Confirms the runner actually picks up a job
+# under its bare custom label (registered with --no-default-labels, so it
+# carries NO 'self-hosted'/'macOS'/'ARM64' default labels — only 'hellmini'),
+# and that the expected toolchain (GraalVM, uv, Docker via colima) is present
+# and working.
+#
+# Deliberately scoped to workflow_dispatch + push on a throwaway
+# 'runner-probe/**' branch, never pull_request or push to develop/main — this
+# runner is release-jobs-only (Sam's directive) and this probe itself must
+# not become a routine PR/push trigger.
+name: hellmini-probe
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - 'runner-probe/**'
+
+concurrency:
+  group: hellmini-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  probe:
+    name: Probe hellmini runner
+    runs-on: hellmini
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - name: Report runner identity + toolchain versions
+        run: |
+          set -euo pipefail
+          echo "=== sw_vers ==="
+          sw_vers
+          echo "=== java -version ==="
+          java -version
+          echo "=== native-image --version ==="
+          native-image --version
+          echo "=== uv --version ==="
+          uv --version
+          echo "=== docker version ==="
+          docker version
+          echo "=== git --version / gh --version / jq --version ==="
+          git --version
+          gh --version
+          jq --version
+
+      - name: Docker smoke (hello-world via colima)
+        run: docker run --rm hello-world
+
+      - name: Disk space
+        run: |
+          df -h /
+          df -h /Volumes/Bulk || echo "NOTE: /Volumes/Bulk not present on this runner"

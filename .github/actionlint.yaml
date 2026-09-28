@@ -1,0 +1,8 @@
+self-hosted-runner:
+  # hellmini: Mac mini M5 Pro, self-hosted for release jobs only (nexus-yd9po).
+  # Registered with --no-default-labels, so it carries ONLY this custom label
+  # -- no 'self-hosted'/'macos'/'arm64' defaults -- hence `runs-on: hellmini`
+  # (a bare custom label, not an array with 'self-hosted') in the workflows
+  # that target it.
+  labels:
+    - hellmini
