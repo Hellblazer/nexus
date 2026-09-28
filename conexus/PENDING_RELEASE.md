@@ -41,25 +41,9 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.64.1)
+## Awaiting the next release or plugin cut (pinned: v7.64.2)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
-
-- nexus-452oy: `conexus/hooks/scripts/routing/_lib.py` adds
-  `pass_envelope`/`pass_through`/`pass_result` and rewires
-  `warn_envelope`/`warn`/`warn_result`, `run_hook`, and `run_hook_result`'s
-  fail-open and pass-through branches to use them instead of
-  `allow_envelope`/`allow`/`allow_result` — no `permissionDecision` is
-  emitted on a pass-through, warn, or fail-open path any more.
-- nexus-452oy: `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py`
-  changes its 5 bare `_lib.allow()` pass-through call sites to
-  `_lib.pass_through()`.
-- nexus-452oy: `conexus/hooks/scripts/routing/phase_review_close_requires_gate.py`
-  changes its 5 bare `_lib.allow()` pass-through call sites and its one
-  sentinel-verified advisory call site to `_lib.pass_through()`.
-- nexus-452oy: `conexus/hooks/scripts/routing/credential_print_guard.py`
-  changes its 3 bare `_lib.allow()` pass-through/fail-open call sites to
-  `_lib.pass_through()`.
 
 ## Deferred to the next client release
 
