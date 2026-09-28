@@ -953,7 +953,7 @@ def catalog_store_hook_tracked(
         if (
             existing is not None
             and source_uri is not None
-            and existing.source_uri
+            and getattr(existing, "source_uri", "")
             and existing.source_uri != source_uri
         ):
             existing = None
