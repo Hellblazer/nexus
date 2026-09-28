@@ -209,12 +209,47 @@ def test_deny_envelope_whitespace_or_empty_reason_does_not_crash():
         assert env["hookSpecificOutput"]["permissionDecisionReason"]
 
 
-def test_warn_envelope_is_allow():
+def test_warn_envelope_carries_no_permission_decision():
+    """nexus-452oy: warn is advisory-only, never an explicit allow.
+
+    An explicit ``permissionDecision: allow`` on a warn bypasses both
+    Claude Code's own permission prompt and its auto-mode classifier for
+    the command (cc-validation scenario 28) — so warn must carry NO
+    decision at all, only ``additionalContext``.
+    """
     lib = _load_lib()
     env = json.loads(lib.warn_envelope("just a warning"))
-    # warn() is semantic alias for allow() — same decision, message in additionalContext
+    assert "permissionDecision" not in env["hookSpecificOutput"]
+    assert env["hookSpecificOutput"]["additionalContext"] == "just a warning"
+
+
+def test_warn_envelope_is_semantic_alias_for_pass_envelope():
+    lib = _load_lib()
+    assert lib.warn_envelope("a note") == lib.pass_envelope("a note")
+
+
+def test_pass_envelope_bare_is_empty_string():
+    """No opinion at all: nothing to write to stdout."""
+    lib = _load_lib()
+    assert lib.pass_envelope() == ""
+
+
+def test_pass_envelope_with_context_carries_no_permission_decision():
+    lib = _load_lib()
+    env = json.loads(lib.pass_envelope("advisory text"))
+    assert env["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
+    assert "permissionDecision" not in env["hookSpecificOutput"]
+    assert env["hookSpecificOutput"]["additionalContext"] == "advisory text"
+
+
+def test_allow_envelope_is_reserved_and_unaffected_by_the_pass_helper():
+    """allow_envelope keeps its own (unchanged) shape -- it is reserved for
+    a deliberate override of the prompt, e.g. auto_approve.py's conexus
+    MCP-tool allowlist, and pass_envelope must not have touched it."""
+    lib = _load_lib()
+    env = json.loads(lib.allow_envelope("still explicit"))
     assert env["hookSpecificOutput"]["permissionDecision"] == "allow"
-    assert "just a warning" in env["hookSpecificOutput"]["additionalContext"]
+    assert env["hookSpecificOutput"]["additionalContext"] == "still explicit"
 
 
 # ---------------------------------------------------------------------------
@@ -274,14 +309,31 @@ def test_deny_exits_zero_with_json():
 
 
 def test_fail_open_on_exception_default():
-    """run_hook with fail_closed=False emits allow on exception, exits 0."""
+    """nexus-452oy: run_hook with fail_closed=False emits NO decision on
+    exception, exits 0 -- empty stdout, not an explicit allow.
+
+    An explicit ``permissionDecision: allow`` on fail-open bypasses both
+    Claude Code's own permission prompt and its auto-mode classifier for
+    the command (cc-validation scenario 28), so a crashed rule must defer
+    to the ordinary permission flow instead of silently approving it.
+    """
     proc = _run_stub(
         "_lib.run_hook(lambda stdin: 1/0, fail_closed=False, rule_name='selftest_fail_open')",
         stdin="{}",
     )
     assert proc.returncode == 0, proc.stderr
-    payload = json.loads(proc.stdout)
-    assert payload["hookSpecificOutput"]["permissionDecision"] == "allow"
+    assert proc.stdout == "", f"expected empty (no-decision) stdout, got: {proc.stdout!r}"
+
+
+def test_run_hook_body_returns_without_emitting_is_no_decision():
+    """A body that decides nothing (no allow()/deny()/warn() call) is "no
+    opinion", not "allow" (nexus-452oy)."""
+    proc = _run_stub(
+        "_lib.run_hook(lambda stdin: None, fail_closed=False, rule_name='selftest_no_emit')",
+        stdin="{}",
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == "", f"expected empty (no-decision) stdout, got: {proc.stdout!r}"
 
 
 def test_fail_closed_on_exception_denies():

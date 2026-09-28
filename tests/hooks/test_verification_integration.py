@@ -285,14 +285,23 @@ class TestCloseHookPipeline:
     def _get_decision(output: dict) -> str:
         return output.get("hookSpecificOutput", {}).get("permissionDecision", "")
 
+    @staticmethod
+    def _parse_stdout(stdout: str) -> dict:
+        """Parse the hook's stdout, or ``{}`` for a no-decision (empty
+        stdout) verdict (nexus-452oy)."""
+        return json.loads(stdout) if stdout else {}
+
     def test_non_bash_tool_fast_noop(self) -> None:
+        """nexus-452oy: genuinely no-opinion -- empty stdout, not an
+        explicit allow, which bypassed both Claude Code's own permission
+        prompt and its auto-mode classifier for the command."""
         payload = json.dumps({
             "hook_event_name": "PreToolUse",
             "tool_name": "Write",
             "tool_input": {"file_path": "/tmp/x.txt", "content": "x"},
         })
         result = _run_hook(CLOSE_HOOK, payload)
-        assert self._get_decision(json.loads(result.stdout)) == "allow"
+        assert result.stdout == "", f"expected empty (no-decision) stdout, got: {result.stdout!r}"
 
     def test_non_matching_bash_fast_noop(self) -> None:
         payload = json.dumps({
@@ -301,7 +310,7 @@ class TestCloseHookPipeline:
             "tool_input": {"command": "ls -la"},
         })
         result = _run_hook(CLOSE_HOOK, payload)
-        assert self._get_decision(json.loads(result.stdout)) == "allow"
+        assert result.stdout == "", f"expected empty (no-decision) stdout, got: {result.stdout!r}"
 
     def test_on_close_true_with_t1_unreachable_allows_capability_honest(
         self, mock_plugin_root
@@ -311,7 +320,9 @@ class TestCloseHookPipeline:
         for that path in full). This PATH has no `nx` on it at all -- a
         capability gap, not a review gap -- so it allows (never brick a
         close over a broken T1) but stamps verification=unverified, not
-        the old unconditional verification=passed."""
+        the old unconditional verification=passed. nexus-452oy: that
+        "allows" is advisory only now -- no permissionDecision, the note
+        rides in additionalContext alone."""
         env = mock_plugin_root({"on_close": True})
         payload = json.dumps({
             "hook_event_name": "PreToolUse",
@@ -319,8 +330,8 @@ class TestCloseHookPipeline:
             "tool_input": {"command": "bd close nexus-test"},
         })
         result = _run_hook(CLOSE_HOOK, payload, env_overrides=env)
-        out = json.loads(result.stdout)
-        assert self._get_decision(out) == "allow"
+        out = self._parse_stdout(result.stdout)
+        assert "permissionDecision" not in out.get("hookSpecificOutput", {})
         assert "unreachable" in out["hookSpecificOutput"].get("additionalContext", "").lower()
 
     def test_on_close_false_passes_through(self, mock_plugin_root) -> None:
@@ -331,4 +342,6 @@ class TestCloseHookPipeline:
             "tool_input": {"command": "bd close nexus-test"},
         })
         result = _run_hook(CLOSE_HOOK, payload, env_overrides=env)
-        assert self._get_decision(json.loads(result.stdout)) == "allow"
+        out = self._parse_stdout(result.stdout)
+        # nexus-452oy: advisory only -- no permissionDecision.
+        assert "permissionDecision" not in out.get("hookSpecificOutput", {})

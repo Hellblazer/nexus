@@ -324,7 +324,9 @@ class TestNexus2b24oRound2Scoping:
         result = gate._run_gate({}, command, verbs)
         parsed = json.loads(result.stdout)
         hso = parsed["hookSpecificOutput"]
-        assert hso["permissionDecision"] == "allow"
+        # nexus-452oy: advisory, not an override of the user's own Bash
+        # permission prompt -- no permissionDecision.
+        assert "permissionDecision" not in hso
         assert "INDETERMINATE" in (hso.get("additionalContext") or "")
         assert called == [], (
             "_bead_ids was called on the indeterminate-only path -- this "
@@ -564,11 +566,20 @@ class TestTheLimitThePortRecords:
 
 
 class TestTheEnvelopes:
-    def test_allow_without_context_matches_the_scripts_shape(self):
-        assert json.loads(gate._allow().stdout) == {
+    def test_allow_bare_is_no_decision(self):
+        """nexus-452oy: a bare ``_allow()`` call is genuinely no-opinion --
+        empty stdout, not an explicit allow. An explicit
+        ``permissionDecision: allow`` here bypassed both Claude Code's own
+        permission prompt and its auto-mode classifier for the command."""
+        assert gate._allow().stdout is None
+
+    def test_allow_with_context_is_advisory_only(self):
+        """A non-empty context is the "warn" shape -- additionalContext,
+        never permissionDecision."""
+        assert json.loads(gate._allow("a note").stdout) == {
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
-                "permissionDecision": "allow",
+                "additionalContext": "a note",
             }
         }
 
@@ -584,20 +595,23 @@ class TestTheEnvelopes:
         assert hso["reason"] == hso["permissionDecisionReason"]
         assert parsed["systemMessage"] == "first line"
 
-    def test_every_no_op_path_emits_an_allow_rather_than_silence(self):
-        """Ten tests failed on JSONDecodeError against an empty string
-        before this: silence and an explicit allow are the same DECISION
-        and different OUTPUT, and the output is the part with consumers."""
+    def test_every_no_op_path_is_silent_no_decision(self):
+        """nexus-452oy: every no-op path is genuinely no-opinion -- empty
+        stdout, not an explicit allow. An earlier version of this test
+        asserted the opposite (an explicit allow envelope on every no-op
+        path, reasoning that "silence and an explicit allow are the same
+        DECISION and different OUTPUT"), and that reasoning is exactly the
+        bug: an explicit ``permissionDecision: allow`` bypasses both Claude
+        Code's own permission prompt and its auto-mode classifier for the
+        command (cc-validation scenario 28), so the no-op path must stay
+        silent and defer to the ordinary permission flow instead."""
         for payload in (
             {"tool_name": "Read", "tool_input": {}},
             {"tool_name": "Bash", "tool_input": {"command": "ls -la"}},
             {"tool_name": "Bash", "tool_input": {"command": "bd ready"}},
         ):
             result = gate.run(payload)
-            assert result.stdout is not None, payload
-            assert json.loads(result.stdout)["hookSpecificOutput"][
-                "permissionDecision"
-            ] == "allow"
+            assert result.stdout is None, (payload, result.stdout)
             assert result.exit_code == 0
 
 

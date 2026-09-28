@@ -24,7 +24,7 @@ unavoidable, and they are the same two every verb in this port has made:
 
 2. **The emitters return instead of exiting.** ``_lib.allow()`` /
    ``_lib.deny()`` printed an envelope and ``sys.exit(0)``; this body
-   returns ``_lib.allow_result()`` / ``_lib.deny_result()`` and
+   returns ``_lib.pass_result()`` / ``_lib.deny_result()`` and
    ``run_hook_result`` hands it back, exactly as
    ``phase_review_close_gate`` does. The control flow is unchanged because
    the original relied on ``allow()`` never returning: every call site was
@@ -32,7 +32,15 @@ unavoidable, and they are the same two every verb in this port has made:
 
 ``import _lib`` becomes ``from nexus.hooks import _routing_lib as _lib`` —
 the same library, moved into the wheel at ``5e24abfc2`` for this bead. No
-call site changed name.
+call site changed name (until nexus-452oy: every bare
+``_lib.allow_result()`` here was a pass-through case -- "not a subagent",
+"no command", "no git-write pattern matched", "escape token used", "proven
+safe worktree" -- and none of them is a deliberate override of the user's
+permission prompt, so they now call ``_lib.pass_result()`` instead. An
+explicit ``allow`` for "nothing to report" bypassed both Claude Code's
+prompt and its auto-mode classifier for every one of these; a routing
+guard whose entire purpose is to DENY dangerous patterns has no business
+force-approving everything else).
 
 The original module docstring follows, unedited:
 
@@ -1256,11 +1264,11 @@ def body(payload: dict[str, Any]) -> HookResult:
 
     if not agent_id:
         # main conversation — the rule targets subagents only
-        return _lib.allow_result()
+        return _lib.pass_result()
 
     command = _lib.get_bash_command(payload)
     if not command:
-        return _lib.allow_result()
+        return _lib.pass_result()
 
     normalized = _normalize_for_primary_scan(command)
 
@@ -1294,7 +1302,7 @@ def body(payload: dict[str, Any]) -> HookResult:
             _delete_all_expansions(normalized)
         )
     if not spliced_fragment and primary_match is None:
-        return _lib.allow_result()
+        return _lib.pass_result()
 
     # Match FIRST, escape SECOND (the nexus-mzvwa.8 telemetry rule) — applies
     # to EITHER gate above.
@@ -1304,7 +1312,7 @@ def body(payload: dict[str, Any]) -> HookResult:
             command_fragment=command,
             escape_reason=_lib.extract_escape_reason(command),
         )
-        return _lib.allow_result()
+        return _lib.pass_result()
 
     cwd = str(payload.get("cwd") or "") or os.getcwd()
     worktree = _in_linked_worktree(cwd)
@@ -1312,7 +1320,7 @@ def body(payload: dict[str, Any]) -> HookResult:
         # Linked worktree, POSITIVELY PROVEN: the agent owns its tree,
         # including destroying it. This is the ONLY exemption from either
         # gate's verdict, applied uniformly.
-        return _lib.allow_result()
+        return _lib.pass_result()
     # worktree is False (primary checkout) OR None (undeterminable) — EITHER
     # GATE WINS either way (nexus-3c92m round 4; retires the old nexus-ays2l
     # item 3 fail-open-for-hygiene-verbs carve-out). "I could not prove this

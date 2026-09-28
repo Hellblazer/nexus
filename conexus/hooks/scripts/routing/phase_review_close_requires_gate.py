@@ -213,11 +213,11 @@ def _redirect_message(rdr_id: str | None, phase: str | None, reason: str) -> str
 def body(payload: dict[str, Any]) -> None:
     command = _lib.get_bash_command(payload)
     if not command:
-        _lib.allow()
+        _lib.pass_through()
 
     match = _BD_CLOSE_RE.search(command)
     if not match:
-        _lib.allow()
+        _lib.pass_through()
 
     # Escape token takes precedence; audit and pass through.
     if _lib.should_skip_for_reason(command):
@@ -226,14 +226,14 @@ def body(payload: dict[str, Any]) -> None:
             command_fragment=command,
             escape_reason=_lib.extract_escape_reason(command),
         )
-        _lib.allow()
+        _lib.pass_through()
 
     bead_id = match.group("bead_id")
     bd_output = _bd_show(bead_id)
     if not bd_output:
         # Cannot determine if this is a phase-review bead. Allow rather
         # than fail-closed; we have no signal to deny on.
-        _lib.allow()
+        _lib.pass_through()
 
     # Trigger: match against the bead's TITLE line only (the first non-empty
     # line of bd show output), and only for the narrow "Phase N ... review
@@ -242,7 +242,7 @@ def body(payload: dict[str, Any]) -> None:
     # or "review" no longer false-positive (GH #931 / nexus-1pr9n).
     title_line = _bd_header_line(bd_output)
     if not _GATE_TITLE_RE.search(title_line):
-        _lib.allow()
+        _lib.pass_through()
 
     rdr_id, phase = _extract_rdr_phase(bd_output)
     if not rdr_id or not phase:
@@ -274,7 +274,7 @@ def body(payload: dict[str, Any]) -> None:
         rule=RULE_NAME, outcome="allow", tool_name="Bash",
         command_fragment=command,
     )
-    _lib.allow(
+    _lib.pass_through(
         f"phase-review close approved by sentinel (RDR-{rdr_id} phase {phase})"
     )
 

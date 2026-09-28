@@ -426,7 +426,7 @@ def _contains_failsafe_marker(command: str) -> bool:
 def body(payload: dict) -> None:
     command = _lib.get_bash_command(payload)
     if not command:
-        _lib.allow()
+        _lib.pass_through()
         return
 
     # NO ESCAPE (RDR-219): `_lib.should_skip_for_reason` is never called.
@@ -451,7 +451,7 @@ def body(payload: dict) -> None:
             rule=RULE_NAME, outcome="allow_fail_open", tool_name="Bash",
             command_fragment=command,
         )
-        _lib.allow()
+        _lib.pass_through()
         return
 
     if reason:
@@ -461,7 +461,7 @@ def body(payload: dict) -> None:
         )
         _lib.deny(f"{_REDIRECT}\n\nMatched: {reason}.")
         return
-    _lib.allow()
+    _lib.pass_through()
 
 
 if __name__ == "__main__":

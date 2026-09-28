@@ -330,6 +330,16 @@ def _run_hook(
     )
 
 
+def _parse_stdout(stdout: str) -> dict:
+    """Parse a hook's stdout, or ``{}`` for a no-decision (empty stdout)
+    verdict (nexus-452oy: a pass-through/fail-open case now emits NOTHING
+    rather than an explicit allow). ``_get_decision``/``_get_context``/
+    ``_get_reason`` already default missing keys to ``""``, so ``{}``
+    reads the same as any other envelope with nothing to report.
+    """
+    return json.loads(stdout) if stdout else {}
+
+
 def _get_decision(parsed: dict) -> str:
     return parsed.get("hookSpecificOutput", {}).get("permissionDecision", "")
 
@@ -453,25 +463,25 @@ class TestFastNoops:
         assert _run_hook(_make_payload()).returncode == 0
 
     def test_outputs_valid_json(self) -> None:
-        parsed = json.loads(_run_hook(_make_payload()).stdout)
+        parsed = _parse_stdout(_run_hook(_make_payload()).stdout)
         assert "hookSpecificOutput" in parsed
 
     def test_fast_noop_non_bash_tool(self) -> None:
         result = _run_hook(_make_payload(tool_name="Write"))
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
 
     def test_fast_noop_non_matching_bash(self) -> None:
         result = _run_hook(_make_payload(command="ls -la"))
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
 
     def test_fast_noop_bd_list(self) -> None:
         result = _run_hook(_make_payload(command="bd list --status=in_progress"))
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
 
     def test_allow_when_on_close_false(self, mock_config_env) -> None:
         env = mock_config_env({"on_close": False})
         result = _run_hook(_make_payload(), env_overrides=env)
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
 
     def test_allow_when_there_is_no_config_anywhere(self, tmp_path) -> None:
         """No `.nexus.yml` on any candidate path means DEFAULTS, and
@@ -489,8 +499,8 @@ class TestFastNoops:
             env_overrides={"CLAUDE_PROJECT_DIR": str(tmp_path)},
             cwd=str(tmp_path),
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "on_close is not enabled" in _get_context(parsed), (
             "an unarmed gate must SAY it is unarmed; a bare allow is "
             "indistinguishable from one that checked and was satisfied"
@@ -498,7 +508,7 @@ class TestFastNoops:
 
     def test_graceful_empty_stdin(self) -> None:
         result = _run_hook("")
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
 
     def test_bd_done_pattern_matches(self, mock_config_env, fake_nx) -> None:
         """`bd done` is recognized the same as `bd close`."""
@@ -509,7 +519,7 @@ class TestFastNoops:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
 
 
 class TestMatcherTightening:
@@ -528,8 +538,8 @@ class TestMatcherTightening:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         # Fast no-op path: no additionalContext at all (never reached the
         # coverage machinery).
         assert _get_context(parsed) == ""
@@ -544,8 +554,8 @@ class TestMatcherTightening:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert _get_context(parsed) == ""
 
     def test_real_bd_close_in_a_compound_command_still_triggers(
@@ -558,7 +568,7 @@ class TestMatcherTightening:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
 
 
 class TestDenyOnMissingMarker:
@@ -574,7 +584,7 @@ class TestDenyOnMissingMarker:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny"
         assert "nexus-abc12" in _get_reason(parsed)
         assert "review-completed" in _get_reason(parsed).lower()
@@ -604,7 +614,7 @@ class TestDenyOnMissingMarker:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
 
     def test_denies_when_bead_id_present_but_not_tagged_review_completed(
         self, mock_config_env, fake_nx
@@ -620,7 +630,7 @@ class TestDenyOnMissingMarker:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
 
     def test_deny_does_not_stamp_any_verification_state(
         self, mock_config_env, fake_nx, fake_bd
@@ -635,7 +645,7 @@ class TestDenyOnMissingMarker:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
         assert not log.exists() or log.read_text().strip() == ""
 
 
@@ -652,8 +662,8 @@ class TestAllowOnCoveredMarker:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "nexus-cotmr" in _get_context(parsed)
         assert log.exists()
         assert "nexus-cotmr verification=passed" in log.read_text()
@@ -675,8 +685,8 @@ class TestAllowOnCoveredMarker:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         calls = log.read_text()
         assert "nexus-cotmr verification=passed" in calls
         assert "nexus-tafjk verification=passed" in calls
@@ -753,7 +763,7 @@ class TestNexus2b24oCloseTransitionSpellings:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", (
             f"{label!r} ({command!r}) did not deny with no marker: {parsed}"
         )
@@ -773,8 +783,8 @@ class TestNexus2b24oCloseTransitionSpellings:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", (
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", (
             f"{label!r} ({command!r}) did not allow with a full marker: {parsed}"
         )
 
@@ -814,8 +824,8 @@ class TestNexus2b24oRound2NegativeControls:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", (command, parsed)
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", (command, parsed)
 
     def test_a_real_batch_close_joined_by_and_and_to_an_unrelated_command_still_denies(
         self, mock_config_env, fake_nx
@@ -831,7 +841,7 @@ class TestNexus2b24oRound2NegativeControls:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", (command, parsed)
         assert "nexus-realone" in _get_reason(parsed)
 
@@ -862,8 +872,8 @@ class TestNexus2b24oRound2IndeterminateSource:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", (command, parsed)
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", (command, parsed)
         assert "INDETERMINATE" in _get_context(parsed), (
             f"{command!r} allowed silently -- round 1's docstring claimed "
             f"this already happened; it did not until this fix."
@@ -886,8 +896,8 @@ class TestNexus2b24oRound2IndeterminateSource:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", (command, parsed)
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", (command, parsed)
 
     def test_on_close_disabled_suppresses_the_indeterminate_message_too(
         self, mock_config_env, fake_nx
@@ -903,8 +913,8 @@ class TestNexus2b24oRound2IndeterminateSource:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "on_close is not enabled" in _get_context(parsed)
         assert "INDETERMINATE" not in _get_context(parsed)
 
@@ -934,7 +944,7 @@ class TestNexus2b24oRound3ShellBoundaries:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", (command, parsed)
         assert "nexus-nlb01" in _get_reason(parsed)
 
@@ -949,8 +959,8 @@ class TestNexus2b24oRound3ShellBoundaries:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", (command, parsed)
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", (command, parsed)
 
     def test_a_multi_line_command_with_a_genuine_close_on_line_three_is_caught(
         self, mock_config_env, fake_nx
@@ -963,7 +973,7 @@ class TestNexus2b24oRound3ShellBoundaries:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", (command, parsed)
         assert "nexus-nlb02" in _get_reason(parsed)
 
@@ -986,7 +996,7 @@ class TestNexus2b24oRound3ShellBoundaries:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "allow", command
+        assert _get_decision(_parse_stdout(result.stdout)) == "", command
 
 
 class TestNexus2b24oRound4QuoteAwareBoundaries:
@@ -1016,8 +1026,8 @@ class TestNexus2b24oRound4QuoteAwareBoundaries:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", (command, parsed)
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", (command, parsed)
 
     def test_a_genuine_close_after_a_closed_multiline_quoted_value_still_denies(
         self, mock_config_env, fake_nx
@@ -1033,7 +1043,7 @@ class TestNexus2b24oRound4QuoteAwareBoundaries:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", (command, parsed)
         assert "nexus-nlb04" in _get_reason(parsed)
 
@@ -1066,7 +1076,7 @@ class TestT1OnlyCoverage:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny"
         assert "T2" in _get_reason(parsed)  # the deny names the retirement
         assert not log.exists() or log.read_text().strip() == ""
@@ -1090,8 +1100,8 @@ class TestT1OnlyCoverage:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "WARNING" in _get_context(parsed) or "WARNING" in _get_reason(parsed)
         calls = log.read_text()
         assert "nexus-abc12 verification=unverified" in calls
@@ -1118,8 +1128,8 @@ class TestT1OnlyCoverage:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "nexus-abc12 verification=passed" in log.read_text()
         assert "memory search" not in call_log.read_text()
 
@@ -1136,7 +1146,7 @@ class TestT1OnlyCoverage:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
         calls = call_log.read_text()
         assert "memory search" not in calls
         assert calls.count("scratch list") == 1
@@ -1160,8 +1170,8 @@ class TestT1OnlyCoverage:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         calls = log.read_text()
         assert "nexus-abc12 verification=unverified" in calls
         assert "verification=passed" not in calls
@@ -1177,7 +1187,7 @@ class TestT1OnlyCoverage:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
 
     def test_mixed_bead_ids_covered_and_uncovered_denies_naming_only_uncovered(
         self, mock_config_env, fake_nx
@@ -1191,7 +1201,7 @@ class TestT1OnlyCoverage:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny"
         assert "nexus-uncov" in _get_reason(parsed)
 
@@ -1219,7 +1229,7 @@ class TestLoopVariableDatum:
         # nothing -- a false-positive advisory (under the old model) or a
         # false DENY (under the new blocking model). Both real ids are
         # covered, so this must ALLOW.
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
 
     def test_loop_variable_with_one_uncovered_id_still_denies(
         self, mock_config_env, fake_nx
@@ -1234,7 +1244,7 @@ class TestLoopVariableDatum:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny"
         assert "nexus-uncov" in _get_reason(parsed)
         assert "nexus-cotmr" not in _get_reason(parsed).split("Remedy")[0].split("found in T1 scratch for:")[1]
@@ -1251,8 +1261,8 @@ class TestLoopVariableDatum:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "INDETERMINATE" in _get_context(parsed)
 
 
@@ -1270,8 +1280,8 @@ class TestOverride:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "1"},
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "OVERRIDE" in _get_context(parsed)
         assert "nexus-abc12 verification=overridden" in log.read_text()
 
@@ -1283,7 +1293,7 @@ class TestOverride:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
 
     def test_override_value_other_than_1_does_not_bypass(
         self, mock_config_env, fake_nx
@@ -1295,7 +1305,7 @@ class TestOverride:
             path_prefix=str(fake_bin),
             env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "true"},
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
 
 
 class TestCapabilityHonestBothSourcesDown:
@@ -1315,8 +1325,8 @@ class TestCapabilityHonestBothSourcesDown:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "unreachable" in _get_context(parsed).lower() or "not verify" in _get_context(parsed).lower()
         assert "nexus-abc12 verification=unverified" in log.read_text()
 
@@ -1330,8 +1340,8 @@ class TestCapabilityHonestBothSourcesDown:
             path_prefix=str(fake_bd_bin),  # nx is NOT on this PATH at all
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "nexus-abc12 verification=unverified" in log.read_text()
 
     def test_t1_unreachable_plus_override_stamps_overridden_not_unverified(
@@ -1344,8 +1354,8 @@ class TestCapabilityHonestBothSourcesDown:
             path_prefix=str(fake_bd_bin),
             env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "1"},
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         calls = log.read_text()
         assert "nexus-abc12 verification=overridden" in calls
         assert "unverified" not in calls
@@ -1375,7 +1385,7 @@ class TestDeadlineBudget:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides={**env, "NX_CLOSE_GATE_DEADLINE_SECONDS": "0.5"},
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny"
         reason = _get_reason(parsed)
         assert "0.5" in reason or "wall-clock" in reason.lower()
@@ -1391,7 +1401,7 @@ class TestDeadlineBudget:
             path_prefix=str(fake_bin),
             env_overrides={**env, "NX_CLOSE_GATE_DEADLINE_SECONDS": "0.5"},
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny"
         assert "NX_REVIEW_GATE_OVERRIDE" in _get_reason(parsed)
 
@@ -1410,8 +1420,8 @@ class TestDeadlineBudget:
                 "NX_REVIEW_GATE_OVERRIDE": "1",
             },
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         assert "OVERRIDE" in _get_context(parsed)
         assert "verification=overridden" in log.read_text()
 
@@ -1431,8 +1441,8 @@ class TestDeadlineBudget:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
         calls = call_log.read_text().splitlines() if call_log.exists() else []
         assert len(calls) == 1, calls
         assert calls[0].startswith("scratch"), calls
@@ -1454,7 +1464,7 @@ class TestDeadlineBudget:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny"
         reason = _get_reason(parsed)
         for i in range(1, 6):
@@ -1484,8 +1494,8 @@ class TestStampFailureIsLoud:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"  # never crashes/bricks the close
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""  # never crashes/bricks the close
         assert "FAILED" in result.stderr or "WARNING" in result.stderr
 
 
@@ -1509,8 +1519,8 @@ class TestF2EnvPrefixOverride:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", parsed
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", parsed
         assert "OVERRIDE" in _get_context(parsed), parsed
         assert "nexus-abc12 verification=overridden" in log.read_text()
 
@@ -1532,8 +1542,8 @@ class TestF2EnvPrefixOverride:
             path_prefix=str(fake_bin),
             env_overrides={**env, "NX_DROPPED_WRITES_LOG_PATH": str(drop_path)},
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", parsed
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", parsed
         assert drop_path.exists(), "no routing event drop was recorded for the override"
         drops = [json.loads(l) for l in drop_path.read_text().splitlines() if l.strip()]
         assert any(d.get("hook") == "routing_events" for d in drops), drops
@@ -1555,8 +1565,8 @@ class TestF2EnvPrefixOverride:
                 "NX_REVIEW_GATE_OVERRIDE": "1",
             },
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", parsed
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", parsed
         drops = [json.loads(l) for l in drop_path.read_text().splitlines() if l.strip()]
         assert any(d.get("hook") == "routing_events" for d in drops), drops
 
@@ -1589,8 +1599,8 @@ class TestF3ReasonBlindIdHarvesting:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", parsed
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", parsed
 
     def test_id_only_in_description_equals_value_is_not_required(
         self, mock_config_env, fake_nx
@@ -1611,8 +1621,8 @@ class TestF3ReasonBlindIdHarvesting:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", parsed
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", parsed
 
     def test_id_in_reason_value_is_still_a_denial_target_if_it_is_ALSO_the_close_positional(
         self, mock_config_env, fake_nx
@@ -1627,7 +1637,7 @@ class TestF3ReasonBlindIdHarvesting:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", parsed
         assert "nexus-uncov" in _get_reason(parsed)
 
@@ -1675,7 +1685,7 @@ class TestF3ReasonBlindIdHarvesting:
             env_overrides=env,
         )
         assert result.returncode == 0
-        out = json.loads(result.stdout)
+        out = _parse_stdout(result.stdout)
         assert out.get("hookSpecificOutput", {}).get("permissionDecision") != "deny", out
 
     def test_loop_variable_ids_still_harvested_alongside_a_reason_flag(
@@ -1700,8 +1710,8 @@ class TestF3ReasonBlindIdHarvesting:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", parsed
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", parsed
 
 
 class TestF4RemedySeparateCallWarning:
@@ -1719,7 +1729,7 @@ class TestF4RemedySeparateCallWarning:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", parsed
         reason = _get_reason(parsed)
         assert "SEPARATE tool call" in reason, reason
@@ -1751,7 +1761,7 @@ class TestB3T2TitleOnlyMarker:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", parsed
 
 
@@ -1884,8 +1894,8 @@ class TestF5RemedyRoundTripReal:
                 "NX_CLOSE_GATE_DEADLINE_SECONDS": "15",
             },
         )
-        reason = _get_reason(json.loads(probe.stdout))
-        assert _get_decision(json.loads(probe.stdout)) == "deny", (
+        reason = _get_reason(_parse_stdout(probe.stdout))
+        assert _get_decision(_parse_stdout(probe.stdout)) == "deny", (
             "precondition: with no marker written the hook must deny, or this "
             f"test never exercises the remedy it is here to verify -- got: {probe.stdout}"
         )
@@ -1924,8 +1934,8 @@ class TestF5RemedyRoundTripReal:
                 "NX_CLOSE_GATE_DEADLINE_SECONDS": "15",
             },
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow", parsed
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", parsed
 
 
 class TestSessionIdExport:
@@ -2052,7 +2062,7 @@ class TestMalformedQuotingNeverBypasses:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny"
         assert "nexus-abc12" in _get_reason(parsed)
 
@@ -2069,8 +2079,8 @@ class TestMalformedQuotingNeverBypasses:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == ""
 
 
     def test_quote_inside_the_verb_still_triggers_the_gate(
@@ -2086,7 +2096,7 @@ class TestMalformedQuotingNeverBypasses:
             path_prefix=str(fake_bin),
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny"
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
 
 
 class TestE3makCompleteReviewerSet:
@@ -2136,7 +2146,7 @@ class TestE3makCompleteReviewerSet:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", (
             "the reviewer's own handoff note still satisfies the gate it is "
             "one half of — this IS nexus-e3mak"
@@ -2161,7 +2171,7 @@ class TestE3makCompleteReviewerSet:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        parsed = json.loads(result.stdout)
+        parsed = _parse_stdout(result.stdout)
         assert _get_decision(parsed) == "deny", parsed
         assert "substantive-critic" in _get_reason(parsed), (
             "the refusal must name what is missing, not just refuse"
@@ -2179,7 +2189,7 @@ class TestE3makCompleteReviewerSet:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
         assert log.exists(), "a passed close must acquire its verification record"
 
     def test_a_t2_marker_must_also_name_the_full_set(
@@ -2211,7 +2221,7 @@ class TestE3makCompleteReviewerSet:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides=env,
         )
-        assert _get_decision(json.loads(result.stdout)) == "deny", (
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny", (
             "the T2 leg accepted a marker naming one reviewer"
         )
 
@@ -2231,4 +2241,4 @@ class TestE3makCompleteReviewerSet:
             path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
             env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "1"},
         )
-        assert _get_decision(json.loads(result.stdout)) == "allow"
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
