@@ -1,5 +1,14 @@
 # Changelog
 
+## [7.64.2] - 2026-09-28
+
+Plugin version aligned with conexus 7.64.2. Security fix (nexus-452oy): the
+Bash routing hooks (`hooks/scripts/routing/`) no longer return an explicit
+`permissionDecision: "allow"` on pass-through, warn or fail-open, which had
+been skipping Claude Code's permission prompt for every Bash command no
+permission rule covered. They now return no decision unless they deny. See the
+root CHANGELOG's 7.64.2 entry for the full advisory.
+
 ## [7.64.1] - 2026-09-28
 
 Plugin version aligned with conexus 7.64.1. No plugin-side changes.
