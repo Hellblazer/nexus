@@ -117,26 +117,121 @@ def tuple_out_cmd(
     click.echo(tuple_id)
 
 
+#: Rows per engine read: the engine's own default read cap (NX_TUPLE_READ_MAX),
+#: which is also the client-wide paging ceiling.
+_RD_PAGE: int = 300
+
+#: The default hard bound on --all / --newest: a board or ledger read must
+#: stay a bounded call even on a subspace far larger than expected.
+_RD_MAX_ROWS_DEFAULT: int = 10_000
+
+#: First words of the truncation note, the marker a machine reader that merges
+#: stderr into stdout (the expectations census) keys on.
+TRUNCATION_MARKER: str = "nx tuple rd: truncated"
+
+
+def _parse_since(value: str | None) -> tuple[str, str] | None:
+    """CREATED_AT[,ID] -> the store's (created_at, id) cursor. A bare
+    timestamp reads rows created after it (the store's watermark form)."""
+    if not value:
+        return None
+    created_at, _, row_id = value.partition(",")
+    if not created_at.strip():
+        raise click.UsageError(f"--since expects CREATED_AT[,ID], got {value!r}")
+    return created_at.strip(), row_id.strip()
+
+
+def _cursor_of(row: Any) -> str:
+    return f"{row.created_at or ''},{row.id}"
+
+
 @tuple_group.command(name="rd")
 @click.argument("subspace")
 @click.option("--pattern", "patterns", multiple=True, metavar="KEY=VALUE",
               help="A key-equality filter (repeatable; subset match).")
-@click.option("-n", "n", type=int, default=1, show_default=True, help="Max rows to return.")
+@click.option("-n", "n", type=int, default=1, show_default=True,
+              help=f"Max rows to return. One engine read returns at most {_RD_PAGE}; "
+                   "with --newest, how many of the newest rows to keep.")
+@click.option("--since", "since", default=None, metavar="CREATED_AT[,ID]",
+              help="Start after this cursor (oldest first). The truncation note "
+                   "prints the cursor for the next page.")
+@click.option("--all", "read_all", is_flag=True, default=False,
+              help="Page through every matching row, oldest first, up to --max-rows.")
+@click.option("--newest", is_flag=True, default=False,
+              help="Return the newest -n rows instead of the oldest (pages the "
+                   "subspace, up to --max-rows).")
+@click.option("--max-rows", "max_rows", type=int, default=_RD_MAX_ROWS_DEFAULT,
+              show_default=True, help="Hard bound on rows read by --all / --newest.")
 @click.option("--timeout-s", "timeout_s", type=int, default=0, show_default=True,
               help="Seconds to park when nothing matches immediately; 0 never blocks.")
 @click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON array.")
 def tuple_rd_cmd(
-    subspace: str, patterns: tuple[str, ...], n: int, timeout_s: int, json_out: bool,
+    subspace: str, patterns: tuple[str, ...], n: int, since: str | None,
+    read_all: bool, newest: bool, max_rows: int, timeout_s: int, json_out: bool,
 ) -> None:
-    """Non-destructive read from SUBSPACE. A probe by default (--timeout-s 0);
-    returns dead-lettered rows too (dead-lettering is a claim state, not an
-    exclusion)."""
+    """Non-destructive read from SUBSPACE, OLDEST rows first. A probe by
+    default (--timeout-s 0); returns dead-lettered rows too (dead-lettering
+    is a claim state, not an exclusion).
+
+    A plain read returns one page; when the page is full, a note on stderr
+    says so and names the --since cursor for the next one. --all pages
+    through everything and --newest keeps the latest -n; both stop at
+    --max-rows and say so on stderr when they do (nexus-sh1ea: the board
+    read returned the 300 oldest rows with nothing saying more existed).
+    """
     pattern_map = _parse_kv_pairs(patterns, option_name="--pattern") or None
+    cursor = _parse_since(since)
+    if max_rows <= 0:
+        raise click.UsageError("--max-rows must be positive")
+    store = _store()
     try:
-        rows = _store().rd(subspace, pattern_map, n=n, timeout_s=timeout_s)
+        if not (read_all or newest):
+            rows = store.rd(subspace, pattern_map, n=n, since=cursor, timeout_s=timeout_s)
+            full = len(rows) >= min(n, _RD_PAGE) > 0
+            if n > _RD_PAGE and full:
+                click.echo(
+                    f"{TRUNCATION_MARKER}: one read returns at most {_RD_PAGE} rows "
+                    f"(asked for {n}); next page: --since '{_cursor_of(rows[-1])}', "
+                    "or --all / --newest.", err=True,
+                )
+            elif full and n > 1:
+                click.echo(
+                    f"{TRUNCATION_MARKER}: showing the oldest {len(rows)} matching rows; "
+                    f"more may exist. Next page: --since '{_cursor_of(rows[-1])}', "
+                    "or --all / --newest.", err=True,
+                )
+        else:
+            rows = []
+            truncated = False
+            # Stop on an EMPTY page, not a short one: the engine's per-read cap
+            # is configurable (NX_TUPLE_READ_MAX) and may sit below _RD_PAGE.
+            while len(rows) < max_rows:
+                page = store.rd(
+                    subspace, pattern_map, n=min(_RD_PAGE, max_rows - len(rows)),
+                    since=cursor, timeout_s=timeout_s if not rows else 0,
+                )
+                if not page:
+                    break
+                rows.extend(page)
+                cursor = (page[-1].created_at or "", page[-1].id)
+            else:
+                truncated = bool(store.rd(subspace, pattern_map, n=1, since=cursor))
+            resume = _cursor_of(rows[-1]) if rows else ""
+            if newest:
+                rows = rows[-n:] if n > 0 else []
+            if truncated:
+                click.echo(
+                    f"{TRUNCATION_MARKER}: stopped at --max-rows {max_rows}; more rows "
+                    + ("exist, so these are not the newest. " if newest else "exist. ")
+                    + f"Resume with --since '{resume}' or raise --max-rows.", err=True,
+                )
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
         _print_tuple_error(e)
         raise SystemExit(1) from e
+    finally:
+        close = getattr(store, "close", None)
+        if close is not None:
+            close()
     _render_rows(rows, json_out)
 
 

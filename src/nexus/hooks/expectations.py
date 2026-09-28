@@ -1397,6 +1397,10 @@ def _declares_verify(templates_json: str) -> str:
     return "no"
 
 
+#: Hard bound on the report rows the verify-absent count reads (nexus-sh1ea).
+_VERIFY_MAX_ROWS: int = 10_000
+
+
 def _census_verify_absent(session_id: str) -> list[str]:
     """Port of bash's ``_expectations_census_verify_absent``. See that
     function's header comment for the full contract, including the
@@ -1431,14 +1435,24 @@ def _census_verify_absent(session_id: str) -> list[str]:
             "not declare verify yet (below engine-service-v0.1.118)"
         ]
 
+    # --all, not "-n 300": one read returns at most 300 rows, so a session
+    # with more reports counted only its oldest 300 and the count saturated
+    # there (nexus-sh1ea). The bound keeps the census a bounded call; hitting
+    # it is reported, never counted.
     rows_json, rc = _run_nx_bounded(
-        ["nx", "tuple", "rd", target, "--pattern", "kind=report", "-n", "300", "--json"],
+        ["nx", "tuple", "rd", target, "--pattern", "kind=report", "--all",
+         "--max-rows", str(_VERIFY_MAX_ROWS), "--json"],
         timeout_s,
     )
     if rc != 0:
         return [
             f"VERIFY_FALLBACK\treason=nx tuple rd {target} --pattern kind=report "
             f"failed (rc={rc}): {_scrub_reason(rows_json)}"
+        ]
+    if "nx tuple rd: truncated" in rows_json:
+        return [
+            f"VERIFY_FALLBACK\treason=more than {_VERIFY_MAX_ROWS} report rows "
+            f"on {target}; the count would be partial"
         ]
 
     try:

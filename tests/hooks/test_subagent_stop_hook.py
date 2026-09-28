@@ -1968,6 +1968,37 @@ class TestCensusVerifyAbsent:
         assert "VERIFY_UNVERIFIABLE" not in proc.stdout
         assert "VERIFY_FALLBACK" not in proc.stdout
 
+    def test_more_than_one_read_of_absent_reports_counts_exactly(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, t2_service_env: str
+    ) -> None:
+        """nexus-sh1ea: the census read ``-n 300``, and one engine read
+        returns at most 300 rows, so a session with more reports than that
+        counted only its oldest 300. Seeds 310 absent reports (in-process,
+        since 310 ``nx tuple out`` subprocesses would take minutes) and
+        asserts the exact count."""
+        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — test-local import
+
+        monkeypatch.setenv(
+            "NX_ALLOW_PROD_WRITE",
+            "test fixture seeding the t2_service_env throwaway tuple-space test tenant, never production (nexus-sh1ea)",
+        )
+        fake_bin = _fake_nx_dir(tmp_path)
+        sid = "verify-over-one-page-sess"
+        self._write_ledger_row(tmp_path, sid)
+        store = HttpTupleStore()
+        try:
+            for i in range(310):
+                store.out(
+                    f"ledger/{sid}", {"agent_id": f"agent-{i:04d}", "kind": "report"},
+                    {"agent_type": "developer", "verify": "absent"}, None,
+                )
+        finally:
+            store.close()
+        proc = _run_census(tmp_path, monkeypatch, sid, env_overrides=self._path_env(fake_bin))
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "VERIFY_ABSENT_COUNT\tn=310" in proc.stdout, proc.stdout
+        assert "VERIFY_FALLBACK" not in proc.stdout
+
     def test_all_present_counts_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, t2_service_env: str
     ) -> None:

@@ -409,7 +409,9 @@ things to avoid carefully; they are impossible.
    back to the client-side drop the parenthetical above describes,
    automatically, for the life of the session's waiter. Either way,
    wait for the state you care about or read the board for your sha
-   rather than acting on every ping. From a shell, `nx tuple rd board/ci/nexus-develop -n 300 --json`.
+   rather than acting on every ping. From a shell, `nx tuple rd board/ci/nexus-develop --newest -n 300 --json`
+   (rows come back oldest first, so without `--newest` a plain read shows
+   the 300 oldest posts; nexus-sh1ea).
    Never `gh run watch`: several concurrent watch loops on one token
    tripped GitHub's secondary rate limit on 2026-09-26 and every Actions
    call 403'd (T2 `nexus/github-api-usage-research-2026-09-26`). If the
