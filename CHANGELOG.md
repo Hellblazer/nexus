@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.64.0] - 2026-09-28
+
+Pairs with engine-service-v0.1.137. That engine's reads show only chunks with a live owning document (RDR-192 Step 5, nexus-wbfpw.10), which older clients do not expect, so it deploys in step with this release rather than before it: conexus has it armed and flips it once this client is published, the live(c) census has been reviewed, and the gate corpus has been re-seeded through an owner-registering path. engine-service-v0.1.135 and v0.1.136 were tagged on the way and never deploy.
+
 ### Added
 
 - **`nx catalog footnotes FILE.md` — the in-place converter GH #896 asked for** (nexus-sxiay, closes #896). Converts every `[label](nx://catalog/<tumbler>)` markdown link IN PLACE in the SOURCE file (not a `.rendered.md` sidecar — GitHub/GitLab/VS Code preview render the source) into a stable GFM footnote marker `[label][^tumbler-<slug>]` — the label stays bracketed, which is what makes `--to-links` exact regardless of what precedes or follows a citation on its line, or how many citations share one — with a `## Footnotes` section carrying title, content type, indexed date, link/merge/outbound-link data per unique tumbler. Idempotent: an unchanged catalog state re-run is a byte-for-byte no-op (trailing newline, or its absence, and CRLF-vs-LF preserved exactly); a drifted one (title edit, merge) rewrites only the footnote bodies — markers, once assigned, never move. `--check` (CI/pre-commit gate, exits non-zero on any needed change or dangling reference), `--dry-run` (unified diff, always shows the full picture, writes nothing), `--to-links` (reverse conversion, no catalog access needed), `--refresh` (only refresh existing footnote bodies, add no new markers), `--style long|short` (footnote body verbosity). GH #896's own acceptance criterion is held literally: a tumbler that fails to resolve means NOTHING is written for that file — not even the parts that would have converted cleanly — every failure is still reported (never silently dropped), and the run exits 1. It ships as a thin `/conexus:tumbler-footnotes` skill too.

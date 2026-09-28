@@ -1,6 +1,6 @@
 # Privacy Policy — Conexus
 
-_Effective: RELEASE-DATE (set when the release carrying nexus-5zv4j is cut)_
+_Effective: 2026-09-28_
 
 > **Change note (2026-08-18):** corrected three data-locality misstatements
 > present since the 2026-06-20 revision — T1 session scratch is Postgres-backed

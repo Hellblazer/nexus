@@ -556,7 +556,16 @@ from __future__ import annotations
 #: (nexus-33q80, no changeset). Both wire-ledger entries lead with
 #: [additive], so the engine deploys BEFORE this client tag (nexus-1emxn
 #: choreography (a)).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 134)
+#:
+#: 7.64.0 pairs with engine-service-v0.1.137 (tagged 2026-09-28 on 896b11b61):
+#: RDR-192 Step 5 live(c) reads (nexus-wbfpw.10, NOT additive: old clients
+#: lose sight of unowned chunks, so the deploy is armed with conexus and
+#: flips only after this client tag, the live(c) census and the gate-xr789
+#: re-seed), catalog-040 aspects_enabled (nexus-l46pu), catalog-041 bulk
+#: file_path lookup (nexus-1vc0n), catalog-042/043 bounded and live-safe
+#: restore (nexus-e8h5x, nexus-brxnp), the raced-embed counter (nexus-ulrjq).
+#: v0.1.135 and v0.1.136 were tagged on the way and never deploy.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 137)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

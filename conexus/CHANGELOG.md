@@ -1,5 +1,15 @@
 # Changelog
 
+## [7.64.0] - 2026-09-28
+
+Plugin version aligned with conexus 7.64.0. The plugin-side changes held
+since 7.63.0 go live as `source.ref` advances to `v7.64.0`: the new
+tumbler-footnotes skill (nexus-sxiay); the RDR-184 and RDR-205 ledger hooks
+moved to synchronous command-tier `nx-hook` verbs (nexus-5l8i8,
+nexus-egm7p); the orchestration skill's resume guidance (nexus-xxvv3); the
+mailbox drain claim loop fix (nexus-3lc5s); and the version-lockstep hook
+deriving the plugin set from marketplace.json (nexus-smsau).
+
 ## [7.63.0] - 2026-09-26
 
 Plugin version aligned with conexus 7.63.0. No plugin-side behaviour change in
