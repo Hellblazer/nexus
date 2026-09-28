@@ -7935,7 +7935,24 @@ public final class CatalogRepository {
      */
     public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
                                                    String expectedTargetSupersededBy) {
-        Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy);
+        return renameCollection(tenant, oldName, newName, expectedTargetSupersededBy, null, null);
+    }
+
+    /**
+     * Same as {@link #renameCollection(String, String, String, String)}, with the new row's
+     * {@code content_type} and {@code owner_id} as the CLIENT derived them from the new name
+     * (nexus-sis0m.3). The engine does not parse collection names (RDR-204, pinned by
+     * {@code CollectionParseGateTest}); the client's {@code collection_registration_kwargs}
+     * is the one derivation, the same values {@code /collections/upsert} already accepts from
+     * it. {@code null} keeps the source's value, which is what a client predating the field
+     * gets: before this, the new row always copied the old one's owner, so a renamed
+     * knowledge collection kept the old subject.
+     */
+    public Map<String, Integer> renameCollection(String tenant, String oldName, String newName,
+                                                   String expectedTargetSupersededBy,
+                                                   String newContentType, String newOwnerId) {
+        Map<String, Integer> counts = renameCollectionTxn(tenant, oldName, newName, expectedTargetSupersededBy,
+            newContentType, newOwnerId);
         // Post-commit (nexus-h8rf6 wave review): the canonical branch RETIRES the old
         // registry row — evict it so a later same-named collection re-registers. The
         // cross-model COPY branch leaves both registry rows untouched (no key in
@@ -8044,6 +8061,16 @@ public final class CatalogRepository {
      */
     public static final class CollectionMergeRefused extends RuntimeException {
         public CollectionMergeRefused(String message) { super(message); }
+    }
+
+    /**
+     * nexus-sis0m.3: the rename would rewrite a document's {@code chroma://<old>/...}
+     * source_uri onto one a LIVE document elsewhere already holds. The live-URI index
+     * (catalog-016) would reject the UPDATE as a 500; this names the URI instead, and the
+     * handler maps it to 409. Nothing has moved when it is thrown.
+     */
+    public static final class SourceUriCollision extends RuntimeException {
+        public SourceUriCollision(String message) { super(message); }
     }
 
     /** RLS-scoped {@link #collectionIsEmpty(DSLContext, String)} for callers outside a txn. */
@@ -8202,8 +8229,14 @@ public final class CatalogRepository {
         return false;
     }
 
+    /** Postgres {@code starts_with}: a literal prefix test, unlike LIKE where '_' matches any char. */
+    private static Condition uriStartsWith(Field<String> uri, String prefix) {
+        return DSL.condition(DSL.function("starts_with", SQLDataType.BOOLEAN, uri, DSL.val(prefix)));
+    }
+
     private Map<String, Integer> renameCollectionTxn(String tenant, String oldName, String newName,
-                                                        String expectedTargetSupersededBy) {
+                                                        String expectedTargetSupersededBy,
+                                                        String newContentTypeOrNull, String newOwnerIdOrNull) {
         return tenantScope.withTenant(tenant, ctx -> {
             Map<String, Integer> counts = new LinkedHashMap<>();
             // nexus-11gh6 rev 2 §3.2 (Hal Q1: gate the Java collection-move
@@ -8331,6 +8364,37 @@ public final class CatalogRepository {
                 return counts;
             }
 
+            // nexus-sis0m.3: the chroma://X/ -> chroma://Y/ source_uri rewrite below must not
+            // land on a URI a live document already holds (the catalog-016 partial unique
+            // index would abort the transaction with an opaque 500). Checked here, in this
+            // transaction and before anything moves, so the refusal leaves X untouched.
+            String oldUriPrefix = "chroma://" + oldName + "/";
+            String newUriPrefix = "chroma://" + newName + "/";
+            var moving = CATALOG_DOCUMENTS.as("moving");
+            var holder = CATALOG_DOCUMENTS.as("holder");
+            String collidingUri = ctx.select(holder.SOURCE_URI)
+                .from(moving).join(holder).on(holder.SOURCE_URI.eq(
+                    DSL.val(newUriPrefix).concat(DSL.substring(moving.SOURCE_URI, oldUriPrefix.length() + 1))))
+                .where(uriStartsWith(moving.SOURCE_URI, oldUriPrefix))
+                .and(holder.DELETED_AT.isNull())
+                .limit(1)
+                .fetchOne(holder.SOURCE_URI);
+            if (collidingUri != null) {
+                throw new SourceUriCollision(
+                    "renaming " + oldName + " to " + newName + " would rewrite a document's source_uri to "
+                    + collidingUri + ", which a live document already holds. Resolve that document first.");
+            }
+            // nexus-sis0m.3: Y's content_type and owner_id are the client's, derived from Y's
+            // name (see the 6-arg renameCollection); absent, they are X's. Copying X's
+            // unconditionally left a renamed knowledge collection carrying X's subject as its
+            // owner. embedding_model, dimension and the rest stay X's.
+            Field<String> newContentType = newContentTypeOrNull != null
+                ? DSL.val(newContentTypeOrNull, CATALOG_COLLECTIONS.CONTENT_TYPE)
+                : CATALOG_COLLECTIONS.CONTENT_TYPE;
+            Field<String> newOwnerId = newOwnerIdOrNull != null
+                ? DSL.val(newOwnerIdOrNull, CATALOG_COLLECTIONS.OWNER_ID)
+                : CATALOG_COLLECTIONS.OWNER_ID;
+
             // 1. New registry row Y, copying X's metadata (so children can re-home onto it).
             //    UPSERT, not a bare INSERT (nexus-cecqy): the conflict that can reach here is
             //    Y's own tombstone from an earlier rename Y->X, since a LIVE Y took the COPY
@@ -8356,7 +8420,7 @@ public final class CatalogRepository {
                         CATALOG_COLLECTIONS.CREATED_AT)
                     .select(ctx.select(
                             CATALOG_COLLECTIONS.TENANT_ID, DSL.val(newName),
-                            CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
+                            newContentType, newOwnerId,
                             CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                             CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED,
                             // RDR-204 nexus-ft04v.4/.5: catalog_collections.dimension and
@@ -8477,6 +8541,26 @@ public final class CatalogRepository {
             // contradicting the fix 120 lines above. The handler now permits exactly one
             // revive: a tombstone whose superseded_by names the collection being renamed
             // (nexus-v6za0). Every other non-live target 409s.
+            // nexus-sis0m.3: a knowledge note's identity is chroma://<collection>/<title>, so
+            // the URI must follow the collection or a re-put into Y misses its own document
+            // and mints a duplicate. Three columns hold such a URI (the enumeration is pinned
+            // by CatalogRenameIdentityCascadeTest against information_schema, not by this
+            // list). starts_with, not LIKE: collection names contain '_', a LIKE wildcard.
+            // Tombstoned documents are rewritten too, for the reason the COPY branch's
+            // physical_collection repoint gives (nexus-mqd6t).
+            counts.put("catalog_documents_source_uri", ctx.update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.SOURCE_URI, DSL.val(newUriPrefix)
+                    .concat(DSL.substring(CATALOG_DOCUMENTS.SOURCE_URI, oldUriPrefix.length() + 1)))
+                .where(uriStartsWith(CATALOG_DOCUMENTS.SOURCE_URI, oldUriPrefix)).execute());
+            counts.put("document_aspects_source_uri", ctx.update(DOCUMENT_ASPECTS)
+                .set(DOCUMENT_ASPECTS.SOURCE_URI, DSL.val(newUriPrefix)
+                    .concat(DSL.substring(DOCUMENT_ASPECTS.SOURCE_URI, oldUriPrefix.length() + 1)))
+                .where(uriStartsWith(DOCUMENT_ASPECTS.SOURCE_URI, oldUriPrefix)).execute());
+            counts.put("document_highlights_source_uri", ctx.update(DOCUMENT_HIGHLIGHTS)
+                .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, DSL.val(newUriPrefix)
+                    .concat(DSL.substring(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldUriPrefix.length() + 1)))
+                .where(uriStartsWith(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldUriPrefix)).execute());
+
             counts.put("catalog_collections_superseded",
                 ctx.update(CATALOG_COLLECTIONS)
                    .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, newName)
@@ -9520,11 +9604,20 @@ public final class CatalogRepository {
      */
     public Map<String, Object> collectionOwnerRoot(String tenant, String name) {
         return tenantScope.withTenant(tenant, ctx -> {
+            // nexus-sis0m.3: a code/docs/rdr collection's owner_id is the owner tumbler
+            // with dots written as hyphens (the collection-name charset has no '.'), while
+            // catalog_owners keys on the dotted tumbler. The join compared them verbatim,
+            // so repo_root was always '' and reindex fell back to repos.json. An exact
+            // match still wins over the hyphenated one.
+            var exact = CATALOG_OWNERS.TUMBLER_PREFIX.eq(CATALOG_COLLECTIONS.OWNER_ID);
             var r = ctx.select(CATALOG_COLLECTIONS.OWNER_ID, CATALOG_OWNERS.REPO_ROOT)
                        .from(CATALOG_COLLECTIONS)
                        .leftJoin(CATALOG_OWNERS)
-                       .on(CATALOG_COLLECTIONS.OWNER_ID.eq(CATALOG_OWNERS.TUMBLER_PREFIX))
+                       .on(exact.or(DSL.replace(CATALOG_OWNERS.TUMBLER_PREFIX, ".", "-")
+                           .eq(CATALOG_COLLECTIONS.OWNER_ID)))
                        .where(CATALOG_COLLECTIONS.NAME.eq(name))
+                       .orderBy(DSL.when(exact, 0).otherwise(1))
+                       .limit(1)
                        .fetchOne();
             if (r == null) return null;
             Map<String, Object> m = new LinkedHashMap<>();

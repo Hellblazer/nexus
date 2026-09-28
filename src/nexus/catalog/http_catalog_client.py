@@ -3308,6 +3308,18 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         body: dict[str, Any] = {"old_name": old, "new_name": new}
         if cross_model:
             body["cross_model"] = True
+        else:
+            # nexus-sis0m.3: the new row's content_type/owner_id, derived from
+            # the new name here because the engine does not parse names
+            # (RDR-204). Without them the engine copies the old row's, and a
+            # renamed knowledge collection kept the old subject as its owner.
+            # An engine predating the fields ignores them.
+            from nexus.corpus import collection_type_and_owner  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+            try:
+                body["content_type"], body["owner_id"] = collection_type_and_owner(new)
+            except ValueError:
+                pass
         # idempotent=False (nexus-ll31n sibling): a cascade rename over
         # EVERY row matching `old` across a dozen tables is a
         # population-discovery sweep, not a caller-supplied-id mutation. A

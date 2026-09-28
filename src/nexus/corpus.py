@@ -1520,6 +1520,33 @@ def t3_collection_name(
     return promoted
 
 
+def collection_type_and_owner(name: str) -> tuple[str, str]:
+    """The (content_type, owner_id) a collection *name* implies: the one
+    derivation, shared by :func:`collection_registration_kwargs` and by
+    rename, which sends them for the new row (nexus-sis0m.3; the engine does
+    not parse names, RDR-204). Pure: no config or embedding-model lookup.
+
+    Raises :class:`ValueError` when *name* has no ``<content_type>__<owner_id>``
+    shape (see :func:`collection_registration_kwargs`).
+    """
+    if is_conformant_collection_name(name):
+        segments = parse_conformant_collection_name(name)
+        return segments["content_type"], segments["owner_id"]
+    _ct_probe, _owner_probe = split_candidate_collection_name(name)
+    if _owner_probe == name:
+        return "knowledge", name
+    content_type = _ct_probe
+    owner_id = _owner_probe
+    # Equivalent to the historical `parts = name.split("__"); len(parts) < 2
+    # or not parts[0] or not parts[1]` guard (see collection_registration_kwargs).
+    if not content_type or not owner_id or owner_id.startswith("__"):
+        raise ValueError(
+            f"collection_registration_kwargs: {name!r} has no "
+            "<content_type>__<owner_id> shape to register with"
+        )
+    return content_type, owner_id
+
+
 def collection_registration_kwargs(name: str) -> dict[str, str]:
     """Derive ``register_collection`` kwargs for *name*.
 
@@ -1585,35 +1612,11 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
     # the same reason as t3_collection_name's ct/rest split above -- the
     # has-"__"-but-empty-first-segment case must still raise below, not
     # silently default to "knowledge".
-    if is_conformant_collection_name(name):
-        segments = parse_conformant_collection_name(name)
-        content_type = segments["content_type"]
-        owner_id = segments["owner_id"]
-        model_version = segments["model_version"]
-    else:
-        _ct_probe, _owner_probe = split_candidate_collection_name(name)
-        if _owner_probe == name:
-            content_type = "knowledge"
-            owner_id = name
-        else:
-            content_type = _ct_probe
-            owner_id = _owner_probe
-            # Equivalent to the historical `parts = name.split("__"); len(parts) < 2
-            # or not parts[0] or not parts[1]` guard: `len(parts) < 2` can never
-            # fire here (a "__" is already known present), `not parts[0]` is
-            # exactly `not content_type`, and `not parts[1]` is exactly
-            # `not owner_id or owner_id.startswith("__")` -- parts[1] is the
-            # first joined element of owner_id, which is empty iff owner_id
-            # itself is empty or begins with a second, immediately-adjacent
-            # "__" (a plain str.split("__") can never leave "__" inside a
-            # single part, so owner_id cannot start with "__" for any other
-            # reason).
-            if not content_type or not owner_id or owner_id.startswith("__"):
-                raise ValueError(
-                    f"collection_registration_kwargs: {name!r} has no "
-                    "<content_type>__<owner_id> shape to register with"
-                )
-        model_version = "v1"
+    content_type, owner_id = collection_type_and_owner(name)
+    model_version = (
+        parse_conformant_collection_name(name)["model_version"]
+        if is_conformant_collection_name(name) else "v1"
+    )
 
     # RDR-204 Phase 3 (nexus-ft04v.26): deliberately NOT repointed to read
     # the row. *name* here may have NO row at all -- registering IS what

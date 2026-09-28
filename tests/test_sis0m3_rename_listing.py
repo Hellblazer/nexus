@@ -76,3 +76,41 @@ def test_a_retired_name_still_holding_chunks_stays_listed(monkeypatch):
     assert out.exit_code == 0, out.output
     old_line = next(ln for ln in out.output.splitlines() if ln.startswith(_OLD))
     assert f"superseded->{_NEW}" in old_line, out.output
+
+
+def test_a_renamed_note_keeps_one_identity_under_the_new_name(t2_service_env, tmp_path):
+    """Engine half (Surface F F9): after renaming a knowledge collection, the new
+    row carries the new subject as its owner, the note's source_uri names the
+    new collection, and re-putting the same title into it updates that note
+    rather than minting a second document."""
+    from nexus.aspect_readers import uri_for
+    from nexus.catalog.factory import make_catalog_reader
+    from nexus.corpus import t3_collection_name
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    note = tmp_path / "rn-note.md"
+    note.write_text("sis0m3 renamed note body, one identity across a rename")
+
+    def _put(subject: str):
+        with patch("nexus.commands.store._t3", return_value=client):
+            return CliRunner().invoke(main, ["store", "put", str(note), "-c", subject, "-t", "rn-note"])
+
+    assert (r := _put("sis0m3-src")).exit_code == 0, r.output
+    old = t3_collection_name("sis0m3-src", t3=client)
+    new = old.replace("sis0m3-src", "sis0m3-dst")
+    with patch("nexus.commands.collection._t3", return_value=client):
+        renamed = CliRunner().invoke(main, ["collection", "rename", old, new])
+    assert renamed.exit_code == 0, renamed.output
+
+    reader = make_catalog_reader()
+    assert reader is not None
+    row = next(c for c in reader.list_collections() if c.get("name") == new)
+    assert row.get("owner_id") == "sis0m3-dst", row
+    doc = reader.by_source_uri(uri_for(new, "rn-note"))
+    assert doc is not None, "the note's source_uri still names the old collection"
+    assert doc.physical_collection == new
+    assert reader.by_source_uri(uri_for(old, "rn-note")) is None
+
+    assert (r := _put("sis0m3-dst")).exit_code == 0, r.output
+    titled = [d for d in reader.list_by_collection(new) if d.title == "rn-note"]
+    assert len(titled) == 1, [(d.tumbler, d.source_uri) for d in titled]

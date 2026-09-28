@@ -288,6 +288,10 @@ public final class CatalogHandler implements HttpHandler {
             // gets the same 409 the pre-check gives, with the message that names the remedy.
             // It fell into the generic catch below for one commit and surfaced as an opaque 500.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.SourceUriCollision e) {
+            // nexus-sis0m.3: the rename's source_uri rewrite would land on a URI a live
+            // document already holds; a refusal, not a server error.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.RehomeRefused e) {
             // nexus-wsx4l: the bounded re-home refused — same endpoints, an absent or
             // retired registry row, a non-positive bound, or shared-chash closure
@@ -2092,6 +2096,21 @@ public final class CatalogHandler implements HttpHandler {
         out.put("done", s.done());
     }
 
+    /**
+     * nexus-sis0m.3: {@code body[key]} when present; {@code null} when absent. A present value
+     * that is not a non-blank string is an {@link IllegalArgumentException}, which the route's
+     * catch answers with 400 naming the key.
+     */
+    private static String optionalNonBlank(Map<String, Object> body, String key) {
+        if (!body.containsKey(key) || body.get(key) == null) {
+            return null;
+        }
+        if (body.get(key) instanceof String v && !v.isBlank()) {
+            return v;
+        }
+        throw new IllegalArgumentException(key + " must be a non-blank string when present");
+    }
+
     private void handleCollectionRename(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
@@ -2101,6 +2120,11 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
+        // nexus-sis0m.3: optional attributes for the new row, derived by the client from the
+        // new name (the engine does not parse names, RDR-204). Absent keeps the source's;
+        // present must be a non-blank string.
+        String newContentType = optionalNonBlank(body, "content_type");
+        String newOwnerId = optionalNonBlank(body, "owner_id");
         // Guard 0 (nexus-mxzxs) — old == new. Mirrors handleCollectionSupersede's guard 0,
         // whose comment already claimed this verb refused the case. That was only ever
         // INCIDENTALLY true: collectionExists(newName) was true when newName == oldName, so
@@ -2244,7 +2268,8 @@ public final class CatalogHandler implements HttpHandler {
         // whenever the target turns out live or absent anyway; it only compares when the
         // target is STILL a non-live tombstone at commit time, same as this handler's own
         // identityOk/empty gate above.
-        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded);
+        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded,
+            newContentType, newOwnerId);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
     }
 
