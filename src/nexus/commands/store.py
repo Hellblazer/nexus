@@ -498,9 +498,11 @@ def _list_documents(db: T3Database, col_name: str) -> None:
     """
     try:
         total_chunks = db.collection_info(col_name)["count"]
-    except Exception:  # noqa: BLE001 — collection-open failure (incl. KeyError) surfaced to user via click.echo, returns
-        click.echo(f"Collection not found: {col_name}")
-        return
+    except KeyError:
+        # nexus-sis0m.1: only a genuinely absent collection is "not found".
+        # Every other failure (a stopped service among them) used to print
+        # this too, at exit 0, which reads as data loss.
+        raise click.ClickException(f"Collection not found: {col_name}")
 
     from nexus.catalog.store_hook import manifest_doc_index  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 

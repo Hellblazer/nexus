@@ -89,6 +89,7 @@ class _StorageBackendGuardGroup(click.Group):
     """
 
     def invoke(self, ctx: click.Context):
+        from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.t2.http_token_store import TokenAdminAuthError  # noqa: PLC0415 — deferred: keep CLI import surface light
 
@@ -96,6 +97,11 @@ class _StorageBackendGuardGroup(click.Group):
             return super().invoke(ctx)
         except StorageModeFlagError as exc:
             raise click.UsageError(str(exc)) from exc
+        except ServiceEndpointUnresolvableError as exc:
+            # nexus-sis0m.1: no service to talk to (a stopped local service,
+            # no managed endpoint). The message names the remedy; a
+            # traceback buried it (shakeout 7.64.1 F6).
+            raise click.ClickException(str(exc)) from exc
         except TokenAdminAuthError as exc:
             # nexus-xzeml: a refused token-admin call is a credential problem
             # the operator has to act on, not a crash.

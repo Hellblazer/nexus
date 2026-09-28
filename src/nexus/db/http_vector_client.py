@@ -346,7 +346,12 @@ def _resolve_endpoint() -> tuple[str, str]:
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
         # migration module; stranded pre-PG installs are redirected by the
         # stranded-install detector at CLI/MCP startup.
-        raise RuntimeError(
+        # nexus-sis0m.1: the named not-resolvable type (a RuntimeError
+        # subclass, so existing catchers still match) lets the CLI render
+        # it as one line instead of a traceback.
+        from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred to avoid circular import
+
+        raise ServiceEndpointUnresolvableError(
             "nexus-service endpoint is not resolvable: T3 vector serving "
             "routes through the nexus-service HTTP API (RDR-155 Phase 4a — "
             "the direct Chroma serving paths are retired). Either start the "
