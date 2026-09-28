@@ -746,6 +746,24 @@ def expire_cmd() -> None:
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
 
 
+def _resolve_bare_subject(collection: str, *, t3: object | None = None, for_write: bool = False) -> str:
+    """Resolve a bare ``--collection`` subject for export and import;
+    pass a prefixed name through unchanged.
+
+    RDR-204 Phase 3 (nexus-ft04v.26), class (a): *collection* is the raw
+    CLI argument, not necessarily a registered name, so this is a
+    candidate-string shape check, not a row lookup. Only the bare form
+    resolves: the exporter checks a legacy two-segment name against the
+    model its prefix implies, where :func:`t3_collection_name` would
+    promote it to the install's model (nexus-8o7ae).
+    """
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if split_candidate_collection_name(collection)[0]:
+        return collection
+    return t3_collection_name(collection, t3=t3, for_write=for_write)
+
+
 @store.command("export")
 @click.argument("collection", default="", required=False)
 @click.option("--output", "-o", default=None,
@@ -777,7 +795,6 @@ def export_cmd(
     """
     from datetime import date  # noqa: PLC0415 — stdlib import kept branch-local
 
-    from nexus.corpus import split_candidate_collection_name, t3_collection_name as _t3col  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.errors import EmbeddingModelMismatch, FormatVersionError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.exporter import export_collection  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -820,11 +837,7 @@ def export_cmd(
                 click.echo(f"ERROR exporting {col_name}: {exc}", err=True)
         click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
     else:
-        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `collection` is the
-        # raw --collection CLI argument, not necessarily an existing
-        # registered name (a bare/legacy arg falls through to _t3col's
-        # promotion) -- candidate-string shape check, not a row lookup.
-        col_name = collection if split_candidate_collection_name(collection)[0] else _t3col(collection)
+        col_name = _resolve_bare_subject(collection)
         out_path = Path(output) if output else Path(f"{col_name}.nxexp")
         try:
             result = export_collection(
@@ -905,6 +918,11 @@ def import_cmd(
 
     db = _t3()
     input_path = Path(file)
+    # nexus-8o7ae: passed raw, a bare subject reached the exporter's model
+    # gate unresolved and was refused as a voyage-code-3 target on a bge
+    # install.
+    if collection:
+        collection = _resolve_bare_subject(collection, t3=db, for_write=True)
 
     # nexus-s71lr: "nx store put"/import bulk writes had NO progress signal at
     # all -- import_collection is one opaque call with no per-record callback,
