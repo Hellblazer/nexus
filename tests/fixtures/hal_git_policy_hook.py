@@ -251,6 +251,14 @@ def _allow(context: str = "") -> None:
     sys.exit(0)
 
 
+def _pass() -> None:
+    """No decision: exit 0 with empty stdout so Claude Code's own permission
+    prompt / auto-mode classifier decides. An explicit allow here would
+    bypass the user's prompt for every unmatched Bash command (nexus-452oy)."""
+    sys.stdout.flush()
+    sys.exit(0)
+
+
 def _deny(reason: str, summary: str | None = None) -> None:
     sys.stdout.write(_deny_envelope(reason, summary) + "\n")
     sys.stdout.flush()
@@ -1242,7 +1250,7 @@ def _unscoped_commit_message(kind: str) -> str:
 def body(payload: dict[str, Any]) -> None:
     command = _get_bash_command(payload)
     if not command:
-        _allow()
+        _pass()
 
     # Match FIRST, escape SECOND: an escape token on a non-matching
     # command must not log a phantom escape event.
@@ -1274,11 +1282,11 @@ def body(payload: dict[str, Any]) -> None:
         and bare_push is None
         and unscoped_commit is None
     ):
-        _allow()
+        _pass()
 
     if _should_skip_for_reason(command):
         _log_event("escape", command_fragment=command, escape_reason=_extract_escape_reason(command))
-        _allow()
+        _pass()
 
     _log_event("deny", command_fragment=command)
     # Each check keeps its OWN message.
@@ -1312,8 +1320,8 @@ def body(payload: dict[str, Any]) -> None:
 
 
 def main() -> None:
-    """Fail-open top-level runner: any unexpected exception allows the
-    command through rather than bricking every Bash call (matches the
+    """Fail-open top-level runner: any unexpected exception passes the
+    command through (no decision) rather than bricking every Bash call (matches the
     plugin hook framework's fail-open-by-default contract)."""
     try:
         raw = sys.stdin.read()
@@ -1326,8 +1334,8 @@ def main() -> None:
         raise
     except BaseException:
         _log_event("allow_fail_open")
-        _allow()
-    _allow()
+        _pass()
+    _pass()
 
 
 if __name__ == "__main__":
