@@ -1541,6 +1541,17 @@ class TestHttpCatalogClientRoundTrip:
 
         assert client.docs_for_chashes([]) == {}
 
+    def test_docs_and_manifests_for_chashes_journey(self, client: HttpCatalogClient) -> None:
+        """nexus-w032x: the reverse lookup returns the manifests it fetched,
+        so search's doc-id attach does not fetch them a second time. Same
+        edges as docs_for_chashes, plus each referencing doc's manifest rows
+        against the real fake-server routes."""
+        docs, manifests = client.docs_and_manifests_for_chashes([CHASH_A])
+        assert docs == {CHASH_A: ["1.1.1"]}
+        assert set(manifests) == {"1.1.1"}
+        assert CHASH_A in {row.chash for row in manifests["1.1.1"]}
+        assert client.docs_and_manifests_for_chashes([]) == ({}, {})
+
     # ── nexus-h8rf6.3: return-type regression pins ───────────────────────────
     #
     # Three call sites previously returned the WRONG wire-adjacent type

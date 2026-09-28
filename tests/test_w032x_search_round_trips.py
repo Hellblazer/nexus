@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Search enrichment must not repeat catalog round trips, and the fan-out
-must use the concurrent-read quota.
+"""Search enrichment must not repeat catalog round trips.
 
 nexus-w032x. A default cloud search (knowledge,code,docs,rdr) spent its
 enrichment time in client round trips. The catalog reverse lookup
 (docs_for_chashes) fetches every referencing document's manifest to rebuild
 chash -> doc_id edges, and the doc-id attach then fetched a subset of the
 SAME manifests again: two /manifest/get_many calls where one carries the
-data. The search fan-out ran ~28 batches 8 at a time though the quota
-allows 10. These count the calls, so a regression shows up as a number,
+data. These count the calls, so a regression shows up as a number,
 not as cloud latency that varies run to run.
 """
 from __future__ import annotations
@@ -56,27 +54,57 @@ def test_the_doc_id_attach_fetches_manifests_once() -> None:
     assert {r.metadata["chunk_index"] for r in rows} == {0}
 
 
-class _SlowT3:
-    """Singleton-group collections (names without a model token), so every
-    collection is its own batch; records peak concurrent search calls."""
+def test_a_legacy_doc_id_the_reverse_lookup_missed_still_gets_its_manifest() -> None:
+    """Review of f80ce4e0a: a chunk that already carries its own doc_id may
+    name a doc the reverse lookup never found; taking manifests only from
+    the prefetch dropped its chunk_count and chunk_index."""
+    from types import SimpleNamespace
 
-    def __init__(self) -> None:
-        self.active = self.peak = 0
-        self._lock = threading.Lock()
+    cat = _CountingCatalog()
+    fetched: list[list[str]] = []
 
-    def search(self, query, collection_names, n_results=10, where=None):
-        with self._lock:
-            self.active += 1
-            self.peak = max(self.peak, self.active)
+    def get_manifests(doc_ids):
+        fetched.append(list(doc_ids))
+        return {d: [SimpleNamespace(chash="l" * 64, position=3)] for d in doc_ids}
+
+    cat.get_manifests = get_manifests
+    rows = [
+        SearchResult(id="new", content="", distance=0.1, collection="knowledge__x",
+                     metadata={"chunk_text_hash": f"{0:064d}"}),
+        SearchResult(id="legacy", content="", distance=0.2, collection="knowledge__x",
+                     metadata={"chunk_text_hash": "l" * 64, "doc_id": "9.9.9"}),
+    ]
+    _attach_doc_ids_from_catalog(rows, cat)
+
+    assert fetched == [["9.9.9"]], "only the doc the prefetch missed is fetched"
+    assert rows[1].metadata["chunk_count"] == 1
+    assert rows[1].metadata["chunk_index"] == 3
+    assert rows[0].metadata["chunk_count"] == 2
+
+
+def test_topic_labels_are_fetched_concurrently_and_completely() -> None:
+    """The engine has no batched by-id topic route; search's topic grouping
+    (the CLI default) looked labels up one serial GET at a time: 9 in the
+    shakeout profile."""
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+
+    store = object.__new__(HttpTaxonomyStore)
+    lock = threading.Lock()
+    state = {"active": 0, "peak": 0}
+
+    def get_topic_by_id(tid):
+        with lock:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
         time.sleep(0.05)
-        with self._lock:
-            self.active -= 1
-        return []
+        with lock:
+            state["active"] -= 1
+        return None if tid == 7 else {"id": tid, "label": f"topic {tid}"}
 
+    store.get_topic_by_id = get_topic_by_id
+    labels = store.get_labels_for_ids([3, 1, 7, 2, 3, 9, 4, 5, 6])
 
-def test_the_search_fan_out_uses_the_concurrent_read_quota() -> None:
-    from nexus.db.limits import QUOTAS
-
-    t3 = _SlowT3()
-    search_cross_corpus("q", [f"knowledge__c{i}" for i in range(28)], n_results=10, t3=t3)
-    assert t3.peak == QUOTAS.MAX_CONCURRENT_READS
+    assert labels == {3: "topic 3", 1: "topic 1", 2: "topic 2", 9: "topic 9",
+                      4: "topic 4", 5: "topic 5", 6: "topic 6"}
+    assert list(labels) == [3, 1, 2, 9, 4, 5, 6]
+    assert state["peak"] > 1, "labels fetched one at a time"

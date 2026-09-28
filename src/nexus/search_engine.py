@@ -180,8 +180,12 @@ def _attach_doc_ids_from_catalog(
     manifest_cache: dict[str, list[Any]] = {}
     _get_manifests_batch = getattr(catalog, "get_manifests", None)
     if prefetched is not None:
-        manifest_cache.update({d: prefetched.get(d, []) for d in distinct_doc_ids})
-    elif _get_manifests_batch is not None and distinct_doc_ids:
+        manifest_cache.update({d: prefetched[d] for d in distinct_doc_ids if d in prefetched})
+    # Whatever the prefetch did not cover is fetched as before: a legacy
+    # chunk carrying its own doc_id may name a doc the reverse lookup never
+    # found (review of f80ce4e0a: those rows lost chunk_count/chunk_index).
+    distinct_doc_ids = [d for d in distinct_doc_ids if d not in manifest_cache]
+    if _get_manifests_batch is not None and distinct_doc_ids:
         try:
             batch_result = _get_manifests_batch(distinct_doc_ids)
             # nexus-7lm3q review (CR Low-1): ``update(... or {})`` makes an
@@ -1066,12 +1070,7 @@ def search_cross_corpus(
     # inside _search_batch re-raises any non-``VectorServiceError`` (fail-
     # loud, matching the prior serial behaviour where such errors bubbled
     # out of the loop).
-    # nexus-w032x: the quota constant, not a hand-picked 8. A default
-    # knowledge,code,docs,rdr search plans ~28 batches (the per-collection
-    # floor splits each model group; nexus-d9xt2), so the wave count is what
-    # the caller waits on. Each batch names different collections, and the
-    # quota is per collection.
-    workers = min(QUOTAS.MAX_CONCURRENT_READS, len(batches))
+    workers = min(8, len(batches))
     if workers <= 1:
         batch_results = [_search_batch(b) for b in batches]
     else:
