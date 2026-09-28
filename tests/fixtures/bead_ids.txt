@@ -6159,6 +6159,7 @@ nexus-uks83
 nexus-uks83.1
 nexus-ulcqf
 nexus-uloao
+nexus-ulrjq
 nexus-um2h1
 nexus-um2h1.1
 nexus-um47z
@@ -6577,6 +6578,7 @@ nexus-weqhg
 nexus-wf07
 nexus-wfko
 nexus-wgalh
+nexus-wgalh.1
 nexus-whh61
 nexus-whh61.1
 nexus-whh61.2
