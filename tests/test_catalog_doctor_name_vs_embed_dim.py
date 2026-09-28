@@ -65,6 +65,9 @@ def _fake_t3(client, names: list[str]):
         def get_collection(self, name):
             return client.get_collection(name)
 
+        def get_or_create_collection(self, name):
+            return client.get_collection(name)
+
         def get_embeddings(self, collection_name, ids):
             import numpy as np
             col = client.get_collection(collection_name)
@@ -87,6 +90,9 @@ def _fake_t3_service_like(client, names: list[str]):
             return [{"name": n} for n in names]
 
         def get_collection(self, name):
+            return client.get_collection(name)
+
+        def get_or_create_collection(self, name):
             return client.get_collection(name)
 
         def get_embeddings(self, collection_name, ids):
@@ -388,3 +394,68 @@ class TestNameVsEmbedDimRealHttpVectorClient:
         assert m["collection"] == name
         assert m["expected_dim"] == 1024
         assert m["actual_dim"] == 384
+
+
+@pytest.mark.integration
+def test_the_check_lists_collections_once_however_many_it_probes(t2_service_env):
+    """nexus-5z0us: the probe loop called get_collection per collection, and
+    get_collection re-lists the whole tenant (a /v1/vectors/stats pass,
+    3.5s on a 111-collection tenant) to check existence. That made the
+    check ~5s per collection: 8 minutes of silence in `nx upgrade --dry-run`.
+    The consequence measured here is the number of tenant-wide listings."""
+    from datetime import UTC, datetime
+    from unittest.mock import patch
+
+    import nexus.db.http_vector_client as hvc
+    from nexus.commands.catalog_cmds.doctor import _run_name_vs_embed_dim
+
+    import hashlib
+
+    from nexus.catalog.factory import make_catalog_writer
+
+    client = hvc.HttpVectorClient(tenant=t2_service_env)
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    names = [f"knowledge__z0us-{i}__bge-base-en-v15-768__v1" for i in range(6)]
+    for i, name in enumerate(names):
+        text = f"z0us probe collection {i}"
+        chash = hashlib.sha256(text.encode()).hexdigest()
+        client.upsert_chunks_with_embeddings(
+            name, ids=[chash], documents=[text], embeddings=[],
+            metadatas=[{"title": text, "indexed_at": datetime.now(UTC).isoformat()}],
+        )
+        # An owned chunk: live(c) hides a chunk with no manifest owner.
+        doc = str(writer.register(
+            owner=owner, title=text, content_type="knowledge", physical_collection=name,
+        ))
+        writer.write_manifest(doc, [{"chash": chash, "position": 0}], collection=name)
+
+    real_post = hvc._post
+    stats_calls: list[str] = []
+
+    def _counting_post(path, body, **kwargs):
+        if path.startswith("/v1/vectors/stats"):
+            stats_calls.append(path)
+        return real_post(path, body, **kwargs)
+
+    real_get = getattr(hvc, "_get", None)
+
+    def _counting_get(path, *args, **kwargs):
+        if str(path).startswith("/v1/vectors/stats"):
+            stats_calls.append(str(path))
+        return real_get(path, *args, **kwargs)
+
+    patches = [patch.object(hvc, "_post", _counting_post), patch("nexus.db.make_t3", lambda: client)]
+    if real_get is not None:
+        patches.append(patch.object(hvc, "_get", _counting_get))
+    for p in patches:
+        p.start()
+    try:
+        report = _run_name_vs_embed_dim()
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert report["checked"] >= len(names), report
+    assert not report["read_errors"], report
+    assert len(stats_calls) == 1, f"{len(stats_calls)} tenant-wide listings for {report['checked']} probes"

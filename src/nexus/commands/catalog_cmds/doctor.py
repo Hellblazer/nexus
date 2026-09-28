@@ -971,6 +971,36 @@ def _run_name_vs_embed_dim() -> dict:
             "error": f"Failed to list T3 collections: {exc}",
         }
 
+    def _probe(name: str) -> tuple[list, object, str | None]:
+        """``(ids, embeddings, error)`` for one sampled chunk of *name*."""
+        probe_err: str | None = None
+        ids: list = []
+        embs = None
+        # ou4tb critique: ONE bounded retry so a single transient blip
+        # during a multi-collection run doesn't flap the whole check to
+        # FAIL; persistent unreadability still fails loud below.
+        for _attempt in (1, 2):
+            try:
+                # nexus-5z0us: a handle, not get_collection(). get_collection
+                # re-lists every collection to check existence -- a full
+                # /v1/vectors/stats pass, 3.5s measured on a 111-collection
+                # tenant -- once per probed collection, which made this
+                # check ~5s per collection (8 minutes in `nx upgrade
+                # --dry-run`). These names came from that listing a moment
+                # ago; the handle is side-effect free.
+                # nexus-pyv0e: sample via the dual-mode-safe public surface
+                # (collection handle + get_embeddings), not client._client.
+                coll = t3_db.get_or_create_collection(name)
+                sample = coll.get(limit=1)
+                ids = sample.get("ids") or []
+                embs = t3_db.get_embeddings(name, ids[:1]) if ids else None
+                probe_err = None
+                break
+            except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
+                probe_err = str(exc)
+        return ids, embs, probe_err
+
+    targets: list[tuple[str, str, int]] = []
     for name in cols:
         if not is_conformant_collection_name(name):
             skipped_non_conformant += 1
@@ -982,26 +1012,15 @@ def _run_name_vs_embed_dim() -> dict:
         if expected is None:
             unknown_token.append({"collection": name, "token": token})
             continue
-        probe_err: str | None = None
-        ids: list = []
-        embs = None
-        # ou4tb critique: ONE bounded retry so a single transient blip
-        # during a multi-collection run doesn't flap the whole check to
-        # FAIL; persistent unreadability still fails loud below.
-        for _attempt in (1, 2):
-            try:
-                # nexus-pyv0e: sample via the dual-mode-safe public surface
-                # (get_collection + get_embeddings), not client._client — the
-                # service-mode HttpVectorClient has no ._client attribute, only
-                # local T3Database's raw chromadb client does.
-                coll = t3_db.get_collection(name)
-                sample = coll.get(limit=1)
-                ids = sample.get("ids") or []
-                embs = t3_db.get_embeddings(name, ids[:1]) if ids else None
-                probe_err = None
-                break
-            except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
-                probe_err = str(exc)
+        targets.append((name, token, expected))
+
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only this check fans out
+
+    # nexus-5z0us: probes run concurrently, under QUOTAS.MAX_CONCURRENT_READS.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        probes = list(pool.map(lambda t: _probe(t[0]), targets))
+
+    for (name, token, expected), (ids, embs, probe_err) in zip(targets, probes):
         if probe_err is not None:
             # nexus-ou4tb walk (MEDIUM): a read failure is NOT an
             # "unrecognized model token" — burying it there let a fully
