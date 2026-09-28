@@ -43,6 +43,14 @@ def _run_nx_json(*args: str, cap: str | None) -> subprocess.CompletedProcess[str
     exactly as a real ``nx`` invocation would.
     """
     env = dict(os.environ)
+    # nexus-sis0m.2: --check-mcp-logs now exits 1 when it scanned nothing,
+    # which made it depend on whether Claude Code has logged for this
+    # directory. A HOME with no Claude cache root takes the
+    # platform-absent branch (rc 0) on every machine, keeping this test
+    # about stdout only.
+    import tempfile
+
+    env["HOME"] = tempfile.mkdtemp(prefix="nx-json-stdout-home-")
     if cap is None:
         env.pop(_ENV_VAR, None)
     else:
