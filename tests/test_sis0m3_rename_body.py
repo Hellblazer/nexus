@@ -14,8 +14,8 @@ from nexus.corpus import collection_registration_kwargs, collection_type_and_own
 @pytest.mark.parametrize(
     "name, expected",
     [
-        ("knowledge__distributed-systems__voyage-context-3__v1", ("knowledge", "distributed-systems")),
-        ("code__1-1__voyage-code-3__v1", ("code", "1-1")),
+        ("knowledge__distributed-systems__bge-base-en-v15-768__v1", ("knowledge", "distributed-systems")),
+        ("code__1-1__bge-base-en-v15-768__v1", ("code", "1-1")),
         ("knowledge__gamma_sub", ("knowledge", "gamma_sub")),
         ("hren__keep-tgt", ("hren", "keep-tgt")),
         ("my-notes", ("knowledge", "my-notes")),
