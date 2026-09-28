@@ -31,22 +31,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
       - name: Report runner identity + toolchain versions
+        # Deliberately NOT `set -e`: this step is a diagnostic survey, so one
+        # missing tool must not hide the report for every tool after it.
         run: |
-          set -euo pipefail
+          set -uo pipefail
           echo "=== sw_vers ==="
-          sw_vers
+          sw_vers || echo "MISSING: sw_vers"
+          echo "=== JAVA_HOME / GRAALVM_HOME ==="
+          echo "JAVA_HOME=${JAVA_HOME:-<unset>}"
+          echo "GRAALVM_HOME=${GRAALVM_HOME:-<unset>}"
           echo "=== java -version ==="
-          java -version
+          java -version || echo "MISSING: java"
           echo "=== native-image --version ==="
-          native-image --version
+          native-image --version || {
+            echo "MISSING: native-image on PATH"
+            echo "-- checking \$JAVA_HOME/bin/native-image and \$GRAALVM_HOME/bin/native-image --"
+            [ -n "${JAVA_HOME:-}" ] && ls -la "${JAVA_HOME}/bin/native-image" 2>&1
+            [ -n "${GRAALVM_HOME:-}" ] && ls -la "${GRAALVM_HOME}/bin/native-image" 2>&1
+            echo "-- which java --"
+            command -v java
+            echo "-- java binary's real path (resolves symlinks) --"
+            java -XshowSettings:properties -version 2>&1 | grep -i "java.home" || true
+          }
           echo "=== uv --version ==="
-          uv --version
+          uv --version || echo "MISSING: uv"
           echo "=== docker version ==="
-          docker version
+          docker version || echo "MISSING: docker / colima not running"
           echo "=== git --version / gh --version / jq --version ==="
-          git --version
-          gh --version
-          jq --version
+          git --version || echo "MISSING: git"
+          gh --version || echo "MISSING: gh"
+          jq --version || echo "MISSING: jq"
 
       - name: Docker smoke (hello-world via colima)
         run: docker run --rm hello-world
