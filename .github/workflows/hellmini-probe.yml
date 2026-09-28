@@ -25,6 +25,11 @@ concurrency:
 jobs:
   probe:
     name: Probe hellmini runner
+    # Defense in depth (Sam, 2026-09-28): this repo is PUBLIC, and although a
+    # self-hosted runner only ever picks up jobs from workflows already on a
+    # ref pushable by a collaborator (never a fork PR), this job also refuses
+    # to run for anyone but the repo owner.
+    if: github.actor == 'Hellblazer'
     runs-on: hellmini
     timeout-minutes: 20
     steps:
