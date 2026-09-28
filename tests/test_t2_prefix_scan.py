@@ -206,6 +206,19 @@ def test_hard_cap_across_namespaces() -> None:
     assert len(rendered) <= _HARD_CAP
 
 
+def test_a_large_first_namespace_leaves_the_cap_budget_to_the_next() -> None:
+    """nexus-xn9ut review: the overflow count must not overwrite the
+    cross-namespace cap accumulator, or a first namespace with
+    matching_total >= _HARD_CAP silently drops every namespace after it."""
+    store = _RowStore()  # reports matching_total, as the bounded engine does
+    for ns in ["repo", "repo_rdr"]:
+        for i in range(1, 11):
+            store.put(ns, f"{ns}-entry-{i}.md", f"Content {i}")
+    output = _run_scan(store, "repo")
+    assert "### T2 Memory\n" in output
+    assert "### T2 Memory (rdr)" in output, output
+
+
 def test_content_fetch_is_scoped_to_snippet_ranks() -> None:
     """nexus-fow78: ``get()`` (the per-entry content fetch) must only be
     issued for the ranks that actually render a snippet (``_SNIPPET_LIMIT``

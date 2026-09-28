@@ -3,6 +3,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.MemoryRepository;
+import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -409,6 +410,11 @@ class MemoryHandlerTest {
         var resp = get("/v1/memory/list?project=list-clamp-proj&limit=10001", TENANT);
         assertThat(resp.statusCode()).isEqualTo(200);
         assertThat(mapper.readValue(resp.body(), LIST_T)).hasSize(1);
+        // The route answering 200 does not show the clamp; the parse does.
+        assertThat(MemoryHandler.parseListLimit("10001")).isEqualTo(MemoryHandler.LIST_LIMIT_CEILING);
+        assertThat(MemoryHandler.parseListLimit(" 7 ")).isEqualTo(7);
+        assertThat(MemoryHandler.parseListLimit(null)).isNull();
+        assertThat(MemoryHandler.parseListLimit("")).isNull();
     }
 
     @Test

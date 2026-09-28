@@ -325,9 +325,9 @@ def _build_output(
                 # the bound reports matching_total on each row, so the exact
                 # count survives; an older engine's rows carry none, and the
                 # extra row only says there are more.
-                total = summaries[0].get("matching_total")
-                if isinstance(total, int) and total > len(ns_lines):
-                    lines.append(f"  … ({total - len(ns_lines)} more)")
+                matching_total = summaries[0].get("matching_total")
+                if isinstance(matching_total, int) and matching_total > len(ns_lines):
+                    lines.append(f"  … ({matching_total - len(ns_lines)} more)")
                 else:
                     lines.append("  … (more)")
             lines.append("")

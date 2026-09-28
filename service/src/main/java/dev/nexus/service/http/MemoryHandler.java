@@ -67,7 +67,23 @@ public final class MemoryHandler implements HttpHandler {
     private static final Logger log = LoggerFactory.getLogger(MemoryHandler.class);
 
     /** nexus-xn9ut: the most rows one {@code /list?limit=} returns; larger values are clamped. */
-    static final int LIST_LIMIT_CEILING = 10_000;
+    public static final int LIST_LIMIT_CEILING = 10_000;
+
+    /**
+     * nexus-xn9ut: the {@code /list} bound on the newest rows returned. Absent
+     * or blank reads all (the old contract); a non-positive or non-numeric
+     * value is a 400; a value above {@link #LIST_LIMIT_CEILING} is clamped to it.
+     */
+    public static Integer parseListLimit(String rawLimit) {
+        if (rawLimit == null || rawLimit.isBlank()) {
+            return null;
+        }
+        int parsed = parseInt(rawLimit.trim(), "limit");
+        if (parsed < 1) {
+            throw new IllegalArgumentException("query param 'limit' must be a positive integer, got " + parsed);
+        }
+        return Math.min(parsed, LIST_LIMIT_CEILING);
+    }
 
     // Jackson configured to handle OffsetDateTime and include null fields in output (SQLite-parity: every column key always present, RDR-152 nexus-fjwxh).
     static final ObjectMapper MAPPER = new ObjectMapper()
@@ -278,18 +294,7 @@ public final class MemoryHandler implements HttpHandler {
         Map<String, String> params = queryParams(ex.getRequestURI());
         String project = params.get("project");
         String agent   = params.get("agent");
-        // nexus-xn9ut: optional bound on the newest rows returned. Absent
-        // reads all (the old contract); a non-positive or non-numeric value
-        // is a 400; a value above LIST_LIMIT_CEILING is clamped to it.
-        Integer limit = null;
-        String rawLimit = params.get("limit");
-        if (rawLimit != null && !rawLimit.isBlank()) {
-            int parsed = parseInt(rawLimit.trim(), "limit");
-            if (parsed < 1) {
-                throw new IllegalArgumentException("query param 'limit' must be a positive integer, got " + parsed);
-            }
-            limit = Math.min(parsed, LIST_LIMIT_CEILING);
-        }
+        Integer limit = parseListLimit(params.get("limit"));
 
         var rows = repo.listEntries(tenant, project, agent, limit);
         // A bounded read also reports how many rows match in total, on each
