@@ -13,11 +13,12 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 # engine path had ZERO automated coverage, and the edge silently rewrote
 # both infrastructure endpoints: /version answered with a two-field stub
 # (dropping embedding_mode/embedding_models -> voyage threshold gating OFF,
-# dimension-orphan tooling inert, guided-upgrade voyage-capability check
-# falsely fail-closed) and /health was auth-gated (401) while the pinned
-# ez5.1 contract — which guided_upgrade's readiness gate polls with a bare
-# unauthenticated GET — is 200 + db=up. Three client features shipped green
-# through every gate and were dead-on-arrival for cloud boxes.
+# dimension-orphan tooling inert, and the then-live guided-upgrade
+# voyage-capability check falsely fail-closed) and /health was auth-gated
+# (401) while the pinned ez5.1 contract — which guided_upgrade's readiness
+# gate then polled with a bare unauthenticated GET — is 200 + db=up. Three
+# client features shipped green through every gate and were dead-on-arrival
+# for cloud boxes. (guided_upgrade itself was deleted at RDR-155 P4b.)
 #
 # Gate-green on the engine does NOT mean client-visible. This gate is the
 # client-visible half.
@@ -39,15 +40,17 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 # is exactly what the old header would now license, which is why the header
 # was changed rather than left as history.
 #
-# Legs (all read-only; no writes, no config mutation, safe on a live box):
+# Legs (no config mutation; E, G and H write probe rows to the live store,
+# which is why NX_ALLOW_PROD_WRITE is set above):
 #   A  /version contract through the edge: 200, release_version parseable
 #      and >= REQUIRED_ENGINE_VERSION, embedding_mode present and known,
 #      embedding_models non-empty (RDR-002 + nexus-pebfx.5 contract).
-#   B  /health edge contract: AUTHENTICATED GET -> 200 + body.db == "up"
-#      (conexus relay [21082], decision (b): the public edge auth-gates
-#      /health and relays the engine's ez5.1 body verbatim to bearers —
-#      exactly what guided_upgrade's health gate now sends for managed
-#      targets; unauth-401 is conexus's own IT-pinned contract).
+#   B  edge auth contract the client relies on (Sam, 2026-09-28): an
+#      UNAUTHENTICATED /health is refused by the edge (403), and the minted
+#      data token the client sends is accepted on /v1 (200). The old
+#      authenticated-/health probe is retired: its only consumer,
+#      guided_upgrade's readiness gate, was deleted at RDR-155 P4b, and the
+#      static service_token it used was revoked 2026-09-28.
 #   C  real-client probe: HttpVectorClient.embedding_mode() through the
 #      live config resolves a mode (never None). This is the exact signal
 #      the search threshold gate and dimension-orphan tooling key on.
@@ -168,8 +171,8 @@ models = body.get("embedding_models")
 if not (isinstance(models, list) and models):
     errs.append(
         f"embedding_models missing/empty through the edge (got {models!r}) — "
-        "guided-upgrade voyage-capability check falsely fail-closes, "
-        "blocking managed migrations targeting this service"
+        "nx init and nx service report no embedding models for this "
+        "service (nexus.db.managed_endpoint capabilities)"
     )
 # RDR-196 .p1c (nexus-nyry9.9): nx_answer_steps_supported is a compile-time-
 # constant true on any engine build carrying the handler, unconditionally
@@ -194,23 +197,31 @@ print(f"  ok: release_version={body['release_version']} "
       f"nx_answer_steps_supported={steps_supported}")
 PY
 
-# ── Leg B: /health edge contract, AUTHENTICATED (conexus relay [21082],
-#    decision (b)). Its original consumer, guided_upgrade's readiness probe,
-#    was deleted at RDR-155 P4b; the leg now pins the edge contract itself.
-#    Whether that contract admits a minted data token or only a service-
-#    class bearer is an open question with conexus (2026-09-28; T2
-#    [23517] separates the two credential classes). ────────────────────
-_leg_enter B "/health edge contract (authenticated bearer)"
-# The bearer the client itself sends: the minted data token when a
-# mint_token credential is configured (the pass-through engine refuses a
-# static token, and the static service_token was revoked 2026-09-28), else
-# the static service_token. Same resolution as catalog.factory and the
-# nx doctor "Data-token self-minting" row. A mint failure is reported, never
-# papered over with the static token. The token travels through a mode-600
-# temp file, not stdout: structlog writes its info lines to stdout, and the
-# first live run carried them into the Authorization header. curl reads the
-# header from that file (-H @file), so the token is never in argv or a shell
-# variable. Which kind was used goes to stderr.
+# ── Leg B: the edge auth contract the client relies on (Sam, 2026-09-28) ──
+#    B1: an UNAUTHENTICATED /health is refused by the edge (measured 403).
+#    B2: the minted data token the client sends is accepted on /v1 (200).
+#    The authenticated-/health probe this leg used to make is retired: its
+#    consumer (guided_upgrade) was deleted at RDR-155 P4b, the static
+#    service_token it sent was revoked 2026-09-28, and the edge's /health gate
+#    does not admit the minted data token (401, T2 [23517] separates the two
+#    credential classes). A different /health status is reported as a change
+#    in conexus's gate, not as an engine fault.
+_leg_enter B "edge auth contract (unauthenticated /health refused, data token accepted on /v1)"
+NOAUTH_STATUS="$(curl -sS -m 20 -o /dev/null -w "%{http_code}" "$SERVICE_URL/health" || echo 000)"
+case "$NOAUTH_STATUS" in
+    403) echo "  ok [B1]: unauthenticated /health refused by the edge (403)" ;;
+    200) _leg_fail "B1: unauthenticated /health returned 200 — the edge no longer gates /health (conexus changed relay [21082] decision (b)); confirm with conexus and update this pin" ;;
+    401) _leg_fail "B1: unauthenticated /health returned 401, not the 403 pinned 2026-09-28 — conexus changed how its edge gates /health; confirm with conexus and update this pin" ;;
+    *)   _leg_fail "B1: unauthenticated /health returned HTTP $NOAUTH_STATUS (pinned: 403) — the edge is unreachable or its /health gate changed" ;;
+esac
+
+# The bearer the client itself sends: the minted data token (the pass-through
+# engine refuses a static token), resolved by DataTokenManager.bearer_for as
+# catalog.factory and nx doctor do; the static service_token only when no
+# mint_token is configured. The header travels through a mode-600 temp file,
+# never stdout (structlog writes its info lines there, and the first live run
+# carried one into the Authorization header), argv, or a shell variable; curl
+# reads it with -H @file. Which kind was used goes to stderr.
 BEARER_FILE="$(mktemp)"
 chmod 600 "$BEARER_FILE"
 BEARER_RC=0
@@ -218,6 +229,8 @@ SERVICE_URL="$SERVICE_URL" BEARER_FILE="$BEARER_FILE" uv run python - <<'PY' || 
 import os
 import sys
 
+from nexus.logging_setup import configure_logging
+configure_logging("cli")
 from nexus.config import get_credential
 from nexus.db.data_token import DataTokenMintError, get_data_token_manager
 from nexus.db.t2._refreshable_client import DEFAULT_TENANT
@@ -225,36 +238,28 @@ from nexus.db.t2._refreshable_client import DEFAULT_TENANT
 try:
     token = get_data_token_manager().bearer_for(os.environ["SERVICE_URL"], DEFAULT_TENANT)
 except DataTokenMintError as exc:
-    print(f"  B: data-token mint failed: {exc}", file=sys.stderr)
+    print(f"  B2: data-token mint failed: {exc}", file=sys.stderr)
     sys.exit(0)
 if token:
-    print("  B: bearer = minted data token", file=sys.stderr)
+    print("  B2: bearer = minted data token", file=sys.stderr)
 else:
     token = (get_credential("service_token") or "").strip()
     if token:
-        print("  B: bearer = static service_token (no mint_token configured)", file=sys.stderr)
+        print("  B2: bearer = static service_token (no mint_token configured)", file=sys.stderr)
 if token:
     with open(os.environ["BEARER_FILE"], "w") as fh:
         fh.write(f"Authorization: Bearer {token}\n")
 PY
 if [ "$BEARER_RC" -ne 0 ]; then
-    _leg_fail "B: resolving the bearer crashed (exit $BEARER_RC, see above) — cannot probe the auth-gated edge /health"
+    _leg_fail "B2: resolving the bearer crashed (exit $BEARER_RC, see above)"
 elif [ ! -s "$BEARER_FILE" ]; then
-    _leg_fail "B: no bearer — neither a mint_token (minted data token) nor a service_token credential is usable; cannot probe the auth-gated edge /health"
+    _leg_fail "B2: no bearer — neither a mint_token (minted data token) nor a service_token credential is usable"
 else
-    HEALTH_STATUS="$(curl -sS -m 20 -H @"$BEARER_FILE" -o /tmp/cloud-gate-health.$$ -w "%{http_code}" "$SERVICE_URL/health" || echo 000)"
-    HEALTH_BODY="$(cat /tmp/cloud-gate-health.$$ 2>/dev/null; rm -f /tmp/cloud-gate-health.$$)"
-    if [ "$HEALTH_STATUS" != "200" ]; then
-        _leg_fail "B: authenticated /health returned HTTP $HEALTH_STATUS (body: $HEALTH_BODY) — the edge contract (conexus [21082]) is 200 + verbatim engine {status, db} for bearers; a 401 here with a minted data token, while /v1 accepts the same bearer, means the edge's /health gate does not admit that credential class"
-    # Pipe-free (nexus-i66g4/wbeyi class): match the already-captured
-    # variable directly instead of `echo ... | grep -q ...` -- under this
-    # script's `set -o pipefail`, a still-writing echo closed early by
-    # grep risks its SIGPIPE getting promoted over grep's own (successful)
-    # exit status.
-    elif ! [[ "$HEALTH_BODY" =~ \"db\"[[:space:]]*:[[:space:]]*\"up\" ]]; then
-        _leg_fail "B: authenticated /health 200 but body lacks db=up (body: $HEALTH_BODY)"
+    V1_STATUS="$(curl -sS -m 20 -H @"$BEARER_FILE" -o /dev/null -w "%{http_code}" "$SERVICE_URL/v1/catalog/collections/list" || echo 000)"
+    if [ "$V1_STATUS" = "200" ]; then
+        echo "  ok [B2]: /v1 accepts the client's bearer (200)"
     else
-        echo "  ok: 200 + db=up (authenticated)"
+        _leg_fail "B2: /v1/catalog/collections/list returned HTTP $V1_STATUS with the client's bearer (pinned: 200) — every cloud client's reads and writes go through this"
     fi
 fi
 rm -f "$BEARER_FILE"
