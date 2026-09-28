@@ -12,9 +12,11 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 
 /**
@@ -88,6 +90,23 @@ public final class CombinedWriteService {
         this.tenantScope = tenantScope;
         this.catalogRepo = catalogRepo;
         this.docRouter   = docRouter;
+    }
+
+    /**
+     * Test-only interleaving seam (RDR-222 Phase 0, bead nexus-ulrjq), mirroring
+     * {@link PgVectorRepository#setAfterExistencePartitionHookForTests}: an optional
+     * callback invoked in {@link #writeManyCombined} immediately after Phase 2a's
+     * existence-partition transaction has committed (so {@code needEmbedIdx} is
+     * finalized) and BEFORE the embed call — the exact window a concurrent second
+     * writer can commit one of THIS call's originally-absent chashes, producing a
+     * raced embed once this call's own per-doc INSERT runs. Default {@code null}
+     * (no-op); never read or written by production code.
+     */
+    private volatile Runnable afterExistencePartitionHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the interleaving hook above. */
+    public void setAfterExistencePartitionHookForTests(Runnable hook) {
+        this.afterExistencePartitionHookForTests = hook;
     }
 
     /**
@@ -227,6 +246,16 @@ public final class CombinedWriteService {
         // deadlock against a DIFFERENT lock order (the superseded-chunk
         // sweep DELETE, orphan GC) is still possible, and this SELECT +
         // UPDATE transaction is idempotent, so re-running it is safe.
+        // RDR-222 Phase 0 (bead nexus-ulrjq): originalAbsentIdx is the STRICT SUBSET
+        // of needEmbedIdx that was ABSENT at this existence SELECT (stored == null),
+        // as opposed to present-but-content-divergent or the zero-row reroute below.
+        // Threaded onto each ResolvedChunk (originalAbsent) so
+        // CatalogRepository#upsertManifestChunkVectors's own RETURNING-based raced
+        // count can tell "this chash genuinely raced another writer" from "this
+        // chash's presence was already known to this call" — see
+        // PgVectorRepository.NeedEmbedResolution's javadoc for the identical
+        // distinction on the direct upsert-chunks path.
+        Set<Integer> originalAbsentIdx = new HashSet<>();
         List<Integer> needEmbedIdx = dedupChashes.isEmpty() ? new ArrayList<>()
             : DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: SHARED sweep gate first, like every manifest
@@ -239,10 +268,18 @@ public final class CombinedWriteService {
                 CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
                 Map<String, String> existingText =
                     selectExistingText(ctx, ch, tenant, collection, dedupChashes);
+                // RDR-222 Phase 0: reset per DeadlockRetry attempt (a retried attempt
+                // re-runs this whole transaction from scratch — see
+                // PgVectorRepository.upsertChunksInternal's identical racedThisWrite
+                // reset for the full rationale).
+                originalAbsentIdx.clear();
                 List<Integer> need = new ArrayList<>();
                 List<Integer> metadataOnly = new ArrayList<>();
                 for (int i = 0; i < dedupChashes.size(); i++) {
                     String stored = existingText.get(dedupChashes.get(i));
+                    if (stored == null) {
+                        originalAbsentIdx.add(i);
+                    }
                     if (forceReEmbed || stored == null || !stored.equals(dedupTexts.get(i))) {
                         need.add(i);
                     } else {
@@ -257,11 +294,26 @@ public final class CombinedWriteService {
                     // rerouted to need-embed, never silently dropped --
                     // the SAME concurrent-delete race guard
                     // PgVectorRepository's own caller already relies on.
+                    // NOT added to originalAbsentIdx: this chash WAS present
+                    // (with identical text) at the SELECT above, so it is the
+                    // zero-row-reroute class, deliberately excluded from the
+                    // raced-embed count exactly like the direct upsert path.
                     need.addAll(PgVectorRepository.batchUpdateMetadata(
                         ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly));
                 }
                 return need;
             }));
+
+        // Test-only interleaving seam (RDR-222 Phase 0) — see
+        // afterExistencePartitionHookForTests javadoc. Fires AFTER Phase 2a's
+        // existence-partition transaction has committed and BEFORE the embed call
+        // below, so a test can let a concurrent second writer commit one of THIS
+        // call's originally-absent chashes before this call's own per-doc INSERT
+        // runs. No-op (null) in production.
+        Runnable hook = afterExistencePartitionHookForTests;
+        if (hook != null) {
+            hook.run();
+        }
 
         List<String> textsToEmbed = new ArrayList<>(needEmbedIdx.size());
         for (int idx : needEmbedIdx) {
@@ -315,7 +367,8 @@ public final class CombinedWriteService {
                     "chunks[].metadata for chash '" + chash + "' is not JSON-serializable", e);
             }
             resolved.put(chash,
-                new CatalogRepository.ResolvedChunk(dedupTexts.get(idx), embeddings.get(k), metadataJson));
+                new CatalogRepository.ResolvedChunk(dedupTexts.get(idx), embeddings.get(k), metadataJson,
+                    originalAbsentIdx.contains(idx)));
         }
 
         // Phase 3: dispatch — every actual WRITE happens inside this call,

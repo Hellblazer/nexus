@@ -35,6 +35,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.jooq.binding.Vector;
 import dev.nexus.service.vectors.DimTables;
+import dev.nexus.service.vectors.RacedEmbedActivity;
 import org.jooq.Condition;
 import org.jooq.DSLContext;
 import org.jooq.DeleteConditionStep;
@@ -5139,8 +5140,15 @@ public final class CatalogRepository {
      *        PgVectorRepository}'s {@code toJson} convention — serialized
      *        once by the caller, not re-serialized per doc that references
      *        a shared chash).
+     * @param originalAbsent RDR-222 Phase 0 (bead nexus-ulrjq): {@code true} iff
+     *        {@code CombinedWriteService}'s existence-partition found this chash
+     *        ABSENT (not merely content-divergent, and not the zero-row-UPDATE
+     *        reroute) — the same original-absentee distinction {@code
+     *        PgVectorRepository.NeedEmbedResolution} makes on the direct
+     *        upsert-chunks path. Only {@code true} entries feed {@link
+     *        #upsertManifestChunkVectors}'s raced-embed count.
      */
-    public record ResolvedChunk(String text, float[] embedding, String metadataJson) {}
+    public record ResolvedChunk(String text, float[] embedding, String metadataJson, boolean originalAbsent) {}
 
     /**
      * nexus-kl2z6 increment 1 (design memo §0/§1.4): upsert THIS doc's chunk
@@ -5227,6 +5235,18 @@ public final class CatalogRepository {
         // per-doc transaction grain.
         Collections.sort(toWrite);
 
+        // RDR-222 Phase 0 (bead nexus-ulrjq): the chashes CombinedWriteService's own
+        // existence-partition found genuinely ABSENT (ResolvedChunk#originalAbsent) —
+        // the subset that feeds the raced-embed count below. See
+        // PgVectorRepository.NeedEmbedResolution's javadoc for why a content-divergent
+        // or zero-row-reroute chash is excluded.
+        Set<String> originalAbsentChashes = new HashSet<>();
+        for (String c : toWrite) {
+            if (resolved.get(c).originalAbsent()) {
+                originalAbsentChashes.add(c);
+            }
+        }
+
         var insert = ctx.insertInto(ch.table(),
                 ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
         for (String c : toWrite) {
@@ -5234,12 +5254,32 @@ public final class CatalogRepository {
             insert = insert.values(tenant, collection, c, rc.text(),
                     Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
         }
-        insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+        long raced = 0;
+        // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): same (xmax = 0) RETURNING idiom as
+        // PgVectorRepository.upsertChunksInternal's final INSERT — see that call
+        // site's comment for the RawSqlGateTest rationale.
+        var returned = insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
               .doUpdate()
               .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
               .set(ch.embedding(), DSL.excluded(ch.embedding()))
               .set(ch.metadata(),  DSL.excluded(ch.metadata()))
-              .execute();
+              .returningResult(ch.chash(), DSL.field(
+                  DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
+              .fetch();
+        for (var r : returned) {
+            if (!Boolean.TRUE.equals(r.value2()) && originalAbsentChashes.contains(r.value1())) {
+                raced++;
+            }
+        }
+        if (raced > 0) {
+            // RDR-222 Phase 0: another writer committed one of this combined write's
+            // originally-absent chashes between CombinedWriteService's existence
+            // partition and this per-doc INSERT — this write paid a duplicate embed
+            // for it.
+            log.info("event=upsert_embed_raced collection={} raced={} embedded={}",
+                    collection, raced, toWrite.size());
+            RacedEmbedActivity.record(raced);
+        }
         return toWrite.size();
     }
 

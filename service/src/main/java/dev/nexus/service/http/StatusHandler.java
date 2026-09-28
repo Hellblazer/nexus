@@ -6,6 +6,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedActivitySnapshot;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.RacedEmbedActivity;
 
 import java.io.IOException;
 import java.util.Map;
@@ -29,7 +30,18 @@ import java.util.function.Supplier;
  *    "sub_batches_total":64,"last_chunks_per_sec":7.7,
  *    "last_activity_age_ms":230,"queue_depth":0,"thread_width":4,
  *    "deadline_aborts_total":0,"admission_refusals_total":0},
- *  "embedder_activity":{"bge-base-en-v15-768":{...same shape...}}}</pre>
+ *  "embedder_activity":{"bge-base-en-v15-768":{...same shape...}},
+ *  "raced_embeds_total":0}</pre>
+ *
+ * <p>{@code raced_embeds_total} (RDR-222 Phase 0, bead nexus-ulrjq, ADDITIVE) is a
+ * process-wide, lifetime counter (see {@link RacedEmbedActivity}) of chashes a
+ * write's existence partition found ABSENT that another concurrent writer had
+ * already committed by the time this write's own INSERT ran — a duplicate embed
+ * (RDR-181's existence-check-then-embed window). Deliberately a TOP-LEVEL field,
+ * not folded into {@code local_embed_activity}/{@code embedder_activity}: unlike
+ * every field in those two shapes, it has no embedder dimension — it is a
+ * DB-write-layer count, identical across every embedder, so nesting it per
+ * embedder would misrepresent it as per-embedder data.
  *
  * <p>{@code deadline_aborts_total} (nexus-8hdg9 phases 3/4, ADDITIVE, in
  * every entry of both shapes) counts embed calls the embedder aborted at a
@@ -124,6 +136,10 @@ public final class StatusHandler implements HttpHandler {
             appendSnapshot(body, e.getValue());
         }
         body.append('}');
+
+        // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: process-wide lifetime
+        // counter, not per-embedder — see this class's own javadoc.
+        body.append(",\"raced_embeds_total\":").append(RacedEmbedActivity.total());
 
         body.append('}');
         HttpUtil.send(exchange, 200, body.toString());

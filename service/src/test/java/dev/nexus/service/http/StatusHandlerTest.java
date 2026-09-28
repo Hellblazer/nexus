@@ -173,6 +173,21 @@ class StatusHandlerTest {
     }
 
     @Test
+    void racedEmbedsTotal_topLevelFieldReflectsTheGlobalCounterDelta() throws Exception {
+        // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: raced_embeds_total is a
+        // process-wide counter (dev.nexus.service.vectors.RacedEmbedActivity), not
+        // per-embedder — asserted here as a DELTA (never an absolute value), since
+        // other test classes sharing this JVM/fork may also record against it.
+        start(new StatusHandler(null));
+        long before = get().get("raced_embeds_total").asLong();
+
+        dev.nexus.service.vectors.RacedEmbedActivity.record(3);
+
+        long after = get().get("raced_embeds_total").asLong();
+        assertThat(after - before).isEqualTo(3L);
+    }
+
+    @Test
     void nonGetMethodIsRejected() throws Exception {
         start(new StatusHandler(null));
         HttpResponse<String> resp = http.send(

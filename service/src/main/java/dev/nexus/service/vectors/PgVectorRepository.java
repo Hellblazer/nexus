@@ -90,6 +90,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Pattern;
 
 /**
@@ -684,15 +685,22 @@ public final class PgVectorRepository {
         // short transaction) is FULLY handled there and excluded from insertIdx —
         // re-inserting it would be redundant: its vector is untouched, which is the
         // whole point of the optimization.
-        List<Integer> insertIdx = null;
+        NeedEmbedResolution resolution = null;
         if (dedupProvided == null && !dedupIds.isEmpty() && !forceReEmbed) {
             // RDR-181 (bead nexus-f0r8p.3): forceReEmbed bypasses the existence
             // check entirely — the rare model-drift-within-collection recompute,
             // and the escape for the (0%-hit) first-index path so it never pays
             // for the existence SELECT with no offsetting benefit.
-            insertIdx = resolveNeedEmbedIdx(tenant, collection, dim, dedupIds, dedupDocs, dedupMetas,
+            resolution = resolveNeedEmbedIdx(tenant, collection, dim, dedupIds, dedupDocs, dedupMetas,
                     deleteKeys);
         }
+        List<Integer> insertIdx = resolution != null ? resolution.needEmbedIdx() : null;
+        // RDR-222 Phase 0 (bead nexus-ulrjq): the original-absentee subset feeds the
+        // raced-embed count below. No partition ran (passthrough/forceReEmbed/empty
+        // batch) or it failed fail-safe — either way there is no absentee/present
+        // distinction to measure, so raced-embed counting is simply skipped for this
+        // call (empty set), never guessed at.
+        Set<Integer> originalAbsentIdx = resolution != null ? resolution.originalAbsentIdx() : Set.of();
         if (insertIdx == null) {
             // Passthrough, forceReEmbed, an empty batch, or the existence-check
             // transaction itself failing (fail-safe: a SELECT/UPDATE error must never
@@ -791,6 +799,15 @@ public final class PgVectorRepository {
         // identity fallback), so javac sees more than one assignment statement and
         // refuses to treat it as effectively final even though exactly one runs.
         final List<Integer> finalInsertIdx = insertIdx;
+        // RDR-222 Phase 0 (bead nexus-ulrjq): the chashes (not indices — finalInsertIdx's
+        // index space is dedupIds', which the RETURNING rows below cannot be matched
+        // against positionally without assuming Postgres preserves multi-row VALUES
+        // order, an implementation detail this does not rely on) that were ORIGINAL
+        // absentees per resolveNeedEmbedIdx's partition — see NeedEmbedResolution.
+        final Set<String> finalOriginalAbsentChashes = new HashSet<>();
+        for (int idx : originalAbsentIdx) {
+            finalOriginalAbsentChashes.add(dedupIds.get(idx));
+        }
         // RDR-181 (bead nexus-f0r8p.2): when the existence-partition resolved every
         // chash via the have-vector metadata-only UPDATE (a pure re-index-with-no-
         // content-change batch), finalInsertIdx is empty and there is NOTHING left to
@@ -800,7 +817,14 @@ public final class PgVectorRepository {
         // ChashVectorConcurrencyTest), an unconditional extra checkout per call is
         // real, avoidable contention.
         if (!finalInsertIdx.isEmpty()) {
+            // RDR-222 Phase 0: read/reset OUTSIDE the retry lambda so a value survives
+            // DeadlockRetry.run's return, but explicitly zeroed at the TOP of each
+            // attempt below — a retried attempt re-runs the INSERT from scratch (the
+            // prior attempt's transaction is already rolled back by Postgres), so its
+            // raced count must never accumulate onto a discarded attempt's count.
+            final AtomicLong racedThisWrite = new AtomicLong();
             DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
+                racedThisWrite.set(0);
                 // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
                 // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
                 // round trips. The old per-row loop held this transaction's connection
@@ -858,9 +882,34 @@ public final class PgVectorRepository {
                       // from this statement's column list); this only needs stating for
                       // the conflict branch.
                       .set(ch.retention(), "full")
-                      .execute();
+                      // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): (xmax = 0) is the
+                      // standard Postgres RETURNING idiom for "this row was genuinely
+                      // INSERTed, not reached via the ON CONFLICT DO UPDATE branch" —
+                      // same DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)
+                      // form CatalogRepository#upsertLink already uses (RawSqlGateTest:
+                      // a typed dynamic-column reference, not a raw SQL string, so it
+                      // needs no SANCTIONED_STATEMENTS entry).
+                      .returningResult(ch.chash(), DSL.field(
+                          DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
+                      .fetch()
+                      .forEach(r -> {
+                          if (!Boolean.TRUE.equals(r.value2())
+                                  && finalOriginalAbsentChashes.contains(r.value1())) {
+                              racedThisWrite.incrementAndGet();
+                          }
+                      });
                 return null;
             }));
+            long raced = racedThisWrite.get();
+            if (raced > 0) {
+                // RDR-222 Phase 0: another writer committed one of THIS request's
+                // originally-absent chashes between the existence partition and this
+                // INSERT — this request paid a duplicate embed for it (RDR-181's
+                // existence-check-then-embed window, M-b).
+                log.info("event=upsert_embed_raced collection={} raced={} embedded={}",
+                        collection, raced, finalInsertIdx.size());
+                RacedEmbedActivity.record(raced);
+            }
         }
         log.debug("event=upsert_chunks_done collection={} table={} count={} embedded={} metadata_only={}",
                 collection, table, dedupIds.size(), insertIdx.size(), embedSkipped);
@@ -3911,6 +3960,21 @@ FROM scope s
     public record ExistencePartition(List<Integer> needEmbedIdx, List<Integer> haveVectorIdx) {}
 
     /**
+     * Result of {@link #resolveNeedEmbedIdx} (RDR-222 Phase 0, bead nexus-ulrjq):
+     * {@code needEmbedIdx} is the full finalized set this call will embed and write
+     * (original absentees, content-divergent have-vector chashes, and the zero-row
+     * have-vector reroute); {@code originalAbsentIdx} is the STRICT SUBSET that was
+     * absent at the existence SELECT (i.e. {@code partition.needEmbedIdx()} before
+     * the content-divergent/zero-row additions below mutate it). Only that subset
+     * feeds the raced-embed count on the final INSERT's {@code RETURNING} — a
+     * content-divergent or zero-row-reroute chash is EXPECTED to hit ON CONFLICT
+     * (the caller's own prior text/UPDATE already told it the row exists or existed
+     * moments ago), so counting it as "raced" would conflate an ordinary re-write
+     * with a genuine concurrent-writer collision.
+     */
+    private record NeedEmbedResolution(List<Integer> needEmbedIdx, Set<Integer> originalAbsentIdx) {}
+
+    /**
      * Pure partition of a chash batch into need-embed vs have-vector indices
      * (RDR-181), given the set of chashes {@link #selectExistingChashesOrEmpty}
      * found present. No DB dependency — deliberately kept separate from the
@@ -3982,13 +4046,14 @@ FROM scope s
      *
      * @return the finalized need-embed indices (original absentees, any have-vector
      *         chash whose stored text differs from the incoming text, plus any
-     *         have-vector chash whose metadata-only UPDATE affected 0 rows), or
-     *         {@code null} if the existence-check transaction itself failed —
-     *         fail-safe: the caller must treat {@code null} exactly like "skip the
-     *         optimization, embed everything" (today's behavior), never as "nothing
-     *         needs embedding"
+     *         have-vector chash whose metadata-only UPDATE affected 0 rows), paired
+     *         with the ORIGINAL-absentee subset alone (RDR-222 Phase 0, bead
+     *         nexus-ulrjq — see {@link NeedEmbedResolution}), or {@code null} if the
+     *         existence-check transaction itself failed — fail-safe: the caller must
+     *         treat {@code null} exactly like "skip the optimization, embed
+     *         everything" (today's behavior), never as "nothing needs embedding"
      */
-    private List<Integer> resolveNeedEmbedIdx(String tenant, String collection, int dim,
+    private NeedEmbedResolution resolveNeedEmbedIdx(String tenant, String collection, int dim,
                                                List<String> dedupIds,
                                                List<String> dedupDocs,
                                                List<Map<String, Object>> dedupMetas,
@@ -4023,6 +4088,11 @@ FROM scope s
                 // the reroute step ("if 0 rows, move that chash into need-embed") is a
                 // mutation partition.needEmbedIdx() cannot express directly.
                 List<Integer> needEmbedIdx = new ArrayList<>(partition.needEmbedIdx());
+                // RDR-222 Phase 0 (bead nexus-ulrjq): snapshot the ORIGINAL absentee
+                // set before the content-divergent/zero-row reroutes below mutate
+                // needEmbedIdx further — see NeedEmbedResolution's javadoc for why
+                // only this subset counts toward the raced-embed counter.
+                Set<Integer> originalAbsentIdx = new HashSet<>(partition.needEmbedIdx());
                 // nexus-6yps0: split have-vector into "content-divergent" (routed
                 // straight to need-embed below, exactly as before — no UPDATE issued;
                 // the insert path rewrites chunk_text/embedding/metadata together) vs
@@ -4056,7 +4126,7 @@ FROM scope s
                 needEmbedIdx.addAll(
                     batchUpdateMetadata(ctx, ch, collection, dedupIds, dedupMetas, unchangedIdx,
                             deleteKeys == null ? List.of() : deleteKeys));
-                return needEmbedIdx;
+                return new NeedEmbedResolution(needEmbedIdx, originalAbsentIdx);
             });
         } catch (RuntimeException e) {
             log.warn("event=existence_partition_failed collection={} count={} fail_safe=embed_all err={}",
