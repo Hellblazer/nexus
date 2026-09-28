@@ -198,9 +198,13 @@ print(f"  ok: release_version={body['release_version']} "
       f"nx_answer_steps_supported={steps_supported}")
 PY
 
-# ── Leg B: the edge auth contract the client relies on (Sam, 2026-09-28) ──
-#    B1: an UNAUTHENTICATED /health is refused by the edge (measured 403).
-#    B2: the minted data token the client sends is accepted on /v1 (200).
+# ── Leg B: the edge auth contract (Sam, 2026-09-28) ──────────────────────
+#    B1: an UNAUTHENTICATED /health is refused by the edge (measured 403). An
+#        access-control pin on the edge; no client calls cloud /health today.
+#    B2: the minted data token the client sends is accepted on /v1 (200). This
+#        is the dependency every cloud client has. It curls the route directly
+#        rather than leaning on leg D, whose list_collections degrades an
+#        error to an empty list and hits a different route.
 #    The authenticated-/health probe this leg used to make is retired: its
 #    consumer (guided_upgrade) was deleted at RDR-155 P4b, the static
 #    service_token it sent was revoked 2026-09-28, and the edge's /health gate
