@@ -111,6 +111,20 @@ class CatalogRenameIdentityCascadeTest {
     }
 
     @Test
+    void clientSuppliedAttributesAlsoApplyWhenRevivingATombstone() throws Exception {
+        // B->A onto A's own rename tombstone takes the upsert's DO UPDATE arm, not the insert.
+        seedCollection("knowledge__rv-a", "knowledge", "rv-a");
+        seedDocument("knowledge__rv-a", "rv-doc", "Revive");
+        assertThat(rename("knowledge__rv-a", "knowledge__rv-b",
+            Map.of("content_type", "knowledge", "owner_id", "rv-b")).statusCode()).isEqualTo(200);
+        assertThat(rename("knowledge__rv-b", "knowledge__rv-a",
+            Map.of("content_type", "knowledge", "owner_id", "rv-a-revived")).statusCode()).isEqualTo(200);
+        var row = collectionRow("knowledge__rv-a");
+        assertThat(row.get("superseded_by")).isEqualTo("");
+        assertThat(row.get("owner_id")).isEqualTo("rv-a-revived");
+    }
+
+    @Test
     void absentAttributesKeepTheSources() throws Exception {
         // A client predating the field sends neither; the row copies the source's, as before.
         seedCollection("hren__keep-src", "knowledge", "kept-owner");
@@ -199,7 +213,7 @@ class CatalogRenameIdentityCascadeTest {
 
         var resp = rename(a, b, Map.of());
         assertThat(resp.statusCode()).isEqualTo(409);
-        assertThat(resp.body()).contains("chroma://" + b + "/Dup");
+        assertThat(resp.body()).contains("chroma://" + b + "/Dup").contains("col-squat");
 
         assertThat(docSourceUri("col-doc")).isEqualTo("chroma://" + a + "/Dup");
         assertThat(queryString(dsl -> dsl.select(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION).from(CATALOG_DOCUMENTS)
@@ -207,6 +221,27 @@ class CatalogRenameIdentityCascadeTest {
             .isEqualTo(a);
         assertThat(collectionRow(a).get("superseded_by")).isEqualTo("");
         assertThat(collectionRow(b)).isNull();
+    }
+
+    @Test
+    void aStaleUriOnAForeignDocumentIsNotThisRenamesToTouch() throws Exception {
+        // Critique of a11876053: a document in a THIRD collection still carrying a stale
+        // chroma://<name>/ URI (a pre-fix rename, then the name reused) must be neither
+        // rewritten nor reported as a collision by a rename of the new <name>.
+        String reused = "knowledge__reuse-x";
+        seedCollection(reused, "knowledge", "reuse-x");
+        seedCollection("knowledge__third", "knowledge", "third");
+        seedDocument(reused, "member-doc", "Member");
+        setSourceUri("member-doc", "chroma://" + reused + "/Member");
+        seedDocument("knowledge__third", "orphan-doc", "Orphan");
+        setSourceUri("orphan-doc", "chroma://" + reused + "/Orphan");
+        // Its rewritten form collides with a live document; a text-only check would 409.
+        seedDocument("knowledge__third", "squat-doc", "Squat");
+        setSourceUri("squat-doc", "chroma://knowledge__reuse-y/Orphan");
+
+        assertThat(rename(reused, "knowledge__reuse-y", Map.of()).statusCode()).isEqualTo(200);
+        assertThat(docSourceUri("member-doc")).isEqualTo("chroma://knowledge__reuse-y/Member");
+        assertThat(docSourceUri("orphan-doc")).isEqualTo("chroma://" + reused + "/Orphan");
     }
 
     @Test

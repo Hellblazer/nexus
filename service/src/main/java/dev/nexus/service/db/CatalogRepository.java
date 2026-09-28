@@ -8372,17 +8372,22 @@ public final class CatalogRepository {
             String newUriPrefix = "chroma://" + newName + "/";
             var moving = CATALOG_DOCUMENTS.as("moving");
             var holder = CATALOG_DOCUMENTS.as("holder");
-            String collidingUri = ctx.select(holder.SOURCE_URI)
+            // Only X's OWN documents move (physical_collection = X). A stale chroma://X/ URI on
+            // a document living in some other collection (left by a rename before this fix,
+            // then X's name reused) is not this rename's to touch (critique of a11876053).
+            var collision = ctx.select(holder.SOURCE_URI, holder.TUMBLER, holder.PHYSICAL_COLLECTION)
                 .from(moving).join(holder).on(holder.SOURCE_URI.eq(
                     DSL.val(newUriPrefix).concat(DSL.substring(moving.SOURCE_URI, oldUriPrefix.length() + 1))))
-                .where(uriStartsWith(moving.SOURCE_URI, oldUriPrefix))
+                .where(moving.PHYSICAL_COLLECTION.eq(oldName))
+                .and(uriStartsWith(moving.SOURCE_URI, oldUriPrefix))
                 .and(holder.DELETED_AT.isNull())
                 .limit(1)
-                .fetchOne(holder.SOURCE_URI);
-            if (collidingUri != null) {
+                .fetchOne();
+            if (collision != null) {
                 throw new SourceUriCollision(
                     "renaming " + oldName + " to " + newName + " would rewrite a document's source_uri to "
-                    + collidingUri + ", which a live document already holds. Resolve that document first.");
+                    + collision.value1() + ", which live document " + collision.value2() + " in "
+                    + collision.value3() + " already holds. Delete or re-title that document, then rename again.");
             }
             // nexus-sis0m.3: Y's content_type and owner_id are the client's, derived from Y's
             // name (see the 6-arg renameCollection); absent, they are X's. Copying X's
@@ -8547,19 +8552,24 @@ public final class CatalogRepository {
             // by CatalogRenameIdentityCascadeTest against information_schema, not by this
             // list). starts_with, not LIKE: collection names contain '_', a LIKE wildcard.
             // Tombstoned documents are rewritten too, for the reason the COPY branch's
-            // physical_collection repoint gives (nexus-mqd6t).
+            // physical_collection repoint gives (nexus-mqd6t). Scoped to rows the re-home loop
+            // above just moved to Y (the target held nothing before, per the emptiness check),
+            // so a foreign row carrying a stale chroma://X/ URI is left alone.
             counts.put("catalog_documents_source_uri", ctx.update(CATALOG_DOCUMENTS)
                 .set(CATALOG_DOCUMENTS.SOURCE_URI, DSL.val(newUriPrefix)
                     .concat(DSL.substring(CATALOG_DOCUMENTS.SOURCE_URI, oldUriPrefix.length() + 1)))
-                .where(uriStartsWith(CATALOG_DOCUMENTS.SOURCE_URI, oldUriPrefix)).execute());
+                .where(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION.eq(newName))
+                .and(uriStartsWith(CATALOG_DOCUMENTS.SOURCE_URI, oldUriPrefix)).execute());
             counts.put("document_aspects_source_uri", ctx.update(DOCUMENT_ASPECTS)
                 .set(DOCUMENT_ASPECTS.SOURCE_URI, DSL.val(newUriPrefix)
                     .concat(DSL.substring(DOCUMENT_ASPECTS.SOURCE_URI, oldUriPrefix.length() + 1)))
-                .where(uriStartsWith(DOCUMENT_ASPECTS.SOURCE_URI, oldUriPrefix)).execute());
+                .where(DOCUMENT_ASPECTS.COLLECTION.eq(newName))
+                .and(uriStartsWith(DOCUMENT_ASPECTS.SOURCE_URI, oldUriPrefix)).execute());
             counts.put("document_highlights_source_uri", ctx.update(DOCUMENT_HIGHLIGHTS)
                 .set(DOCUMENT_HIGHLIGHTS.SOURCE_URI, DSL.val(newUriPrefix)
                     .concat(DSL.substring(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldUriPrefix.length() + 1)))
-                .where(uriStartsWith(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldUriPrefix)).execute());
+                .where(DOCUMENT_HIGHLIGHTS.COLLECTION.eq(newName))
+                .and(uriStartsWith(DOCUMENT_HIGHLIGHTS.SOURCE_URI, oldUriPrefix)).execute());
 
             counts.put("catalog_collections_superseded",
                 ctx.update(CATALOG_COLLECTIONS)
