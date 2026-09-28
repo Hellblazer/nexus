@@ -2387,6 +2387,11 @@ def is_live_collection_row(row: Any) -> bool:
     treated the same way."""
     if not isinstance(row, dict):
         return True
+    # nexus-4w07i: a rename's old name keeps lifecycle 'live' as a tombstone
+    # with superseded_by naming its successor; it is not a routing target
+    # even when it holds chunks. An engine that predates the key omits it.
+    if row.get("superseded_by"):
+        return False
     return row.get("lifecycle_state", "live") == "live"
 
 
@@ -3902,7 +3907,9 @@ class HttpVectorClient:
     #: (``mcp_infra.get_collection_row``) reads exactly these fields off
     #: the SAME round trip this method already makes. Omitted from a row
     #: (not present as a key) when no catalog row backs that collection.
-    _STATS_CATALOG_ATTR_KEYS = ("content_type", "owner_id", "embedding_model", "lifecycle_state")
+    _STATS_CATALOG_ATTR_KEYS = (
+        "content_type", "owner_id", "embedding_model", "lifecycle_state", "superseded_by",
+    )
 
     def list_collections(
         self, lifecycle_state: str | None = None, *, strict: bool = False,
