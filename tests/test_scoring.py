@@ -546,6 +546,15 @@ def test_no_circular_imports():
     finally:
         sys.modules.clear()
         sys.modules.update(saved)
+        # The re-imports above bound fresh submodules as attributes on the
+        # parent packages, which sys.modules.update does not undo. Left split,
+        # monkeypatch.setattr("nexus.x.attr") patches the package attribute
+        # while `from nexus.x import attr` reads sys.modules, so later tests'
+        # patches silently miss (test_sis0m4_cli_polish on CI shard 4).
+        for name, mod in saved.items():
+            parent_name, _, child = name.rpartition(".")
+            if parent_name.startswith("nexus") and parent_name in saved:
+                setattr(saved[parent_name], child, mod)
 
 
 # ── formatter spot-checks ────────────────────────────────────────────────────
