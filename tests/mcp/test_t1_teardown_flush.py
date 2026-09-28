@@ -135,3 +135,34 @@ def test_a_hanging_store_lookup_is_bounded_too(owned_session, monkeypatch) -> No
         release.set()
     assert time.monotonic() - started < 5
     assert order == ["lease_cleared", "token_closed"], order
+
+
+def test_a_hanging_token_revoke_is_bounded_too(owned_session, monkeypatch) -> None:
+    """The revoke that follows the flush waited up to 30 s plus a 12 s rebind
+    retry in the same SIGTERM chain (critique of cf234888a)."""
+    import threading  # noqa: PLC0415 — test-local import
+    import time  # noqa: PLC0415 — test-local import
+
+    release = threading.Event()
+
+    class _Hanging:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def close_session(self, sid):
+            release.wait(30)
+
+    monkeypatch.setattr("nexus.db.t2.http_token_store.HttpTokenStore", _Hanging)
+    monkeypatch.setattr(core, "_TEARDOWN_FLUSH_TIMEOUT_S", 0.3)
+    started = time.monotonic()
+    try:
+        core._t1_session_shutdown()
+    finally:
+        release.set()
+    assert time.monotonic() - started < 5

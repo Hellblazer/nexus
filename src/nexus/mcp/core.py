@@ -1927,17 +1927,39 @@ def _t1_session_shutdown() -> None:
         clear_t1_session_lease(session_id, nexus_config_dir())
     except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort cleanup, must not crash teardown
         _log.warning("t1_session_lease_clear_failed", session_id=session_id, error=str(_exc))
-    try:
-        from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        with HttpTokenStore(prefer_data_token=True) as _ts:  # nexus-maf9l
-            _ts.close_session(session_id)
+    # The revoke is bounded the same way as the flush: HttpTokenStore's client
+    # waits up to 30 s plus a 12 s rebind retry, and this runs in the SIGTERM
+    # handler's synchronous chain (critique of cf234888a). An abandoned revoke
+    # leaves the token to expire on its own TTL.
+    token_outcome: dict[str, str] = {}
+
+    def _revoke() -> None:
+        try:
+            from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            with HttpTokenStore(prefer_data_token=True) as _ts:  # nexus-maf9l
+                _ts.close_session(session_id)
+            token_outcome["ok"] = ""
+        except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
+            token_outcome["error"] = str(_exc)
+
+    revoker = threading.Thread(target=_revoke, name="t1-token-revoke", daemon=True)
+    revoker.start()
+    revoker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
+    if "ok" in token_outcome:
         _log.info("t1_session_token_closed", session_id=session_id)
-    except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
-        _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
+    elif "error" in token_outcome:
+        _log.warning("t1_session_token_close_failed", session_id=session_id, error=token_outcome["error"])
+    else:
+        _log.warning(
+            "t1_session_token_close_incomplete", session_id=session_id,
+            timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
+        )
 
 
-#: Upper bound on the teardown flush (nexus-mgu1k), well inside the few
-#: seconds a harness gives a server between SIGTERM and SIGKILL.
+#: Upper bound on each networked teardown step, the flush and the token
+#: revoke (nexus-mgu1k). Chosen, not measured: no harness SIGTERM-to-SIGKILL
+#: grace is documented, so the worst case for the whole teardown is two of
+#: these, not a figure checked against a real grace period.
 _TEARDOWN_FLUSH_TIMEOUT_S: float = 5.0
 
 
