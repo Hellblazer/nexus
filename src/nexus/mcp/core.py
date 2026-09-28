@@ -2548,8 +2548,7 @@ def _search_render(
         rerank_note: str | None = None
         cached = _page_cache_get(cache_key, need)
         if cached is not None:
-            results, diag = cached
-            rerank_note = _page_cache_note(cache_key)
+            results, diag, rerank_note = cached
         else:
             results = None
         if results is None:
@@ -2617,6 +2616,21 @@ def _search_render(
                 # search_cross_corpus produced.
                 _by_id = {r.id: r for r in results}
                 results = [_by_id[i] for i in _cluster_order if i in _by_id]
+                if lexical_rerank:
+                    # The restore above would put a lexical row back in its
+                    # distance position (review finding on a463fa4ce). Keep
+                    # clusters contiguous, but order the clusters by their
+                    # best rerank score and each cluster's rows by score,
+                    # scored rows first.
+                    def _score(r) -> float:
+                        s = r.metadata.get("rerank_score")
+                        return float(s) if s is not None else float("-inf")
+
+                    groups: dict[str, list] = {}
+                    for r in results:
+                        groups.setdefault(r.metadata.get("_cluster_label", ""), []).append(r)
+                    ordered = sorted(groups.values(), key=lambda g: max(_score(r) for r in g), reverse=True)
+                    results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
             # Non-clustered results are now ranked by hybrid_score
             # (apply_ranking_boosts' own sort) rather than raw distance.
             _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
@@ -3004,7 +3018,7 @@ _page_cache_lock = threading.Lock()
 _page_cache: dict[str, Any] = {}
 
 
-def _page_cache_get(key: tuple, need: int) -> tuple[list, list] | None:
+def _page_cache_get(key: tuple, need: int) -> tuple[list, list, str | None] | None:
     """``(results, diagnostics)`` when the entry matches *key*, is TTL-fresh,
     and its fetch covered the needed window (or exhausted the corpus).
 
@@ -3021,7 +3035,9 @@ def _page_cache_get(key: tuple, need: int) -> tuple[list, list] | None:
         fetched = _page_cache.get("fetch_n", 0)
         exhausted = len(results) < fetched   # corpus smaller than the ask
         if fetched >= need or exhausted:
-            return results, _page_cache.get("diag") or []
+            # The degrade note is read under the same lock as the entry it
+            # belongs to (a separate read could see a newer entry's).
+            return results, _page_cache.get("diag") or [], _page_cache.get("note")
         return None
 
 
@@ -3034,13 +3050,6 @@ def _page_cache_put(
             "key": key, "results": results, "fetch_n": fetch_n,
             "diag": diag, "note": note, "at": time.monotonic(),
         })
-
-
-def _page_cache_note(key: tuple) -> str | None:
-    """The degrade note stored with *key*'s entry, so a cache-hit render
-    (the ``search`` wrapper renders twice per call) carries it too."""
-    with _page_cache_lock:
-        return _page_cache.get("note") if _page_cache.get("key") == key else None
 
 
 def _page_cache_invalidate() -> None:
@@ -4095,7 +4104,8 @@ def query(
             "Empty (default) means every knowledge__* collection when no catalog "
             "param is set; with one (author, content_type, follow_links, "
             "subtree), the content_type's own corpus when it names one "
-            "(code, docs, rdr, knowledge), otherwise every corpus, since the "
+            "(code, docs, rdr, knowledge) and follow_links is unset, otherwise "
+            "every corpus, since the "
             "catalog filter does the narrowing. An explicit corpus always applies."
         ),
     )] = "",
@@ -4137,7 +4147,7 @@ def query(
     Constraints:
     - With no catalog param, `corpus` defaults to "knowledge" only, not
       code/docs; with one, it defaults to the content_type's own corpus
-      when that names one, else every corpus.
+      when that names one and `follow_links` is unset, else every corpus.
     - Every catalog param requires an initialized catalog plus an
       HttpVectorClient-backed T3 (every local and cloud install since
       RDR-155 P4b); it errors rather than falling back without one.
@@ -4175,9 +4185,12 @@ def query(
         if not corpus.strip():
             if not has_catalog_params:
                 corpus = "knowledge"
-            elif content_type in ("code", "docs", "rdr", "knowledge"):
+            elif content_type in ("code", "docs", "rdr", "knowledge") and not follow_links:
                 # A content type that names a corpus narrows to it: the same
                 # rows, without querying every other corpus's collections.
+                # Not with follow_links: the hop's targets can live in any
+                # corpus (code cites an RDR), and content_type filters only
+                # the seeds.
                 corpus = content_type
             else:
                 corpus = "all"

@@ -87,3 +87,33 @@ def test_a_corpus_named_content_type_narrows_the_default_to_that_corpus(t3) -> N
     collections. content_type="rdr" names its corpus; query only that."""
     core.query("q", content_type="rdr", structured=True)
     assert t3.meta_calls == [[RDR_COL]]
+
+
+def test_follow_links_keeps_every_corpus_even_with_a_corpus_named_content_type(t3) -> None:
+    """Review finding on a463fa4ce: content_type filters the graph hop's
+    SEEDS; its targets can live in any corpus (code cites an RDR). Narrowing
+    the default corpus to content_type there drops them silently."""
+    seen: list[list[str]] = []
+
+    def search_graph_hop(query, seeds, collection_names, **kw):
+        seen.append(list(collection_names))
+        return []
+
+    t3.search_graph_hop = search_graph_hop
+
+    class _SeedCatalog:
+        def get_owner_by_prefix(self, prefix):
+            return {"tumbler_prefix": prefix}
+
+        def by_content_type(self, content_type):
+            from types import SimpleNamespace
+            return [SimpleNamespace(tumbler="1.1.7")]
+
+    import nexus.mcp.core as _core
+    _core_get = _core._get_catalog
+    try:
+        _core._get_catalog = lambda: _SeedCatalog()
+        core.query("q", content_type="code", follow_links="cites", structured=True)
+    finally:
+        _core._get_catalog = _core_get
+    assert RDR_COL in {c for call in seen for c in call}, seen

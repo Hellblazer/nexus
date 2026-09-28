@@ -2850,3 +2850,28 @@ def test_a_non_lexical_search_does_not_ask_for_the_rerank():
          patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
         search(query="zdzm5 plain probe", corpus="code__test", structured=True)
     assert seen["rerank"] is False
+
+
+def test_semantic_clustering_keeps_the_lexical_rerank_order():
+    """Review finding on a463fa4ce: cluster_by="semantic" restored the
+    pre-rerank cluster order after the rerank, putting a lexical row back
+    at its distance position. Clusters stay contiguous; the rerank orders
+    clusters and rows within them."""
+    t3 = _mock_t3([{"name": "code__test", "count": 1}])
+    t3.supports_server_rerank = True
+
+    def _cross_corpus(*a, **kw):
+        return [
+            SearchResult(id="near-a", content="x", distance=0.1, collection="code__test",
+                         metadata={"_cluster_label": "A", "rerank_score": 0.2}),
+            SearchResult(id="near-a2", content="x", distance=0.15, collection="code__test",
+                         metadata={"_cluster_label": "A", "rerank_score": 0.1}),
+            SearchResult(id="lexical-b", content="x", distance=0.9, collection="code__test",
+                         metadata={"_cluster_label": "B", "rerank_score": 0.95}),
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="zdzm5 cluster probe", corpus="code__test",
+                        lexical=True, cluster_by="semantic", structured=True)
+    assert result["ids"] == ["lexical-b", "near-a", "near-a2"]
