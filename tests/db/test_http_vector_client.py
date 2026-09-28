@@ -2233,10 +2233,10 @@ class TestUnregisteredCollectionMessage:
     collection does not exist and how to check the name, and keeps the
     "not registered" words the write-retry detector keys on."""
 
-    _BODY = (b'{"error":"collection \'knowledge__nope__voyage-context-3__v1\' is not '
+    _BODY = (b'{"error":"collection \'knowledge__nope__model-ctx__v1\' is not '
              b'registered for tenant \'default\' \u2014 register it first via POST '
              b'/v1/catalog/collections/upsert","tenant":"default",'
-             b'"collection":"knowledge__nope__voyage-context-3__v1"}')
+             b'"collection":"knowledge__nope__model-ctx__v1"}')
 
     def _raise(self, monkeypatch, code=422, body=None):
         import io
@@ -2256,7 +2256,7 @@ class TestUnregisteredCollectionMessage:
             hv._post("/v1/vectors/get", {}) if verb == "post" else hv._get("/v1/vectors/x")
         text = str(exc.value)
         assert exc.value.code == 422
-        assert "'knowledge__nope__voyage-context-3__v1' is not registered" in text
+        assert "'knowledge__nope__model-ctx__v1' is not registered" in text
         assert "does not exist here" in text and "nx collection list" in text
         assert "/v1/catalog/collections/upsert" not in text
 
