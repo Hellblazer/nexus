@@ -549,3 +549,16 @@ def test_a_repo_relative_display_path_falls_back_to_the_absolute_source_path(tmp
     r = SearchResult(id="r1", content="the line", distance=0.1, collection="docs__x",
                      metadata={"_display_path": "docs/architecture.md", "source_path": str(doc)})
     assert format_vimgrep([r])[0] == "docs/architecture.md:5:0:the line"
+
+
+def test_a_printed_file_that_opens_but_drifted_never_borrows_a_line_from_another_file(tmp_path) -> None:
+    """Critique of b3a2f9fd1: when the printed file opens but no longer holds
+    the line, the answer is line 1, not a line number read from the chunk's
+    source_path, which after a catalog rename names a different document."""
+    shown = tmp_path / "renamed.md"
+    shown.write_text("edited since indexing\n")
+    other = tmp_path / "old-name.md"
+    other.write_text("a\nb\nthe line\n")
+    r = SearchResult(id="r1", content="the line", distance=0.1, collection="docs__x",
+                     metadata={"_display_path": str(shown), "source_path": str(other)})
+    assert format_vimgrep([r])[0] == f"{shown}:1:0:the line"

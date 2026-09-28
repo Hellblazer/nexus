@@ -331,8 +331,11 @@ def _file_line_no(
     # The printed path first. A catalog _display_path is often REPO-RELATIVE
     # and only opens from the repo root (review of d41e47c1f), so the chunk's
     # own source_path / file_path, which the indexer writes absolute, are
-    # tried next. Either way the text itself must match, so a stale copy
-    # elsewhere cannot answer for the printed file unless it holds the line.
+    # tried next, but only while nothing has opened: the first candidate
+    # that opens IS the file, and a line missing from it has drifted, so
+    # the answer is line 1 rather than a line read from another file (a
+    # catalog rename leaves source_path naming a different document;
+    # critique of b3a2f9fd1).
     candidates = list(dict.fromkeys(
         p for p in (shown, r.metadata.get("source_path"), r.metadata.get("file_path")) if p
     ))
@@ -345,11 +348,11 @@ def _file_line_no(
             except OSError:
                 file_lines[path] = None
         lines = file_lines[path]
-        if lines is not None and wanted:
-            try:
-                return lines.index(wanted) + 1
-            except ValueError:
-                pass
+        if lines is None:
+            continue
+        if wanted and wanted in lines:
+            return lines.index(wanted) + 1
+        return 1
     return 1
 
 
