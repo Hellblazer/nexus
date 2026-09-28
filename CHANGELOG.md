@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx store import` no longer aborts on a collection whose name's owner segment is not a tumbler** (nexus-wbfpw.33). 7.64.0 worked out the owner of an import-registered document by parsing the collection name's owner segment, so `code__arcaneum-2ad2825c__voyage-code-3__v1` failed with "cannot resolve an owner tumbler", and so did a name whose model segment does not parse. The owner now comes from the catalog: the collection row's owner when it is a registered owner, otherwise the owner of a live document already in the collection, otherwise the knowledge curator. Re-running an import that failed this way is safe.
+
 ## [7.64.0] - 2026-09-28
 
 Pairs with engine-service-v0.1.137. That engine's reads show only chunks with a live owning document (RDR-192 Step 5, nexus-wbfpw.10), which older clients do not expect, so it deploys in step with this release rather than before it: conexus has it armed and flips it once this client is published, the live(c) census has been reviewed, and the gate corpus has been re-seeded through an owner-registering path. engine-service-v0.1.135 and v0.1.136 were tagged on the way and never deploy.
