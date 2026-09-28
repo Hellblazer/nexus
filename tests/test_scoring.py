@@ -951,15 +951,25 @@ class TestTopicBoost:
             apply_topic_boost,
         )
 
+        # nexus-2yshe: the credit is a fraction of the window's spread.
         r1 = self._make_result(doc_id="doc-a", distance=0.5)
-        r2 = self._make_result(doc_id="doc-b", distance=0.5)
+        r2 = self._make_result(doc_id="doc-b", distance=0.3)
 
         assignments = {"doc-a": 1, "doc-b": 1}
         apply_topic_boost([r1, r2], assignments)
 
-        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST, abs=0.001)
-        assert r2.topic_boost == pytest.approx(_TOPIC_SAME_BOOST, abs=0.001)
-        assert (r1.distance, r2.distance) == (0.5, 0.5)
+        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST * 0.2, abs=1e-9)
+        assert r2.topic_boost == pytest.approx(_TOPIC_SAME_BOOST * 0.2, abs=1e-9)
+        assert (r1.distance, r2.distance) == (0.5, 0.3)
+
+    def test_equal_distances_get_no_credit(self) -> None:
+        """nexus-2yshe: with no spread there is no order to break ties in."""
+        from nexus.scoring import apply_topic_boost
+
+        r1 = self._make_result(doc_id="doc-a", distance=0.5)
+        r2 = self._make_result(doc_id="doc-b", distance=0.5)
+        apply_topic_boost([r1, r2], {"doc-a": 1, "doc-b": 1})
+        assert (r1.topic_boost, r2.topic_boost) == (0.0, 0.0)
 
     def test_combined_same_and_linked_boost(self) -> None:
         """Results get both same-topic and linked-topic distance reduction."""
@@ -971,7 +981,7 @@ class TestTopicBoost:
 
         r1 = self._make_result(doc_id="doc-a", distance=0.5)
         r2 = self._make_result(doc_id="doc-b", distance=0.5)
-        r3 = self._make_result(doc_id="doc-c", distance=0.5)
+        r3 = self._make_result(doc_id="doc-c", distance=0.3)  # spread 0.2
 
         # doc-a and doc-b in topic 1, doc-c in topic 2
         assignments = {"doc-a": 1, "doc-b": 1, "doc-c": 2}
@@ -981,11 +991,11 @@ class TestTopicBoost:
 
         # r1 gets same-topic (with r2) + linked-topic (with r3)
         assert r1.topic_boost == pytest.approx(
-            _TOPIC_SAME_BOOST + _TOPIC_LINKED_BOOST, abs=0.001,
+            (_TOPIC_SAME_BOOST + _TOPIC_LINKED_BOOST) * 0.2, abs=1e-9,
         )
         # r3 gets linked-topic (with r1 and r2)
-        assert r3.topic_boost == pytest.approx(_TOPIC_LINKED_BOOST, abs=0.001)
-        assert (r1.distance, r2.distance, r3.distance) == (0.5, 0.5, 0.5)
+        assert r3.topic_boost == pytest.approx(_TOPIC_LINKED_BOOST * 0.2, abs=1e-9)
+        assert (r1.distance, r2.distance, r3.distance) == (0.5, 0.5, 0.3)
 
     def test_the_floor_at_zero_moved_to_the_effective_distance(self) -> None:
         """The clamp still exists; it just is not applied to ``distance``.
@@ -999,16 +1009,17 @@ class TestTopicBoost:
         """
         from nexus.scoring import _TOPIC_SAME_BOOST, _effective_distance, apply_topic_boost
 
-        r1 = self._make_result(doc_id="doc-a", distance=0.05)
-        r2 = self._make_result(doc_id="doc-b", distance=0.05)
+        r1 = self._make_result(doc_id="doc-a", distance=0.005)
+        r2 = self._make_result(doc_id="doc-b", distance=0.005)
+        far = self._make_result(doc_id="doc-z", distance=1.005)  # spread 1.0
 
-        assignments = {"doc-a": 1, "doc-b": 1}
-        apply_topic_boost([r1, r2], assignments)
+        assignments = {"doc-a": 1, "doc-b": 1, "doc-z": 2}
+        apply_topic_boost([r1, r2, far], assignments)
 
-        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST, abs=0.001)
-        assert r1.topic_boost > 0.05, "fixture must over-credit, or the clamp is untested"
-        assert r1.distance == 0.05
-        assert r2.distance == 0.05
+        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST * 1.0, abs=1e-9)
+        assert r1.topic_boost > 0.005, "fixture must over-credit, or the clamp is untested"
+        assert r1.distance == 0.005
+        assert r2.distance == 0.005
         assert _effective_distance(r1, {}) == 0.0
         assert _effective_distance(r2, {}) == 0.0
 

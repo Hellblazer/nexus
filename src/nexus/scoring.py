@@ -498,6 +498,15 @@ def apply_link_boost(
 
 # ── Topic boost (RDR-070, nexus-aym) ─────────────────────────────────────
 
+#: Credit as a FRACTION of the window's distance spread (max - min), not
+#: absolute distance (nexus-2yshe). The flat 0.1 this replaced was a whole
+#: window on voyage-code-3, where a top-10 spans about 0.1: every row with a
+#: same-topic peer jumped every row without one, so the nearest hit (whose
+#: topic had no peer in the window) fell from rank 1 to rank 8 and was cut,
+#: and since whether a peer is in the window depends on its size, the page
+#: changed with -m. As a fraction of the spread the credit reorders only
+#: rows within that fraction of each other: a tie-break toward topical
+#: coherence, never a jump over a clearly nearer hit.
 _TOPIC_SAME_BOOST: float = 0.1
 _TOPIC_LINKED_BOOST: float = 0.05
 
@@ -524,13 +533,25 @@ def apply_topic_boost(
     number is the one that was measured.
 
     For each result with a topic assignment:
-    - If another result in the set shares the SAME topic: -_TOPIC_SAME_BOOST distance
-    - If another result is in a LINKED topic: -_TOPIC_LINKED_BOOST distance
+    - If another result in the set shares the SAME topic:
+      ``_TOPIC_SAME_BOOST * spread``
+    - If another result is in a LINKED topic: ``_TOPIC_LINKED_BOOST * spread``
 
-    Boost is applied once per relationship type (not per partner).
+    where ``spread`` is the set's raw distance range (max - min), so the
+    credit is relative to how far apart the candidates actually are
+    (nexus-2yshe; see the constants). Boost is applied once per
+    relationship type (not per partner). A set whose distances are all
+    equal gets no credit: there is no order for it to break ties in.
     """
     if not topic_assignments or len(results) < 2:
         return results
+
+    distances = [r.distance for r in results]
+    spread = max(distances) - min(distances)
+    if spread <= 0.0:
+        return results
+    same_credit = _TOPIC_SAME_BOOST * spread
+    linked_credit = _TOPIC_LINKED_BOOST * spread
 
     links = topic_links or {}
 
@@ -557,7 +578,7 @@ def apply_topic_boost(
         # Same-topic boost: at least one other result in the same topic
         same_topic_peers = topic_to_indices.get(tid, [])
         if len(same_topic_peers) > 1:
-            r.topic_boost += _TOPIC_SAME_BOOST
+            r.topic_boost += same_credit
 
         # Linked-topic boost: at least one result in a linked topic
         has_linked = False
@@ -568,7 +589,7 @@ def apply_topic_boost(
                 has_linked = True
                 break
         if has_linked:
-            r.topic_boost += _TOPIC_LINKED_BOOST
+            r.topic_boost += linked_credit
 
     return results
 
