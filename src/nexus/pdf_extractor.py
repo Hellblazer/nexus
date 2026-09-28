@@ -2501,6 +2501,15 @@ class PDFExtractor:
                     f"MinerU subprocess timed out after {timeout_s}s "
                     f"(pages {start}–{end}, path={pdf_path})"
                 )
+            except BaseException:
+                # nexus-6y4e0 measurement review: any OTHER exception out of
+                # the wait (KeyboardInterrupt, a signal-driven interrupt)
+                # used to skip every cleanup path, leaving the worker's job
+                # open and its tree running until this process exited. The
+                # other three contain() sites release in an unconditional
+                # finally; this is that same guarantee for this site.
+                _killpg_safe()
+                raise
             if returncode != 0:
                 # Clean up any orphaned children in the process group
                 _killpg_safe()
