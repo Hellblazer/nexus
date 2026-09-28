@@ -229,11 +229,18 @@ chunk owned.
    so it is one `write_many` request with `sweep` on and the first-batch
    problem of step 1 cannot arise. `store_put` carries machinery built for
    the split write (R-11), reconciled piece by piece:
+   - replaced by the one `write_many` request: `put_note_pieces`
+     (`store_hook.py:303`, one `/store-put` per piece with a compensating
+     delete of the pieces it wrote when a later piece fails, R-15), whose
+     pieces become that request's `chunks` array, and
+     `store_put_manifest_direct_with_recovery` (`store_hook.py:1469`, a
+     single retry that re-puts pieces a concurrent rollback deleted between
+     the chunk write and the manifest write, R-15), which has no gap left to
+     recover;
    - retired: `rollback_uncataloged_chunk_write` (a chunk can no longer land
-     without its manifest), the piece re-put inside
-     `store_put_manifest_direct_with_recovery` (the pieces travel in the
-     manifest request), and nexus-bb6n2's client reap of chashes a supersede
-     dropped (`store_hook.py:1449-1460`), replaced by `write_many`'s own sweep;
+     without its manifest), and nexus-bb6n2's client reap of chashes a
+     supersede dropped (`store_hook.py:1449-1460`), replaced by `write_many`'s
+     own sweep;
    - kept: the index fence (`_fence_begin`, `_fence_fail`), the registration
      rollback `rollback_minted_catalog_entry` (Decision 5; a failed first
      put's empty document is still removed), and the
