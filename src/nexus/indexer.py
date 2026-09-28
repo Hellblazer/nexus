@@ -3949,6 +3949,7 @@ def _prune_collection_serverside(
     from datetime import UTC, datetime, timedelta  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
 
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — deferred import
+        GC_AUDIT_MAX_CHASHES,
         expire_quarantine_serverside,
         quarantine_days,
         quarantine_orphans_bounded_serverside,
@@ -4002,12 +4003,21 @@ def _prune_collection_serverside(
     # line -- the 41,032-row code__1-1 quarantine call that ran 58s past
     # the ~30s edge deadline (the a6mon incident this route exists to fix)
     # was still fully reproducible end-to-end before this change.
+    #
+    # nexus-brxnp: sample_limit raised from a bare 20 to the engine's own
+    # GC_AUDIT_MAX_CHASHES ceiling -- a caller-supplied value above it is
+    # silently clamped anyway (VectorHandler.clampSampleLimit /
+    # gc_quarantine_orphans's own LEAST(...,5000)), so 20 only threw away
+    # forensic detail for free. This is exactly what starved the production
+    # investigation into the restore-clobber bug this bead fixes: a
+    # 41,032-row quarantine pass audited only its first 20 chashes (T2
+    # nexus/debug-u6d93-brxnp).
     quarantined = quarantine_orphans_bounded_serverside(
-        db, collection_name, quarantine_name, quarantined_at, sample_limit=20,
+        db, collection_name, quarantine_name, quarantined_at, sample_limit=GC_AUDIT_MAX_CHASHES,
     )
     if quarantined is None:
         quarantined = quarantine_orphans_serverside(
-            db, collection_name, quarantine_name, quarantined_at, sample_limit=20,
+            db, collection_name, quarantine_name, quarantined_at, sample_limit=GC_AUDIT_MAX_CHASHES,
         )
     if quarantined is None:
         return False  # route unavailable

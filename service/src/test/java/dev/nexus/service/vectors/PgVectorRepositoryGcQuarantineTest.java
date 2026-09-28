@@ -880,6 +880,14 @@ class PgVectorRepositoryGcQuarantineTest {
                 + "never overwritten by the quarantine copy")
             .isEqualTo("will be orphaned then healed");
         assertThat(chunkText(quarantineCol, chash)).as("Q no longer holds it").isNull();
+
+        var rows = catalogRepo.listGcAudit(TENANT_A, quarantineCol, "gc_restore_rereferenced", 100, 0);
+        assertThat(rows).hasSize(1);
+        @SuppressWarnings("unchecked")
+        var details = (Map<String, Object>) rows.get(0).get("details");
+        assertThat(((Number) details.get("already_live")).longValue())
+            .as("nexus-brxnp: the one candidate hit the DO NOTHING conflict -- the origin was already live")
+            .isEqualTo(1L);
     }
 
     /**
@@ -938,6 +946,14 @@ class PgVectorRepositoryGcQuarantineTest {
         assertThat(createdAt(originCol, chash))
             .as("O's created_at is untouched by the restore")
             .isEqualTo(freshCreatedAt);
+
+        var rows = catalogRepo.listGcAudit(TENANT_A, quarantineCol, "gc_restore_rereferenced", 100, 0);
+        assertThat(rows).hasSize(1);
+        @SuppressWarnings("unchecked")
+        var details = (Map<String, Object>) rows.get(0).get("details");
+        assertThat(((Number) details.get("already_live")).longValue())
+            .as("nexus-brxnp: the one candidate hit the DO NOTHING conflict -- the origin was already live")
+            .isEqualTo(1L);
     }
 
     // ── expire: grace-window floor refuses a mass hard-delete, force overrides ─

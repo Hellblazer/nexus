@@ -905,7 +905,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogDocumentCascadeTest.java", 11),
         Map.entry("dev/nexus/service/CatalogEngineDefects70Test.java", 5),
         Map.entry("dev/nexus/service/CatalogFtsFilenameSearchTest.java", 3),
-        Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 8),
+        // nexus-brxnp fix round: 8 -> 10 (+2, insertManifestRowBypassingFk's
+        // two ALTER TABLE DROP/ADD CONSTRAINT execute() calls -- the same
+        // FK-bypass idiom GcRestoreRereferencedBoundedTest.java and
+        // PgVectorRepositoryGcQuarantineTest.java already carry entries for).
+        Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 10),
         Map.entry("dev/nexus/service/CatalogHandlerManifestEnvelopeTest.java", 1),
         Map.entry("dev/nexus/service/CatalogHandlerRenameTest.java", 4),
         Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 23),
@@ -1630,7 +1634,10 @@ class RawSqlGateTest {
     // nexus-brxnp: 972 -> 977 (+5: new test file GcRestoreRereferencedBoundedTest.java
     // at 3, PgVectorRepositoryGcQuarantineTest.java 11 -> 13 (+2) -- see each
     // entry's own comment).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 977;
+    // nexus-brxnp fix round: 977 -> 979 (+2: CatalogGcAuditProducersTest.java
+    // 8 -> 10, insertManifestRowBypassingFk's two ALTER TABLE execute() calls
+    // -- see that entry's own comment).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 979;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

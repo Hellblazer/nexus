@@ -424,9 +424,9 @@ class CatalogGcAuditProducersTest {
      * #liveOriginRow_metadataAndCreatedAt_areNeverOverwrittenByAnOlderQuarantineCopy}.
      * (catalog-042-2's own fix, carrying {@code created_at} through on a
      * genuine INSERT when the origin has NO row at all, is covered
-     * separately by {@code PgVectorRepositoryGcQuarantineTest
-     * #restoreRereferenced_movesBackWhenManifestReReferencesIt} and is
-     * unaffected by this changeset.)
+     * separately by {@link
+     * #restoreRereferenced_unbounded_createdAtIsCarriedThrough_onInsertWhenOriginIsAbsent_regressionGuard}
+     * and is unaffected by this changeset.)
      */
     @Test @Order(45)
     void restoreRereferenced_unbounded_liveOriginCreatedAt_isNeverOverwrittenByAnOlderQuarantineCopy()
@@ -482,6 +482,14 @@ class CatalogGcAuditProducersTest {
             .as("nexus-brxnp: the pre-existing origin row's OWN created_at survives, never "
                 + "overwritten by the older quarantine copy's backdated stamp")
             .isEqualTo(originCreatedAtBeforeRestore);
+
+        var rows = repo.listGcAudit(TENANT, quarantineCollection, "gc_restore_rereferenced", 100, 0);
+        assertThat(rows).hasSize(1);
+        @SuppressWarnings("unchecked")
+        var details = (Map<String, Object>) rows.get(0).get("details");
+        assertThat(((Number) details.get("already_live")).longValue())
+            .as("nexus-brxnp: the one candidate hit the DO NOTHING conflict -- the origin was already live")
+            .isEqualTo(1L);
     }
 
     private OffsetDateTime chunkCreatedAt(String collection, String chashHex) throws Exception {
@@ -496,6 +504,135 @@ class CatalogGcAuditProducersTest {
             assertThat(r).as("chunks row for %s/%s", collection, chashHex).isNotNull();
             return r.withOffsetSameInstant(ZoneOffset.UTC);
         }
+    }
+
+    private String chunkText(String collection, String chashHex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+               .select(DSL.field("chunk_text", String.class))
+               .from(DSL.table(DSL.name("nexus", "chunks")))
+               .where(DSL.field("tenant_id", String.class).eq(TENANT))
+               .and(DSL.field("collection", String.class).eq(collection))
+               .and(DSL.field("chash", byte[].class).eq(Chash.fromHex(chashHex).toBytes()))
+               .fetchOne(0, String.class);
+        }
+    }
+
+    private String metadataField(String collection, String chashHex, String key) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+               .select(DSL.jsonbGetAttributeAsText(DSL.field("metadata", org.jooq.JSONB.class), key))
+               .from(DSL.table(DSL.name("nexus", "chunks")))
+               .where(DSL.field("tenant_id", String.class).eq(TENANT))
+               .and(DSL.field("collection", String.class).eq(collection))
+               .and(DSL.field("chash", byte[].class).eq(Chash.fromHex(chashHex).toBytes()))
+               .fetchOne(0, String.class);
+        }
+    }
+
+    /**
+     * nexus-brxnp: bypasses {@code fk_catalog_chunks_chunk} locally (drop,
+     * insert, re-add {@code NOT VALID}) so a manifest row can name {@code
+     * collection} for a chash whose physical chunk currently sits ONLY in
+     * the quarantine collection -- the real production race the FK
+     * structurally blocks at write time (RDR-191 Phase 5, nexus-o8dil.29).
+     * Same idiom {@code PgVectorRepositoryGcQuarantineTest
+     * #seedManifestBypassingFk} and {@code GcRestoreRereferencedBoundedTest
+     * #insertManifestRowBypassingFk} already use.
+     */
+    private void insertManifestRowBypassingFk(String docId, String chashHex, String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            insertManifestRow(su, TENANT, docId, chashHex, collection);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        }
+    }
+
+    /**
+     * nexus-brxnp fix round (code-review CONFIRMED): the javadoc on {@link
+     * #restoreRereferenced_unbounded_liveOriginCreatedAt_isNeverOverwrittenByAnOlderQuarantineCopy}
+     * used to claim {@code PgVectorRepositoryGcQuarantineTest
+     * #restoreRereferenced_movesBackWhenManifestReReferencesIt} covers the
+     * UNBOUNDED function's {@code created_at} carry-through on the plain-INSERT
+     * path (origin genuinely absent) -- that test never asserts {@code
+     * created_at} at all. This IS that proof: the origin has NO row for the
+     * chash, the manifest re-references it anyway (bypassing {@code
+     * fk_catalog_chunks_chunk} the same way production's real race does),
+     * and restore must INSERT the quarantine copy's own content and {@code
+     * created_at}, stripping the quarantine stamps -- catalog-042-2's fix,
+     * unaffected by catalog-043-2's {@code ON CONFLICT DO NOTHING} change
+     * (DO NOTHING only changes behaviour when a conflicting row already
+     * exists; this path is a plain INSERT). Mirrors {@code
+     * GcRestoreRereferencedBoundedTest
+     * #createdAtIsCarriedThrough_onInsertWhenOriginIsAbsent_regressionGuard}
+     * for the unbounded twin.
+     */
+    @Test @Order(47)
+    void restoreRereferenced_unbounded_createdAtIsCarriedThrough_onInsertWhenOriginIsAbsent_regressionGuard()
+            throws Exception {
+        String collection = "code__gcaudit-restore-absent__minilm-l6-v2-384__v1";
+        String quarantineCollection = "quarantine-code__gcaudit-restore-absent__minilm-l6-v2-384__v1";
+        String docId = "gc-audit-restore-absent-doc";
+        String chash = ch("gc-audit-restore-absent-chunk");
+        OffsetDateTime past = OffsetDateTime.of(2026, 7, 16, 0, 8, 44, 0, ZoneOffset.UTC);
+
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, collection);
+            PgContainerHelper.insertCollection(dsl, TENANT, quarantineCollection);
+        }
+
+        vecRepo.upsertChunks(TENANT, quarantineCollection, List.of(chash),
+            List.of("gc audit restore absent text"), List.of(Map.of()));
+        repo.upsertDocument(TENANT, Map.of(
+            "tumbler", docId, "title", "gc-audit-restore-absent-" + docId,
+            "content_type", "code", "corpus", "code",
+            "physical_collection", collection, "chunk_count", 0));
+
+        try (Connection su = pg.createConnection("")) {
+            int n = DSL.using(su, SQLDialect.POSTGRES)
+               .update(DSL.table(DSL.name("nexus", "chunks")))
+               .set(DSL.field("created_at", OffsetDateTime.class), past)
+               .where(DSL.field("tenant_id", String.class).eq(TENANT))
+               .and(DSL.field("collection", String.class).eq(quarantineCollection))
+               .execute();
+            assertThat(n).as("guard: the quarantine-side row exists to backdate").isEqualTo(1);
+        }
+        // NON-VACUITY: the backdate must have landed before asserting carry-through.
+        assertThat(chunkCreatedAt(quarantineCollection, chash))
+            .as("guard: quarantine-side row is backdated").isEqualTo(past);
+
+        // D re-references X while X is STILL only in Q -- the origin genuinely
+        // has no row for this chash, exactly the plain-INSERT path.
+        insertManifestRowBypassingFk(docId, chash, collection);
+
+        long restored = vecRepo.restoreRereferenced(TENANT, quarantineCollection, collection);
+        assertThat(restored).as("the restore inserts it").isEqualTo(1L);
+
+        assertThat(chunkText(collection, chash))
+            .as("origin gets the quarantine copy's own content -- there was nothing to conflict with")
+            .isEqualTo("gc audit restore absent text");
+        assertThat(chunkCreatedAt(collection, chash))
+            .as("created_at is carried through on a genuine INSERT, the absent-origin path -- "
+                + "catalog-042-2's fix, unaffected by catalog-043-2's ON CONFLICT DO NOTHING change")
+            .isEqualTo(past);
+        assertThat(metadataField(collection, chash, "quarantined_at")).as("quarantine stamp stripped").isNull();
+        assertThat(metadataField(collection, chash, "origin_collection")).as("quarantine stamp stripped").isNull();
+
+        var rows = repo.listGcAudit(TENANT, quarantineCollection, "gc_restore_rereferenced", 100, 0);
+        assertThat(rows).hasSize(1);
+        @SuppressWarnings("unchecked")
+        var details = (Map<String, Object>) rows.get(0).get("details");
+        assertThat(((Number) details.get("already_live")).longValue())
+            .as("nexus-brxnp: a genuine INSERT (origin absent) hits no conflict at all")
+            .isZero();
     }
 
     /**

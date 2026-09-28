@@ -197,6 +197,14 @@ class GcRestoreRereferencedBoundedTest {
         assertThat(metadataField(origin, chash, "quarantined_at")).as("quarantine stamp stripped").isNull();
         assertThat(metadataField(origin, chash, "origin_collection")).as("quarantine stamp stripped").isNull();
         assertThat(chunkCount(quarantine)).as("Q no longer holds X").isZero();
+
+        var rows = repo.listGcAudit(TENANT, quarantine, "gc_restore_rereferenced_bounded", 100, 0);
+        assertThat(rows).hasSize(1);
+        @SuppressWarnings("unchecked")
+        var details = (Map<String, Object>) rows.get(0).get("details");
+        assertThat(((Number) details.get("already_live")).longValue())
+            .as("nexus-brxnp: a genuine INSERT (origin absent) hits no conflict at all")
+            .isZero();
     }
 
     /**
@@ -261,6 +269,14 @@ class GcRestoreRereferencedBoundedTest {
         assertThat(createdAts(origin))
             .as("O's created_at is untouched by the restore")
             .containsExactly(freshCreatedAt);
+
+        var rows = repo.listGcAudit(TENANT, quarantine, "gc_restore_rereferenced_bounded", 100, 0);
+        assertThat(rows).hasSize(1);
+        @SuppressWarnings("unchecked")
+        var details = (Map<String, Object>) rows.get(0).get("details");
+        assertThat(((Number) details.get("already_live")).longValue())
+            .as("nexus-brxnp: the one candidate hit the DO NOTHING conflict -- the origin was already live")
+            .isEqualTo(1L);
     }
 
     @Test

@@ -40,6 +40,18 @@ QUARANTINE_PREFIX = "quarantine"
 #: Days a quarantined chunk survives before the expiry pass hard-deletes it.
 QUARANTINE_DAYS_DEFAULT = 14
 
+#: Server-side ceiling on a ``gc_audit`` sample/chash list, mirrored from the
+#: engine's own cap (``CatalogRepository.GC_AUDIT_MAX_CHASHES`` = 5000,
+#: applied client-request-side by ``VectorHandler.clampSampleLimit`` and
+#: server-side by ``gc_quarantine_orphans``'s own ``LEAST(...,5000)``,
+#: catalog-033-2). A caller-supplied ``sample_limit`` above this is silently
+#: clamped by the engine either way, so requesting less than this ceiling
+#: only throws away forensic detail for free — nexus-brxnp: the production
+#: investigation that root-caused the restore-clobber bug (T2
+#: ``nexus/debug-u6d93-brxnp``) was starved by a 41,032-row quarantine pass
+#: sampling only its first 20 chashes.
+GC_AUDIT_MAX_CHASHES = 5000
+
 _WRITE_BATCH = 300  # ChromaCloud MAX_RECORDS_PER_WRITE; safe everywhere
 
 
