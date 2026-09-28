@@ -404,27 +404,38 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         self,
         project: str | None = None,
         agent: str | None = None,
+        limit: int | None = None,
         *,
         timeout: float | None = None,
         retry_read_timeout: bool = True,
     ) -> list[dict[str, Any]]:
         """List entries (summary view) ordered by timestamp descending.
 
+        *limit* bounds the rows to the newest N (nexus-xn9ut); the engine
+        reads only those. An engine older than the parameter ignores it and
+        returns every row, so the result is also cut here: callers get at
+        most *limit* rows either way, only the cost differs.
+
         ``timeout``/``retry_read_timeout``: see :meth:`get`'s identical
         parameters.
         """
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit must be a positive integer, got {limit}")
         params: dict[str, str] = {}
         if project:
             params["project"] = project
         if agent:
             params["agent"] = agent
+        if limit is not None:
+            params["limit"] = str(limit)
         resp = self._get(
             "/v1/memory/list",
             params=params,
             timeout=timeout,
             retry_read_timeout=retry_read_timeout,
         )
-        return [_normalize_summary(r) for r in resp]
+        rows = [_normalize_summary(r) for r in resp]
+        return rows[:limit] if limit is not None else rows
 
     def get_projects_with_prefix(self, prefix: str) -> list[dict[str, Any]]:
         """Return distinct project namespaces starting with *prefix*."""
