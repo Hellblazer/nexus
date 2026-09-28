@@ -1908,6 +1908,15 @@ def _t1_session_shutdown() -> None:
     import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
     _log = structlog.get_logger(__name__)
 
+    # nexus-mgu1k: drain flagged scratch entries to T2 BEFORE the lease and
+    # the session token go. The detached SessionEnd flush used to do this,
+    # racing this very teardown on the same stdin EOF, and it lost every time
+    # measured (6 of 6 session_end events, 2026-09-27/28): by the time it ran,
+    # the lease below was unlinked and the token revoked, so the rows were
+    # unreachable. The owner drains first; the SessionEnd flush stays as a
+    # best-effort second chance (T2 puts upsert, so running both is safe).
+    _flush_flagged_t1_entries(session_id)
+
     # nexus-c8yvj: remove the published lease FIRST so a stale lease is
     # never read by a later, unrelated process once this session has
     # genuinely ended (mirrors the existing t1_addr.<session_id>
@@ -1925,6 +1934,39 @@ def _t1_session_shutdown() -> None:
         _log.info("t1_session_token_closed", session_id=session_id)
     except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
         _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
+
+
+def _flush_flagged_t1_entries(session_id: str) -> int:
+    """Write this session's flagged T1 scratch entries to T2; return how
+    many. Never raises: a teardown step must not stop the lease clear and
+    token revoke that follow it (nexus-mgu1k)."""
+    import structlog  # noqa: PLC0415 — branch-local logging in a best-effort teardown path
+    _log = structlog.get_logger(__name__)
+    try:
+        from nexus.mcp_infra import get_t1, t2_index_write  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+        t1, _ = get_t1()
+        entries = list(t1.flagged_entries())
+        if not entries:
+            return 0
+
+        def _put_all(db) -> int:
+            for entry in entries:
+                db.memory.put(
+                    project=entry["flush_project"],
+                    title=entry["flush_title"],
+                    content=entry["content"],
+                    tags=entry.get("tags", ""),
+                    ttl=None,
+                )
+            return len(entries)
+
+        flushed = t2_index_write(_put_all, op="t1_teardown_flush")
+        _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=flushed)
+        return flushed
+    except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
+        _log.warning("t1_teardown_flush_failed", session_id=session_id, error=str(exc))
+        return 0
 
 
 def _t1_shutdown() -> None:

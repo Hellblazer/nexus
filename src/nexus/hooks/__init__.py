@@ -559,9 +559,11 @@ def session_end_flush() -> str:
         live lease, and raises ``T1ServerNotFoundError``. The
         ``except`` below catches the raise and logs
         ``session_end_flush_t1_unavailable``; flagged entries are then
-        silently dropped. Best-effort flush is the documented contract;
-        a future improvement would be for the lifespan to drain the
-        flagged-entries queue itself before unlinking the addr file.
+        silently dropped. It lost that race in every measured run (6 of 6,
+        nexus-mgu1k), so the MCP teardown now drains the flagged entries
+        itself before it clears the lease and revokes the token
+        (``nexus.mcp.core._flush_flagged_t1_entries``); this flush is the
+        second chance for a session whose MCP never reached its teardown.
 
     ``clear()`` is gated on OWNERSHIP, not merely on ``t1 is not None``
     (nexus-65a9k / GH #1454). A tool-free ``claude -p`` operator dispatch
