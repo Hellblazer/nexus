@@ -3783,12 +3783,74 @@ async def test_retrieval_refused_propagates_out_of_plan_run_not_absorbed() -> No
 # ``test_run_substitutes_sentinel_on_operator_error_isolated`` above.
 
 
+class _RunnerClock:
+    """Stands in for ``nexus.plans.runner.time`` so a test moves the
+    runner's clock without touching the event loop's (patching
+    ``time.monotonic`` globally would move asyncio's timers too)."""
+
+    def __init__(self, now: float) -> None:
+        self.now = now
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def __getattr__(self, name: str):
+        import time as _time
+        return getattr(_time, name)
+
+
 @pytest.mark.asyncio
 async def test_deadline_stops_before_operator_segment_after_retrieval() -> None:
-    """A budget that expires between the retrieval step and the operator
-    step must let retrieval finish, then stop BEFORE dispatching the
-    operator — never mid-flight, never after.
+    """A budget that expires after a retrieval step completes must keep
+    that step's output and stop BEFORE dispatching the operator.
     """
+    from unittest.mock import patch
+
+    from nexus.plans import runner as runner_mod
+    from nexus.plans.runner import plan_run
+
+    plan = {
+        "steps": [
+            {"tool": "search", "args": {"query": "x", "corpus": "knowledge"}},
+            {"tool": "extract", "args": {"fields": "a", "inputs": "[]"}},
+        ],
+    }
+    calls: list[str] = []
+    clock = _RunnerClock(1000.0)
+
+    async def stub_search(**kwargs):
+        calls.append("search")
+        clock.now = 1100.0  # the search "took" past the deadline, and finished
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    async def stub_extract(**kwargs):
+        calls.append("extract")
+        return {"extractions": []}
+
+    from nexus.mcp import core as mcp_core
+
+    with patch.object(runner_mod, "time", clock), \
+         patch.object(mcp_core, "search", stub_search), \
+         patch.object(mcp_core, "operator_extract", stub_extract):
+        result = await plan_run(_match(plan), {}, deadline=1050.0, bundle_operators=False)
+
+    assert calls == ["search"], f"extract must not have been dispatched, got {calls}"
+    assert result.budget_exhausted_at_step == 2
+    assert result.total_planned_steps == 2
+    assert len(result.steps) == 1
+
+
+# nexus-5ezgn: the 7.64.1 shakeout ran nx_answer(budget_seconds=120) for
+# 324 s because one search step took 310 s, and the deadline was only read
+# BETWEEN steps. The real search tool is SYNC, so it ran on the event loop
+# and nothing could interrupt it. These drive the default dispatcher with a
+# slow search of each kind and assert plan_run RETURNS near the deadline.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["sync", "async"])
+async def test_deadline_cuts_a_slow_retrieval_step_mid_flight(kind: str) -> None:
+    import asyncio
     import time as _time
     from unittest.mock import patch
 
@@ -3802,10 +3864,14 @@ async def test_deadline_stops_before_operator_segment_after_retrieval() -> None:
     }
     calls: list[str] = []
 
-    async def stub_search(**kwargs):
+    def sync_search(**kwargs):
         calls.append("search")
-        import asyncio
-        await asyncio.sleep(0.05)
+        _time.sleep(3.0)
+        return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
+
+    async def async_search(**kwargs):
+        calls.append("search")
+        await asyncio.sleep(3.0)
         return {"ids": ["a"], "tumblers": [], "distances": [], "collections": []}
 
     async def stub_extract(**kwargs):
@@ -3814,15 +3880,21 @@ async def test_deadline_stops_before_operator_segment_after_retrieval() -> None:
 
     from nexus.mcp import core as mcp_core
 
-    deadline = _time.monotonic() + 0.02  # expires during the search sleep
-    with patch.object(mcp_core, "search", stub_search), \
+    started = _time.monotonic()
+    with patch.object(mcp_core, "search", sync_search if kind == "sync" else async_search), \
          patch.object(mcp_core, "operator_extract", stub_extract):
-        result = await plan_run(_match(plan), {}, deadline=deadline, bundle_operators=False)
+        result = await plan_run(
+            _match(plan), {}, deadline=started + 0.3, bundle_operators=False,
+        )
+    elapsed = _time.monotonic() - started
 
-    assert calls == ["search"], f"extract must not have been dispatched, got {calls}"
-    assert result.budget_exhausted_at_step == 2
-    assert result.total_planned_steps == 2
+    assert elapsed < 1.5, f"plan_run ran {elapsed:.2f}s against a 0.3s budget"
+    assert calls == ["search"]
+    assert result.budget_exhausted_at_step == 1
+    assert result.budget_exhausted_kind == "time"
     assert len(result.steps) == 1
+    assert result.steps[0]["status"] == "timeout"
+    assert result.steps[0]["tool"] == "search"
 
 
 @pytest.mark.asyncio
