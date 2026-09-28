@@ -41,99 +41,12 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.63.0)
+## Awaiting the next release or plugin cut (pinned: v7.64.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- `conexus/skills/tumbler-footnotes/SKILL.md` — nexus-sxiay: new standalone
-  skill wrapping `nx catalog footnotes` (GH #896 ask 4, the in-place
-  `nx://catalog/<tumbler>` -> GFM-footnote converter, including `--check` and
-  `--to-links`). Inert until the next release/cut ships it — until then,
-  `/conexus:tumbler-footnotes` resolves to nothing installed.
-
 ## Deferred to the next client release
 
-- nexus-5l8i8: `conexus/hooks/hooks.json` rewires the RDR-184 ledger's two
-  writers (`agent_dispatch_expect`, `subagent_start_stamp`) from `mcp_tool`
-  to the command tier, through two new `nx-hook` verbs
-  (`agent-dispatch-expect`, `subagent-start-stamp`) added to
-  `src/nexus/_hook_runtime/entry.py`'s `VERB_TABLE`. An `mcp_tool` hook
-  depends on this session's own MCP server being connected, and root cause
-  (session 81d1d28b's transcript, 2026-09-27) showed an MCP outage
-  dropping EXPECT rows while the matching SubagentStart still wrote a
-  START row after reconnect — read by the retro audit as an undeclared
-  dispatch. Deferred because the verbs are wheel content
-  (`src/nexus/_hook_runtime/entry.py`, `src/nexus/hooks/agent_dispatch_expect.py`,
-  `src/nexus/hooks/subagent_start_stamp.py`, `src/nexus/mcp/hooks.py`), so
-  the hooks.json rewiring ships with the client release that makes the
-  verbs resolve — an installed CLI predating this release would exit 2 on
-  a direct `nx-hook` call naming either verb, which is exactly what the
-  shim-routed form in hooks.json avoids.
-- nexus-5l8i8: `conexus/skills/orchestration/SKILL.md` item 1's prose named
-  `hook_agent_dispatch_expect` as the MCP tool that writes the EXPECT row;
-  corrected to say the writer fires on the command tier
-  (`nx-hook agent-dispatch-expect`) and the MCP tool is registration-only,
-  same reasoning and same wheel-content dependency as the bullet above.
-- `conexus/skills/orchestration/SKILL.md` — nexus-xxvv3: new "Resuming a
-  Worktree Agent After a /clear" section. A SendMessage-resumed agent runs in
-  the primary checkout, so the subagent git guard refuses its commits and its
-  own hand-back must use `git -C <worktree>`; the ledger credits it as
-  RESUMED. Deferred because the bead's ledger half is wheel content
-  (`src/nexus/hooks/expectations.py`, `subagent_start_stamp.py`), so the
-  doc ships with the client release that makes it true.
-- `conexus/hooks/scripts/mailbox_drain.py` — nexus-3lc5s: the claim loop's
-  budget stop now logs a SKIP instead of returning silently. Deferred because
-  the same fix is in the wheel copy (`src/nexus/hooks/mailbox_drain.py`), so
-  both copies ship together in the next client release.
-- nexus-smsau: `conexus/hooks/scripts/version_lockstep_hook.py` now derives
-  its plugin set from marketplace.json (a `known_plugins()` reader keyed off
-  the `CLAUDE_PLUGIN_ROOT` clone this hook already resolves), replacing the
-  hardcoded `PLUGINS = ("conexus", "sn")` tuple that silently dropped any
-  plugin marketplace.json listed without a matching source edit. Deferred
-  because the wheel-side half of the same fix (`src/nexus/plugin_registry.py`,
-  `src/nexus/plugin_lockstep.py`, `src/nexus/routing_stats.py`) is wheel
-  content, so both derivations ship together at the next client release --
-  until then the hook's own fallback and the wheel's fallback must keep
-  agreeing on the same hardcoded set.
-- nexus-egm7p: `conexus/hooks/hooks.json` rewires the RDR-205 ledger's two
-  projectors (`hook_subagent_start_tuple`, `hook_subagent_stop_tuple`) from
-  `mcp_tool` to the command tier (synchronous since nexus-wgalh, so
-  `claude -p` teardown cannot kill a projection mid-write), through two new `nx-hook` verbs — `subagent-start-tuple`,
-  `subagent-stop-tuple` — added to `src/nexus/_hook_runtime/entry.py`'s
-  `VERB_TABLE`), for the same MCP-disconnect hazard nexus-5l8i8 fixed for the
-  RDR-184 ledger's writers: an `mcp_tool` hook's invocation depends on this
-  session's own MCP server being connected, and the SubagentStart/
-  SubagentStop event it observes fires regardless. Deferred because the
-  verbs are wheel content (`src/nexus/_hook_runtime/entry.py`,
-  `src/nexus/hooks/subagent_start_tuple.py`,
-  `src/nexus/hooks/subagent_stop_tuple.py`, `src/nexus/mcp/hooks.py` keeps
-  its registrations for diagnosis) — an installed CLI predating this
-  release would exit 2 on a direct `nx-hook` call naming either verb, which
-  is exactly what the shim-routed form in hooks.json avoids. This move also
-  fixes the RDR-205 ledger's `verify` dim transport: the retired `mcp_tool`
-  registration never forwarded `agent_transcript_path`, so every REPORT row
-  reached `_extract_verify_dims("")` and read `verify=absent`; the command
-  tier receives the full SubagentStop payload, which already carries that
-  field. A second, independent bug found verifying this against real
-  transcripts is fixed in `src/nexus/hooks/tuple_ledger_project.py` proper
-  (not a hooks.json/wiring change, so not itself a deferred entry): its
-  `_last_send_message_text` read a SendMessage report under the wrong input
-  field name (`"content"`, a truncated preview the harness also stores,
-  instead of `"message"`, the real one), which independently zeroed out
-  `verify=present` for every SendMessage-shaped report regardless of tier.
-- nexus-egm7p: `conexus/skills/orchestration/SKILL.md` "Waiting for One
-  Agent's Report" section gains a bounded-loop rule: cap the parked
-  `tuple_rd(kind="report")` wait at ~10 rounds (~250s) and fall back to the
-  harness's own task-completion notification rather than looping
-  indefinitely, since the RDR-205 projection this waits on is a
-  best-effort write that can be silently lost (an engine outage at the
-  exact moment the agent's SubagentStop hook fires). Deferred alongside the
-  hooks.json bullet above because it documents behaviour of the same
-  wheel-content projectors.
-
-_The four RDR-215 straddling beads deferred here by nexus-2x3qy
-(nexus-t9klx, nexus-z9cz2, nexus-silj0, nexus-veh77) shipped with the 7.58.0
-client release, except their hooks.json entries: 7.58.0 kept the v7.57.0
-plugin-script entries, because an older `nx-hook` exits 2 on a verb it does not
-know. Moving those entries to `nx-hook` verbs is future plugin-surface drift
-and gets declared here when it lands; version lockstep never moves._
+_Empty. The entries deferred here (nexus-5l8i8, nexus-xxvv3, nexus-3lc5s,
+nexus-smsau, nexus-egm7p) shipped with the 7.64.0 client release, together with
+nexus-sxiay's new tumbler-footnotes skill._
