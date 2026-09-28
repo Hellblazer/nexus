@@ -170,7 +170,10 @@ def test_a_hanging_token_revoke_is_bounded_too(owned_session, monkeypatch) -> No
 
 def test_an_outcome_after_the_bound_is_still_logged(owned_session, monkeypatch) -> None:
     """A write the caller abandoned at the bound, then failing (against the
-    just-revoked token, say), is recorded, not dropped (review of a956bb57f)."""
+    just-revoked token, say), is recorded, not dropped, when the process
+    outlives it, as the lifespan and atexit paths do. The SIGTERM path's
+    os._exit kills the thread first; this test does not claim that path
+    (review of a956bb57f; critique of 822d9dcec)."""
     import threading  # noqa: PLC0415 — test-local import
 
     import structlog  # noqa: PLC0415 — test-local import

@@ -2004,8 +2004,11 @@ def _flush_flagged_t1_entries(session_id: str) -> int:
         except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
             outcome["error"] = str(exc)
             # Logged here, not by the caller, so an outcome that arrives after
-            # the bound (a write against the just-revoked token, say) is still
-            # recorded (review of a956bb57f).
+            # the bound is recorded whenever the process lives long enough to
+            # reach this line: the lifespan finally and atexit paths do. The
+            # SIGTERM path does not, since _sigterm_handler calls os._exit right
+            # after the teardown and that kills this thread (review of
+            # a956bb57f; critique of 822d9dcec).
             _log.warning("t1_teardown_flush_failed", session_id=session_id, error=str(exc))
 
     worker = threading.Thread(target=_work, name="t1-teardown-flush", daemon=True)
