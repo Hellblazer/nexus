@@ -116,8 +116,9 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # side — a heredoc that dies mid-leg still counts as a leg that failed to
 # complete, never a leg that quietly did not run.
 #
-# EXPECTED_LEGS=7 (dated 2026-09-13): [A] /version, [B] /health
-# authenticated, [C+D] client probe heredoc (one shell-side entry for the
+# EXPECTED_LEGS=7 (dated 2026-09-13; [B] redefined 2026-09-28): [A] /version,
+# [B] edge auth contract (unauthenticated /health refused, data token
+# accepted on /v1), [C+D] client probe heredoc (one shell-side entry for the
 # combined python leg), [E] T2 write body carrying shell-substitution text
 # (nexus-cmzib WAF passthrough), [F] RDR-205 tuple-space CA 3 through the
 # edge (nexus-em75s.15), [G] ledger tuple projector hook drive (nexus-g2lln
