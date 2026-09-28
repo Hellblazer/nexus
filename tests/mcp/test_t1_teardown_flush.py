@@ -197,3 +197,41 @@ def test_an_outcome_after_the_bound_is_still_logged(owned_session, monkeypatch) 
     events = [e["event"] for e in logs]
     assert "t1_teardown_flush_incomplete" in events
     assert any(e["event"] == "t1_teardown_flush_failed" and e["error"] == "token revoked" for e in logs), events
+
+
+def test_a_revoke_outcome_after_the_bound_is_still_logged(owned_session, monkeypatch) -> None:
+    """The revoke-side sibling of the flush test above (review of 822d9dcec)."""
+    import threading  # noqa: PLC0415 — test-local import
+
+    import structlog  # noqa: PLC0415 — test-local import
+
+    release, done = threading.Event(), threading.Event()
+
+    class _SlowThenFail:
+        def __init__(self, **_):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def close_session(self, sid):
+            release.wait(30)
+            done.set()
+            raise RuntimeError("engine gone")
+
+    monkeypatch.setattr("nexus.db.t2.http_token_store.HttpTokenStore", _SlowThenFail)
+    monkeypatch.setattr(core, "_TEARDOWN_FLUSH_TIMEOUT_S", 0.3)
+    with structlog.testing.capture_logs() as logs:
+        core._t1_session_shutdown()
+        release.set()
+        assert done.wait(5)
+        for _ in range(50):
+            if any(e["event"] == "t1_session_token_close_failed" for e in logs):
+                break
+            threading.Event().wait(0.05)
+    events = [e["event"] for e in logs]
+    assert "t1_session_token_close_incomplete" in events
+    assert any(e["event"] == "t1_session_token_close_failed" and e["error"] == "engine gone" for e in logs), events
