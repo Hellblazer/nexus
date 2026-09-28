@@ -259,3 +259,30 @@ def test_an_nx_plugin_from_another_marketplace_is_not_ours_to_flag(tmp_path):
     assert retired_plugin_installs(reg) == []
     [row] = _check_retired_plugin_installed(reg)
     assert row.ok is True
+
+
+def test_a_virgin_box_logs_no_warning_and_the_plugin_rows_are_not_applicable(monkeypatch, tmp_path):
+    """7.65.0's fresh-install MVV failed on a virgin box's nx doctor: with no
+    Claude Code there is no plugin registry and no marketplace clone, and the
+    registry reader resolved the marketplace names eagerly, so
+    known_plugins() logged plugin_registry_marketplace_unreachable at warning
+    level. A new doctor row is not applicable on a virgin box and logs nothing
+    above debug."""
+    import structlog  # noqa: PLC0415 — test-local import
+
+    import nexus.plugin_registry as reg  # noqa: PLC0415 — test-local import
+    from nexus.health import _check_orchestration_hook_floor, _check_retired_plugin_installed  # noqa: PLC0415 — test-local import
+    from nexus.plugin_lockstep import registry_entries  # noqa: PLC0415 — test-local import
+
+    monkeypatch.delenv(reg.MARKETPLACE_JSON_ENV, raising=False)
+    monkeypatch.setattr(reg, "_dev_checkout_path", lambda: tmp_path / "no-checkout" / "marketplace.json")
+    monkeypatch.setattr(reg, "_default_marketplaces_path", lambda: tmp_path / "no-claude" / "known_marketplaces.json")
+    absent = tmp_path / "no-claude" / "installed_plugins.json"
+
+    with structlog.testing.capture_logs() as logs:
+        assert registry_entries(absent) is None
+        retired = _check_retired_plugin_installed(absent)
+        floor = _check_orchestration_hook_floor(absent)
+    loud = [e for e in logs if e.get("log_level") not in ("debug",)]
+    assert not loud, loud
+    assert all(r.ok for r in retired + floor), [(r.label, r.detail) for r in retired + floor]

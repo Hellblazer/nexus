@@ -164,7 +164,11 @@ def registry_entries(registry_path: Path | None = None) -> dict[str, list[dict[s
     (``{"version": 2, "plugins": {...}}``) and the older flat shape (the
     plugin map at top level). None when the file is absent, unreadable, or
     names none of our plugins."""
-    return _entries_named(known_plugins(), registry_path)
+    # The names resolve only once a registry has parsed: known_plugins() falls
+    # back with a warning when no marketplace clone exists, which is every box
+    # without Claude Code, and a registry that is absent needs no names at all
+    # (the virgin-box doctor warning that blocked 7.65.0's fresh-install MVV).
+    return _entries_named(None, registry_path)
 
 
 #: Plugin names this project used to ship. ``nx`` was renamed to ``conexus``
@@ -192,10 +196,11 @@ def retired_plugin_installs(registry_path: Path | None = None) -> list[str]:
 
 
 def _entries_named(
-    names: "frozenset[str] | set[str]", registry_path: Path | None,
+    names: "frozenset[str] | set[str] | None", registry_path: Path | None,
 ) -> dict[str, list[dict[str, Any]]] | None:
     """The single parse of ``installed_plugins.json``: entries whose plugin
-    part is in *names*."""
+    part is in *names*, or in :func:`known_plugins` when *names* is None,
+    resolved after the file parses."""
     path = registry_path or default_registry_path()
     try:
         data = json.loads(path.read_text())
@@ -204,7 +209,7 @@ def _entries_named(
     if not isinstance(data, dict):
         return None
     plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else data
-    ours = names
+    ours = names if names is not None else known_plugins()
     found: dict[str, list[dict[str, Any]]] = {}
     for key, entries in plugins.items():
         if not isinstance(key, str) or "@" not in key or key.split("@", 1)[0] not in ours:
