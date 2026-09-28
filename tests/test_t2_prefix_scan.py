@@ -75,6 +75,7 @@ class _RowStore:
 
     def __init__(self) -> None:
         self._rows: dict[str, list[dict[str, Any]]] = {}
+        self.limits_requested: list[int | None] = []
         self.get_calls: list[tuple[str, str]] = []
 
     def put(self, project: str, title: str, content: str) -> None:
@@ -84,14 +85,17 @@ class _RowStore:
         self,
         project: str | None = None,
         agent: str | None = None,
+        limit: int | None = None,
         *,
         timeout: float | None = None,
         retry_read_timeout: bool = True,
     ) -> list[dict[str, Any]]:
-        return [
+        self.limits_requested.append(limit)
+        rows = [
             {"title": r["title"], "project": project}
             for r in self._rows.get(project or "", [])
         ]
+        return rows[:limit] if limit is not None else rows
 
     def get(
         self,
@@ -144,16 +148,30 @@ def test_entries_snippet_limit_to_title_limit_are_title_only() -> None:
     assert len(without_snippet) == _TITLE_LIMIT - _SNIPPET_LIMIT
 
 
-def test_entries_beyond_title_limit_appear_as_count() -> None:
-    """Entries beyond ``_TITLE_LIMIT`` per namespace are summarised as
-    '… (N more)' -- N derived from the constant (nexus-h33x8.5 fix-pass;
-    was hardcoded "12 entries -> 3 more" against the pre-tune _TITLE_LIMIT=8)."""
+def test_entries_beyond_title_limit_are_marked_as_more() -> None:
+    """Entries beyond ``_TITLE_LIMIT`` per namespace are marked '… (more)'.
+
+    nexus-xn9ut: the scan now lists only ``_TITLE_LIMIT + 1`` rows per
+    namespace (the whole-project list cost 2.4s of the hook's 9s bound), so
+    the exact overflow count ('… (N more)', nexus-h33x8.5) is no longer
+    known; the extra row says more exist. Pinned here: the bound reaches
+    the store, and the marker still appears."""
     overflow = 3
     store = _RowStore()
     for i in range(1, _TITLE_LIMIT + overflow + 1):
         store.put("repo", f"entry-{i}.md", f"Content {i}")
     output = _run_scan(store, "repo")
-    assert f"… ({overflow} more)" in output
+    assert "… (more)" in output
+    assert store.limits_requested and all(
+        lim == _TITLE_LIMIT + 1 for lim in store.limits_requested
+    ), store.limits_requested
+
+
+def test_exactly_title_limit_entries_have_no_more_marker() -> None:
+    store = _RowStore()
+    for i in range(1, _TITLE_LIMIT + 1):
+        store.put("repo", f"entry-{i}.md", f"Content {i}")
+    assert "… (more)" not in _run_scan(store, "repo")
 
 
 def test_hard_cap_across_namespaces() -> None:

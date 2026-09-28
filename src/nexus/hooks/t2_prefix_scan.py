@@ -273,8 +273,12 @@ def _build_output(
 
         ns = ns_row.get("project", "")
         try:
+            # nexus-xn9ut: read only the rows this scan can render, plus
+            # one to learn whether more exist. The whole-project list cost
+            # 2.4s on a 3,840-row namespace against the hook's 9s bound.
             summaries = store.list_entries(
                 project=ns,
+                limit=_TITLE_LIMIT + 1,
                 timeout=_clamped_call_timeout(deadline, request_timeout_s),
                 retry_read_timeout=False,
             )
@@ -317,7 +321,10 @@ def _build_output(
             lines.append(f"### {label}")
             lines.extend(ns_lines)
             if ns_remaining:
-                lines.append(f"  … ({ns_remaining} more)")
+                # The list is bounded (nexus-xn9ut), so the number past the
+                # rendered titles is not known; the extra row says there
+                # are more.
+                lines.append("  … (more)")
             lines.append("")
 
     if skipped_for_cap:
