@@ -1,7 +1,9 @@
 # Proposal: Applying "Beyond Similarity Search" to Nexus
 
-> **UNRESOLVED DRAFT (2026-05-31)**; substrate claims predate RDR-155/158;
-> disposition pending.
+> **Not adopted** (Sam, 2026-09-28, nexus-z93bq). Kept as a historical record.
+> Overtaken by RDR-155/158: nexus moved every tier onto one PG substrate with
+> row-level security, which removes the split-store staleness and tenant-leak
+> failure modes this proposal argues from. Its substrate claims predate that move.
 
 **Status:** draft — proposal only, no code or doc changes yet
 **Author:** synthesis of /nx:research run 2026-05-17

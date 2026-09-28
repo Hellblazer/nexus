@@ -2298,6 +2298,41 @@ the service backend's `chash` length constraint) are re-hashed to full 64-char
 content-derived ids automatically (RDR-180); the CLI reports how many were
 re-hashed.
 
+**Owner registration:** after every chunk batch is written, `import` finds or
+registers a catalog document per owner group and writes its manifest
+(nexus-wbfpw.31), so an imported chunk stays visible under RDR-192 Step 5's
+live(c) read predicate — a chunk with no manifest row in its own collection
+is otherwise invisible to search and get.
+
+- Chunks are grouped by owner identity — the export's `owner` record field
+  (`source_uri`, `title`, `content_type`, `position`) — across the whole
+  file, and each group's document is found or registered once every batch
+  has upserted, not per batch: the per-batch manifest hook restarts position
+  numbering at each 300-chunk batch and would corrupt a multi-batch
+  document's manifest.
+- Importing into a collection other than the one the documents live in
+  (`-c`/`--collection`) COPIES rather than moves: the source collection's
+  documents are left untouched and stay live, and the target gets its own
+  documents under `nxexp://<target>/<original source_uri>`. Re-importing the
+  same file finds that qualified document again, so the copy is idempotent.
+- A legacy record carrying `meta.doc_id` (a pre-RDR-108 export with no
+  `owner` field) keeps that document when it is still live in the target
+  collection, and otherwise gets a new one scoped to the file
+  (`nxexp://<target>/<file>#<doc_id>`).
+- A record with no owner at all (an older export predating this field, or a
+  live-but-unmanifested chunk the export could not resolve) is grouped under
+  one document per import file, keyed by the target collection and file name.
+- `--skip-existing` still ends every record owned: grouping happens before
+  duplicate filtering, since a chunk dropped as an existing duplicate was
+  written by a prior run and must still end up owned by this one.
+- An owner with no title (an export whose document had none) keeps its
+  source URI as the registered document's title.
+- If an owner document or its manifest fails to write, the rest of the
+  import still completes; the command then fails, naming every failed
+  source URI (capped at 5, with a count of the rest) and noting that
+  re-running the same import is safe — document lookup and manifest writes
+  are idempotent.
+
 **Restoring a pre-migration (Chroma-era) backup:**
 
 ```

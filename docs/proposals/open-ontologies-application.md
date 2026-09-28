@@ -1,7 +1,8 @@
 # Proposal: Applying "Open Ontologies" Findings to Nexus
 
-> **UNRESOLVED DRAFT (2026-05-31)**; substrate claims predate RDR-155/158;
-> disposition pending.
+> **Not adopted** (Sam, 2026-09-28, nexus-z93bq). Kept as a historical record.
+> Nothing here was picked up; the catalog linker work continues without it.
+> Its substrate claims predate RDR-155/158.
 
 **Status:** draft — proposal only, no code or doc changes yet
 **Author:** synthesis of /nx:research run 2026-05-17
