@@ -2247,6 +2247,7 @@ nexus-br31l.1
 nexus-br90a
 nexus-brw1s
 nexus-brw1s.1
+nexus-brxnp
 nexus-bsg
 nexus-bsg.1
 nexus-bsjro
@@ -6084,6 +6085,7 @@ nexus-u5dln.1
 nexus-u5rp1
 nexus-u5rp1.1
 nexus-u6d6
+nexus-u6d93
 nexus-u7blf
 nexus-u7ek
 nexus-u7r0
@@ -6160,6 +6162,7 @@ nexus-uks83.1
 nexus-ulcqf
 nexus-uloao
 nexus-ulrjq
+nexus-ulrjq.1
 nexus-um2h1
 nexus-um2h1.1
 nexus-um47z
