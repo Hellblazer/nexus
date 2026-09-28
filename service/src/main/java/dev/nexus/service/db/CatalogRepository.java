@@ -7523,6 +7523,12 @@ public final class CatalogRepository {
             if (lifecycleState != null && !lifecycleState.isBlank()) {
                 cond = cond.and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleState));
             }
+            // nexus-4w07i: 'live' is the routing view here as on /v1/vectors/stats,
+            // so a rename tombstone (superseded_by set, lifecycle still 'live') is
+            // left out of it on both routes. The unfiltered inventory keeps it.
+            if ("live".equals(lifecycleState)) {
+                cond = cond.and(CATALOG_COLLECTIONS.SUPERSEDED_BY.isNull().or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")));
+            }
             return ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.MODEL_VERSION,
                            CATALOG_COLLECTIONS.DISPLAY_NAME, CATALOG_COLLECTIONS.LEGACY_GRANDFATHERED, CATALOG_COLLECTIONS.SUPERSEDED_BY, F_COL_SUPAT, F_COL_CRTAT,
                            CATALOG_COLLECTIONS.DIMENSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE, CATALOG_COLLECTIONS.ASPECTS_ENABLED)
