@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 import nexus.db.http_vector_client as hvc
+from nexus.catalog.chunk_quarantine import now_stamp, quarantine_collection_name
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests._engine_substrate import ensure_engine, mint_test_tenant
 
@@ -112,6 +113,21 @@ def _seed_one_chunk_per_cause(coll: str, coll2: str) -> dict[str, str]:
     }
 
 
+def _psql(state: dict, tenant: str | None, *, sql_path: Path | None = None, command: str | None = None):
+    """Run psql as ``nexus_svc`` (NOSUPERUSER NOBYPASSRLS) with ON_ERROR_STOP,
+    either a file (*sql_path*) or a single *command*."""
+    args = [
+        str(Path(state["pg_bin"]) / "psql"),
+        "-h", "127.0.0.1", "-p", str(state["pg_port"]),
+        "-U", "nexus_svc", "-d", state["pg_dbname"],
+        "-v", "ON_ERROR_STOP=1", "-A", "-F,", "-t",
+    ]
+    if tenant is not None:
+        args += ["-v", f"tenant={tenant}"]
+    args += ["-f", str(sql_path)] if sql_path is not None else ["-c", command or ""]
+    return subprocess.run(args, capture_output=True, text=True, timeout=130)
+
+
 def _run_census(state: dict, tenant: str, sql_path: Path = _SQL_PATH) -> list[tuple[str, str | None, str, int]]:
     """Run *sql_path* via ``psql -f``, as ``nexus_svc``, scoped to *tenant*.
 
@@ -120,20 +136,7 @@ def _run_census(state: dict, tenant: str, sql_path: Path = _SQL_PATH) -> list[tu
     every non-SELECT command's status line (``BEGIN``, ``SET``, ``COMMIT``),
     are filtered out by field count -- neither carries three commas.
     """
-    psql = Path(state["pg_bin"]) / "psql"
-    proc = subprocess.run(
-        [
-            str(psql),
-            "-h", "127.0.0.1",
-            "-p", str(state["pg_port"]),
-            "-U", "nexus_svc",
-            "-d", state["pg_dbname"],
-            "-v", f"tenant={tenant}",
-            "-A", "-F,", "-t",
-            "-f", str(sql_path),
-        ],
-        capture_output=True, text=True, timeout=130,
-    )
+    proc = _psql(state, tenant, sql_path=sql_path)
     assert proc.returncode == 0, (
         f"livec_census.sql failed ({proc.returncode}) for tenant {tenant!r} "
         f"via {sql_path}:\nstdout: {proc.stdout}\nstderr: {proc.stderr}"
@@ -196,13 +199,14 @@ def test_livec_census_classifies_each_cause_and_scopes_by_tenant(
     # Totals reconcile: each cause's 'total' row is the sum of every
     # per-collection row for that cause (the grid's whole point).
     totals_a = {r[2]: r[3] for r in rows_a if r[0] == "total"}
-    for cause in ("live", "tombstoned-owner", "other-collection-only", "no-manifest"):
+    for cause in ("live", "quarantine", "tombstoned-owner", "other-collection-only", "no-manifest"):
         expected = sum(v for (_, c), v in by_key_a.items() if c == cause)
         assert totals_a[cause] == expected, f"total for {cause!r} does not reconcile against its own collections"
     assert totals_a["live"] == 2  # coll_a's 1 + coll_a2's 1
     assert totals_a["tombstoned-owner"] == 1
     assert totals_a["other-collection-only"] == 1
     assert totals_a["no-manifest"] == 1
+    assert totals_a["quarantine"] == 0
 
     # Reverse direction: tenant A's collections are invisible under tenant B's GUC.
     rows_b = _run_census(substrate_state, tenant_b)
@@ -255,3 +259,108 @@ def test_livec_census_catches_a_missing_tombstone_join(
         "mutant expected to empty 'tombstoned-owner' -- its one chunk was "
         "misclassified as 'live'"
     )
+
+
+@pytest.mark.integration
+def test_livec_census_reports_quarantine_siblings_as_their_own_cause(
+    t2_service_env: str, substrate_state: dict,
+) -> None:
+    """A chunk GC moved into a quarantine-* sibling keeps whatever manifest
+    rows it had under the ORIGIN collection name, so the own-collection
+    probes would misread it as other-collection-only or no-manifest, a
+    false regression under the deploy condition. It must read 'quarantine'.
+    Seeded through the real GC route, not a hand-named collection."""
+    coll = _coll("quar")
+    cat = ActiveCatalog()
+    db = hvc.HttpVectorClient(tenant="unused-client-side-tag")
+    owner = cat.register_owner(f"{coll}-owner", "curator")
+    live, orphan = _chash(f"{coll}:live"), _chash(f"{coll}:orphan")
+    db.upsert_chunks_with_embeddings(
+        coll, ids=[live, orphan],
+        documents=["livec census quarantine live chunk", "livec census quarantine orphan chunk"],
+        embeddings=[],
+        metadatas=[
+            {"chunk_text_hash": live, "title": "qlive.txt:1-1"},
+            {"chunk_text_hash": orphan, "title": "qorphan.txt:1-1"},
+        ],
+    )
+    doc = str(cat.register(
+        owner, f"{coll}-doc", content_type="knowledge",
+        physical_collection=coll, file_path=f"/tmp/{coll}/qlive.txt",
+    ))
+    cat.write_manifest(doc, [{"chash": live, "position": 0}], collection=coll)
+
+    sibling = quarantine_collection_name(coll)
+    moved = db.gc_quarantine_orphans(coll, sibling, now_stamp(), 20)
+    assert int(moved.get("moved", 0)) == 1, moved
+
+    by_key = {(r[1], r[2]): r[3] for r in _run_census(substrate_state, t2_service_env) if r[0] == "collection"}
+    assert by_key[(sibling, "quarantine")] == 1
+    assert by_key[(sibling, "no-manifest")] == 0
+    assert by_key[(sibling, "other-collection-only")] == 0
+    assert by_key[(coll, "live")] == 1
+    assert by_key[(coll, "no-manifest")] == 0
+
+
+@pytest.mark.integration
+def test_livec_census_refuses_an_unset_or_empty_tenant(
+    t2_service_env: str, substrate_state: dict,
+) -> None:
+    """For this gate an all-zero grid reads as a pass, so a missing or
+    misspelled tenant must fail loud instead."""
+    unset = _psql(substrate_state, "", sql_path=_SQL_PATH)
+    assert unset.returncode != 0
+    assert "nexus.tenant is unset" in unset.stderr
+
+    wrong = _psql(substrate_state, "wbfpw32-no-such-tenant", sql_path=_SQL_PATH)
+    assert wrong.returncode != 0
+    assert "holds no chunks" in wrong.stderr
+
+
+@pytest.mark.integration
+def test_livec_census_manifest_probe_is_an_index_condition_under_rls(
+    t2_service_env: str, substrate_state: dict,
+) -> None:
+    """The file writes no tenant_id predicate and relies on the RLS policy.
+    The chash equality reaches idx_catalog_chunks_chash as an Index Cond
+    only because byteaeq is leakproof (texteq likewise for collection); if
+    either flag flips, the equality becomes a post-scan filter and ~317k
+    probes blow the 120 s timeout. Pin both flags, and pin that the chash
+    equality CAN be an Index Cond for nexus_svc. Which index the planner
+    then picks is a costing choice that only production statistics settle;
+    the 2026-09-27 manifest-less census ran the same join shape on
+    production at p50 23 ms and at most 4.4 s for 47,778 chunks."""
+    flags = _psql(
+        substrate_state, None,
+        command="SELECT proname, proleakproof FROM pg_proc "
+                "WHERE proname IN ('byteaeq', 'texteq') ORDER BY proname",
+    )
+    assert flags.returncode == 0, flags.stderr
+    assert flags.stdout.split() == ["byteaeq,t", "texteq,t"], flags.stdout
+
+    # On a near-empty table the planner may cost (tenant, collection) the
+    # same as (tenant, chash) and pick it, which says nothing about pushdown.
+    # So, as the substrate superuser, drop that competitor inside a
+    # transaction that is rolled back, switch to nexus_svc, and require the
+    # chash equality to appear in the Index Cond of idx_catalog_chunks_chash.
+    q = (
+        "BEGIN; DROP INDEX nexus.idx_catalog_chunks_collection; "
+        "SET LOCAL ROLE nexus_svc; SET LOCAL enable_seqscan = off; "
+        f"SELECT set_config('nexus.tenant', '{t2_service_env}', true); "
+        "EXPLAIN SELECT 1 FROM nexus.catalog_document_chunks m "
+        "WHERE m.chash = '\\x00'::bytea; ROLLBACK;"
+    )
+    plan = subprocess.run(
+        [
+            str(Path(substrate_state["pg_bin"]) / "psql"),
+            "-h", "127.0.0.1", "-p", str(substrate_state["pg_port"]),
+            "-U", substrate_state["pg_user"], "-d", substrate_state["pg_dbname"],
+            "-v", "ON_ERROR_STOP=1", "-A", "-t", "-c", q,
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert plan.returncode == 0, plan.stderr
+    text = plan.stdout
+    assert "idx_catalog_chunks_chash" in text, text
+    cond = [line for line in text.splitlines() if "Index Cond" in line]
+    assert cond and "chash" in cond[0] and "tenant_id" in cond[0], text

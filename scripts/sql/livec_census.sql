@@ -21,8 +21,14 @@
 -- this tenant, across every collection -- RDR-191 Phase 4 unified this
 -- into one table with one embedding_<dim> column per row, so a single
 -- scan of it already covers 384/768/1024 with no per-dim table to miss)
--- into exactly one of three non-live causes, evaluated in this order:
+-- into exactly one of four non-live causes, evaluated in this order:
 --
+--   quarantine            the chunk sits in a quarantine-* sibling
+--                         collection (catalog-023). GC moved it there as an
+--                         orphan; its manifest rows, if any, still name the
+--                         origin collection, so the tests below would
+--                         misread it. No search reads quarantine-*, so it is
+--                         reported for reconciliation only, not as a loss.
 --   tombstoned-owner      not live, but an own-collection manifest row
 --                         exists. By construction that owner MUST be
 --                         tombstoned (fk_catalog_chunks_catalog_doc,
@@ -43,6 +49,11 @@
 -- NOT on that list are a regression, not an accepted loss -- and
 -- gate-xr789 reads 100% live after its re-seed with owners.
 --
+-- GUARD: the file raises, rather than printing an all-zero grid, when
+-- the tenant GUC is unset or names a tenant that holds no chunks. For this
+-- gate an empty result would read as a clean pass. Run psql with
+-- -v ON_ERROR_STOP=1 so the raise stops the run.
+--
 -- USAGE: read-only (BEGIN READ ONLY), one call per tenant -- set the RLS
 -- GUC first, in the SAME transaction (the `true` third argument scopes it
 -- to this BEGIN..COMMIT, unlike manifest_less_census.sql's session-wide
@@ -52,11 +63,14 @@
 -- true)`) supplies it, and texteq/byteaeq are both leakproof so it still
 -- drives an index scan (same barrier analysis as manifest_less_census.sql's
 -- header; nexus_diag cannot run this, its grants exclude catalog_documents).
--- Per-tenant loop (tenant_id list: `SELECT DISTINCT tenant_id FROM
--- nexus.service_tokens`, no RLS on that table):
+-- Per-tenant loop over an EXPLICIT tenant list, which must include nexus
+-- and gate-xr789. `SELECT DISTINCT tenant_id FROM nexus.service_tokens`
+-- (no RLS on that table) can help find others, but a tenant seeded without
+-- ever being issued a token is absent from it, so it is not the list:
 --
---     for t in $(...); do
---       psql "$DATABASE_URL" -v tenant="$t" -f scripts/sql/livec_census.sql
+--     for t in nexus gate-xr789; do
+--       psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -v tenant="$t" \
+--            -f scripts/sql/livec_census.sql
 --     done
 --
 -- RESULT SHAPE: row_kind='collection' -- one row per (collection, cause)
@@ -77,6 +91,18 @@ BEGIN READ ONLY;
 SET LOCAL statement_timeout = '120s';
 SELECT set_config('nexus.tenant', :'tenant', true);
 
+DO $guard$
+BEGIN
+    IF COALESCE(current_setting('nexus.tenant', true), '') = '' THEN
+        RAISE EXCEPTION 'livec_census: nexus.tenant is unset; pass -v tenant=<tenant>';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM nexus.chunks) THEN
+        RAISE EXCEPTION 'livec_census: tenant % holds no chunks; wrong tenant name?',
+            current_setting('nexus.tenant', true);
+    END IF;
+END
+$guard$;
+
 WITH scoped AS (
     SELECT c.collection, c.chash
       FROM nexus.chunks c
@@ -85,6 +111,7 @@ classified AS (
     SELECT
         s.collection,
         CASE
+            WHEN s.collection LIKE 'quarantine-%' THEN 'quarantine'
             WHEN EXISTS (
                      SELECT 1
                        FROM nexus.catalog_document_chunks m
@@ -110,7 +137,7 @@ classified AS (
       FROM scoped s
 ),
 causes (cause) AS (
-    SELECT unnest(ARRAY['live', 'tombstoned-owner', 'other-collection-only', 'no-manifest'])
+    SELECT unnest(ARRAY['live', 'quarantine', 'tombstoned-owner', 'other-collection-only', 'no-manifest'])
 ),
 collections AS (SELECT DISTINCT collection FROM scoped),
 per_collection AS (
@@ -142,9 +169,10 @@ SELECT * FROM (
 ORDER BY row_kind, collection NULLS LAST,
          CASE cause
              WHEN 'live'                   THEN 1
-             WHEN 'tombstoned-owner'        THEN 2
-             WHEN 'other-collection-only'   THEN 3
-             WHEN 'no-manifest'             THEN 4
+             WHEN 'quarantine'              THEN 2
+             WHEN 'tombstoned-owner'        THEN 3
+             WHEN 'other-collection-only'   THEN 4
+             WHEN 'no-manifest'             THEN 5
          END;
 
 COMMIT;
