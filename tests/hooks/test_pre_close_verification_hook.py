@@ -1465,7 +1465,13 @@ class TestDeadlineBudget:
         )
         elapsed = time.monotonic() - t0
         parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        # nexus-452oy: a non-blocking "review completed" opinion carries
+        # NO permissionDecision at all (empty stdout for the bare case,
+        # additionalContext-only here) -- an explicit allow would bypass
+        # the user's own Bash permission prompt for a decision this gate
+        # never needed to make.
+        assert _get_decision(parsed) == ""
+        assert "nexus-cotmr" in _get_context(parsed)
         assert elapsed < 3.0, (
             f"hook took {elapsed:.2f}s — the stamp call was not clamped to "
             "the remaining budget and waited out bd's full sleep"
@@ -1510,7 +1516,9 @@ class TestDeadlineBudget:
         )
         elapsed = time.monotonic() - t0
         parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        # nexus-452oy: see the identical note above.
+        assert _get_decision(parsed) == ""
+        assert "nexus-cotmr" in _get_context(parsed)
         assert elapsed < 4.8, (
             f"hook took {elapsed:.2f}s against a 5.0s harness bound (margin "
             f"{5.0 - elapsed:.2f}s) — the shipped default did not clamp "
@@ -1574,7 +1582,9 @@ class TestDeadlineBudget:
         )
         elapsed = time.monotonic() - t0
         parsed = json.loads(result.stdout)
-        assert _get_decision(parsed) == "allow"
+        # nexus-452oy: an override is STILL advisory-only here -- see the
+        # identical note above.
+        assert _get_decision(parsed) == ""
         assert "OVERRIDE" in _get_context(parsed)
         assert elapsed < 2.0, (
             f"hook took {elapsed:.2f}s — the shared budget was not "
