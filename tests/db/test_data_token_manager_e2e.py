@@ -101,7 +101,17 @@ def test_data_token_manager_self_mint_round_trip_against_real_engine(
             )
             # Read: a second call through the SAME manager -- proves cache
             # reuse (residue discipline), not a re-mint per call.
-            present = client.get_collection(collection).get(ids=[chash], include=[])
+            # nexus-wbfpw.10 (RDR-192 Step 5 live(c), engine fc99baac9): this
+            # test proves the write was ACCEPTED (self-mint auth actually
+            # took effect), not a retrieval-relevance property, and the
+            # chunk is written with no catalog manifest owner -- so read
+            # back through the maintenance include_non_live=True escape
+            # hatch, which sees stored rows regardless of live(c) ownership,
+            # rather than registering an owner document this test has no
+            # other use for.
+            present = client.get_collection(collection).get(
+                ids=[chash], include=[], include_non_live=True,
+            )
 
         assert chash in (present.get("ids") or []), (
             "the engine accepted the write authenticated by the self-minted "
@@ -179,7 +189,12 @@ def test_mint_tenant_tenant_asymmetric_round_trip_succeeds(
                 collection, ids=[chash], documents=[content], embeddings=[embedding],
                 metadatas=[{"title": "ssqk9-asym", "chunk_text_hash": chash}],
             )
-            present = client.get_collection(collection).get(ids=[chash], include=[])
+            # nexus-wbfpw.10 (RDR-192 Step 5 live(c)): auth round trip, not a
+            # retrieval-relevance property -- see the sibling test above for
+            # why include_non_live=True is the faithful read-back here.
+            present = client.get_collection(collection).get(
+                ids=[chash], include=[], include_non_live=True,
+            )
 
         assert chash in (present.get("ids") or []), (
             "mint_tenant must have overridden the caller's 'default' "
