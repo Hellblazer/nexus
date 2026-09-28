@@ -108,8 +108,39 @@ _DEFAULT_STALE_DAYS = 14
 
 #: Short by design — this hook runs on every SessionStart/SubagentStart
 #: and must never make the injected-context path noticeably slower than
-#: the rest of the hook chain. Override via NX_T2_SCAN_TIMEOUT_S.
+#: the rest of the hook chain. Override via NX_T2_SCAN_TIMEOUT_S. This
+#: is the CEILING each individual HTTP call may use; the actual per-call
+#: timeout is the SMALLER of this and whatever is left of the whole-scan
+#: budget (nexus-8t9w8 fold-in: critic follow-up on nexus-fow78/9b038bfae
+#: -- one namespace issues up to 1 ``list_entries`` + ``_SNIPPET_LIMIT``
+#: ``get`` calls, and each independently risking this full timeout could
+#: burn ``(1 + _SNIPPET_LIMIT) * _DEFAULT_HTTP_TIMEOUT_S`` = 4 * 3.0s =
+#: 12.0s against an 8.0s whole-scan budget for a SINGLE degraded
+#: namespace, the same stacking-timeout defect the stamp-budget fix
+#: closed for ``_stamp_ids``. See ``_clamped_call_timeout``.)
 _DEFAULT_HTTP_TIMEOUT_S = 3.0
+
+#: Floor for a single HTTP call's clamped timeout once the scan budget
+#: is nearly exhausted -- mirrors ``_STAMP_TIMEOUT_FLOOR`` in
+#: ``pre_close_verification.py``: never zero (a 0.0 timeout is not "try
+#: briefly", it is "don't try"), small enough that a near-exhausted
+#: budget still fails fast rather than eating what little is left.
+_HTTP_TIMEOUT_FLOOR = 0.5
+
+
+def _clamped_call_timeout(deadline: float, ceiling: float) -> float:
+    """The per-call HTTP timeout for a request issued now, against
+    *deadline* (an absolute ``time.monotonic()`` value) and never larger
+    than *ceiling* (the configured ``NX_T2_SCAN_TIMEOUT_S``).
+
+    The smaller of "what's configured" and "what's actually left of the
+    scan budget" -- so a namespace already deep into a slow scan gets a
+    correspondingly SHORTER attempt on its next call, rather than every
+    call independently risking the full configured ceiling regardless of
+    how much budget prior calls in the same scan already spent.
+    """
+    remaining = deadline - time.monotonic()
+    return max(_HTTP_TIMEOUT_FLOOR, min(ceiling, remaining))
 
 #: Engine timestamp format: UTC second-precision ISO
 #: (MemoryHandler.recordToMap / MemoryRepository.UTC_SECOND on the Java side).
@@ -139,15 +170,28 @@ def _snippet(content: str, max_chars: int = 70) -> str:
     return ""
 
 
-def _snippet_for(store: HttpMemoryStore, project: str, title: str) -> str:
+def _snippet_for(
+    store: HttpMemoryStore, project: str, title: str, *, timeout: float
+) -> str:
     """Fetch one entry's content and reduce it to a snippet.
 
     A per-entry fetch failure (unreachable, deleted between the summary
     list and this call) degrades to no snippet rather than aborting the
-    namespace — the title alone still renders.
+    namespace — the title alone still renders. ``timeout`` is the
+    caller-computed, budget-clamped per-call value (see
+    ``_clamped_call_timeout``), not the store's own client-wide default.
+
+    ``retry_read_timeout=False``: a clamped-short *timeout* that this
+    call itself trips must not be retried with the SAME clamp value —
+    that silently doubles the wait against a budget that was
+    deliberately shortened to avoid exactly that (measured: without
+    this, a single clamped ``get()`` call cost ~2x its clamp, not the
+    clamp itself).
     """
     try:
-        entry = store.get(project=project, title=title)
+        entry = store.get(
+            project=project, title=title, timeout=timeout, retry_read_timeout=False
+        )
     except _UNREACHABLE_EXC:
         return ""
     if not entry:
@@ -160,6 +204,7 @@ def _build_output(
     project_name: str,
     namespaces: list[dict[str, Any]],
     scan_budget_s: float = _DEFAULT_SCAN_BUDGET_S,
+    request_timeout_s: float = _DEFAULT_HTTP_TIMEOUT_S,
 ) -> list[str]:
     """Render the ``### T2 Memory (...)`` block(s), capped per the same
     per-namespace/whole-scan budget the plugin mirror used.
@@ -185,12 +230,30 @@ def _build_output(
     whole loop is bounded by *scan_budget_s* — both independent of
     ``_HARD_CAP``, which only counts RENDERED entries and does not fire
     for a run of empty namespaces. The deadline is also checked BETWEEN
-    per-entry snippet fetches (not only between namespaces): each fetch
-    carries the store's own per-request timeout, so a degraded server
-    answering slowly on every call could otherwise burn up to
-    ``_SNIPPET_LIMIT`` timeouts before the next namespace-level check —
-    once the deadline passes mid-namespace, remaining snippet ranks
-    render title-only instead of issuing another network call.
+    per-entry snippet fetches (not only between namespaces): once the
+    deadline passes mid-namespace, remaining snippet ranks render
+    title-only instead of issuing another network call.
+
+    **Every HTTP call's own timeout is clamped to what's left of the
+    scan budget, AND opts out of the mixin's default retry-on-
+    ReadTimeout** (nexus-8t9w8 fold-in), not a flat *request_timeout_s*
+    every call gets independently: a single degraded namespace issuing
+    up to ``1 + _SNIPPET_LIMIT`` calls (one ``list_entries`` plus up to
+    ``_SNIPPET_LIMIT`` ``get`` calls) could otherwise burn
+    ``(1 + _SNIPPET_LIMIT) * request_timeout_s`` against *scan_budget_s*
+    on its own — with the defaults, 4 * 3.0s = 12.0s against an 8.0s
+    budget for ONE namespace, the exact stacking-timeout shape the
+    stamp-budget fix closed for ``_stamp_ids`` (code review of
+    9b038bfae). Measured WORSE than that estimate during the fix itself:
+    ``RefreshableHttpStoreMixin._get`` retries a ``ReadTimeout`` exactly
+    once by default (``retry_read_timeout=True``), so an UNCLAMPED call
+    against a truly hung server pays roughly 2x its nominal timeout, not
+    1x — a single ``get()`` call in the consequence test below measured
+    ~6.9s against a nominal 3.0s ceiling before this fix added
+    ``retry_read_timeout=False`` alongside the clamp (a clamped-short
+    timeout must not be retried with the SAME clamp; that silently
+    doubles the wait against a budget deliberately shortened to avoid
+    exactly that). See ``_clamped_call_timeout``.
     """
     lines: list[str] = []
     total = 0  # rendered entries across all namespaces
@@ -210,7 +273,11 @@ def _build_output(
 
         ns = ns_row.get("project", "")
         try:
-            summaries = store.list_entries(project=ns)
+            summaries = store.list_entries(
+                project=ns,
+                timeout=_clamped_call_timeout(deadline, request_timeout_s),
+                retry_read_timeout=False,
+            )
         except _UNREACHABLE_EXC as exc:
             lines.append(f"  WARNING: T2 memory namespace {ns!r} unreachable: {exc}")
             continue
@@ -232,7 +299,10 @@ def _build_output(
             title = s.get("title", "") or ""
             if ns_rank <= _SNIPPET_LIMIT:
                 if time.monotonic() < deadline:
-                    snip = _snippet_for(store, ns, title)
+                    snip = _snippet_for(
+                        store, ns, title,
+                        timeout=_clamped_call_timeout(deadline, request_timeout_s),
+                    )
                     ns_lines.append(f"  {title}" + (f" — {snip}" if snip else ""))
                 else:
                     ns_lines.append(f"  {title}")
@@ -359,7 +429,9 @@ def scan(project: str) -> str:
             # Reachable, zero matching namespaces: a genuinely empty T2.
             return ""
 
-        lines = _build_output(store, project, namespaces, scan_budget_s)
+        lines = _build_output(
+            store, project, namespaces, scan_budget_s, request_timeout_s=timeout
+        )
 
         freshness_warning = _check_freshness(
             namespaces[0].get("last_updated", ""), stale_days

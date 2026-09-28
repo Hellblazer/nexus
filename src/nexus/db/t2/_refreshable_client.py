@@ -1053,6 +1053,7 @@ class RefreshableHttpStoreMixin:
         *,
         idempotent: bool = True,
         timeout: float | None = None,
+        retry_read_timeout: bool = True,
     ) -> Any:
         """GET *path*; self-heals once on a retryable error.
 
@@ -1066,8 +1067,25 @@ class RefreshableHttpStoreMixin:
         shared, longer-timeout client) can get one WITHOUT giving up a
         shared client -- see :meth:`_post`'s docstring for the full
         rationale, identical here.
+
+        ``retry_read_timeout`` (nexus-8t9w8 fold-in): ``_post`` has
+        carried this since nexus-y9t08 and ``_get`` had not -- an
+        inconsistency this closes, not a new mechanism. Default ``True``
+        preserves the existing self-heal behavior (a ``ReadTimeout``
+        retries exactly once, same as any other retryable exception).
+        Pass ``False`` when *timeout* is itself a shrinking, caller-
+        computed remaining-budget clamp (``t2_prefix_scan``'s per-
+        namespace snippet loop, mirroring the stamp-budget fix) --
+        without it, a clamped-short call that times out gets retried
+        with the SAME clamp value, silently doubling the wait against a
+        budget that was deliberately shortened to avoid exactly that.
+        See :meth:`_post`'s docstring for the full rationale.
         """
-        kwargs: dict[str, Any] = {"params": params, "idempotent": idempotent}
+        kwargs: dict[str, Any] = {
+            "params": params,
+            "idempotent": idempotent,
+            "retry_read_timeout": retry_read_timeout,
+        }
         if timeout is not None:
             kwargs["timeout"] = timeout
         return self._send("GET", path, **kwargs)

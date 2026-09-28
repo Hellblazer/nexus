@@ -61,15 +61,31 @@ from nexus._hook_runtime._io import HookResult
 __all__ = ["run"]
 
 
-#: Process-wide clock anchor (nexus-8t9w8): when THIS module was imported,
-#: which is "when this hook dispatch began" in both production and tests --
-#: every invocation is a FRESH subprocess (hooks.json's PreToolUse entry
-#: spawns `python3 nx_hook_shim.py`, which spawns `nx-hook`, which imports
-#: this module exactly once; this file's own test driver does the same).
-_MODULE_LOAD_TIME = time.monotonic()
+#: Per-INVOCATION clock anchor (nexus-8t9w8 round 2, code-review finding),
+#: reset at the top of every :func:`run` call -- NOT module-import time.
+#: `pre_close_verification` is one of `DECIDING_HOOKS`
+#: (`src/nexus/mcp/hooks.py`): allowed to register as the
+#: `hook_pre_close_verification` mcp_tool for diagnosis ("a verdict is
+#: useful as data, and these tools are how the gate gets exercised in
+#: diagnosis" -- that module's own comment), though `hooks.json` never
+#: WIRES it that way (confirmed: the only `hooks.json` reference is the
+#: command-tier `nx-hook pre-close-verification` entry this file's own
+#: tests drive, PreToolUse, `"timeout": 5`). `nx-mcp` is a server process
+#: that stays up for the whole session and imports this module exactly
+#: ONCE at its own boot. Anchoring at IMPORT time -- the first cut of
+#: this fix -- would put the stamp budget at its floor PERMANENTLY after
+#: the server's first `_STAMP_DEADLINE_SECONDS` of uptime, for every
+#: mcp_tool-tier dispatch after the first; a fresh `nx-hook` subprocess
+#: (the command-tier, WIRED path) never hit this, because for it "per
+#: run()" and "per process" already coincided, but the bug was real on
+#: the diagnosis path DECIDING_HOOKS deliberately keeps open. A
+#: module-level mutable slot, reset at the top of `run()`, mirrors
+#: `_SESSION_ID`'s own per-dispatch reset and is correct under both
+#: invocation shapes.
+_HOOK_START_TIME = [0.0]
 
-#: Whole-PROCESS wall-clock budget for `_stamp_ids`' `bd set-state` calls,
-#: measured from `_MODULE_LOAD_TIME` (nexus-8t9w8; T2
+#: Whole-DISPATCH wall-clock budget for `_stamp_ids`' `bd set-state`
+#: calls, measured from `_HOOK_START_TIME` (nexus-8t9w8; T2
 #: nexus/shakeout-7.64.1-hooks-2026-09-28 F3: 13/22 `bd close` commands hit
 #: hooks.json's 5.0s PreToolUse kill with NO decision returned at all --
 #: the ALLOW/DENY `_run_gate` had already computed was discarded along with
@@ -95,24 +111,42 @@ _MODULE_LOAD_TIME = time.monotonic()
 #: of risking the harness kill taking the already-decided ALLOW/DENY down
 #: with it. 4.0s (0.5s under hooks.json's 5.0s timeout for this dispatch)
 #: leaves margin for the outer shim's spawn and this process's own
-#: pre-`_MODULE_LOAD_TIME` interpreter/import startup, neither of which
-#: this in-process clock can see. Overridable for tests, mirroring
-#: `_coverage`'s NX_CLOSE_GATE_DEADLINE_SECONDS test seam.
+#: pre-`_HOOK_START_TIME` interpreter/import startup, neither of which
+#: this in-process clock can see (measured directly, idle box: shim spawn
+#: + `nx-hook` spawn + dispatch to a fast no-op payload = 0.06s; see the
+#: bead's own timing record for the fuller breakdown). Overridable for
+#: tests, mirroring `_coverage`'s NX_CLOSE_GATE_DEADLINE_SECONDS seam.
 _STAMP_DEADLINE_SECONDS = float(
     os.environ.get('NX_CLOSE_GATE_STAMP_DEADLINE_SECONDS', '4.0') or '4.0'
 )
 
-#: Floor for a single `bd set-state` call's clamped timeout -- never zero
-#: (a 0.0 timeout is not "try briefly", it is "don't try"), and small
-#: enough that a truly exhausted budget still fails within a fraction of
-#: a second rather than eating the last of it.
+#: Minimum remaining budget worth ATTEMPTING a `bd` call with -- below
+#: this, `_stamp_ids` skips the call entirely (a loud warning, zero
+#: subprocess time) rather than trying with a near-zero timeout that
+#: cannot realistically succeed against bd's own measured 1.9-4.0s floor.
+#:
+#: This is NOT a padded minimum handed to every call independently --
+#: that was the round-2 defect (code review of 9b038bfae): flooring each
+#: of N ids (or the override path's two separate `_stamp_ids` calls) up
+#: to at least 0.5s made the TOTAL unbounded in N (3+ ids, or the
+#: 2-call override path, could still exceed the 5.0s harness ceiling).
+#: `_stamp_deadline_remaining` now reports the RAW remaining, which can
+#: be zero or negative; once it drops to or below this floor, every
+#: remaining id in the batch is skipped in one warning rather than each
+#: getting its own doomed attempt.
 _STAMP_TIMEOUT_FLOOR = 0.5
 
 
 def _stamp_deadline_remaining() -> float:
-    """Seconds left in the shared stamp budget, clamped to the floor."""
-    elapsed = time.monotonic() - _MODULE_LOAD_TIME
-    return max(_STAMP_TIMEOUT_FLOOR, _STAMP_DEADLINE_SECONDS - elapsed)
+    """Raw seconds left in the shared stamp budget for THIS dispatch.
+
+    Not clamped to the floor -- callers compare against
+    `_STAMP_TIMEOUT_FLOOR` themselves to decide whether an attempt is
+    still worthwhile (see `_STAMP_TIMEOUT_FLOOR`'s own docstring for why
+    padding this value up was the round-2 defect).
+    """
+    elapsed = time.monotonic() - _HOOK_START_TIME[0]
+    return _STAMP_DEADLINE_SECONDS - elapsed
 
 
 #: The only built-in bd status VALUE whose category is "done" (bd's own
@@ -1074,6 +1108,13 @@ def run(payload: dict | None) -> HookResult:
     fix is emitting nothing on those paths and updating the tests that
     assumed otherwise, not the other way around. See :func:`_allow`.
     """
+    # nexus-8t9w8 round 2: reset the stamp-budget clock FIRST, before any
+    # branch -- this dispatch's `bd set-state` calls (if it reaches them)
+    # must be timed from HERE, not from whenever this module happened to
+    # be imported. See _HOOK_START_TIME's own docstring for why that
+    # distinction matters on the mcp_tool (long-lived nx-mcp) tier.
+    _HOOK_START_TIME[0] = time.monotonic()
+
     data = payload if isinstance(payload, dict) else {}
     # Record the session id BEFORE any branch: every `nx` subprocess this
     # hook spawns needs it forced, because the hook can run detached from
@@ -1278,7 +1319,7 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
     nobody was told is missing.
 
     nexus-8t9w8: each call's timeout is CLAMPED to what's left of the
-    shared process-wide stamp budget (:func:`_stamp_deadline_remaining`),
+    shared DISPATCH-WIDE stamp budget (:func:`_stamp_deadline_remaining`),
     not an independent flat 5.0s -- see that budget's own docstring for
     why an uncoordinated per-call timeout was the dominant cost behind
     close commands losing their ALLOW/DENY decision to the harness kill
@@ -1286,6 +1327,16 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
     raises the same ``TimeoutExpired``-or-nonzero shape the ``except``
     below already handled -- this changes HOW LONG a stamp is allowed to
     try, never what happens when it fails.
+
+    The budget is a HARD TOTAL across every id in *this* call AND every
+    other ``_stamp_ids`` call in the same dispatch (the override path in
+    ``_run_gate`` calls this twice: once for ``covered``, once for the
+    overridden set) -- round 2 fix (code review of 9b038bfae): giving
+    each id its own floored minimum made the total unbounded in the
+    number of ids, defeating the whole point of a shared budget. Once
+    the remaining budget drops to or below ``_STAMP_TIMEOUT_FLOOR``, every
+    id still in the batch is skipped in ONE loud warning rather than each
+    getting its own doomed, floor-padded attempt.
     """
     if not ids:
         return
@@ -1294,11 +1345,19 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
               f"for: {' '.join(ids)}")
         return
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred: a hook process pays its import cost on every invocation, and a module-scope import of this pulls structlog + ~231 modules (measured on verification_config: 14ms/106 -> 62-84ms/337). Deferred, it is paid only when we actually spawn
-    for bid in ids:
+    for i, bid in enumerate(ids):
+        remaining = _stamp_deadline_remaining()
+        if remaining <= _STAMP_TIMEOUT_FLOOR:
+            skipped = ids[i:]
+            _warn(
+                "stamp budget exhausted — skipping verification="
+                f"{state} for: {' '.join(skipped)}"
+            )
+            break
         try:
             r = run_bounded(
                 ["bd", "set-state", bid, f"verification={state}", "--reason", reason],
-                timeout=_stamp_deadline_remaining(),
+                timeout=remaining,
             )
             if r.returncode != 0:
                 _warn(f"could not stamp verification={state} for {bid}")

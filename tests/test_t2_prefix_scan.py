@@ -80,14 +80,27 @@ class _RowStore:
     def put(self, project: str, title: str, content: str) -> None:
         self._rows.setdefault(project, []).append({"title": title, "content": content})
 
-    def list_entries(self, project: str | None = None, agent: str | None = None) -> list[dict[str, Any]]:
+    def list_entries(
+        self,
+        project: str | None = None,
+        agent: str | None = None,
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
+    ) -> list[dict[str, Any]]:
         return [
             {"title": r["title"], "project": project}
             for r in self._rows.get(project or "", [])
         ]
 
     def get(
-        self, project: str | None = None, title: str | None = None, id: int | None = None
+        self,
+        project: str | None = None,
+        title: str | None = None,
+        id: int | None = None,
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
     ) -> dict[str, Any] | None:
         self.get_calls.append((project or "", title or ""))
         for r in self._rows.get(project or "", []):

@@ -1471,6 +1471,129 @@ class TestDeadlineBudget:
             "the remaining budget and waited out bd's full sleep"
         )
 
+    def test_shipped_default_stays_under_the_harness_bound_with_a_realistic_slow_bd(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """Critic follow-up item 1: the SHIPPED default
+        (NX_CLOSE_GATE_STAMP_DEADLINE_SECONDS unset -> 4.0s), no test
+        override, against a realistic worst-realistic-case pair: ``nx``
+        sleeps 0.7s (the top of the measured real-T1 ``_coverage`` range,
+        0.4-0.7s) and ``bd`` sleeps 4.0s (the top of the measured real-bd
+        range, 1.9-4.0s). hooks.json's PreToolUse bound for this entry is
+        5.0s.
+
+        MARGIN, stated: with the shipped 4.0s stamp budget and ~0.7s
+        already spent on the T1 check, the stamp attempt is clamped to
+        ~3.3s remaining -- shorter than bd's 4.0s sleep, so it times out
+        at the clamp rather than completing. Total wall time is therefore
+        bounded by (nx sleep) + (clamped stamp attempt) =~ 0.7 + 3.3 =
+        4.0s, not 0.7 + 4.0 = 4.7s -- a margin of roughly 1.0s under the
+        5.0s harness kill, NOT the ~0.3s a naive "0.7 + 4.0" sum would
+        suggest. Measured on this box (5 runs, idle): 4.04-4.05s,
+        margin 0.95-0.96s. The bound below (4.8s) is looser than that
+        measured steady state, to absorb ordinary box jitter without
+        becoming flaky, while still meaningfully proving the dispatch
+        stays under the 5.0s harness kill rather than merely under some
+        arbitrary larger number.
+        """
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-cotmr", "review-completed: nexus-cotmr — clean"
+        )
+        fake_nx_bin = fake_nx(scratch, sleep_seconds=0.7)
+        fake_bd_bin, log = fake_bd(sleep_seconds=4.0)
+        t0 = time.monotonic()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-cotmr"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,  # NO NX_CLOSE_GATE_STAMP_DEADLINE_SECONDS override
+        )
+        elapsed = time.monotonic() - t0
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert elapsed < 4.8, (
+            f"hook took {elapsed:.2f}s against a 5.0s harness bound (margin "
+            f"{5.0 - elapsed:.2f}s) — the shipped default did not clamp "
+            "the stamp call to what nx's sleep left of the budget"
+        )
+
+    def test_multi_id_stamps_share_one_budget_including_the_override_path(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """Critic follow-up item 2: the SUM of every ``bd`` stamp attempt
+        across a multi-id close -- covered AND overridden -- must stay
+        within the ONE shared dispatch budget, not each id (or each of
+        the override path's TWO separate ``_stamp_ids`` calls) getting
+        its own independent allowance.
+
+        Two ids (nexus-m01, nexus-m02) are covered by a full marker;
+        one (nexus-m03) is not -- with NX_REVIEW_GATE_OVERRIDE=1 this
+        drives ``_run_gate``'s override branch, which calls
+        ``_stamp_ids`` TWICE: once for ``covered`` (2 ids), once for the
+        overridden set (1 id) -- the exact two-call shape the round-2
+        fix has to bound as ONE total, not 2x independent budgets. Every
+        ``bd`` call sleeps 2.0s (so 3 ids x 2.0s = 6.0s if each got its
+        own attempt, already over the harness bound on its own). ``nx``
+        is fast (no sleep). With the budget clamped to 1.5s total, only
+        the FIRST id of the FIRST ``_stamp_ids`` call gets a real
+        (clamped-short) attempt before the shared budget is exhausted;
+        every id after that -- the covered call's second id AND the
+        entire second (overridden) call -- is skipped with a loud
+        warning and never reaches ``bd`` at all.
+
+        Measured on this box: round-2 (fixed) code, 3 runs idle,
+        1.20-1.56s. The pre-fix per-id-FLOORED code measures ~2.55s for
+        this same scenario (three independently-floored attempts: ~1.5s
+        for m01, ~0.5s floored for m02, ~0.5s floored for m03 -- the
+        SECOND and THIRD attempts should have been skipped entirely once
+        the shared budget was exhausted, but the floor guaranteed each
+        one a minimum try anyway). The bound below (2.0s) sits strictly
+        between the two measured values, so it passes the fixed code and
+        fails the reverted one -- not merely "under the naive 6.0s worst
+        case", which both old and new code already satisfy here and so
+        cannot tell them apart.
+        """
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-m01,nexus-m02",
+            "review-completed: nexus-m01 + nexus-m02 — both rounds",
+        )
+        fake_nx_bin = fake_nx(scratch)  # fast -- no sleep
+        fake_bd_bin, log = fake_bd(sleep_seconds=2.0)
+        t0 = time.monotonic()
+        result = _run_hook(
+            _make_payload(
+                command="for b in nexus-m01 nexus-m02 nexus-m03; do bd close $b; done"
+            ),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides={
+                **env,
+                "NX_CLOSE_GATE_STAMP_DEADLINE_SECONDS": "1.5",
+                "NX_REVIEW_GATE_OVERRIDE": "1",
+            },
+        )
+        elapsed = time.monotonic() - t0
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert "OVERRIDE" in _get_context(parsed)
+        assert elapsed < 2.0, (
+            f"hook took {elapsed:.2f}s — the shared budget was not "
+            "enforced as a hard total across the override path's two "
+            "_stamp_ids calls; the pre-fix per-id-floor code measures "
+            "~2.55s here (three independently-floored attempts: ~1.5s + "
+            "~0.5s + ~0.5s), and the fully-naive worst case is "
+            "3 x 2.0s = 6.0s"
+        )
+        # 2.0s sleep > 1.5s total budget, so even the FIRST attempt
+        # (covered's nexus-m01) should time out before bd's script gets
+        # to its own `echo` line -- no id, covered or overridden, should
+        # have landed a successful stamp.
+        stamped = log.read_text() if log.exists() else ""
+        assert "verification=" not in stamped, (
+            f"a stamp landed despite a budget too small for bd's sleep to "
+            f"ever complete: {stamped!r}"
+        )
+
     def test_fast_path_single_call_when_t1_covers(
         self, mock_config_env, fake_nx, tmp_path
     ) -> None:

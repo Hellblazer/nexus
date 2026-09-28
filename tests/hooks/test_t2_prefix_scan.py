@@ -73,6 +73,7 @@ class _MockMemoryEngine:
         *,
         expected_token: str = _TOKEN,
         fail_projects: set[str] | None = None,
+        get_sleep_seconds: float = 0.0,
     ) -> None:
         self.projects = projects
         self.entries_by_project = entries_by_project
@@ -80,6 +81,12 @@ class _MockMemoryEngine:
         #: nexus-eg6qe: projects in this set get a 500 from /v1/memory/list,
         #: simulating a single bad/slow namespace mid-scan.
         self.fail_projects = fail_projects or set()
+        #: nexus-8t9w8: deterministically reproduces a slow-but-working
+        #: /v1/memory/get (the per-entry content fetch) -- mirrors
+        #: pre_close_verification's own fake_nx/fake_bd sleep_seconds
+        #: idiom. Deliberately NOT applied to /v1/memory/list, so a test
+        #: can isolate the get-call clamp from the list-call clamp.
+        self.get_sleep_seconds = get_sleep_seconds
         self.requests: list[str] = []
 
         engine = self
@@ -117,6 +124,8 @@ class _MockMemoryEngine:
                     ]
                     self._send_json(200, summaries)
                 elif parsed.path == "/v1/memory/get":
+                    if engine.get_sleep_seconds:
+                        time.sleep(engine.get_sleep_seconds)
                     project = params.get("project", "")
                     title = params.get("title", "")
                     rows = engine.entries_by_project.get(project, [])
@@ -410,6 +419,61 @@ def test_scan_budget_stops_the_fetch_loop(tmp_path: Path, mock_engine) -> None:
     assert "scan budget exceeded" in out
     assert not [r for r in engine.requests if "/v1/memory/list" in r]
     assert not [r for r in engine.requests if "/v1/memory/all" in r]
+
+
+def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
+    tmp_path: Path, mock_engine
+) -> None:
+    """Critic follow-up on nexus-fow78/9b038bfae: a degraded
+    ``/v1/memory/get`` must not burn the FULL configured
+    ``NX_T2_SCAN_TIMEOUT_S`` ceiling once most of the whole-scan budget
+    is already spent -- the same stacking-timeout defect the
+    ``_stamp_ids`` fix closed for ``pre_close_verification``.
+
+    ``/v1/memory/list`` answers instantly (isolating the get-call clamp
+    from the list-call clamp); ``/v1/memory/get`` sleeps 5.0s, longer
+    than both the 1.5s scan budget and the 3.0s configured ceiling. With
+    the fetch clamped to what's left of the budget (and
+    ``retry_read_timeout=False``, so the clamped timeout is not silently
+    retried and doubled), the first snippet attempt gives up at ~1.5s
+    (not the full 3.0s ceiling, and nowhere near 2x that from a retry)
+    and the existing per-entry deadline gate then renders the remaining
+    entries title-only rather than issuing further calls.
+
+    Measured on this box: fixed code passes comfortably under the 2.2s
+    bound below; the pre-fix code (unclamped timeout, default
+    ``retry_read_timeout=True``) measures ~6.9s for this same scenario
+    -- the mixin's own once-retry-on-ReadTimeout doubles even the
+    UNCLAMPED 3.0s ceiling, not just a clamped one.
+    """
+    now = _now()
+    engine = mock_engine(
+        projects=[{"project": "nexus", "last_updated": _iso(now)}],
+        entries_by_project={
+            "nexus": [
+                _entry(f"entry-{i}", f"Content {i}", now - timedelta(seconds=i))
+                for i in range(3)
+            ],
+        },
+        get_sleep_seconds=5.0,
+    )
+    t0 = time.monotonic()
+    out = _run(
+        "nexus",
+        config_dir=tmp_path,
+        env=_engine_env(
+            engine,
+            NX_T2_SCAN_BUDGET_S="1.5",
+            NX_T2_SCAN_TIMEOUT_S="3.0",
+        ),
+    )
+    elapsed = time.monotonic() - t0
+    assert "entry-0" in out  # the freshest entry's title still renders
+    assert elapsed < 2.2, (
+        f"scan took {elapsed:.2f}s — the get() call was not clamped to "
+        "the remaining scan budget (~1.5s) and instead waited out closer "
+        "to the full 3.0s configured ceiling"
+    )
 
 
 # ── Scoped to what is rendered (nexus-fow78) ─────────────────────────────────
