@@ -80,3 +80,10 @@ def test_an_explicit_corpus_still_narrows(t3) -> None:
     out = core.query("q", content_type="rdr", corpus="knowledge")
     assert "No documents found" in out
     assert "in corpus 'knowledge'" in out, "the empty message must name what was searched"
+
+
+def test_a_corpus_named_content_type_narrows_the_default_to_that_corpus(t3) -> None:
+    """Critique finding: every catalog-param query paid for all ~111
+    collections. content_type="rdr" names its corpus; query only that."""
+    core.query("q", content_type="rdr", structured=True)
+    assert t3.meta_calls == [[RDR_COL]]

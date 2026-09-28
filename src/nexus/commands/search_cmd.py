@@ -422,9 +422,13 @@ def search_cmd(
     # must be decided before retrieval now, and reranking a request whose
     # extra corpora return empty is harmless), not --no-rerank, plus the
     # backend capability marker — legacy backends are never asked.
+    # nexus-zdzm5 (RDR-217 A2): --lexical also reranks a single collection.
+    # The rerank is the only stage that scores a lexical row on its text; in
+    # distance order it sits at the bottom of the window and --lexical
+    # changed nothing on a one-collection search.
     want_server_rerank = (
         not no_rerank
-        and len(target_collections) > 1
+        and (len(target_collections) > 1 or lexical)
         and bool(getattr(db, "supports_server_rerank", False))
     )
     rerank_meta: dict[str, dict] = {}

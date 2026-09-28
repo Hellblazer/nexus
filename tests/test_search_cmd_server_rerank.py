@@ -138,6 +138,27 @@ def test_single_collection_skips_server_rerank(runner, cloud_env):
     assert captured and captured[0]["rerank"] is False
 
 
+def test_lexical_reranks_a_single_collection(runner, cloud_env):
+    """nexus-zdzm5 (surface A A2): the rerank is the only stage that scores
+    a lexical row on its text. Without it a single-collection --lexical
+    search ordered the lexical row by its (usually worst) vector distance
+    and cut it: 'RDR-223' --lexical on one collection returned no rdr-223
+    row. --lexical now reranks one collection too."""
+    captured: list[dict] = []
+    mock_t3 = _t3_mock(["knowledge__test"])
+    results = [
+        _result("vector-near", "knowledge__test", 0.1),
+        _result("lexical-far", "knowledge__test", 0.9, score=0.95),
+    ]
+
+    res = _invoke(runner, mock_t3, _fake_retrieval(results, captured=captured),
+                  ["search", "RDR-223", "--corpus", "knowledge", "--lexical", "-m", "1", "--json"])
+
+    assert res.exit_code == 0, res.output
+    assert captured and captured[0]["rerank"] is True
+    assert [i["id"] for i in json.loads(res.stdout)] == ["lexical-far"]
+
+
 def test_backend_without_capability_never_requests_rerank(runner, cloud_env):
     """A legacy backend (no supports_server_rerank marker) is never asked to
     rerank — the kwarg stays False, no crash, distance order preserved."""

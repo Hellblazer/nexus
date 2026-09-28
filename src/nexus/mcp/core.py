@@ -2542,12 +2542,26 @@ def _search_render(
         # zero-hit can surface the closest dropped candidate (the MCP tool
         # turns it into an actionable message; the engine still emits no stderr).
         diag: list = []
+        #: nexus-zdzm5: set when a lexical call's server rerank degraded, so
+        #: its lexical rows went back to vector-distance order (RDR-188 Gap 2:
+        #: a degrade is surfaced, never only logged).
+        rerank_note: str | None = None
         cached = _page_cache_get(cache_key, need)
         if cached is not None:
             results, diag = cached
+            rerank_note = _page_cache_note(cache_key)
         else:
             results = None
         if results is None:
+            # nexus-zdzm5 (RDR-217 A2): a lexical row's vector distance is
+            # usually the worst in its window, and RDR-217 forbids ordering
+            # across the two legs by distance. Only the server rerank scores
+            # rows on their text, and this path never asked for it, so
+            # lexical=true changed the page's scores and not its rows. Ask
+            # for it whenever lexical is on (the CLI already reranks the
+            # multi-collection case; see search_cmd.py).
+            lexical_rerank = lexical and bool(getattr(t3, "supports_server_rerank", False))
+            rerank_meta: dict = {}
             with _t2_ctx() as _t2_db:
             # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
             # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
@@ -2562,6 +2576,8 @@ def _search_render(
                     lexical=lexical,
                     telemetry=_t2_db.telemetry,
                     diagnostics_out=diag,
+                    rerank=lexical_rerank,
+                    rerank_meta_out=rerank_meta if lexical_rerank else None,
                 )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
@@ -2575,6 +2591,22 @@ def _search_render(
                 tuning=get_tuning_config(),
                 catalog=_get_catalog(),
             )
+            if lexical_rerank:
+                # Same consumption as the CLI's: scored rows lead in server
+                # relevance order; rows a degraded collection left unscored
+                # follow in boosted order, since the two scales differ.
+                scored = [r for r in results if "rerank_score" in r.metadata]
+                for r in scored:
+                    r.hybrid_score = float(r.metadata["rerank_score"])
+                scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
+                results = scored + [r for r in results if "rerank_score" not in r.metadata]
+                degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded"))
+                if degraded:
+                    rerank_note = (
+                        f"lexical rerank degraded in {len(degraded)} collection(s) "
+                        f"({', '.join(degraded[:3])}{', ...' if len(degraded) > 3 else ''}); "
+                        "their lexical rows are in vector-distance order and may be cut"
+                    )
             if clustered:
                 # apply_ranking_boosts sorts by hybrid_score globally, which
                 # would scatter same-cluster results apart — the text
@@ -2587,7 +2619,7 @@ def _search_render(
                 results = [_by_id[i] for i in _cluster_order if i in _by_id]
             # Non-clustered results are now ranked by hybrid_score
             # (apply_ranking_boosts' own sort) rather than raw distance.
-            _page_cache_put(cache_key, results, fetch_n, diag)
+            _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
         if not results:
             if structured:
                 return _structured_no_results(diag)
@@ -2681,8 +2713,8 @@ def _search_render(
                 "chunk_text_hash": [
                     r.metadata.get("chunk_text_hash", "") for r in page
                 ],
-                **({"warnings": [_failed_collections_note(diag)]}
-                   if _failed_collections_note(diag) else {}),
+                **({"warnings": [w for w in (_failed_collections_note(diag), rerank_note) if w]}
+                   if (_failed_collections_note(diag) or rerank_note) else {}),
             }
 
         # nexus-onn7s: the reader instruction leads every text render, and
@@ -2733,6 +2765,8 @@ def _search_render(
         _warning_line = _failed_collections_note(diag)
         if _warning_line:
             lines.append(f"\n[{_warning_line}]")
+        if rerank_note:
+            lines.append(f"\n[{rerank_note}]")
 
         # Pagination footer
         shown_end = offset + len(page)
@@ -2991,13 +3025,22 @@ def _page_cache_get(key: tuple, need: int) -> tuple[list, list] | None:
         return None
 
 
-def _page_cache_put(key: tuple, results: list, fetch_n: int, diag: list) -> None:
+def _page_cache_put(
+    key: tuple, results: list, fetch_n: int, diag: list, note: str | None = None,
+) -> None:
     with _page_cache_lock:
         _page_cache.clear()
         _page_cache.update({
             "key": key, "results": results, "fetch_n": fetch_n,
-            "diag": diag, "at": time.monotonic(),
+            "diag": diag, "note": note, "at": time.monotonic(),
         })
+
+
+def _page_cache_note(key: tuple) -> str | None:
+    """The degrade note stored with *key*'s entry, so a cache-hit render
+    (the ``search`` wrapper renders twice per call) carries it too."""
+    with _page_cache_lock:
+        return _page_cache.get("note") if _page_cache.get("key") == key else None
 
 
 def _page_cache_invalidate() -> None:
@@ -4050,9 +4093,10 @@ def query(
         description=(
             "Corpus prefix or full collection name; \"all\" for every corpus. "
             "Empty (default) means every knowledge__* collection when no catalog "
-            "param is set, and every corpus when one (author, content_type, "
-            "follow_links, subtree) is, since the catalog filter does the "
-            "narrowing. An explicit corpus always applies."
+            "param is set; with one (author, content_type, follow_links, "
+            "subtree), the content_type's own corpus when it names one "
+            "(code, docs, rdr, knowledge), otherwise every corpus, since the "
+            "catalog filter does the narrowing. An explicit corpus always applies."
         ),
     )] = "",
     where: Annotated[str, Field(
@@ -4092,7 +4136,8 @@ def query(
 
     Constraints:
     - With no catalog param, `corpus` defaults to "knowledge" only, not
-      code/docs; with one, it defaults to every corpus.
+      code/docs; with one, it defaults to the content_type's own corpus
+      when that names one, else every corpus.
     - Every catalog param requires an initialized catalog plus an
       HttpVectorClient-backed T3 (every local and cloud install since
       RDR-155 P4b); it errors rather than falling back without one.
@@ -4128,7 +4173,14 @@ def query(
         # false. The catalog filter narrows server-side; the default corpus
         # there is every corpus.
         if not corpus.strip():
-            corpus = "all" if has_catalog_params else "knowledge"
+            if not has_catalog_params:
+                corpus = "knowledge"
+            elif content_type in ("code", "docs", "rdr", "knowledge"):
+                # A content type that names a corpus narrows to it: the same
+                # rows, without querying every other corpus's collections.
+                corpus = content_type
+            else:
+                corpus = "all"
 
         if has_catalog_params:
             from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -8194,13 +8246,14 @@ def traverse(
     Returns `{"tumblers": [...], "ids": [...], "collections": [...]}`:
     the reachable document tumblers, the chunk ids (chashes) of those
     documents' manifests, and their collections (sorted). `$stepN.ids` with
-    `$stepN.collections` hydrates through `store_get_many`. A `"warning"`
-    key is added when `purpose` does not resolve to a known name.
+    `$stepN.collections` hydrates through `store_get_many`. When `purpose`
+    does not resolve to a known name the result is
+    `{"tumblers": [...], "ids": [...], "collections": [...], "warning": "..."}`.
 
     Constraints:
     - `ids` is capped at 300 (a two-hop walk from one note reached 1,196
-      chunks); when capped, an `"ids_truncated": {"total": N, "kept": 300}`
-      key says so. `tumblers` is not capped.
+      chunks); when capped, an `ids_truncated` entry carries the total and
+      kept counts. `tumblers` is not capped.
     - `link_types` and `purpose` are mutually exclusive.
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)

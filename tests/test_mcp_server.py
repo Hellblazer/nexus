@@ -2806,3 +2806,47 @@ def test_search_error_is_marked_in_structured_content():
     assert result.isError is True
     assert "no_such_corpus_zz" in result.structuredContent["error"]
     assert result.structuredContent["ids"] == []
+
+
+def test_lexical_search_asks_for_the_rerank_and_orders_by_it():
+    """nexus-zdzm5 (surface A A2, RDR-217): MCP search never requested the
+    server rerank, so a lexical row (vector distance usually the worst in the
+    window) was ordered by distance and cut; lexical=true changed the scores
+    and not the rows. It now reranks, and rerank-scored rows lead."""
+    t3 = _mock_t3([{"name": "code__test", "count": 1}])
+    t3.supports_server_rerank = True
+    seen: dict = {}
+
+    def _cross_corpus(*a, **kw):
+        seen.update(kw)
+        return [
+            SearchResult(id="vector-near", content="x", distance=0.1,
+                         collection="code__test", metadata={}),
+            SearchResult(id="lexical-far", content="x", distance=0.9,
+                         collection="code__test", metadata={"rerank_score": 0.95}),
+            SearchResult(id="scored-mid", content="x", distance=0.2,
+                         collection="code__test", metadata={"rerank_score": 0.5}),
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="zdzm5 lexical probe", corpus="code__test",
+                        lexical=True, structured=True)
+    assert seen["rerank"] is True
+    assert result["ids"] == ["lexical-far", "scored-mid", "vector-near"]
+
+
+def test_a_non_lexical_search_does_not_ask_for_the_rerank():
+    t3 = _mock_t3([{"name": "code__test", "count": 1}])
+    t3.supports_server_rerank = True
+    seen: dict = {}
+
+    def _cross_corpus(*a, **kw):
+        seen.update(kw)
+        return [SearchResult(id="r1", content="x", distance=0.1,
+                             collection="code__test", metadata={})]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        search(query="zdzm5 plain probe", corpus="code__test", structured=True)
+    assert seen["rerank"] is False
