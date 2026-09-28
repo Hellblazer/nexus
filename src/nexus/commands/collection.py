@@ -217,11 +217,17 @@ def info_cmd(name: str) -> None:
     if not idx_model:
         query_model = embedding_model_for_collection(name)
         idx_model = index_model_for_collection(name)
+    else:
+        # The row and the name can disagree (a disputed row, RDR-204); say so
+        # rather than print one of them as the whole truth.
+        named = index_model_for_collection(name)
+        if named and named != idx_model:
+            idx_model = query_model = f"{idx_model} (catalog row; the name says {named})"
 
     # nexus-ktsa1: the latest document indexed_at from the catalog, in one
     # read. Paging every chunk's metadata for MAX(indexed_at) (nexus-j857)
     # took 5 minutes on a 48k-chunk collection.
-    last_indexed = _latest_document_indexed_at(name) or "unknown"
+    last_indexed = _latest_document_indexed_at(name)
 
     click.echo(f"Collection:  {match['name']}")
     stored_count = match.get("stored_count", match["count"])
@@ -237,7 +243,8 @@ def info_cmd(name: str) -> None:
 
 def _latest_document_indexed_at(name: str) -> str:
     """Most recent ``indexed_at`` over the live catalog documents in
-    collection *name*, or ``""`` when the catalog has none or cannot be read.
+    collection *name*; ``"unknown"`` when it has none, and the error when
+    the catalog cannot be read, so the two never look alike.
 
     One row from the engine's collection-health aggregate (nexus-dsu5z), the
     read ``nx collection health`` already makes."""
@@ -247,10 +254,10 @@ def _latest_document_indexed_at(name: str) -> str:
     try:
         reader = make_catalog_reader()
         if reader is None:
-            return ""
-        return str(reader.collection_health_meta(name).get("last_indexed") or "")
-    except Exception:  # noqa: BLE001 — informational line; "unknown" is the honest fallback
-        return ""
+            return "unknown (no catalog)"
+        return str(reader.collection_health_meta(name).get("last_indexed") or "unknown")
+    except Exception as exc:  # noqa: BLE001 — informational line; the error is printed, not raised
+        return f"unknown (catalog could not be read: {exc})"
     finally:
         close = getattr(reader, "close", None)
         if close is not None:

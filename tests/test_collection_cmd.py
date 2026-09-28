@@ -291,6 +291,34 @@ def test_info_shows_unknown_when_no_indexed_at(runner, env_creds, mock_db, monke
     assert "unknown" in result.output.lower()
 
 
+def test_info_names_a_catalog_read_failure(runner, env_creds, mock_db, monkeypatch) -> None:
+    _mock_db_for_info(mock_db, "knowledge__test", 3, [{}])
+
+    class _Broken:
+        def collection_health_meta(self, name):
+            raise RuntimeError("engine down")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Broken())
+    result = _invoke(runner, mock_db, ["info", "knowledge__test"])
+    assert result.exit_code == 0, result.output
+    assert "catalog could not be read: engine down" in result.output, result.output
+
+
+def test_info_says_when_the_row_and_name_models_disagree(runner, env_creds, mock_db, monkeypatch) -> None:
+    name = "docs__nine__minilm-l6-v2-384__v1"
+    _mock_db_for_info(mock_db, name, 3, [{}])
+    mock_db.list_collections.return_value = [
+        {"name": name, "count": 3, "embedding_model": "bge-base-en-v15-768"},
+    ]
+    _catalog_with_documents(monkeypatch, [])
+    result = _invoke(runner, mock_db, ["info", name])
+    assert result.exit_code == 0, result.output
+    assert "bge-base-en-v15-768 (catalog row; the name says minilm-l6-v2-384)" in result.output, result.output
+
+
 def test_info_prints_the_rows_model_not_the_local_embedder(runner, env_creds, mock_db, monkeypatch) -> None:
     """nexus-sis0m F8: a local install printed its local embedder's name for
     every collection. The row's embedding_model is the truth."""
