@@ -199,7 +199,8 @@ def test_doctor_flags_a_retired_nx_plugin_still_installed(tmp_path):
 
     reg = _registry(tmp_path, ["conexus@nexus-plugins", "nx@nexus-plugins"])
     [row] = _check_retired_plugin_installed(reg)
-    assert row.ok is False and row.warn is True
+    # A failure, not a warn: warn never moves nx doctor's exit code.
+    assert row.ok is False and row.warn is False and row.fatal is False
     assert "nx@nexus-plugins" in row.detail
     assert row.fix_suggestions[0] == "/plugin uninstall nx@nexus-plugins"
 
@@ -211,3 +212,50 @@ def test_doctor_retired_plugin_row_is_ok_without_one(tmp_path):
     assert row.ok is True
     [row] = _check_retired_plugin_installed(tmp_path / "absent.json")
     assert row.ok is True, "a box with no registry is not applicable, not a failure"
+
+
+
+def test_mcp_startup_warns_when_nx_sits_beside_a_correct_conexus(monkeypatch, tmp_path, capsys):
+    """Critique of 3a3afaf5a: the rename check sees only the running plugin,
+    so conexus installed correctly with nx still installed (its hooks live)
+    produced no startup signal. The registry does show it."""
+    plugin_root = _plant_plugin_manifest(tmp_path, name="conexus")
+    monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(plugin_root))
+    reg = _registry(tmp_path, ["conexus@nexus-plugins", "nx@nexus-plugins"])
+    monkeypatch.setattr("nexus.plugin_lockstep.default_registry_path", lambda: reg)
+    monkeypatch.setattr("nexus.mcp_infra.default_db_path", lambda: Path("/nonexistent.db"))
+
+    from nexus.mcp_infra import check_version_compatibility
+    check_version_compatibility()
+
+    out, err = capsys.readouterr()
+    captured = out + err
+    assert "retired_plugin_still_installed" in captured
+    assert "/plugin uninstall nx@nexus-plugins" in captured
+    assert "plugin_name_mismatch" not in captured
+
+
+def test_nx_upgrade_names_a_retired_plugin(monkeypatch, tmp_path, capsys):
+    reg = _registry(tmp_path, ["conexus@nexus-plugins", "nx@nexus-plugins"])
+    monkeypatch.setattr("nexus.plugin_lockstep.default_registry_path", lambda: reg)
+    monkeypatch.setattr("nexus.plugin_lockstep.converge_plugins", lambda dry_run: [])
+    monkeypatch.setattr("nexus.plugin_lockstep.render", lambda outcomes, echo: None)
+
+    from nexus.commands.upgrade import _converge_plugins
+    _converge_plugins(dry_run=True)
+
+    out = capsys.readouterr().out
+    assert "Retired plugin nx@nexus-plugins is still installed" in out
+    assert "/plugin uninstall nx@nexus-plugins" in out
+
+
+def test_an_nx_plugin_from_another_marketplace_is_not_ours_to_flag(tmp_path):
+    """Review of 3a3afaf5a: nx is a generic name; only nexus-plugins' nx is
+    the retired plugin the advisory is about."""
+    from nexus.health import _check_retired_plugin_installed
+    from nexus.plugin_lockstep import retired_plugin_installs
+
+    reg = _registry(tmp_path, ["conexus@nexus-plugins", "nx@some-other-marketplace"])
+    assert retired_plugin_installs(reg) == []
+    [row] = _check_retired_plugin_installed(reg)
+    assert row.ok is True

@@ -3058,8 +3058,11 @@ def _check_retired_plugin_installed(registry_path: Path | None = None) -> list[H
     stale = retired_plugin_installs(registry_path)
     if not stale:
         return [HealthResult(label=label, ok=True, detail="none installed")]
+    # A failure, not a soft warn: warn never moves the exit code (RDR-129
+    # B4), and a live auto-approve-every-Bash hook is not benign or
+    # transient (critique of 3a3afaf5a). Not fatal: everything still runs.
     return [HealthResult(
-        label=label, ok=False, warn=True,
+        label=label, ok=False,
         detail=(
             f"{', '.join(stale)} still installed; it keeps its own hooks "
             "(v4.34.x auto-approved every Bash command, GHSA-mc84-6gjq-vm2p)"

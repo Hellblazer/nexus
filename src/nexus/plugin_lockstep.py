@@ -177,8 +177,18 @@ RETIRED_PLUGIN_NAMES: frozenset[str] = frozenset({"nx"})
 def retired_plugin_installs(registry_path: Path | None = None) -> list[str]:
     """``<plugin>@<marketplace>`` keys of retired plugins still in the
     registry, sorted; empty when none are (or there is no registry). Same
-    parser as :func:`registry_entries` (nexus-qocnk)."""
-    return sorted(_entries_named(RETIRED_PLUGIN_NAMES, registry_path) or {})
+    parser as :func:`registry_entries` (nexus-qocnk).
+
+    Only this project's marketplace counts: ``nx`` is a generic name (the Nx
+    build tool, for one), and an ``nx`` plugin from another marketplace is
+    not ours to flag with our advisory or to suggest uninstalling (review
+    of 3a3afaf5a)."""
+    from nexus.plugin_registry import MARKETPLACE_NAME  # noqa: PLC0415 — deferred, matches this module's imports
+
+    return sorted(
+        key for key in (_entries_named(RETIRED_PLUGIN_NAMES, registry_path) or {})
+        if key.split("@", 1)[1] == MARKETPLACE_NAME
+    )
 
 
 def _entries_named(

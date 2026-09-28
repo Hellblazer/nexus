@@ -93,14 +93,15 @@ Service lifecycle: `nx daemon service status` / `start` / `stop` are the canonic
 
 After upgrading conexus or after the plugin rename (`nx` → `conexus` at v5.0.0), `nx doctor` surfaces two kinds of drift:
 
-- **Plugin name drift**: the installed Claude Code plugin still has `name: "nx"` but the CLI expects `conexus`. Fix is two commands:
+- **Plugin name drift**: the installed Claude Code plugin still has `name: "nx"` but the CLI expects `conexus`. Fix is three commands, in order:
 
   ```
-  /plugin install conexus@nexus-plugins   # in Claude Code — registers the new plugin
-  /reload-plugins                          # in Claude Code — activates it
+  /plugin uninstall nx@nexus-plugins      # in Claude Code: removes the old plugin and its hooks
+  /plugin install conexus@nexus-plugins   # in Claude Code: registers the new plugin
+  /reload-plugins                          # in Claude Code: activates it
   ```
 
-  Install alone leaves the new plugin staged but inactive; reload alone won't pick up the renamed plugin from marketplace.json. Both are required. Optionally `/plugin uninstall nx@nexus-plugins` after to drop the stale entry.
+  The uninstall is not optional. Claude Code does not remove a renamed plugin, and the old `nx` plugin keeps its own hooks while it is installed: v4.34.x hooks auto-approved every Bash command (GHSA-mc84-6gjq-vm2p). `nx doctor` fails the "Retired Claude Code plugin" row, and every MCP startup logs `retired_plugin_still_installed`, while `nx@nexus-plugins` is still in the plugin registry. Install alone leaves the new plugin staged but inactive; reload alone won't pick up the renamed plugin from marketplace.json.
 
 - **Post-commit hook stanza drift**: the installed `.git/hooks/post-commit` predates the pgrep guard fix (nexus-mkj6u 2026-05-23). Fix:
 

@@ -711,3 +711,15 @@ def _converge_plugins(*, dry_run: bool) -> None:
     except Exception:  # noqa: BLE001 — advisory step; the data convergence above already happened
         _log.warning("plugin_lockstep_error", exc_info=True)
         click.echo("Plugin lockstep: could not check the installed plugins; run /plugin update in Claude Code")
+    # nexus-qocnk: nx upgrade is the path for old installs, exactly where a
+    # retired nx plugin (with its own live hooks) is likeliest to remain.
+    try:
+        from nexus.plugin_lockstep import retired_plugin_installs  # noqa: PLC0415 — deferred, CLI cold start
+
+        for key in retired_plugin_installs():
+            click.echo(
+                f"Retired plugin {key} is still installed and its hooks are still live "
+                f"(GHSA-mc84-6gjq-vm2p). In Claude Code: /plugin uninstall {key}, then /reload-plugins"
+            )
+    except Exception:  # noqa: BLE001 — advisory step, same as the lockstep above
+        _log.warning("retired_plugin_check_error", exc_info=True)

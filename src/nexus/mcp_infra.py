@@ -3609,6 +3609,30 @@ def check_version_compatibility() -> None:
                     ),
                 )
 
+            # nexus-qocnk (critique of 3a3afaf5a): the name check above only
+            # sees the RUNNING plugin. The dangerous shape is conexus
+            # installed correctly AND nx still installed beside it, whose
+            # hooks stay live; only the registry shows that. Every session
+            # starts this server, so this is where it has to be said.
+            try:
+                from nexus.plugin_lockstep import retired_plugin_installs  # noqa: PLC0415 — deferred, startup path
+
+                _retired = retired_plugin_installs()
+            except Exception:  # noqa: BLE001 — advisory; a registry read failure must not break MCP startup
+                _retired = []
+            if _retired:
+                log.warning(
+                    "retired_plugin_still_installed",
+                    retired=_retired,
+                    hint=(
+                        "A retired plugin is still installed and its hooks are "
+                        "still live (v4.34.x nx hooks auto-approved every Bash "
+                        "command, GHSA-mc84-6gjq-vm2p). In Claude Code, run: "
+                        + ", ".join(f"/plugin uninstall {k}" for k in _retired)
+                        + ", then /reload-plugins."
+                    ),
+                )
+
             if plugin_ver:
                 cli_t = _parse_version(cli_ver)
                 plugin_t = _parse_version(plugin_ver)
