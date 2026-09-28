@@ -51,8 +51,8 @@ class _FakeTupleRow:
         self.claim_state = claim_state
 
 
-def _fake_template(name: str, *, take_enabled: bool = True) -> dict:
-    return {"name": name, "take": {"enabled": take_enabled}}
+def _fake_template(name: str, *, take_enabled: bool = True, lock: bool = False) -> dict:
+    return {"name": name, "take": {"enabled": take_enabled}, "lock": lock}
 
 
 class _FakeParkStats:
@@ -243,6 +243,25 @@ class TestCheckTupleUnclaimedAgeBehavior:
         assert r.ok is True
         assert r.warn is not True
         assert "ledger/sess1" not in r.detail
+        assert rd_calls == []
+
+    def test_an_available_lock_token_is_an_idle_lock_not_stuck_work(self, monkeypatch) -> None:
+        """nexus-sis0m.2 (shakeout 7.64.1 Surface E F7): a lock/<resource>
+        token sits available whenever nobody holds the lock. The row marked
+        lock/ci-develop-push (34h) and lock/agctp-manual-smoke (119h) as
+        stuck work. A lock template (``lock: true``) is skipped."""
+        import datetime as _dt
+        old = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=5)).isoformat().replace("+00:00", "Z")
+        rd_calls: list[str] = []
+        store = _FakeTupleStore(
+            subspaces=[_FakeSubspace("lock/ci-develop-push", available=1, oldest_created_at=old)],
+            rd_by_subspace={"lock/ci-develop-push": [_FakeTupleRow("id1", old, None)]},
+            templates=[_fake_template("lock/<resource>", take_enabled=True, lock=True)],
+            rd_calls=rd_calls,
+        )
+        r = _run_unclaimed(monkeypatch, store)
+        assert r.ok is True
+        assert "lock/ci-develop-push" not in r.detail
         assert rd_calls == []
 
     def test_take_disabled_directory_subspace_with_day_old_rows_is_ok(self, monkeypatch) -> None:

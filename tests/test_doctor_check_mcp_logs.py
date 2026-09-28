@@ -354,7 +354,7 @@ class TestRunCheckMcpLogsNexusSection:
 
         with patch(
             "nexus.commands.doctor._resolve_claude_cache_dir",
-            return_value=tmp_path / "no_claude_cache_here",
+            return_value=tmp_path / "no_cache_root" / "-a-project",
         ):
             _run_check_mcp_logs(json_out=False)
 
@@ -380,7 +380,7 @@ class TestRunCheckMcpLogsNexusSection:
 
         with patch(
             "nexus.commands.doctor._resolve_claude_cache_dir",
-            return_value=tmp_path / "no_claude_cache_here",
+            return_value=tmp_path / "no_cache_root" / "-a-project",
         ):
             _run_check_mcp_logs(json_out=True)
 
@@ -395,7 +395,7 @@ class TestRunCheckMcpLogsNexusSection:
         monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path / "nexus_config"))
         with patch(
             "nexus.commands.doctor._resolve_claude_cache_dir",
-            return_value=tmp_path / "no_claude_cache_here",
+            return_value=tmp_path / "no_cache_root" / "-a-project",
         ):
             _run_check_mcp_logs(json_out=False)
         out = capsys.readouterr().out
@@ -411,7 +411,7 @@ class TestRunCheckMcpLogs:
     on every platform."""
 
     def test_skips_cleanly_when_cache_dir_missing(self, tmp_path, capsys):
-        nonexistent = tmp_path / "no_cache_here"
+        nonexistent = tmp_path / "no_cache_root" / "-a-project"
         with patch(
             "nexus.commands.doctor._resolve_claude_cache_dir",
             return_value=nonexistent,
@@ -423,7 +423,7 @@ class TestRunCheckMcpLogs:
     def test_json_output_skip_path_includes_platform_supported_false(
         self, tmp_path, capsys,
     ):
-        nonexistent = tmp_path / "no_cache_here"
+        nonexistent = tmp_path / "no_cache_root" / "-a-project"
         with patch(
             "nexus.commands.doctor._resolve_claude_cache_dir",
             return_value=nonexistent,
@@ -497,10 +497,15 @@ class TestRunCheckMcpLogs:
             "nexus.commands.doctor._resolve_claude_cache_dir",
             return_value=cache_dir,
         ):
-            _run_check_mcp_logs(json_out=True, hours=24)
+            # nexus-sis0m.2: a window with no file in it checked nothing,
+            # which is not a pass.
+            with pytest.raises(SystemExit) as exited:
+                _run_check_mcp_logs(json_out=True, hours=24)
 
+        assert exited.value.code == 1
         payload = _loads_json_out(capsys.readouterr().out)
         assert payload["log_files_scanned"] == 0
+        assert payload["nothing_checked"] is True
         assert payload["silent_deaths"] == []
 
 

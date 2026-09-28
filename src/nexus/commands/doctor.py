@@ -526,16 +526,33 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
         "nexus_log_by_event": nexus_by_event,
     }
 
+    # nexus-sis0m.2: the cache is per project directory. Its ROOT missing
+    # means this platform has none; the root present with no folder (or no
+    # recent file) for this directory means nothing was checked, which is
+    # not a pass (shakeout 7.64.1 Surface E F5: from /tmp this printed
+    # "No silent-death ... signatures found" at rc 0 after scanning 0 files).
+    nothing_checked_msg = (
+        f"nothing was checked: Claude Code has no MCP client log for this "
+        f"directory in the last {hours}h under {cache_dir}. Run from the "
+        f"project directory Claude Code works in."
+    )
     if not cache_dir.exists():
+        platform_has_cache = cache_dir.parent.exists()
+        payload["nothing_checked"] = platform_has_cache
         if json_out:
             click.echo(_json.dumps(payload, indent=2))
         else:
             click.echo(_format_nexus_log_section(nexus_log_dir, hours, nexus_hits, nexus_by_event))
             click.echo("")
-            click.echo(
-                f"MCP log surface not present at {cache_dir} "
-                f"(macOS-only path; nothing to check on this platform)."
-            )
+            if platform_has_cache:
+                click.echo(nothing_checked_msg)
+            else:
+                click.echo(
+                    f"MCP log surface not present at {cache_dir} "
+                    f"(macOS-only path; nothing to check on this platform)."
+                )
+        if platform_has_cache:
+            raise SystemExit(1)
         return
 
     payload["platform_supported"] = True
@@ -561,8 +578,11 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
                 hit["server"] = log_dir.name
                 payload["tool_failures"].append(hit)
 
+    payload["nothing_checked"] = payload["log_files_scanned"] == 0
     if json_out:
         click.echo(_json.dumps(payload, indent=2))
+        if payload["nothing_checked"]:
+            raise SystemExit(1)
         return
 
     click.echo(_format_nexus_log_section(nexus_log_dir, hours, nexus_hits, nexus_by_event))
@@ -572,6 +592,9 @@ def _run_check_mcp_logs(*, json_out: bool, hours: int = 24) -> None:
         f"{payload['log_dirs_scanned']} mcp-logs-* dirs under "
         f"{cache_dir} (last {hours}h)."
     )
+    if payload["nothing_checked"]:
+        click.echo(nothing_checked_msg)
+        raise SystemExit(1)
     if not payload["silent_deaths"] and not payload["tool_failures"]:
         click.echo("No silent-death or tool-failure signatures found.")
         return
@@ -2895,6 +2918,39 @@ def doctor_cmd(clean_checkpoints: bool, clean_pipelines: bool, fix: bool,
                 "--json only works with the main sweep (no mode flag), "
                 "--check-search, --check-quotas, or --check-mcp-logs."
             )
+
+    # nexus-sis0m.2: each mode below runs and returns, so a second --check-*
+    # flag was silently dropped and the run exited 0 as if both had passed
+    # (shakeout 7.64.1 F7). Refuse the combination by name instead.
+    _modes_requested = [
+        flag for flag, requested in {
+            "--check-storage-boundary": check_storage_boundary,
+            "--check-schema": check_schema,
+            "--check-search": check_search,
+            "--check-resources": check_resources,
+            "--check-quotas": check_quotas,
+            "--check-mcp-logs": check_mcp_logs,
+            "--check-taxonomy": check_taxonomy,
+            "--check-plan-library": check_plan_library,
+            "--check-post-store-hooks": check_post_store_hooks,
+            "--check-mineru": check_mineru,
+            "--check-aspect-queue": check_aspect_queue,
+            "--check-t1": check_t1,
+            "--check-collection-shape": check_collection_shape,
+            "--check-embeddings": check_embeddings,
+            "--check-assignments": check_assignments,
+            "--check-references": check_references,
+            "--check-wal-retention": check_wal_retention,
+            "--check-engine-activity": check_engine_activity,
+            "--check-index-failures": check_index_failures,
+            "--check-tier-discipline": check_tier_discipline,
+        }.items() if requested
+    ]
+    if len(_modes_requested) > 1:
+        raise click.UsageError(
+            f"{', '.join(_modes_requested)}: nx doctor runs one --check-* mode "
+            "per invocation; run each separately."
+        )
 
     if check_storage_boundary:
         _run_check_storage_boundary(

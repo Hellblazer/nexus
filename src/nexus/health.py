@@ -5388,6 +5388,12 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
             # rows are never claimed by design, so "oldest unclaimed" carries
             # no signal here (nexus-em75s.12 review fix).
             continue
+        template = _resolve_tuple_template(templates, census.subspace)
+        if template is not None and template.get("lock"):
+            # nexus-sis0m.2: a lock template's available token IS the idle
+            # lock; its age is how long nobody has held it, not stuck work
+            # (shakeout 7.64.1 Surface E F7 flagged lock/ci-develop-push).
+            continue
         census_oldest_dt = _parse_tuple_timestamp(census.oldest_created_at)
         if census_oldest_dt is not None:
             census_age_s = (datetime.now(UTC) - census_oldest_dt).total_seconds()
