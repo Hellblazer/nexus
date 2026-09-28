@@ -468,7 +468,7 @@ class TestRetrievalQualityProbe:
 # nexus/critique-6c06ab9c4-check-search-probe-self-text-tautology). The
 # incident test below pins that the probe still fires.
 
-COLS = ["code__a__voyage-code-3__v1", "rdr__a__voyage-context-3__v1"]
+COLS = ["code__a__model-code__v1", "rdr__a__model-ctx__v1"]
 
 
 class _ChunkT3:
@@ -600,7 +600,7 @@ def test_a_threshold_drop_row_names_its_evidence() -> None:
     what a reader needs to judge it."""
     from nexus.doctor_search import ProbeResult, format_combined_human
 
-    row = ProbeResult(name="docs__1-45__voyage-context-3__v1", surface="retrieval_quality",
+    row = ProbeResult(name="docs__1-45__model-ctx__v1", surface="retrieval_quality",
                       outcome="threshold_drop", raw_count=18, kept_count=0,
                       nearest_distance=0.6954, threshold=0.65, probe_chunks=1)
     text = format_combined_human([], [row])
