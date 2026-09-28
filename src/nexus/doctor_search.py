@@ -19,8 +19,9 @@ query; classifies each as:
 
 - ``matched``        — raw>0 AND kept>0. Healthy.
 - ``empty``          — raw==0. Empty or corrupt.
-- ``threshold_drop`` — raw>0 AND kept==0. nexus-rc45 class (silent
-  threshold-drop). Regression-level signal.
+- ``threshold_drop`` — the collection's nearest real neighbours fall past
+  its threshold (nexus-rc45 class, silent threshold-drop). A WARNING, not
+  an exit-2 failure; see below.
 - ``model_drift``    — registered ``embedding_model`` metadata
   disagrees with :func:`corpus.voyage_model_for_collection`.
   Regression.
@@ -266,6 +267,12 @@ def _neighbour_probe(
     nearest remaining distance is taken. The verdict compares the median of
     those against the collection's threshold. No sample with a real
     neighbour reads ``empty``.
+
+    ``raw_count`` / ``kept_count`` on the result are the real neighbours
+    judged across all samples and how many of them individually fall within
+    the threshold. They are context, not the verdict: the verdict is the
+    median of each sample's NEAREST distance, so a row can read ``matched``
+    with a low ``kept_count``.
     """
     import statistics  # noqa: PLC0415 — probe path only
 

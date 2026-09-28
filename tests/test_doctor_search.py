@@ -661,3 +661,14 @@ def test_the_neighbour_count_is_the_window_judged_not_the_overfetched_pool() -> 
     t3 = _ChunkT3(n_chunks=1)
     rows = _probe(t3, wide_search, **_default(t3))
     assert {r.raw_count for r in rows.values()} == {5}
+
+
+def test_a_close_self_hit_is_excluded_by_id_when_real_neighbours_are_far() -> None:
+    """Review of 634cc2b66: the far-self test cannot tell whether the id
+    exclusion exists (a far self-row is never the minimum). The shape the
+    exclusion guards: the self-row lands close (past the duplicate filter,
+    inside the threshold) while every real neighbour is past the threshold.
+    Counting the self-row would read the collection healthy."""
+    t3 = _ChunkT3()
+    rows = _probe(t3, _neighbour_search(lambda c: 0.7, self_distance=0.1), **_default(t3))
+    assert {r.outcome for r in rows.values()} == {"threshold_drop"}
