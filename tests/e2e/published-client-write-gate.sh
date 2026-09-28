@@ -236,7 +236,7 @@ if [ -n "$NEXUS_SERVICE_TAG" ]; then
   export NEXUS_SERVICE_TAG   # _ensure_service_binary_step no-ops: already installed
 fi
 
-NEXUS_CONFIG_DIR="$ENGINE_HOME" uv run nx init --service 2>&1 | tee "$LOGS/init.log" \
+NEXUS_CONFIG_DIR="$ENGINE_HOME" uv run nx init --service --no-autostart </dev/null 2>&1 | tee "$LOGS/init.log" \
   || _fail "nx init --service failed (see $LOGS/init.log)"
 
 # nexus-4e96a: init --service auto-starts a binary (the pinned release, or in

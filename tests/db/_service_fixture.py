@@ -95,7 +95,8 @@ def pg_bin_dir() -> Path:
     bundle for :data:`~nexus.daemon.binary_install.PINNED_SERVICE_TAG`
     through the product's OWN install seam (``install_pg_bundle`` +
     ``ensure_pg_bundle``) into a dedicated per-tag test cache
-    (``~/.cache/nexus-test-substrate/<tag>/`` — NEVER the live config
+    (``<substrate_cache_root()>/<tag>/``, ``~/.cache/nexus-test-substrate``
+    by default — NEVER the live config
     dir). Keyed on the immutable tag: warm cache = extract-marker no-op;
     a floor bump re-provisions exactly once. This is what retired the
     silent mass-skip on boxes with no host PG (2026-07-23: EVERY
@@ -230,6 +231,20 @@ def _install_pg_bundle_with_tuf_retry(tag: str, cache_dir: Path) -> None:
             time.sleep(_TUF_RETRY_BACKOFF_S * attempt)
 
 
+def substrate_cache_root() -> Path:
+    """Root of the per-tag test-substrate caches: ``$XDG_CACHE_HOME`` when set
+    and non-blank, else ``~/.cache``, then ``nexus-test-substrate``.
+
+    nexus-wvyvn: this was ``~/.cache`` unconditionally, so a host that moves
+    its caches with ``XDG_CACHE_HOME`` still grew a second cache under HOME.
+    No Java side reads this path, so the rung cannot diverge the way the
+    onnx_models root would (see ``nexus.db.onnx_model_root``).
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return base / "nexus-test-substrate"
+
+
 def _self_provision_pg_bundle() -> Path | None:
     """Fetch + extract OUR pinned PG bundle into the per-tag test cache.
 
@@ -245,7 +260,7 @@ def _self_provision_pg_bundle() -> Path | None:
 
     if not PINNED_SERVICE_TAG:
         return None
-    cache_dir = Path.home() / ".cache" / "nexus-test-substrate" / PINNED_SERVICE_TAG
+    cache_dir = substrate_cache_root() / PINNED_SERVICE_TAG
     cached = extracted_bin_dir(cache_dir)
     if cached is not None:
         return cached

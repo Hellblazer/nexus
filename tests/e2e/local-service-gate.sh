@@ -408,7 +408,9 @@ cleanup() {
 trap cleanup EXIT
 
 # 1. Provision the throwaway PG cluster.
-NEXUS_CONFIG_DIR="$SCRATCH" uv run nx init --service
+# --no-autostart: a gate never registers a login unit, and without it nx init
+# prompts for one whenever stdin is a TTY, hanging the gate in tmux (nexus-wvyvn).
+NEXUS_CONFIG_DIR="$SCRATCH" uv run nx init --service --no-autostart </dev/null
 
 # `nx init --service` does not stop at provisioning: it also installs the
 # CURRENT PINNED RELEASE native binary (REQUIRED_ENGINE_VERSION) and starts

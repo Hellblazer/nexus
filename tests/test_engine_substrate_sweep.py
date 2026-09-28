@@ -742,6 +742,34 @@ class TestWorkerPortSharding:
     it for the rest of that process). Sharding by PYTEST_XDIST_WORKER
     removes the collision surface for the common case."""
 
+    @pytest.fixture(autouse=True)
+    def _no_ambient_worker_count(self, monkeypatch) -> None:
+        # Under a real `-n N` run xdist sets this in the test process too;
+        # these tests pin the fixed-width behaviour, so clear it.
+        monkeypatch.delenv("PYTEST_XDIST_WORKER_COUNT", raising=False)
+
+    def test_nineteen_workers_each_get_a_disjoint_shard(self, monkeypatch) -> None:
+        """nexus-wvyvn: -n auto on a 15-core box spawned 19 workers; with a
+        fixed 500-port width the 19th fell back to the shared full range."""
+        import warnings as _warnings  # noqa: PLC0415 — test-local import
+        monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "19")
+        seen: set[int] = set()
+        with _warnings.catch_warnings():
+            _warnings.simplefilter("error")
+            for index in range(19):
+                monkeypatch.setenv("PYTEST_XDIST_WORKER", f"gw{index}")
+                shard = _worker_shard_range()
+                assert shard != _LOW_PORT_RANGE, f"gw{index} fell back to the full range"
+                assert not (set(shard) & seen), f"gw{index} overlaps an earlier worker"
+                assert shard.stop <= _LOW_PORT_RANGE.stop
+                seen |= set(shard)
+
+    def test_a_small_run_keeps_the_500_port_width(self, monkeypatch) -> None:
+        monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "8")
+        monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw2")
+        start = _LOW_PORT_RANGE.start + 2 * _WORKER_SHARD_WIDTH
+        assert _worker_shard_range() == range(start, start + _WORKER_SHARD_WIDTH)
+
     def test_no_worker_env_gets_the_full_range(self, monkeypatch) -> None:
         monkeypatch.delenv("PYTEST_XDIST_WORKER", raising=False)
         assert _worker_shard_range() == _LOW_PORT_RANGE

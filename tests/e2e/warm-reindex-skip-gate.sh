@@ -180,7 +180,7 @@ echo "── 2/8 Virgin venv + local init (engine + PG + bge-768) ──"
 uv venv "$VENV" >"$LOGS/venv.log" 2>&1 || _fail "venv create failed"
 uv pip install --python "$VENV/bin/python" "$WHEEL" >>"$LOGS/venv.log" 2>&1 \
     || _fail "wheel install failed (see $LOGS/venv.log)"
-_nx init >"$LOGS/init.log" 2>&1 || { tail -20 "$LOGS/init.log" >&2; _fail "nx init failed"; }
+_nx init --no-autostart </dev/null >"$LOGS/init.log" 2>&1 || { tail -20 "$LOGS/init.log" >&2; _fail "nx init failed"; }
 
 echo "── 3/8 Engine-version guard (nexus-acvi7 item a) ──"
 # event=combined_write_embed_partition — the ONLY server-side evidence legs
