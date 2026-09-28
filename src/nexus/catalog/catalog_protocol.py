@@ -92,7 +92,7 @@ class CatalogReader(Protocol):
     def docs_for_chashes(self, chashes) -> object:  # canonical
         ...
 
-    def find(self, query, *, content_type=...) -> object:  # canonical
+    def find(self, query, *, content_type=..., limit=...) -> object:  # canonical
         ...
 
     def find_by_title_exact(self, title, *, content_type=...) -> object:  # canonical (nexus-fgxmk)

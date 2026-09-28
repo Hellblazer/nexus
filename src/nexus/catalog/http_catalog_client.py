@@ -1878,9 +1878,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return int(result.get("id", 0))
 
     def find(
-        self, query: str, *, content_type: str | None = None
+        self, query: str, *, content_type: str | None = None, limit: int = 0,
     ) -> list[CatalogEntry]:
         """Full-text search over title/author/corpus/file_path.
+
+        ``limit`` 0 sends none and takes the engine's default cap (50 rows);
+        a positive ``limit`` asks for that many. A caller that pages or
+        post-filters must pass one, or it sees at most the first 50 matches
+        and reads the cut as the whole answer (nexus-3bafq).
 
         Order contract (nexus-fgxmk): the engine returns matches ordered by
         tumbler as TEXT — string order, stable across heap churn — not by
@@ -1898,6 +1903,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         params: dict = {"q": query}
         if content_type:
             params["content_type"] = content_type
+        if limit > 0:
+            params["limit"] = limit
         return self._docs_from(self._get("/search", **params))
 
     def find_by_title_exact(
