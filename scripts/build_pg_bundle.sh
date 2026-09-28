@@ -33,7 +33,13 @@
 #   PGVECTOR_VERSION        default v0.8.2 (>=0.8 is the RDR-155 iterative_scan floor)
 #   WORK_DIR                scratch dir for sources; default `mktemp -d`
 #   MACOSX_DEPLOYMENT_TARGET (darwin only) default 13.0 — Mach-O minos floor
-#   SKIP_PREREQS            when "1", do not attempt to install flex/bison/perl
+#   SKIP_PREREQS            LINUX ONLY: when "1", do not attempt to install
+#                           flex/bison/perl/patchelf (dnf/apt-get). Darwin
+#                           ignores this var entirely (nexus-yd9po) — it
+#                           always installs flex/bison if missing (never
+#                           unconditionally) and always exports their keg-only
+#                           PATH, since skipping the export would silently
+#                           fall back to macOS's ancient system bison.
 #
 # Usage:
 #   BUNDLE_PREFIX=/opt/nexus-pg scripts/build_pg_bundle.sh
