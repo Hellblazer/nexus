@@ -1939,17 +1939,15 @@ def _t1_session_shutdown() -> None:
             with HttpTokenStore(prefer_data_token=True) as _ts:  # nexus-maf9l
                 _ts.close_session(session_id)
             token_outcome["ok"] = ""
+            _log.info("t1_session_token_closed", session_id=session_id)
         except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
             token_outcome["error"] = str(_exc)
+            _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
 
     revoker = threading.Thread(target=_revoke, name="t1-token-revoke", daemon=True)
     revoker.start()
     revoker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
-    if "ok" in token_outcome:
-        _log.info("t1_session_token_closed", session_id=session_id)
-    elif "error" in token_outcome:
-        _log.warning("t1_session_token_close_failed", session_id=session_id, error=token_outcome["error"])
-    else:
+    if not token_outcome:
         _log.warning(
             "t1_session_token_close_incomplete", session_id=session_id,
             timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
@@ -2002,24 +2000,25 @@ def _flush_flagged_t1_entries(session_id: str) -> int:
                 return len(entries)
 
             outcome["flushed"] = t2_index_write(_put_all, op="t1_teardown_flush")
+            _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=outcome["flushed"])
         except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
             outcome["error"] = str(exc)
+            # Logged here, not by the caller, so an outcome that arrives after
+            # the bound (a write against the just-revoked token, say) is still
+            # recorded (review of a956bb57f).
+            _log.warning("t1_teardown_flush_failed", session_id=session_id, error=str(exc))
 
     worker = threading.Thread(target=_work, name="t1-teardown-flush", daemon=True)
     worker.start()
     worker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
-    if "error" in outcome:
-        _log.warning("t1_teardown_flush_failed", session_id=session_id, error=outcome["error"])
-        return 0
-    if "flushed" not in outcome:
+    if "flushed" in outcome:
+        return outcome["flushed"]
+    if "error" not in outcome:
         _log.warning(
             "t1_teardown_flush_incomplete", session_id=session_id,
             pending=outcome.get("pending"), timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
         )
-        return 0
-    if outcome["flushed"]:
-        _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=outcome["flushed"])
-    return outcome["flushed"]
+    return 0
 
 
 def _t1_shutdown() -> None:

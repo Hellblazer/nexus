@@ -166,3 +166,34 @@ def test_a_hanging_token_revoke_is_bounded_too(owned_session, monkeypatch) -> No
     finally:
         release.set()
     assert time.monotonic() - started < 5
+
+
+def test_an_outcome_after_the_bound_is_still_logged(owned_session, monkeypatch) -> None:
+    """A write the caller abandoned at the bound, then failing (against the
+    just-revoked token, say), is recorded, not dropped (review of a956bb57f)."""
+    import threading  # noqa: PLC0415 — test-local import
+
+    import structlog  # noqa: PLC0415 — test-local import
+
+    t1, _ = mcp_infra.get_t1()
+    t1.put("late", persist=True, flush_project="nexus_test_mgu1k", flush_title=f"late-{uuid.uuid4().hex[:8]}")
+    release, done = threading.Event(), threading.Event()
+
+    def _slow_then_fail(fn, *, op="t2_write"):
+        release.wait(30)
+        done.set()
+        raise RuntimeError("token revoked")
+
+    monkeypatch.setattr(mcp_infra, "t2_index_write", _slow_then_fail)
+    monkeypatch.setattr(core, "_TEARDOWN_FLUSH_TIMEOUT_S", 0.3)
+    with structlog.testing.capture_logs() as logs:
+        core._t1_session_shutdown()
+        release.set()
+        assert done.wait(5)
+        for _ in range(50):
+            if any(e["event"] == "t1_teardown_flush_failed" for e in logs):
+                break
+            threading.Event().wait(0.05)
+    events = [e["event"] for e in logs]
+    assert "t1_teardown_flush_incomplete" in events
+    assert any(e["event"] == "t1_teardown_flush_failed" and e["error"] == "token revoked" for e in logs), events

@@ -825,7 +825,8 @@ def project(kind: str, payload: dict[str, Any] | None) -> None:
     # kind=="report" from a HARNESS-INTERNAL stop (nexus-uzntx): the harness
     # now supplies an agent_id for these, so the check above passes them,
     # but they carry no agent_type and have no transcript on disk. Measured on
-    # ledger/8866f29d (2026-09-28, at 1592 rows): 1468 of 1530 report rows
+    # ledger/8866f29d (2026-09-28, read at 1592 rows; the shakeout's earlier
+    # read at 1585 rows counted 1462): 1468 of 1530 report rows
     # were this shape, none with a START tuple or a transcript file, while all
     # 62 real reports had an agent_type, a START and a transcript. Each cost a
     # synchronous POST (nexus-wgalh). Either signal alone keeps the row, so a
