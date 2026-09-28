@@ -125,7 +125,13 @@ LEGS_RAN=0
 EXPECTED_LEGS=7
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
+# Every python whose STDOUT is captured below configures cli logging first:
+# structlog's unconfigured default writes to stdout, and a log line there
+# becomes part of the captured value (leg B's first data-token run carried
+# one into its Authorization header).
 SERVICE_URL="$(uv run python - <<'PY'
+from nexus.logging_setup import configure_logging
+configure_logging("cli")
 from nexus.config import get_credential
 print((get_credential("service_url") or "").strip())
 PY
@@ -188,21 +194,58 @@ print(f"  ok: release_version={body['release_version']} "
       f"nx_answer_steps_supported={steps_supported}")
 PY
 
-# ── Leg B: /health edge contract, AUTHENTICATED (guided_upgrade's managed-
-#    target probe shape per conexus relay [21082], decision (b)) ──────────
+# ── Leg B: /health edge contract, AUTHENTICATED (conexus relay [21082],
+#    decision (b)). Its original consumer, guided_upgrade's readiness probe,
+#    was deleted at RDR-155 P4b; the leg now pins the edge contract itself.
+#    Whether that contract admits a minted data token or only a service-
+#    class bearer is an open question with conexus (2026-09-28; T2
+#    [23517] separates the two credential classes). ────────────────────
 _leg_enter B "/health edge contract (authenticated bearer)"
-SERVICE_TOKEN="$(uv run python - <<'PY'
+# The bearer the client itself sends: the minted data token when a
+# mint_token credential is configured (the pass-through engine refuses a
+# static token, and the static service_token was revoked 2026-09-28), else
+# the static service_token. Same resolution as catalog.factory and the
+# nx doctor "Data-token self-minting" row. A mint failure is reported, never
+# papered over with the static token. The token travels through a mode-600
+# temp file, not stdout: structlog writes its info lines to stdout, and the
+# first live run carried them into the Authorization header. curl reads the
+# header from that file (-H @file), so the token is never in argv or a shell
+# variable. Which kind was used goes to stderr.
+BEARER_FILE="$(mktemp)"
+chmod 600 "$BEARER_FILE"
+BEARER_RC=0
+SERVICE_URL="$SERVICE_URL" BEARER_FILE="$BEARER_FILE" uv run python - <<'PY' || BEARER_RC=$?
+import os
+import sys
+
 from nexus.config import get_credential
-print((get_credential("service_token") or "").strip())
+from nexus.db.data_token import DataTokenMintError, get_data_token_manager
+from nexus.db.t2._refreshable_client import DEFAULT_TENANT
+
+try:
+    token = get_data_token_manager().bearer_for(os.environ["SERVICE_URL"], DEFAULT_TENANT)
+except DataTokenMintError as exc:
+    print(f"  B: data-token mint failed: {exc}", file=sys.stderr)
+    sys.exit(0)
+if token:
+    print("  B: bearer = minted data token", file=sys.stderr)
+else:
+    token = (get_credential("service_token") or "").strip()
+    if token:
+        print("  B: bearer = static service_token (no mint_token configured)", file=sys.stderr)
+if token:
+    with open(os.environ["BEARER_FILE"], "w") as fh:
+        fh.write(f"Authorization: Bearer {token}\n")
 PY
-)"
-if [ -z "$SERVICE_TOKEN" ]; then
-    _leg_fail "B: no service_token credential configured — cannot probe the auth-gated edge /health"
+if [ "$BEARER_RC" -ne 0 ]; then
+    _leg_fail "B: resolving the bearer crashed (exit $BEARER_RC, see above) — cannot probe the auth-gated edge /health"
+elif [ ! -s "$BEARER_FILE" ]; then
+    _leg_fail "B: no bearer — neither a mint_token (minted data token) nor a service_token credential is usable; cannot probe the auth-gated edge /health"
 else
-    HEALTH_STATUS="$(curl -sS -m 20 -H "Authorization: Bearer $SERVICE_TOKEN" -o /tmp/cloud-gate-health.$$ -w "%{http_code}" "$SERVICE_URL/health" || echo 000)"
+    HEALTH_STATUS="$(curl -sS -m 20 -H @"$BEARER_FILE" -o /tmp/cloud-gate-health.$$ -w "%{http_code}" "$SERVICE_URL/health" || echo 000)"
     HEALTH_BODY="$(cat /tmp/cloud-gate-health.$$ 2>/dev/null; rm -f /tmp/cloud-gate-health.$$)"
     if [ "$HEALTH_STATUS" != "200" ]; then
-        _leg_fail "B: authenticated /health returned HTTP $HEALTH_STATUS (body: $HEALTH_BODY) — the edge contract (conexus [21082]) is 200 + verbatim engine {status, db} for bearers; guided_upgrade's managed-target readiness gate will time out 'service not ready'"
+        _leg_fail "B: authenticated /health returned HTTP $HEALTH_STATUS (body: $HEALTH_BODY) — the edge contract (conexus [21082]) is 200 + verbatim engine {status, db} for bearers; a 401 here with a minted data token, while /v1 accepts the same bearer, means the edge's /health gate does not admit that credential class"
     # Pipe-free (nexus-i66g4/wbeyi class): match the already-captured
     # variable directly instead of `echo ... | grep -q ...` -- under this
     # script's `set -o pipefail`, a still-writing echo closed early by
@@ -214,6 +257,7 @@ else
         echo "  ok: 200 + db=up (authenticated)"
     fi
 fi
+rm -f "$BEARER_FILE"
 
 # ── Legs C+D: real client code through the live config ───────────────────
 _leg_enter C+D "client embedding_mode probe + client read path"
@@ -433,6 +477,8 @@ PY
 _hook_read() {
     HOOK_READ_SID="$1" HOOK_READ_AGENT="$2" uv run python - <<'PY' 2>/dev/null || printf 'total=0\nstart=0\nreport=0\n'
 import os
+from nexus.logging_setup import configure_logging
+configure_logging("cli")  # stdout is parsed by the caller; logs go to stderr
 from nexus.db.t2.http_tuple_store import HttpTupleStore
 sid = os.environ["HOOK_READ_SID"]; agent = os.environ["HOOK_READ_AGENT"]
 store = HttpTupleStore()
