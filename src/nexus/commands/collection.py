@@ -205,36 +205,44 @@ def info_cmd(name: str) -> None:
     if match is None:
         raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
 
-    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    if is_local_mode():
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-        ef = LocalEmbeddingFunction()
-        query_model = idx_model = f"{ef.model_name} (local)"
-    else:
+    # nexus-sis0m F8: the collection's own catalog row names its model. The
+    # local branch used to print the local embedder's name (MiniLM) for
+    # every collection, whatever it was indexed with.
+    idx_model = query_model = match.get("embedding_model") or ""
+    if not idx_model:
         query_model = embedding_model_for_collection(name)
-        idx_model   = index_model_for_collection(name)
+        idx_model = index_model_for_collection(name)
 
-    info = db.collection_info(name)
-
-    col = db.get_or_create_collection(name)
-    # Paginate for accurate MAX(indexed_at) timestamp (nexus-j857).
-    all_timestamps: list[str] = []
-    offset = 0
-    while True:
-        batch = col.get(limit=300, offset=offset, include=["metadatas"])
-        for meta in batch.get("metadatas") or []:
-            if meta and "indexed_at" in meta:
-                all_timestamps.append(meta["indexed_at"])
-        if len(batch.get("ids", [])) < 300:
-            break
-        offset += 300
-    last_indexed = max(all_timestamps) if all_timestamps else "unknown"
+    # nexus-ktsa1: the latest document indexed_at from the catalog, in one
+    # read. Paging every chunk's metadata for MAX(indexed_at) (nexus-j857)
+    # took 5 minutes on a 48k-chunk collection.
+    last_indexed = _latest_document_indexed_at(name) or "unknown"
 
     click.echo(f"Collection:  {match['name']}")
     click.echo(f"Chunks:      {match['count']}")
     click.echo(f"Index model: {idx_model}")
     click.echo(f"Query model: {query_model}")
     click.echo(f"Indexed:     {last_indexed}")
+
+
+def _latest_document_indexed_at(name: str) -> str:
+    """Most recent ``indexed_at`` over the live catalog documents in
+    collection *name*, or ``""`` when the catalog has none or cannot be read."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reader = None
+    try:
+        reader = make_catalog_reader()
+        if reader is None:
+            return ""
+        stamps = [e.indexed_at for e in reader.list_by_collection(name) if e.indexed_at]
+        return max(stamps) if stamps else ""
+    except Exception:  # noqa: BLE001 — informational line; "unknown" is the honest fallback
+        return ""
+    finally:
+        close = getattr(reader, "close", None)
+        if close is not None:
+            close()
 
 
 def _require_docs_collection(row: dict, name: str) -> None:

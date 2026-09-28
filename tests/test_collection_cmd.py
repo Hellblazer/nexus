@@ -231,25 +231,54 @@ def test_info_shows_embedding_model(runner, env_creds, mock_db, col_name, expect
     assert expected_model in result.output
 
 
-def test_info_shows_last_indexed_when_metadata_exists(runner, env_creds, mock_db) -> None:
-    _mock_db_for_info(mock_db, "knowledge__test", 3, [
-        {"indexed_at": "2026-02-20T08:00:00+00:00"},
-        {"indexed_at": "2026-02-22T10:23:45+00:00"},
-        {"indexed_at": "2026-02-21T12:00:00+00:00"},
+def _catalog_with_documents(monkeypatch, indexed_ats):
+    """nexus-ktsa1: info reads the latest indexed_at from the catalog's
+    documents in the collection, not by paging chunk metadata."""
+    from types import SimpleNamespace
+
+    class _Reader:
+        def list_by_collection(self, name):
+            return [SimpleNamespace(indexed_at=t) for t in indexed_ats]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
+
+
+def test_info_shows_last_indexed_from_the_catalog(runner, env_creds, mock_db, monkeypatch) -> None:
+    _mock_db_for_info(mock_db, "knowledge__test", 3, [{}])
+    _catalog_with_documents(monkeypatch, [
+        "2026-02-20T08:00:00+00:00", "2026-02-22T10:23:45+00:00", "", "2026-02-21T12:00:00+00:00",
     ])
     result = _invoke(runner, mock_db, ["info", "knowledge__test"])
     assert result.exit_code == 0, result.output
     assert "2026-02-22T10:23:45+00:00" in result.output
+    mock_db.get_or_create_collection.return_value.get.assert_not_called()
 
 
-def test_info_shows_unknown_when_no_indexed_at(runner, env_creds, mock_db) -> None:
-    _mock_db_for_info(mock_db, "knowledge__legacy", 2, [
-        {"title": "doc_without_ts"},
-        {"title": "another_without_ts"},
-    ])
+def test_info_shows_unknown_when_no_indexed_at(runner, env_creds, mock_db, monkeypatch) -> None:
+    _mock_db_for_info(mock_db, "knowledge__legacy", 2, [{}])
+    _catalog_with_documents(monkeypatch, ["", ""])
     result = _invoke(runner, mock_db, ["info", "knowledge__legacy"])
     assert result.exit_code == 0, result.output
     assert "unknown" in result.output.lower()
+
+
+def test_info_prints_the_rows_model_not_the_local_embedder(runner, env_creds, mock_db, monkeypatch) -> None:
+    """nexus-sis0m F8: a local install printed its local embedder's name for
+    every collection. The row's embedding_model is the truth."""
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    _mock_db_for_info(mock_db, "code__nexus__model-code__v1", 5, [{}])
+    mock_db.list_collections.return_value = [
+        {"name": "code__nexus__model-code__v1", "count": 5, "embedding_model": "model-row"},
+    ]
+    _catalog_with_documents(monkeypatch, [])
+    result = _invoke(runner, mock_db, ["info", "code__nexus__model-code__v1"])
+    assert result.exit_code == 0, result.output
+    assert "Index model: model-row" in result.output
+    assert "Query model: model-row" in result.output
+    assert "(local)" not in result.output
 
 
 # ── delete ──────────────────────────────────────────────────────────────────
