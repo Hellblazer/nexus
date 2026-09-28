@@ -9,13 +9,20 @@
 #
 # The cache key MUST stay byte-identical to the one in
 # engine-service-release.yml (build-publish-pg-bundle job):
-#   pg-bundle-<arch>-pg<PG_VERSION>-pgvector<PGVECTOR_VERSION>-img-<image|native>-<sha256 of scripts/build_pg_bundle.sh>
+#   pg-bundle-<arch>-<runner>-pg<PG_VERSION>-pgvector<PGVECTOR_VERSION>-img-<image|native>-<sha256 of scripts/build_pg_bundle.sh>
 # PG_VERSION / PGVECTOR_VERSION are duplicated across ci.yml, the release
 # workflow, and here (the pre-existing duplication pattern; the build script
 # holds the defaults). Bumping a version in the release workflow WITHOUT
 # bumping it here just means a cache miss at the next tag (graceful — it
 # compiles as before); the versions live in the key precisely so a stale
-# bundle of the WRONG version can never be restored silently.
+# bundle of the WRONG version can never be restored silently. The <runner>
+# segment is the resolved runner LABEL (e.g. "hellmini", "macos-14"), so
+# nexus-yd9po's mac-arm64 switch to hellmini keeps this file's own matrix
+# entry (below) on the identical label as the release workflow's, or a
+# release run never restores what this seeds — and the SAME reason
+# scripts/build_pg_bundle.sh's Darwin `brew install flex bison` step is
+# blocked by a Homebrew-permissions gap on hellmini as of this change (see
+# the release workflow's build-publish-pg-bundle header for detail).
 name: pg-bundle-cache-seed
 
 on:
@@ -27,7 +34,19 @@ on:
   schedule:
     # Weekly keep-warm (Mondays 07:23 UTC — off the hour to dodge cron rush).
     - cron: '23 7 * * 1'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mac_runner:
+        description: >-
+          Runner label for the mac-arm64 leg. Default is the hellmini
+          self-hosted Mac mini (nexus-yd9po); fall back to macos-14 when
+          hellmini is offline.
+        required: false
+        default: hellmini
+        type: choice
+        options:
+          - hellmini
+          - macos-14
 
 permissions:
   contents: read
@@ -43,7 +62,13 @@ jobs:
         target:
           - { arch: linux-amd64, runner: ubuntu-latest,    image: "quay.io/pypa/manylinux_2_28_x86_64" }
           - { arch: linux-arm64, runner: ubuntu-24.04-arm, image: "quay.io/pypa/manylinux_2_28_aarch64" }
-          - { arch: mac-arm64,   runner: macos-14,         image: "" }
+          # mac-arm64: hellmini by default (nexus-yd9po); workflow_dispatch
+          # mac_runner falls back to macos-14 when hellmini is offline. Keep
+          # this label IDENTICAL to engine-service-release.yml's
+          # build-publish-pg-bundle mac-arm64 entry — the cache key embeds
+          # matrix.target.runner verbatim (see header), so a mismatch here
+          # means the release workflow's restore never hits this seed.
+          - { arch: mac-arm64,   runner: "${{ inputs.mac_runner || 'hellmini' }}", image: "" }
     env:
       # Pinned identically to engine-service-release.yml + ci.yml (see header).
       PG_VERSION: "17.5"
