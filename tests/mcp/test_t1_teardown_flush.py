@@ -82,3 +82,32 @@ def test_a_failing_flush_never_stops_the_teardown(owned_session, monkeypatch) ->
     monkeypatch.setattr(mcp_infra, "get_t1", _broken)
     core._t1_session_shutdown()
     assert order == ["lease_cleared", "token_closed"], order
+
+
+def test_a_hanging_t2_write_is_abandoned_at_the_bound(owned_session, monkeypatch) -> None:
+    """The flush runs inside the SIGTERM handler's chain: a stalled engine
+    must not delay the lease clear and revoke past the harness's grace,
+    which would turn SIGTERM into SIGKILL and skip both (critique of
+    c4312a874)."""
+    import threading  # noqa: PLC0415 — test-local import
+    import time  # noqa: PLC0415 — test-local import
+
+    _, order = owned_session
+    t1, _ = mcp_infra.get_t1()
+    t1.put("stalled", persist=True, flush_project="nexus_test_mgu1k", flush_title=f"stall-{uuid.uuid4().hex[:8]}")
+    release = threading.Event()
+
+    def _hang(fn, *, op="t2_write"):
+        order.append(f"t2:{op}")
+        release.wait(30)
+        return 0
+
+    monkeypatch.setattr(mcp_infra, "t2_index_write", _hang)
+    monkeypatch.setattr(core, "_TEARDOWN_FLUSH_TIMEOUT_S", 0.3)
+    started = time.monotonic()
+    try:
+        core._t1_session_shutdown()
+    finally:
+        release.set()
+    assert time.monotonic() - started < 5
+    assert order == ["t2:t1_teardown_flush", "lease_cleared", "token_closed"], order

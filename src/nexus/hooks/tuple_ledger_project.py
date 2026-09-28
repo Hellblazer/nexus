@@ -825,11 +825,13 @@ def project(kind: str, payload: dict[str, Any] | None) -> None:
     # kind=="report" from a HARNESS-INTERNAL stop (nexus-uzntx): the harness
     # now supplies an agent_id for these, so the check above passes them,
     # but they carry no agent_type and have no transcript on disk. Measured on
-    # ledger/8866f29d (2026-09-28): 1468 of 1530 report rows were this shape,
-    # none with a START tuple or a transcript file, while all 62 real reports
-    # had an agent_type, a START and a transcript. Each cost a synchronous POST
-    # (nexus-wgalh). Either signal alone keeps the row, so a real agent whose
-    # payload lacks one of them still projects (the nexus-0zsmg tolerance).
+    # ledger/8866f29d (2026-09-28, at 1592 rows): 1468 of 1530 report rows
+    # were this shape, none with a START tuple or a transcript file, while all
+    # 62 real reports had an agent_type, a START and a transcript. Each cost a
+    # synchronous POST (nexus-wgalh). Either signal alone keeps the row, so a
+    # real agent whose payload lacks one of them still projects (the
+    # nexus-0zsmg tolerance). START presence is not consulted: it is a GET, as
+    # costly as the POST this saves. The hook's interpreter start remains.
     if kind == "report" and not agent_type and not _transcript_exists(transcript_path):
         return
 

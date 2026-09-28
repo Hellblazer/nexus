@@ -562,8 +562,11 @@ def session_end_flush() -> str:
         silently dropped. It lost that race in every measured run (6 of 6,
         nexus-mgu1k), so the MCP teardown now drains the flagged entries
         itself before it clears the lease and revokes the token
-        (``nexus.mcp.core._flush_flagged_t1_entries``); this flush is the
-        second chance for a session whose MCP never reached its teardown.
+        (``nexus.mcp.core._flush_flagged_t1_entries``). This flush remains
+        for the one case it can still reach: an MCP that died before its
+        teardown (SIGKILL, crash) leaves the lease file and the unrevoked
+        token in place until they expire. Not measured; the 6 failures were
+        all graceful exits.
 
     ``clear()`` is gated on OWNERSHIP, not merely on ``t1 is not None``
     (nexus-65a9k / GH #1454). A tool-free ``claude -p`` operator dispatch

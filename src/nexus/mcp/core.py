@@ -1936,6 +1936,11 @@ def _t1_session_shutdown() -> None:
         _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
 
 
+#: Upper bound on the teardown flush (nexus-mgu1k), well inside the few
+#: seconds a harness gives a server between SIGTERM and SIGKILL.
+_TEARDOWN_FLUSH_TIMEOUT_S: float = 5.0
+
+
 def _flush_flagged_t1_entries(session_id: str) -> int:
     """Write this session's flagged T1 scratch entries to T2; return how
     many. Never raises: a teardown step must not stop the lease clear and
@@ -1961,9 +1966,26 @@ def _flush_flagged_t1_entries(session_id: str) -> int:
                 )
             return len(entries)
 
-        flushed = t2_index_write(_put_all, op="t1_teardown_flush")
-        _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=flushed)
-        return flushed
+        # Bounded: this runs inside _sigterm_handler's synchronous chain, and a
+        # slow or unreachable engine must not delay the lease clear and token
+        # revoke past the harness's shutdown grace, which would turn SIGTERM
+        # into SIGKILL and skip both (the nexus-c8yvj leak). A write still in
+        # flight at the bound is abandoned to its daemon thread.
+        result: list[int] = []
+        worker = threading.Thread(
+            target=lambda: result.append(t2_index_write(_put_all, op="t1_teardown_flush")),
+            name="t1-teardown-flush", daemon=True,
+        )
+        worker.start()
+        worker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
+        if not result:
+            _log.warning(
+                "t1_teardown_flush_incomplete", session_id=session_id,
+                pending=len(entries), timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
+            )
+            return 0
+        _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=result[0])
+        return result[0]
     except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
         _log.warning("t1_teardown_flush_failed", session_id=session_id, error=str(exc))
         return 0
