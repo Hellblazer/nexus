@@ -791,7 +791,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   smoke_request POST /v1/catalog/manifest/write \
     "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','collection':'$SMOKE_VEC_COLLECTION','rows':[{'position':0,'chash':'$SMOKE_CHASH'}]}))")"
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/manifest/write"
-  smoke_check "POST /v1/catalog/manifest/write -> 200 (chunk gets a live owner)" "True"
+  smoke_check "POST /v1/catalog/manifest/write -> ok, count=1 (chunk gets a live owner)" "d.get('ok') is True and d.get('count')==1"
 
   smoke_request POST /v1/vectors/search \
     "$(python3 -c "import json;print(json.dumps({'query':'$SMOKE_CHUNK_TEXT','collections':['$SMOKE_VEC_COLLECTION'],'n_results':5}))")"

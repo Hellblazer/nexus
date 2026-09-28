@@ -117,8 +117,9 @@ def test_count_list_collections_and_reindex_existence_agree_on_mixed_dim_collect
     # dim-agnostic parity this test proves ((a) below) is itself a
     # retrieval-inventory property -- list_collections()'s per-collection
     # count is now backed by LIVE chunk_count, not stored_count, so a chunk
-    # with no catalog manifest owner is invisible to it even though
-    # count()/store-get still see it. Give both rows a real owner via the
+    # with no catalog manifest owner is invisible to it even though the
+    # unfiltered count() still sees it (a plain store-get is filtered too;
+    # only include_non_live sees it). Give both rows a real owner via the
     # same catalog_store_hook_tracked + store_put_manifest_direct path the
     # real indexing path uses (mirrors
     # tests/test_wbfpw2_client_liveness_matrix.py), so the dim-agnostic
