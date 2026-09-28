@@ -51,3 +51,28 @@ def test_a_renamed_collection_is_not_listed_as_live(t2_service_env, tmp_path):
     assert info_old.exit_code != 0
     assert f"renamed to {_NEW}" in info_old.output, info_old.output
     assert "not found" not in info_old.output, info_old.output
+
+
+def test_a_retired_name_still_holding_chunks_stays_listed(monkeypatch):
+    """Critique of e91a9daed: only an EMPTY tombstone is hidden. One that holds
+    chunks (written after the rename, or never fully moved) must stay visible in
+    plain ``list``, labelled with its successor."""
+    from types import SimpleNamespace
+
+    import nexus.commands.collection as coll
+
+    listed = [
+        {"name": _NEW, "count": 3, "stored_count": 3},
+        {"name": _OLD, "count": 0, "stored_count": 2},
+    ]
+    monkeypatch.setattr(coll, "_t3", lambda: SimpleNamespace(list_collections=lambda strict=False: listed))
+    rows = {
+        _NEW: {"name": _NEW, "superseded_by": "", "lifecycle_state": "live"},
+        _OLD: {"name": _OLD, "superseded_by": _NEW, "lifecycle_state": "live"},
+    }
+    monkeypatch.setattr(coll, "_catalog_collection_rows", lambda: (rows, ""))
+
+    out = CliRunner().invoke(main, ["collection", "list"])
+    assert out.exit_code == 0, out.output
+    old_line = next(ln for ln in out.output.splitlines() if ln.startswith(_OLD))
+    assert f"superseded->{_NEW}" in old_line, out.output
