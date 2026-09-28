@@ -46,13 +46,24 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * all before the move), a restore candidate's ORIGIN collection already
  * carries a STUB chunk row for every seeded chash — the manifest FK that
  * makes it "re-referenced" is scoped to (tenant, origin collection, chash),
- * so a real chunks row must already exist there for the FK to be satisfiable.
- * The bounded function's copy-INSERT then {@code ON CONFLICT DO UPDATE}s that
- * stub with the quarantine row's real content, exactly like a heal
- * rehydrating a reference before the vector itself came back (same shape as
- * {@code CatalogGcAuditProducersTest.restoreRereferenced_...}'s single-row
- * fixture, extended to n chashes with one doc per chash to avoid a
+ * so a real chunks row must already exist there for the FK to be satisfiable
+ * (same shape as {@code CatalogGcAuditProducersTest.restoreRereferenced_...}'s
+ * single-row fixture, extended to n chashes with one doc per chash to avoid a
  * {@code (doc_id, position)} collision).
+ *
+ * <p>nexus-brxnp / nexus-u6d93 (T2 {@code nexus/debug-u6d93-brxnp}): the
+ * bounded function's copy-INSERT used to {@code ON CONFLICT DO UPDATE} that
+ * pre-existing origin row with the quarantine row's content — correct only
+ * when the origin row is a genuine placeholder, but WRONG whenever the
+ * origin row is itself the product of a later, fresher re-index that landed
+ * before the end-of-walk restore leg ran: the older quarantine copy then
+ * clobbered the newer live metadata (and, from catalog-042, its
+ * {@code created_at} too). The fix makes the ORIGIN row authoritative
+ * whenever one already exists ({@code ON CONFLICT DO NOTHING}); the
+ * quarantine copy is still deleted either way, so it never lingers. See
+ * {@link #boundIsHonouredPerCall_andRemainingCountsDownToZero} (the
+ * pre-existing stub survives untouched) and the dedicated
+ * {@code liveOriginRow_*} test below for the load-bearing proof.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class GcRestoreRereferencedBoundedTest {
@@ -117,8 +128,10 @@ class GcRestoreRereferencedBoundedTest {
         assertThat(chunkCount(p.quarantine())).as("quarantine fully drained").isZero();
         for (String h : p.hashes()) {
             assertThat(chunkText(p.origin(), h))
-                .as("every chash's origin row now carries the REAL content, not the stub")
-                .isEqualTo(realText(h));
+                .as("nexus-brxnp: the origin row already existed, so it is NEVER overwritten by "
+                    + "the older quarantine copy (ON CONFLICT DO NOTHING) -- restore only removes "
+                    + "the now-redundant quarantine copy")
+                .isEqualTo(stubText(h));
         }
 
         var idle = vecRepo.restoreRereferencedBounded(TENANT, p.quarantine(), p.origin(), 2);
@@ -126,23 +139,128 @@ class GcRestoreRereferencedBoundedTest {
         assertThat(idle.remaining()).as("an idempotent no-op once drained").isZero();
     }
 
+    /**
+     * nexus-brxnp regression guard: when the origin genuinely has NO row for
+     * the re-referenced chash — the ordinary heal case, where D's manifest
+     * write races AHEAD of the physical restore, exactly the production race
+     * {@code fk_catalog_chunks_chunk} now structurally blocks unless bypassed
+     * (mirrors {@code PgVectorRepositoryGcQuarantineTest
+     * #restoreRereferenced_movesBackWhenManifestReReferencesIt}) — restore
+     * must still INSERT the quarantine copy's own content and
+     * {@code created_at}, and strip the quarantine stamps. This is the
+     * insert-path property catalog-042 fixed and the new
+     * {@code ON CONFLICT DO NOTHING} changeset must not regress: DO NOTHING
+     * only changes behaviour when a conflicting row ALREADY exists.
+     */
     @Test
-    void createdAtIsCarriedThrough_notRestampedToRestoreTime() throws Exception {
-        var p = seed("ts", 3);
-        backdate(p.quarantine(), PAST);
+    void createdAtIsCarriedThrough_onInsertWhenOriginIsAbsent_regressionGuard() throws Exception {
+        String origin = "code__e8h5x-absent__minilm-l6-v2-384__v1";
+        String quarantine = "quarantine-code__e8h5x-absent__minilm-l6-v2-384__v1";
+        String chash = Chash.ofText("absent-restore").toHex();
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, origin);
+            PgContainerHelper.insertCollection(dsl, TENANT, quarantine);
+        }
+        String docId = "e8h5x-absent-doc";
+        vecRepo.upsertChunks(TENANT, origin, List.of(chash), List.of("orphan-text"), List.of(Map.of()));
+        repo.upsertDocument(TENANT, Map.of(
+            "tumbler", docId, "title", "e8h5x-absent", "content_type", "code",
+            "corpus", "code", "physical_collection", origin, "chunk_count", 1));
+        repo.writeManifest(TENANT, docId, origin, List.of(
+            Map.of("position", 0, "chash", chash, "chunk_index", 0)));
+
+        // Orphan it, then quarantine it FOR REAL, so the quarantine copy
+        // carries the quarantined_at/origin_collection stamps restore must strip.
+        repo.writeManifest(TENANT, docId, origin, List.of());
+        var quarantined = vecRepo.quarantineOrphansBounded(TENANT, origin, quarantine, "2026-08-01T00:00:00Z", 20, 10);
+        assertThat(quarantined.moved()).as("guard: X actually left O for Q").isEqualTo(1L);
+        backdate(quarantine, PAST);
         // NON-VACUITY: the backdate must have landed, or "equals PAST" below
         // could only pass by coincidence of the clock.
-        assertThat(createdAts(p.quarantine())).as("guard: quarantine rows are backdated").containsOnly(PAST);
+        assertThat(createdAts(quarantine)).as("guard: quarantine row is backdated").containsOnly(PAST);
 
-        vecRepo.restoreRereferencedBounded(TENANT, p.quarantine(), p.origin(), 10);
+        // D re-references X while X is STILL only in Q -- bypassing the FK
+        // exactly like PgVectorRepositoryGcQuarantineTest's own
+        // seedManifestBypassingFk, since a real write cannot do this without
+        // the chunk already existing in O.
+        insertManifestRowBypassingFk(docId, chash, origin);
 
-        assertThat(createdAts(p.origin()))
-            .as("restored rows keep their ORIGINAL (quarantine) created_at. The unbounded "
-                + "gc_restore_rereferenced omits created_at from its INSERT just like "
-                + "gc_quarantine_orphans did before a6mon's fix, so the column default would "
-                + "restamp every restored row to restore time and erase the generation "
-                + "history a round trip through quarantine should preserve")
+        var outcome = vecRepo.restoreRereferencedBounded(TENANT, quarantine, origin, 10);
+        assertThat(outcome.restored()).as("the restore inserts it").isEqualTo(1L);
+        assertThat(chunkText(origin, chash))
+            .as("origin gets the quarantine copy's content -- there was nothing to conflict with")
+            .isEqualTo("orphan-text");
+        assertThat(createdAts(origin))
+            .as("created_at is carried through on a genuine INSERT, the absent-origin path")
             .containsOnly(PAST);
+        assertThat(metadataField(origin, chash, "quarantined_at")).as("quarantine stamp stripped").isNull();
+        assertThat(metadataField(origin, chash, "origin_collection")).as("quarantine stamp stripped").isNull();
+        assertThat(chunkCount(quarantine)).as("Q no longer holds X").isZero();
+    }
+
+    /**
+     * nexus-brxnp / nexus-u6d93 load-bearing proof: a chash re-referenced by
+     * a FRESH combined-write (new metadata, e.g. {@code indexed_at}/
+     * {@code content_hash}) lands in the ORIGIN collection BEFORE the
+     * end-of-walk restore leg runs. The quarantine collection still holds an
+     * OLDER copy of that same chash from an earlier orphan sweep. Before the
+     * fix, {@code ON CONFLICT DO UPDATE} let the stale quarantine copy
+     * clobber the fresh origin row's metadata and {@code created_at}. The
+     * fix ({@code ON CONFLICT DO NOTHING}) makes the live origin row win; the
+     * quarantine copy is still deleted so it does not linger.
+     */
+    @Test
+    void liveOriginRow_metadataAndCreatedAt_areNeverOverwrittenByAnOlderQuarantineCopy() throws Exception {
+        String origin = "code__e8h5x-live-win__minilm-l6-v2-384__v1";
+        String quarantine = "quarantine-code__e8h5x-live-win__minilm-l6-v2-384__v1";
+        String docId = "e8h5x-live-win-doc";
+        String chash = Chash.ofText("live-win-chash").toHex();
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, origin);
+            PgContainerHelper.insertCollection(dsl, TENANT, quarantine);
+        }
+
+        // 1. X lands in O with T1/H1 metadata, manifest-referenced by D.
+        vecRepo.upsertChunks(TENANT, origin, List.of(chash), List.of("text-t1"),
+            List.of(Map.of("indexed_at", "T1", "content_hash", "H1")));
+        repo.upsertDocument(TENANT, Map.of(
+            "tumbler", docId, "title", "e8h5x-live-win", "content_type", "code",
+            "corpus", "code", "physical_collection", origin, "chunk_count", 1));
+        repo.writeManifest(TENANT, docId, origin, List.of(
+            Map.of("position", 0, "chash", chash, "chunk_index", 0)));
+
+        // 2. D's reference to X is dropped -- X becomes an orphan -- quarantined.
+        repo.writeManifest(TENANT, docId, origin, List.of());
+        var quarantined = vecRepo.quarantineOrphansBounded(TENANT, origin, quarantine, "2026-08-01T00:00:00Z", 20, 10);
+        assertThat(quarantined.moved()).as("guard: X actually left O for Q").isEqualTo(1L);
+        backdate(quarantine, PAST);
+        assertThat(createdAts(quarantine)).as("guard: quarantine copy is backdated").containsOnly(PAST);
+
+        // 3. A later re-index re-inserts X live into O with fresh T2/H2
+        // metadata, and re-references it from D -- exactly what a combined
+        // write does before the walk's end-of-walk restore leg runs.
+        vecRepo.upsertChunks(TENANT, origin, List.of(chash), List.of("text-t2"),
+            List.of(Map.of("indexed_at", "T2", "content_hash", "H2")));
+        OffsetDateTime freshCreatedAt = createdAts(origin).get(0);
+        assertThat(freshCreatedAt).as("guard: the fresh row is NOT the backdated quarantine copy")
+            .isNotEqualTo(PAST);
+        repo.writeManifest(TENANT, docId, origin, List.of(
+            Map.of("position", 0, "chash", chash, "chunk_index", 0)));
+
+        // 4. The end-of-walk restore leg runs and finds X re-referenced.
+        var outcome = vecRepo.restoreRereferencedBounded(TENANT, quarantine, origin, 10);
+        assertThat(outcome.restored()).as("the restore still processes and reports X").isEqualTo(1L);
+        assertThat(outcome.remaining()).isZero();
+
+        assertThat(chunkCount(quarantine)).as("Q no longer holds X").isZero();
+        assertThat(chunkText(origin, chash)).as("O keeps its OWN, live content").isEqualTo("text-t2");
+        assertThat(metadataField(origin, chash, "indexed_at")).isEqualTo("T2");
+        assertThat(metadataField(origin, chash, "content_hash")).isEqualTo("H2");
+        assertThat(createdAts(origin))
+            .as("O's created_at is untouched by the restore")
+            .containsExactly(freshCreatedAt);
     }
 
     @Test
@@ -257,6 +375,39 @@ class GcRestoreRereferencedBoundedTest {
                 CATALOG_DOCUMENT_CHUNKS.COLLECTION)
            .values(tenant, docId, 0, Chash.fromHex(chashHex).toBytes(), collection)
            .execute();
+    }
+
+    /**
+     * nexus-brxnp: inserts a manifest row naming {@code collection} for a
+     * chash whose physical chunk currently sits ONLY in the quarantine
+     * collection — the real production race {@code fk_catalog_chunks_chunk}
+     * now structurally blocks (RDR-191 Phase 5, nexus-o8dil.29). Bypasses the
+     * FK locally, the same drop/insert/re-add-NOT-VALID idiom
+     * {@code PgVectorRepositoryGcQuarantineTest#seedManifestBypassingFk} uses,
+     * so the SQL restore function's own insert-path handling of an
+     * already-referenced-but-not-yet-physically-restored row stays covered.
+     */
+    private void insertManifestRowBypassingFk(String docId, String chashHex, String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks DROP CONSTRAINT IF EXISTS fk_catalog_chunks_chunk");
+            insertManifestRow(su, TENANT, docId, chashHex, collection);
+            su.createStatement().execute(
+                "ALTER TABLE nexus.catalog_document_chunks "
+                + "ADD CONSTRAINT fk_catalog_chunks_chunk "
+                + "FOREIGN KEY (tenant_id, collection, chash) REFERENCES nexus.chunks (tenant_id, collection, chash) "
+                + "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE NOT VALID");
+        }
+    }
+
+    private String metadataField(String collection, String chashHex, String key) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var rs = su.createStatement().executeQuery(
+                "SELECT metadata->>'" + key + "' FROM nexus.chunks WHERE collection = '" + collection
+                + "' AND chash = decode('" + chashHex + "', 'hex')");
+            return rs.next() ? rs.getString(1) : null;
+        }
     }
 
     private int chunkCount(String collection) {

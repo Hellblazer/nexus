@@ -1635,6 +1635,17 @@
     <include file="db/changelog/catalog-042-gc-restore-rereferenced-bounded.xml"/>
 
     <!--
+        nexus-brxnp / nexus-u6d93: nexus.gc_restore_rereferenced and
+        nexus.gc_restore_rereferenced_bounded now leave a LIVE origin row
+        alone (ON CONFLICT DO NOTHING) instead of overwriting it with an
+        older quarantine copy — see the included file's own header. Placed
+        after catalog-042 (the tail when this landed) and before the
+        grants-nexus-svc.xml runAlways block, matching the established D0.1
+        late-append convention.
+    -->
+    <include file="db/changelog/catalog-043-gc-restore-rereferenced-live-origin-wins.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

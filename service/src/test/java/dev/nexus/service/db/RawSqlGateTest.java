@@ -936,6 +936,13 @@ class RawSqlGateTest {
         // dims) -- no jOOQ codegen for GRANT EXECUTE.
         Map.entry("dev/nexus/service/CrossPreviewRepositoryTest.java", 4),
         Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 7),
+        // nexus-brxnp: new file at 3 -- metadataField's raw executeQuery
+        // (metadata->>key read, no jOOQ codegen shortcut used here) and
+        // insertManifestRowBypassingFk's two ALTER TABLE DROP/ADD CONSTRAINT
+        // execute() calls, the same FK-bypass idiom
+        // PgVectorRepositoryGcQuarantineTest.seedManifestBypassingFk already
+        // carries raw-SQL entries for below.
+        Map.entry("dev/nexus/service/GcRestoreRereferencedBoundedTest.java", 3),
         // nexus-cbo4a batch 9 item 0: 13 -> 18 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 18 -> 20 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-f1pbh: 20 -> 21 (nexusDiagCanSelectTupleTables's count(diag, "SELECT count(*) FROM " + table) call).
@@ -1236,7 +1243,12 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDeleteAntiJoinTest.java", 2),
         Map.entry("dev/nexus/service/vectors/PgVectorRepositoryDimGuardTest.java", 2),
-        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 11),
+        // nexus-brxnp: 11 -> 13 (+2, the new createdAt/backdateChunk helpers'
+        // raw executeQuery/execute -- the live-origin-row-wins regression
+        // test needs a per-chash created_at read and a targeted backdate,
+        // same raw idiom this file's existing chunkText/metadataField
+        // helpers already use).
+        Map.entry("dev/nexus/service/vectors/PgVectorRepositoryGcQuarantineTest.java", 13),
         // RDR-192 Step 1 (bead nexus-wbfpw.1): 1 raw-JDBC site -- seedCentroid384's
         // taxonomy_centroids INSERT, the identical shape
         // TaxonomyUnassignedChashesRepositoryTest#seedCentroid already carries (no
@@ -1615,7 +1627,10 @@ class RawSqlGateTest {
     // the inline current_setting('hnsw.max_scan_tuples') read; see its entry).
     // RDR-222 Phase 0 fix round (bead nexus-ulrjq): 970 -> 972 (+2: new test file
     // CombinedWriteRacedEmbedCounterTest.java at 2 -- see that entry's own comment).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 972;
+    // nexus-brxnp: 972 -> 977 (+5: new test file GcRestoreRereferencedBoundedTest.java
+    // at 3, PgVectorRepositoryGcQuarantineTest.java 11 -> 13 (+2) -- see each
+    // entry's own comment).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 977;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

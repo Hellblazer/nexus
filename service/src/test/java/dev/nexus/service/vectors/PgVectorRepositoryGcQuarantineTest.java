@@ -19,6 +19,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
@@ -61,6 +63,8 @@ class PgVectorRepositoryGcQuarantineTest {
     private static final String TENANT_B = "gcq-tenant-b";
     private static final String SVC_ROLE = "svc_gcq_test";
     private static final String SVC_PASS = "svc_gcq_test_pass";
+    private static final OffsetDateTime PAST =
+        OffsetDateTime.of(2026, 7, 16, 0, 8, 44, 0, ZoneOffset.UTC);
 
     private static String ch(String seed) {
         return Chash.ofText(seed).toHex();
@@ -237,6 +241,26 @@ class PgVectorRepositoryGcQuarantineTest {
                 "SELECT metadata->>'" + key + "' FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
                 + "' AND chash = decode('" + chash + "', 'hex')");
             return rs.next() ? rs.getString(1) : null;
+        }
+    }
+
+    /** nexus-brxnp: this chash's {@code created_at}, normalized to UTC. */
+    private OffsetDateTime createdAt(String collection, String chash) throws SQLException {
+        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
+            var rs = st.executeQuery(
+                "SELECT created_at FROM " + DimTables.CHUNKS_TABLE_NAME + " WHERE collection = '" + collection
+                + "' AND chash = decode('" + chash + "', 'hex')");
+            rs.next();
+            return rs.getObject(1, OffsetDateTime.class).withOffsetSameInstant(ZoneOffset.UTC);
+        }
+    }
+
+    /** nexus-brxnp: backdates one chunk's {@code created_at}, for a non-vacuous "untouched by restore" proof. */
+    private void backdateChunk(String collection, String chash, OffsetDateTime to) throws SQLException {
+        try (var conn = pg.createConnection(""); var st = conn.createStatement()) {
+            st.execute(
+                "UPDATE " + DimTables.CHUNKS_TABLE_NAME + " SET created_at = '" + to + "' WHERE collection = '"
+                + collection + "' AND chash = decode('" + chash + "', 'hex')");
         }
     }
 
@@ -846,6 +870,74 @@ class PgVectorRepositoryGcQuarantineTest {
             .as("an existing origin row must be byte-identical after a restore — "
                 + "ON CONFLICT DO NOTHING, never touched")
             .isEqualTo(originBefore);
+        // nexus-brxnp: the collections-registration row is not the whole
+        // story — the CHUNK row itself must also survive untouched. Before
+        // the fix, ON CONFLICT DO UPDATE clobbered the pre-existing origin
+        // chunk's own content with the (here, different, older) quarantine
+        // copy's content.
+        assertThat(chunkText(originCol, chash))
+            .as("nexus-brxnp: the pre-existing origin row's OWN content survives, "
+                + "never overwritten by the quarantine copy")
+            .isEqualTo("will be orphaned then healed");
+        assertThat(chunkText(quarantineCol, chash)).as("Q no longer holds it").isNull();
+    }
+
+    /**
+     * nexus-brxnp / nexus-u6d93 (T2 {@code nexus/debug-u6d93-brxnp}) load-bearing
+     * proof, unbounded twin of {@code GcRestoreRereferencedBoundedTest
+     * #liveOriginRow_metadataAndCreatedAt_areNeverOverwrittenByAnOlderQuarantineCopy}:
+     * a chash re-referenced by a FRESH combined-write (new metadata) lands in
+     * the origin BEFORE the end-of-walk restore leg runs; the quarantine
+     * collection still holds an OLDER copy from an earlier orphan sweep.
+     * Before the fix, {@code ON CONFLICT DO UPDATE} let the stale quarantine
+     * copy clobber the fresh origin row's metadata and {@code created_at}.
+     * The fix ({@code ON CONFLICT DO NOTHING}) makes the live origin row win;
+     * the quarantine copy is still deleted so it does not linger.
+     */
+    @Test
+    void restoreRereferenced_liveOriginRow_metadataAndCreatedAt_areNeverOverwrittenByAnOlderQuarantineCopy()
+            throws Exception {
+        String originCol = originCol("brxnp-live-win");
+        String quarantineCol = quarantineCol("brxnp-live-win");
+        String docId = "gcq.doc.brxnp-live-win";
+        String chash = ch("gcq-brxnp-live-win");
+        try (var su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT_A, originCol);
+        }
+
+        // 1. X lands in O with T1/H1 metadata, manifest-referenced by D.
+        vectorRepo.upsertChunks(TENANT_A, originCol, List.of(chash), List.of("text-t1"),
+            List.of(Map.of("indexed_at", "T1", "content_hash", "H1")));
+        seedManifest(TENANT_A, docId, chash, originCol);
+
+        // 2. D's reference to X is dropped -- X becomes an orphan -- quarantined.
+        catalogRepo.writeManifest(TENANT_A, docId, originCol, List.of());
+        var quarantined = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-08-10T03:00:00Z", 20);
+        assertThat(quarantined.moved()).as("guard: X actually left O for Q").isEqualTo(1L);
+        backdateChunk(quarantineCol, chash, PAST);
+        assertThat(createdAt(quarantineCol, chash)).as("guard: quarantine copy is backdated").isEqualTo(PAST);
+
+        // 3. A later re-index re-inserts X live into O with fresh T2/H2
+        // metadata, and re-references it from D -- exactly what a combined
+        // write does before the walk's end-of-walk restore leg runs.
+        vectorRepo.upsertChunks(TENANT_A, originCol, List.of(chash), List.of("text-t2"),
+            List.of(Map.of("indexed_at", "T2", "content_hash", "H2")));
+        OffsetDateTime freshCreatedAt = createdAt(originCol, chash);
+        assertThat(freshCreatedAt).as("guard: the fresh row is NOT the backdated quarantine copy")
+            .isNotEqualTo(PAST);
+        seedManifest(TENANT_A, docId, chash, originCol);
+
+        // 4. The end-of-walk restore leg runs and finds X re-referenced.
+        long restored = vectorRepo.restoreRereferenced(TENANT_A, quarantineCol, originCol);
+        assertThat(restored).as("the restore still processes and reports X").isEqualTo(1L);
+
+        assertThat(chunkText(quarantineCol, chash)).as("Q no longer holds X").isNull();
+        assertThat(chunkText(originCol, chash)).as("O keeps its OWN, live content").isEqualTo("text-t2");
+        assertThat(metadataField(originCol, chash, "indexed_at")).isEqualTo("T2");
+        assertThat(metadataField(originCol, chash, "content_hash")).isEqualTo("H2");
+        assertThat(createdAt(originCol, chash))
+            .as("O's created_at is untouched by the restore")
+            .isEqualTo(freshCreatedAt);
     }
 
     // ── expire: grace-window floor refuses a mass hard-delete, force overrides ─

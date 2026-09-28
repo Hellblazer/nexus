@@ -1111,6 +1111,47 @@ def test_prune_collection_serverside_never_registers_the_quarantine_sibling(
     assert calls == ["restore", "quarantine", "expire"]
 
 
+def test_prune_collection_serverside_logs_restored_count_even_when_nothing_quarantined(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-brxnp: before this fix, the only log statement naming
+    ``restored`` was folded into ``gc_pruned_orphan_chunks_serverside``,
+    gated on ``moved`` being truthy -- a restore-only pass (a re-referenced
+    chash comes back, but nothing new was orphaned this walk) left NO log
+    trace of what it restored at all. This is exactly the shape a
+    restore-only end-of-walk leg produces (T2 ``nexus/debug-u6d93-brxnp``)."""
+    import nexus.catalog.chunk_quarantine as cq
+    from nexus.indexer import _prune_collection_serverside
+
+    monkeypatch.setattr(cq, "restore_rereferenced_serverside", lambda *a, **k: 3)
+    monkeypatch.setattr(cq, "quarantine_orphans_serverside", lambda *a, **k: (0, []))
+    monkeypatch.setattr(cq, "expire_quarantine_serverside", lambda *a, **k: (0, 0))
+
+    origin = "code__nexus-1-1__voyage-code-3__v1"
+    qname = "quarantine-code__nexus-1-1__voyage-code-3__v1"
+    with patch("nexus.indexer._log") as log:
+        result = _prune_collection_serverside(object(), origin, qname, "2026-01-01T00:00:00Z")
+
+    assert result is True
+    restored_calls = [
+        c for c in log.info.call_args_list
+        if c.args and c.args[0] == "gc_restored_rereferenced_chunks_serverside"
+    ]
+    assert len(restored_calls) == 1, (
+        f"expected exactly one restored-count log event on a restore-only pass, "
+        f"got {log.info.call_args_list!r}"
+    )
+    _, kwargs = restored_calls[0]
+    assert kwargs["count"] == 3
+    assert kwargs["collection"] == origin
+    # The quarantine event must NOT fire when nothing was moved (moved == 0) --
+    # the restored count must not be silently smuggled in there instead.
+    assert not any(
+        c.args and c.args[0] == "gc_pruned_orphan_chunks_serverside"
+        for c in log.info.call_args_list
+    )
+
+
 def test_prune_deleted_files_propagates_valueerror_from_serverside_prune(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

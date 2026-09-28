@@ -3985,6 +3985,16 @@ def _prune_collection_serverside(
     if restored is None:
         return False  # route unavailable — client-side path handles restore too
 
+    # nexus-brxnp: logged unconditionally on this pass's own restored count,
+    # not folded into the quarantine event below (which only fires when
+    # `moved` is truthy) — a restore-only pass (nothing to quarantine this
+    # walk) previously left no log trace of what it restored at all.
+    if restored:
+        _log.info(
+            "gc_restored_rereferenced_chunks_serverside",
+            collection=collection_name, count=restored, mode="restore-serverside",
+        )
+
     # nexus-e8h5x review round 2: same bounded-then-fallback shape as
     # restore above, for the direction catalog-037/nexus-a6mon's engine
     # route was ORIGINALLY added for. The engine route shipped in

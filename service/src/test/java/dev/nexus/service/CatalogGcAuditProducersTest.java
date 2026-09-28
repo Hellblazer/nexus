@@ -409,21 +409,28 @@ class CatalogGcAuditProducersTest {
     }
 
     /**
-     * nexus-e8h5x review round 2 (code-review CONFIRMED LIVE DEFECT):
-     * catalog-039-1's copy-INSERT omits {@code created_at}, so the column
-     * default restamps every restored row to restore time -- the same
-     * class of generation-history loss nexus-a6mon found and fixed for
-     * {@code gc_quarantine_orphans}'s unbounded form (catalog-037), here
-     * for the opposite direction. Fixed by catalog-042-2 (this changeset
-     * lands in the SAME file as the bounded sibling, catalog-042-1).
-     * BACKDATES the quarantine-side chunk to a fixed past instant so a
-     * restamp is distinguishable from carry-through -- asserting merely
-     * "created_at is set" would pass either way, same non-vacuity
-     * reasoning as {@code GcRestoreRereferencedBoundedTest
-     * #createdAtIsCarriedThrough_notRestampedToRestoreTime}.
+     * nexus-brxnp / nexus-u6d93 (T2 {@code nexus/debug-u6d93-brxnp}): before
+     * this fix, {@code gc_restore_rereferenced}'s copy-INSERT used {@code ON
+     * CONFLICT DO UPDATE}, so a PRE-EXISTING origin row (this fixture's
+     * stub, inserted before the quarantine-side row is even backdated) was
+     * clobbered by the older quarantine copy's {@code created_at} on
+     * restore. The fix ({@code catalog-043-2}, {@code ON CONFLICT DO
+     * NOTHING}) makes the pre-existing origin row's OWN {@code created_at}
+     * authoritative: it must be UNCHANGED by the restore, never backdated to
+     * the quarantine copy's stamp. BACKDATES the quarantine-side chunk to a
+     * fixed past instant so "unchanged" is distinguishable from "coincidentally
+     * still now" -- same non-vacuity reasoning as {@code
+     * GcRestoreRereferencedBoundedTest
+     * #liveOriginRow_metadataAndCreatedAt_areNeverOverwrittenByAnOlderQuarantineCopy}.
+     * (catalog-042-2's own fix, carrying {@code created_at} through on a
+     * genuine INSERT when the origin has NO row at all, is covered
+     * separately by {@code PgVectorRepositoryGcQuarantineTest
+     * #restoreRereferenced_movesBackWhenManifestReReferencesIt} and is
+     * unaffected by this changeset.)
      */
     @Test @Order(45)
-    void restoreRereferenced_unbounded_carriesCreatedAtThrough_notRestampedToRestoreTime() throws Exception {
+    void restoreRereferenced_unbounded_liveOriginCreatedAt_isNeverOverwrittenByAnOlderQuarantineCopy()
+            throws Exception {
         String collection = "code__gcaudit-restore-ts__minilm-l6-v2-384__v1";
         String quarantineCollection = "quarantine-code__gcaudit-restore-ts__minilm-l6-v2-384__v1";
         String docId = "gc-audit-restore-ts-doc";
@@ -445,6 +452,7 @@ class CatalogGcAuditProducersTest {
             "physical_collection", collection, "chunk_count", 0));
         vecRepo.upsertChunks(TENANT, collection, List.of(chash),
             List.of("gc audit restore ts stub text"), List.of(Map.of()));
+        OffsetDateTime originCreatedAtBeforeRestore = chunkCreatedAt(collection, chash);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             insertManifestRow(su, TENANT, docId, chash, collection);
@@ -459,18 +467,21 @@ class CatalogGcAuditProducersTest {
                .execute();
             assertThat(n).as("guard: the quarantine-side row exists to backdate").isEqualTo(1);
         }
-        // NON-VACUITY: the backdate must have landed before asserting carry-through.
+        // NON-VACUITY: the backdate must have landed, and it must differ from
+        // the origin's own pre-restore created_at, or "unchanged" below could
+        // only pass by coincidence of the clock.
         assertThat(chunkCreatedAt(quarantineCollection, chash))
             .as("guard: quarantine-side row is backdated").isEqualTo(past);
+        assertThat(originCreatedAtBeforeRestore).as("guard: origin's own created_at is NOT the backdated value")
+            .isNotEqualTo(past);
 
         long restored = vecRepo.restoreRereferenced(TENANT, quarantineCollection, collection);
-        assertThat(restored).isEqualTo(1L);
+        assertThat(restored).as("the restore still processes and reports it").isEqualTo(1L);
 
         assertThat(chunkCreatedAt(collection, chash))
-            .as("restored row keeps its ORIGINAL (quarantine) created_at -- before catalog-042-2, "
-                + "the column default restamped it to restore time and erased the collection's "
-                + "generation history across the quarantine round trip")
-            .isEqualTo(past);
+            .as("nexus-brxnp: the pre-existing origin row's OWN created_at survives, never "
+                + "overwritten by the older quarantine copy's backdated stamp")
+            .isEqualTo(originCreatedAtBeforeRestore);
     }
 
     private OffsetDateTime chunkCreatedAt(String collection, String chashHex) throws Exception {
