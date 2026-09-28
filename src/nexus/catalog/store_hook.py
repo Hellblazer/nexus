@@ -944,6 +944,19 @@ def catalog_store_hook_tracked(
             reader, doc_id, log_event="catalog_store_hook_dedup",
             collection=collection_name,
         )
+        # nexus-enej7: the same content under a DIFFERENT title is a second
+        # document sharing the chunk (RDR-108), not a re-put of this one.
+        # Reconciling onto it rewrote the first document's source_uri to the
+        # new title and never registered the new one (shakeout 7.64.1 F1).
+        # Only a row with the same identity, or a legacy row with no
+        # source_uri to compare, reconciles here.
+        if (
+            existing is not None
+            and source_uri is not None
+            and existing.source_uri
+            and existing.source_uri != source_uri
+        ):
+            existing = None
         if existing is not None:
             # nexus-k54nk fix-round 1: capture the row's meta.doc_id AS IT
             # STOOD before this call's own writer.update below overwrites

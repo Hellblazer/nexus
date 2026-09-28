@@ -4445,7 +4445,44 @@ class HttpVectorClient:
             if len(page) < page_limit:
                 break
             offset += len(page)
+        seen = set(ids)
+        ids.extend(c for c in self._catalog_chashes_for_title(collection, title) if c not in seen)
         return ids
+
+    @staticmethod
+    def _catalog_chashes_for_title(collection: str, title: str) -> list[str]:
+        """Manifest chashes of the live document the catalog registers under
+        (*collection*, *title*) (nexus-enej7).
+
+        A chunk row holds one ``title`` value, the last writer's. Two notes
+        with identical content in one collection are two documents sharing
+        that row, so the metadata match above finds only one of them; the
+        catalog holds both identities. Best-effort: a catalog failure leaves
+        the metadata answer as it was.
+        """
+        from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred: catalog-side helper
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
+
+        uri = uri_for(collection, title) if title else None
+        if not uri:
+            return []
+        reader = None
+        try:
+            reader = make_catalog_reader()
+            if reader is None:
+                return []
+            doc = reader.by_source_uri(uri)
+            if doc is None or doc.physical_collection != collection:
+                return []
+            rows = sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)
+            return [r.chash for r in rows]
+        except Exception:  # noqa: BLE001 — catalog is a second source here; the T3 answer stands without it
+            _log.warning("find_ids_by_title_catalog_lookup_failed", collection=collection, exc_info=True)
+            return []
+        finally:
+            close = getattr(reader, "close", None)
+            if close is not None:
+                close()
 
     def batch_delete(self, collection: str, ids: list[str]) -> int:
         """Delete *ids* from *collection* in service-quota-bounded batches.
