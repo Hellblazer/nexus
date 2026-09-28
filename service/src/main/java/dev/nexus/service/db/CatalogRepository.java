@@ -5010,7 +5010,7 @@ public final class CatalogRepository {
 
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, List<Map<String, Object>> rows) {
-        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null);
+        return writeManifestRows(ctx, tenant, docId, collection, rows, null, null, null, null);
     }
 
     /**
@@ -5043,6 +5043,18 @@ public final class CatalogRepository {
      *        rows actually written for this doc (the {@code chunks_written}
      *        response echo's per-doc contribution). Untouched when {@code
      *        resolvedChunks} is null.
+     * @param writtenThisRequest RDR-222 Phase 0 fix round (bead nexus-ulrjq):
+     *        chashes already WRITTEN by an EARLIER doc of this same {@code
+     *        writeManifestMany} call — excluded from that doc's raced-embed
+     *        count (a sibling doc's own recent write, not a race with another
+     *        writer). {@code null} treated as empty. Ignored when {@code
+     *        resolvedChunks} is null.
+     * @param writtenChashesOut single-cell output: the chashes THIS doc's
+     *        {@link #upsertManifestChunkVectors} call actually wrote — the
+     *        caller ({@link #writeManifestMany}) merges this into the
+     *        request-scoped set ONLY after this doc's transaction commits,
+     *        never from inside it. Untouched when {@code resolvedChunks} is
+     *        null.
      * @return {@code collection}, unchanged — kept as the return type so the
      *         post-commit sweep step ({@link #runSweepTransaction},
      *         {@link #writeManifestMany}) has the collection to sweep
@@ -5051,7 +5063,9 @@ public final class CatalogRepository {
     private static String writeManifestRows(DSLContext ctx, String tenant, String docId,
                                           String collection, List<Map<String, Object>> rows,
                                           Map<String, ResolvedChunk> resolvedChunks,
-                                          int[] chunksWrittenOut) {
+                                          int[] chunksWrittenOut,
+                                          Set<String> writtenThisRequest,
+                                          List<String>[] writtenChashesOut) {
         requireNonBlank(collection, "collection");
         // Case-1 duty only (RDR-191): does docId exist at all? A ghost
         // document (exists, no physical_collection) is no longer a special
@@ -5079,7 +5093,8 @@ public final class CatalogRepository {
         // reader can only ever observe both or neither, never one without
         // the other.
         if (resolvedChunks != null) {
-            int written = upsertManifestChunkVectors(ctx, tenant, collection, rows, resolvedChunks);
+            int written = upsertManifestChunkVectors(ctx, tenant, collection, rows, resolvedChunks,
+                    writtenThisRequest == null ? Set.of() : writtenThisRequest, writtenChashesOut);
             if (chunksWrittenOut != null) {
                 chunksWrittenOut[0] = written;
             }
@@ -5183,13 +5198,26 @@ public final class CatalogRepository {
      * per-doc catch, landing in {@code failed}/{@code failed_doc_ids}) —
      * a manifest row must never reference a chunk that does not exist.
      *
+     * @param writtenThisRequest chashes already written by an earlier doc of
+     *        this same request (RDR-222 Phase 0 fix round, bead nexus-ulrjq)
+     *        — excluded from the raced-embed count below; never mutated here.
+     * @param writtenChashesOut single-cell output: set to the exact chashes
+     *        this call wrote ({@code toWrite}), unconditionally, on every
+     *        return path — {@code null} entries are never left unset so a
+     *        caller reading it after a zero-row call sees an empty list, not
+     *        a stale value from a previous call.
      * @return count of chash rows actually written (INSERT ... ON CONFLICT)
      *         — this doc's contribution to the {@code chunks_written}
      *         response echo.
      */
     private static int upsertManifestChunkVectors(DSLContext ctx, String tenant, String collection,
                                                    List<Map<String, Object>> rows,
-                                                   Map<String, ResolvedChunk> resolved) {
+                                                   Map<String, ResolvedChunk> resolved,
+                                                   Set<String> writtenThisRequest,
+                                                   List<String>[] writtenChashesOut) {
+        if (writtenChashesOut != null) {
+            writtenChashesOut[0] = List.of();
+        }
         if (rows == null || rows.isEmpty()) return 0;
         // (1.4.1) dedupe — first occurrence wins, matches
         // PgVectorRepository.upsertChunksInternal's `Set<String> seen` discipline.
@@ -5240,9 +5268,18 @@ public final class CatalogRepository {
         // the subset that feeds the raced-embed count below. See
         // PgVectorRepository.NeedEmbedResolution's javadoc for why a content-divergent
         // or zero-row-reroute chash is excluded.
+        //
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq, code-review CRITICAL): ALSO
+        // excludes writtenThisRequest — a chash a SIBLING doc of this SAME
+        // writeManyCombined call already wrote (committed) moments earlier hits ON
+        // CONFLICT here for an entirely mundane reason (this request's own RDR-108
+        // shared-chash fan-out across two docs), not because a DIFFERENT writer
+        // raced this call. Without this exclusion, one call writing the same shared
+        // chash from two docs always reports raced=1 on the second doc, even with
+        // zero concurrency anywhere.
         Set<String> originalAbsentChashes = new HashSet<>();
         for (String c : toWrite) {
-            if (resolved.get(c).originalAbsent()) {
+            if (resolved.get(c).originalAbsent() && !writtenThisRequest.contains(c)) {
                 originalAbsentChashes.add(c);
             }
         }
@@ -5255,6 +5292,16 @@ public final class CatalogRepository {
                     Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
         }
         long raced = 0;
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #1): a bounded sample
+        // of the raced chashes themselves (already hex — ch.chash()'s Java binding),
+        // capped at 8 per event. The direct upsert-chunks path carries no doc id at
+        // all; this path's own event line carries no doc id either (per-doc calls
+        // share one log statement shape with the direct path by design). The chash
+        // is what lets an operator join afterward against catalog_document_chunks
+        // and tell a genuine cross-writer retry race (one owner) apart from RDR-108
+        // shared chunk text landing from two independent documents (multiple
+        // owners) — a decomposition aid, not a new counter.
+        List<String> racedChashSample = new ArrayList<>();
         // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): same (xmax = 0) RETURNING idiom as
         // PgVectorRepository.upsertChunksInternal's final INSERT — see that call
         // site's comment for the RawSqlGateTest rationale.
@@ -5269,6 +5316,9 @@ public final class CatalogRepository {
         for (var r : returned) {
             if (!Boolean.TRUE.equals(r.value2()) && originalAbsentChashes.contains(r.value1())) {
                 raced++;
+                if (racedChashSample.size() < 8) {
+                    racedChashSample.add(r.value1());
+                }
             }
         }
         if (raced > 0) {
@@ -5276,9 +5326,12 @@ public final class CatalogRepository {
             // originally-absent chashes between CombinedWriteService's existence
             // partition and this per-doc INSERT — this write paid a duplicate embed
             // for it.
-            log.info("event=upsert_embed_raced collection={} raced={} embedded={}",
-                    collection, raced, toWrite.size());
+            log.info("event=upsert_embed_raced collection={} raced={} embedded={} raced_chashes={}",
+                    collection, raced, toWrite.size(), String.join(",", racedChashSample));
             RacedEmbedActivity.record(raced);
+        }
+        if (writtenChashesOut != null) {
+            writtenChashesOut[0] = toWrite;
         }
         return toWrite.size();
     }
@@ -5450,6 +5503,20 @@ public final class CatalogRepository {
         List<Map<String, Object>> failedDetail = new ArrayList<>();
         List<Map<String, Object>> completeRefused = new ArrayList<>();
         List<Map<String, Object>> sweepDetail = new ArrayList<>();
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq, code-review CRITICAL): chashes
+        // already WRITTEN (committed) by an earlier doc of THIS SAME call. A doc's
+        // own per-doc INSERT hitting ON CONFLICT against a chash a SIBLING doc of
+        // this same writeManyCombined/writeManifestMany call already wrote moments
+        // earlier is not a race with another WRITER — it is this request's own
+        // RDR-108 shared-chash fan-out (CombinedWriteService's existence-partition
+        // ran ONCE, before any per-doc write, so every doc referencing a shared
+        // chash sees it as absent identically). Populated ONLY after a doc's
+        // tenantScope.withTenant call returns (i.e. after that doc's transaction
+        // COMMITS, see the writtenChashesHolder merge below) — a doc whose write
+        // throws and lands in `failed` never contributes, and a hypothetical future
+        // retry-wrapped attempt could not double-contribute either, since only a
+        // call that actually returns normally merges into this set.
+        Set<String> requestWrittenChashes = new HashSet<>();
         if (docs != null) {
             for (Map<String, Object> d : docs) {
                 String docId = s(d, "doc_id");
@@ -5468,6 +5535,7 @@ public final class CatalogRepository {
                 Map<String, Object>[] sweepOutcome = new Map[1];
                 Set<String>[] beforeHolder = new Set[1];
                 int[] chunksWrittenHolder = new int[1];
+                List<String>[] newlyWrittenChashesHolder = new List[1];
                 try {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
@@ -5503,7 +5571,8 @@ public final class CatalogRepository {
                         boolean beforeReadFailed = sweep && beforeRead == null;
                         long tWriteStart = tBeforeReadEnd;
                         writeManifestRows(ctx, tenant, docId, collection, rows,
-                                resolvedChunks, chunksWrittenHolder);
+                                resolvedChunks, chunksWrittenHolder,
+                                requestWrittenChashes, newlyWrittenChashesHolder);
                         if (beforeReadFailed) {
                             // Nothing to compute — the before-read itself is what
                             // failed, so `dropped` was never determined. Reported
@@ -5525,6 +5594,14 @@ public final class CatalogRepository {
                         writeNanosTotal[0] += (System.nanoTime() - tWriteStart);
                         return null;
                     });
+                    // RDR-222 Phase 0 fix round (bead nexus-ulrjq): merge THIS doc's
+                    // newly-written chashes into the request-scoped set only NOW that
+                    // its transaction has committed (tenantScope.withTenant returned
+                    // normally) — never inside the lambda above, which runs BEFORE
+                    // commit.
+                    if (newlyWrittenChashesHolder[0] != null) {
+                        requestWrittenChashes.addAll(newlyWrittenChashesHolder[0]);
+                    }
                     okDocs++;
                     totalRows += rows.size();
                     totalChunksWritten += chunksWrittenHolder[0];

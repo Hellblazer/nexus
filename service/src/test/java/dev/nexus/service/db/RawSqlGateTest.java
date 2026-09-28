@@ -920,6 +920,13 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/ChunksRlsBehavioralTest.java", 11),
         Map.entry("dev/nexus/service/CollectionVectorStatsTest.java", 17),
         Map.entry("dev/nexus/service/CombinedQueryParityTest.java", 21),
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq): 2 raw-JDBC fixture sites,
+        // the same idiom CombinedWriteRepositoryTest's own seedChunk384/
+        // chunk384Exists use just below -- seedChunk's chunks INSERT (a
+        // chunk-row-only seed with NO manifest reference, required so the
+        // zero-row-reroute fixture's concurrent delete does not trip
+        // fk_catalog_chunks_chunk) and deleteChunk's chunks DELETE.
+        Map.entry("dev/nexus/service/CombinedWriteRacedEmbedCounterTest.java", 2),
         Map.entry("dev/nexus/service/CombinedWriteRepositoryTest.java", 6),
         // nexus-v4pj4 (round-2 review decision): 4 raw-JDBC fixture sites, the
         // same idiom TaxonomyAssignFromChashesRepositoryTest uses above --
@@ -1606,7 +1613,9 @@ class RawSqlGateTest {
     // nexus-wbfpw.9 round 3 (coordinator instruction: control the recall numbers):
     // 968 -> 970 (+2: that file 3 -> 5, the new countMatching(String) call site and
     // the inline current_setting('hnsw.max_scan_tuples') read; see its entry).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 970;
+    // RDR-222 Phase 0 fix round (bead nexus-ulrjq): 970 -> 972 (+2: new test file
+    // CombinedWriteRacedEmbedCounterTest.java at 2 -- see that entry's own comment).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 972;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

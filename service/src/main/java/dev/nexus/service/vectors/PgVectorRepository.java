@@ -240,6 +240,36 @@ public final class PgVectorRepository {
     }
 
     /**
+     * Test-only interleaving seam (RDR-222 Phase 0 fix round, bead nexus-ulrjq,
+     * finding 2): an optional callback invoked in {@link #upsertChunksInternal}
+     * immediately after {@link #resolveNeedEmbedIdx} returns — {@code insertIdx}
+     * and the original-absentee set are finalized, but embedding and the final
+     * INSERT have not run yet — so a test can force a chash resolved via the
+     * ZERO-ROW have-vector reroute (present at the existence SELECT, deleted
+     * before the have-vector UPDATE, self-healed into need-embed) to hit a REAL
+     * {@code ON CONFLICT} on the final INSERT below: recreate the row here, from
+     * a second connection, while this thread is paused. Proves the raced-embed
+     * count excludes that chash (it was never in the original-absentee set — see
+     * {@link NeedEmbedResolution}) even though its INSERT genuinely conflicts.
+     * No equivalent hook is needed for the content-divergent case: a
+     * content-divergent chash's final INSERT conflicts DETERMINISTICALLY (the
+     * chash already exists, by definition), no interleaving required.
+     *
+     * <p>Default {@code null} (no-op), same shape as {@link
+     * #afterExistencePartitionHookForTests}. Never read or written by
+     * production code.
+     */
+    private volatile Runnable afterNeedEmbedResolvedHookForTests;
+
+    /**
+     * Test-only: install (or clear with {@code null}) the post-need-embed-
+     * resolution pause hook — see {@link #afterNeedEmbedResolvedHookForTests}.
+     */
+    public void setAfterNeedEmbedResolvedHookForTests(Runnable hook) {
+        this.afterNeedEmbedResolvedHookForTests = hook;
+    }
+
+    /**
      * Pairs a value with the embedding token count consumed to produce it (bead nexus-ehc4q).
      *
      * <p>Returned by the {@code *WithTokens} sibling methods so the caller (VectorHandler)
@@ -710,6 +740,13 @@ public final class PgVectorRepository {
             insertIdx = new ArrayList<>(dedupIds.size());
             for (int i = 0; i < dedupIds.size(); i++) insertIdx.add(i);
         }
+        // Test-only interleaving seam (RDR-222 Phase 0 fix round) — see
+        // afterNeedEmbedResolvedHookForTests javadoc. Fires AFTER insertIdx/
+        // originalAbsentIdx are finalized and BEFORE embedding. No-op in production.
+        Runnable needEmbedResolvedHook = afterNeedEmbedResolvedHookForTests;
+        if (needEmbedResolvedHook != null) {
+            needEmbedResolvedHook.run();
+        }
         List<String> docsToEmbed = new ArrayList<>(insertIdx.size());
         for (int idx : insertIdx) docsToEmbed.add(dedupDocs.get(idx));
 
@@ -823,8 +860,18 @@ public final class PgVectorRepository {
             // prior attempt's transaction is already rolled back by Postgres), so its
             // raced count must never accumulate onto a discarded attempt's count.
             final AtomicLong racedThisWrite = new AtomicLong();
+            // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #1): a bounded
+            // sample of the raced chashes themselves, capped at 8 per event, so an
+            // operator can join afterward against catalog_document_chunks and tell
+            // a genuine cross-request retry race (single owner) apart from RDR-108
+            // shared chunk text landing from independent callers (multiple owners)
+            // — a decomposition aid, not a new counter. Same per-attempt reset
+            // discipline as racedThisWrite: a fresh list every attempt, read only
+            // after DeadlockRetry.run returns.
+            final List<String>[] racedChashSampleHolder = new List[]{List.of()};
             DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
                 racedThisWrite.set(0);
+                racedChashSampleHolder[0] = new ArrayList<>();
                 // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
                 // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
                 // round trips. The old per-row loop held this transaction's connection
@@ -896,6 +943,9 @@ public final class PgVectorRepository {
                           if (!Boolean.TRUE.equals(r.value2())
                                   && finalOriginalAbsentChashes.contains(r.value1())) {
                               racedThisWrite.incrementAndGet();
+                              if (racedChashSampleHolder[0].size() < 8) {
+                                  racedChashSampleHolder[0].add(r.value1());
+                              }
                           }
                       });
                 return null;
@@ -906,8 +956,8 @@ public final class PgVectorRepository {
                 // originally-absent chashes between the existence partition and this
                 // INSERT — this request paid a duplicate embed for it (RDR-181's
                 // existence-check-then-embed window, M-b).
-                log.info("event=upsert_embed_raced collection={} raced={} embedded={}",
-                        collection, raced, finalInsertIdx.size());
+                log.info("event=upsert_embed_raced collection={} raced={} embedded={} raced_chashes={}",
+                        collection, raced, finalInsertIdx.size(), String.join(",", racedChashSampleHolder[0]));
                 RacedEmbedActivity.record(raced);
             }
         }

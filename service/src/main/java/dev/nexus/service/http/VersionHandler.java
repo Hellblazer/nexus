@@ -106,6 +106,20 @@ public final class VersionHandler implements HttpHandler {
     /** Wall-clock millis when this handler was constructed — see {@link #appendProcessUptimeFields}. */
     private final long processStartMillis = System.currentTimeMillis();
 
+    /**
+     * RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2): the SAME instant
+     * {@link #appendProcessUptimeFields} renders as {@code /version}'s {@code
+     * process_start_time} — exposed so {@code StatusHandler} can report the
+     * identical value on {@code GET /v1/status} (a window reader comparing two
+     * {@code raced_embeds_total} reads needs to tell "the counter reset because
+     * the process restarted" apart from "nothing raced"; with no second clock
+     * source, this is the SAME sample, not a fresh {@code System.currentTimeMillis()}
+     * call moments apart at a different handler's construction).
+     */
+    public long processStartMillis() {
+        return processStartMillis;
+    }
+
     public VersionHandler(DataSource dataSource) {
         this(dataSource, null);
     }

@@ -31,7 +31,8 @@ import java.util.function.Supplier;
  *    "last_activity_age_ms":230,"queue_depth":0,"thread_width":4,
  *    "deadline_aborts_total":0,"admission_refusals_total":0},
  *  "embedder_activity":{"bge-base-en-v15-768":{...same shape...}},
- *  "raced_embeds_total":0}</pre>
+ *  "raced_embeds_total":0,
+ *  "process_start_time":"2026-09-12T09:00:00Z"}</pre>
  *
  * <p>{@code raced_embeds_total} (RDR-222 Phase 0, bead nexus-ulrjq, ADDITIVE) is a
  * process-wide, lifetime counter (see {@link RacedEmbedActivity}) of chashes a
@@ -42,6 +43,17 @@ import java.util.function.Supplier;
  * every field in those two shapes, it has no embedder dimension — it is a
  * DB-write-layer count, identical across every embedder, so nesting it per
  * embedder would misrepresent it as per-embedder data.
+ *
+ * <p>{@code process_start_time} (RDR-222 Phase 0 fix round, bead nexus-ulrjq,
+ * critic #2, ADDITIVE) is the SAME value {@code /version}'s field of the same
+ * name reports ({@link VersionHandler#appendProcessUptimeFields}, nexus-904y8) —
+ * reused verbatim, never a second {@code System.currentTimeMillis()} sample at
+ * this handler's own construction, so the two routes never disagree about when
+ * the process started. Answers the restart-fragility gap a window reader of
+ * {@code raced_embeds_total} otherwise has no way to close: a counter that reads
+ * lower on a later poll, or resets to a small number, is indistinguishable from
+ * "nothing raced in this window" unless the reader can also see that the process
+ * restarted between the two reads.
  *
  * <p>{@code deadline_aborts_total} (nexus-8hdg9 phases 3/4, ADDITIVE, in
  * every entry of both shapes) counts embed calls the embedder aborted at a
@@ -77,6 +89,7 @@ public final class StatusHandler implements HttpHandler {
 
     private final EmbedderRouter embedderRouter;   // nullable — mode "unknown"
     private final Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier; // nullable
+    private final long processStartMillis;
 
     public StatusHandler(EmbedderRouter embedderRouter) {
         this(embedderRouter, null);
@@ -102,8 +115,32 @@ public final class StatusHandler implements HttpHandler {
     public StatusHandler(
             EmbedderRouter embedderRouter,
             Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier) {
+        // No real deploy correlates against this handler's own construction time
+        // (this 2-arg ctor predates process_start_time and every caller of it,
+        // production included through NexusService's OWN 3-arg wiring, either
+        // passes VersionHandler's real value below or is a test that only checks
+        // the field's presence/format) — a fresh sample here is a reasonable
+        // fallback, never presented as if it were VersionHandler's own value.
+        this(embedderRouter, localEmbedActivitySupplier, System.currentTimeMillis());
+    }
+
+    /**
+     * @param processStartMillis RDR-222 Phase 0 fix round (bead nexus-ulrjq,
+     *                                    critic #2): the SAME instant {@link
+     *                                    VersionHandler#processStartMillis()}
+     *                                    reports — production wiring MUST pass
+     *                                    that handler's own value here, never a
+     *                                    fresh {@code System.currentTimeMillis()}
+     *                                    (a second clock source the two routes
+     *                                    could then disagree on).
+     */
+    public StatusHandler(
+            EmbedderRouter embedderRouter,
+            Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
+            long processStartMillis) {
         this.embedderRouter = embedderRouter;
         this.localEmbedActivitySupplier = localEmbedActivitySupplier;
+        this.processStartMillis = processStartMillis;
     }
 
     @Override
@@ -140,6 +177,12 @@ public final class StatusHandler implements HttpHandler {
         // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: process-wide lifetime
         // counter, not per-embedder — see this class's own javadoc.
         body.append(",\"raced_embeds_total\":").append(RacedEmbedActivity.total());
+
+        // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2), [additive]:
+        // VersionHandler.startTimeIso is the SAME rendering /version's field of
+        // the same name uses — no second format, no second clock read here.
+        body.append(",\"process_start_time\":")
+            .append(HttpUtil.jsonString(VersionHandler.startTimeIso(processStartMillis)));
 
         body.append('}');
         HttpUtil.send(exchange, 200, body.toString());

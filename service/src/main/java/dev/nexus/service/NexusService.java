@@ -465,14 +465,20 @@ public final class NexusService {
 
         // /version — unauthenticated app+schema+embedding-mode handshake
         // (nexus-pebfx.4 + nexus-pebfx.5)
-        server.createContext("/version", new VersionHandler(dataSource, docEmbedderRouter));
+        var versionHandler = new VersionHandler(dataSource, docEmbedderRouter);
+        server.createContext("/version", versionHandler);
 
         // /v1/status — unauthenticated live embed-activity counters (bead
         // nexus-s71lr, deliverable 2). Same no-auth posture as /health and
         // /version: operational telemetry, not user data. Deliberately
-        // OUTSIDE the /v1/* auth-filter block below.
+        // OUTSIDE the /v1/* auth-filter block below. RDR-222 Phase 0 fix round
+        // (bead nexus-ulrjq, critic #2): process_start_time reuses versionHandler's
+        // OWN already-computed instant (constructed one line above, so this reads
+        // it, never a fresh System.currentTimeMillis() sample at a different
+        // moment) -- the "no second clock source" requirement in one place.
         server.createContext("/v1/status",
-                new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier));
+                new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier,
+                        versionHandler.processStartMillis()));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they

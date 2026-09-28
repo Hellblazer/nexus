@@ -94,13 +94,36 @@ public final class CombinedWriteService {
 
     /**
      * Test-only interleaving seam (RDR-222 Phase 0, bead nexus-ulrjq), mirroring
-     * {@link PgVectorRepository#setAfterExistencePartitionHookForTests}: an optional
+     * {@link PgVectorRepository#setAfterNeedEmbedResolvedHookForTests}: an optional
      * callback invoked in {@link #writeManyCombined} immediately after Phase 2a's
      * existence-partition transaction has committed (so {@code needEmbedIdx} is
      * finalized) and BEFORE the embed call — the exact window a concurrent second
      * writer can commit one of THIS call's originally-absent chashes, producing a
-     * raced embed once this call's own per-doc INSERT runs. Default {@code null}
-     * (no-op); never read or written by production code.
+     * raced embed once this call's own per-doc INSERT runs; also the window a test
+     * can recreate a chash Phase 2a rerouted via the zero-row-UPDATE path (see
+     * {@link #afterExistencePartitionHookForTests} below) so its per-doc INSERT
+     * hits a REAL {@code ON CONFLICT}. Default {@code null} (no-op); never read or
+     * written by production code.
+     */
+    private volatile Runnable afterNeedEmbedResolvedHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the interleaving hook above. */
+    public void setAfterNeedEmbedResolvedHookForTests(Runnable hook) {
+        this.afterNeedEmbedResolvedHookForTests = hook;
+    }
+
+    /**
+     * Test-only interleaving seam (RDR-222 Phase 0 fix round, bead nexus-ulrjq,
+     * finding 2), mirroring {@link PgVectorRepository#setAfterExistencePartitionHookForTests}
+     * exactly: an optional callback invoked INSIDE Phase 2a's existence-partition
+     * transaction, immediately after the existence SELECT resolves (so {@code
+     * originalAbsentIdx}/{@code need}/{@code metadataOnly} are computed) and BEFORE
+     * {@code batchUpdateMetadata}'s have-vector UPDATE runs — the window a
+     * concurrent delete of a {@code metadataOnly} chash makes that UPDATE affect 0
+     * rows, self-healing it into {@code need} via the zero-row reroute (see
+     * PgVectorRepository.NeedEmbedResolution's javadoc for why that reroute is
+     * excluded from the raced-embed count). Default {@code null} (no-op); never
+     * read or written by production code.
      */
     private volatile Runnable afterExistencePartitionHookForTests;
 
@@ -286,6 +309,15 @@ public final class CombinedWriteService {
                         metadataOnly.add(i);
                     }
                 }
+                // Test-only interleaving seam (RDR-222 Phase 0 fix round) — see
+                // afterExistencePartitionHookForTests javadoc. Fires INSIDE this
+                // transaction, AFTER the existence SELECT resolves and BEFORE
+                // batchUpdateMetadata's have-vector UPDATE below runs. No-op (null)
+                // in production.
+                Runnable existencePartitionHook = afterExistencePartitionHookForTests;
+                if (existencePartitionHook != null) {
+                    existencePartitionHook.run();
+                }
                 if (!metadataOnly.isEmpty()) {
                     // A chash present at the existence SELECT above but
                     // gone by the time this UPDATE runs, INSIDE THIS SAME
@@ -305,14 +337,14 @@ public final class CombinedWriteService {
             }));
 
         // Test-only interleaving seam (RDR-222 Phase 0) — see
-        // afterExistencePartitionHookForTests javadoc. Fires AFTER Phase 2a's
+        // afterNeedEmbedResolvedHookForTests javadoc. Fires AFTER Phase 2a's
         // existence-partition transaction has committed and BEFORE the embed call
         // below, so a test can let a concurrent second writer commit one of THIS
-        // call's originally-absent chashes before this call's own per-doc INSERT
-        // runs. No-op (null) in production.
-        Runnable hook = afterExistencePartitionHookForTests;
-        if (hook != null) {
-            hook.run();
+        // call's originally-absent chashes (or recreate a zero-row-rerouted one)
+        // before this call's own per-doc INSERT runs. No-op (null) in production.
+        Runnable needEmbedResolvedHook = afterNeedEmbedResolvedHookForTests;
+        if (needEmbedResolvedHook != null) {
+            needEmbedResolvedHook.run();
         }
 
         List<String> textsToEmbed = new ArrayList<>(needEmbedIdx.size());
