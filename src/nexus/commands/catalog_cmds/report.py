@@ -194,13 +194,18 @@ def session_summary_cmd(since: str) -> None:
         git_since, since_label = f"{int(since)} hours ago", f"in the last {int(since)} hours"
     else:
         try:
-            _dt.datetime.fromisoformat(since.strip().replace("Z", "+00:00"))
+            parsed = _dt.datetime.fromisoformat(since.strip().replace("Z", "+00:00"))
         except ValueError as exc:
             raise click.BadParameter(
                 f"{since!r} is neither a number of hours nor an ISO 8601 timestamp",
                 param_hint="--since",
             ) from exc
-        git_since, since_label = since.strip(), f"since {since.strip()}"
+        # git reads only some ISO 8601 forms and silently ignores the bound
+        # on others (a week date, the compact form), listing all history.
+        # Hand it the normalized form of what was parsed (critique of
+        # 5f7ab8e97; the normalize_since_filter pattern).
+        git_since = parsed.isoformat()
+        since_label = f"since {git_since}"
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible

@@ -55,12 +55,26 @@ def test_session_summary_since_takes_iso_8601_as_well_as_hours(monkeypatch):
     iso = CliRunner().invoke(main, ["catalog", "session-summary", "--since", "2026-09-27T00:00:00"])
     hours = CliRunner().invoke(main, ["catalog", "session-summary", "--since", "48"])
     bad = CliRunner().invoke(main, ["catalog", "session-summary", "--since", "yesterday-ish"])
+    # An ISO week date parses in Python but git ignores it and lists all
+    # history; git must get the normalized timestamp.
+    week = CliRunner().invoke(main, ["catalog", "session-summary", "--since", "2026-W40-1"])
 
     assert iso.exit_code == 0, iso.output
     assert hours.exit_code == 0, hours.output
     assert bad.exit_code == 2, bad.output
     assert "--since=2026-09-27T00:00:00" in argvs[0]
     assert "--since=48 hours ago" in argvs[1]
+    assert week.exit_code == 0, week.output
+    assert "--since=2026-09-28T00:00:00" in argvs[2], argvs[2]
+
+
+def test_rdr_fix_preamble_with_no_id_exits_0(tmp_path, monkeypatch):
+    """conexus/commands/rdr-fix.md runs `nx rdr preamble rdr-fix` with no id
+    on every /rdr-fix, as a context preload (review of 5f7ab8e97)."""
+    (tmp_path / "docs" / "rdr").mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(main, ["rdr", "preamble", "rdr-fix"])
+    assert result.exit_code == 0, result.output
 
 
 def test_link_density_reads_only_the_seeds_it_samples(monkeypatch):
