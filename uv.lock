@@ -412,7 +412,7 @@ wheels = [
 
 [[package]]
 name = "conexus"
-version = "7.64.0"
+version = "7.64.1"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

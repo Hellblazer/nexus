@@ -421,18 +421,83 @@ def test_export_fails_loud_when_catalog_unreachable(t2_service_env, tmp_path, mo
 
 
 @pytest.mark.integration
-def test_resolve_import_owner_tumbler_uses_owner_segment_for_code_collection(t2_service_env):
+def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_service_env):
+    """nexus-wbfpw.33: the owner comes from the collection's catalog row.
+    An owner segment is not always tumbler-derived (gate-xr789's
+    code__arcaneum-2ad2825c), so a slug segment must resolve through the
+    row, and a numeric-looking segment with no row must NOT be parsed."""
 
     reader = make_catalog_reader()
     writer = make_catalog_writer(priority="interactive")
     owner_tumbler = writer.register_owner(
-        "wbfpw31-owner-test", "repo", repo_hash="wbfpw31deadbeefcafe",
+        "wbfpw33-owner-test", "repo", repo_hash="wbfpw33deadbeefcafe",
     )
-    seg = owner_segment_for_tumbler(str(owner_tumbler))
-    collection = f"code__{seg}__{_MODEL}__v1"
+    slug = f"code__wbfpw33slug-2ad2825c__{_MODEL}__v1"
+    writer.register_collection(
+        slug, content_type="code", owner_id=str(owner_tumbler), embedding_model=_MODEL,
+    )
+    assert _resolve_import_owner_tumbler(slug, reader, writer) == owner_tumbler
 
-    resolved = _resolve_import_owner_tumbler(collection, reader, writer)
-    assert resolved == owner_tumbler
+    # What real writers store: the name's hyphenated owner segment ("1-1").
+    hyphen = f"code__wbfpw33hyphen-row__{_MODEL}__v1"
+    writer.register_collection(
+        hyphen, content_type="code",
+        owner_id=owner_segment_for_tumbler(str(owner_tumbler)), embedding_model=_MODEL,
+    )
+    assert _resolve_import_owner_tumbler(hyphen, reader, writer) == owner_tumbler
+
+    curator = writer.register_owner("knowledge", "curator")
+    seg = owner_segment_for_tumbler(str(owner_tumbler))
+    unregistered = f"code__{seg}__{_MODEL}__v1-unregistered"
+    assert _resolve_import_owner_tumbler(unregistered, reader, writer) == curator
+    # A name that does not even parse (non-canonical model segment) resolves too.
+    odd = "knowledge__wbfpw33-seam__all-minilm-l6-v2-384__v1"
+    assert _resolve_import_owner_tumbler(odd, reader, writer) == curator
+
+
+@pytest.mark.integration
+def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_path):
+    """The conexus-sdyq failure end to end: re-import into a code collection
+    whose owner segment is a slug, --skip-existing, chunks already stored."""
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("wbfpw33-slug-repo", "repo", repo_hash="wbfpw33slugrepocafe")
+    dst = f"code__wbfpw33e2e-2ad2825c__{_MODEL}__v1"
+    writer.register_collection(dst, content_type="code", owner_id=str(owner), embedding_model=_MODEL)
+
+    records = []
+    for i in range(2):
+        content = f"wbfpw33 slug chunk {i}"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        client.upsert_chunks_with_embeddings(
+            dst, ids=[chash], documents=[content], embeddings=[],
+            metadatas=[{"chunk_text_hash": chash, "indexed_at": datetime.now(UTC).isoformat()}],
+        )
+        records.append({"id": chash, "document": content, "metadata": {"chunk_text_hash": chash}})
+
+    f = tmp_path / "slug.nxexp"
+    _write_hand_crafted_nxexp(f, dst, records)
+    result = import_collection(db=client, input_path=f, target_collection=dst, skip_existing=True)
+    assert result["owned_count"] == 2
+
+    # The chunk write rewrote the row's owner_id to the name's slug, which is
+    # no owner; the import still lands owned, under the curator here since
+    # the collection holds no documents yet.
+    doc = reader.by_source_uri(f"nxexp://{dst}/{f.name}")
+    assert doc is not None
+    assert doc.physical_collection == dst
+
+    # With a live document already in the collection, its owner is used.
+    existing = writer.register(
+        owner=owner, title="wbfpw33 existing", content_type="code",
+        physical_collection=dst, source_uri=f"file:///wbfpw33/{dst}/existing.py",
+    )
+    assert existing is not None
+    assert _resolve_import_owner_tumbler(dst, reader, writer) == owner
+    for r in records:
+        assert r["id"] in client.get_collection(dst).get(ids=[r["id"]], include=[])["ids"]
 
 
 @pytest.mark.integration

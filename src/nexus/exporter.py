@@ -44,12 +44,10 @@ import numpy as np
 import structlog
 
 from nexus.aspect_readers import uri_for
-from nexus.catalog.collection_name import CollectionName
 from nexus.catalog.tumbler import Tumbler
 from nexus.corpus import (
     embedding_model_for_collection_name,
     index_model_for_collection,
-    is_conformant_collection_name,
 )
 from nexus.db.limits import QUOTAS
 from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
@@ -534,46 +532,40 @@ def export_collection(
 
 def _resolve_import_owner_tumbler(collection_name: str, reader: Any, writer: Any) -> Tumbler:
     """The owner an import-minted document is registered under
-    (nexus-wbfpw.31) -- mirrors the SAME choice the live write path
-    already makes for a document going into *collection_name*, never a
-    fresh convention. The split is by CONTENT_TYPE, not by name
-    conformance -- a ``knowledge`` collection's four-segment name is
-    routinely conformant too (``knowledge__<subject>__<model>__v<n>``),
-    but its owner_id segment is an arbitrary subject slug, never a
-    tumbler-derived one, because every knowledge document is owned by
-    the ONE ``knowledge`` curator regardless of which subject collection
-    it lives in (``catalog_store_hook_tracked``'s own owner lookup):
+    (nexus-wbfpw.31, nexus-wbfpw.33). Read from the collection's CATALOG
+    ROW, never from its name (RDR-204): an owner segment is not always
+    tumbler-derived (``code__arcaneum-2ad2825c__...``), and a name with a
+    non-canonical model segment does not even parse.
 
-    * A conformant, NON-knowledge collection name (code/docs/rdr) embeds
-      its owner segment in the name itself (``CollectionName.owner_id``)
-      -- the identical field the indexer's own catalog hook registers
-      those documents under (``owner_segment_for_tumbler``'s forward
-      direction). This reverses it: hyphens back to dots reconstruct the
-      owner's own tumbler prefix directly, no catalog round trip needed.
-    * Every other case -- a ``knowledge`` collection (conformant or not),
-      or a legacy / non-conformant name (2-segment, or simply
-      unregistered, the same fallback ``export_collection`` already
-      applies when no catalog row backs it) -- is owned by the
-      ``knowledge`` curator, the identical owner
-      ``catalog_store_hook_tracked`` registers every note under.
-
-    Raises :class:`NexusError` naming *collection_name* when a conformant
-    non-knowledge name's owner segment does not parse to a tumbler -- a
-    malformed collection name is a data-correctness problem, not
-    something to paper over with a guessed owner.
+    * A non-knowledge collection whose row's ``owner_id`` is a registered
+      owner: that owner. Writers store it in the name's hyphenated form
+      (``1-1``), and ``upsertCollection`` overwrites it from the name on
+      every chunk write (nexus-7tys2), so both the stored value and its
+      hyphens-as-dots form are tried, and either is used only when the
+      catalog confirms it is a registered owner. A slug
+      (``arcaneum-2ad2825c``) matches no owner and falls through.
+    * Otherwise, for a non-knowledge collection, the owner of a live
+      document already in it.
+    * Everything else (a knowledge collection, or a collection with no
+      usable row and no documents, such as gate-xr789's): the
+      ``knowledge`` curator, the owner ``catalog_store_hook_tracked``
+      registers every note under. Liveness needs a live owning document,
+      not a particular owner.
     """
-    if is_conformant_collection_name(collection_name):
-        cn = CollectionName.parse(collection_name)
-        if cn.content_type != "knowledge":
-            owner_str = cn.owner_id.replace("-", ".")
-            try:
-                return Tumbler.parse(owner_str)
-            except Exception as exc:
-                raise NexusError(
-                    f"Import into {collection_name!r} cannot resolve an "
-                    f"owner tumbler from the collection's owner segment "
-                    f"{cn.owner_id!r}: {exc}"
-                ) from exc
+    row = reader.get_collection(collection_name) or {}
+    if row.get("content_type") != "knowledge":
+        owner_id = str(row.get("owner_id") or "")
+        for candidate in dict.fromkeys((owner_id, owner_id.replace("-", "."))):
+            if candidate and reader.get_owner_by_prefix(candidate) is not None:
+                try:
+                    return Tumbler.parse(candidate)
+                except Exception:  # noqa: BLE001 — an unparseable owner id falls through
+                    _log.warning(
+                        "import_owner_row_unparseable", collection=collection_name, owner_id=candidate,
+                    )
+        existing = reader.list_by_collection(collection_name, limit=1)
+        if existing:
+            return existing[0].tumbler.owner_address()
     owner_t = reader.curator_owner_tumbler_by_name("knowledge")
     if owner_t is not None:
         return owner_t
