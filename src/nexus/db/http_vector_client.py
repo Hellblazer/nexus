@@ -4445,8 +4445,11 @@ class HttpVectorClient:
             if len(page) < page_limit:
                 break
             offset += len(page)
-        seen = set(ids)
-        ids.extend(c for c in self._catalog_chashes_for_title(collection, title) if c not in seen)
+        if not ids:
+            # nexus-enej7: only on a miss, so a title that its chunks carry
+            # costs no catalog round trip (store_get probes every collection
+            # in its scope).
+            ids = self._catalog_chashes_for_title(collection, title)
         return ids
 
     @staticmethod
@@ -4457,8 +4460,11 @@ class HttpVectorClient:
         A chunk row holds one ``title`` value, the last writer's. Two notes
         with identical content in one collection are two documents sharing
         that row, so the metadata match above finds only one of them; the
-        catalog holds both identities. Best-effort: a catalog failure leaves
-        the metadata answer as it was.
+        catalog holds both identities. Consulted only when the metadata
+        match is empty: a split note one of whose pieces is shared with
+        another document still resolves by its other pieces, without that
+        one. Best-effort: a catalog failure leaves the metadata answer as it
+        was.
         """
         from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred: catalog-side helper
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
