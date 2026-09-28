@@ -2448,10 +2448,11 @@ def _run_supplementary_checks() -> None:
     help="Run probes 3a and 3b: the name-resolution canary from "
          "tests/fixtures/name_canaries.py, then a retrieval probe that queries "
          "each collection with one of its own chunks and checks that some "
-         "OTHER chunk survives the distance threshold. Exits 2 when a surface "
-         "raises, a collection's nearest real neighbours all fall past its "
-         "threshold, or a collection's embedding model disagrees with its "
-         "name. RDR-087 Phase 3.",
+         "OTHER chunk survives the distance threshold. A collection whose "
+         "nearest real neighbours all fall past its threshold is a WARNING "
+         "row naming that distance, the threshold, and the sample it rests "
+         "on. Exits 2 only when a surface raises or a collection's embedding "
+         "model disagrees with its name. RDR-087 Phase 3.",
 )
 @click.option(
     "--check-resources",

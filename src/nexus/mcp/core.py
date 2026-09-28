@@ -2744,7 +2744,9 @@ def _search_render(
         current_cluster: str | None = None
         for r in page:
             # Emit cluster header when group changes
-            cluster_label = r.metadata.get("_cluster_label", "")
+            # Topic grouping sets _topic_label, Ward clustering
+            # _cluster_label; a header prints for either (critique, 29fab0df4).
+            cluster_label = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
             if clustered and cluster_label and cluster_label != current_cluster:
                 if current_cluster is not None:
                     lines.append("")  # blank separator between clusters
