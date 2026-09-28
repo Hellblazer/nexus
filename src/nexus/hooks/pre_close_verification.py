@@ -61,6 +61,60 @@ from nexus._hook_runtime._io import HookResult
 __all__ = ["run"]
 
 
+#: Process-wide clock anchor (nexus-8t9w8): when THIS module was imported,
+#: which is "when this hook dispatch began" in both production and tests --
+#: every invocation is a FRESH subprocess (hooks.json's PreToolUse entry
+#: spawns `python3 nx_hook_shim.py`, which spawns `nx-hook`, which imports
+#: this module exactly once; this file's own test driver does the same).
+_MODULE_LOAD_TIME = time.monotonic()
+
+#: Whole-PROCESS wall-clock budget for `_stamp_ids`' `bd set-state` calls,
+#: measured from `_MODULE_LOAD_TIME` (nexus-8t9w8; T2
+#: nexus/shakeout-7.64.1-hooks-2026-09-28 F3: 13/22 `bd close` commands hit
+#: hooks.json's 5.0s PreToolUse kill with NO decision returned at all --
+#: the ALLOW/DENY `_run_gate` had already computed was discarded along with
+#: the audit stamp, so the close proceeded completely ungated).
+#:
+#: The dominant cost is NOT `_coverage`'s `nx scratch list` (measured
+#: ~0.7s against a real T1 session; its own DEADLINE_SECONDS already
+#: bounds it to <=3.5s). It is `bd` itself: `bd set-state`/`bd show`
+#: against this box's real `bd` measured 1.9-4.0s per invocation (vs 0.06s
+#: for `bd --version`) -- a fixed per-process cost inherent to `bd`
+#: (dolt/db load, not this hook's code) and not fixable from here. What
+#: WAS fixable: `_stamp_ids` gave every `bd set-state` call its OWN
+#: independent, uncoordinated 5.0s timeout, stacked directly ON TOP of
+#: whatever `_coverage` had already spent of the SAME 5.0s harness
+#: ceiling (worse still with multiple bead ids: N calls x up to 5.0s
+#: each). A coverage check that took 3s left a stamp attempt free to run
+#: for another 5s -- 8s against a 5s hard kill, so the decision often
+#: never made it out at all.
+#:
+#: `_stamp_ids` now clamps each `bd` call's timeout to what's actually
+#: LEFT of this shared budget, so a slow stamp fails fast and LOUD (its
+#: existing contract: "a failed stamp is LOUD ... never blocks") instead
+#: of risking the harness kill taking the already-decided ALLOW/DENY down
+#: with it. 4.0s (0.5s under hooks.json's 5.0s timeout for this dispatch)
+#: leaves margin for the outer shim's spawn and this process's own
+#: pre-`_MODULE_LOAD_TIME` interpreter/import startup, neither of which
+#: this in-process clock can see. Overridable for tests, mirroring
+#: `_coverage`'s NX_CLOSE_GATE_DEADLINE_SECONDS test seam.
+_STAMP_DEADLINE_SECONDS = float(
+    os.environ.get('NX_CLOSE_GATE_STAMP_DEADLINE_SECONDS', '4.0') or '4.0'
+)
+
+#: Floor for a single `bd set-state` call's clamped timeout -- never zero
+#: (a 0.0 timeout is not "try briefly", it is "don't try"), and small
+#: enough that a truly exhausted budget still fails within a fraction of
+#: a second rather than eating the last of it.
+_STAMP_TIMEOUT_FLOOR = 0.5
+
+
+def _stamp_deadline_remaining() -> float:
+    """Seconds left in the shared stamp budget, clamped to the floor."""
+    elapsed = time.monotonic() - _MODULE_LOAD_TIME
+    return max(_STAMP_TIMEOUT_FLOOR, _STAMP_DEADLINE_SECONDS - elapsed)
+
+
 #: The only built-in bd status VALUE whose category is "done" (bd's own
 #: label; see `bd statuses`). Case-sensitive on bd's side -- `bd update
 #: --status Closed` is refused by bd itself with `invalid status "Closed"`
@@ -1222,6 +1276,16 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
     stderr rather than swallowed, so a broken ``bd`` at close time is
     observable instead of producing an audit record nobody can trust and
     nobody was told is missing.
+
+    nexus-8t9w8: each call's timeout is CLAMPED to what's left of the
+    shared process-wide stamp budget (:func:`_stamp_deadline_remaining`),
+    not an independent flat 5.0s -- see that budget's own docstring for
+    why an uncoordinated per-call timeout was the dominant cost behind
+    close commands losing their ALLOW/DENY decision to the harness kill
+    entirely. A clamped-short timeout on a genuinely slow ``bd`` still
+    raises the same ``TimeoutExpired``-or-nonzero shape the ``except``
+    below already handled -- this changes HOW LONG a stamp is allowed to
+    try, never what happens when it fails.
     """
     if not ids:
         return
@@ -1234,7 +1298,7 @@ def _stamp_ids(ids: list[str], state: str, reason: str) -> None:
         try:
             r = run_bounded(
                 ["bd", "set-state", bid, f"verification={state}", "--reason", reason],
-                timeout=5.0,
+                timeout=_stamp_deadline_remaining(),
             )
             if r.returncode != 0:
                 _warn(f"could not stamp verification={state} for {bid}")

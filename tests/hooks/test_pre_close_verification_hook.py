@@ -36,6 +36,7 @@ import shutil as _shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -208,15 +209,21 @@ def fake_nx(tmp_path):
 def fake_bd(tmp_path):
     """Install a fake `bd` on PATH that logs every `set-state` call to a
     file, so tests can assert which verification state got stamped (or
-    that none did)."""
+    that none did).
 
-    def _make() -> tuple[Path, Path]:
+    `sleep_seconds` (nexus-8t9w8, mirrors `fake_nx`'s own parameter):
+    deterministically reproduces a slow-but-working `bd`, for the
+    stamp-budget-clamp tests, without depending on real subprocess-spawn
+    or real `bd` latency."""
+
+    def _make(*, sleep_seconds: float = 0.0) -> tuple[Path, Path]:
         fake_bin = tmp_path / "bdbin"
         fake_bin.mkdir(exist_ok=True)
         log = tmp_path / "bd_calls.log"
         bd_script = fake_bin / "bd"
         bd_script.write_text(
             "#!/bin/bash\n"
+            f"sleep {sleep_seconds!r}\n"
             f'echo "$*" >> "{log}"\n'
             "exit 0\n"
         )
@@ -1424,6 +1431,45 @@ class TestDeadlineBudget:
         assert _get_decision(parsed) == ""
         assert "OVERRIDE" in _get_context(parsed)
         assert "verification=overridden" in log.read_text()
+
+    def test_stamp_call_does_not_blow_the_hook_past_its_own_budget(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """nexus-8t9w8 consequence test: a slow ``bd`` must not push the
+        WHOLE hook well past hooks.json's 5.0s PreToolUse kill.
+
+        Pre-fix, ``_stamp_ids`` gave ``bd set-state`` an independent flat
+        5.0s timeout regardless of how much of the SAME 5.0s ceiling
+        ``_coverage``'s own T1 check had already spent -- stacked on top
+        of it rather than sharing it. Here ``nx`` sleeps 1.0s (a covered
+        marker, so the close reaches the passed-stamp path) and ``bd``
+        sleeps 3.0s; with the stamp budget clamped to 1.3s total, only
+        ~0.3s is left for the stamp attempt after the T1 check, so it
+        gives up almost immediately rather than waiting out the full
+        3.0s sleep. Total wall time must stay well under the pre-fix
+        1.0 + 3.0 = 4.0s. Fails with the fix reverted (the clamp call
+        replaced by a bare ``timeout=5.0``): the stamp then waits out
+        the full 3.0s sleep and the bound below trips.
+        """
+        env = mock_config_env({"on_close": True})
+        scratch = _marker(
+            "review-completed,nexus-cotmr", "review-completed: nexus-cotmr — clean"
+        )
+        fake_nx_bin = fake_nx(scratch, sleep_seconds=1.0)
+        fake_bd_bin, log = fake_bd(sleep_seconds=3.0)
+        t0 = time.monotonic()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-cotmr"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides={**env, "NX_CLOSE_GATE_STAMP_DEADLINE_SECONDS": "1.3"},
+        )
+        elapsed = time.monotonic() - t0
+        parsed = json.loads(result.stdout)
+        assert _get_decision(parsed) == "allow"
+        assert elapsed < 3.0, (
+            f"hook took {elapsed:.2f}s — the stamp call was not clamped to "
+            "the remaining budget and waited out bd's full sleep"
+        )
 
     def test_fast_path_single_call_when_t1_covers(
         self, mock_config_env, fake_nx, tmp_path

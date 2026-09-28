@@ -139,6 +139,22 @@ def _snippet(content: str, max_chars: int = 70) -> str:
     return ""
 
 
+def _snippet_for(store: HttpMemoryStore, project: str, title: str) -> str:
+    """Fetch one entry's content and reduce it to a snippet.
+
+    A per-entry fetch failure (unreachable, deleted between the summary
+    list and this call) degrades to no snippet rather than aborting the
+    namespace — the title alone still renders.
+    """
+    try:
+        entry = store.get(project=project, title=title)
+    except _UNREACHABLE_EXC:
+        return ""
+    if not entry:
+        return ""
+    return _snippet(entry.get("content") or "")
+
+
 def _build_output(
     store: HttpMemoryStore,
     project_name: str,
@@ -148,13 +164,33 @@ def _build_output(
     """Render the ``### T2 Memory (...)`` block(s), capped per the same
     per-namespace/whole-scan budget the plugin mirror used.
 
+    **Scoped to what is rendered (nexus-fow78).** A namespace's ranked
+    list comes from :meth:`HttpMemoryStore.list_entries` — the same
+    ``project`` filter and ``timestamp DESC`` order as the retired
+    ``get_all`` call, but without each row's ``content`` column, which is
+    the overwhelming majority of the payload on a namespace with a real
+    history (measured against production T2: ``get_all('nexus')`` = 3840
+    rows / ~20.9MB content / ~15s; ``list_entries(project='nexus')`` =
+    same 3840 rows / ~2.4s with no per-row content). Full content is then
+    fetched with a targeted :meth:`HttpMemoryStore.get` call, and ONLY for
+    the ranks that actually render a snippet (``_SNIPPET_LIMIT`` = 3 per
+    namespace) — titles beyond that never pay for content at all, matched
+    or not. Both are existing ``/v1/memory/*`` routes; no engine change
+    was needed.
+
     Per-namespace fetch failures are isolated: a bad/slow namespace N gets
     its own warning line and the loop moves on, rather than an exception
     from namespace N discarding namespaces ``1..N-1``'s already-rendered
     output too. ``namespaces`` is capped to ``_MAX_NAMESPACES`` and the
     whole loop is bounded by *scan_budget_s* — both independent of
     ``_HARD_CAP``, which only counts RENDERED entries and does not fire
-    for a run of empty namespaces.
+    for a run of empty namespaces. The deadline is also checked BETWEEN
+    per-entry snippet fetches (not only between namespaces): each fetch
+    carries the store's own per-request timeout, so a degraded server
+    answering slowly on every call could otherwise burn up to
+    ``_SNIPPET_LIMIT`` timeouts before the next namespace-level check —
+    once the deadline passes mid-namespace, remaining snippet ranks
+    render title-only instead of issuing another network call.
     """
     lines: list[str] = []
     total = 0  # rendered entries across all namespaces
@@ -174,12 +210,11 @@ def _build_output(
 
         ns = ns_row.get("project", "")
         try:
-            rows = store.get_all(ns)
+            summaries = store.list_entries(project=ns)
         except _UNREACHABLE_EXC as exc:
             lines.append(f"  WARNING: T2 memory namespace {ns!r} unreachable: {exc}")
             continue
-        entries = [(r.get("title", "") or "", r.get("content") or "") for r in rows]
-        if not entries:
+        if not summaries:
             continue
 
         suffix = ns[len(project_name) :].lstrip("_") if ns != project_name else ""
@@ -189,14 +224,18 @@ def _build_output(
         ns_remaining = 0
         ns_rank = 0  # per-namespace position (1-based)
 
-        for title, content in entries:
+        for s in summaries:
             if total >= _HARD_CAP:
                 ns_remaining += 1
                 continue
             ns_rank += 1
+            title = s.get("title", "") or ""
             if ns_rank <= _SNIPPET_LIMIT:
-                snip = _snippet(content)
-                ns_lines.append(f"  {title}" + (f" — {snip}" if snip else ""))
+                if time.monotonic() < deadline:
+                    snip = _snippet_for(store, ns, title)
+                    ns_lines.append(f"  {title}" + (f" — {snip}" if snip else ""))
+                else:
+                    ns_lines.append(f"  {title}")
                 total += 1
             elif ns_rank <= _TITLE_LIMIT:
                 ns_lines.append(f"  {title}")

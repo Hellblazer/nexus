@@ -775,3 +775,61 @@ class TestTheTwoFlagTablesCannotDrift:
             f"blanking {flag} also blinded the harvester to the real target; "
             f"finding nothing routes to INDETERMINATE, which ALLOWS"
         )
+
+
+class TestTheStampBudgetIsSharedNotIndependent:
+    """nexus-8t9w8: pure-logic pin for ``_stamp_deadline_remaining``'s
+    clamping arithmetic. The full wall-clock consequence test (proving the
+    WHOLE hook stays bounded when ``bd`` itself is slow) lives in
+    ``test_pre_close_verification_hook.py``, which drives the gate as a
+    child process; this file owns what that harness cannot reach cheaply
+    -- the clamp's own math, in-process and instant.
+
+    T2 nexus/shakeout-7.64.1-hooks-2026-09-28 F3: 13/22 real ``bd close``
+    commands hit hooks.json's 5.0s PreToolUse kill with NO decision
+    returned -- the ALLOW/DENY ``_run_gate`` had already computed was
+    discarded along with the audit stamp. Measured cause (read-only,
+    synthetic ``bd close nexus-doesnotexist-999999`` payload, never a
+    real bead): ``_coverage``'s own T1 check cost ~0.4-0.7s against a
+    real T1 session, comfortably inside its own budget; ``bd`` itself
+    (``bd set-state`` / ``bd show`` alike) cost 1.9-4.0s per invocation
+    on this box (vs 0.06s for ``bd --version``) -- a fixed per-process
+    cost inherent to ``bd``, not this hook's code. The pre-fix
+    ``_stamp_ids`` gave every ``bd set-state`` call its OWN independent
+    flat 5.0s timeout, stacked ON TOP of whatever ``_coverage`` had
+    already spent of the SAME 5.0s harness ceiling.
+    """
+
+    def test_remaining_shrinks_with_elapsed_time(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(gate, "_STAMP_DEADLINE_SECONDS", 4.0)
+        monkeypatch.setattr(gate, "_MODULE_LOAD_TIME", gate.time.monotonic() - 1.0)
+        remaining = gate._stamp_deadline_remaining()
+        assert 2.9 < remaining < 3.1, remaining
+
+    def test_remaining_is_clamped_to_the_floor_not_negative_or_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A 0.0 (or negative) timeout is not 'try briefly' -- it is 'don't
+        try' (or, for a raw negative, a TypeError deep inside
+        ``subprocess``). An exhausted budget must still get a real,
+        bounded, positive attempt."""
+        monkeypatch.setattr(gate, "_STAMP_DEADLINE_SECONDS", 4.0)
+        monkeypatch.setattr(gate, "_MODULE_LOAD_TIME", gate.time.monotonic() - 100.0)
+        assert gate._stamp_deadline_remaining() == gate._STAMP_TIMEOUT_FLOOR
+
+    def test_remaining_is_the_full_budget_when_nothing_has_elapsed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(gate, "_STAMP_DEADLINE_SECONDS", 4.0)
+        monkeypatch.setattr(gate, "_MODULE_LOAD_TIME", gate.time.monotonic())
+        assert 3.9 < gate._stamp_deadline_remaining() <= 4.0
+
+    def test_env_override_changes_the_default_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Mirrors ``_coverage``'s own ``NX_CLOSE_GATE_DEADLINE_SECONDS``
+        test seam -- read once at import time, so this pins the parsing,
+        not a live re-read."""
+        monkeypatch.setattr(gate, "_STAMP_DEADLINE_SECONDS", 1.5)
+        monkeypatch.setattr(gate, "_MODULE_LOAD_TIME", gate.time.monotonic())
+        assert 1.4 < gate._stamp_deadline_remaining() <= 1.5
