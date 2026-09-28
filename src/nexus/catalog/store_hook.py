@@ -779,7 +779,10 @@ def _find_ghost_by_title(reader, owner, title: str):
     """
     if not title:
         return None
-    for entry in reader.find(title, content_type="knowledge"):
+    # find_all, not find: find returns the engine's first 50 matches, so a
+    # ghost past row 50 went unmatched and register() minted a duplicate
+    # (nexus-3bafq sibling).
+    for entry in reader.find_all(title, content_type="knowledge"):
         if entry.title == title and entry.chunk_count == 0 and owner.is_prefix_of(entry.tumbler):
             return entry
     return None
