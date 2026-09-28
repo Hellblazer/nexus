@@ -8277,6 +8277,62 @@ def _check_next_seq_drift() -> list[HealthResult]:
     )]
 
 
+def _check_failed_runs_hidden_chunks() -> list[HealthResult]:
+    """Name failed documents whose stored chunks have no manifest owner
+    (nexus-0ntxj).
+
+    An index run upserts chunks before their manifest rows. When it fails
+    between the two, the chunks stay stored with no owner, and engine
+    v0.1.137's live(c) hides them from every read. Measured 2026-09-28
+    (shakeout 7.64.1): FootPrintRAGVA 1.82.146/147, 395 chunks, repaired
+    by hand with ``nx catalog reconcile``. ``_fence_fail`` now heals the
+    document at failure time; this row finds what that could not (a run
+    killed outright, a heal that failed, anything written before the
+    heal existed).
+
+    Walks the corpus for ``index_state='failed'`` documents, then runs the
+    shared heal core in dry-run mode over just those, so the count is the
+    number of documents ``nx catalog reconcile`` would repair. Read-only;
+    degrades to a skip.
+    """
+    label = "failed index runs with hidden chunks"
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+        failed = [
+            e for e in cat.all_documents(limit=0)
+            if getattr(e, "index_state", None) == "failed"
+        ]
+        if not failed:
+            return [HealthResult(label=label, ok=True, detail="not applicable (no failed index runs)")]
+        result = heal_manifest_gaps(failed, cat, make_t3, None, dry_run=True)
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_failed_runs_hidden_chunks_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog or T3 unavailable)")]
+
+    if not result.reconciled:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"none ({len(failed)} failed document(s), none with stored chunks hidden)",
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"{result.reconciled} of {len(failed)} failed document(s) have "
+            "chunks stored with no manifest owner, so every read hides them"
+        ),
+        fix_suggestions=[
+            "nx catalog reconcile   (rebuilds their manifests from the stored chunks)",
+            "then re-index the named sources; the documents stay 'failed' until a run completes",
+        ],
+    )]
+
+
 def _highest_child_seqs(cat: Any) -> dict[str, int]:
     """Highest numeric child sequence per owner prefix, tombstones INCLUDED.
 
@@ -8783,6 +8839,9 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
     results.extend(_check_stale_indexing_runs())
+    # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
+    # hidden by live(c). Degrades internally.
+    results.extend(_check_failed_runs_hidden_chunks())
     # nexus-rte90: PDF chunks left with the upload placeholder metadata
     # (nexus-w94eo). Degrades internally.
     results.extend(_check_pdf_stub_metadata())

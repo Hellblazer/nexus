@@ -1030,6 +1030,10 @@ def reconcile_cmd(dry_run: bool) -> None:
     ``content_hash`` + ``physical_collection`` are candidates for the same
     T3 rebuild; register-only ghosts (no content_hash) are deliberately
     excluded — they were never indexed, so there is nothing to rebuild.
+    A document whose first run failed has no ``content_hash`` yet; the
+    hash its run's fence recorded (``index_content_hash``) stands in
+    (nexus-0ntxj), so ``nx doctor``'s "failed index runs with hidden
+    chunks" row and this command agree.
 
     This command finds every document with that gap, rebuilds its manifest
     from the T3 chunks in its ``physical_collection`` (matched by the
