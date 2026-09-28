@@ -33,7 +33,8 @@ from tests.db._service_fixture import pg_bin_dir
 # Locked policy: nexus ALWAYS uses the PostgreSQL it BUILDS — never Homebrew,
 # never a host install (T2 always-install-pg-bundle-no-fallback). pg_bin_dir()
 # downloads the sigstore-verified nexus-pg bundle for PINNED_SERVICE_TAG into
-# ~/.cache/nexus-test-substrate/<tag>/ and returns a nonexistent sentinel ONLY
+# substrate_cache_root()/<tag>/ (XDG_CACHE_HOME, else ~/.cache) and returns a
+# nonexistent sentinel ONLY
 # when self-provisioning ITSELF fails.
 #
 # This module previously gated on discover_pg_binaries(), which asks whether the

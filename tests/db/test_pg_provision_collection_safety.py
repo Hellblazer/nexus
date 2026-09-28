@@ -250,3 +250,23 @@ def test_a_blank_xdg_cache_home_falls_back_to_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path / "h"))
     monkeypatch.setenv("XDG_CACHE_HOME", "  ")
     assert sf.substrate_cache_root() == tmp_path / "h" / ".cache" / "nexus-test-substrate"
+
+
+def test_a_failed_provision_is_named_in_the_substrate_setup_error(monkeypatch, tmp_path):
+    """nexus-wvyvn: the setup error every substrate test reports must carry the
+    provisioning failure, not "no PostgreSQL binaries ... Install the PG bundle
+    (nx init)", which sent the reader to discovery (hellmini, 2026-09-28)."""
+    from tests import _engine_substrate as es  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    _cold_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sf, "_last_provision_failure", None)
+
+    def _reset(*a, **k):
+        raise BinaryDownloadError("failed to download nexus-pg-x.txz: connection reset")
+
+    monkeypatch.setattr("nexus.daemon.binary_install.install_pg_bundle", _reset)
+    with pytest.warns(UserWarning):
+        assert sf._self_provision_pg_bundle() is None
+    msg = es._no_pg_message()
+    assert "BinaryDownloadError" in msg and "connection reset" in msg, msg
+    assert "nx init" not in msg

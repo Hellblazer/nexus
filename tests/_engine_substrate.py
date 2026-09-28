@@ -212,7 +212,12 @@ def _ambient_env() -> Iterator[None]:
     """Run the body under the import-time ambient env snapshot. The lock
     serializes the env-swap window against any concurrent in-process caller
     (review round 2: ``sweep_stale_substrate_clusters`` can reach
-    :func:`_pg_bin` from a test body)."""
+    :func:`_pg_bin` from a test body).
+
+    The swap has to cover the whole body, downloads included, because the
+    product seams read the env at call time; so the lock spans a cold PG
+    bundle download (as it always has in :func:`_pg_bin`) and a cold ONNX
+    fetch. Both run once per process, inside ``_boot``'s own lock."""
     with _pg_bin_lock:
         saved = {k: os.environ.get(k) for k in _PG_AMBIENT_ENV_KEYS}
         try:
@@ -240,6 +245,32 @@ def _pg_bin() -> Path:
             if _pg_bin_resolved is None:
                 _pg_bin_resolved = pg_bin_dir()
     return _pg_bin_resolved
+
+
+def _no_pg_message() -> str:
+    """The setup error when no PG bundle is usable, naming the provisioning
+    failure when there was one.
+
+    nexus-wvyvn: a fresh host reported ~23k setup errors reading "no
+    PostgreSQL binaries discoverable ... Install the PG bundle (nx init)",
+    which points at discovery, while the real cause (the self-provisioning
+    download failing) had gone to a warning nobody could find among them.
+    """
+    from tests.db._service_fixture import last_provision_failure, substrate_cache_root  # noqa: PLC0415 — deferred, matches this module's lazy PG resolution
+
+    failure = last_provision_failure()
+    if failure:
+        return (
+            "T2 engine substrate unavailable: self-provisioning the pinned PG "
+            f"bundle into {substrate_cache_root()} failed ({failure}). Fix "
+            "connectivity and rerun, or set NEXUS_PG_BIN to a PostgreSQL bin "
+            "dir that has pgvector."
+        )
+    return (
+        "T2 engine substrate unavailable: no PostgreSQL binaries "
+        "discoverable (NEXUS_PG_BIN / config-dir bundle / Homebrew / "
+        "PATH). Install the PG bundle (nx init) or set NEXUS_PG_BIN."
+    )
 
 
 def _ensure_onnx_models(spawn_env: dict[str, str]) -> Path | None:
@@ -270,6 +301,21 @@ def _ensure_onnx_models(spawn_env: dict[str, str]) -> Path | None:
 
     with _ambient_env():
         root = service_onnx_models_root()
+        # The engine reads only <root>/<model>/onnx; a Python-only per-model
+        # override pointed elsewhere would provision one dir while the engine
+        # crashes on another (production warns on the same check at spawn,
+        # storage_service_daemon; critique of 5ded8b067).
+        for env_name, mismatch in (
+            ("NX_SERVICE_BGE_DIR", bge.service_bge_engine_dir_mismatch()),
+            ("NX_SERVICE_CROSSENCODER_DIR", ce.service_crossencoder_engine_dir_mismatch()),
+        ):
+            if mismatch is not None:
+                raise RuntimeError(
+                    f"T2 engine substrate unavailable: {env_name} points at "
+                    f"{mismatch[0]}, but the engine reads only {mismatch[1]}. "
+                    f"Unset {env_name}, or set NX_ONNX_MODEL_DIR so the override "
+                    "sits at <root>/<model>/onnx."
+                )
         present = lambda: bge.service_bge_model_present() and ce.service_crossencoder_model_present()  # noqa: E731 — two call sites, one line
         if present():
             return root
@@ -736,6 +782,11 @@ def _boot() -> dict:
             f"{exc}",
             stacklevel=2,
         )
+    # The cheapest precondition first: before PG is booted or models fetched
+    # (critique of 5ded8b067).
+    java = shutil.which("java")
+    if java is None:
+        raise RuntimeError("T2 engine substrate: no java on PATH")
     stale = _jar_ready_reason(_JAR)
     if stale:
         raise RuntimeError(
@@ -745,11 +796,12 @@ def _boot() -> dict:
         )
     bin_dir = _pg_bin()
     if not bin_dir.exists():
-        raise RuntimeError(
-            "T2 engine substrate unavailable: no PostgreSQL binaries "
-            "discoverable (NEXUS_PG_BIN / config-dir bundle / Homebrew / "
-            "PATH). Install the PG bundle (nx init) or set NEXUS_PG_BIN."
-        )
+        raise RuntimeError(_no_pg_message())
+    # Before PG boots and before any port is probed: a cold fetch is slow, and
+    # a probed port is released the moment the probe returns (review of
+    # 5ded8b067). The engine's spawn env is os.environ plus fixed NX_* keys,
+    # none of which is NX_VOYAGE_API_KEY, so os.environ decides the posture.
+    onnx_root = _ensure_onnx_models(dict(os.environ))
 
     pg_port = _free_port()
     pg_user = os.environ["USER"]
@@ -892,17 +944,8 @@ def _boot() -> dict:
         "NX_DB_ADMIN_PASS": "",
     }
     env.pop("NX_STORAGE_BACKEND", None)
-    try:
-        onnx_root = _ensure_onnx_models(env)
-    except BaseException:
-        _kill_pg()
-        raise
     if onnx_root is not None:
         env["NX_ONNX_MODEL_DIR"] = str(onnx_root)
-    java = shutil.which("java")
-    if java is None:
-        _kill_pg()
-        raise RuntimeError("T2 engine substrate: no java on PATH")
     # Engine output goes to a FILE, never a PIPE (nexus-j0nec root cause):
     # an undrained 64KB stdout pipe fills after ~250 tenant mints of
     # Logback console logging, write(2) blocks holding the PrintStream
