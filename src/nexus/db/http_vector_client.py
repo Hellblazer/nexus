@@ -1745,6 +1745,10 @@ def _unregistered_collection_message(code: int, err: Any) -> str | None:
     or a typo: store_list, store_get and search all surfaced it, advising a
     write endpoint for a collection name that simply does not exist
     (nexus-zdzm5, 7.64.1 shakeout surface C F9 / surface E F10).
+
+    A stopgap: it matches the engine's wording. nexus-bgvnx tracks a
+    machine-readable reason code on the engine's typed 422 body to key on
+    instead.
     """
     if code != 422 or not isinstance(err, dict):
         return None

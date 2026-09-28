@@ -508,3 +508,29 @@ def test_a_prose_line_whose_file_is_unreadable_reports_line_one() -> None:
     r = SearchResult(id="r1", content="a\nb", distance=0.1, collection="rdr__x",
                      metadata={"source_path": "/no/such/file.md"})
     assert format_vimgrep([r])[0].split(":")[1] == "1"
+
+
+def test_the_line_is_looked_up_in_the_printed_file_not_raw_metadata(tmp_path) -> None:
+    """Review of 6385b878b: the printed path is the catalog-resolved
+    _display_path, and the line must come from that file, not from a stale
+    raw source_path."""
+    moved = tmp_path / "moved.md"
+    moved.write_text("a\nb\nc\nthe line\n")
+    stale = tmp_path / "stale.md"
+    stale.write_text("the line\n")
+    r = SearchResult(id="r1", content="the line", distance=0.1, collection="docs__x",
+                     metadata={"_display_path": str(moved), "source_path": str(stale)})
+    out = format_vimgrep([r])[0]
+    assert out.startswith(f"{moved}:4:0:")
+
+
+def test_a_title_only_result_reports_its_position_in_the_note() -> None:
+    r = SearchResult(id="r1", content="one\ntwo\nthree", distance=0.1, collection="knowledge__x",
+                     metadata={"title": "A Note"})
+    assert format_compact([r], query="three")[0] == "A Note:3:three"
+
+
+def test_an_empty_prose_chunk_never_prints_line_zero() -> None:
+    r = SearchResult(id="r1", content="", distance=0.1, collection="docs__x",
+                     metadata={"source_path": "/no/such.md"})
+    assert format_compact([r])[0] == "/no/such.md:1:"
