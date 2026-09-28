@@ -60,9 +60,10 @@ recovery-bundle import, and `doc_indexer._index_document` (`nx index md`,
 
 #### Gap 3: The engine still accepts ownerless chunk writes
 
-`/v1/vectors/upsert-chunks` and `/v1/vectors/store-put` insert chunks with no
-owner row in the same transaction (F-4). While they accept that, any client
-path, including a future one, can reopen the window.
+`/v1/vectors/upsert-chunks`, `/v1/vectors/store-put` and
+`/v1/vectors/upsert-reference-only` insert chunks with no owner row in the
+same transaction (F-4, R-12). While they accept that, any client path,
+including a future one, can reopen the window.
 
 #### Gap 4: One path writes ownerless chunks on purpose
 
@@ -121,8 +122,8 @@ nexus-76's store-path and import review.
 
 - **F-1 (Verified, source).** One client path uses the combined write: the
   `nx index repo` batch flush (`src/nexus/indexer.py:5658`), for files that
-  fit one batch. Sixteen paths are split: thirteen can orphan on a client
-  death, one is ownerless by design (Gap 4), one cannot orphan
+  fit one batch. Sixteen paths are split: twelve can orphan on a client
+  death (R-13), one is ownerless by design (Gap 4), one cannot orphan
   (`collection re-embed` rewrites already-owned chunks), two are dead code
   (`db/reconcile.verify_fill_*`, `db/embed_migrate`). By traffic: streaming
   PDF first, then MCP `store_put`, `_index_document`, the `nx index repo`
@@ -194,29 +195,65 @@ chunk owned.
    the index-run lock inside `appendManifestChunks`'s transaction (F-3).
    Manifest rows keep their explicit positions (append already upserts by
    position). A multi-batch document writes its first batch with the combined
-   write (replace) and each later batch with append plus chunks; a crash
-   mid-document leaves a document with some of its batches and never an
-   ownerless chunk. A multi-document form, `append_many`, carries several
+   write (replace) and each later batch with append plus chunks.
+   The superseded-chunk sweep is deferred to the document's last batch. Today
+   `write_many` with `sweep` on sweeps the chashes the write dropped from the
+   document's previous manifest, in its own transaction right after the
+   commit (R-10); on a first batch that would delete the previous run's
+   chunks for the later batches before those batches land. So the first batch
+   is written with `sweep` off and its response returns the dropped list
+   `write_many` already computes (`dropped_chashes`); the client passes that
+   list on the last append as `sweep_chashes`, and the engine sweeps it after
+   that commit under the existing NOT EXISTS guard, so a dropped chash a later
+   batch re-added, or another document owns, survives. A crash mid-document
+   leaves a document with some of its batches and no chunk this run wrote
+   without an owner; the deferred sweep never runs, so the previous run's
+   dropped chunks stay ownerless and hidden until the RDR-192 reaper removes
+   them. A multi-document form, `append_many`, carries several
    documents in one request, one transaction per document, as `write_many`
    does. The raced-embed counter (RDR-222, nexus-ulrjq) counts on this path
    too.
 2. **Client-supplied embeddings (engine, needed by import).** Both combined
    routes accept an optional vector per chunk. The engine checks its dimension
    and the collection's embedding model (F-8) and refuses the request on a
-   mismatch; a supplied vector is stored as-is and never re-embedded.
+   mismatch. For each chunk (R-14):
+   - new chash, no vector: embedded, as today;
+   - new chash, vector: the supplied vector is stored as-is;
+   - existing chash, no vector: not re-embedded, metadata refreshed (RDR-181);
+   - existing chash, vector: the stored vector is kept (same text, same
+     collection model) and a mismatch with the supplied one is counted and
+     logged, not written (inferred, not read: a design choice).
 3. **Client migration (closes Gaps 1 and 2).** Each split path moves onto the
    combined write, or append plus chunks for later batches. The note paths
-   move with no engine change (F-5). Note registration stays a separate
-   request before the chunk write, and nexus-wbfpw.28's rollback of a failed
-   first put's empty document stays; a failed re-put leaves the old manifest
-   intact.
+   move with no engine change (F-5); a note is one document of a few pieces,
+   so it is one `write_many` request with `sweep` on and the first-batch
+   problem of step 1 cannot arise. `store_put` carries machinery built for
+   the split write (R-11), reconciled piece by piece:
+   - retired: `rollback_uncataloged_chunk_write` (a chunk can no longer land
+     without its manifest), the piece re-put inside
+     `store_put_manifest_direct_with_recovery` (the pieces travel in the
+     manifest request), and nexus-bb6n2's client reap of chashes a supersede
+     dropped (`store_hook.py:1449-1460`), replaced by `write_many`'s own sweep;
+   - kept: the index fence (`_fence_begin`, `_fence_fail`), the registration
+     rollback `rollback_minted_catalog_entry` (Decision 5; a failed first
+     put's empty document is still removed), and the
+     `ManifestVerifyUncertainError` outcome check, because an atomic request
+     can still time out with an unknown result.
+   Each piece is retired only after a test shows its replacement covers the
+   same failure. A failed re-put leaves the old manifest intact.
 4. **Stop the ownerless route (closes Gap 4).** The route at
    `src/nexus/indexer.py:5598` becomes a counted event that writes no chunks,
    and the registration gap behind it is fixed. No ghost documents.
 5. **Refuse ownerless writes, last (closes Gap 3).** Once the client release
-   carrying step 3 is the paired release, `upsert-chunks` and `store-put`
-   refuse a write that names no owner, with an error naming the replacement
-   route.
+   carrying step 3 is the paired release, `upsert-chunks`, `store-put` and
+   `upsert-reference-only` accept a write only when every chash in it already
+   has a live manifest row in that collection, checked inside the write's own
+   transaction; that keeps `collection re-embed` and metadata refreshes of
+   owned chunks working. Every other write is refused (422) with an error
+   naming the combined routes. A request field naming an owner is not enough,
+   because these routes never write manifest rows. `upsert-reference-only`
+   has no client caller (R-12); if RDR-169's G4 is built, it writes through
+   the combined routes.
 
 ### Existing Infrastructure Audit
 
@@ -269,7 +306,9 @@ append reuses code that exists.
 
 ### Consequences
 
-- Positive: no client path can leave an ownerless chunk once Phase 3 lands.
+- Positive: once Phase 3 lands, no write inserts a chunk without an owner.
+  Chunks a supersede drops still lose their owner; they are swept at the
+  document's last batch, or after a crash by the RDR-192 reaper.
 - Positive: the note paths get atomic chunk-plus-owner writes with no engine
   change.
 - Negative: a crash mid-document still leaves a partial document (some
@@ -302,16 +341,18 @@ append reuses code that exists.
 ### Minimum Viable Validation
 
 A multi-batch document written as the combined write plus N appends with
-chunks, with the client killed between two appends, leaves zero ownerless
-chunks, and its final manifest equals a single combined write of the whole
-document.
+chunks, with the client killed between two appends, leaves no chunk this
+run wrote without an owner; run to completion, its final manifest and chunks
+equal a single combined write of the whole document.
 
 ### Phase 1: Engine
 
 #### Step 1: Append with chunks
 
 Add the optional `chunks` array to `/v1/catalog/manifest/append` and the
-`append_many` form, as in Technical Design 1. Record the wire change as an
+`append_many` form, the `dropped_chashes` response field on `write_many`
+with `sweep` off, and the `sweep_chashes` request field on append, as in
+Technical Design 1. Record the wire change as an
 `[additive]` entry in `docs/wire-contract-pending.md`.
 
 #### Step 2: Client-supplied vectors on the combined routes
@@ -325,7 +366,10 @@ Technical Design 2. Rides the next engine tag after it lands.
 
 Streaming PDF, MCP `store_put`, `_index_document`, the `nx index repo`
 oversize fallbacks, then `nx store put`, `nx memory promote` and
-recovery-bundle import. One bead per path.
+recovery-bundle import. One bead per path. Multi-batch paths write the first
+batch with `sweep` off and carry the dropped list to the last append
+(Technical Design 1). The `store_put` bead retires and keeps the machinery
+listed in Technical Design 3.
 
 #### Step 2: Import
 
@@ -348,7 +392,8 @@ reaper and census tests build orphan states through substrate SQL instead of
 #### Step 2: Refuse
 
 Once the client release carrying Phase 2 is the paired release, the engine
-refuses ownerless `upsert-chunks` and `store-put` writes. Delete the dead
+applies Technical Design 5's rule to `upsert-chunks`, `store-put` and
+`upsert-reference-only`. Delete the dead
 paths (`db/reconcile.verify_fill_*`, `db/embed_migrate`). If nexus-b50zw
 closes, retire the staging routes.
 
@@ -367,23 +412,33 @@ None.
 ## Test Plan
 
 - **Scenario**: client killed between two appends with chunks — **Verify**:
-  zero ownerless chunks.
+  no chunk this run wrote is without an owner.
 - **Scenario**: append with chunks carrying known and content-changed chashes
   — **Verify**: known ones are not re-embedded; changed ones are.
 - **Scenario**: combined write plus N appends — **Verify**: manifest and
   chunks equal one combined write of the whole document.
+- **Scenario**: multi-batch re-index of an unchanged document, first batch
+  with `sweep` off — **Verify**: no chunk is swept before its batch lands,
+  zero re-embeds, and after the last append the chashes the new version
+  dropped are swept while re-added and shared ones survive.
+- **Scenario**: client killed before the last append — **Verify**: the
+  deferred sweep does not run and no chunk this run wrote is ownerless.
+- **Scenario**: supplied vector for an existing chash — **Verify**: the stored
+  vector is kept and the mismatch is counted.
 - **Scenario**: append with chunks concurrent with a superseded-chunk sweep —
   **Verify**: no deadlock; the sweep does not remove the new chunks.
 - **Scenario**: each migrated client path, killed after its first request —
-  **Verify**: no ownerless chunk.
+  **Verify**: no chunk that request wrote is without an owner.
 - **Scenario**: a gate-xr789-shaped fixture imported through append with
   chunks and supplied vectors — **Verify**: vectors byte-identical, zero
   embedder calls, scattered positions in manifest order, a re-import replaces.
 - **Scenario**: supplied vector with the wrong dimension or model —
   **Verify**: refused, nothing stored.
-- **Scenario**: Phase 3 refusal — **Verify**: an ownerless `upsert-chunks` is
-  refused naming the replacement route; the seeding helpers still build
-  orphan states.
+- **Scenario**: Phase 3 refusal — **Verify**: an `upsert-chunks`,
+  `store-put` or `upsert-reference-only` write of a chash with no live
+  manifest row is refused naming the combined routes, even when the request
+  names a document; a re-embed of owned chashes is accepted; the seeding
+  helpers still build orphan states.
 
 ## Finalization Gate
 
@@ -431,7 +486,8 @@ per-path beads.
 ## Decisions (Sam, 2026-09-28)
 
 1. **Refuse ownerless writes at the end** (Phase 3).
-2. **Note paths need no engine change** (settled by checking, F-5).
+2. **Note paths need no engine change** (settled by checking, F-5). The
+   client-side `store_put` machinery is reconciled in Technical Design 3.
 3. **Gap 4: stop writing identity-less chunks and find why they lack
    identity.** No ghost documents.
 4. **Own RDR**, separate from RDR-222.
