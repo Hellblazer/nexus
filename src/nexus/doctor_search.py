@@ -186,26 +186,35 @@ def _default_model_for(col: str) -> str:
     return voyage_model_for_collection(col)
 
 
-#: Probe text drawn from a collection's own chunk is cut to this many
-#: characters: enough to be a real query, short enough to stay cheap.
-_PROBE_QUERY_CHARS: int = 200
+#: Probe text drawn from a chunk is cut to this many characters.
+_PROBE_QUERY_CHARS: int = 400
 
 
-def _default_query_for(t3, col: str) -> str | None:
-    """A probe query drawn from one of *col*'s own chunks, or ``None``.
+def _default_probe_for(t3, col: str) -> tuple[str, str] | None:
+    """``(query, self_id)``: one of *col*'s chunks as the query, and its id.
 
-    nexus-dhvzx: one canned query ("example test probe") for every
-    collection was irrelevant to most of them, so the per-collection
-    distance threshold correctly dropped it, 58 of 111 collections read
-    ``threshold_drop``, and the check exited 2 on every real tenant. A
-    healthy collection must retrieve its own text; that is the retrieval
-    health this probe claims to measure.
+    nexus-dhvzx. One canned query ("example test probe") for every
+    collection was irrelevant to most of them, so the threshold correctly
+    dropped it, 58 of 111 collections read ``threshold_drop``, and the check
+    exited 2 on every real tenant.
+
+    What RDR-087 built this probe to catch is a healthy collection whose
+    natural distance floor sits above its threshold (docs__art-grossberg-
+    papers, MVV item 2): related text exists but every real neighbour lands
+    past the cut. So the probe asks exactly that. A chunk's own text finds
+    the chunk itself at distance ~0, which proves nothing (a first version
+    of this fix counted that self-hit and could never fire; critique
+    nexus/critique-6c06ab9c4-check-search-probe-self-text-tautology), so
+    the caller discounts the self-hit and judges only the other neighbours.
+    A document-title query was tried in between and rejected on measurement:
+    chunk "titles" are often synthetic ("README.md:chunk-20"), so the
+    verdict tracked metadata quality, not retrieval health.
     """
-    got = t3.get_collection(col).get(include=["documents"], limit=1)
-    for doc in got.get("documents") or []:
+    got = t3.get_or_create_collection(col).get(include=["documents"], limit=1)
+    for cid, doc in zip(got.get("ids") or [], got.get("documents") or []):
         text = " ".join((doc or "").split())[:_PROBE_QUERY_CHARS]
-        if text:
-            return text
+        if text and cid:
+            return text, cid
     return None
 
 
@@ -217,7 +226,7 @@ def run_retrieval_quality_probe(
     model_for: Callable[[str], str] = _default_model_for,
     metadata_fn: Callable[[str], dict[str, Any]] | None = None,
     query: str = "example test probe",
-    query_for: Callable[[str], str | None] | None = None,
+    probe_for: Callable[[str], tuple[str, str] | None] | None = None,
     n_results: int = 5,
 ) -> list[ProbeResult]:
     """Query each registered collection and classify retrieval health.
@@ -234,9 +243,11 @@ def run_retrieval_quality_probe(
         metadata_fn: ``col_name -> metadata dict``. Defaults to
             ``t3.collection_metadata`` when *None*.
         query: canned probe query, used for a collection when
-            ``query_for`` is unset or yields nothing (no readable chunk).
-        query_for: ``col_name -> probe query or None``; ``run_check_search``
-            passes :func:`_default_query_for` (the collection's own text).
+            ``probe_for`` is unset or yields nothing (no readable chunk).
+        probe_for: ``col_name -> (query, self_id) or None``;
+            ``run_check_search`` passes :func:`_default_probe_for`. The
+            self-hit is discounted from both counts, so the verdict is about
+            the chunk's real neighbours.
         n_results: small probe depth.
     """
     from nexus.search_engine import SearchDiagnostics  # noqa: F401,PLC0415 — deferred import; presence-probe only needed in this diagnostic
@@ -279,7 +290,8 @@ def run_retrieval_quality_probe(
             continue
 
         try:
-            probe = (query_for(col) if query_for is not None else None) or query
+            picked = probe_for(col) if probe_for is not None else None
+            probe, self_hits = (picked[0], 1) if picked else (query, 0)
             diag_list: list[Any] = []
             search_fn(
                 probe, [col], n_results, t3,
@@ -315,6 +327,9 @@ def run_retrieval_quality_probe(
         per_col = diag.per_collection.get(col, (0, 0, None, None))
         raw, dropped = per_col[0], per_col[1]
         kept = raw - dropped
+        # The probe chunk finds itself at distance ~0 and is always kept;
+        # only its other neighbours say anything about the threshold.
+        raw, kept = max(raw - self_hits, 0), max(kept - self_hits, 0)
         if raw == 0:
             outcome = "empty"
         elif kept == 0:
@@ -468,7 +483,7 @@ def run_check_search(*, json_out: bool) -> None:
                     run_retrieval_quality_probe(
                         t3=t3,
                         collections=collections,
-                        query_for=lambda col: _default_query_for(t3, col),
+                        probe_for=lambda col: _default_probe_for(t3, col),
                     )
                 )
 

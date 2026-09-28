@@ -2446,9 +2446,10 @@ def _run_supplementary_checks() -> None:
     is_flag=True,
     default=False,
     help="Run probes 3a and 3b: the name-resolution canary from "
-         "tests/fixtures/name_canaries.py, then a retrieval probe of every "
-         "collection with a query drawn from its own text. Exits 2 when a "
-         "surface raises, a collection drops its own text at the distance "
+         "tests/fixtures/name_canaries.py, then a retrieval probe that queries "
+         "each collection with one of its own chunks and checks that some "
+         "OTHER chunk survives the distance threshold. Exits 2 when a surface "
+         "raises, a collection's nearest real neighbours all fall past its "
          "threshold, or a collection's embedding model disagrees with its "
          "name. RDR-087 Phase 3.",
 )

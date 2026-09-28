@@ -2628,7 +2628,10 @@ def _search_render(
 
                     groups: dict[str, list] = {}
                     for r in results:
-                        groups.setdefault(r.metadata.get("_cluster_label", ""), []).append(r)
+                        # Topic grouping labels rows _topic_label, Ward
+                        # clustering _cluster_label (search_engine.py).
+                        key = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
+                        groups.setdefault(key, []).append(r)
                     ordered = sorted(groups.values(), key=lambda g: max(_score(r) for r in g), reverse=True)
                     results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
             # Non-clustered results are now ranked by hybrid_score

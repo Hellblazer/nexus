@@ -2875,3 +2875,38 @@ def test_semantic_clustering_keeps_the_lexical_rerank_order():
         result = search(query="zdzm5 cluster probe", corpus="code__test",
                         lexical=True, cluster_by="semantic", structured=True)
     assert result["ids"] == ["lexical-b", "near-a", "near-a2"]
+
+
+def test_topic_grouped_clusters_stay_contiguous_under_the_lexical_rerank():
+    """Review finding on 312751471: topic grouping labels rows _topic_label,
+    not _cluster_label; keying on _cluster_label alone collapsed every row
+    into one group and interleaved the topics."""
+    t3 = _mock_t3([{"name": "code__test", "count": 1}])
+    t3.supports_server_rerank = True
+
+    def _cross_corpus(*a, **kw):
+        return [
+            SearchResult(id="a1", content="x", distance=0.1, collection="code__test",
+                         metadata={"_topic_label": "A", "rerank_score": 0.9}),
+            SearchResult(id="b1", content="x", distance=0.2, collection="code__test",
+                         metadata={"_topic_label": "B", "rerank_score": 0.8}),
+            SearchResult(id="a2", content="x", distance=0.3, collection="code__test",
+                         metadata={"_topic_label": "A", "rerank_score": 0.1}),
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="topic cluster probe", corpus="code__test",
+                        lexical=True, cluster_by="semantic", structured=True)
+    assert result["ids"] == ["a1", "a2", "b1"]
+
+
+def test_the_page_cache_returns_the_note_of_the_entry_it_returns():
+    """312751471: the degrade note is read with its entry, under one lock."""
+    from nexus.mcp import core as _core
+
+    _core._page_cache_put(("k1",), ["r"], 10, [], note="degraded-1")
+    assert _core._page_cache_get(("k1",), 5) == (["r"], [], "degraded-1")
+    _core._page_cache_put(("k2",), ["s"], 10, [], note=None)
+    assert _core._page_cache_get(("k1",), 5) is None
+    assert _core._page_cache_get(("k2",), 5) == (["s"], [], None)

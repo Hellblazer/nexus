@@ -460,61 +460,94 @@ class TestRetrievalQualityProbe:
 # nexus-dhvzx: the 7.64.1 shakeout ran --check-search on the live tenant; the
 # canned query "example test probe" was irrelevant to most collections, the
 # per-collection threshold correctly dropped it, 58 of 111 collections read
-# threshold_drop, and the check exited 2 on every real tenant. The existing
-# tests stubbed search to return whatever each case needed, so no test ever
-# held a collection whose content the canned query did not match.
+# threshold_drop, and the check exited 2 on every real tenant. The fix queries
+# with one of the collection's own chunks and judges only that chunk's OTHER
+# neighbours: the chunk finds itself at distance ~0, and a first version that
+# counted the self-hit could never fire on RDR-087's incident, a healthy
+# collection whose natural floor sits above its threshold (critique
+# nexus/critique-6c06ab9c4-check-search-probe-self-text-tautology). The
+# incident test below pins that the probe still fires.
+
+COLS = ["code__a__voyage-code-3__v1", "rdr__a__voyage-context-3__v1"]
 
 
-class _SubjectT3:
-    """Collections with their own subject text; get() returns a chunk."""
+class _ChunkT3:
+    def __init__(self, with_chunks: bool = True):
+        self.with_chunks = with_chunks
 
-    TEXT = {
-        "code__a__voyage-code-3__v1": "def reconcile_manifest(doc_id): ...",
-        "rdr__a__voyage-context-3__v1": "RDR-211 tuple claim lease renewal",
-    }
-
-    def get_collection(self, col):
-        text = self.TEXT[col]
+    def get_or_create_collection(self, col):
+        docs = [f"text of {col}"] if self.with_chunks else []
 
         class _Coll:
             def get(self, include=None, limit=None):
-                return {"ids": ["x"], "documents": [text]}
+                return {"ids": [f"self-{col}"] * len(docs), "documents": docs}
         return _Coll()
 
 
-def _thresholded_search(query, cols, n_results, t3, diagnostics_out=None):
-    """A search whose threshold keeps a hit only for a query near the
-    collection's own text, the way a real per-collection threshold does."""
+def _search(neighbour_distance, threshold=0.5, n_neighbours=4):
+    """Raw = the probe chunk itself (distance 0, always kept) plus its
+    neighbours, which the threshold keeps only when close enough."""
     from nexus.search_engine import SearchDiagnostics
 
-    col = cols[0]
-    dropped = 0 if query in _SubjectT3.TEXT[col] else 1
-    diagnostics_out.append(SearchDiagnostics(
-        per_collection={col: (1, dropped, 0.5, None)},
-        total_dropped=dropped, total_raw=1, failed_collections={},
-    ))
-    return []
+    def search(query, cols, n_results, t3, diagnostics_out=None):
+        col = cols[0]
+        own = query == f"text of {col}"
+        d = neighbour_distance(col)
+        raw = n_neighbours + (1 if own else 0)
+        dropped = n_neighbours if d > threshold else 0
+        if not own:  # a query that is not the collection's text is far away
+            dropped = n_neighbours
+        diagnostics_out.append(SearchDiagnostics(
+            per_collection={col: (raw, dropped, threshold, None)},
+            total_dropped=dropped, total_raw=raw, failed_collections={},
+        ))
+        return []
+    return search
+
+
+def _probe(t3, search, **kw):
+    from nexus.doctor_search import run_retrieval_quality_probe
+
+    return {r.name: r.outcome for r in run_retrieval_quality_probe(
+        t3=t3, collections=COLS, search_fn=search,
+        model_for=lambda c: "", metadata_fn=lambda c: {}, **kw)}
 
 
 def test_the_canned_query_reads_threshold_drop_on_healthy_collections() -> None:
-    """The defect, reproduced: nothing is wrong with either collection."""
-    from nexus.doctor_search import run_retrieval_quality_probe
-
-    t3 = _SubjectT3()
-    rows = run_retrieval_quality_probe(
-        t3=t3, collections=list(_SubjectT3.TEXT), search_fn=_thresholded_search,
-        model_for=lambda c: "", metadata_fn=lambda c: {},
-    )
-    assert {r.outcome for r in rows} == {"threshold_drop"}
+    """The defect, reproduced: both collections have close neighbours."""
+    assert set(_probe(_ChunkT3(), _search(lambda c: 0.3)).values()) == {"threshold_drop"}
 
 
-def test_each_collection_is_probed_with_its_own_text() -> None:
-    from nexus.doctor_search import _default_query_for, run_retrieval_quality_probe
+def test_a_collection_with_close_neighbours_matches() -> None:
+    from nexus.doctor_search import _default_probe_for
 
-    t3 = _SubjectT3()
-    rows = run_retrieval_quality_probe(
-        t3=t3, collections=list(_SubjectT3.TEXT), search_fn=_thresholded_search,
-        model_for=lambda c: "", metadata_fn=lambda c: {},
-        query_for=lambda col: _default_query_for(t3, col),
-    )
-    assert {r.outcome for r in rows} == {"matched"}
+    t3 = _ChunkT3()
+    rows = _probe(t3, _search(lambda c: 0.3), probe_for=lambda c: _default_probe_for(t3, c))
+    assert set(rows.values()) == {"matched"}
+
+
+def test_a_collection_whose_floor_sits_above_its_threshold_still_reads_drop() -> None:
+    """RDR-087's incident: related text exists, but every real neighbour
+    lands past the threshold. The self-hit alone must not read as healthy."""
+    from nexus.doctor_search import _default_probe_for
+
+    t3 = _ChunkT3()
+    high = COLS[1]
+    rows = _probe(t3, _search(lambda c: 0.7 if c == high else 0.3),
+                  probe_for=lambda c: _default_probe_for(t3, c))
+    assert rows == {COLS[0]: "matched", high: "threshold_drop"}
+
+
+def test_a_collection_with_no_readable_chunk_falls_back_to_the_canned_query() -> None:
+    from nexus.doctor_search import _default_probe_for
+
+    t3 = _ChunkT3(with_chunks=False)
+    seen: list[str] = []
+    inner = _search(lambda c: 0.3)
+
+    def search(query, cols, n_results, t3_, diagnostics_out=None):
+        seen.append(query)
+        return inner(query, cols, n_results, t3_, diagnostics_out)
+
+    _probe(t3, search, probe_for=lambda c: _default_probe_for(t3, c))
+    assert set(seen) == {"example test probe"}
