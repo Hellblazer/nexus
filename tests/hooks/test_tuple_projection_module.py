@@ -222,6 +222,25 @@ class TestTheProjectionCall:
                                  "agent_transcript_path": str(tmp_path / "never-written.jsonl")})
         assert emitted == ["tuple_projection_dropped_orphan"]
 
+    def test_a_skipped_projection_is_not_logged_as_ok(self, monkeypatch):
+        """Critique of 9601b5df6: every _Skip (no endpoint, no data-token
+        lease, a refused POST) returned the same None as a write and logged
+        ok. Drives the real project() to its skip path."""
+        def _unresolvable(_config_dir):
+            raise tuple_ledger_project._Skip("no service endpoint resolvable")
+
+        monkeypatch.setattr(tuple_ledger_project, "_resolve_endpoint_and_token", _unresolvable)
+        emitted: list[tuple] = []
+        monkeypatch.setattr(proj, "_emit", lambda lvl, ev, **_kw: emitted.append((lvl, ev)))
+        proj._project("start", {"session_id": "s-skip", "agent_id": "a-skip", "agent_type": "Explore"})
+        assert emitted == [("info", "tuple_projection_skipped")]
+
+    def test_a_stop_with_no_agent_id_is_ignored_not_ok(self, monkeypatch):
+        emitted: list[str] = []
+        monkeypatch.setattr(proj, "_emit", lambda _lvl, ev, **_kw: emitted.append(ev))
+        proj._project("report", {"session_id": "s-none"})
+        assert emitted == ["tuple_projection_ignored"]
+
 
 # ── Mock /v1/tuples/out engine (mirrors tests/hooks/test_tuple_ledger_project.py) ──
 

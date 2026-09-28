@@ -358,6 +358,14 @@ def registered_rules(
         / ".claude" / "plugins" / "marketplaces" / "nexus-plugins"
     )
     root = repo_root or pathlib.Path(__file__).resolve().parents[2]
+    # With no plugin hooks.json under either base (a box without Claude Code,
+    # an installed wheel) there is nothing to read, and resolving the names
+    # would only log known_plugins()'s marketplace-unreachable warning: the
+    # same eager lookup a89e5d72a removed from the doctor path.
+    if plugins is None and not any(
+        any(base.glob("*/hooks/hooks.json")) for base in (marketplace, root) if base.is_dir()
+    ):
+        return None
     plugin_names = plugins if plugins is not None else known_plugins()
     found: set[str] | None = None
     for plugin in plugin_names:
