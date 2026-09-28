@@ -146,8 +146,11 @@ def _run_session_end_synchronously() -> None:
     below -- see ``nexus._session_end_census``'s module docstring for the
     full reasoning on why no visible line was added.
     """
-    from nexus._hook_runtime._io import configure_hook_logging  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import); off the POSIX pre-fork path, see docstring above
-    configure_hook_logging()
+    try:
+        from nexus._hook_runtime._io import configure_hook_logging  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import); off the POSIX pre-fork path, see docstring above
+        configure_hook_logging()
+    except Exception:  # noqa: BLE001 — logging setup must never abort the cleanup below; stdio is the null device, so nothing could report it anyway
+        pass
     try:
         from nexus import hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
         hooks.session_end_flush()
@@ -442,6 +445,10 @@ def main() -> None:
     # (RDR-158 P3, nexus-7bomn): the service twin below prints POST-fork so
     # a slow/hung service read can never delay the cleanup dispatch — the
     # exact pre-fork SIGTERM race the old ordering had to guard against.
+    # Claude Code cancels a SessionEnd hook on its own clock, not the
+    # hooks.json ``timeout``: measured on native Windows at about 1.6 s with
+    # timeout 10 declared (nexus-34f7r). Anything the parent does after the
+    # dispatch spends that window, and a cancel kills the whole tree.
     if not hasattr(os, "fork"):
         # Windows: a detached child is the no-fork double-fork. Inline only
         # when the spawn itself failed, so cleanup is never skipped. The

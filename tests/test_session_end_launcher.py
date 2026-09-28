@@ -652,6 +652,9 @@ def test_print_service_tier_summary_exception_writes_no_stdout(
 
     captured = capsys.readouterr()
     assert captured.out == "", f"structlog output leaked to stdout: {captured.out!r}"
+    assert "session_end_tier_summary" in captured.err, (
+        f"the debug fallback must land on stderr, not vanish: {captured.err!r}"
+    )
 
 
 def test_hooks_json_session_end_drops_detach_fallback() -> None:
