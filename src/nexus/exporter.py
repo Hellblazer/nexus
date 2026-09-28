@@ -667,7 +667,7 @@ def _accumulate_legacy_group(
     upserted (so ``--skip-existing`` leaves them manifest-less), its
     positions restart per batch, and the named document is often
     tombstoned or absent in the target. The group records the original
-    doc_id; :func:`_write_owner_group` keeps that document when it is
+    doc_id; :func:`_resolve_owner_document` keeps that document when it is
     live in the target collection and otherwise registers a new one at
     ``<file source_uri>#<doc_id>``, one per original document.
     """
@@ -701,16 +701,19 @@ def _manifest_rows(rows: list[tuple[int, str]]) -> list[dict]:
     return [{"chash": chash, "position": pos} for _, (pos, chash) in ordered]
 
 
-def _write_owner_group(
+def _resolve_owner_document(
     group: dict, collection_name: str, owner_tumbler: Tumbler, reader: Any, writer: Any,
     live_legacy: dict[str, Any] | None = None,
-) -> int:
-    """Register (or find) the document for one owner group and write its
-    manifest in *collection_name* (nexus-wbfpw.31). Returns the number of
-    manifest rows written.
+) -> str:
+    """Find or register the catalog document one owner group belongs to
+    in *collection_name* (nexus-wbfpw.31) and return its tumbler. The
+    manifest is written by the caller, once per DOCUMENT with every
+    group's rows merged, because ``write_manifest`` replaces all of a
+    document's rows: two groups resolving to one document (a live
+    document holding both owner-tagged and legacy doc_id chunks) would
+    otherwise clobber each other.
 
-    ``source_uri`` is unique across the tenant, and ``write_manifest``
-    replaces a document's rows in EVERY collection, so a document can own
+    ``source_uri`` is unique across the tenant, so a document can own
     live chunks in only one collection. When the export's document still
     lives in another collection (``--collection`` naming a different
     target), import COPIES rather than moves (Sam, 2026-09-27): the
@@ -726,27 +729,21 @@ def _write_owner_group(
     """
     legacy = (live_legacy or {}).get(group.get("legacy_doc_id") or "")
     if legacy is not None:
-        rows = _manifest_rows(group["rows"])
-        writer.write_manifest(str(legacy.tumbler), rows, collection=collection_name)
-        return len(rows)
+        return str(legacy.tumbler)
     source_uri = group["source_uri"]
     existing = reader.by_source_uri(source_uri) if source_uri else None
     if existing is not None and existing.physical_collection != collection_name:
         source_uri = f"nxexp://{collection_name}/{source_uri}"
         existing = reader.by_source_uri(source_uri)
     if existing is not None:
-        doc_tumbler = existing.tumbler
-    else:
-        doc_tumbler = writer.register(
-            owner=owner_tumbler,
-            title=group["title"] or group["source_uri"],
-            content_type=group["content_type"] or "knowledge",
-            physical_collection=collection_name,
-            source_uri=source_uri,
-        )
-    rows = _manifest_rows(group["rows"])
-    writer.write_manifest(str(doc_tumbler), rows, collection=collection_name)
-    return len(rows)
+        return str(existing.tumbler)
+    return str(writer.register(
+        owner=owner_tumbler,
+        title=group["title"] or group["source_uri"],
+        content_type=group["content_type"] or "knowledge",
+        physical_collection=collection_name,
+        source_uri=source_uri,
+    ))
 
 
 def import_collection(
@@ -1049,7 +1046,9 @@ def import_collection(
                 # filtering below): a record dropped as a duplicate at
                 # flush time was already written by a prior run and must
                 # still end up owned by this one.
-                if meta.get("doc_id"):
+                # An export-time ``owner`` is the chunk's current owner; a
+                # ``meta.doc_id`` beside it is stale pre-RDR-108 metadata.
+                if meta.get("doc_id") and not record.get("owner"):
                     _accumulate_legacy_group(
                         owner_groups, meta, rec_id,
                         file_source_uri=file_fallback_source_uri,
@@ -1116,11 +1115,12 @@ def import_collection(
                 for doc_id, entry in (reader.resolve_many(legacy_ids) if legacy_ids else {}).items()
                 if entry.physical_collection == collection_name
             }
+            # One group's failure must not strand every later group
+            # manifest-less: record it, carry on, report all at the end.
+            rows_by_doc: dict[str, list[tuple[int, str]]] = {}
             for group in owner_groups.values():
-                # One group's failure must not strand every later group
-                # manifest-less: record it, carry on, report all at the end.
                 try:
-                    owned_count += _write_owner_group(
+                    doc = _resolve_owner_document(
                         group, collection_name, owner_tumbler, reader, writer, live_legacy,
                     )
                 except Exception as exc:  # noqa: BLE001 — collected and re-raised below as one NexusError
@@ -1131,6 +1131,20 @@ def import_collection(
                         error=str(exc),
                     )
                     failures.append((group["source_uri"], str(exc)))
+                    continue
+                rows_by_doc.setdefault(doc, []).extend(group["rows"])
+            for doc, doc_rows in rows_by_doc.items():
+                rows = _manifest_rows(doc_rows)
+                try:
+                    writer.write_manifest(doc, rows, collection=collection_name)
+                except Exception as exc:  # noqa: BLE001 — collected and re-raised below as one NexusError
+                    _log.warning(
+                        "import_owner_manifest_failed",
+                        collection=collection_name, doc=doc, error=str(exc),
+                    )
+                    failures.append((doc, str(exc)))
+                    continue
+                owned_count += len(rows)
         finally:
             _close = getattr(writer, "close", None)
             if callable(_close):

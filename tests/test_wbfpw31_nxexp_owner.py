@@ -375,14 +375,14 @@ def test_one_failed_owner_group_does_not_strand_the_rest(t2_service_env, tmp_pat
     out = tmp_path / "partial.nxexp"
     export_collection(db=client, collection_name=src, output_path=out)
 
-    real = exporter_mod._write_owner_group
+    real = exporter_mod._resolve_owner_document
 
     def _fail_bad(group, *a, **kw):
         if group["source_uri"] == bad_uri:
             raise RuntimeError("injected register failure")
         return real(group, *a, **kw)
 
-    monkeypatch.setattr(exporter_mod, "_write_owner_group", _fail_bad)
+    monkeypatch.setattr(exporter_mod, "_resolve_owner_document", _fail_bad)
 
     with pytest.raises(NexusError, match=r"1 of 2 owner documents.*injected register failure"):
         import_collection(db=client, input_path=out, target_collection=dst)
@@ -525,3 +525,53 @@ def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_p
         assert doc.physical_collection == dst
         rows = sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)
         assert [r.chash for r in rows] == by_doc[orig]
+
+
+@pytest.mark.integration
+def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service_env, tmp_path):
+    """A live document whose chunks arrive partly as owner-tagged records
+    (with a stale meta.doc_id beside the owner) and partly as legacy
+    doc_id-only records. Both resolve to the same document; the manifest
+    is a whole-document replace, so the rows must be merged into one
+    write, never written group by group."""
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    dst = _coll("mixed-owner-legacy")
+    title = "wbfpw31 mixed doc"
+    doc_uri = uri_for(dst, title)
+    doc = str(writer.register(
+        owner=owner, title=title, content_type="knowledge",
+        physical_collection=dst, source_uri=doc_uri,
+    ))
+
+    records = []
+    chashes = []
+    for i in range(4):
+        content = f"wbfpw31 mixed chunk {i}"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        meta = {"chunk_text_hash": chash, "doc_id": doc, "chunk_index": i}
+        client.upsert_chunks_with_embeddings(
+            dst, ids=[chash], documents=[content], embeddings=[],
+            metadatas=[{**meta, "indexed_at": datetime.now(UTC).isoformat()}],
+        )
+        rec = {"id": chash, "document": content, "metadata": meta}
+        if i < 2:
+            rec["owner"] = {
+                "source_uri": doc_uri, "title": title,
+                "content_type": "knowledge", "position": i,
+            }
+        records.append(rec)
+        chashes.append(chash)
+
+    f = tmp_path / "mixed.nxexp"
+    _write_hand_crafted_nxexp(f, dst, records)
+    result = import_collection(db=client, input_path=f, target_collection=dst, skip_existing=True)
+    assert result["owned_count"] == 4
+
+    rows = sorted(reader.get_manifest(doc), key=lambda r: r.position)
+    assert [r.chash for r in rows] == chashes
+    for chash in chashes:
+        assert chash in client.get_collection(dst).get(ids=[chash], include=[])["ids"]
