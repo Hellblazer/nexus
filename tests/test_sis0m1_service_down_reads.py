@@ -87,3 +87,18 @@ def test_a_service_error_mid_run_is_one_line(monkeypatch):
     assert result.exit_code != 0, result.output
     assert isinstance(result.exception, SystemExit), type(result.exception).__name__
     assert "HTTP 500" in result.output, result.output
+
+
+def test_the_note_names_an_env_configured_endpoint(monkeypatch):
+    """The request note used only the lease cache, so an endpoint set by
+    NX_SERVICE_URL printed no host (review of 3857e7cd6)."""
+    monkeypatch.setenv("NX_SERVICE_URL", "http://127.0.0.1:9")
+    monkeypatch.setenv("NX_SERVICE_TOKEN", "sis0m-token")
+    monkeypatch.setattr(hvc, "_lease_cache", None)
+    monkeypatch.setattr("nexus.db.service_endpoint.mint_armed", lambda: False)
+    monkeypatch.setattr(hvc, "_managed_remedy", lambda: None)
+
+    result = CliRunner().invoke(main, ["collection", "list"])
+
+    assert isinstance(result.exception, SystemExit), type(result.exception).__name__
+    assert "127.0.0.1:9/v1/" in result.output, result.output

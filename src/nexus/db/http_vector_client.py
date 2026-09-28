@@ -1724,7 +1724,10 @@ def _note_request(exc: BaseException, method: str, path: str) -> None:
     (PEP 678), leaving its type and message alone. A connection failure's
     own text names neither host, port nor route."""
     try:
-        base = (_lease_cache or (None, None))[0] or ""
+        # The resolved endpoint however it was found (env, config, host/port
+        # or lease); the lease cache alone left the host off for the first
+        # three (review of 3857e7cd6).
+        base = _resolve_endpoint()[0]
     except Exception:  # noqa: BLE001 — a diagnostic note must never raise
         base = ""
     exc.add_note(f"request: {method} {base}{path}")

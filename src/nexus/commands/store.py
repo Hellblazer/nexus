@@ -480,7 +480,10 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
         tag_str = f"  [{tags}]" if tags else ""
         click.echo(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
 
-    if shown_end < (total if isinstance(total, int) else float("inf")):
+    # A full page is the live signal that more rows may follow; the stored
+    # total can exceed the live rows and point at an empty page (review of
+    # 56bb2e88e).
+    if len(entries) >= limit:
         click.echo(f"\n  Next page: --offset {shown_end}")
 
 

@@ -868,3 +868,16 @@ def test_store_list_names_its_total_as_stored(runner):
         result = runner.invoke(main, ["store", "list", "-c", "knowledge__x__model-ctx__v1"])
     assert result.exit_code == 0, result.output
     assert "(showing 1-1; 62 stored)" in result.output, result.output
+
+
+def test_store_list_offers_a_next_page_only_after_a_full_page(runner):
+    """The stored total can exceed the live rows, so a short page is the end
+    (review of 56bb2e88e: the hint pointed at an empty offset)."""
+    mock_db = MagicMock()
+    mock_db.list_store.return_value = [{"id": "a" * 64, "title": "t"}]
+    mock_db.collection_info.return_value = {"count": 62}
+    with patch("nexus.commands.store._t3", return_value=mock_db):
+        short = runner.invoke(main, ["store", "list", "-c", "knowledge__x__model-ctx__v1", "--limit", "5"])
+        full = runner.invoke(main, ["store", "list", "-c", "knowledge__x__model-ctx__v1", "--limit", "1"])
+    assert "Next page" not in short.output, short.output
+    assert "Next page: --offset 1" in full.output, full.output

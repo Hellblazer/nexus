@@ -315,9 +315,11 @@ def is_note_shaped(entry: object) -> bool:
 
 
 def live_note_chashes(documents) -> set[str]:
-    """Chashes of manifest-less notes among *documents* that a
+    """Chashes of note-shaped documents among *documents* that a
     T3-deleting sweep must NEVER treat as orphans (nexus-39upx hazard 2
-    / RDR-145).
+    / RDR-145). Every note-shaped document's chunk is returned, with or
+    without a manifest row; a caller that reports a manifest-less count
+    subtracts the manifest's own chashes (``nx t3 gc``, nexus-sis0m.3).
 
     Reads no longer show a manifest-less chunk (RDR-192 Step 5: every
     engine read path uses live(c), which requires a live own-collection
