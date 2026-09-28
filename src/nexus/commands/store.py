@@ -920,9 +920,13 @@ def import_cmd(
     input_path = Path(file)
     # nexus-8o7ae: passed raw, a bare subject reached the exporter's model
     # gate unresolved and was refused as a voyage-code-3 target on a bge
-    # install.
+    # install. The resolve's two profile refusals name their remedy; exit
+    # cleanly with it, as put does (7.38.0 shakeout), not with a traceback.
     if collection:
-        collection = _resolve_bare_subject(collection, t3=db, for_write=True)
+        try:
+            collection = _resolve_bare_subject(collection, t3=db, for_write=True)
+        except (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError) as exc:
+            raise click.ClickException(str(exc)) from exc
 
     # nexus-s71lr: "nx store put"/import bulk writes had NO progress signal at
     # all -- import_collection is one opaque call with no per-record callback,

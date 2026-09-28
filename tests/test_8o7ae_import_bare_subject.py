@@ -68,3 +68,30 @@ def test_import_into_bare_subject_lands_where_other_verbs_read(t2_service_env, t
     assert listed.exit_code == 0, listed.output
     assert title in listed.output, listed.output
     assert chash in client.get_collection(resolved).get(ids=[chash], include=[])["ids"]
+
+
+def test_keyless_voyage_install_gets_the_remedy_not_a_traceback(t2_service_env, tmp_path, monkeypatch):
+    """The resolve runs before the import's own error handling. On a local
+    install whose embed model is voyage-shaped with no key, a new bare
+    subject raises LocalVoyageCredentialMissingError; the operator must see
+    its message and a clean exit, as ``nx store put`` gives (7.38.0)."""
+    import nexus.config as _config_mod
+
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.config.local_embed_model_choice", lambda: "voyage-context-3")
+    monkeypatch.setattr("nexus.config.local_embed_model_is_voyage", lambda: True)
+    real_get_credential = _config_mod.get_credential
+    monkeypatch.setattr(
+        "nexus.config.get_credential",
+        lambda name: "" if name == "voyage_api_key" else real_get_credential(name),
+    )
+    f = tmp_path / "unused.nxexp"
+    f.write_bytes(b"{}\n")
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    with patch("nexus.commands.store._t3", return_value=client):
+        result = CliRunner().invoke(main, ["store", "import", str(f), "-c", "o7ae-keyless-new"])
+
+    assert result.exit_code == 1, result.output
+    assert isinstance(result.exception, SystemExit), repr(result.exception)
+    assert "voyage" in result.output.lower(), result.output
