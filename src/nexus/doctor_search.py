@@ -276,8 +276,12 @@ def _neighbour_probe(
         for text, self_id in samples:
             rows = search_fn(text, [col], n_results + 1, t3,
                              diagnostics_out=[], threshold_override=float("inf"))
-            real = [r.distance for r in rows or []
-                    if r.id != self_id and r.distance >= _DUPLICATE_DISTANCE]
+            # search_cross_corpus over-fetches (up to 4x) and returns the
+            # whole pool; judge only the n_results nearest real neighbours so
+            # the evidence line's count is the window actually used. The
+            # nearest distance is the same either way (critique, 634cc2b66).
+            real = sorted(r.distance for r in rows or []
+                          if r.id != self_id and r.distance >= _DUPLICATE_DISTANCE)[:n_results]
             seen += len(real)
             if threshold is not None:
                 kept += sum(1 for d in real if d <= threshold)

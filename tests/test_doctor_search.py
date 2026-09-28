@@ -645,3 +645,19 @@ def test_a_near_duplicate_neighbour_does_not_make_a_high_floor_collection_health
     t3 = _ChunkT3()
     rows = _probe(t3, search, **_default(t3))
     assert {r.outcome for r in rows.values()} == {"threshold_drop"}
+
+
+def test_the_neighbour_count_is_the_window_judged_not_the_overfetched_pool() -> None:
+    """Critique of 634cc2b66: search_cross_corpus returns its whole
+    over-fetched pool, so the evidence line counted up to 4x more
+    neighbours than the probe's own depth."""
+    from nexus.search_engine import SearchResult
+
+    def wide_search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None):
+        col = cols[0]
+        return [SearchResult(id=f"{col}-n{j}", content="", distance=0.3 + j * 0.01,
+                             collection=col, metadata={}) for j in range(24)]
+
+    t3 = _ChunkT3(n_chunks=1)
+    rows = _probe(t3, wide_search, **_default(t3))
+    assert {r.raw_count for r in rows.values()} == {5}

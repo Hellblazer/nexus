@@ -2910,3 +2910,24 @@ def test_the_page_cache_returns_the_note_of_the_entry_it_returns():
     _core._page_cache_put(("k2",), ["s"], 10, [], note=None)
     assert _core._page_cache_get(("k1",), 5) is None
     assert _core._page_cache_get(("k2",), 5) == (["s"], [], None)
+
+
+def test_a_topic_grouped_text_render_prints_the_topic_headers():
+    """Critique of 29fab0df4/634cc2b66: the text header read only
+    _cluster_label, so topic-grouped results printed no headers."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+
+    def _cross_corpus(*a, **kw):
+        return [
+            SearchResult(id="a1", content="alpha", distance=0.1, collection="code__test",
+                         metadata={"_topic_label": "Topic Alpha"}),
+            SearchResult(id="b1", content="beta", distance=0.2, collection="code__test",
+                         metadata={"_topic_label": "Topic Beta"}),
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        text = search(query="topic header probe", corpus="code__test",
+                      cluster_by="semantic").content[0].text
+    assert "── Topic Alpha ──" in text
+    assert "── Topic Beta ──" in text
