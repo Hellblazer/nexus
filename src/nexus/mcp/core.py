@@ -7488,8 +7488,9 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         # surfaced, never silent.
         #
         # nexus-c53hy (RDR-191 P2 round-2 fix): resolve-and-VERIFY before
-        # cleanup. store_delete_catalog_cleanup resolves purely by chash,
-        # with no check that doc_id is actually in col_name -- a bogus/
+        # cleanup. store_delete_catalog_cleanup resolved purely by chash
+        # when this landed (collection-scoped since nexus-r3cdg), with no
+        # check that doc_id is actually in col_name -- a bogus/
         # stale doc_id, or one paired with the wrong collection, would
         # otherwise get cleanup run unconditionally and could tombstone a
         # live, unrelated document that owns this exact chash under a
