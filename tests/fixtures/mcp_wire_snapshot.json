@@ -1449,7 +1449,7 @@
             "type": "string"
           },
           "corpus": {
-            "default": "knowledge",
+            "default": "",
             "type": "string"
           },
           "depth": {

@@ -4023,12 +4023,13 @@ def query(
     question: Annotated[str, Field(description="Natural-language research question.")],
     corpus: Annotated[str, Field(
         description=(
-            "Corpus prefix or full collection name. \"knowledge\" (default) means "
-            "every knowledge__* collection, not code/docs; \"all\" for every corpus. "
-            "Overridden by the resolved catalog collections when a catalog param "
-            "(author, content_type, follow_links, subtree) is set."
+            "Corpus prefix or full collection name; \"all\" for every corpus. "
+            "Empty (default) means every knowledge__* collection when no catalog "
+            "param is set, and every corpus when one (author, content_type, "
+            "follow_links, subtree) is, since the catalog filter does the "
+            "narrowing. An explicit corpus always applies."
         ),
-    )] = "knowledge",
+    )] = "",
     where: Annotated[str, Field(
         description=(
             "Metadata filter, KEY=VALUE comma-separated (e.g. \"tags=arch\"). "
@@ -4065,7 +4066,8 @@ def query(
     `structured=True`.
 
     Constraints:
-    - `corpus` defaults to "knowledge" only, not code/docs.
+    - With no catalog param, `corpus` defaults to "knowledge" only, not
+      code/docs; with one, it defaults to every corpus.
     - Every catalog param requires an initialized catalog plus an
       HttpVectorClient-backed T3 (every local and cloud install since
       RDR-155 P4b); it errors rather than falling back without one.
@@ -4095,6 +4097,13 @@ def query(
         # mode); this is permanently None now, kept only for that reason.
         graph_batch_info: dict | None = None
         has_catalog_params = author or content_type or follow_links or subtree
+        # nexus-p5ei5: the old default "knowledge" also applied to the
+        # catalog path, so content_type="rdr" searched knowledge__* only and
+        # reported that no document matched the catalog filters, which was
+        # false. The catalog filter narrows server-side; the default corpus
+        # there is every corpus.
+        if not corpus.strip():
+            corpus = "all" if has_catalog_params else "knowledge"
 
         if has_catalog_params:
             from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -4179,7 +4188,8 @@ def query(
             _no_docs_msg = (
                 f"No documents found matching catalog filters "
                 f"(author={author!r}, content_type={content_type!r}, "
-                f"subtree={subtree!r}, follow_links={follow_links!r})"
+                f"subtree={subtree!r}, follow_links={follow_links!r}) "
+                f"in corpus {corpus!r}"
             )
 
             # Disclosure envelope for a capped subtree seed list
