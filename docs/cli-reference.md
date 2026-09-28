@@ -2492,7 +2492,7 @@ nx collection list
 | `audit NAME` | Deep-dive per-collection report: distance histogram, top-5 cross-projections, orphan chunks, hub topics (RDR-087 Phase 4) |
 | `shape [--json] [--full]` | Read-only audit of the whole collection SET against the rules in [docs/collections.md](collections.md): placeholder, date-like, task-or-document-shaped, and source-app subjects, the `default` corpus, likely duplicate subjects (name evidence; confirm with `merge-candidates`), a model the install no longer writes with, a stored dimension that disagrees with the name's model (the GH #667 class), thin and one-document collections, fan-out-floor casualties, test residue, ghost rows, grandfathered relics, blank catalog attributes, superseded-but-live, chunks with no catalog row. One finding per violation with a proposed action; the human view lists at most 10 collections per check, `--full` lists every one, `--json` always carries all; never writes, never calls a model; a read failure is an error, never an empty report (nexus-ger23) |
 | `health` | Composite per-collection health table — chunk counts (T3-sourced), staleness, hub score (RDR-087 Phase 3.4) |
-| `merge-candidates` | Pair-wise cross-collection overlap ranking — surfaces collection pairs with high shared-topic similarity as merge/bridge candidates (RDR-087 Phase 4.3) |
+| `merge-candidates` | Unavailable. It was the pair-wise cross-collection overlap ranking (RDR-087 Phase 4.3), which ran over the local SQLite taxonomy store deleted at RDR-158 P4, and the engine does not expose the analysis yet (nexus-i711w.1). Since 7.65.0 the verb prints that and exits 1, under `--format json` too (nexus-sis0m.4); before, it exited 0 and the message read as an empty result |
 | `delete NAME` | Delete collection (irreversible) |
 | `prune` | List collections whose name-declared embedding dim mismatches the ACTIVE serving embedder — orphans from a prior embedder generation that every search silently skips (GH #1113, nexus-9tsdf). Fail-safe: no flags lists only; `--yes` deletes via the same cascade as `delete`; `--dry-run` always wins over `--yes`. An unresolved active-embedder probe lists nothing (never guesses). `nx doctor` names these orphans and points here |
 
@@ -3061,6 +3061,20 @@ interpreter). Before 7.21.0 only the two `fatal` checks could move the code,
 so a sweep that printed genuine ✗ lines exited `0` and any script gating on
 `$?` read a constant. Automation that wants "healthy or only warnings" tests
 `== 0`; automation that only cares whether nexus will run at all tests `< 2`.
+
+**One mode per invocation (7.65.0, nexus-sis0m.2).** Each `--check-*`,
+`--fix-paths` and `--clean-*` mode runs and returns, so a command naming two
+of them used to run only the first and exit on its result. Naming more than
+one mode is now a usage error that lists them; run each separately.
+
+**Retired plugin row (7.65.0, nexus-qocnk).** The default sweep reads Claude
+Code's plugin registry and fails the "Retired Claude Code plugin" row while
+`nx@nexus-plugins`, the plugin's name before the conexus rename, is still
+installed. Claude Code does not remove a renamed plugin, and the old one keeps
+running its own hooks, which on v4.34.x approved every Bash command
+(GHSA-mc84-6gjq-vm2p). The remedy is `/plugin uninstall nx@nexus-plugins`.
+Only that marketplace's `nx` counts. The row reads "none installed" on a box
+without the plugin or without a registry.
 
 **Supplementary checks (new in 7.11.0).** After the default sweep prints its
 own result, `nx doctor` additionally runs the cheap, read-only subset of the
