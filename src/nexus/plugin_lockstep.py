@@ -164,6 +164,28 @@ def registry_entries(registry_path: Path | None = None) -> dict[str, list[dict[s
     (``{"version": 2, "plugins": {...}}``) and the older flat shape (the
     plugin map at top level). None when the file is absent, unreadable, or
     names none of our plugins."""
+    return _entries_named(known_plugins(), registry_path)
+
+
+#: Plugin names this project used to ship. ``nx`` was renamed to ``conexus``
+#: on 2026-05-23 (nexus-mkj6u); Claude Code does not uninstall a renamed
+#: plugin, and a stale ``nx`` install keeps its own hooks (v4.34.x
+#: auto-approved every Bash command: nexus-452oy, GHSA-mc84-6gjq-vm2p).
+RETIRED_PLUGIN_NAMES: frozenset[str] = frozenset({"nx"})
+
+
+def retired_plugin_installs(registry_path: Path | None = None) -> list[str]:
+    """``<plugin>@<marketplace>`` keys of retired plugins still in the
+    registry, sorted; empty when none are (or there is no registry). Same
+    parser as :func:`registry_entries` (nexus-qocnk)."""
+    return sorted(_entries_named(RETIRED_PLUGIN_NAMES, registry_path) or {})
+
+
+def _entries_named(
+    names: "frozenset[str] | set[str]", registry_path: Path | None,
+) -> dict[str, list[dict[str, Any]]] | None:
+    """The single parse of ``installed_plugins.json``: entries whose plugin
+    part is in *names*."""
     path = registry_path or default_registry_path()
     try:
         data = json.loads(path.read_text())
@@ -172,7 +194,7 @@ def registry_entries(registry_path: Path | None = None) -> dict[str, list[dict[s
     if not isinstance(data, dict):
         return None
     plugins = data.get("plugins") if isinstance(data.get("plugins"), dict) else data
-    ours = known_plugins()
+    ours = names
     found: dict[str, list[dict[str, Any]]] = {}
     for key, entries in plugins.items():
         if not isinstance(key, str) or "@" not in key or key.split("@", 1)[0] not in ours:

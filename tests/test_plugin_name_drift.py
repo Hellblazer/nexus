@@ -53,6 +53,8 @@ def test_check_plugin_name_warns_on_old_nx(monkeypatch, tmp_path):
     assert r.fatal is False
     assert "nx@nexus-plugins" in r.detail or "renamed" in r.detail
     suggestions = " ".join(r.fix_suggestions)
+    # nexus-qocnk: installing conexus does not remove nx, whose hooks stay.
+    assert r.fix_suggestions[0] == "/plugin uninstall nx@nexus-plugins"
     assert "/plugin install conexus@nexus-plugins" in suggestions
     assert "/reload-plugins" in suggestions
 
@@ -108,8 +110,11 @@ def test_check_version_compatibility_logs_plugin_name_mismatch(monkeypatch, tmp_
     assert "plugin_name_mismatch" in captured, (
         f"expected plugin_name_mismatch warning in stdout/stderr; got: {captured!r}"
     )
-    # Actionable hint names BOTH commands: install registers, reload activates.
-    assert "/plugin install conexus@nexus-plugins" in captured
+    # Actionable hint: uninstall the old plugin (nexus-qocnk: it keeps its
+    # own hooks), install the new one, reload.
+    assert "/plugin uninstall nx@nexus-plugins" in captured
+    assert captured.index("/plugin uninstall nx@nexus-plugins") < captured.index(
+        "/plugin install conexus@nexus-plugins")
     assert "/reload-plugins" in captured
 
 
@@ -173,3 +178,36 @@ class TestParseVersion:
         assert _parse_version("1.10.0") > _parse_version("1.9.0")
         assert _parse_version("2.0.0") > _parse_version("1.99.99")
         assert _parse_version("4.1.2") == _parse_version("4.1.2")
+
+
+# nexus-qocnk: nx doctor flags a retired plugin still in Claude Code's plugin
+# registry, whichever plugin the session runs (the rename check above only
+# sees the running plugin's own manifest).
+
+
+def _registry(tmp_path: Path, keys: list[str]) -> Path:
+    import json
+
+    path = tmp_path / "installed_plugins.json"
+    path.write_text(json.dumps({"version": 2, "plugins": {
+        k: [{"scope": "user", "version": "4.34.5", "installPath": "/x"}] for k in keys}}))
+    return path
+
+
+def test_doctor_flags_a_retired_nx_plugin_still_installed(tmp_path):
+    from nexus.health import _check_retired_plugin_installed
+
+    reg = _registry(tmp_path, ["conexus@nexus-plugins", "nx@nexus-plugins"])
+    [row] = _check_retired_plugin_installed(reg)
+    assert row.ok is False and row.warn is True
+    assert "nx@nexus-plugins" in row.detail
+    assert row.fix_suggestions[0] == "/plugin uninstall nx@nexus-plugins"
+
+
+def test_doctor_retired_plugin_row_is_ok_without_one(tmp_path):
+    from nexus.health import _check_retired_plugin_installed
+
+    [row] = _check_retired_plugin_installed(_registry(tmp_path, ["conexus@nexus-plugins"]))
+    assert row.ok is True
+    [row] = _check_retired_plugin_installed(tmp_path / "absent.json")
+    assert row.ok is True, "a box with no registry is not applicable, not a failure"

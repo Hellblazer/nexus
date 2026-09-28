@@ -3594,12 +3594,18 @@ def check_version_compatibility() -> None:
                     "plugin_name_mismatch",
                     installed_plugin_name=plugin_name,
                     expected_plugin_name=EXPECTED_PLUGIN_NAME,
+                    # nexus-qocnk: installing the new name does not remove
+                    # the old plugin, which keeps its own hooks: a stale nx
+                    # plugin kept v4.34.x hooks that auto-approved every Bash
+                    # command (nexus-452oy, GHSA-mc84-6gjq-vm2p).
                     hint=(
                         f"Plugin was renamed '{plugin_name}' -> "
                         f"'{EXPECTED_PLUGIN_NAME}' (nexus-mkj6u). In "
-                        f"Claude Code, run: /plugin install "
-                        f"{EXPECTED_PLUGIN_NAME}@nexus-plugins "
-                        "&& /reload-plugins"
+                        f"Claude Code, run: /plugin uninstall "
+                        f"{plugin_name}@nexus-plugins, then /plugin install "
+                        f"{EXPECTED_PLUGIN_NAME}@nexus-plugins, then "
+                        "/reload-plugins. The old plugin keeps its own hooks "
+                        "until it is uninstalled."
                     ),
                 )
 

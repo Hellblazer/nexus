@@ -3032,13 +3032,41 @@ def _check_plugin_name() -> list[HealthResult]:
                 "(renamed 2026-05-23, nexus-mkj6u)"
             ),
             fix_suggestions=[
+                f"/plugin uninstall {plugin_name}@nexus-plugins",
                 "/plugin install conexus@nexus-plugins",
                 "/reload-plugins",
-                "(both run in Claude Code; install registers the new plugin, reload activates it)",
+                "(all run in Claude Code; the old plugin keeps its own hooks until it is "
+                "uninstalled, nexus-qocnk)",
             ],
             fatal=False,
         )
     ]
+
+
+def _check_retired_plugin_installed(registry_path: Path | None = None) -> list[HealthResult]:
+    """nexus-qocnk: flag a retired plugin (``nx@nexus-plugins``) still in
+    Claude Code's plugin registry, whichever plugin this session runs.
+
+    Installing ``conexus`` does not remove ``nx``, and the old plugin keeps
+    its own hooks: a stale ``nx`` kept v4.34.x hooks that auto-approved
+    every Bash command (nexus-452oy, GHSA-mc84-6gjq-vm2p). Not applicable
+    (ok row) on a box with no registry or no retired install.
+    """
+    from nexus.plugin_lockstep import retired_plugin_installs  # noqa: PLC0415 — deferred, keeps health import light
+
+    label = "Retired Claude Code plugin"
+    stale = retired_plugin_installs(registry_path)
+    if not stale:
+        return [HealthResult(label=label, ok=True, detail="none installed")]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"{', '.join(stale)} still installed; it keeps its own hooks "
+            "(v4.34.x auto-approved every Bash command, GHSA-mc84-6gjq-vm2p)"
+        ),
+        fix_suggestions=[f"/plugin uninstall {key}" for key in stale]
+        + ["/reload-plugins (in Claude Code)"],
+    )]
 
 
 def _check_worktree_developer_agent() -> list[HealthResult]:
@@ -8989,6 +9017,16 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
         results.append(HealthResult(
             label="Legacy catalog file", ok=False, warn=True,
             detail=f"check failed ({exc}) — could not verify legacy catalog state",
+        ))
+
+    # nexus-qocnk: a retired plugin still installed keeps its own hooks.
+    try:
+        results.extend(_check_retired_plugin_installed())
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_retired_plugin_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Retired Claude Code plugin", ok=False, warn=True,
+            detail=f"check failed ({exc}) — could not read the plugin registry",
         ))
 
     # nexus-3xg21: plugin-floor check for the RDR-184 orchestration hooks —
