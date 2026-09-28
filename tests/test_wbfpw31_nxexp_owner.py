@@ -451,3 +451,77 @@ def test_resolve_import_owner_tumbler_uses_knowledge_curator_for_knowledge_colle
     collection = _coll("owner-branch")
     resolved = _resolve_import_owner_tumbler(collection, reader, writer)
     assert resolved == expected
+
+
+# ── Legacy doc_id records: owned whether their document is live, dead or gone ─
+
+
+@pytest.mark.integration
+def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_path):
+    """The gate-xr789 shape (conexus-sdyq): chunks already in the target with
+    no manifest, carrying meta.doc_id that names a live document, a
+    tombstoned one, or none at all, re-imported with --skip-existing. The
+    per-batch hook never fires for skipped records, so only the owner path
+    can make them live."""
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    dst = _coll("legacy-docid")
+
+    live_doc = str(writer.register(
+        owner=owner, title="wbfpw31 live legacy", content_type="knowledge",
+        physical_collection=dst, source_uri=uri_for(dst, "wbfpw31 live legacy"),
+    ))
+    dead_doc = str(writer.register(
+        owner=owner, title="wbfpw31 dead legacy", content_type="knowledge",
+        physical_collection=dst, source_uri=uri_for(dst, "wbfpw31 dead legacy"),
+    ))
+    writer.delete_document(dead_doc)
+    missing_doc = "1.99999.31"
+
+    plan = [
+        (live_doc, "wbfpw31 legacy live 0"), (live_doc, "wbfpw31 legacy live 1"),
+        (dead_doc, "wbfpw31 legacy dead 0"), (dead_doc, "wbfpw31 legacy dead 1"),
+        (missing_doc, "wbfpw31 legacy missing 0"),
+    ]
+    records = []
+    per_doc: dict[str, int] = {}
+    for doc_id, content in plan:
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        idx = per_doc.get(doc_id, 0)
+        per_doc[doc_id] = idx + 1
+        meta = {"chunk_text_hash": chash, "doc_id": doc_id, "chunk_index": idx}
+        client.upsert_chunks_with_embeddings(
+            dst, ids=[chash], documents=[content], embeddings=[],
+            metadatas=[{**meta, "indexed_at": datetime.now(UTC).isoformat()}],
+        )
+        records.append({"id": chash, "document": content, "metadata": meta, "chash": chash})
+
+    by_doc = {d: [r["chash"] for r in records if r["metadata"]["doc_id"] == d]
+              for d in (live_doc, dead_doc, missing_doc)}
+    for r in records:
+        r.pop("chash")
+
+    f = tmp_path / "legacy-docid.nxexp"
+    _write_hand_crafted_nxexp(f, dst, records)
+    result = import_collection(db=client, input_path=f, target_collection=dst, skip_existing=True)
+    assert result["skipped_count"] == 5
+    assert result["owned_count"] == 5
+
+    for chashes in by_doc.values():
+        for chash in chashes:
+            got = client.get_collection(dst).get(ids=[chash], include=[])
+            assert chash in got["ids"], f"{chash} not live in {dst}"
+
+    # The live original document keeps its chunks, in chunk_index order.
+    rows = sorted(reader.get_manifest(live_doc), key=lambda r: r.position)
+    assert [r.chash for r in rows] == by_doc[live_doc]
+    # Dead and missing originals each get their own new document.
+    for orig in (dead_doc, missing_doc):
+        doc = reader.by_source_uri(f"nxexp://{dst}/{f.name}#{orig}")
+        assert doc is not None, orig
+        assert doc.physical_collection == dst
+        rows = sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)
+        assert [r.chash for r in rows] == by_doc[orig]

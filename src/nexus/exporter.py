@@ -653,6 +653,40 @@ def _accumulate_owner_group(
     group["rows"].append((position, chash))
 
 
+def _accumulate_legacy_group(
+    owner_groups: dict[str, dict],
+    meta: dict,
+    chash: str,
+    *,
+    file_source_uri: str,
+    fallback_content_type: str,
+) -> None:
+    """Assign a legacy record (one carrying ``meta.doc_id``) to its owner
+    group (nexus-wbfpw.31, legacy leg). The per-batch manifest hook alone
+    cannot be trusted for these: it fires only for records actually
+    upserted (so ``--skip-existing`` leaves them manifest-less), its
+    positions restart per batch, and the named document is often
+    tombstoned or absent in the target. The group records the original
+    doc_id; :func:`_write_owner_group` keeps that document when it is
+    live in the target collection and otherwise registers a new one at
+    ``<file source_uri>#<doc_id>``, one per original document.
+    """
+    doc_id = str(meta["doc_id"])
+    group = owner_groups.setdefault(
+        f"legacy:{doc_id}",
+        {
+            "source_uri": f"{file_source_uri}#{doc_id}",
+            "title": meta.get("title") or doc_id,
+            "content_type": fallback_content_type,
+            "legacy_doc_id": doc_id,
+            "rows": [],
+        },
+    )
+    raw = meta.get("chunk_index")
+    position = raw if isinstance(raw, int) and not isinstance(raw, bool) else len(group["rows"])
+    group["rows"].append((position, chash))
+
+
 def _manifest_rows(rows: list[tuple[int, str]]) -> list[dict]:
     """Manifest rows for one owner group, ordered by recorded position
     (nexus-wbfpw.31). Positions are the manifest's primary key per
@@ -669,6 +703,7 @@ def _manifest_rows(rows: list[tuple[int, str]]) -> list[dict]:
 
 def _write_owner_group(
     group: dict, collection_name: str, owner_tumbler: Tumbler, reader: Any, writer: Any,
+    live_legacy: dict[str, Any] | None = None,
 ) -> int:
     """Register (or find) the document for one owner group and write its
     manifest in *collection_name* (nexus-wbfpw.31). Returns the number of
@@ -683,7 +718,17 @@ def _write_owner_group(
     live, and the target gets a separate document under the
     target-qualified identity ``nxexp://<target>/<original source_uri>``.
     Re-importing finds that qualified document again, so it is idempotent.
+
+    A legacy group (``legacy_doc_id`` set) whose original document is live
+    in *collection_name* (*live_legacy*, from one batched ``resolve_many``)
+    keeps that document; otherwise it falls through to the same find-or-
+    register path under its file-scoped ``#<doc_id>`` identity.
     """
+    legacy = (live_legacy or {}).get(group.get("legacy_doc_id") or "")
+    if legacy is not None:
+        rows = _manifest_rows(group["rows"])
+        writer.write_manifest(str(legacy.tumbler), rows, collection=collection_name)
+        return len(rows)
     source_uri = group["source_uri"]
     existing = reader.by_source_uri(source_uri) if source_uri else None
     if existing is not None and existing.physical_collection != collection_name:
@@ -743,15 +788,14 @@ def import_collection(
     dict with keys: collection_name, imported_count, skipped_count,
     rehashed_count, owned_count, elapsed_seconds. ``owned_count``
     (nexus-wbfpw.31) is the number of chunks that got an explicit
-    catalog-manifest row written by THIS call (owner-grouped or
-    file-fallback records only -- a legacy record carrying ``meta.doc_id``
-    is manifested by the existing per-batch hook path and is not counted
-    here).
+    catalog-manifest row written by THIS call, which is every record in
+    the file.
 
-    Every chunk this function upserts that is NOT keyed by a legacy
-    ``meta.doc_id`` (see :func:`_fire_store_chains_grouped_by_doc`) is
-    grouped by owner identity (:func:`_accumulate_owner_group`) as it
-    streams, and — once every batch has been flushed — each group's
+    Every record is grouped by owner identity as it streams: a legacy
+    record carrying ``meta.doc_id`` by that doc_id
+    (:func:`_accumulate_legacy_group`), every other record by its export-
+    time ``owner`` or the file fallback (:func:`_accumulate_owner_group`),
+    and — once every batch has been flushed — each group's
     document is registered (or reconciled onto an existing one) and its
     manifest is written EXPLICITLY, once, with the group's full,
     correctly-ordered row list (:func:`_resolve_import_owner_tumbler`
@@ -761,13 +805,11 @@ def import_collection(
     ``fire_store_chains`` call and restarts at 0 per batch, which is
     wrong the moment a document's chunks span more than one 300-record
     upsert batch (exactly the shape RDR-192 Step 5 needs this fix to
-    close for a large import). The hook already naturally NO-OPS for
-    these records regardless -- ``_fire_store_chains_grouped_by_doc``
-    groups by ``meta.get("doc_id", "")``, and every non-legacy record's
-    key is the empty string, which the hook's own ``if not by_doc:
-    return`` guard skips -- so no hook-side change was needed to keep the
-    two write paths from producing conflicting manifest rows for the same
-    chunk.
+    close for a large import). For non-legacy records the hook no-ops
+    (their group key is the empty string, which its ``if not by_doc:
+    return`` guard skips). For legacy records it still fires per upserted
+    batch, as before; the explicit write here runs after every batch and
+    is a replace, so it has the last word on the manifest either way.
 
     Raises
     ------
@@ -1007,7 +1049,13 @@ def import_collection(
                 # filtering below): a record dropped as a duplicate at
                 # flush time was already written by a prior run and must
                 # still end up owned by this one.
-                if not meta.get("doc_id"):
+                if meta.get("doc_id"):
+                    _accumulate_legacy_group(
+                        owner_groups, meta, rec_id,
+                        file_source_uri=file_fallback_source_uri,
+                        fallback_content_type=default_content_type,
+                    )
+                else:
                     _accumulate_owner_group(
                         owner_groups, record.get("owner"), rec_id,
                         fallback_source_uri=file_fallback_source_uri,
@@ -1062,12 +1110,18 @@ def import_collection(
         failures: list[tuple[str, str]] = []
         try:
             owner_tumbler = _resolve_import_owner_tumbler(collection_name, reader, writer)
+            legacy_ids = [g["legacy_doc_id"] for g in owner_groups.values() if g.get("legacy_doc_id")]
+            live_legacy = {
+                doc_id: entry
+                for doc_id, entry in (reader.resolve_many(legacy_ids) if legacy_ids else {}).items()
+                if entry.physical_collection == collection_name
+            }
             for group in owner_groups.values():
                 # One group's failure must not strand every later group
                 # manifest-less: record it, carry on, report all at the end.
                 try:
                     owned_count += _write_owner_group(
-                        group, collection_name, owner_tumbler, reader, writer,
+                        group, collection_name, owner_tumbler, reader, writer, live_legacy,
                     )
                 except Exception as exc:  # noqa: BLE001 — collected and re-raised below as one NexusError
                     _log.warning(
