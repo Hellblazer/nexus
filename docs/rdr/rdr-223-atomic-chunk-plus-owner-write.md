@@ -2,7 +2,8 @@
 title: "Atomic Chunk-Plus-Owner Write on Every Client Path"
 id: RDR-223
 type: Architecture
-status: draft
+status: accepted
+accepted_date: 2026-09-28
 priority: medium
 author: Sam
 reviewed-by: self
