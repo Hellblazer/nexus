@@ -98,7 +98,9 @@ is left unknown.
   this request paid a duplicate embed for it. Log
   `event=upsert_embed_raced collection= raced= embedded=` at INFO when
   `raced > 0`, and add a lifetime `raced_embeds_total` counter to the existing
-  `EmbedActivitySnapshot` on `GET /v1/status`. Same change in
+  `EmbedActivitySnapshot` on `GET /v1/status` (as built: a top-level
+  `raced_embeds_total` field instead, since the count has no embedder
+  dimension; see Phase 0). Same change in
   `CombinedWriteService`'s per-doc write. Caveats: `xmax` is a system column,
   so the jOOQ form needs checking against `RawSqlGateTest`; the count cannot
   say WHICH other writer won (a retry of the same page, or another document
@@ -536,8 +538,22 @@ Every piece is `[additive]` in `docs/wire-contract-pending.md`'s sense.
 - Exit: two numbers exist. Phase 2 proceeds only if `raced_embeds_total`
   over a representative window is material (threshold Sam's call); Phase 3
   proceeds only if M-c finds real cases.
-- Engine write-path change: needs the standing throughput A/B (one extra
-  RETURNING on the hot INSERT).
+- Reading the number. A raced embed is either a retry of the same page or two
+  different documents embedding the same new text at once; the counter
+  cannot tell which (M-a's caveat), and Phase 2 fixes only the first. Each
+  `event=upsert_embed_raced` line therefore carries up to 8 raced chashes, so
+  an operator can join them against `catalog_document_chunks` and split
+  single-owner chashes (likely retries) from multi-owner ones (shared text)
+  before applying the threshold. Within one combined write, a chash shared by
+  two of its documents counts once, on its first per-doc write.
+- The counter is per engine process and resets on restart. `GET /v1/status`
+  carries `process_start_time` beside it (the value `/version` serves), so a
+  window whose start time changes between polls is discarded, not summed.
+  One instance per poll: Open Question 7 bounds any fleet-wide reading.
+- Engine write-path change: the standing throughput A/B (one extra
+  RETURNING on the hot INSERT) runs at the `engine-service-v0.1.137` cut,
+  in `--shakeout`'s index-throughput gate; no local harness runs it earlier
+  (T2 `nexus/ulrjq-throughput-ab`).
 
 ### Phase 1: ledger + sweeps + status route (closes ll31n)
 
@@ -628,7 +644,9 @@ under the keyed Phase 2 path.
    only if the M-c query finds real late cross-run commits.
 3. **Start small.** Phase 0 goes first: the engine-only raced-embed counter,
    plus conexus running the M-c query and the edge-504 count. Phases 1 and 2
-   wait on those numbers. Phase 0 rides `engine-service-v0.1.137`.
+   wait on those numbers. Phase 0 rides `engine-service-v0.1.137`. The
+   threshold is applied to the retry share of the count, not the raw total
+   (see Phase 0, "Reading the number").
 
 Record: T2 `nexus/request-identity-decisions-2026-09-27`.
 
@@ -656,6 +674,8 @@ Questions 3, 4 and 6 are answered above. Still open: 1, 2, 5 and 7.
    retention arm should run once per database, not once per instance.
 
 ## Revision History
+
+- 2026-09-28: Phase 0 as built (nexus-ulrjq). `raced_embeds_total` is a top-level `/v1/status` field, not part of `EmbedActivitySnapshot`; `process_start_time` added beside it for restart detection; raced chashes sampled into the log line so retries can be split from shared text; same-request cross-doc repeats excluded; the throughput A/B moved to the v0.1.137 cut. From the round-1 code review and critique (T2 `nexus/review-nexus-ulrjq-raced-embed-counter-round1`, `nexus/critique-nexus-ulrjq-rdr222-phase0-raced-counter`).
 
 - 2026-09-27: created as RDR-222 from the T2 draft; Sam's decisions recorded; Problem Statement gaps given `#### Gap N:` headings.
 
