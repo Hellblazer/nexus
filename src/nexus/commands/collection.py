@@ -1521,7 +1521,8 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     grand_updated = 0
     for i, col_name in enumerate(sorted(targets), 1):
         try:
-            col = db.get_collection(col_name)
+            # nexus-5z0us sibling: get_collection re-lists the tenant per call.
+            col = db.get_or_create_collection(col_name) if all_collections else db.get_collection(col_name)
         except Exception as exc:  # noqa: BLE001 — per-collection resolution failure surfaced via click.echo, loop continues
             click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
             continue

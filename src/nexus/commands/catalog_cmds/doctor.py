@@ -534,7 +534,9 @@ def _run_chunk_size_distribution() -> dict:
     tables: dict[str, dict] = {}
     for name in collections:
         try:
-            col = t3.get_collection(name=name)
+            # nexus-5z0us sibling: a handle for a name just listed, not
+            # get_collection (which re-lists the whole tenant per call).
+            col = t3.get_or_create_collection(name)
         except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             tables[name] = {"error": f"open: {exc}"}
             overall_pass = False
@@ -650,7 +652,9 @@ def _run_chunk_text_dedup() -> dict:
     chash_to_collections: dict[str, set[str]] = {}
     for name in collections:
         try:
-            col = t3.get_collection(name=name)
+            # nexus-5z0us sibling: a handle for a name just listed, not
+            # get_collection (which re-lists the whole tenant per call).
+            col = t3.get_or_create_collection(name)
         except Exception as exc:  # noqa: BLE001 — best-effort fallback path; failure is non-fatal here
             within_summary[name] = {"error": f"open: {exc}"}
             overall_pass = False
@@ -807,15 +811,16 @@ def _run_t3_vs_catalog() -> dict:
     zombies = []
     zombie_errors: list[dict] = []
     for name in sorted(projection_names & t3_names):
-        try:
-            col = t3_db.get_collection(name=name)
-            count = col.count()
-        except Exception as exc:  # noqa: BLE001 — boundary catch; third-party raises undocumented types, handled gracefully
-            # nexus-pyv0e sibling: `continue`-past-error here previously
-            # meant a failed check for a candidate zombie silently dropped
-            # it from consideration — a false PASS, not a loud error.
-            zombie_errors.append({"name": name, "error": str(exc)})
+        # nexus-5z0us sibling: the listing's physical count, not a
+        # get_collection per name (each re-lists the whole tenant).
+        row = t3_listing[name]
+        raw = row.get("stored_count", row.get("count"))
+        if raw is None:
+            # nexus-pyv0e sibling: an unreadable count is reported, never
+            # silently read as zero (or dropped from consideration).
+            zombie_errors.append({"name": name, "error": "no chunk count in the collection listing"})
             continue
+        count = int(raw)
         if count == 0:
             zombies.append(name)
 

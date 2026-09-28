@@ -101,7 +101,12 @@ class _T3:
     def list_collections(self):
         if self._list_collections_exc is not None:
             raise self._list_collections_exc
-        return [{"name": n} for n in self._names]
+        # The real listing carries each collection's count; a collection
+        # whose count cannot be read has none (nexus-5z0us sibling).
+        return [
+            {"name": n, "count": self._counts.get(n, 0)} if n not in self._count_errors else {"name": n}
+            for n in self._names
+        ]
 
     def get_collection(self, name):
         if name in self._count_errors:
