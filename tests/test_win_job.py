@@ -295,6 +295,12 @@ class TestWindowsShapedExceptionGuard:
         windows_shaped.raise_from.add("CloseHandle")
         assert win_job.close_job(job) is False
 
+    def test_send_ctrl_break_degrades_when_the_api_raises(
+        self, windows_shaped: _FakeKernel32,
+    ) -> None:
+        windows_shaped.raise_from.add("GenerateConsoleCtrlEvent")
+        assert win_job.send_ctrl_break(1234) is False
+
 
 def test_structures_have_consistent_sizes() -> None:
     """The ctypes structs must actually assemble -- a field-order or type

@@ -324,7 +324,11 @@ def send_ctrl_break(pid: int) -> bool:
     """
     if not IS_WINDOWS or _kernel32 is None:
         return False
-    ok = bool(_kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid))
+    try:
+        ok = bool(_kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid))
+    except (OSError, ctypes.ArgumentError) as exc:
+        _log.debug("win_job_ctrl_break_exception", exc_class=type(exc).__name__)
+        return False
     if not ok:
         _log.debug(
             "win_job_ctrl_break_failed", pid=pid, error=_last_error(),

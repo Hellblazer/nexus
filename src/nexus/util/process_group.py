@@ -253,8 +253,13 @@ def kill_tree(proc_or_pid: Any, job: int | None, sig: int = KILL_SIGNAL) -> bool
 
 
 def release(job: int | None) -> None:
-    """Close *job* (from :func:`contain`) without attempting to kill
-    anything -- the SUCCESS-path counterpart to :func:`kill_tree`
+    """Close *job* (from :func:`contain`) on the SUCCESS path, the
+    counterpart to :func:`kill_tree`. It sends no signal, but it is not a
+    pure no-op on Windows: the job carries
+    ``JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`` and this process holds its only
+    handle, so closing it terminates any descendant the direct child left
+    running in the job. POSIX has no equivalent; a stray grandchild there
+    outlives the parent's success path
     (nexus-6y4e0 review: a job handle assigned at spawn must close on
     EVERY outcome, not only a timeout/failure kill; three call sites
     closed it only inside their ``except TimeoutExpired`` branch and
