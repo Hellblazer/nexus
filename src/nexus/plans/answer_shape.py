@@ -78,6 +78,20 @@ class AnswerShape(str, Enum):
     LISTING = "listing"
     #: Empty or whitespace-only ``final_text``.
     EMPTY = "empty"
+    #: No plan ran: the plan-match gate missed and the inline planner
+    #: failed. Set by ``nx_answer`` directly and never produced by
+    #: :func:`classify_answer_shape`, so it is not in
+    #: :data:`NON_ANSWER_SHAPES` (``nx answer-runs`` already classes these
+    #: rows by their recorded text, as ``planner_error``) (nexus-f9kxd).
+    PLANNER_ERROR = "planner_error"
+    #: ``nx_answer`` stopped on an error: invalid input, a plan-match or
+    #: plan-execution failure, or a retrieval refusal. Set directly, like
+    #: ``PLANNER_ERROR`` (nexus-f9kxd).
+    ERROR = "error"
+    #: The plan ran and every retrieval step returned zero results, so
+    #: there was nothing to reduce. Set directly, like ``PLANNER_ERROR``
+    #: (nexus-f9kxd).
+    NO_EVIDENCE = "no_evidence"
 
 
 #: Every shape that is not an answer. ``nx_answer`` records these as

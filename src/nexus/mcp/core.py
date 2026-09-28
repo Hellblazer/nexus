@@ -10288,11 +10288,25 @@ async def nx_answer(
             # nexus-90gyo: what final_text structurally IS — "answered",
             # or one of the non-answer shapes (hydration_dump,
             # extractions_only, ranking_only, operator_payload, retrieval_only, listing,
-            # empty). A caller must not read final_text as prose unless
-            # this is "answered". None when the plan path never
-            # classified (see the closure declaration).
+            # empty), or, set by _error_result (nexus-f9kxd), error /
+            # planner_error / no_evidence. A caller must not read final_text
+            # as prose unless this is "answered". None on the remaining
+            # unclassified paths: the single-step fast path, a continuation
+            # handoff, and the budget-exhausted marker (which carries its
+            # own prefix).
             "answer_shape": _answer_shape,
         }
+
+    # nexus-f9kxd: single emitter for every error return. The tool contract
+    # says a degraded answer is marked -- ``[non-answer: <shape>]`` in text,
+    # a non-"answered" ``answer_shape`` when structured -- and the error
+    # paths returned bare text with ``answer_shape=None``, so a caller could
+    # not tell a failure from an answer without parsing prose.
+    def _error_result(text: str, *, shape: str = "error", **kwargs: Any) -> "str | dict":
+        nonlocal _answer_shape
+        from nexus.plans.answer_shape import NON_ANSWER_NOTICE_PREFIX  # noqa: PLC0415 — deferred: error paths only
+        _answer_shape = shape
+        return _result(f"{NON_ANSWER_NOTICE_PREFIX} {shape}] {text}", **kwargs)
 
     # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
     # emitter for the budget-exhausted marker. Called from TWO sites —
@@ -10511,7 +10525,7 @@ async def nx_answer(
     # fails loudly (code-review S-4) instead of silently admitting
     # every match (negative) or rejecting every cosine match (> 1.0).
     if min_confidence is not None and not (0.0 <= min_confidence <= 1.0):
-        return _result(
+        return _error_result(
             f"min_confidence must be in [0.0, 1.0], got {min_confidence!r}"
         )
     # RDR-200 Phase 1a (nexus-4e75w.3): bounds-check the same way
@@ -10519,7 +10533,7 @@ async def nx_answer(
     # fails loudly before any dispatch rather than being silently
     # coerced by a bare truthy check further down.
     if continuation is not None and not isinstance(continuation, bool):
-        return _result(
+        return _error_result(
             f"continuation must be a bool or None, got {continuation!r}"
         )
     effective_min_confidence = (
@@ -10535,7 +10549,7 @@ async def nx_answer(
     # dispatch, exactly like a degenerate min_confidence.
     if _budget_enforcement_enabled:
         if budget_usd is not None and budget_usd <= 0:
-            return _result(f"budget_usd must be > 0, got {budget_usd!r}")
+            return _error_result(f"budget_usd must be > 0, got {budget_usd!r}")
         effective_budget_usd = budget_usd if budget_usd is not None else _derived_budget_usd
 
     if force_dynamic:
@@ -10616,7 +10630,7 @@ async def nx_answer(
                 op="plan_match",
             )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            return _result(f"Error during plan match: {exc}")
+            return _error_result(f"Error during plan match: {exc}")
 
     if not matches or not _nx_answer_match_is_hit(
         matches[0].confidence, threshold=effective_min_confidence,
@@ -10663,9 +10677,10 @@ async def nx_answer(
             # "planner returned only non-dispatchable tools: Bash, grep"
             # — so the user isn't left guessing why the inline path failed.
             reason = str(exc) or "unknown error"
-            return _result(
+            return _error_result(
                 f"No matching plan found and inline planner failed: {reason}. "
-                "Try rephrasing, or use search/query directly."
+                "Try rephrasing, or use search/query directly.",
+                shape="planner_error",
             )
     else:
         best = matches[0]
@@ -11013,7 +11028,7 @@ async def nx_answer(
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
-                return _result(str(exc), plan_id=best.plan_id, step_count=0)
+                return _error_result(str(exc), plan_id=best.plan_id, step_count=0)
 
             # Resolve the same way plan_run (Step 4 below) would: caller
             # bindings autoaliased from the question, merged over the
@@ -11054,7 +11069,7 @@ async def nx_answer(
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
-                return _result(str(exc), plan_id=best.plan_id, step_count=0)
+                return _error_result(str(exc), plan_id=best.plan_id, step_count=0)
             q = step_args.get("question", question)
             # nexus-rl59s (code review [24061] Critical): this fast path
             # bypasses plan_run, so the runner's fall-through default never
@@ -11172,7 +11187,7 @@ async def nx_answer(
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
-            return _result(
+            return _error_result(
                 f"Error in single-step query: {exc}",
                 plan_id=best.plan_id,
                 step_count=1,
@@ -11245,7 +11260,7 @@ async def nx_answer(
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
             pass
-        return _result(str(exc), plan_id=best.plan_id, step_count=0)
+        return _error_result(str(exc), plan_id=best.plan_id, step_count=0)
 
     # nexus-nyry9.5 (RDR-196 .r5 review-fix): the retrieval-only
     # deadline exemption that used to apply here was DELETED along with
@@ -11352,7 +11367,7 @@ async def nx_answer(
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
-        return _result(
+        return _error_result(
             f"Error during plan execution: {exc}",
             plan_id=best.plan_id,
             step_count=len(_exc_step_records),
@@ -11608,7 +11623,7 @@ async def nx_answer(
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
-            return _result(
+            return _error_result(
                 f"Error during plan execution: {exc}",
                 plan_id=best.plan_id,
                 step_count=len(_exc_step_records),
@@ -11748,8 +11763,8 @@ async def nx_answer(
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
-        return _result(
-            no_match, plan_id=best.plan_id,
+        return _error_result(
+            no_match, shape="no_evidence", plan_id=best.plan_id,
             step_count=len(result.steps), chunks=[],
             step_records=_result_step_records,
         )
