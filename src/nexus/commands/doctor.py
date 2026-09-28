@@ -2445,9 +2445,12 @@ def _run_supplementary_checks() -> None:
     "check_search",
     is_flag=True,
     default=False,
-    help="Run probe 3a — the name-resolution canary from "
-         "tests/fixtures/name_canaries.py. Exits 2 when any surface "
-         "raises an unexpected exception. RDR-087 Phase 3.2.",
+    help="Run probes 3a and 3b: the name-resolution canary from "
+         "tests/fixtures/name_canaries.py, then a retrieval probe of every "
+         "collection with a query drawn from its own text. Exits 2 when a "
+         "surface raises, a collection drops its own text at the distance "
+         "threshold, or a collection's embedding model disagrees with its "
+         "name. RDR-087 Phase 3.",
 )
 @click.option(
     "--check-resources",

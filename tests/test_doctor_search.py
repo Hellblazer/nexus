@@ -455,3 +455,66 @@ class TestRetrievalQualityProbe:
         assert by_name["knowledge__drop"] == "threshold_drop"
         assert by_name["docs__drifted"] == "model_drift"
         assert by_name["code__boom"] == "error"
+
+
+# nexus-dhvzx: the 7.64.1 shakeout ran --check-search on the live tenant; the
+# canned query "example test probe" was irrelevant to most collections, the
+# per-collection threshold correctly dropped it, 58 of 111 collections read
+# threshold_drop, and the check exited 2 on every real tenant. The existing
+# tests stubbed search to return whatever each case needed, so no test ever
+# held a collection whose content the canned query did not match.
+
+
+class _SubjectT3:
+    """Collections with their own subject text; get() returns a chunk."""
+
+    TEXT = {
+        "code__a__voyage-code-3__v1": "def reconcile_manifest(doc_id): ...",
+        "rdr__a__voyage-context-3__v1": "RDR-211 tuple claim lease renewal",
+    }
+
+    def get_collection(self, col):
+        text = self.TEXT[col]
+
+        class _Coll:
+            def get(self, include=None, limit=None):
+                return {"ids": ["x"], "documents": [text]}
+        return _Coll()
+
+
+def _thresholded_search(query, cols, n_results, t3, diagnostics_out=None):
+    """A search whose threshold keeps a hit only for a query near the
+    collection's own text, the way a real per-collection threshold does."""
+    from nexus.search_engine import SearchDiagnostics
+
+    col = cols[0]
+    dropped = 0 if query in _SubjectT3.TEXT[col] else 1
+    diagnostics_out.append(SearchDiagnostics(
+        per_collection={col: (1, dropped, 0.5, None)},
+        total_dropped=dropped, total_raw=1, failed_collections={},
+    ))
+    return []
+
+
+def test_the_canned_query_reads_threshold_drop_on_healthy_collections() -> None:
+    """The defect, reproduced: nothing is wrong with either collection."""
+    from nexus.doctor_search import run_retrieval_quality_probe
+
+    t3 = _SubjectT3()
+    rows = run_retrieval_quality_probe(
+        t3=t3, collections=list(_SubjectT3.TEXT), search_fn=_thresholded_search,
+        model_for=lambda c: "", metadata_fn=lambda c: {},
+    )
+    assert {r.outcome for r in rows} == {"threshold_drop"}
+
+
+def test_each_collection_is_probed_with_its_own_text() -> None:
+    from nexus.doctor_search import _default_query_for, run_retrieval_quality_probe
+
+    t3 = _SubjectT3()
+    rows = run_retrieval_quality_probe(
+        t3=t3, collections=list(_SubjectT3.TEXT), search_fn=_thresholded_search,
+        model_for=lambda c: "", metadata_fn=lambda c: {},
+        query_for=lambda col: _default_query_for(t3, col),
+    )
+    assert {r.outcome for r in rows} == {"matched"}

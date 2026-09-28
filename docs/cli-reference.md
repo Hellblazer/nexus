@@ -3138,7 +3138,7 @@ nx doctor --fix-paths --dry-run # Preview migration without applying
 
 | Flag | Description |
 |------|-------------|
-| `--check-search` | Run probe 3a — the name-resolution canary from `tests/fixtures/name_canaries.py`. Exits 2 when any surface raises an unexpected exception (RDR-087 Phase 3.2) |
+| `--check-search` | Run probes 3a and 3b: the name-resolution canary from `tests/fixtures/name_canaries.py`, then a retrieval probe of every collection with a query drawn from its own text. Exits 2 when a surface raises, a collection drops its own text at the distance threshold, or a collection's embedding model disagrees with its name (RDR-087 Phase 3) |
 | `--check-resources` | Probe POSIX semaphore headroom and report orphan multiprocessing-tracker pressure. Exits 2 with `Errno 28` when the namespace is exhausted (MinerU workers / orphan chroma children / trackers re-parented to init after ungraceful MCP shutdowns) |
 | `--check-taxonomy` | Verify the `topic_links` ≡ projection-assignment invariant (GH #252) against the ENGINE. Exits 1 on drift or an engine-side error, 2 when no engine answers or the deployed engine lacks the `/links/drift` route (unverifiable is not a pass; the frozen-SQLite fallback was deleted 2026-08-29 — there is no path back to that era) |
 | `--check-tier-discipline` | Audit tier-write activity for the current session: prints the tier-write summary and warns when a substantive session has no write-back (Phase 1B nexus-a52i) |

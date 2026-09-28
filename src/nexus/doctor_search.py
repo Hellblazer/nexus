@@ -186,6 +186,29 @@ def _default_model_for(col: str) -> str:
     return voyage_model_for_collection(col)
 
 
+#: Probe text drawn from a collection's own chunk is cut to this many
+#: characters: enough to be a real query, short enough to stay cheap.
+_PROBE_QUERY_CHARS: int = 200
+
+
+def _default_query_for(t3, col: str) -> str | None:
+    """A probe query drawn from one of *col*'s own chunks, or ``None``.
+
+    nexus-dhvzx: one canned query ("example test probe") for every
+    collection was irrelevant to most of them, so the per-collection
+    distance threshold correctly dropped it, 58 of 111 collections read
+    ``threshold_drop``, and the check exited 2 on every real tenant. A
+    healthy collection must retrieve its own text; that is the retrieval
+    health this probe claims to measure.
+    """
+    got = t3.get_collection(col).get(include=["documents"], limit=1)
+    for doc in got.get("documents") or []:
+        text = " ".join((doc or "").split())[:_PROBE_QUERY_CHARS]
+        if text:
+            return text
+    return None
+
+
 def run_retrieval_quality_probe(
     *,
     t3,
@@ -194,6 +217,7 @@ def run_retrieval_quality_probe(
     model_for: Callable[[str], str] = _default_model_for,
     metadata_fn: Callable[[str], dict[str, Any]] | None = None,
     query: str = "example test probe",
+    query_for: Callable[[str], str | None] | None = None,
     n_results: int = 5,
 ) -> list[ProbeResult]:
     """Query each registered collection and classify retrieval health.
@@ -209,8 +233,10 @@ def run_retrieval_quality_probe(
         model_for: maps collection name → expected embedding_model.
         metadata_fn: ``col_name -> metadata dict``. Defaults to
             ``t3.collection_metadata`` when *None*.
-        query: canned probe query. Short so we stay inside the budget
-            (≤400 ms per A-2 measurement).
+        query: canned probe query, used for a collection when
+            ``query_for`` is unset or yields nothing (no readable chunk).
+        query_for: ``col_name -> probe query or None``; ``run_check_search``
+            passes :func:`_default_query_for` (the collection's own text).
         n_results: small probe depth.
     """
     from nexus.search_engine import SearchDiagnostics  # noqa: F401,PLC0415 — deferred import; presence-probe only needed in this diagnostic
@@ -253,9 +279,10 @@ def run_retrieval_quality_probe(
             continue
 
         try:
+            probe = (query_for(col) if query_for is not None else None) or query
             diag_list: list[Any] = []
             search_fn(
-                query, [col], n_results, t3,
+                probe, [col], n_results, t3,
                 diagnostics_out=diag_list,
             )
         except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
@@ -441,6 +468,7 @@ def run_check_search(*, json_out: bool) -> None:
                     run_retrieval_quality_probe(
                         t3=t3,
                         collections=collections,
+                        query_for=lambda col: _default_query_for(t3, col),
                     )
                 )
 
