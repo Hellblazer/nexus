@@ -2721,6 +2721,14 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         if len(ids) <= 1:
             topics = [self.get_topic_by_id(t) for t in ids]
         else:
-            with ThreadPoolExecutor(max_workers=min(_LABEL_FETCH_WORKERS, len(ids))) as pool:
-                topics = list(pool.map(self.get_topic_by_id, ids))
+            try:
+                with ThreadPoolExecutor(max_workers=min(_LABEL_FETCH_WORKERS, len(ids))) as pool:
+                    topics = list(pool.map(self.get_topic_by_id, ids))
+            except Exception:  # noqa: BLE001 — retried serially below
+                # The client's self-heal (re-resolve on a 401 or reset) is
+                # unlocked and retries once per call; several pool workers
+                # failing together can each exhaust their retry where the
+                # serial loop heals on the first (review of 791bc1a81). Fall
+                # back to it; a genuine failure still raises from there.
+                topics = [self.get_topic_by_id(t) for t in ids]
         return {tid: t["label"] for tid, t in zip(ids, topics) if t}

@@ -57,15 +57,23 @@ def test_hybrid_score_weights(vector_norm: float, frecency_norm: float, expected
 
 # ── AC2: --hybrid warns when no code corpus ───────────────────────────────────
 
-def test_hybrid_no_code_corpus_warning(capsys):
-    """hybrid_score_results logs a warning when no code__ collections in scope."""
+def test_hybrid_no_code_corpus_warning():
+    """apply_hybrid_scoring records that no code__ collection is in scope.
+
+    nexus-zdzm5: a debug event now, not a warning; a library warning reached
+    CLI users as a raw structlog line, and nx search prints its own note
+    (tests/test_search_cmd_server_rerank.py pins that)."""
+    from unittest.mock import patch
+
     results = [
         SearchResult(id="1", content="text", distance=0.1,
                      collection="docs__papers", metadata={}),
     ]
-    apply_hybrid_scoring(results, hybrid=True)
-    captured = capsys.readouterr()
-    assert "no code corpus" in (captured.out + captured.err).lower()
+    with patch("nexus.scoring._log") as log:
+        apply_hybrid_scoring(results, hybrid=True)
+    assert any(c.args and c.args[0] == "hybrid_no_code_corpus_in_scope"
+               for c in log.debug.call_args_list)
+    assert not log.warning.called
 
 
 def test_hybrid_mixed_corpus_no_warning(capsys, monkeypatch):

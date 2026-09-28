@@ -108,3 +108,24 @@ def test_topic_labels_are_fetched_concurrently_and_completely() -> None:
                       4: "topic 4", 5: "topic 5", 6: "topic 6"}
     assert list(labels) == [3, 1, 2, 9, 4, 5, 6]
     assert state["peak"] > 1, "labels fetched one at a time"
+
+
+def test_a_failing_concurrent_label_fetch_falls_back_to_the_serial_loop() -> None:
+    """Review of 791bc1a81: concurrent workers share one client whose
+    self-heal is unlocked; when the pool fails, the serial loop runs."""
+    from nexus.db.t2.http_taxonomy_store import HttpTaxonomyStore
+
+    store = object.__new__(HttpTaxonomyStore)
+    calls = {"n": 0}
+    lock = threading.Lock()
+
+    def get_topic_by_id(tid):
+        with lock:
+            calls["n"] += 1
+            first_wave = calls["n"] <= 3
+        if first_wave and tid == 2:
+            raise RuntimeError("401 mid token rotation")
+        return {"id": tid, "label": f"topic {tid}"}
+
+    store.get_topic_by_id = get_topic_by_id
+    assert store.get_labels_for_ids([1, 2, 3]) == {1: "topic 1", 2: "topic 2", 3: "topic 3"}
