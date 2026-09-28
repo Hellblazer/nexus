@@ -512,8 +512,8 @@ def _run_upgrade(*, dry_run: bool, auto_mode: bool, skip_t3: bool = False) -> No
 
     if not auto_mode:
         click.echo(
-            "Service mode: the local SQLite/Chroma tiers are an immutable "
-            "migration source — no local schema migration to run."
+            "Service mode: no local schema migration to run; the service "
+            "applies its own schema when it starts."
         )
 
 

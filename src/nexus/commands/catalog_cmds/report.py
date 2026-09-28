@@ -172,15 +172,35 @@ def orphans_cmd(no_links: bool) -> None:
 
 
 @click.command("session-summary")
-@click.option("--since", default=24, type=int, help="Hours to look back for git changes")
-def session_summary_cmd(since: int) -> None:
+@click.option(
+    "--since", default="24",
+    help="Look back this far for git changes: a number of hours, or an ISO 8601 "
+         "timestamp as every other --since takes.",
+)
+def session_summary_cmd(since: str) -> None:
     """Show link graph summary for recently modified files.
 
     \b
     Examples:
-      nx catalog session-summary            # files modified in last 24 hours
-      nx catalog session-summary --since 48 # last 48 hours
+      nx catalog session-summary                            # last 24 hours
+      nx catalog session-summary --since 48                 # last 48 hours
+      nx catalog session-summary --since 2026-09-27T00:00   # since a timestamp
     """
+    # nexus-sis0m.4: every other --since takes ISO 8601; this one took only
+    # integer hours (shakeout 7.64.1 Surface E F11). Both are accepted now.
+    import datetime as _dt  # noqa: PLC0415 — branch-local
+
+    if since.strip().isdigit():
+        git_since, since_label = f"{int(since)} hours ago", f"in the last {int(since)} hours"
+    else:
+        try:
+            _dt.datetime.fromisoformat(since.strip().replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise click.BadParameter(
+                f"{since!r} is neither a number of hours nor an ISO 8601 timestamp",
+                param_hint="--since",
+            ) from exc
+        git_since, since_label = since.strip(), f"since {since.strip()}"
     from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — deferred import; rare/branch-local path or circular-dep / startup-cost avoidance
 
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -195,7 +215,7 @@ def session_summary_cmd(since: int) -> None:
         result = run_bounded(
             [
                 "git", "log",
-                f"--since={since} hours ago",
+                f"--since={git_since}",
                 "--name-only",
                 "--pretty=format:",
                 "--diff-filter=ACMR",
@@ -208,7 +228,7 @@ def session_summary_cmd(since: int) -> None:
         return
 
     if not files:
-        click.echo(f"No files modified in the last {since} hours.")
+        click.echo(f"No files modified {since_label}.")
     else:
         # nexus-xnz0o: replaced raw SQL with catalog API (uniform across backends).
         found_any = False

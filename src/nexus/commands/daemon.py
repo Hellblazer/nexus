@@ -1224,6 +1224,18 @@ def service_status_cmd(config_dir_str: str | None, as_json: bool) -> None:
     record = registry.discover(scope)
 
     if record is None:
+        if as_json:
+            # nexus-sis0m.4: --json promises JSON on stdout; a script parsing
+            # it got plain text (shakeout 7.64.1 Surface E F11). Still exit 1.
+            click.echo(_json.dumps({
+                "status": "no_lease",
+                "running": False,
+                "addr_file": str(config_dir / f"storage_service_addr.{_os.getuid()}"),
+                "detail": "No storage service lease found; this install either "
+                          "runs against a managed endpoint or the local service "
+                          "is not running (nx daemon service start).",
+            }, indent=2))
+            sys.exit(1)
         click.echo(
             "No storage service lease found — is the service running?",
             err=True,

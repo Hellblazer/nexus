@@ -2016,7 +2016,7 @@ def merge_candidates_cmd(
     exclude_hubs: bool, hub_top_n: int,
     limit: int, fmt: str, create_link: bool,
 ) -> None:
-    """Pair-wise cross-collection overlap ranking (RDR-087 Phase 4.3).
+    """(Unavailable) Pair-wise cross-collection overlap ranking (RDR-087 Phase 4.3).
 
     Surfaces (a, b) pairs where collection *a* projects into topics in
     collection *b* with high similarity — hints at merge or bridge-
@@ -2030,7 +2030,9 @@ def merge_candidates_cmd(
         )
     from nexus.merge_candidates import run_merge_candidates  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    click.echo(
+    # nexus-sis0m.4: the analysis is unavailable; exiting 0 with prose
+    # (even under --format json) read as an empty result.
+    raise click.ClickException(
         run_merge_candidates(
             min_shared=min_shared,
             min_similarity=min_similarity,

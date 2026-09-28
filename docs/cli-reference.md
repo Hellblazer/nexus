@@ -908,7 +908,7 @@ carried (import re-embeds through the real store_put chain, so the
 bundle survives an embedding-mode change); import is idempotent and
 reports every unresolvable link or failed doc without aborting the rest.
 See `docs/catalog.md` § Recovery bundle for the format contract. For an
-embedding-preserving per-collection backup use `nx export COLLECTION`
+embedding-preserving per-collection backup use `nx store export COLLECTION`
 (`.nxexp`) instead.
 
 ### nx catalog show

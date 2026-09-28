@@ -463,10 +463,17 @@ def link_density_cmd(
     # nexus-xnz0o: replaced raw SQL GROUP BY with distinct_doc_collections() +
     # list_by_collection() for uniform SQLite + service mode support.
     collections = cat.distinct_doc_collections()
-    # Build (collection, total) pairs via list_by_collection (cached per-call).
+    # nexus-sis0m.4: the BFS needs only --sample seeds per collection; this
+    # read every document of every collection first and printed nothing for
+    # minutes (4m on a 23k-document catalog, shakeout 7.64.1 Surface E F11).
+    click.echo(
+        f"Sampling up to {sample} seed(s) in each of {len(collections)} "
+        f"collection(s), BFS depth {depth}…",
+        err=True,
+    )
     coll_entries: dict[str, list] = {}
     for coll in collections:
-        coll_entries[coll] = cat.list_by_collection(coll)
+        coll_entries[coll] = cat.list_by_collection(coll, limit=sample)
     rows = [(coll, len(entries)) for coll, entries in sorted(coll_entries.items())]
 
     if not rows:
