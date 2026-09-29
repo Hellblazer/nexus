@@ -55,7 +55,6 @@ from tests.db._service_fixture import (
     ENGINE_ADMIN_DB_ENV_KEYS,
     SERVICE_ROLES_SQL,
     pg_bin_dir,
-    jar_argv,
     spawn_service,
     wait_for_service,
 )
@@ -218,7 +217,7 @@ def java_service(pg_instance):
     # output accumulated before the port bound (nexus-j0nec), and discarded the
     # log so the failure surfaced as a bare TimeoutError.
     proc, svc_log = spawn_service(
-        jar_argv(_JAVA, _JAR), env, log_dir=chroma_data,
+        [str(_JAVA), "-jar", str(_JAR)], env, log_dir=chroma_data,
     )
     try:
         wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=svc_log)

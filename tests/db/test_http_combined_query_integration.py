@@ -103,7 +103,6 @@ import pytest
 
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
-    jar_argv,
     spawn_service,
     wait_for_service,
 )
@@ -351,7 +350,7 @@ def local_service(pg_instance: dict):
     # nexus-lom9g: FILE-backed output via the shared primitive; the old
     # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
     # output accumulated before the port bound (nexus-j0nec).
-    proc, _svc_log = spawn_service(jar_argv(_JAVA, _JAR), env)
+    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
     try:
         wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=90.0)
         yield f"http://127.0.0.1:{svc_port}", token

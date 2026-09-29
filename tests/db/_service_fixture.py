@@ -774,6 +774,17 @@ def jar_argv(java: str | Path, jar: str | Path) -> list[str]:
     return [str(java), jvm_error_file_arg(), "-jar", str(jar)]
 
 
+def with_error_file(cmd: list[str]) -> list[str]:
+    """Insert the hs_err redirect just before ``-jar`` when *cmd* is a JVM launch
+    that has none (nexus-o5xyx.2). A command without ``-jar`` (a native binary) or
+    with its own ``-XX:ErrorFile=`` comes back unchanged. The flag must precede
+    ``-jar``: after it, the JVM hands it to the program as an argument."""
+    if "-jar" not in cmd or any(str(a).startswith("-XX:ErrorFile=") for a in cmd):
+        return list(cmd)
+    i = cmd.index("-jar")
+    return [*cmd[:i], jvm_error_file_arg(), *cmd[i:]]
+
+
 def spawn_service(
     cmd: list[str],
     env: dict[str, str],
@@ -801,7 +812,11 @@ def spawn_service(
     Returns ``(proc, log_path)``. Pair with :func:`wait_for_service`, which
     surfaces the tail of *log_path* when the port never opens — the diagnostic
     the PIPE form threw away.
+
+    A JVM launch (``-jar`` in *cmd*) gets ``-XX:ErrorFile=`` injected by
+    :func:`with_error_file`, so no caller can drop hs_err into the cwd.
     """
+    cmd = with_error_file(cmd)
     d = Path(log_dir) if log_dir is not None else Path(tempfile.mkdtemp(prefix="nexus-svc-log-"))
     d.mkdir(parents=True, exist_ok=True)
     log_path = d / "engine.log"
