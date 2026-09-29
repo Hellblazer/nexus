@@ -232,8 +232,8 @@ def _update_sets_closed_status(tokens: list[str]) -> bool:
 #: verb-position detector, reopened one call away for batch/import. See
 #: :func:`_pipeline_segments` for what "same shell segment" means here.
 _BD_BATCH_CLOSE_RE = re.compile(
-    r'\b(?:close|done)\s+(?:nexus-[a-z0-9]+)\b'
-    r'|\bupdate\s+nexus-[a-z0-9]+\s+[^\n]*?\bstatus\s*=\s*closed\b',
+    r'\b(?:close|done)\s+(?:nexus-[a-z0-9]+(?:\.[0-9]+)*)\b'
+    r'|\bupdate\s+nexus-[a-z0-9]+(?:\.[0-9]+)*\s+[^\n]*?\bstatus\s*=\s*closed\b',
     re.IGNORECASE,
 )
 
@@ -246,7 +246,7 @@ _BD_BATCH_CLOSE_RE = re.compile(
 #: line that only touches unrelated fields does not match. SCOPED to the
 #: prior pipe stage(s) the same way :data:`_BD_BATCH_CLOSE_RE` is, for the
 #: same round-2 reason.
-_BD_IMPORT_ID_RE = re.compile(r'"id"\s*:\s*"nexus-[a-z0-9]+"', re.IGNORECASE)
+_BD_IMPORT_ID_RE = re.compile(r'"id"\s*:\s*"nexus-[a-z0-9]+(?:\.[0-9]+)*"', re.IGNORECASE)
 _BD_IMPORT_CLOSED_RE = re.compile(r'"status"\s*:\s*"closed"', re.IGNORECASE)
 
 #: `bd sql <query>` (a real bd subcommand, `bd sql --help`: "Execute a raw
@@ -737,7 +737,10 @@ _FLAG_VALUE_RE = re.compile(
 )
 
 
-_BEAD_ID_RE = re.compile(r'\bnexus-[a-z0-9]+\b', re.IGNORECASE)
+#: nexus-qhskl: a child id (nexus-x.1) is its own bead, with its own review
+#: marker. The pattern once stopped at the dot, so the gate checked the
+#: parent and any child's marker covered every sibling.
+_BEAD_ID_RE = re.compile(r'\bnexus-[a-z0-9]+(?:\.[0-9]+)*\b', re.IGNORECASE)
 _ENV_ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 
@@ -840,7 +843,7 @@ def _close_segment_ids(cmd: str) -> list[str] | None:
                 # an unknown flag's value may hide a target: scan it all.
                 if not _LITERAL_BEAD_ARG_RE.fullmatch(tok):
                     return None
-                bead = tok.split('.', 1)[0].lower()  # a child id gates as its parent, as before
+                bead = tok.lower()  # a child id is its own target (nexus-qhskl)
                 if bead not in seen:
                     seen.add(bead)
                     ids.append(bead)
@@ -1148,7 +1151,9 @@ def _coverage(
             return False
         if bead_id in tags:
             return True
-        pat = re.compile(r'(?<![A-Za-z0-9-])' + re.escape(bead_id) + r'(?![A-Za-z0-9-])', re.IGNORECASE)
+        # Exact id: nexus-x.1 must not cover nexus-x, nor nexus-x.12 cover
+        # nexus-x.1 (nexus-qhskl). A sentence-ending dot still ends the id.
+        pat = re.compile(r'(?<![A-Za-z0-9.-])' + re.escape(bead_id) + r'(?![A-Za-z0-9-]|\.[0-9])', re.IGNORECASE)
         return bool(pat.search(content_line))
 
     def _parse_entries(raw):

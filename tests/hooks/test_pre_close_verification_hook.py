@@ -2578,3 +2578,37 @@ class TestE3makCompleteReviewerSet:
             env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "1"},
         )
         assert _get_decision(_parse_stdout(result.stdout)) == ""
+
+
+class TestQhsklChildBeadIds:
+    """nexus-qhskl: a child bead id (nexus-x.1) is its own close target.
+    The id pattern stopped at the dot, so closing nexus-x.2 checked
+    coverage for nexus-x, and a marker naming nexus-x.1 matched nexus-x
+    by substring: any child's marker let every sibling close unreviewed."""
+
+    def _close(self, mock_config_env, fake_nx, marker_id: str, close_id: str) -> dict:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(_marker(f"review-completed,{marker_id}", f"review-completed: {marker_id}"))
+        result = _run_hook(
+            _make_payload(command="bd " + "close " + close_id),
+            path_prefix=str(fake_bin), env_overrides=env,
+        )
+        return _parse_stdout(result.stdout)
+
+    def test_a_childs_own_marker_covers_its_close(self, mock_config_env, fake_nx) -> None:
+        assert _get_decision(self._close(mock_config_env, fake_nx, "nexus-qhs01.1", "nexus-qhs01.1")) == ""
+
+    def test_a_siblings_marker_does_not_cover_a_child(self, mock_config_env, fake_nx) -> None:
+        parsed = self._close(mock_config_env, fake_nx, "nexus-qhs01.1", "nexus-qhs01.2")
+        assert _get_decision(parsed) == "deny"
+        assert "nexus-qhs01.2" in _get_reason(parsed)
+
+    def test_a_longer_siblings_marker_does_not_cover_a_child(self, mock_config_env, fake_nx) -> None:
+        parsed = self._close(mock_config_env, fake_nx, "nexus-qhs01.12", "nexus-qhs01.1")
+        assert _get_decision(parsed) == "deny"
+
+    def test_the_parents_marker_does_not_cover_a_child(self, mock_config_env, fake_nx) -> None:
+        assert _get_decision(self._close(mock_config_env, fake_nx, "nexus-qhs01", "nexus-qhs01.3")) == "deny"
+
+    def test_a_childs_marker_does_not_cover_the_parent(self, mock_config_env, fake_nx) -> None:
+        assert _get_decision(self._close(mock_config_env, fake_nx, "nexus-qhs01.3", "nexus-qhs01")) == "deny"

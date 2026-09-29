@@ -92,13 +92,13 @@ class TestTheHarvesterFixes:
         """Ours, created by the worktree convention: a command that
         changes directory before closing harvested the directory names."""
         ids = gate._bead_ids(f"cd /Users/x/git/nexus-wt/nexus-01 && {CLOSE} nexus-q02nx.17")
-        assert ids == ["nexus-q02nx"], ids
+        assert ids == ["nexus-q02nx.17"], ids
 
     def test_a_peer_worktree_path_is_not_a_close_target(self):
         """The dangerous instance: this path yields a token that IS
         bead-shaped, so the refusal reads as a real gate failure."""
         ids = gate._bead_ids(f"cd /Users/x/git/nexus-wt/nexus-c3 && {CLOSE} nexus-q02nx.17")
-        assert ids == ["nexus-q02nx"], ids
+        assert ids == ["nexus-q02nx.17"], ids
 
     def test_an_id_in_a_short_reason_flag_is_not_a_close_target(self):
         """PRE-EXISTING and unrelated to worktrees: -r is bd's real short
@@ -106,11 +106,11 @@ class TestTheHarvesterFixes:
         id mentioned in a close reason became a target. Taken from
         `bd close --help`, not guessed."""
         ids = gate._bead_ids(f'{CLOSE} nexus-q02nx.17 -r "supersedes nexus-zzzzz"')
-        assert ids == ["nexus-q02nx"], ids
+        assert ids == ["nexus-q02nx.17"], ids
 
     def test_an_id_in_a_reason_file_path_is_not_a_close_target(self):
         ids = gate._bead_ids(f"{CLOSE} nexus-q02nx.17 --reason-file nexus-93.txt")
-        assert ids == ["nexus-q02nx"], ids
+        assert ids == ["nexus-q02nx.17"], ids
 
     def test_real_targets_still_survive_both_fixes(self):
         """The fixes must not make the harvester find NOTHING — that
@@ -875,7 +875,7 @@ class TestTheTwoFlagTablesCannotDrift:
             f'{CLOSE} nexus-q02nx.17 --reason-file nexus-93.txt "unterminated',
             f'{CLOSE} nexus-q02nx.17 -r "unterminated supersedes nexus-zzzzz',
         ):
-            assert "nexus-q02nx" in gate._bead_ids(command), command
+            assert "nexus-q02nx.17" in gate._bead_ids(command), command
 
     @pytest.mark.parametrize("flag", sorted(gate._VALUE_FLAGS))
     def test_every_value_flag_is_blanked_on_the_fallback_path(self, flag: str) -> None:
@@ -891,7 +891,7 @@ class TestTheTwoFlagTablesCannotDrift:
             f"{flag} is in _VALUE_FLAGS but its value was still harvested on the "
             f"malformed-quoting fallback path; got {ids}"
         )
-        assert "nexus-q02nx" in ids, (
+        assert "nexus-q02nx.17" in ids, (
             f"blanking {flag} also blinded the harvester to the real target; "
             f"finding nothing routes to INDETERMINATE, which ALLOWS"
         )
@@ -1014,3 +1014,27 @@ class TestTheStampBudgetIsSharedNotIndependent:
             ["nexus-aaa", "nexus-bbb", "nexus-ccc"], "passed", "test"
         )
         assert calls == [], f"bd was invoked despite an exhausted budget: {calls}"
+
+
+class TestQhsklChildIds:
+    """nexus-qhskl: child ids keep their suffix on every extraction path."""
+
+    def test_a_close_names_the_child_not_its_parent(self) -> None:
+        assert gate._bead_ids("bd " + "close nexus-qhs01.3") == ["nexus-qhs01.3"]
+
+    def test_two_children_stay_distinct(self) -> None:
+        assert gate._bead_ids("bd " + "close nexus-qhs01.1 nexus-qhs01.2") == ["nexus-qhs01.1", "nexus-qhs01.2"]
+
+    def test_the_whole_command_fallback_keeps_the_suffix(self) -> None:
+        # $ID forces the fallback scan; the literal child must survive it whole.
+        ids = gate._bead_ids('ID=nexus-qhs01.4; bd ' + 'close "$ID" nexus-qhs01.5')
+        assert "nexus-qhs01.4" in ids and "nexus-qhs01.5" in ids
+        assert "nexus-qhs01" not in ids
+
+    def test_a_batch_update_closing_a_child_is_a_close(self) -> None:
+        cmd = "printf 'update nexus-qhs01.3 status=closed\\n' | bd batch"
+        assert gate._bd_verbs(cmd)["has_close_or_done"] is True
+
+    def test_an_import_closing_a_child_is_a_close(self) -> None:
+        cmd = """echo '{"id":"nexus-qhs01.3","status":"closed"}' | bd import -"""
+        assert gate._bd_verbs(cmd)["has_close_or_done"] is True
