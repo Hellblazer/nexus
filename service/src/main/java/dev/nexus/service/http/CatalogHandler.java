@@ -180,6 +180,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/purge"        -> handleManifestPurge(exchange, tenant, method);
                 case "/manifest/chashes"      -> handleManifestChashes(exchange, tenant, method);
                 case "/manifest/docs_for_chashes" -> handleDocsForChashes(exchange, tenant, method);
+                case "/manifest/chash_positions" -> handleChashPositions(exchange, tenant, method);
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/null_collection" -> handleManifestNullCollection(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
@@ -1373,6 +1374,30 @@ public final class CatalogHandler implements HttpHandler {
         // in handleManifestChashes above).
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
             Map.of("tumblers", docs, "count", docs.size())));
+    }
+
+    /**
+     * POST /v1/catalog/manifest/chash_positions (nexus-opxwd): {@code {chashes: [...]}}
+     * in, {@code {rows: [{chash, doc_id, position, chunk_count}], count: N}} out.
+     * Search's reverse lookup, with a payload proportional to the hits rather than
+     * to the referencing documents' full manifests. Same IN-list cap as its
+     * siblings; the client reconciles {@code len(rows) == count}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleChashPositions(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("chashes");
+        List<String> chashes = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (chashes.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many chashes (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var rows = repo.chashPositions(tenant, chashes);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("rows", rows, "count", rows.size())));
     }
 
     /**

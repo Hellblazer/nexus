@@ -157,6 +157,18 @@ class CatalogHandlerManifestEnvelopeTest {
         assertThat(resp.statusCode()).as("manifest write must succeed: " + resp.body()).isEqualTo(200);
     }
 
+    /** Several manifest rows for one doc, positions 0..n-1 (nexus-opxwd). */
+    private void writeManifestRows(String docId, String collection, List<String> chashes) throws Exception {
+        for (String chash : chashes) {
+            writeManifestRow(docId, collection, chash);
+        }
+        var rows = new java.util.ArrayList<Map<String, Object>>();
+        for (int i = 0; i < chashes.size(); i++) rows.add(Map.of("position", i, "chash", chashes.get(i)));
+        var resp = post("/v1/catalog/manifest/write",
+            mapper.writeValueAsString(Map.of("doc_id", docId, "collection", collection, "rows", rows)));
+        assertThat(resp.statusCode()).as("manifest write must succeed: " + resp.body()).isEqualTo(200);
+    }
+
     // ── nexus-ocf52: docs_for_chashes carries count ────────────────────────────
 
     @Test
@@ -206,6 +218,58 @@ class CatalogHandlerManifestEnvelopeTest {
         assertThat((String) body.get("error"))
             .as("mirrors handleManifestGetMany's 400 error shape")
             .isEqualTo("too many chashes (max 1000)");
+    }
+
+    // ── nexus-opxwd: chash_positions ────────────────────────────────────────────
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void chashPositions_returnsOnlyTheHitRows_withTheWholeDocumentsChunkCount() throws Exception {
+        var coll = "knowledge__opxwd-owner__v1";
+        var t1 = registerDoc("opxwd.owner", "opxwd doc 1", "file:///opxwd/doc1.md");
+        var t2 = registerDoc("opxwd.owner", "opxwd doc 2", "file:///opxwd/doc2.md");
+        String hit = "ab".repeat(32), other1 = "cd".repeat(32), other2 = "ef".repeat(32), shared = "12".repeat(32);
+        writeManifestRows(t1, coll, List.of(other1, hit, other2));
+        writeManifestRows(t2, coll, List.of(shared));
+
+        var resp = post("/v1/catalog/manifest/chash_positions",
+            mapper.writeValueAsString(Map.of("chashes", List.of(hit, shared, "00".repeat(32)))));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var body = mapper.readValue(resp.body(), MAP_T);
+        var rows = (List<Map<String, Object>>) body.get("rows");
+        assertThat(body.get("count")).isEqualTo(rows.size());
+        assertThat(rows).hasSize(2);
+        var byChash = new java.util.HashMap<String, Map<String, Object>>();
+        rows.forEach(r -> byChash.put((String) r.get("chash"), r));
+        assertThat(byChash.get(hit)).containsEntry("doc_id", t1).containsEntry("position", 1).containsEntry("chunk_count", 3);
+        assertThat(byChash.get(shared)).containsEntry("doc_id", t2).containsEntry("position", 0).containsEntry("chunk_count", 1);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void chashPositions_aChashInTwoDocs_returnsBothRowsOrderedByDocId() throws Exception {
+        var coll = "knowledge__opxwd2-owner__v1";
+        var t1 = registerDoc("opxwd2.owner", "opxwd2 doc 1", "file:///opxwd2/doc1.md");
+        var t2 = registerDoc("opxwd2.owner", "opxwd2 doc 2", "file:///opxwd2/doc2.md");
+        String dup = "9a".repeat(32), filler = "9b".repeat(32);
+        writeManifestRows(t1, coll, List.of(filler, dup));
+        writeManifestRows(t2, coll, List.of(dup));
+
+        var body = mapper.readValue(post("/v1/catalog/manifest/chash_positions",
+            mapper.writeValueAsString(Map.of("chashes", List.of(dup)))).body(), MAP_T);
+        var rows = (List<Map<String, Object>>) body.get("rows");
+        assertThat(rows).extracting(r -> r.get("doc_id")).containsExactly(
+            t1.compareTo(t2) < 0 ? t1 : t2, t1.compareTo(t2) < 0 ? t2 : t1);
+        var first = rows.get(0);
+        assertThat(first.get("chunk_count")).isEqualTo(first.get("doc_id").equals(t1) ? 2 : 1);
+    }
+
+    @Test
+    void chashPositions_overBatchCap_returns400() throws Exception {
+        var resp = post("/v1/catalog/manifest/chash_positions",
+            mapper.writeValueAsString(Map.of("chashes", java.util.Collections.nCopies(1001, "ab".repeat(32)))));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("too many chashes");
     }
 
     // ── nexus-b9puj: get_many carries count ────────────────────────────────────

@@ -6891,6 +6891,49 @@ public final class CatalogRepository {
     }
 
     /**
+     * {@code (chash, doc_id, position, chunk_count)} for every live manifest row
+     * holding one of {@code chashes} (nexus-opxwd).
+     *
+     * <p>Search needed only these four facts per hit, and fetched them by pulling
+     * every referencing document's FULL manifest through {@link #getManifestMany}:
+     * a payload proportional to the documents' sizes rather than to the hits,
+     * measured at about 3.4 s of a warm cloud search (nexus-w032x).
+     * {@code chunk_count} counts ALL of the document's manifest rows, which is what
+     * the client read as {@code len(manifest)}. Same tombstone filter as
+     * {@link #getManifestMany}, so the two answer alike for a live document.
+     *
+     * @return rows ordered by doc_id, then position
+     */
+    public List<Map<String, Object>> chashPositions(String tenant, List<String> chashes) {
+        if (chashes == null || chashes.isEmpty()) return List.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            var all = CATALOG_DOCUMENT_CHUNKS.as("all_rows");
+            // liveParentDoc correlates to the outer row's doc_id, which the outer
+            // WHERE already requires live; it is repeated here so the count read
+            // carries its own tombstone guard (TombstoneFilterGateTest).
+            Field<Integer> chunkCount = DSL.field(
+                ctx.selectCount().from(all)
+                   .where(all.DOC_ID.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID).and(liveParentDoc(ctx, tenant))));
+            var rows = ctx.select(CHK_CHASH_HEX, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                                  CATALOG_DOCUMENT_CHUNKS.POSITION, chunkCount)
+                          .from(CATALOG_DOCUMENT_CHUNKS)
+                          .where(CHK_CHASH_HEX.in(chashes).and(liveParentDoc(ctx, tenant)))
+                          .orderBy(CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
+                          .fetch();
+            List<Map<String, Object>> out = new ArrayList<>(rows.size());
+            for (var r : rows) {
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("chash",       r.value1());
+                m.put("doc_id",      r.value2());
+                m.put("position",    r.value3());
+                m.put("chunk_count", r.value4());
+                out.add(m);
+            }
+            return out;
+        });
+    }
+
+    /**
      * Batch-fetch manifest rows for multiple doc_ids (nexus-7lm3q).
      *
      * <p>Executes {@code SELECT ... FROM catalog_document_chunks WHERE doc_id IN (?)}
