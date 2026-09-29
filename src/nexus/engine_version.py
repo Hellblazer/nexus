@@ -572,7 +572,16 @@ from __future__ import annotations
 #: No changeset. The wire ledger carries no Unshipped entry and the change is
 #: additive, so the engine deploys BEFORE this client tag (nexus-1emxn
 #: choreography (a)).
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 138)
+#:
+#: 7.66.0 pairs with engine-service-v0.1.140 (tagged 2026-09-29 on 3cb2fcf5e):
+#: rename carries the new name's owner and rewrites notes' chroma:// URIs
+#: (nexus-sis0m.3), rename tombstones leave both routing views (nexus-4w07i),
+#: POST /v1/catalog/manifest/chash_positions (nexus-opxwd), and the mac-arm64
+#: binary pinned to minos 14.0 (nexus-280ei). v0.1.139 (37a27d340) differs
+#: only by lacking that pin and was never published: its mac leg linked minos
+#: 27.0 on hellmini and the ABI gate refused it. No changeset; all three wire
+#: entries are additive, so the engine deploys BEFORE this client tag.
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 140)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
