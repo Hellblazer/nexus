@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / "tests" / "e2e" / "lib"))
 
@@ -247,8 +249,95 @@ def test_settings_default_to_leg_ones_bounds_and_read_its_env_knobs() -> None:
 
 def test_the_probe_routes_the_installer_through_the_wait() -> None:
     """Wiring pin: main() must build the generation via build_generation, not a
-    bare subprocess.run of install_generation.sh (which is what shipped the bug)."""
+    bare subprocess.run of install_generation.sh (which is what shipped the bug).
+
+    Asserted on the CODE, not on substrings a comment could satisfy: the AST of
+    main() must contain a call to build_generation assigned to `outcome`, and no
+    subprocess.run call at all that names install_generation.sh.
+    """
+    import ast
+
     src = (REPO_ROOT / "tests" / "e2e" / "lib" / "generation_install_probe.py").read_text()
-    main_body = src[src.index("def main()"):]
-    assert "build_generation(" in main_body
-    assert '"install_generation.sh"), "--source"' not in main_body
+    main = next(
+        n for n in ast.parse(src).body if isinstance(n, ast.FunctionDef) and n.name == "main"
+    )
+    assigned = [
+        n for n in ast.walk(main)
+        if isinstance(n, ast.Assign)
+        and isinstance(n.value, ast.Call)
+        and isinstance(n.value.func, ast.Name)
+        and n.value.func.id == "build_generation"
+        and any(isinstance(t, ast.Name) and t.id == "outcome" for t in n.targets)
+    ]
+    assert len(assigned) == 1, "main() must do `outcome = build_generation(...)`"
+    for n in ast.walk(main):
+        if (
+            isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr == "run"
+            and "install_generation.sh" in ast.unparse(n)
+        ):
+            raise AssertionError(
+                "main() runs install_generation.sh directly, bypassing the propagation wait"
+            )
+
+
+def test_empty_env_knobs_fall_back_to_defaults_like_leg_one() -> None:
+    # leg 1: ${VAR:-default} treats exported-but-empty as unset; float("") would crash.
+    s = PropagationSettings.from_env({
+        "FRESH_MVV_PROPAGATION_CEILING_SECONDS": "",
+        "FRESH_MVV_PROPAGATION_INITIAL_BACKOFF_SECONDS": "",
+        "FRESH_MVV_PROPAGATION_MAX_BACKOFF_SECONDS": "",
+    })
+    assert (s.ceiling_s, s.initial_backoff_s, s.max_backoff_s) == (1800.0, 15.0, 60.0)
+
+
+class TestNotInRegistryClauseIsExact:
+    @pytest.mark.parametrize("text", [
+        "Because conexus-foo was not found in the package registry and you require",
+        "Because xconexus was not found in the package registry and you require",
+        "Because pdftext was not found in the package registry and conexus==7.66.0 depends on pdftext",
+        "Because conexus.extra was not found in the package registry and you require",
+    ])
+    def test_other_packages_are_not_our_release_being_late(self, text: str) -> None:
+        assert is_propagation_miss(text, "conexus==7.66.0") is False
+
+    def test_wrapped_exact_name_still_matches(self) -> None:
+        text = "Because conexus\n      was not found in the package registry and you"
+        assert is_propagation_miss(text, "conexus==7.66.0") is True
+
+
+class TestFailedInstallerLeavesNoGenerationDirectory:
+    """The retries rely on install_generation.sh's EXIT trap removing the
+    half-built gen-* tree, so N misses must not leave N directories behind."""
+
+    def test_real_installer_script_cleans_up_each_missed_attempt(self, tmp_path: Path) -> None:
+        stub_bin = tmp_path / "bin"
+        stub_bin.mkdir()
+        uv_log = tmp_path / "uv.log"
+        uv = stub_bin / "uv"
+        uv.write_text(
+            "#!/usr/bin/env bash\n"
+            f'echo "$1" >> "{uv_log}"\n'
+            'if [ "$1" = venv ]; then\n'
+            '  for last; do :; done\n'
+            '  mkdir -p "$last/bin"; printf "home = /x\\nversion = 3.12.0\\n" > "$last/pyvenv.cfg"\n'
+            "  exit 0\nfi\n"
+            f"cat >&2 <<'MSG'\n{_UV_MISS}MSG\n"
+            "exit 1\n"
+        )
+        uv.chmod(0o755)
+        home = tmp_path / "home"
+        tools = home / ".local" / "share" / "nexus" / "tools"
+        tools.mkdir(parents=True)
+        env = {"PATH": f"{stub_bin}:/usr/bin:/bin", "HOME": str(home), "TERM": "dumb"}
+        t = _FakeTime()
+        r = build_generation(
+            REPO_ROOT / "src" / "nexus" / "_install", "conexus==7.66.0", env,
+            PropagationSettings(ceiling_s=3.0, initial_backoff_s=1.0, max_backoff_s=1.0),
+            clock=t.clock, sleep=t.sleep,
+        )
+        assert r.exhausted is True and r.attempts >= 3, r.proc.stderr
+        assert uv_log.read_text().splitlines().count("pip") == r.attempts
+        # No gen-* directory at all -- not merely no receipt inside one.
+        assert sorted(p.name for p in tools.iterdir()) == []

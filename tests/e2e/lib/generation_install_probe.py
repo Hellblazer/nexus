@@ -89,7 +89,11 @@ def is_propagation_miss(text: str, source: str) -> bool:
     extras = re.escape(m.group("extras") or "")
     version = re.escape(m.group("version"))
     no_version = rf"no\s+version\s+of\s+conexus{extras}==\s*{version}"
-    not_in_registry = r"conexus\S*\s+was\s+not\s+found\s+in\s+the\s+package\s+registry"
+    # Exactly this package: `conexus-foo was not found` or a dependency that
+    # was not found must not read as our own release being late.
+    not_in_registry = (
+        rf"(?<![\w.-])conexus{extras}\s+was\s+not\s+found\s+in\s+the\s+package\s+registry"
+    )
     return re.search(no_version, text) is not None or re.search(not_in_registry, text) is not None
 
 
@@ -101,11 +105,17 @@ class PropagationSettings:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> PropagationSettings:
-        """Same knobs, same defaults as leg 1 (fresh-install-mvv.sh)."""
+        """Same knobs, same defaults as leg 1 (fresh-install-mvv.sh).
+
+        ``or`` rather than a ``get`` default: leg 1's ``${VAR:-default}`` treats
+        an exported-but-empty value as unset, and so must this.
+        """
         return cls(
-            ceiling_s=float(env.get("FRESH_MVV_PROPAGATION_CEILING_SECONDS", 1800)),
-            initial_backoff_s=float(env.get("FRESH_MVV_PROPAGATION_INITIAL_BACKOFF_SECONDS", 15)),
-            max_backoff_s=float(env.get("FRESH_MVV_PROPAGATION_MAX_BACKOFF_SECONDS", 60)),
+            ceiling_s=float(env.get("FRESH_MVV_PROPAGATION_CEILING_SECONDS") or 1800),
+            initial_backoff_s=float(
+                env.get("FRESH_MVV_PROPAGATION_INITIAL_BACKOFF_SECONDS") or 15
+            ),
+            max_backoff_s=float(env.get("FRESH_MVV_PROPAGATION_MAX_BACKOFF_SECONDS") or 60),
         )
 
 

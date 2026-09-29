@@ -413,7 +413,8 @@ BIN_DIR=""
 PROBE_PYTHON=""
 # nexus-tt5vm: the propagation wait's own elapsed-time data point (Sam's
 # goal -- every release that hits it contributes to a distribution), set
-# ONLY when --published mode's propagation branch actually ran. Declared
+# ONLY when --published mode's propagation branch actually ran (leg 1's, or
+# leg 9's generation-install wait, which is added to it; nexus-qfeez). Declared
 # here (empty) so `set -u` never trips referencing it from the final
 # verdict line in a mode/run that never touched it.
 PROPAGATION_WAIT_S=""
@@ -1311,18 +1312,31 @@ if [ "$PUBLISHED_MODE" = 1 ]; then
     # installed it). generation_install_probe.py therefore retries the real
     # installer on exactly that miss (bounded by the same
     # FRESH_MVV_PROPAGATION_* knobs as leg 1) and still fails on anything
-    # else, or when the ceiling runs out.
+    # else, or when the ceiling runs out. The two waits are independent, so
+    # the combined worst case is leg 1's ceiling PLUS leg 9's (2 x 1800s by
+    # default); the retry lines stream to the terminal (tee below) so that
+    # wait never reads as a hang, and leg 9's seconds are folded into
+    # PROPAGATION_WAIT_S in the final sentinel line.
     GEN_SOURCE="conexus==$EXPECTED_VERSION"
 else
     GEN_SOURCE="$WHEEL"
 fi
 echo "  source: $GEN_SOURCE"
-if ! "$PROBE_PYTHON" "$REPO_ROOT/tests/e2e/lib/generation_install_probe.py" \
-        "$HOME_DIR" "$GEN_SOURCE" >"$LOGS/generation-install.log" 2>&1; then
-    cat "$LOGS/generation-install.log" >&2
+# Streamed with tee, not redirected then cat'd at the end: a propagation wait
+# here can run for up to the ceiling (nexus-qfeez) and a silent leg reads as a
+# hang. `-u` keeps the probe's lines unbuffered through the pipe; pipefail
+# (set above) carries the probe's own exit status past tee.
+if ! "$PROBE_PYTHON" -u "$REPO_ROOT/tests/e2e/lib/generation_install_probe.py" \
+        "$HOME_DIR" "$GEN_SOURCE" 2>&1 | tee "$LOGS/generation-install.log"; then
     _fail "the generation install path failed on a virgin HOME — see the assertions above (nexus-utpuw.19)"
 fi
-cat "$LOGS/generation-install.log"
+# Fold leg 9's propagation wait (if it waited at all) into the same datum leg
+# 1 reports, so a release's wait distribution is not under-counted.
+GEN_WAIT_S="$(sed -n 's/^generation install propagation wait: \([0-9][0-9]*\)s .*/\1/p' "$LOGS/generation-install.log")"
+GEN_WAIT_S="${GEN_WAIT_S%%$'\n'*}"
+if [ -n "$GEN_WAIT_S" ]; then
+    PROPAGATION_WAIT_S=$(( ${PROPAGATION_WAIT_S:-0} + GEN_WAIT_S ))
+fi
 
 echo "── 10/10 non-vacuity ──"
 # The gate must never skip-pass: prove the substantive legs actually ran.
