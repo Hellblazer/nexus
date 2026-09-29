@@ -149,6 +149,34 @@ def _cursor_of(row: Any) -> str:
     return f"{row.created_at or ''},{row.id}"
 
 
+def _newest_by_descending_read(
+    store: Any, subspace: str, pattern_map: dict[str, str] | None, *,
+    n: int, since: tuple[str, str] | None, timeout_s: int,
+) -> tuple[list[Any] | None, bool]:
+    """The newest *n* rows via ONE descending engine read, oldest first.
+
+    Returns ``(rows, waited)``. *rows* is ``None`` when the read cannot stand
+    alone and the caller must page instead: the engine predates descending
+    reads (nexus-kp5q3), or it returned fewer than *n* rows, which means
+    either the subspace holds fewer or the engine's read cap
+    (NX_TUPLE_READ_MAX) hid older ones, and paging answers both (cheaply
+    when the subspace is small). *waited* is True once the engine has had
+    the park timeout, so the fallback must not spend it a second time.
+    """
+    from nexus.db.t2.http_tuple_store import DescendingReadUnsupportedError  # noqa: PLC0415 — deferred: CLI startup cost
+
+    try:
+        page = store.rd(
+            subspace, pattern_map, n=n, since=since, timeout_s=timeout_s, order="desc",
+        )
+    except DescendingReadUnsupportedError:
+        return None, False
+    waited = bool(timeout_s)
+    if len(page) < n:
+        return None, waited
+    return page[::-1], waited
+
+
 @tuple_group.command(name="rd")
 @click.argument("subspace")
 @click.option("--pattern", "patterns", multiple=True, metavar="KEY=VALUE",
@@ -163,10 +191,12 @@ def _cursor_of(row: Any) -> str:
               help="Page through every matching row, oldest first, up to --max-rows "
                    "(-n is ignored).")
 @click.option("--newest", is_flag=True, default=False,
-              help="Return the newest -n rows instead of the oldest (pages the "
-                   "subspace, up to --max-rows).")
+              help="Return the newest -n rows instead of the oldest (one "
+                   "descending engine read; on an engine without it, pages the "
+                   "subspace up to --max-rows).")
 @click.option("--max-rows", "max_rows", type=int, default=_RD_MAX_ROWS_DEFAULT,
-              show_default=True, help="Hard bound on rows read by --all / --newest.")
+              show_default=True, help="Hard bound on rows read by --all, and by "
+                   "--newest against an engine without descending reads.")
 @click.option("--timeout-s", "timeout_s", type=int, default=0, show_default=True,
               help="Seconds to park when nothing matches immediately; 0 never blocks.")
 @click.option("--json", "json_out", is_flag=True, default=False, help="Output as JSON array.")
@@ -180,11 +210,13 @@ def tuple_rd_cmd(
 
     A plain read returns one page; when more rows exist past it, a note on
     stderr says so and names the --since cursor for the next one. --all pages
-    through everything and --newest keeps the latest -n; both stop at
-    --max-rows and say so on stderr when they do (nexus-sh1ea: the board
-    read returned the 300 oldest rows with nothing saying more existed).
-    --newest also exits 3 then, because the rows it printed are not the
-    newest.
+    through everything and stops at --max-rows, saying so on stderr
+    (nexus-sh1ea: the board read returned the 300 oldest rows with nothing
+    saying more existed). --newest asks the engine for a descending read
+    (nexus-kp5q3), so it returns the real newest -n whatever the subspace's
+    size. Against an engine without one it pages oldest-first and keeps the
+    tail, stops at --max-rows, and then exits 3 because the rows it printed
+    are not the newest.
     """
     pattern_map = _parse_kv_pairs(patterns, option_name="--pattern") or None
     cursor = _parse_since(since)
@@ -212,28 +244,44 @@ def tuple_rd_cmd(
                 )
         else:
             rows = []
-            # Stop on an EMPTY page, not a short one: the engine's per-read cap
-            # is configurable (NX_TUPLE_READ_MAX) and may sit below _RD_PAGE.
-            while len(rows) < max_rows:
-                page = store.rd(
-                    subspace, pattern_map, n=min(_RD_PAGE, max_rows - len(rows)),
-                    since=cursor, timeout_s=timeout_s if not rows else 0,
-                )
-                if not page:
-                    break
-                rows.extend(page)
-                cursor = (page[-1].created_at or "", page[-1].id)
-            else:
-                truncated = bool(store.rd(subspace, pattern_map, n=1, since=cursor))
-            resume = _cursor_of(rows[-1]) if rows else ""
+            park_s = timeout_s
+            descended = False
             if newest:
-                rows = rows[-n:] if n > 0 else []
-            if truncated:
-                click.echo(
-                    f"{TRUNCATION_MARKER}: stopped at --max-rows {max_rows}; more rows "
-                    + ("exist, so these are not the newest. " if newest else "exist. ")
-                    + f"Resume with --since '{resume}' or raise --max-rows.", err=True,
+                # nexus-kp5q3: a descending engine read returns the real tail
+                # however large the subspace, so --max-rows does not bound it.
+                # Paging below stays for an engine that predates the read and
+                # for a short result (see _newest_by_descending_read).
+                found, waited = _newest_by_descending_read(
+                    store, subspace, pattern_map, n=n, since=cursor, timeout_s=timeout_s,
                 )
+                if found is not None:
+                    rows, descended = found, True
+                elif waited:
+                    park_s = 0
+            if not descended:
+                # Stop on an EMPTY page, not a short one: the engine's per-read
+                # cap is configurable (NX_TUPLE_READ_MAX) and may sit below
+                # _RD_PAGE.
+                while len(rows) < max_rows:
+                    page = store.rd(
+                        subspace, pattern_map, n=min(_RD_PAGE, max_rows - len(rows)),
+                        since=cursor, timeout_s=park_s if not rows else 0,
+                    )
+                    if not page:
+                        break
+                    rows.extend(page)
+                    cursor = (page[-1].created_at or "", page[-1].id)
+                else:
+                    truncated = bool(store.rd(subspace, pattern_map, n=1, since=cursor))
+                resume = _cursor_of(rows[-1]) if rows else ""
+                if newest:
+                    rows = rows[-n:] if n > 0 else []
+                if truncated:
+                    click.echo(
+                        f"{TRUNCATION_MARKER}: stopped at --max-rows {max_rows}; more rows "
+                        + ("exist, so these are not the newest. " if newest else "exist. ")
+                        + f"Resume with --since '{resume}' or raise --max-rows.", err=True,
+                    )
     except Exception as e:  # noqa: BLE001 — CLI boundary: report and exit non-zero, never traceback
         _print_tuple_error(e)
         raise SystemExit(1) from e
@@ -244,7 +292,8 @@ def tuple_rd_cmd(
     if newest and truncated:
         # The rows printed are the newest of the oldest --max-rows, not the
         # subspace's newest: a caller reading only stdout must not take them
-        # as current. An engine-side descending read would remove this case.
+        # as current. Only the paging fallback reaches here (an engine without
+        # descending reads, nexus-kp5q3); a descending read never truncates.
         raise SystemExit(3)
 
 

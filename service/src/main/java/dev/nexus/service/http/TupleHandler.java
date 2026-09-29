@@ -42,8 +42,13 @@ import java.util.Optional;
  * query-string parameter, not a JSON pattern body):
  * <pre>
  *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?} -&gt; {"id": "&lt;hex&gt;"}
- *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?} -&gt; {"tuples": [...]}
- *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?} -&gt; {"tuples": [...]}
+ *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?, order?} -&gt; {"tuples": [...], "order"?}
+ *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?, order?} -&gt; {"tuples": [...], "order"?}
+ *                                   order (bead nexus-kp5q3): "asc" (default) or "desc". desc returns the
+ *                                   NEWEST n rows strictly after since, newest first, and echoes
+ *                                   "order":"desc" -- the client's capability signal, since an engine that
+ *                                   predates the field ignores it and answers ascending with no echo. An
+ *                                   ascending response carries no order key. Any other value is a 400.
  *   POST /v1/tuples/wait            {subspaces: [{subspace, keys_pattern?, n?, since?, announce?}, ...], timeout_s?}
  *                                   announce: {interval_s, max, subscriber?, waiter?} -- subscriber (bead nexus-q82tk)
  *                                   keys the stamp per reader in nexus.tuple_deliveries; absent, the stamp
@@ -241,9 +246,10 @@ public final class TupleHandler implements HttpHandler {
         int n = intOrDefault(body.get("n"), 1);
         long timeoutS = longOrDefault(body.get("timeout_s"), 0);
         TupleRepository.ReadCursor since = readCursor(body.get("since"));
+        TupleRepository.ReadOrder order = readOrder(body.get("order"));
 
-        List<TupleRepository.TupleRow> rows = repo.rd(tenant, subspace, pattern, n, since, timeoutS);
-        HttpUtil.send(ex, 200, renderTuples(rows));
+        List<TupleRepository.TupleRow> rows = repo.rd(tenant, subspace, pattern, n, since, timeoutS, order);
+        HttpUtil.send(ex, 200, renderTuples(rows, order));
     }
 
     @SuppressWarnings("unchecked")
@@ -257,9 +263,10 @@ public final class TupleHandler implements HttpHandler {
         Map<String, String> pattern = stringMap((Map<String, Object>) body.get("keys_pattern"));
         int n = intOrDefault(body.get("n"), 1);
         TupleRepository.ReadCursor since = readCursor(body.get("since"));
+        TupleRepository.ReadOrder order = readOrder(body.get("order"));
 
-        List<TupleRepository.TupleRow> rows = repo.rdp(tenant, subspace, pattern, n, since);
-        HttpUtil.send(ex, 200, renderTuples(rows));
+        List<TupleRepository.TupleRow> rows = repo.rdp(tenant, subspace, pattern, n, since, order);
+        HttpUtil.send(ex, 200, renderTuples(rows, order));
     }
 
     // ── wait (multiplexed rd, RDR-211 Phase 1 Step 1, bead nexus-rplay.4) ──────
@@ -629,9 +636,15 @@ public final class TupleHandler implements HttpHandler {
 
     // ── rendering ────────────────────────────────────────────────────────────
 
-    private String renderTuples(List<TupleRepository.TupleRow> rows) throws IOException {
+    /** {@code order} is echoed ONLY when it is not the default: an ascending
+     *  response stays byte-identical to what every released client already reads. */
+    private String renderTuples(List<TupleRepository.TupleRow> rows,
+                                TupleRepository.ReadOrder order) throws IOException {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("tuples", rows.stream().map(this::renderTuple).toList());
+        if (order == TupleRepository.ReadOrder.DESC) {
+            out.put("order", "desc");
+        }
         return MAPPER.writeValueAsString(out);
     }
 
@@ -773,6 +786,16 @@ public final class TupleHandler implements HttpHandler {
             return n.longValue();
         }
         return Long.parseLong(String.valueOf(v));
+    }
+
+    /** {@code order} (bead nexus-kp5q3): absent is ascending; a value that is not a
+     *  string {@code asc}/{@code desc} is a caller error, {@link IllegalArgumentException}
+     *  -&gt; 400 like every other malformed field here. */
+    private static TupleRepository.ReadOrder readOrder(Object raw) {
+        if (raw != null && !(raw instanceof String)) {
+            throw new IllegalArgumentException("order must be \"asc\" or \"desc\", got: " + raw);
+        }
+        return TupleRepository.ReadOrder.parse((String) raw);
     }
 
     private static int intOrDefault(Object v, int def) {

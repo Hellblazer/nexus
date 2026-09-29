@@ -307,6 +307,57 @@ class TupleHandlerWiringTest {
         assertThat(tuple).doesNotContainKey("claim_id");
     }
 
+    // ── descending reads (nexus-kp5q3) ──────────────────────────────────────
+
+    /**
+     * {@code order:"desc"} on {@code /rd} and {@code /rdp} returns the newest rows
+     * newest-first AND echoes {@code "order":"desc"} at the top level. The echo is
+     * the capability signal: an engine that predates the field reads the body as a
+     * map, ignores the unknown key and answers ascending without it, so a client
+     * that sees no echo knows it did not get a descending read. An ascending read
+     * carries no {@code order} key, byte-identical to before.
+     */
+    @SuppressWarnings("unchecked")
+    @Test
+    void rdAndRdp_orderDesc_returnsNewestFirstAndEchoesTheOrder() throws Exception {
+        String to = "wire-order-" + java.util.UUID.randomUUID();
+        for (int i = 0; i < 3; i++) {
+            assertThat(post(withRegistry, "/v1/tuples/out", Map.of(
+                    "subspace", "mailbox/" + to,
+                    "keys", Map.of("to", to),
+                    "dims", Map.of("from", "sender"),
+                    "body", "m" + i,
+                    "nonce", "order-nonce-" + i)).statusCode()).isEqualTo(200);
+        }
+        var ascJson = mapper.readValue(post(withRegistry, "/v1/tuples/rdp", Map.of(
+                "subspace", "mailbox/" + to, "keys_pattern", Map.of("to", to), "n", 10)).body(), MAP_T);
+        assertThat(ascJson).as("an ascending read carries no order key").doesNotContainKey("order");
+        var asc = (java.util.List<Map<String, Object>>) ascJson.get("tuples");
+        assertThat(asc).hasSize(3);
+
+        for (String route : new String[] {"/v1/tuples/rdp", "/v1/tuples/rd"}) {
+            var resp = post(withRegistry, route, Map.of(
+                    "subspace", "mailbox/" + to, "keys_pattern", Map.of("to", to),
+                    "n", 2, "order", "desc"));
+            assertThat(resp.statusCode()).as(route).isEqualTo(200);
+            var json = mapper.readValue(resp.body(), MAP_T);
+            assertThat(json).as(route).containsEntry("order", "desc");
+            var tuples = (java.util.List<Map<String, Object>>) json.get("tuples");
+            assertThat(tuples.stream().map(t -> t.get("id")).toList())
+                    .as(route + ": the newest two, newest first")
+                    .containsExactly(asc.get(2).get("id"), asc.get(1).get("id"));
+        }
+    }
+
+    @Test
+    void rdp_orderNotAscOrDesc_is400() throws Exception {
+        var resp = post(withRegistry, "/v1/tuples/rdp", Map.of(
+                "subspace", "mailbox/wire-order-bad", "keys_pattern", Map.of("to", "x"),
+                "order", "sideways"));
+        assertThat(resp.statusCode()).isEqualTo(400);
+        assertThat(resp.body()).contains("order");
+    }
+
     // ── lease_s optional on /in and /inp (nexus-xapt8, scalability research) ──
 
     /**

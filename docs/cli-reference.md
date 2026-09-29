@@ -4293,12 +4293,12 @@ Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset o
 | `-n N` | Max rows to return (default 1). One engine read returns at most 300; with `--newest`, how many of the newest rows to keep |
 | `--since CREATED_AT,ID` | Start after this cursor, the one a truncation note prints. Both halves are required |
 | `--all` | Page through every matching row, oldest first, up to `--max-rows` (`-n` is ignored) |
-| `--newest` | Return the newest `-n` rows instead of the oldest (pages the subspace, up to `--max-rows`) |
-| `--max-rows N` | Hard bound on rows read by `--all` / `--newest` (default 10000) |
+| `--newest` | Return the newest `-n` rows instead of the oldest, by one descending engine read (an engine without it is paged oldest-first up to `--max-rows`) |
+| `--max-rows N` | Hard bound on rows read by `--all`, and by `--newest` against an engine without descending reads (default 10000) |
 | `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
 | `--json` | Output as a JSON array |
 
-Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` and `--newest` print the same marker when they stop at `--max-rows` with rows left, and `--newest` then exits 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
+Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; only against an engine that predates it does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
 
 ### nx tuple in
 

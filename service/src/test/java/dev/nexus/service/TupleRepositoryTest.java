@@ -795,6 +795,77 @@ class TupleRepositoryTest {
         assertThat(rows).hasSize(3);
     }
 
+    // ── rd / rdp: descending order (nexus-kp5q3) ─────────────────────────────
+
+    /** Writes {@code count} ledger rows, one transaction each, and returns the subspace. */
+    private String seedLedger(TupleRepository target, String prefix, int count) {
+        String session = prefix + UUID.randomUUID();
+        for (int i = 0; i < count; i++) {
+            target.out(TENANT_A, "ledger/" + session,
+                    Map.of("agent_id", "a" + i, "kind", "start"), Map.of(), null, null, null);
+        }
+        return "ledger/" + session;
+    }
+
+    private static List<String> ids(List<TupleRepository.TupleRow> rows) {
+        return rows.stream().map(r -> java.util.HexFormat.of().formatHex(r.id())).toList();
+    }
+
+    @Test
+    void rdp_descending_returnsTheNewestRowsNewestFirst() {
+        String subspace = seedLedger(repo, "session-desc-", 5);
+        var asc = ids(repo.rdp(TENANT_A, subspace, null, 10, null));
+        assertThat(asc).hasSize(5);
+
+        var desc = ids(repo.rdp(TENANT_A, subspace, null, 2, null, TupleRepository.ReadOrder.DESC));
+
+        var expected = new java.util.ArrayList<>(asc.subList(3, 5));
+        java.util.Collections.reverse(expected);
+        assertThat(desc).as("the newest two rows, newest first").isEqualTo(expected);
+    }
+
+    @Test
+    void rd_descending_matchesRdpDescending() {
+        String subspace = seedLedger(repo, "session-desc-rd-", 4);
+        var viaRdp = ids(repo.rdp(TENANT_A, subspace, null, 3, null, TupleRepository.ReadOrder.DESC));
+        var viaRd = ids(repo.rd(TENANT_A, subspace, null, 3, null, 0L, TupleRepository.ReadOrder.DESC));
+        assertThat(viaRd).isEqualTo(viaRdp).hasSize(3);
+    }
+
+    @Test
+    void rdp_descending_pastTheReadCap_returnsTheRealNewestNotTheOldest() {
+        TupleRepository smallCapRepo = new TupleRepository(tenantScope, registry,
+                /* readMax */ 3, TupleRepository.DEFAULT_CLAIM_PASSES, 10, 4, 16);
+        String subspace = seedLedger(smallCapRepo, "session-desc-cap-", 5);
+        var asc = ids(repo.rdp(TENANT_A, subspace, null, 10, null));
+
+        var desc = ids(smallCapRepo.rdp(TENANT_A, subspace, null, 100, null, TupleRepository.ReadOrder.DESC));
+
+        var expected = new java.util.ArrayList<>(asc.subList(2, 5));
+        java.util.Collections.reverse(expected);
+        assertThat(desc).as("the cap trims the OLD end of a descending read").isEqualTo(expected);
+    }
+
+    @Test
+    void rdp_descending_sinceStillMeansStrictlyNewerThanTheCursor() {
+        String subspace = seedLedger(repo, "session-desc-since-", 5);
+        var all = repo.rdp(TENANT_A, subspace, null, 10, null);
+        var cursor = new TupleRepository.ReadCursor(all.get(1).createdAt(), all.get(1).id());
+
+        var desc = ids(repo.rdp(TENANT_A, subspace, null, 10, cursor, TupleRepository.ReadOrder.DESC));
+
+        var expected = new java.util.ArrayList<>(ids(all).subList(2, 5));
+        java.util.Collections.reverse(expected);
+        assertThat(desc).isEqualTo(expected);
+    }
+
+    @Test
+    void rdp_ascendingOverloadIsTheOldBehaviour() {
+        String subspace = seedLedger(repo, "session-asc-explicit-", 3);
+        assertThat(ids(repo.rdp(TENANT_A, subspace, null, 10, null, TupleRepository.ReadOrder.ASC)))
+                .isEqualTo(ids(repo.rdp(TENANT_A, subspace, null, 10, null)));
+    }
+
     // ── RLS isolation ────────────────────────────────────────────────────────
 
     @Test

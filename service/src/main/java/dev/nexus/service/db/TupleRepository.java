@@ -386,6 +386,36 @@ public final class TupleRepository {
     public record ReadCursor(OffsetDateTime createdAt, byte[] id) {
     }
 
+    /**
+     * The order {@code rd}/{@code rdp} return rows in (bead nexus-kp5q3). {@link #ASC}
+     * is {@code (created_at, id)} ascending and is what every read did before this
+     * existed. {@link #DESC} is the exact reverse: the same {@code since} filter (rows
+     * strictly after the cursor), then the NEWEST {@code n} of them, newest first, so a
+     * reader of a subspace larger than the read cap gets the true tail instead of the
+     * oldest {@code n} rows. It is served by the same {@code idx_tuples_subspace_scan}
+     * (tenant_id, subspace, created_at, id) as a backward index scan. Only plain
+     * {@code rd}/{@code rdp} honour it: the announce paths select by a due-for-announce
+     * predicate and stay oldest-first.
+     */
+    public enum ReadOrder {
+        ASC, DESC;
+
+        /** {@code "asc"}/{@code "desc"} (case-insensitive); null (field absent) is
+         *  {@link #ASC}; anything else is an {@link IllegalArgumentException}, which the
+         *  handler maps to 400. */
+        public static ReadOrder parse(String wire) {
+            if (wire == null) {
+                return ASC;
+            }
+            return switch (wire.toLowerCase(java.util.Locale.ROOT)) {
+                case "asc" -> ASC;
+                case "desc" -> DESC;
+                default -> throw new IllegalArgumentException(
+                    "order must be \"asc\" or \"desc\", got: " + wire);
+            };
+        }
+    }
+
     public record SubspaceCensus(
             String subspace, long total, long available, long claimed, long dead,
             long consumed, long expiredUnpurged,
@@ -783,7 +813,14 @@ public final class TupleRepository {
 
     /** {@code rdp(subspace, keys_pattern=None, *, n=1, since=None) -> [Tuple]} — probe, never blocks. */
     public List<TupleRow> rdp(String tenant, String subspace, Map<String, String> pattern, int n, ReadCursor since) {
-        return queryOnce(tenant, subspace, pattern, n, since);
+        return rdp(tenant, subspace, pattern, n, since, ReadOrder.ASC);
+    }
+
+    /** {@link #rdp(String, String, Map, int, ReadCursor)} with an explicit {@link ReadOrder}
+     *  (bead nexus-kp5q3). */
+    public List<TupleRow> rdp(String tenant, String subspace, Map<String, String> pattern, int n,
+                               ReadCursor since, ReadOrder order) {
+        return queryOnce(tenant, subspace, pattern, n, since, null, order);
     }
 
     /** {@code rd(subspace, keys_pattern=None, *, n=1, since=None, timeout_s=0) -> [Tuple]} — blocks up to {@code timeoutSeconds}.
@@ -794,15 +831,22 @@ public final class TupleRepository {
      *  TupleWaitRegistry#evictIdleGroups} (nexus-rplay). */
     public List<TupleRow> rd(String tenant, String subspace, Map<String, String> pattern, int n,
                               ReadCursor since, long timeoutSeconds) {
+        return rd(tenant, subspace, pattern, n, since, timeoutSeconds, ReadOrder.ASC);
+    }
+
+    /** {@link #rd(String, String, Map, int, ReadCursor, long)} with an explicit {@link ReadOrder}
+     *  (bead nexus-kp5q3); the order applies to every re-query a park makes. */
+    public List<TupleRow> rd(String tenant, String subspace, Map<String, String> pattern, int n,
+                              ReadCursor since, long timeoutSeconds, ReadOrder order) {
         validateTimeout(timeoutSeconds);
         if (timeoutSeconds <= 0) {
-            return queryOnce(tenant, subspace, pattern, n, since);
+            return queryOnce(tenant, subspace, pattern, n, since, null, order);
         }
         // Registered BEFORE the first query, so a write landing between that query and
         // the first park is not lost (RDR-205 §Technical Design "Wake").
         TupleWaitRegistry.Waiter waiter = waitRegistry.register(tenant, subspace);
         try {
-            List<TupleRow> found = queryOnce(tenant, subspace, pattern, n, since);
+            List<TupleRow> found = queryOnce(tenant, subspace, pattern, n, since, null, order);
             if (!found.isEmpty()) {
                 return found;
             }
@@ -811,15 +855,15 @@ public final class TupleRepository {
                 long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
                 while (true) {
                     if (waitRegistry.isShuttingDown() || System.nanoTime() >= deadlineNanos) {
-                        return queryOnce(tenant, subspace, pattern, n, since);
+                        return queryOnce(tenant, subspace, pattern, n, since, null, order);
                     }
                     try {
                         waiter.awaitSignalOrTimer();
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
-                        return queryOnce(tenant, subspace, pattern, n, since);
+                        return queryOnce(tenant, subspace, pattern, n, since, null, order);
                     }
-                    List<TupleRow> again = queryOnce(tenant, subspace, pattern, n, since);
+                    List<TupleRow> again = queryOnce(tenant, subspace, pattern, n, since, null, order);
                     if (!again.isEmpty()) {
                         return again;
                     }
@@ -839,6 +883,12 @@ public final class TupleRepository {
         return queryOnce(tenant, subspace, pattern, n, since, null);
     }
 
+    /** Back-compat overload (every {@link #waitAny} call site): oldest first. */
+    private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
+                                      int n, ReadCursor since, WaitSpec.Announce announce) {
+        return queryOnce(tenant, subspace, pattern, n, since, announce, ReadOrder.ASC);
+    }
+
     /**
      * {@code announce} (bead nexus-vsipz, RDR-213 engine half) is {@code null} for
      * every {@code rd}/{@code rdp} call and for a {@link WaitSpec} that does not
@@ -855,7 +905,8 @@ public final class TupleRepository {
      * per-row due tracking.
      */
     private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
-                                      int n, ReadCursor since, WaitSpec.Announce announce) {
+                                      int n, ReadCursor since, WaitSpec.Announce announce,
+                                      ReadOrder order) {
         checkFieldSize("subspace", subspace, TupleLimits.MAX_SUBSPACE_BYTES);
         // RDR-205 review (nexus-em75s.35, M4): rd/rdp must refuse an unregistered
         // subspace exactly as out() and in()/inp() (via claimOnce) do -- this was
@@ -884,9 +935,13 @@ public final class TupleRepository {
                 cond = cond.and(DSL.row(TUPLES.CREATED_AT, TUPLES.ID)
                         .gt(DSL.row(DSL.val(since.createdAt()), DSL.val(since.id()))));
             }
+            // nexus-kp5q3: DESC is the exact reverse of ASC over the same filtered set,
+            // so LIMIT trims the OLD end and a reader past the cap gets the real tail.
             var rows = ctx.selectFrom(TUPLES)
                     .where(cond)
-                    .orderBy(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc())
+                    .orderBy(order == ReadOrder.DESC
+                            ? List.of(TUPLES.CREATED_AT.desc(), TUPLES.ID.desc())
+                            : List.of(TUPLES.CREATED_AT.asc(), TUPLES.ID.asc()))
                     .limit(limit)
                     .fetch();
             List<TupleRow> out = new ArrayList<>();

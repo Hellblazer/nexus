@@ -289,6 +289,23 @@ class ReplyNotWrittenError(RuntimeError):
     """
 
 
+class DescendingReadUnsupportedError(RuntimeError):
+    """``rd``/``rdp`` asked for ``order="desc"`` and the engine did not
+    honour it (nexus-kp5q3).
+
+    The engine echoes ``"order": "desc"`` in the response to a descending
+    read. An engine that predates the field reads the request as a map,
+    ignores the unknown key and answers ASCENDING with no echo, which would
+    look like a descending read that happens to start with the oldest rows.
+    The store therefore refuses to return such a response; a caller that can
+    do without (``nx tuple rd --newest``) catches this and reads the old way.
+
+    DELIBERATELY NOT a :class:`TupleError`, for :class:`ReplyNotWrittenError`'s
+    reason: that hierarchy is the engine's own refusal codes, and this is a
+    client-detected capability gap that a broad ``except TupleError`` must
+    not swallow."""
+
+
 class RequestTooLargeError(ValueError):
     """The serialised request body exceeds the edge WAF's 8 KB cap
     (RDR-205 §Technical Environment) — refused before sending."""
@@ -461,6 +478,31 @@ def _since_payload(since: tuple[str, str] | None) -> dict[str, str] | None:
 # ── HttpTupleStore ──────────────────────────────────────────────────────────
 
 
+def _add_order(payload: dict[str, Any], order: str) -> None:
+    """Validate *order* and put it on the wire when it is not the default.
+
+    ``"asc"`` adds nothing, so an ascending request is byte-identical to what
+    every released client sent and an engine that predates the field is never
+    handed an unknown key it does not need."""
+    if order not in ("asc", "desc"):
+        raise ValueError(f'order must be "asc" or "desc", got {order!r}')
+    if order == "desc":
+        payload["order"] = "desc"
+
+
+def _require_order_echo(response: Any, order: str) -> None:
+    """A descending read is only trusted when the engine says it was one.
+
+    The engine echoes ``"order": "desc"`` (TupleHandler, nexus-kp5q3); an
+    engine that predates the field ignores the request key and answers
+    ascending with no echo."""
+    if order == "desc" and (response or {}).get("order") != "desc":
+        raise DescendingReadUnsupportedError(
+            "the engine did not echo order=desc: it predates descending tuple reads "
+            "and answered oldest-first"
+        )
+
+
 class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
     """RDR-205 Linda tuple-space client over ``/v1/tuples``.
 
@@ -572,10 +614,18 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         n: int = 1,
         since: tuple[str, str] | None = None,
         timeout_s: int = 0,
+        order: str = "asc",
     ) -> list[TupleRow]:
         """Non-destructive read. Blocks up to *timeout_s* seconds
         (capped by the engine, CA 3) when nothing matches immediately;
         ``timeout_s=0`` (default) never blocks.
+
+        *order* ``"desc"`` (nexus-kp5q3) returns the NEWEST *n* rows after
+        *since*, newest first, so a subspace larger than the engine's read cap
+        yields its real tail; ``"asc"`` (default) is the oldest *n*, oldest
+        first, and sends no ``order`` field at all. Raises
+        :class:`DescendingReadUnsupportedError` when the engine did not echo a
+        descending read.
         """
         if not subspace:
             raise ValueError("subspace must not be empty")
@@ -589,8 +639,10 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
             payload["since"] = since_body
         if timeout_s:
             payload["timeout_s"] = timeout_s
+        _add_order(payload, order)
         req_timeout = timeout_s + _PARK_TIMEOUT_MARGIN_S if timeout_s > 0 else None
         r = self._post("/rd", payload, mutates=False, timeout=req_timeout)
+        _require_order_echo(r, order)
         return [_body_to_tuple_row(t) for t in (r or {}).get("tuples", [])]
 
     def rdp(
@@ -600,8 +652,9 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         *,
         n: int = 1,
         since: tuple[str, str] | None = None,
+        order: str = "asc",
     ) -> list[TupleRow]:
-        """Non-destructive, non-blocking probe read."""
+        """Non-destructive, non-blocking probe read. *order* is :meth:`rd`'s."""
         if not subspace:
             raise ValueError("subspace must not be empty")
         _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
@@ -612,7 +665,9 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         since_body = _since_payload(since)
         if since_body is not None:
             payload["since"] = since_body
+        _add_order(payload, order)
         r = self._post("/rdp", payload, mutates=False)
+        _require_order_echo(r, order)
         return [_body_to_tuple_row(t) for t in (r or {}).get("tuples", [])]
 
     # ── in_ / inp ─────────────────────────────────────────────────────────
