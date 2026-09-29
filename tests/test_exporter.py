@@ -1400,8 +1400,8 @@ class TestImportFlagsCLI:
         # An existing legacy collection keeps its name, so pre-create it to
         # stay on the legacy target this flag-wiring test was written for; a
         # missing one would be promoted to the conformant name, whose
-        # dimension gate refuses this fixture's 384-dim vectors under a
-        # voyage-code-3 header.
+        # dimension gate refuses this fixture's 384-dim vectors under its
+        # 1024-dim header model.
         populated_db.get_or_create_collection("code__cli_skip", strict=False)
         with patch("nexus.commands.store._t3", return_value=populated_db):
             first = runner.invoke(
