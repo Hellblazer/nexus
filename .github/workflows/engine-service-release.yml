@@ -633,22 +633,31 @@ jobs:
               # their bytes are exactly what -H:IncludeResources pulled the
               # dylibs from, so re-reading the resolved dependency jar is
               # the more reliable source of the two, not a proxy for one.
-              onnx_version=$(sed -n 's/.*<onnxruntime\.version>\(.*\)<\/onnxruntime\.version>.*/\1/p' service/pom.xml)
-              djl_version=$(sed -n 's/.*<djl\.tokenizers\.version>\(.*\)<\/djl\.tokenizers\.version>.*/\1/p' service/pom.xml)
-              if [ -z "$onnx_version" ] || [ -z "$djl_version" ]; then
-                echo "FAIL: could not read onnxruntime.version/djl.tokenizers.version from service/pom.xml — cannot locate the embedded dylibs to check" >&2
-                exit 1
-              fi
-              # Ask Maven where its local repository is rather than assuming
-              # ~/.m2/repository: a runner can relocate it with
-              # MAVEN_OPTS=-Dmaven.repo.local=... (hellmini does), and the
-              # hardcoded path failed engine-service-v0.1.141's mac-arm64
-              # leg there (nexus-zwn92).
-              m2_repo=$(cd service && ./mvnw -q help:evaluate -Dexpression=settings.localRepository -DforceStdout)
+              # Ask Maven, not the file system: the versions come from the
+              # effective model (a property moved to a parent or BOM still
+              # resolves; a commented-out line does not match), and the
+              # local repository from settings, since a runner can relocate
+              # it with MAVEN_OPTS=-Dmaven.repo.local=... (hellmini does; the
+              # hardcoded ~/.m2 path failed engine-service-v0.1.141's
+              # mac-arm64 leg there, nexus-zwn92). The plugin is pinned so a
+              # publish path never floats with Central.
+              mvn_eval() {
+                (cd service && ./mvnw -q org.apache.maven.plugins:maven-help-plugin:3.5.2:evaluate \
+                  -Dexpression="$1" -DforceStdout)
+              }
+              onnx_version=$(mvn_eval onnxruntime.version)
+              djl_version=$(mvn_eval djl.tokenizers.version)
+              m2_repo=$(mvn_eval settings.localRepository)
+              case "$onnx_version$djl_version" in
+                ''|*'null object'*|*[[:space:]]*)
+                  echo "FAIL: could not resolve onnxruntime.version/djl.tokenizers.version from service/pom.xml (got '$onnx_version' / '$djl_version') — cannot locate the embedded dylibs to check" >&2
+                  exit 1 ;;
+              esac
               if [ -z "$m2_repo" ] || [ ! -d "$m2_repo" ]; then
                 echo "FAIL: could not resolve Maven's local repository (got '$m2_repo')" >&2
                 exit 1
               fi
+              echo "ABI floor: local repository $m2_repo; onnxruntime $onnx_version, djl tokenizers $djl_version"
               onnx_jar="$m2_repo/com/microsoft/onnxruntime/onnxruntime/$onnx_version/onnxruntime-$onnx_version.jar"
               djl_jar="$m2_repo/ai/djl/huggingface/tokenizers/$djl_version/tokenizers-$djl_version.jar"
               for jar in "$onnx_jar" "$djl_jar"; do
