@@ -1584,6 +1584,12 @@ resolution, so it can never be picked as a write target. Renaming *back* onto a
 tombstoned name revives it. Before 7.0.0 the row was deleted instead, which silently
 discarded the rename's history (nexus-cecqy).
 
+A write that names the tombstoned collection directly is refused with an error
+naming its successor, and `nx index repo` stops the same way with the remedy
+(nexus-wwuzp). A long-running process that registered the old name before the
+rename checks its cached registration again within 60 s; before 7.67.0 it kept
+writing chunks under the tombstone.
+
 ### nx catalog migrate-fallback
 
 ```
@@ -3649,6 +3655,7 @@ in (all under `~/.config/nexus/` unless noted):
 | `logs/storage_service.log` | Supervisor lifecycle (rotating): start/exit breadcrumbs, service exit codes, restart attempts, PG recoveries, crash backstop. |
 | `logs/storage_service_native.log` | The native service's stdout/stderr (banners, fatal errors). Size-rotated at respawn. |
 | `logs/storage_service.crash.log` | Pre-startup failures of the detached supervisor (import errors, bad argv) and interpreter-fatal tracebacks. Quiet in healthy operation. |
+| `logs/hs_err_<pid>.log` | JVM crash report from a jar launch (`-XX:ErrorFile`, nexus-o5xyx.2). The supervisor's `storage_service_exit_detected` warning names it when one exists; each launch keeps the newest 5. A native launch writes none. |
 | `<pg_data>/pg.log` | The nx-managed Postgres cluster log (`pg_ctl`). |
 
 A supervisor death without a `storage_service_supervisor_exit` breadcrumb
@@ -3869,12 +3876,28 @@ half-built tree is never mistaken for a working one.
 |------|-------------|
 | `--keep N` | Generations to retain (default 3). The four never-delete rules still apply on top of it: the generation `current` points at, the previous one (free rollback), any generation with a live holder, and the generation hosting the running installer. |
 | `--version X.Y.Z` | Install this version instead of whatever the source resolves to. **One-shot** — the pin is not sticky, and the next bare `nx self install` resolves the current release. Downgrades are safe by construction here: they build a new generation and flip, leaving the old tree for its holders. |
+| `--extras NAME` | Extra(s) to add, repeatable or comma-separated. Merged with the extras the receipt already carries, never replacing them (nexus-pffc4; see above). |
 | `--dry-run` | Print the build command and stop. |
 
 Extras travel in the generation's receipt and are threaded into the build
 explicitly, so an upgrade never silently drops `[local]` (and with it the
-768-dim embedder). There is no flag that *adds* an extra to an existing
-generation — extras are fixed when the install is created.
+768-dim embedder). An existing generation's extras never change; `--extras`
+adds one by building the next generation with it.
+
+**A build that cannot reach the package index says so (nexus-12pyx).** When
+the generation build fails with a network-shaped error (DNS, connect,
+timeout, retry exhaustion), the command prints, above uv's own output: the
+index URL uv tried (scheme, host, port and path only; credentials, query and
+fragment are dropped), where that host is set (`UV_INDEX_URL`,
+`UV_DEFAULT_INDEX`, `UV_INDEX` or `PIP_INDEX_URL` by name, `uv.toml` or
+`pip.conf` by path, or that no setting names it), that the running install was
+not changed, and the remedy: reach the index (connect the VPN it needs), or
+build once from PyPI with `UV_INDEX_URL=https://pypi.org/simple nx self install`.
+A certificate failure, or a set `HTTPS_PROXY`/`ALL_PROXY`, gets proxy and
+certificate advice instead (`SSL_CERT_FILE`, `UV_NATIVE_TLS=1`). A local-mode
+upgrade also downloads the pinned engine from GitHub releases, which the same
+network may block. Resolver failures and other errors print uv's output as
+before.
 
 It distinguishes THREE sites, not two (nexus-gu9zo). From a generation it
 builds the next one, as above. From a **legacy `uv tool install conexus`

@@ -41,27 +41,10 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.66.0)
+## Awaiting the next release or plugin cut (pinned: v7.67.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- nexus-2lf1v: `sn/hooks/scripts/auto_approve_sn_mcp.py` stops auto-approving
-  Serena's write tools, `jet_brains_debug` (arbitrary Groovy/Java in the IDE's
-  JVM), `query_project`, `onboarding` and `restart_language_server`. They were
-  all approved before, which skipped your prompt and the auto-mode classifier.
-  Reads and Context7 are still approved. To keep editing through Serena without
-  prompts, add the writers you use by name to `permissions.allow`.
-- nexus-2lf1v: `sn/hooks/scripts/serena-section.md` tells subagents that Serena
-  writes now go through the permission flow, and to fall back to Edit or Write
-  rather than retry a denied one.
-
 ## Deferred to the next client release
 
-- nexus-nmzsg: `conexus/hooks/scripts/routing/_lib.py` adds
-  `ask_envelope`/`ask` (`permissionDecision: ask`, reason in
-  `permissionDecisionReason`), the PreToolUse decision that forces a
-  permission prompt in auto mode where a bare advisory would let the
-  classifier approve silently. No plugin script calls it yet; the pre-close
-  gate that uses it ships in the wheel (`nexus.hooks._routing_lib`). Deferred because the bead also touches `src/`, which a plugin cut refuses deterministically.
-- nexus-qxyqz: `conexus/hooks/hooks.json`, `conexus/README.md` drop the `UserPromptSubmit` entry (and its hook-table row) for `nx-hook mcp-connect-check`, the mid-session "nx-mcp is not connected" warning (it read a session-id-keyed marker that cannot be a reliable liveness signal, and cost 270-300 ms of imports per prompt). Safe against every CLI: the verb stays registered as a silent no-op for plugins that still name it. Deferred because the bead also touches `src/`, which a plugin cut refuses deterministically.
-- nexus-0r5l8: `conexus/hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` (and its wheel port `src/nexus/hooks/subagent_git_write_gate.py`) stop denying subagent Bash commands that merely contain `git` inside a path or word (`nexus-git-policy.py`, `.git/hooks`, `~/git/nexus`, `git-workflow.md`, `git.py`) next to an ordinary word like `add` or `reset`. `git` now arms the guard only as a token whose basename is `git` or `git-<word>` (a bare `git-` too), optionally with an `.exe`, `.cmd`, `.bat`, `.com` or `.sh` suffix (so `scripts/git-push-develop.sh` still arms); every catalogued bypass still denies. Deferred because the bead also touches `src/`, which a plugin cut refuses deterministically.
+_Empty. The entries deferred here (nexus-nmzsg, nexus-qxyqz, nexus-0r5l8) shipped with the 7.67.0 client release, together with nexus-2lf1v's sn reads-only auto-approve._
