@@ -60,7 +60,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tests.db._service_fixture import spawn_service, wait_for_service
+from tests.db._service_fixture import jar_argv, spawn_service, wait_for_service
 
 from tests.benchmarks.test_retrieval_ndcg import ndcg_at_k
 from tests.db._service_fixture import ENGINE_ADMIN_DB_ENV_KEYS, SERVICE_ROLES_SQL, pg_bin_dir
@@ -207,7 +207,7 @@ def java_service(pg_instance):
     # stdout=PIPE/stderr=PIPE form wedged the service once 64KB of Logback
     # output accumulated before the port bound (nexus-j0nec). This file sits
     # OUTSIDE tests/db/ and was missed by the first sweep's grep scope.
-    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
+    proc, _svc_log = spawn_service(jar_argv(_JAVA, _JAR), env)
     try:
         # 120s preserved: this jar also loads the bge-768 ONNX model before
         # listening, per the local _wait_tcp's own note.

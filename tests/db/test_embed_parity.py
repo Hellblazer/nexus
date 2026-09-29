@@ -64,7 +64,7 @@ from typing import Generator
 import numpy as np
 import pytest
 
-from tests.db._service_fixture import SERVICE_ROLES_SQL, pg_bin_dir
+from tests.db._service_fixture import SERVICE_ROLES_SQL, jar_argv, pg_bin_dir
 
 # ── Prerequisite paths ─────────────────────────────────────────────────────────
 
@@ -320,7 +320,7 @@ def _start_service(pg: dict, token: str, voyage_key: str | None = None,
     log_path = os.path.join(tempfile.gettempdir(), f"nexus-svc-parity-{svc_port}.log")
     log_fh = open(log_path, "wb")
     proc = subprocess.Popen(
-        [str(_JAVA), "-jar", str(_JAR)],
+        jar_argv(_JAVA, _JAR),
         env=env,
         stdout=log_fh,
         stderr=subprocess.STDOUT,

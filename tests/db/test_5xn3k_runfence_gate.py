@@ -140,6 +140,7 @@ import pytest
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     pg_bin_dir,
+    jar_argv,
     spawn_service,
     wait_for_service,
 )
@@ -314,7 +315,7 @@ def local_service(pg_instance: dict) -> Generator[tuple[str, str], None, None]:
     env.pop("VOYAGE_API_KEY", None)
     env.pop("NX_STORAGE_BACKEND", None)
 
-    proc, _svc_log = spawn_service([str(_JAVA), "-jar", str(_JAR)], env)
+    proc, _svc_log = spawn_service(jar_argv(_JAVA, _JAR), env)
     try:
         wait_for_service("127.0.0.1", svc_port, proc=proc, log_path=_svc_log, timeout=60.0)
         yield f"http://127.0.0.1:{svc_port}", token

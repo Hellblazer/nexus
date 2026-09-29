@@ -43,7 +43,8 @@ from pathlib import Path
 
 import pytest
 
-from tests._engine_substrate import engine_argv, ensure_engine, jvm_error_file_arg
+from tests._engine_substrate import engine_argv, ensure_engine
+from tests.db._service_fixture import jvm_error_file_arg
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"

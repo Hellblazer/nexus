@@ -1184,8 +1184,19 @@ class StorageServiceSupervisor:
         # JVM launch: the runnable artifact follows as `-jar <jar>` (after any
         # -Xmx, which the JVM requires before -jar). Native: argv[0] is already
         # the binary.
+        # nexus-o5xyx.2: a crashing JVM writes hs_err_pid<N>.log into ITS cwd
+        # unless told otherwise, and the supervisor's cwd is wherever the user
+        # ran `nx` from. Point it at the same logs directory the child's
+        # stdout/stderr already go to (open_child_log_or_devnull below), so a
+        # crash report sits beside the log that names it. JVM-only: a native
+        # image has no hs_err and takes no -XX:ErrorFile, so the native launch
+        # is left alone. %p is expanded by the JVM to its own pid.
         if self._launch_kind == "jar":
-            argv += ["-jar", str(self._binary_path)]
+            argv += [
+                f"-XX:ErrorFile={self._config_dir / 'logs' / 'hs_err_%p.log'}",
+                "-jar",
+                str(self._binary_path),
+            ]
         artifact = str(self._binary_path)
         # nexus-ovbr7: route both streams to one file so interleaved output keeps
         # its order; O_APPEND means a respawn never truncates the previous

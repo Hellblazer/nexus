@@ -146,7 +146,11 @@ def test_jvm_shim_moves_system_properties_ahead_of_jar(tmp_path: Path) -> None:
     )
     shim = made.stdout.strip()
     subprocess.run([shim, "-Duser.timezone=UTC", "serve"], env=env, check=True, timeout=30)
-    assert argv_log.read_text().splitlines() == ["-Duser.timezone=UTC", "-jar", str(jar), "serve"]
+    # nexus-o5xyx.2: the shim also redirects a JVM crash report out of the cwd.
+    tmpdir = os.environ.get("TMPDIR") or "/tmp"
+    assert argv_log.read_text().splitlines() == [
+        "-Duser.timezone=UTC", f"-XX:ErrorFile={tmpdir}/hs_err_%p.log", "-jar", str(jar), "serve",
+    ]
 
 
 def test_linux_elf_on_a_linux_host_runs_the_real_candidate(tmp_path: Path) -> None:

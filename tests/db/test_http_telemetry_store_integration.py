@@ -50,6 +50,7 @@ from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     create_tenant_token,
     pg_bin_dir,
+    jar_argv,
     spawn_service,
 )
 
@@ -217,7 +218,7 @@ def java_service(pg_service):
     # the only one of the 22 with ANY drain at all — but its communicate()
     # runs only AFTER the process has already exited, so a service that wedged
     # on a full 64KB pipe (nexus-j0nec) was never drained and never diagnosed.
-    svc_proc, _svc_log = spawn_service([java_bin, "-jar", str(_JAR)], env)
+    svc_proc, _svc_log = spawn_service(jar_argv(java_bin, _JAR), env)
 
     # Wait for service to be up
     base_url = f"http://127.0.0.1:{svc_port}"

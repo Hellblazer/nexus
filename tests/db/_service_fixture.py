@@ -750,6 +750,30 @@ HikariPool fail-fast. Such a fixture pops every key here
 tests in ``test_xnz0o_commands_integration.py``)."""
 
 
+def jvm_error_file_arg() -> str:
+    """``-XX:ErrorFile=<run temp dir>/hs_err_%p.log``: where a crashing engine JVM
+    writes its hs_err report (nexus-o5xyx.2).
+
+    Without it the JVM drops ``hs_err_pid<N>.log`` into its cwd, which for a test
+    launched from the repo is the repo. ``%p`` is expanded by the JVM to its own
+    pid, so concurrent engines do not overwrite each other. ``tempfile.gettempdir()``
+    honours ``TMPDIR``, the same root every other test artifact uses.
+
+    JVM launches ONLY. A GraalVM native image is not a JVM and has no hs_err
+    machinery, so this flag does not apply to it and is deliberately not passed to
+    a native launch (a fatal error there writes Substrate VM's own crash file, not
+    an hs_err). ``tests/test_jvm_jar_launch_error_file_lint.py`` fails any
+    ``-jar`` launch in tests/ or src/ that omits it.
+    """
+    return f"-XX:ErrorFile={Path(tempfile.gettempdir()) / 'hs_err_%p.log'}"
+
+
+def jar_argv(java: str | Path, jar: str | Path) -> list[str]:
+    """argv for ``java -jar <jar>`` with the hs_err redirect. Pass it to
+    :func:`spawn_service` instead of spelling ``"-jar"`` out."""
+    return [str(java), jvm_error_file_arg(), "-jar", str(jar)]
+
+
 def spawn_service(
     cmd: list[str],
     env: dict[str, str],

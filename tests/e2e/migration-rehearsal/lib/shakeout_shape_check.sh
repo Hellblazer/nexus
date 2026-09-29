@@ -57,7 +57,8 @@ shakeout_shape_needs_jvm_shim() {
 #   shakeout_shape_write_jvm_shim <jar> <dir>
 # Writes an executable shim into *dir* that boots *jar* and prints its path.
 # native-smoke.sh starts $BIN with -D system properties; java only honours
-# them before -jar, so the shim moves every -D argument ahead of it.
+# them before -jar, so the shim moves every -D argument ahead of it. It also
+# redirects a JVM crash report out of the cwd (nexus-o5xyx.2).
 shakeout_shape_write_jvm_shim() {
   local jar="$1" dir="$2" shim
   shim="$dir/nexus-service-jvm-shim"
@@ -67,7 +68,7 @@ jvm=(); app=()
 for a in "\$@"; do
   case "\$a" in -D*) jvm+=("\$a") ;; *) app+=("\$a") ;; esac
 done
-exec java "\${jvm[@]}" -jar '$jar' "\${app[@]}"
+exec java "\${jvm[@]}" "-XX:ErrorFile=\${TMPDIR:-/tmp}/hs_err_%p.log" -jar '$jar' "\${app[@]}"
 EOF
   chmod +x "$shim"
   printf '%s\n' "$shim"

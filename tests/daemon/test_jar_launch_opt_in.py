@@ -144,6 +144,8 @@ def test_jar_argv_is_java_dash_jar(monkeypatch):
         "/usr/bin/java",
         "-Duser.timezone=UTC",
         "-Djava.net.preferIPv4Stack=true",
+        # nexus-o5xyx.2: hs_err goes to the logs dir, before -jar
+        "-XX:ErrorFile=/tmp/logs/hs_err_%p.log",
         "-jar",
         str(jar),
     ]
@@ -180,6 +182,8 @@ def test_jar_argv_states_false_when_opted_out(monkeypatch):
         "/usr/bin/java",
         "-Duser.timezone=UTC",
         "-Djava.net.preferIPv4Stack=false",
+        # nexus-o5xyx.2: hs_err goes to the logs dir, before -jar
+        "-XX:ErrorFile=/tmp/logs/hs_err_%p.log",
         "-jar",
         str(jar),
     ]
@@ -211,6 +215,8 @@ def test_jar_argv_with_heap_orders_xmx_before_jar(monkeypatch):
         "-Duser.timezone=UTC",
         "-Djava.net.preferIPv4Stack=true",
         "-Xmx1g",
+        # nexus-o5xyx.2: hs_err goes to the logs dir, before -jar
+        "-XX:ErrorFile=/tmp/logs/hs_err_%p.log",
         "-jar",
         str(jar),
     ]
