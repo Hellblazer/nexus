@@ -252,12 +252,14 @@ public final class Bge768Embedder implements Embedder {
         // InferenceSession::Initialize and the JVM SEGVs. Throws ShutdownInProgressException
         // (deliberately outside the catch below) if exit has already begun.
         OrtInitGate.Scope initScope = OrtInitGate.process().enter("bge768");
-        this.ortEnv = OrtEnvironment.getEnvironment();
 
         OrtSession          sess = null;
         HuggingFaceTokenizer tok  = null;
         // SessionOptions is AutoCloseable; it holds no state once createSession returns.
+        // getEnvironment() is the first statement INSIDE the try so the scope is closed by
+        // the finally below on every path; nothing runs between enter() and the try.
         try (var sessionOpts = new OrtSession.SessionOptions()) {
+            this.ortEnv = OrtEnvironment.getEnvironment();
             // nexus-00wsf: the intra-op width of this SHARED session comes from one
             // resolver (OnnxThreadPolicy: ORT's own default unless an operator overrides);
             // concurrency is bounded by LocalOnnxAdmission, never by this number.

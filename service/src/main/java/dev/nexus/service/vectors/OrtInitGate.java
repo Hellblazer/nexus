@@ -42,16 +42,32 @@ import java.util.function.UnaryOperator;
  * thing in {@code Main.main}.
  *
  * <p><b>The bound</b> ({@value #WAIT_ENV}, default {@value #DEFAULT_WAIT_MILLIS} ms)
- * sits under the 10 s container stop grace {@code Main}'s own shutdown path is
- * sized to, since a wait that outlives the grace period is answered by SIGKILL,
- * no better than the crash. Measured bge-768 session creation takes about 1 s
- * warm. On expiry exit proceeds anyway and logs
- * {@code event=ort_init_shutdown_wait_timeout}.
+ * must sit UNDER every stop grace that ends in SIGKILL, because a wait that
+ * outlives the grace is answered by SIGKILL, no better than the crash. The two
+ * tightest are 5 s: the local supervisor's {@code _GRACEFUL_STOP_TIMEOUT}
+ * ({@code src/nexus/daemon/storage_service_daemon.py}) and the test substrate's
+ * teardown ({@code tests/_engine_substrate.py}); container stop graces are 10 s.
+ * 3 s leaves 2 s of the tighter grace for the rest of shutdown. Measured bge-768
+ * init on hellmini (M-series, external NVMe): 0.56 to 0.60 s warm (4 runs); after
+ * {@code purge} 0.73, 0.73, 0.80, 0.94, 2.08, 4.83 and 4.97 s (7 runs). So 3 s
+ * covers warm and most cold starts, and the worst cold start (about 5 s) does NOT
+ * fit any bound that also fits a 5 s grace: there the wait expires and exit can
+ * still crash. Raise the bound and the stop grace together on such hosts. On expiry
+ * exit proceeds anyway and
+ * logs {@code event=ort_init_shutdown_wait_timeout}; an operator whose disk makes
+ * init slower than the bound can raise it together with the stop grace.
+ * {@code tests/test_ort_init_gate_bound_lint.py} fails if the default reaches the
+ * supervisor's grace.
  *
  * <p>Not covered: a {@code System.exit} called from application code while a
  * lazy init is in flight (the only callers are boot-time failure paths, which
  * run on the thread that would be initialising), and {@code Runtime.halt}
  * (the supervisor-death watchdog's deliberate hard kill).
+ *
+ * <p>Native image: the crash was NOT observed on the published mac-arm64 binary
+ * (0 of 40 SIGTERM runs, 16 landing mid-init), but exposure is not excluded, and
+ * Linux native binaries were not tested at all. The gate is installed there too
+ * ({@code sun.misc.Signal} works under native-image; verified on mac-arm64).
  *
  * <p>Process-scoped by nature (the ORT environment and JVM signal dispositions
  * are process singletons), so production code shares {@link #process()}; tests
@@ -64,8 +80,8 @@ public final class OrtInitGate {
     /** Env var overriding the shutdown wait bound, in milliseconds. */
     public static final String WAIT_ENV = "NX_ORT_INIT_SHUTDOWN_WAIT_MS";
 
-    /** Default shutdown wait bound; under the 10 s stop grace. */
-    public static final long DEFAULT_WAIT_MILLIS = 8_000L;
+    /** Default shutdown wait bound; must stay under the supervisor's 5 s SIGKILL grace. */
+    public static final long DEFAULT_WAIT_MILLIS = 3_000L;
 
     /** Signals whose default JVM handler is {@code System.exit(128 + n)}. */
     private static final String[] EXIT_SIGNALS = {"TERM", "INT", "HUP"};
