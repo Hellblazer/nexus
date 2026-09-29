@@ -16,6 +16,7 @@ import dataclasses
 import gzip
 import hashlib
 import json
+import shlex
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -695,7 +696,7 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     with patch("nexus.commands.store._t3", return_value=client):
         cli = CliRunner().invoke(main, ["store", "import", str(old_export), "-c", coll])
     assert cli.exit_code == 0, cli.output
-    assert f'nx store delete -c {coll} --title "wbfpw40 note"' in cli.output, cli.output
+    assert f"nx store delete -c {coll} --title 'wbfpw40 note'" in cli.output, cli.output
 
     # Control: re-importing a CURRENT export is a no-op that reports its chunk owned.
     current_export = tmp_path / "current.nxexp"
@@ -788,3 +789,28 @@ def test_delete_then_import_restores_a_document_from_the_file(t2_service_env, tm
     result = import_collection(db=client, input_path=out, target_collection=coll)
     assert (result["owned_count"], result["unowned_count"]) == (1, 0), result
     assert v1 in client.get_collection(coll).get(ids=[v1], include=[])["ids"], "the restored chunk must be visible"
+
+
+def test_the_printed_delete_command_quotes_a_hostile_title(t2_service_env, tmp_path):
+    """A catalog title is user data; the command nx store import prints must
+    round-trip through a shell as exactly one --title argument."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    coll = _coll("hostile-title")
+    title = 'x" ; echo INJECTED $(id) `id` ; "'
+    doc, _uri, _ = _owned_doc(writer, client, coll, owner, title, ["wbfpw40 hostile v1"])
+    out = tmp_path / "hostile.nxexp"
+    export_collection(db=client, collection_name=coll, output_path=out)
+    v2_text = "wbfpw40 hostile v2"
+    v2 = hashlib.sha256(v2_text.encode()).hexdigest()
+    client.upsert_chunks_with_embeddings(
+        coll, ids=[v2], documents=[v2_text], embeddings=[],
+        metadatas=[{"title": title, "chunk_text_hash": v2, "indexed_at": datetime.now(UTC).isoformat()}],
+    )
+    writer.write_manifest(doc, [{"chash": v2, "position": 0}], collection=coll)
+    with patch("nexus.commands.store._t3", return_value=client):
+        cli = CliRunner().invoke(main, ["store", "import", str(out), "-c", coll])
+    assert cli.exit_code == 0, cli.output
+    [line] = [ln.strip() for ln in cli.output.splitlines() if ln.strip().startswith("nx store delete")]
+    assert shlex.split(line) == ["nx", "store", "delete", "-c", coll, "--title", title], line

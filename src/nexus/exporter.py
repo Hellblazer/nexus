@@ -21,12 +21,13 @@ Without it, an imported chunk has no catalog document or manifest row at
 all: since RDR-192 Step 5 (nexus-wbfpw.10) a content read returns only
 chunks with a live owner, so a manifest-less imported chunk is invisible
 to search once its liveness grace window lapses, and the RDR-192 reaper
-deletes it outright. ``import_collection`` registers (or reconciles onto
-an existing) catalog document per distinct owner identity in the file and
-writes its manifest explicitly, once, after every one of its chunks has
-been upserted -- see that function's docstring for why a per-upsert-batch
-manifest write cannot be trusted for a document spanning more than one
-300-chunk batch.
+deletes it outright. ``import_collection`` registers (or finds) the
+catalog document per distinct owner identity in the file and writes its
+manifest explicitly, once, after every one of its chunks has been upserted
+-- see that function's docstring for why a per-upsert-batch manifest write
+cannot be trusted for a document spanning more than one 300-chunk batch.
+A document that already owns chunks keeps its manifest (nexus-wbfpw.40):
+the file's chunks it does not own stay unowned and are reported.
 """
 from __future__ import annotations
 
@@ -1192,14 +1193,15 @@ def import_collection(
             if unowned_tumblers:
                 # The remedy nx store import prints is `nx store delete
                 # --title`, so name each document by its CURRENT title.
+                # title None: the lookup failed; "": the document has none.
                 try:
                     found = reader.resolve_many(unowned_tumblers)
+                    unowned_documents = [
+                        {"tumbler": t, "title": getattr(found.get(t), "title", "") or ""}
+                        for t in unowned_tumblers
+                    ]
                 except Exception:  # noqa: BLE001 — naming is best-effort; the counts above stand
-                    found = {}
-                unowned_documents = [
-                    {"tumbler": t, "title": getattr(found.get(t), "title", "") or ""}
-                    for t in unowned_tumblers
-                ]
+                    unowned_documents = [{"tumbler": t, "title": None} for t in unowned_tumblers]
         finally:
             _close = getattr(writer, "close", None)
             if callable(_close):

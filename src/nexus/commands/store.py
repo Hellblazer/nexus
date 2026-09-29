@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import shlex
 import sys
 from pathlib import Path
 
@@ -1057,11 +1058,17 @@ def import_cmd(
         )
         target = result.get("collection_name", "")
         for d in docs[:5]:
-            title = d.get("title") or ""
-            if title:
-                click.echo(f'    nx store delete -c {target} --title "{title}"')
+            title = d.get("title")
+            tumbler = d.get("tumbler")
+            if title is None:
+                click.echo(f"    (could not look up document {tumbler}'s title; see nx catalog show {tumbler})")
+            elif not title:
+                click.echo(f"    (document {tumbler} has no title; see nx catalog show {tumbler})")
             else:
-                click.echo(f"    (document {d.get('tumbler')} has no title; see nx catalog show {d.get('tumbler')})")
+                # Catalog titles are user and file data: quote them so a
+                # pasted command cannot run anything else.
+                safe = "".join(ch for ch in title if ch.isprintable())
+                click.echo(f"    nx store delete -c {shlex.quote(target)} --title {shlex.quote(safe)}")
         if len(docs) > 5:
             click.echo(f"    ... and {len(docs) - 5} more")
     if result.get("rehashed_count"):
