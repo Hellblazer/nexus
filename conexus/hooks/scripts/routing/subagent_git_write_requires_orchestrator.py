@@ -382,11 +382,14 @@ checkout f' | sh``, ``eval 'git checkout f'`` and ``sh -c '...'`` carry
 ``git`` in argument position and are told from ``echo git add`` only by
 parsing the shell, the unbounded surface rounds 1-3 lost to. So a standalone
 ``git`` token in ANY position arms the scan (unsure means deny); accepted
-false positives are ``echo git add`` and a directory literally named ``git``
-(``cd ~/git && echo add``, ``ls ~/git/ && echo add``). ``=`` and ``$`` end a
-token, keeping ``g=git; $g checkout`` armed; ``+ % #`` are NOT token
-characters, so ``printf 'git%s checkout f' '' | sh`` and ``sed
-'s/x/git/;...' | sh`` (trailing ``/`` stripped before the basename) arm too.
+false positives are ``echo git add``, a directory literally named ``git``
+(``cd ~/git && echo add``, ``ls ~/git/ && echo add``) and ``git~`` editor
+backup names. ``=`` and ``$`` end a token, keeping ``g=git; $g checkout``
+armed; ``+ % # ~`` are NOT token characters, so ``printf 'git%s checkout f' ''
+| sh``, ``sed 's/x/git/;s/$/ checkout f/' | sh`` (the trailing ``/`` is
+stripped before the basename), ``x=git~; ${x%~} checkout f`` and ``printf
+'git~ checkout f' | tr -d '~' | sh`` arm too. The g-flag form ``sed
+'s/x/git/g;...'`` does NOT arm: its token's basename is ``g``.
 Both copies of this module carry the change identically
 (``tests/test_routing_subagent_git_write.py`` runs every rule class against
 both and pins the regexes and ``body()``'s git-present logic by AST).
@@ -504,10 +507,12 @@ _VERB_RE = re.compile(r"\b(" + _PRIMARY_VERB_ALT + r")\b")
 #: reset`` denied.
 #:
 #: A TOKEN rule, not a position analysis. The text is cut into path-ish tokens
-#: (``_PATHISH_TOKEN_RE``: word characters plus ``. - / ~``; whitespace, the
-#: already-stripped quotes, ``; & | ( ) < > = $ { } ` ! + % #`` and everything
-#: else end a token, so ``git%s``, ``git+`` and ``git#`` all leave a bare
-#: ``git`` token behind). Trailing ``/`` is stripped, then ``git`` arms the
+#: (``_PATHISH_TOKEN_RE``: word characters plus ``. - /``; whitespace, the
+#: already-stripped quotes, ``; & | ( ) < > = $ { } ` ! + % # ~`` and everything
+#: else end a token, so ``git%s``, ``git+``, ``git#`` and ``git~`` all leave a
+#: bare ``git`` token behind: text the shell builds can strip the extra
+#: character, e.g. ``x=git~; ${x%~} checkout f`` and ``printf 'git~ checkout
+#: f' | tr -d '~' | sh`` both run git). Trailing ``/`` is stripped, then ``git`` arms the
 #: scan when the token's BASENAME matches ``_GIT_BASENAME_RE``: ``git``, any
 #: ``git-<letters and hyphens>`` including a bare ``git-`` (``git-checkout``,
 #: ``git-core/git-``, whose ``${p}add`` completion is a spliced command), and
@@ -528,7 +533,7 @@ _VERB_RE = re.compile(r"\b(" + _PRIMARY_VERB_ALT + r")\b")
 #: The accepted false positives are therefore ``echo git add`` and a bare
 #: directory named ``git`` (``cd ~/git && ...``); the fixed false positives are
 #: every path or word that merely CONTAINS ``git``.
-_PATHISH_TOKEN_RE = re.compile(r"[\w.\-/~]+")
+_PATHISH_TOKEN_RE = re.compile(r"[\w.\-/]+")
 _GIT_BASENAME_RE = re.compile(
     r"git(?:-[A-Za-z-]*)?(?:\.(?:exe|cmd|bat|com|sh))?"
 )

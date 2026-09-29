@@ -2023,6 +2023,9 @@ _REVIEW_FOUND_BYPASSES = [
     "printf 'git%s checkout f\\n' '' | sh",
     "echo x | sed 's/x/git/;s/$/ checkout f/' | sh",
     "echo 'git+ checkout f' | sh",
+    # `~` is not a token character: text the shell builds can strip it.
+    "x=git~; ${x%~} checkout f",
+    "printf 'git~ checkout f' | tr -d '~' | sh",
     "echo 'git# checkout f' | sh",
     "echo 'git% checkout f' | sh",
     "echo 's/x/git/ checkout f' | sh",
