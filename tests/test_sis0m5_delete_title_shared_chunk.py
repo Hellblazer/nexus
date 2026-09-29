@@ -108,3 +108,118 @@ def test_delete_title_of_an_unshared_note_still_deletes_its_chunk(t2_service_env
     assert reader.by_source_uri(uri) is None
     assert "Deleted 1 entry" in result.output, result.output
     assert "kept" not in result.output, result.output
+
+
+def _two_chunk_note(writer, client, owner, collection: str, title: str) -> tuple[str, str, list[str]]:
+    source_uri = uri_for(collection, title)
+    tumbler = str(writer.register(
+        owner=owner, title=title, content_type="knowledge",
+        physical_collection=collection, source_uri=source_uri,
+    ))
+    bodies = [f"{title} piece one", f"{title} piece two"]
+    chashes = [hashlib.sha256(b.encode()).hexdigest() for b in bodies]
+    client.upsert_chunks_with_embeddings(
+        collection, ids=chashes, documents=bodies, embeddings=[],
+        metadatas=[{"title": title, "chunk_text_hash": c,
+                    "indexed_at": datetime.now(UTC).isoformat()} for c in chashes],
+    )
+    writer.write_manifest(
+        tumbler, [{"chash": c, "position": i} for i, c in enumerate(chashes)],
+        collection=collection,
+    )
+    return tumbler, source_uri, chashes
+
+
+class _FailingWriter:
+    """The real writer, with one method made to raise."""
+
+    def __init__(self, real, fail: str) -> None:
+        self._real, self._fail = real, fail
+
+    def __getattr__(self, name):
+        if name == self._fail:
+            def boom(*a, **k):
+                raise RuntimeError(f"injected {name} failure")
+            return boom
+        return getattr(self._real, name)
+
+
+@pytest.mark.parametrize("fail", ["write_manifest", "delete_document"])
+def test_a_failed_reap_leaves_a_multi_chunk_document_whole(t2_service_env, fail):
+    """All or nothing per document. Retracting row by row could fail part
+    way and leave a live note with some pieces stripped from its manifest
+    while the output said it was not deleted. A retraction failure changes
+    nothing; a tombstone failure puts the manifest back."""
+    import nexus.catalog.factory as factory
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    col = _coll(f"fail-{fail}")
+    tumbler, uri, chashes = _two_chunk_note(writer, client, owner, col, "sis0m5 split")
+    real_factory = factory.make_catalog_writer
+
+    with patch("nexus.commands.store._t3", return_value=client), patch.object(
+        factory, "make_catalog_writer",
+        lambda *a, **k: _FailingWriter(real_factory(*a, **k), fail),
+    ):
+        result = CliRunner().invoke(main, ["store", "delete", "-c", col, "--title", "sis0m5 split", "-y"])
+
+    assert result.exit_code != 0, result.output
+    assert f"document {tumbler} was NOT deleted" in result.output, result.output
+    assert reader.by_source_uri(uri) is not None, "the document must stay live"
+    assert [r.chash for r in reader.get_manifest(tumbler)] == chashes, "its manifest must be whole"
+    assert all(_live(client, col, c) for c in chashes), "its chunks must be untouched"
+
+
+def test_confirmation_prompt_counts_only_what_the_reap_touches(t2_service_env):
+    """A file-backed document with the same title is never reaped by
+    --title, so the prompt must not count it."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    col = _coll("prompt")
+    _t, uri, _c = _note(writer, client, owner, col, "sis0m5 prompt", "sis0m5 prompt body")
+    writer.register(
+        owner=owner, title="sis0m5 prompt", content_type="knowledge",
+        physical_collection=col, file_path="notes/prompt.md",
+    )
+
+    with patch("nexus.commands.store._t3", return_value=client):
+        result = CliRunner().invoke(
+            main, ["store", "delete", "-c", col, "--title", "sis0m5 prompt"], input="y\n",
+        )
+
+    assert result.exit_code == 0, result.output
+    assert "Found 1 document(s)" in result.output, result.output
+    assert reader.by_source_uri(uri) is None
+
+
+def test_a_ghost_titled_document_is_reaped_too(t2_service_env):
+    """A ghost has no physical_collection, so list_by_collection never
+    returns it; it is found through the manifests of the chunks titled X,
+    the owner scope resolve_knowledge_doc_for_chash already uses."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    col = _coll("ghost")
+    body = "sis0m5 ghost shared body"
+    _tb, ub, chash = _note(writer, client, owner, col, "sis0m5 live twin", body)
+    ghost = str(writer.register(owner=owner, title="sis0m5 ghost", content_type="knowledge"))
+    writer.write_manifest(ghost, [{"chash": chash, "position": 0}], collection=col)
+    client.upsert_chunks_with_embeddings(
+        col, ids=[chash], documents=[body], embeddings=[],
+        metadatas=[{"title": "sis0m5 ghost", "chunk_text_hash": chash,
+                    "indexed_at": datetime.now(UTC).isoformat()}],
+    )
+
+    with patch("nexus.commands.store._t3", return_value=client):
+        result = CliRunner().invoke(main, ["store", "delete", "-c", col, "--title", "sis0m5 ghost", "-y"])
+
+    assert result.exit_code == 0, result.output
+    assert f"Deleted document 'sis0m5 ghost' ({ghost})" in result.output, result.output
+    assert reader.by_source_uri(ub) is not None
+    assert _live(client, col, chash)

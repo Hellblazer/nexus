@@ -2219,32 +2219,85 @@ class TitleReap:
 
     *documents* are ``(tumbler, title)`` of every document tombstoned;
     *chashes* the chunks their manifests named, which the caller then asks
-    T3 to delete; *failures* ``(tumbler, error)`` for any document that
-    could not be fully retracted and was left live.
+    T3 to delete; *failures* ``(tumbler, error)`` for any document left
+    live; *held* the chunks of those failed documents, which the caller
+    must leave alone (no other path may reap a document this one refused).
     """
 
     documents: tuple[tuple[str, str], ...]
     chashes: tuple[str, ...]
     failures: tuple[tuple[str, str], ...]
+    held: tuple[str, ...] = ()
 
 
-def reap_catalog_documents_by_title(collection: str, title: str) -> TitleReap | None:
-    """Tombstone every store_put-origin document titled *title* in
-    *collection*, retracting its own manifest rows first (nexus-sis0m.5).
+def _is_title_reap_candidate(entry, title: str, collection: str) -> bool:
+    """The documents ``--title`` names: store_put-origin (knowledge, no
+    file_path), titled *title*, in *collection* or a ghost with no
+    collection (the owner scope :func:`resolve_knowledge_doc_for_chash`
+    uses)."""
+    return (
+        (getattr(entry, "title", "") or "") == title
+        and entry.content_type == "knowledge"
+        and not entry.file_path
+        and (not entry.physical_collection or entry.physical_collection == collection)
+    )
 
-    ``nx store delete --title`` names documents, so the documents are found
-    by catalog title rather than through their chunks. The chash route
+
+def title_reap_candidates(reader, collection: str, title: str, chashes: list[str] = ()) -> list:
+    """Every document :func:`reap_catalog_documents_by_title` would reap.
+
+    Documents in *collection* come from ``list_by_collection``. A ghost has
+    no collection to list it under, so ghosts are found through the
+    manifests of *chashes* (the chunks titled *title* in T3).
+    """
+    found = {
+        str(e.tumbler): e
+        for e in (reader.list_by_collection(collection) or [])
+        if _is_title_reap_candidate(e, title, collection)
+    }
+    if chashes:
+        try:
+            owners = reader.docs_for_chashes(list(chashes)) or {}
+        except httpx.HTTPStatusError as exc:
+            # 400: an id that is not a hex chash (a legacy id) can own
+            # nothing; a miss, as in resolve_knowledge_doc_for_chash.
+            if exc.response.status_code != 400:
+                raise
+            owners = {}
+        for tumblers in owners.values():
+            for t in tumblers:
+                if str(t) in found:
+                    continue
+                e = reader.resolve(t)
+                if e is not None and not e.physical_collection and _is_title_reap_candidate(e, title, collection):
+                    found[str(t)] = e
+    return list(found.values())
+
+
+def reap_catalog_documents_by_title(
+    collection: str, title: str, chashes: list[str] = (),
+) -> TitleReap | None:
+    """Tombstone every document ``--title`` names (:func:`title_reap_candidates`),
+    retracting its own manifest first (nexus-sis0m.5).
+
+    ``nx store delete --title`` names documents, so they are found by catalog
+    title rather than through their chunks. The chash route
     (:func:`reap_catalog_manifest_for_chashes`) refuses a chash two
     documents share, correctly for a delete by chunk id, and so left a note
-    whose body another note duplicates live, while the chunk row's own
-    title (its last writer's) could miss it outright. Only these documents'
+    whose body another note duplicates live. Only these documents'
     manifests are rewritten; every other document naming the same chash
     keeps protecting it through the engine's delete anti-join.
 
-    ``None`` when the catalog is unavailable, so the caller can fall back
-    to the chunk-title path. A document whose retraction fails is left live
-    and reported in *failures*; tombstoning it with a manifest row still in
-    place would pin its chunk to a deleted document.
+    All or nothing per document. The whole manifest is retracted in ONE
+    ``write_manifest`` (an atomic replace), then the document is tombstoned.
+    Retracting chash by chash, as the chash route does, could fail part way
+    and leave a live document with some of its rows stripped. If the
+    tombstone fails after the retraction, the original manifest is written
+    back so the document is left as it was. Either failure lands the
+    document in *failures*, live and intact; a failed write-back is named.
+
+    ``None`` when the catalog is unavailable, so the caller can fall back to
+    the chunk-title path.
     """
     from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -2253,33 +2306,54 @@ def reap_catalog_documents_by_title(collection: str, title: str) -> TitleReap | 
         return None
     writer = None
     documents: list[tuple[str, str]] = []
-    chashes: dict[str, None] = {}
+    reaped_chashes: dict[str, None] = {}
     failures: list[tuple[str, str]] = []
+    held: dict[str, None] = {}
     try:
-        entries = [
-            e for e in (reader.list_by_collection(collection) or [])
-            if (getattr(e, "title", "") or "") == title
-            and e.content_type == "knowledge" and not e.file_path
-        ]
+        entries = title_reap_candidates(reader, collection, title, list(chashes))
         if not entries:
             return TitleReap((), (), ())
         writer = make_catalog_writer()
         for entry in entries:
             tumbler = str(entry.tumbler)
-            own = list(dict.fromkeys(r.chash for r in reader.get_manifest(tumbler)))
+            rows = reader.get_manifest(tumbler)
+            original = [
+                {
+                    "position": r.position, "chash": r.chash, "chunk_index": r.chunk_index,
+                    "line_start": r.line_start, "line_end": r.line_end,
+                    "char_start": r.char_start, "char_end": r.char_end,
+                }
+                for r in rows
+            ]
+            row_collection = entry.physical_collection or collection
             try:
-                for chash in own:
-                    _retract_manifest_rows_for_chash(
-                        reader, writer, entry, chash, expected_collection=collection,
-                    )
+                if original:
+                    writer.write_manifest(tumbler, [], collection=row_collection)
+            except Exception as exc:  # noqa: BLE001 — nothing changed; reported, the caller fails loud
+                _log.warning("catalog_title_reap_retract_failed", tumbler=tumbler, exc_info=True)
+                failures.append((tumbler, f"manifest not retracted ({type(exc).__name__}: {exc})"))
+                held.update(dict.fromkeys(r["chash"] for r in original))
+                continue
+            try:
                 writer.delete_document(entry.tumbler)
-            except Exception as exc:  # noqa: BLE001 — reported per document; the caller fails loud
-                _log.warning("catalog_title_reap_failed", tumbler=tumbler, exc_info=True)
-                failures.append((tumbler, f"{type(exc).__name__}: {exc}"))
+            except Exception as exc:  # noqa: BLE001 — restore below; reported, the caller fails loud
+                _log.warning("catalog_title_reap_tombstone_failed", tumbler=tumbler, exc_info=True)
+                detail = f"not tombstoned ({type(exc).__name__}: {exc})"
+                if original:
+                    try:
+                        writer.write_manifest(tumbler, original, collection=row_collection)
+                    except Exception as restore_exc:  # noqa: BLE001 — named so the operator can repair it
+                        _log.error("catalog_title_reap_restore_failed", tumbler=tumbler, exc_info=True)
+                        detail += (
+                            f"; its manifest could NOT be restored ({type(restore_exc).__name__}) "
+                            f"and is empty: re-run the delete, or repair with nx catalog reconcile"
+                        )
+                failures.append((tumbler, detail))
+                held.update(dict.fromkeys(r["chash"] for r in original))
                 continue
             documents.append((tumbler, title))
-            chashes.update(dict.fromkeys(own))
-        return TitleReap(tuple(documents), tuple(chashes), tuple(failures))
+            reaped_chashes.update(dict.fromkeys(r["chash"] for r in original))
+        return TitleReap(tuple(documents), tuple(reaped_chashes), tuple(failures), tuple(held))
     finally:
         if writer is not None:
             writer.close()

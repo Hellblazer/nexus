@@ -2258,7 +2258,7 @@ catalog cleanup for it has already run; check 'nx catalog list' / 'nx catalog re
 
 Run `nx catalog gc` / `nx catalog reconcile` to resolve the ambiguity, then retry the delete.
 
-`--title` names documents (nexus-sis0m.5). Each catalog document titled X in Y is tombstoned with its own manifest rows retracted first, then its chunks are deleted. A chunk whose row carries title X but that no catalog document owns (stored before the catalog existed) goes through the chunk-id reap above alongside. Two notes with identical bodies share one chunk, so deleting one of them keeps the chunk for the other. Before nexus-sis0m.5 neither note was removed there, and the command printed `Deleted 0 entries` at exit 0 with X still live. The output is one line per removed document, then the SERVER's actual chunk count (nexus-o8dil.45), then on stderr any chunks kept and who holds them:
+`--title` names documents (nexus-sis0m.5). Each store_put-origin catalog document titled X in Y (or a ghost with no collection that owns one of X's chunks) is tombstoned with its own manifest rows retracted first, then its chunks are deleted. A chunk whose row carries title X but that no catalog document owns (stored before the catalog existed) goes through the chunk-id reap above alongside. Two notes with identical bodies share one chunk, so deleting one of them keeps the chunk for the other. Before nexus-sis0m.5 neither note was removed there, and the command printed `Deleted 0 entries` at exit 0 with X still live. The output is one line per removed document, then the SERVER's actual chunk count (nexus-o8dil.45), then on stderr any chunks kept and who holds them:
 
 ```
 Deleted document 'X' (1.2.3) from Y.
@@ -2277,7 +2277,7 @@ The count line is omitted when K is 0. Exit is non-zero only when X was not remo
 | `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
 | `--json` | Output as JSON |
 
-**`export` flags:** (`COLLECTION` is resolved as for every store verb: a bare subject or a two-segment name finds the conformant collection it promotes to, or an existing legacy collection of that name; nexus-sis0m.5)
+**`export` flags:** (`COLLECTION` is resolved as for every store verb: a bare subject or a two-segment name finds the conformant collection it promotes to, or an existing legacy collection of that name when no conformant counterpart exists; nexus-sis0m.5)
 
 | Flag | Description |
 |------|-------------|
@@ -2290,7 +2290,7 @@ The count line is omitted when K is 0. Exit is non-zero only when X was not remo
 
 | Flag | Description |
 |------|-------------|
-| `-c` / `--collection NAME` | Override target collection name (default: from export header). Resolved as every store verb resolves `-c`: a bare subject or a legacy two-segment name that has no existing collection becomes the conformant name for this install's model, and an existing legacy collection keeps its name (nexus-8o7ae, nexus-sis0m.5) |
+| `-c` / `--collection NAME` | Override target collection name (default: from export header). Resolved as every store verb resolves `-c`: a bare subject or a legacy two-segment name that has no existing collection becomes the conformant name for this install's model, and an existing legacy collection keeps its name unless its conformant counterpart also exists, which wins (nexus-8o7ae, nexus-sis0m.5) |
 | `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
 | `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
 | `--skip-existing` | Skip records whose id already exists in the target collection, instead of overwriting. Useful for resuming a partial import |

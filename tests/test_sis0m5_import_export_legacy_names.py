@@ -107,3 +107,16 @@ def test_placeholder_legacy_name_is_a_restore_only_when_it_exists(exists) -> Non
     else:
         with pytest.raises(Exception, match="(?i)placeholder"):
             _resolve_bare_subject("knowledge__knowledge", t3=t3, for_write=True)
+
+
+
+def test_export_of_a_two_segment_name_prefers_the_conformant_collection_when_both_exist() -> None:
+    """With both a legacy collection and its conformant counterpart present,
+    a two-segment name reaches the conformant one, as for put/list/get/delete
+    (nexus-hmxi). The export echoes the resolved name."""
+    from nexus.commands.store import _resolve_bare_subject
+
+    legacy = "knowledge__sis0m5-both"
+    conformant = t3_collection_name(legacy)
+    t3 = _FakeT3({legacy, conformant})
+    assert _resolve_bare_subject(legacy, t3=t3) == conformant

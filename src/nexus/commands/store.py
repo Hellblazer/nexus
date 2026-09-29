@@ -717,23 +717,22 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
     from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         live_holders_of_chashes,
         reap_catalog_documents_by_title,
+        title_reap_candidates,
     )
 
     row_ids = db.find_ids_by_title(col_name, title)
-    docs = reap_catalog_documents_by_title(col_name, title) if yes else None
+    docs = reap_catalog_documents_by_title(col_name, title, row_ids) if yes else None
     if not yes:
         # Count before asking, act after: the reap tombstones, so it cannot
-        # run ahead of the confirmation.
+        # run ahead of the confirmation. The count is the reap's own
+        # candidate set, so the prompt names what will be touched.
         from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         reader = make_catalog_reader()
         n_docs = 0
         if reader is not None:
             try:
-                n_docs = sum(
-                    1 for e in (reader.list_by_collection(col_name) or [])
-                    if (getattr(e, "title", "") or "") == title
-                )
+                n_docs = len(title_reap_candidates(reader, col_name, title, row_ids))
             finally:
                 reader.close()
         if not n_docs and not row_ids:
@@ -743,7 +742,7 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
             f"{title!r} in {col_name}."
         )
         click.confirm("Delete?", abort=True)
-        docs = reap_catalog_documents_by_title(col_name, title)
+        docs = reap_catalog_documents_by_title(col_name, title, row_ids)
 
     reaped = docs.documents if docs else ()
     if not reaped and not row_ids and not (docs and docs.failures):
@@ -752,7 +751,11 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
     # Chunks titled *title* that no reaped document named: the chunk-title
     # path, reap-before-delete, exactly as before.
     doc_chashes = list(docs.chashes) if docs else []
-    loose = [i for i in row_ids if i not in set(doc_chashes)]
+    # A failed document's chunks are held back from the chunk-title path
+    # too: that path resolves a chunk to its sole owner and would reap the
+    # very document the title reap just refused.
+    skip = set(doc_chashes) | set(docs.held if docs else ())
+    loose = [i for i in row_ids if i not in skip]
     if loose:
         _reap_catalog_for_doc_ids(loose, expected_collection=col_name)
     targets = list(dict.fromkeys(doc_chashes + loose))
@@ -761,7 +764,16 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
         click.echo(f"Deleted document {title!r} ({tumbler}) from {col_name}.")
     # nexus-o8dil.45: the server-reported count, never len(targets): the
     # engine's anti-join keeps a chunk another live document still holds.
-    deleted = db.batch_delete(col_name, targets) if targets else 0
+    try:
+        deleted = db.batch_delete(col_name, targets) if targets else 0
+    except Exception as exc:
+        # The documents above are already tombstoned; their chunks stay
+        # until a retry or purge-trash sweeps them.
+        raise click.ClickException(
+            f"the chunk delete failed after {len(reaped)} document(s) were "
+            f"tombstoned ({type(exc).__name__}: {exc}); re-run the delete to "
+            "remove the chunks."
+        ) from exc
     if deleted:
         click.echo(f"Deleted {deleted} {'entry' if deleted == 1 else 'entries'} with title {title!r} from {col_name}.")
     kept = len(targets) - deleted
