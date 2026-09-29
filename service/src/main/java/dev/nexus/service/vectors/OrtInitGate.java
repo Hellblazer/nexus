@@ -5,6 +5,7 @@ package dev.nexus.service.vectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.IntConsumer;
@@ -40,6 +41,23 @@ import java.util.function.UnaryOperator;
  * Once the gate is closed {@code enter} throws {@link ShutdownInProgressException},
  * so nothing starts native init while the process is exiting. Install it first
  * thing in {@code Main.main}.
+ *
+ * <p><b>Inference too</b> (nexus-o5xyx.3). {@code session.run()} logs through the
+ * same manager ({@code ExecuteKernel}'s {@code Capture}), and a SIGTERM under
+ * sustained embed load crashed the ungated process the same way (macOS arm64
+ * laptop, ORT 1.20.0, 8 embed threads: SIGSEGV in {@code LoggingManager::Log} under
+ * {@code InferenceSession::Run} on 7 of 80 signals ungated, 5 of 100 with this gate
+ * covering init only). Waiting a run out is not enough: one bge sub-batch took
+ * 2.7 s alone on that laptop and far longer with eight in flight, so a drain-only
+ * gate hit its bound with 8 runs still live. Every run site ({@link Bge768Embedder},
+ * {@link OnnxEmbedder}, {@link CrossEncoderReranker}) goes through {@link GatedRun}:
+ * a scope from tensor creation to tensor release whose canceller sets ORT's run
+ * terminate flag, so {@link #quiesce} stops in-flight runs at their next kernel
+ * boundary, waits for them to return while the environment is still alive, and
+ * refuses new ones. The names ({@code enter}, {@value #WAIT_ENV}, the
+ * {@code ort_init_shutdown_wait*} events) predate that and are kept stable. A
+ * refused or cancelled embed reaches the client as a retryable 503; a refused or
+ * cancelled rerank degrades like any other local cross-encoder failure.
  *
  * <p><b>The bound</b> ({@value #WAIT_ENV}, default {@value #DEFAULT_WAIT_MILLIS} ms)
  * must sit UNDER every stop grace that ends in SIGKILL, because a wait that
@@ -93,10 +111,49 @@ public final class OrtInitGate {
         }
     }
 
-    /** Scope of one in-flight native model initialisation; closing it twice is harmless. */
-    public interface Scope extends AutoCloseable {
+    /**
+     * Scope of one in-flight piece of native ORT work; closing it twice is harmless.
+     * A scope may carry a canceller that {@link #quiesce} runs when shutdown begins
+     * (nexus-o5xyx.3: an inference is cancelled rather than waited for).
+     */
+    public final class Scope implements AutoCloseable {
+        private boolean left;
+        private boolean cancelled;
+        private Runnable canceller;
+
+        private Scope() {}
+
+        /**
+         * Register (or, with {@code null}, clear) the action that stops this work
+         * when shutdown begins. If shutdown has already begun it runs now. Clear it
+         * before releasing anything the canceller touches.
+         */
+        public void onShutdown(Runnable c) {
+            synchronized (lock) {
+                if (left) return;
+                canceller = c;
+                if (c != null && closed && !cancelled) runCanceller(this);
+            }
+        }
+
+        /** True once shutdown has run this scope's canceller. */
+        public boolean cancelled() {
+            synchronized (lock) {
+                return cancelled;
+            }
+        }
+
         @Override
-        void close();
+        public void close() {
+            synchronized (lock) {
+                if (left) return;
+                left = true;
+                canceller = null;
+                active.remove(this);
+                inFlight--;
+                lock.notifyAll();
+            }
+        }
     }
 
     /** Test seam over {@code sun.misc.Signal}: route signal {@code name} to {@code onSignal(exitStatus)}. */
@@ -114,6 +171,9 @@ public final class OrtInitGate {
     private final Object lock = new Object();
     private int inFlight;
     private boolean closed;
+    /** Open scopes, so {@link #quiesce} can run their cancellers. Guarded by {@link #lock}. */
+    private final java.util.Set<Scope> active =
+            java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
 
     private final AtomicBoolean installed = new AtomicBoolean();
     private final long waitMillis;
@@ -191,15 +251,20 @@ public final class OrtInitGate {
                         "refusing to start native model init '" + what + "': shutdown in progress");
             }
             inFlight++;
+            Scope s = new Scope();
+            active.add(s);
+            return s;
         }
-        AtomicBoolean left = new AtomicBoolean();
-        return () -> {
-            if (!left.compareAndSet(false, true)) return;
-            synchronized (lock) {
-                inFlight--;
-                lock.notifyAll();
-            }
-        };
+    }
+
+    /** Caller holds {@link #lock}. A canceller that throws is logged; the wait still bounds exit. */
+    private static void runCanceller(Scope s) {
+        s.cancelled = true;
+        try {
+            s.canceller.run();
+        } catch (RuntimeException e) {
+            log.warn("event=ort_run_cancel_failed error=\"{}\"", e.toString());
+        }
     }
 
     /**
@@ -212,6 +277,17 @@ public final class OrtInitGate {
         long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
         synchronized (lock) {
             closed = true;
+            int cancelled = 0;
+            // A snapshot: a canceller may close its own scope on this thread (the lock is reentrant).
+            for (Scope s : List.copyOf(active)) {
+                if (s.canceller != null && !s.cancelled) {
+                    runCanceller(s);
+                    cancelled++;
+                }
+            }
+            if (cancelled > 0) {
+                log.info("event=ort_run_cancelled count={}", cancelled);
+            }
             if (inFlight > 0) {
                 log.info("event=ort_init_shutdown_wait in_flight={} bound_ms={}", inFlight, timeoutMillis);
             }

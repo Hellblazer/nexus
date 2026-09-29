@@ -88,6 +88,73 @@ class OrtInitGateTest {
         assertThat(gate.quiesce(100)).as("both closed").isTrue();
     }
 
+    // ── cancellers (nexus-o5xyx.3: in-flight inference is cancelled, not waited out) ──
+
+    @Test
+    void quiesceRunsTheCancellerOfEveryOpenScopeThenWaits() throws Exception {
+        OrtInitGate gate = new OrtInitGate();
+        OrtInitGate.Scope scope = gate.enter("run");
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        // A cancelled run returns promptly: model that by closing the scope from the canceller's thread.
+        scope.onShutdown(() -> {
+            calls.incrementAndGet();
+            new Thread(scope::close).start();
+        });
+
+        long t0 = System.nanoTime();
+        assertThat(gate.quiesce(10_000)).as("the cancelled run returned, so quiesce is clean").isTrue();
+        assertThat(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - t0))
+                .as("cancellation, not the bound, ended the wait").isLessThan(5_000L);
+        assertThat(calls).as("the canceller runs exactly once").hasValue(1);
+        assertThat(scope.cancelled()).isTrue();
+    }
+
+    @Test
+    void aCancellerRegisteredAfterShutdownBeganRunsAtOnce() {
+        OrtInitGate gate = new OrtInitGate();
+        OrtInitGate.Scope scope = gate.enter("run");
+        gate.quiesce(0);
+        AtomicBoolean ran = new AtomicBoolean();
+        scope.onShutdown(() -> ran.set(true));
+        assertThat(ran).as("the race between enter() and registration must not lose the cancel").isTrue();
+        assertThat(scope.cancelled()).isTrue();
+    }
+
+    @Test
+    void aClearedOrClosedScopesCancellerNeverRuns() {
+        OrtInitGate gate = new OrtInitGate();
+        AtomicBoolean ran = new AtomicBoolean();
+        OrtInitGate.Scope cleared = gate.enter("cleared");
+        cleared.onShutdown(() -> ran.set(true));
+        cleared.onShutdown(null);
+        OrtInitGate.Scope closed = gate.enter("closed");
+        closed.onShutdown(() -> ran.set(true));
+        closed.close();
+
+        gate.quiesce(0);
+        assertThat(ran).as("a canceller may touch released native state once cleared or closed").isFalse();
+        assertThat(cleared.cancelled()).isFalse();
+    }
+
+    @Test
+    void aCancellerThatClosesItsOwnScopeSynchronouslyIsSafe() {
+        OrtInitGate gate = new OrtInitGate();
+        OrtInitGate.Scope a = gate.enter("a");
+        OrtInitGate.Scope b = gate.enter("b");
+        a.onShutdown(a::close);
+        b.onShutdown(b::close);
+        assertThat(gate.quiesce(1_000)).as("both closed from inside the cancel pass").isTrue();
+    }
+
+    @Test
+    void aThrowingCancellerIsLoggedAndTheWaitStillBoundsExit() {
+        OrtInitGate gate = new OrtInitGate();
+        OrtInitGate.Scope scope = gate.enter("run");
+        scope.onShutdown(() -> { throw new IllegalStateException("boom"); });
+        assertThat(gate.quiesce(100)).as("the run never returned; the bound ends the wait").isFalse();
+        assertThat(scope.cancelled()).isTrue();
+    }
+
     /** Records the handlers a gate installs, instead of touching real JVM signals. */
     private static final class FakeSignals implements OrtInitGate.SignalInstaller {
         final java.util.Map<String, java.util.function.IntConsumer> handlers = new java.util.LinkedHashMap<>();
@@ -258,6 +325,71 @@ class OrtInitGateTest {
         assertThat(filesWithCalls).as("files containing ORT init calls (Bge768, OnnxEmbedder, CrossEncoder)")
                 .isGreaterThanOrEqualTo(3);
         assertThat(calls).as("ORT init call sites scanned").isGreaterThanOrEqualTo(6);
+    }
+
+    // ── the run lint (nexus-o5xyx.3): every session.run( passes a GatedRun's options ──
+
+    private static final java.util.regex.Pattern SESSION_RUN = java.util.regex.Pattern.compile(
+            "\\bsession\\s*\\.\\s*run\\s*\\(");
+    private static final java.util.regex.Pattern GATED_RUN_OPEN = java.util.regex.Pattern.compile(
+            "try\\s*\\(\\s*GatedRun\\s+(\\w+)\\s*=\\s*GatedRun\\s*\\.\\s*open\\(");
+
+    /**
+     * Problems for every {@code session.run(} whose argument list (up to the matching
+     * parenthesis) does not pass {@code X.options()}, where {@code X} is the resource of
+     * the nearest preceding {@code try (GatedRun X = GatedRun.open(...))}.
+     */
+    static List<String> ungatedRunCalls(String name, String source) {
+        String code = stripComments(source);
+        List<String> problems = new ArrayList<>();
+        var calls = SESSION_RUN.matcher(code);
+        while (calls.find()) {
+            int depth = 1;
+            int i = calls.end();
+            while (i < code.length() && depth > 0) {
+                char c = code.charAt(i++);
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+            }
+            String args = code.substring(calls.end(), i);
+            String runVar = null;
+            var opens = GATED_RUN_OPEN.matcher(code);
+            while (opens.find() && opens.start() < calls.start()) runVar = opens.group(1);
+            if (runVar == null || !args.matches("(?s).*\\b" + runVar + "\\s*\\.\\s*options\\s*\\(\\s*\\).*")) {
+                problems.add(name + ": session.run( at offset " + calls.start()
+                        + " does not pass a GatedRun's options() (a SIGTERM mid-run crashes the JVM)");
+            }
+        }
+        return problems;
+    }
+
+    @Test
+    void everySessionRunInMainSourcePassesAGatedRunsOptions() throws IOException {
+        List<String> problems = new ArrayList<>();
+        int calls = 0;
+        try (var files = Files.walk(MAIN_SRC)) {
+            for (Path f : (Iterable<Path>) files.filter(x -> x.toString().endsWith(".java"))::iterator) {
+                String src = Files.readString(f);
+                calls += (int) SESSION_RUN.matcher(stripComments(src)).results().count();
+                problems.addAll(ungatedRunCalls(f.getFileName().toString(), src));
+            }
+        }
+        assertThat(problems).isEmpty();
+        assertThat(calls).as("non-vacuity: session.run sites scanned (Bge768, OnnxEmbedder, CrossEncoder)")
+                .isGreaterThanOrEqualTo(3);
+    }
+
+    @Test
+    void theRunLintFlagsABareRun() {
+        String gated = "try (GatedRun run = GatedRun.open(\"r\")) {\n"
+                + "  try (var r = session.run(Map.of(\"a\", t), run.options())) { }\n}";
+        assertThat(ungatedRunCalls("ok", gated)).isEmpty();
+        assertThat(ungatedRunCalls("bare", "try (var r = session.run(inputs)) { }")).hasSize(1);
+        assertThat(ungatedRunCalls("no-options",
+                "try (GatedRun run = GatedRun.open(\"r\")) { session.run(inputs); }")).hasSize(1);
+        assertThat(ungatedRunCalls("other-options",
+                "try (GatedRun run = GatedRun.open(\"r\")) { session.run(inputs, opts); }")).hasSize(1);
+        assertThat(ungatedRunCalls("commented", "// session.run(inputs);")).isEmpty();
     }
 
     @Test

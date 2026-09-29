@@ -274,6 +274,13 @@ public final class VectorHandler implements HttpHandler {
             // nexus-qajw7: the shared shape also carries whether work was refused
             // or aborted, which the client budgets its retries by.
             HttpUtil.sendRequestDeadlineExceeded(exchange, e);
+        } catch (dev.nexus.service.vectors.OrtInitGate.ShutdownInProgressException e) {
+            // nexus-o5xyx.3: the process is exiting and refused to start native ONNX
+            // work. Ahead of the IllegalStateException arm it extends (422 there would
+            // read as "unprocessable"); 503 is inside the client's gateway retry codes,
+            // so the request is retried against the restarted engine.
+            log.info("event=vector_refused_shutting_down op={} error={}", op, e.getMessage());
+            HttpUtil.send(exchange, 503, json(Map.of("error", e.getMessage())));
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));

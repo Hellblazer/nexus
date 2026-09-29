@@ -6,6 +6,7 @@ import ai.djl.huggingface.tokenizers.Encoding;
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -227,28 +228,38 @@ public final class CrossEncoderReranker implements Reranker {
 
         long[] shape = {batchSize, maxLen};
 
-        OnnxTensor inputIdsTensor      = null;
-        OnnxTensor attentionMaskTensor = null;
-        OnnxTensor tokenTypeIdsTensor  = null;
-        try {
-            inputIdsTensor      = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(inputIdsFlat), shape);
-            attentionMaskTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(attentionMaskFlat), shape);
+        // nexus-o5xyx.3: the run sits in the OrtInitGate from tensor creation to tensor
+        // release, and shutdown cancels it (see GatedRun). Refused or cancelled, this
+        // request degrades loudly; rerank() rethrows RerankUpstreamException unchanged.
+        try (GatedRun run = GatedRun.open("cross-encoder-run")) {
+            OnnxTensor inputIdsTensor      = null;
+            OnnxTensor attentionMaskTensor = null;
+            OnnxTensor tokenTypeIdsTensor  = null;
+            try {
+                inputIdsTensor      = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(inputIdsFlat), shape);
+                attentionMaskTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(attentionMaskFlat), shape);
 
-            Map<String, OnnxTensor> inputs = new HashMap<>();
-            inputs.put("input_ids", inputIdsTensor);
-            inputs.put("attention_mask", attentionMaskTensor);
-            if (wantsTokenTypeIds) {
-                tokenTypeIdsTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(tokenTypeIdsFlat), shape);
-                inputs.put("token_type_ids", tokenTypeIdsTensor);
-            }
+                Map<String, OnnxTensor> inputs = new HashMap<>();
+                inputs.put("input_ids", inputIdsTensor);
+                inputs.put("attention_mask", attentionMaskTensor);
+                if (wantsTokenTypeIds) {
+                    tokenTypeIdsTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(tokenTypeIdsFlat), shape);
+                    inputs.put("token_type_ids", tokenTypeIdsTensor);
+                }
 
-            try (OrtSession.Result result = session.run(inputs)) {
-                return flattenLogits(result.get(0).getValue(), batchSize);
+                try (OrtSession.Result result = session.run(inputs, run.options())) {
+                    return flattenLogits(result.get(0).getValue(), batchSize);
+                } catch (OrtException e) {
+                    throw run.cancelledOr(e);
+                }
+            } finally {
+                if (inputIdsTensor != null)      inputIdsTensor.close();
+                if (attentionMaskTensor != null) attentionMaskTensor.close();
+                if (tokenTypeIdsTensor != null)  tokenTypeIdsTensor.close();
             }
-        } finally {
-            if (inputIdsTensor != null)      inputIdsTensor.close();
-            if (attentionMaskTensor != null) attentionMaskTensor.close();
-            if (tokenTypeIdsTensor != null)  tokenTypeIdsTensor.close();
+        } catch (OrtInitGate.ShutdownInProgressException e) {
+            throw new RerankUpstreamException(
+                    "local cross-encoder unavailable: service is shutting down", e);
         }
     }
 

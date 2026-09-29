@@ -6,6 +6,7 @@ import ai.djl.huggingface.tokenizers.Encoding;
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -306,6 +307,9 @@ public final class Bge768Embedder implements Embedder {
             // nexus-8hdg9 phase 3: rethrown UNWRAPPED so VectorHandler's typed 503 +
             // Retry-After arm sees it rather than the generic 500 arm.
             throw e;
+        } catch (OrtInitGate.ShutdownInProgressException e) {
+            // nexus-o5xyx.3: unwrapped, so VectorHandler answers a retryable 503.
+            throw e;
         } catch (Exception e) {
             throw new RuntimeException("Bge768Embedder.embed failed: " + e.getMessage(), e);
         }
@@ -491,37 +495,45 @@ public final class Bge768Embedder implements Embedder {
 
         long[] shape = {batchSize, maxLen};
 
-        OnnxTensor inputIdsTensor      = null;
-        OnnxTensor attentionMaskTensor = null;
-        OnnxTensor tokenTypeIdsTensor  = null;
-        try {
-            inputIdsTensor      = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(inputIdsFlat), shape);
-            attentionMaskTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(attentionMaskFlat), shape);
+        // nexus-o5xyx.3: inference logs through ORT's logging manager too (ExecuteKernel's
+        // Capture), so the run sits in the OrtInitGate from tensor creation to tensor
+        // release and shutdown cancels it (see GatedRun). Throws ShutdownInProgressException
+        // once exit has begun, so a multi-sub-batch request stops at the next sub-batch.
+        try (GatedRun run = GatedRun.open("bge768-run")) {
+            OnnxTensor inputIdsTensor      = null;
+            OnnxTensor attentionMaskTensor = null;
+            OnnxTensor tokenTypeIdsTensor  = null;
+            try {
+                inputIdsTensor      = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(inputIdsFlat), shape);
+                attentionMaskTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(attentionMaskFlat), shape);
 
-            Map<String, OnnxTensor> inputs = new HashMap<>();
-            inputs.put("input_ids", inputIdsTensor);
-            inputs.put("attention_mask", attentionMaskTensor);
-            if (wantsTokenTypeIds) {
-                long[] tokenTypeIdsFlat = new long[batchSize * maxLen]; // all zeros
-                tokenTypeIdsTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(tokenTypeIdsFlat), shape);
-                inputs.put("token_type_ids", tokenTypeIdsTensor);
-            }
-
-            onnxInvocationCount.incrementAndGet();
-            try (OrtSession.Result result = session.run(inputs)) {
-                // Output 0 = last_hidden_state shape [batch, seq, 768]
-                float[][][] hiddenState = (float[][][]) result.get(0).getValue();
-
-                List<float[]> embeddings = new ArrayList<>(batchSize);
-                for (int i = 0; i < batchSize; i++) {
-                    embeddings.add(clsPoolNormalize(hiddenState[i]));
+                Map<String, OnnxTensor> inputs = new HashMap<>();
+                inputs.put("input_ids", inputIdsTensor);
+                inputs.put("attention_mask", attentionMaskTensor);
+                if (wantsTokenTypeIds) {
+                    long[] tokenTypeIdsFlat = new long[batchSize * maxLen]; // all zeros
+                    tokenTypeIdsTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(tokenTypeIdsFlat), shape);
+                    inputs.put("token_type_ids", tokenTypeIdsTensor);
                 }
-                return embeddings;
+
+                onnxInvocationCount.incrementAndGet();
+                try (OrtSession.Result result = session.run(inputs, run.options())) {
+                    // Output 0 = last_hidden_state shape [batch, seq, 768]
+                    float[][][] hiddenState = (float[][][]) result.get(0).getValue();
+
+                    List<float[]> embeddings = new ArrayList<>(batchSize);
+                    for (int i = 0; i < batchSize; i++) {
+                        embeddings.add(clsPoolNormalize(hiddenState[i]));
+                    }
+                    return embeddings;
+                } catch (OrtException e) {
+                    throw run.cancelledOr(e);
+                }
+            } finally {
+                if (inputIdsTensor != null)      inputIdsTensor.close();
+                if (attentionMaskTensor != null) attentionMaskTensor.close();
+                if (tokenTypeIdsTensor != null)  tokenTypeIdsTensor.close();
             }
-        } finally {
-            if (inputIdsTensor != null)      inputIdsTensor.close();
-            if (attentionMaskTensor != null) attentionMaskTensor.close();
-            if (tokenTypeIdsTensor != null)  tokenTypeIdsTensor.close();
         }
     }
 
