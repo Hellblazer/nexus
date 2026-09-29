@@ -24,8 +24,9 @@ under `web/`, long-form essays under `docs/exploration/`, CHANGELOG entries,
 commit messages. Line editing (the pass that works sentence by sentence and
 paragraph by paragraph: cutting, reordering, making the claim lead) happens in
 two places only. One is the `site-page` skill's voice pass, which works well.
-The other is Sam, correcting drafts by hand, one document at a time. Nothing
-carries a correction made on one document to the next.
+The other is Sam, correcting drafts by hand, one document at a time. His
+corrections reach later writing as guidance, but nothing applies them as an
+edit to a draft.
 
 ### Enumerated gaps to close
 
@@ -34,18 +35,20 @@ carries a correction made on one document to the next.
 Outside `web/` and the essays, no step edits a sentence. The RDR gate's
 readability check warns and cannot fail; reference docs, CHANGELOG entries and
 commit messages get no pass at all (Discovery 4). What ships unedited
-includes a 121-word sentence in `docs/storage-tiers.md` and CHANGELOG entries
-of 150 to 250 words that cannot be skimmed. A code change pasted a docstring
+includes a 105-word sentence in `docs/storage-tiers.md`, and CHANGELOG entries
+of which 13 of the latest 65 run to 150 words or more (the longest 560). A code change pasted a docstring
 into a published page as three paragraphs, each sentence true, when the
 reader needed one table row and one sentence (Discovery 4).
 
-#### Gap 2: Corrections do not carry forward
+#### Gap 2: Corrections are guidance, never an edit pass
 
 Sam's memory notes record more than twenty distinct prose corrections since
 July: lead with the point, no em dashes in new prose, no trope headings, one
-term per concept, and others. Two became tools; one of those two was reverted.
-One correction recurred within days on another page in the same series
-(Discovery 3). Each document starts from zero.
+term per concept, and others. They reach every later session as writing
+guidance, and `site-page` §3 carries several for `web/` pages (Discovery 12).
+Two became tools; one of those two was reverted. Nothing applies them as an
+edit to a draft, and one correction recurred within days on another page in
+the same series (Discovery 3).
 
 #### Gap 3: Review adds and nothing cuts
 
@@ -119,20 +122,25 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
    `docs/exploration/` get `site-page`'s three passes; RDRs get a readability
    check that only warns (`rdr-gate-checklist`); skill files get a structural
    lint (`writing-nx-skills`); reference docs, CHANGELOG and commit messages
-   get nothing. Unedited samples include a 121-word sentence
-   (`docs/storage-tiers.md` line 7) and 150-250-word CHANGELOG bullets; other
+   get nothing. Unedited samples include a 105-word sentence in
+   `docs/storage-tiers.md`, and CHANGELOG bullets across releases 7.63.0 to
+   7.66.0 with a median of 90 words, 13 of 65 at 150 or more and the longest
+   560 (measured 2026-09-29); other
    unedited docs (`workflows.md`, `querying-guide.md`) are clean. The
    docstring-to-page incident is recorded in `site-page` §5.
 5. **Documented.** The authorities behind common style rules state them as
    diagnostics that need judgement: "There can be no fixed algorithm for good
    writing" (Gopen & Swan); "plenty of nominalizations are fine" (Williams &
    Bizup); Pinker defends the passive where it directs attention correctly.
-   Applied mechanically in this repo, a 721-edit sweep read 19% worse and
-   altered a quoted citation (nexus-ptwm2).
+   Applied mechanically in this repo, a 721-edit sweep made 138 edits (19%)
+   worse and altered a contract string and a title in accepted RDRs
+   (nexus-ptwm2).
 6. **Documented.** Experts editing AI-drafted text add hedges more often than
-   they remove them (62,811 paired clinical notes, arXiv:2606.00018), and
-   native academic writers hedge more than non-native ones. AI prose is
-   under-hedged; the failure worth cutting is a qualifier nothing justifies.
+   they remove them (62,811 paired clinical notes, arXiv:2606.00018).
+   Separately, corpus studies find native academic writers hedge more than
+   non-native ones (T3 `research-style-rule-prescriptivism-2026-08-23`). In
+   clinical notes, then, AI drafts were under-hedged; the failure worth
+   cutting is a qualifier nothing justifies.
 7. **Documented.** Handing a whole document to an LLM to edit silently
    corrupts content: an average of 25% over long delegated workflows
    (arXiv:2604.15597). An LLM also rates its own output above equal-quality
@@ -156,6 +164,15 @@ copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
     partial title given to `get` returns the entry when only one matches, so
     the session log is enumerated with `nx memory list` and filtered.
     `nx memory delete` asks for confirmation unless given `-y`.
+12. **Verified (source search).** Sam's corrections already reach later
+    sessions as writing guidance: auto-memory feedback files and his global
+    instructions load into every session, and `site-page` §3 (lines 34-47)
+    lists register rules for `web/` pages. The voice pass in §5 item 3 is
+    cut-only, runs in parallel with two other passes, and its findings are
+    applied in one pass (lines 62-70).
+13. **Verified (source search).** Every worktree of this repo shares one git
+    common directory (`git rev-parse --git-common-dir` prints the primary's
+    `.git`), while each worktree's own directory name differs per session.
 
 ### Critical Assumptions
 
@@ -207,6 +224,7 @@ Output, in this order:
 
 - an editor's note, at most a paragraph, on global issues;
 - paragraph proposals: cut, move, merge or split, naming the paragraphs;
+  these are advice, applied by the author, never by the skill;
 - sentence edits, each an exact old string, a new string and a one-line
   reason, numbered;
 - queries to the author, numbered.
@@ -220,10 +238,18 @@ inline as `<del>old</del><ins>new</ins>` with its number, paragraph proposals
 and queries as numbered notes where they apply, the editor's note at the top.
 It opens the copy in the author's viewer (a user preference; Typora for Sam).
 The author answers with the numbers to accept and any corrections. The skill
-applies accepted edits to the real file with exact-match replacement, then
-records the session.
+applies accepted sentence edits to the real file with exact-match
+replacement, in file order. An edit is applied only when its old string occurs
+exactly once in the file and overlaps no other accepted edit; otherwise it is
+skipped and reported. Then it records the session.
 
-**Memory in T2.** All of it is T2 memory entries:
+**Memory in T2.** All of it is T2 memory entries, because Sam chose the nx
+stores as the only home for the editor's state (T2
+`nexus_rdr/221-decision-5-nx-integration`). `<repo>` is the basename of the
+parent of `git rev-parse --git-common-dir`, so every worktree of one repo
+shares one style sheet (Discovery 13); `<path>` is always relative to the
+repo root. An exemplar is stored as its passage text plus the path and line
+range it came from, so a later edit to the source file does not change it.
 
 | Record | T2 project | Title |
 | --- | --- | --- |
@@ -233,8 +259,13 @@ records the session.
 | Document voice card and style notes | `<repo>_prose` | `doc/<path>` |
 | Session log (proposals, accepted, rejected) | `<repo>_prose` | `log/<path>/<utc timestamp>`, 90-day TTL |
 
-Rejected edits are summarised into the document's and, when the author says
-so, the user's "not a defect" entries. When the author makes a correction in
+A rejected sentence edit is stored verbatim (its old and new strings) in the
+document's record, and `memory.py` drops any later proposal with the same old
+string for that document before the author sees it. A rejection becomes a
+general "not a defect" entry at user or repo level only when the author says
+so and has read the entry's text. `/prose-edit rejections <path>` lists a
+document's stored rejections, and the author can remove any. When the author
+makes a correction in
 conversation ("lead with the point here"), the skill offers to add it to the
 style sheet at the level the author chooses.
 
@@ -244,8 +275,11 @@ style sheet at the level the author chooses.
 `docs/rdr/REGISTER.md`). The skill infers the genre from the path when the
 repo style sheet maps it, and otherwise asks.
 
-**Invocation.** `/prose-edit <path> [--genre <name>] [--budget <n>]`. Adding
-an exemplar: `/prose-edit exemplar <genre> <path>:<lines>`.
+**Invocation.** `/prose-edit <path>[:<start>-<end>] [--genre <name>]
+[--budget <n>] [--mode cut-only]`. A line range limits the edit to that
+passage, as for one CHANGELOG entry. `/prose-edit - --genre commit-message`
+reads the text from stdin. Adding an exemplar:
+`/prose-edit exemplar <genre> <path>:<start>-<end>`.
 
 ### Existing Infrastructure Audit
 
@@ -261,8 +295,8 @@ an exemplar: `/prose-edit exemplar <genre> <path>:<lines>`.
 
 The one editing practice with evidence of working here is `site-page`'s voice
 pass: an exemplar, a voice card, a budget and a brief to cut (Discovery 1).
-This design keeps that and adds the part missing today, memory, so Sam's
-corrections and rejections reach the next document (Gap 2). It avoids the
+This design keeps that and adds the part missing today: Sam's corrections
+applied as an edit pass on any draft, with his rejections remembered (Gap 2). It avoids the
 forms that failed: no lint and no sweep (Discovery 5), and no rule the model
 applies without the author deciding each case (Discoveries 5, 7). It starts
 as a project skill because that can be changed the same day Sam reacts to it;
@@ -282,8 +316,8 @@ a plugin can come later if it earns one.
 
 **Cons**:
 
-- Nothing is remembered between documents, so corrections do not carry
-  forward (Gap 2).
+- Nothing is remembered between documents, and corrections are applied only
+  where a skill writes them into its brief (Gap 2).
 - Covers only the prose a skill happens to brief for (Gap 1).
 
 **Reason for rejection**: it leaves Gaps 1 and 2 open.
@@ -298,7 +332,8 @@ a plugin can come later if it earns one.
 
 **Cons**:
 
-- A 721-edit mechanical sweep here read 19% worse (Discovery 5).
+- A 721-edit mechanical sweep here made 19% of its edits worse
+  (Discovery 5).
 
 **Reason for rejection**: most prose guidance needs knowing when not to apply
 it, which a linter cannot know (Discovery 5).
@@ -337,12 +372,15 @@ using; a project skill iterates faster and carries no release work.
 - **Risk**: the style sheet grows into a rule list. **Mitigation**: entries
   are written as diagnostics with exceptions; the author reviews the sheet
   when adding to it.
+- **Risk**: stored rejections hide proposals the author would now accept.
+  **Mitigation**: rejections are verbatim and per document, listed on demand,
+  and removable; only the author generalises one.
 
 ### Failure Modes
 
 - Wrong genre: visible in the marked-up copy's header; the author overrides.
-- Stale exact-match string (file changed since the proposal): the edit is
-  skipped and reported, never forced.
+- Stale, repeated or overlapping exact-match string: the edit is skipped and
+  reported, never forced.
 - T2 unavailable: the skill stops and says so.
 
 ## Implementation Plan
@@ -369,7 +407,10 @@ the merge order is the same every time. It lists log entries with
 
 Sam picks one or two exemplar passages for each of the four Phase 2 genres
 (`rdr`, `reference-doc`, `exploration-essay`, `changelog`) and seeds the repo
-style sheet from his existing corrections.
+style sheet from his existing corrections. For editing, the T2 style sheet is
+the authority; the memory files and his instructions remain writing guidance,
+and Step 3.1 moves `site-page` §3's register list into the style sheet so the
+two do not drift.
 
 #### Step 1.4: The editor
 
@@ -387,21 +428,30 @@ the offer to add a correction to the style sheet.
 #### Step 2.1: Four real edits
 
 Use the editor on four pieces of Sam's current work: an RDR, a reference doc
-(for example `docs/storage-tiers.md`), an essay and a CHANGELOG entry. Record
-for each: proposals made, accepted, rejected, queries answered, and Sam's
-answer to "would you reach for this again?".
+(for example `docs/storage-tiers.md`), an essay and a CHANGELOG entry, with the
+budget fixed at 10 sentence edits per document before the run. Record for
+each: sentence edits proposed, accepted and rejected, with each rejection's
+reason (wrong, right but unwanted, over budget); paragraph proposals and
+queries, counted separately; and Sam's answer to "would you reach for this
+again?". Run the essay and the reference doc a second time through the
+existing `site-page` cut-only brief, as a comparison.
 
 #### Step 2.2: Decide
 
-Pass: at least half accepted
-across the four, the essay judged still in Sam's voice, and a yes. On a fail,
-stop and revise this RDR.
+Pass: at least half of the proposed sentence edits accepted across the four,
+the essay judged still in Sam's voice, a yes, and the editor's accepted edits
+on the two comparison documents at least as many as the existing brief's. On
+a fail, stop and revise this RDR.
 
 ### Phase 3: Adopt
 
 #### Step 3.1: `site-page` voice pass
 
-`site-page` §5 item 3 dispatches the line editor with the page's voice card.
+`site-page` §5 item 3 dispatches the line editor with `--mode cut-only` and the
+page's own §2 voice card, which takes the place of the card the editor would
+build. In that mode it returns cut proposals to the gate session, which
+applies them with the other passes' findings as it does today; no marked-up
+copy and no interactive accept.
 
 #### Step 3.2: Remaining genres
 
