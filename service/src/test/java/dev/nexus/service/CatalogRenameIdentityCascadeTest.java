@@ -12,7 +12,6 @@ import org.jooq.impl.DSL;
 import org.junit.jupiter.api.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -78,11 +77,10 @@ class CatalogRenameIdentityCascadeTest {
         svcDs = new com.zaxxer.hikari.HikariDataSource(cfg);
         service = new NexusService(0, TOKEN, svcDs);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
         // Burn the once-per-process ghost sweep before registering anything
         // (see CatalogHandlerRenameTest#startAll).
-        http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+        http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
             .header("Authorization", "Bearer " + TOKEN)
             .GET().build(), HttpResponse.BodyHandlers.ofString());
     }
@@ -270,9 +268,8 @@ class CatalogRenameIdentityCascadeTest {
             .values(TENANT, "1.77", "owner-root-repo", "repo", "/src/owner-root-repo")
             .execute());
         seedCollection("code__1-77__voyage-code-3__v1", "code", "1-77");
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort()
-                + "/v1/catalog/collections/owner-root?name=code__1-77__voyage-code-3__v1"))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort()
+                + "/v1/catalog/collections/owner-root?name=code__1-77__voyage-code-3__v1")
             .header("Authorization", "Bearer " + TOKEN)
             .header("X-Nexus-Tenant", TENANT)
             .GET().build();
@@ -289,8 +286,7 @@ class CatalogRenameIdentityCascadeTest {
         var body = new LinkedHashMap<String, Object>(extra);
         body.put("old_name", oldName);
         body.put("new_name", newName);
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/rename"))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/rename")
             .header("Authorization", "Bearer " + TOKEN)
             .header("X-Nexus-Tenant", TENANT)
             .header("Content-Type", "application/json")
@@ -300,9 +296,8 @@ class CatalogRenameIdentityCascadeTest {
     }
 
     private Map<String, Object> collectionRow(String name) throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort()
-                + "/v1/catalog/collections/get?name=" + name))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort()
+                + "/v1/catalog/collections/get?name=" + name)
             .header("Authorization", "Bearer " + TOKEN)
             .header("X-Nexus-Tenant", TENANT)
             .GET().build();

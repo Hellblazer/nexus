@@ -102,7 +102,9 @@ ALLOWED_CALLERS: dict[tuple[str, tuple[str, ...]], str] = {
             "segments = parse_conformant_collection_name(name)",
         ),
     ): (
-        "collection_registration_kwargs: the write-time registration "
+        "collection_type_and_owner (split out of collection_registration_kwargs "
+        "for nexus-sis0m.3, which rename also calls to send the new row's "
+        "attributes): the write-time registration "
         "derivation used by HttpCatalogClient.register_collection's OWN "
         "bare-call fallback and by ensure_collection_registered (T3 chunk "
         "writes, aspects, taxonomy). Never one of the ten sites this bead "

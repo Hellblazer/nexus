@@ -1613,10 +1613,7 @@ def collection_registration_kwargs(name: str) -> dict[str, str]:
     # has-"__"-but-empty-first-segment case must still raise below, not
     # silently default to "knowledge".
     content_type, owner_id = collection_type_and_owner(name)
-    model_version = (
-        parse_conformant_collection_name(name)["model_version"]
-        if is_conformant_collection_name(name) else "v1"
-    )
+    model_version = model_version_for_collection_name(name) or "v1"
 
     # RDR-204 Phase 3 (nexus-ft04v.26): deliberately NOT repointed to read
     # the row. *name* here may have NO row at all -- registering IS what
