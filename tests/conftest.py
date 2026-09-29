@@ -27,7 +27,7 @@ from nexus.db.t3 import T3Database
 # tests._posix_spawn routes this process's subprocess spawns onto posix_spawn
 # on macOS, where a fork child can die in Network.framework's atfork handler;
 # see that module's docstring.
-pytest_plugins = ["pytester", "tests._posix_spawn"]
+pytest_plugins = ["pytester", "tests._posix_spawn", "tests._env_restore"]
 
 
 # NO _enable_t2_test_auto_migrate: the RDR-120 P3b auto-migrate default
@@ -2003,75 +2003,6 @@ def _restore_manifest_fk_after_dangling_seed():
     ops = _sys.modules.get("tests._catalog_fixture_ops")
     if ops is not None:
         ops.restore_fk_after_dangling_seeds()
-
-
-_ENGINE_DB_ENV_KEYS: tuple[str, ...] = (
-    "NX_DB_URL", "NX_DB_USER", "NX_DB_PASS",
-    "NX_DB_ADMIN_URL", "NX_DB_ADMIN_USER", "NX_DB_ADMIN_PASS",
-)
-
-
-@pytest.fixture(autouse=True)
-def _no_leaked_engine_db_env():
-    """Fail the test that leaves the engine's DB-connection env behind.
-
-    Every engine a later test spawns from ``{**os.environ, ...}`` inherits
-    these keys, and the engine reads ``NX_DB_ADMIN_*`` for its migration
-    pool whenever they are set. ``tests/db/test_pg_provision_token.py``
-    loaded a fake ``pg_credentials`` file into ``os.environ`` through
-    ``pg_provision.load_service_credentials_into_env`` (since deleted, it had
-    no production caller) and never took it back out, so in a
-    single-process ``pytest tests/db`` every engine
-    booted after it tried to migrate against the file's dead
-    ``127.0.0.1:15999`` and exited on HikariPool fail-fast: 35 setup errors
-    in ``test_xnz0o_commands_integration.py``, hidden under ``-n auto``
-    because the two files usually land on different workers
-    (tests-db-isolation, 2026-09-23).
-
-    Autouse fixtures set up before ``monkeypatch`` and tear down after it,
-    so a key a test sets through ``monkeypatch`` is already restored when
-    this compares. What remains is a raw ``os.environ`` write. The fixture
-    puts the old values back before failing, so one leak does not cascade.
-    """
-    from tests._env_restore import restore_changed_keys  # noqa: PLC0415 — conftest-local helper
-
-    before = {k: os.environ.get(k) for k in _ENGINE_DB_ENV_KEYS}
-    yield
-    leaked = restore_changed_keys(before)
-    if leaked:
-        pytest.fail(
-            "test left engine DB env changed in os.environ (restored now): "
-            f"{sorted(leaked)}. An engine spawned later inherits these; set "
-            "them with monkeypatch, or before code that writes os.environ "
-            "directly call monkeypatch.setenv(key, 'x') then "
-            "monkeypatch.delenv(key): that records the undo and leaves the key "
-            "absent (delenv(key, raising=False) records no undo when the key "
-            "starts absent; setenv(key, '') is not absent to the engine, which "
-            "treats an empty NX_DB_ADMIN_* as set).",
-            pytrace=False,
-        )
-
-
-@pytest.fixture(autouse=True)
-def _restore_pg_bin_env():
-    """Put ``NEXUS_PG_BIN`` back after every test.
-
-    ``nexus.commands.init._select_bundled_pg`` writes ``os.environ["NEXUS_PG_BIN"]``
-    by design (it points ``provision`` at the extracted bundle), and the tests
-    that exercise it assert on that write. Their ``monkeypatch.delenv(...,
-    raising=False)`` records no undo when the key starts absent, so the value
-    survived the test: a single-process ``pytest tests/daemon`` ran
-    ``test_pg_bundle_install.py``'s round trip first, and
-    ``test_storage_service_daemon_pg_monitor_backfill.py``'s fixture then took
-    the leaked path, a fake bundle whose ``psql`` is ``exit 0``, as an operator
-    override. Every query printed nothing and its revoke precondition failed
-    (nexus-4h20a). Restored rather than failed, because the write is the
-    behaviour under test.
-    """
-    from tests._env_restore import restore_env_after  # noqa: PLC0415 — conftest-local helper
-
-    with restore_env_after("NEXUS_PG_BIN"):
-        yield
 
 
 @pytest.fixture(autouse=True)
