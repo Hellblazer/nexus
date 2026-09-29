@@ -28,6 +28,26 @@ template disables `take` (`ledger/<session_id>`) are skipped outright —
 whether the expected consumer is running. For `mailbox/<address>`, confirm
 the addressed agent or instance is still alive and draining with `tuple_in`.
 
+## `tuples.lock_held`
+
+**Symptom**: `N lock(s) held past the renewal bound: <subspace> by <claimant> (held <age>, over 60m)`.
+
+**Cause**: a holder that keeps renewing a `lock/<resource>` claim without
+releasing it. Every other taker blocks until it releases or stops renewing
+and its lease lapses. The bound is four times the template's
+`max_lease_seconds`. The hold's start is the claim's `claim` row in
+`nexus.tuple_claim_log`, read through the local nexus_diag path. `no claim
+row` means that row is gone: it was purged past the template's
+`claim_log_ttl_seconds` (30 days for locks), or it was never written. A
+managed deployment cannot run the diag path, so the row names the holder
+and reports the duration unmeasured. Unlike the three RDR-205 rows, this
+row has no engine-floor gate: every engine at or above the pinned floor
+serves the routes and tables it reads.
+
+**Action**: ask the named claimant (usually a session id) whether it is
+still working. A holder that is gone stops renewing, and the lease lapses
+within `max_lease_seconds`.
+
 ## `tuples.dead_tuple_ratio`
 
 **Symptom**: `<table> dead-tuple ratio <pct> exceeds 20%: ...`.

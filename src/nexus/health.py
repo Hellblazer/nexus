@@ -5486,6 +5486,186 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
     return [HealthResult(label=label, ok=True, detail="; ".join(reported) or "none")]
 
 
+_TUPLE_LOCK_HELD_LABEL = "tuples.lock_held"
+
+#: A lock claim held longer than this many ``max_lease_seconds`` has been
+#: renewed at least this many times without a release (nexus-sis0m.7). For
+#: ``lock/<resource>`` (900s) that is one hour, the same scale as
+#: :data:`_TUPLE_STALE_UNCLAIMED_AGE_S`, which is also the fallback for a lock
+#: template with no lease cap.
+_TUPLE_LOCK_HELD_LEASE_MULTIPLE: int = 4
+
+
+def _hex_text_literal(value: str) -> str:
+    """*value* as a SQL text expression built from hex digits only.
+
+    A quoted literal would carry engine-supplied text (a subspace, a
+    claimant) into a statement the read-only lint scans for mutating words
+    anywhere, so ``lock/do`` would be refused. Hex digits spell no keyword and
+    need no escaping.
+    """
+    return f"convert_from(decode('{value.encode('utf-8').hex()}', 'hex'), 'UTF8')"
+
+
+def _lock_claim_started_sql(subspace: str, claimant: str) -> str:
+    """When the live claim *claimant* holds on *subspace* began.
+
+    ``tuple_claim_log``'s ``claim`` row for the tuple's current ``claim_id``
+    is the only record of that time: a renew moves ``lease_until`` and, on a
+    lock template, ``expires_at`` too, so nothing on the tuple row bounds how
+    long a claim has been held. The select list is aggregate-only, as the
+    diagnostic lint requires. nexus_diag bypasses RLS, so the claimant is
+    matched as well as the subspace to keep another tenant's same-named lock
+    out.
+    """
+    return (
+        "SELECT MIN(c.at) FROM nexus.tuples t "
+        "JOIN nexus.tuple_claim_log c ON c.tenant_id = t.tenant_id "
+        "AND c.tuple_id = t.id AND c.claim_id = t.claim_id "
+        f"WHERE t.subspace = {_hex_text_literal(subspace)} "
+        f"AND t.claimant = {_hex_text_literal(claimant)} "
+        "AND t.claim_state = 'claimed' AND t.consumed_at IS NULL "
+        "AND t.lease_until > now() AND c.transition = 'claim';"
+    )
+
+
+def _check_tuple_lock_held(
+    creds_path: Path | None = None,
+    diag_credentials=None,  # injectable for unit tests; DiagCredentials
+    psql_bin: Path | None = None,
+    diag_runner=None,  # injectable for unit tests
+) -> list[HealthResult]:
+    """nexus-sis0m.7: a lock claim held, by renewal, far past its lease.
+
+    :func:`_check_tuple_unclaimed_age` skips a lock's available token (the
+    idle lock) and never sees claimed rows, and no other row measures how
+    long a claim has been held. A holder that keeps renewing a
+    ``lock/<resource>`` claim without releasing it blocks every other taker.
+
+    The engine census finds lock-template subspaces with a claimed row and
+    ``rd`` names each live holder. Only then does the row need the claim's
+    start time, which it reads through the local nexus_diag path. A box with
+    no held lock, a virgin box included, never reaches psql and reports not
+    applicable. A managed deployment has no local diag path, so a held lock
+    there is reported with its holder and an unmeasured duration.
+    """
+    label = _TUPLE_LOCK_HELD_LABEL
+
+    try:
+        from nexus.db.t2.http_tuple_store import HttpTupleStore  # noqa: PLC0415 — deferred: CLI startup cost
+        store = HttpTupleStore()
+        subspaces = store.subspace_list()
+    except Exception as exc:  # noqa: BLE001 — best-effort: engine/config unreachable, must not crash `nx doctor`
+        _log.debug("doctor_tuple_lock_held_list_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"engine unreachable ({type(exc).__name__}: {exc})",
+        )]
+
+    claimed = [c for c in subspaces if c.claimed > 0]
+    if not claimed:
+        return [HealthResult(label=label, ok=True, detail="not applicable: no lock is held")]
+
+    try:
+        templates = store.registry().get("templates") or []
+    except Exception as exc:  # noqa: BLE001 — best-effort: a registry fetch failure must not crash `nx doctor`
+        _log.debug("doctor_tuple_lock_held_registry_failed", error=str(exc))
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=(
+                f"templates could not be resolved ({type(exc).__name__}: "
+                f"{exc}); skipping the lock-hold check for this run"
+            ),
+        )]
+
+    now = datetime.now(UTC)
+    # (subspace, claimant, threshold_s)
+    held: list[tuple[str, str, float]] = []
+    for census in claimed:
+        template = _resolve_tuple_template(templates, census.subspace)
+        if template is None or not template.get("lock"):
+            continue
+        max_lease = (template.get("take") or {}).get("max_lease_seconds")
+        threshold_s = float(
+            max_lease * _TUPLE_LOCK_HELD_LEASE_MULTIPLE if max_lease
+            else _TUPLE_STALE_UNCLAIMED_AGE_S
+        )
+        try:
+            rows = store.rd(census.subspace, None, n=300)
+        except Exception as exc:  # noqa: BLE001 — best-effort per-subspace; one bad subspace must not sink the whole row
+            _log.debug("doctor_tuple_lock_held_rd_failed", subspace=census.subspace, error=str(exc))
+            continue
+        for r in rows:
+            lease_until = _parse_tuple_timestamp(r.lease_until)
+            # A lapsed lease is no longer held: the sweep returns it to
+            # available, and a renew after the lapse is refused.
+            if r.claim_state != "claimed" or not r.claimant or lease_until is None or lease_until <= now:
+                continue
+            held.append((census.subspace, r.claimant, threshold_s))
+
+    if not held:
+        return [HealthResult(label=label, ok=True, detail="not applicable: no lock is held")]
+
+    holders = "; ".join(f"{s} by {c}" for s, c, _ in held)
+    if diag_credentials is None:
+        from nexus.db.diag_connection import resolve_diag_credentials  # noqa: PLC0415 — deferred to avoid circular import
+        diag_credentials = resolve_diag_credentials(creds_path)
+    if diag_credentials is None:
+        from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid circular import
+        why = (
+            "no nexus_diag diagnostic credentials; re-run `nx init --service` "
+            "to backfill the diagnostic role" if is_local_mode()
+            else _MANAGED_DEPLOYMENT_SKIP_DETAIL
+        )
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"held: {holders}; hold duration not measured ({why})",
+        )]
+
+    from nexus.db.diag_connection import run_diagnostic_sql  # noqa: PLC0415 — deferred to avoid circular import
+
+    over: list[str] = []
+    reported: list[str] = []
+    for subspace, claimant, threshold_s in held:
+        try:
+            out = run_diagnostic_sql(
+                (_lock_claim_started_sql(subspace, claimant),), diag_credentials,
+                psql_bin=psql_bin, psql_runner=diag_runner,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort per-lock; report it unmeasured, never clean
+            _log.debug("doctor_tuple_lock_held_diag_failed", subspace=subspace, error=str(exc))
+            over.append(f"{subspace} by {claimant} (hold duration not measured: {exc})")
+            continue
+        started = _parse_tuple_timestamp(out[0] if out else None)
+        if started is None:
+            # The claim row is gone: purged past the template's
+            # claim_log_ttl_seconds, far longer than any threshold here.
+            over.append(
+                f"{subspace} by {claimant} (no claim row in tuple_claim_log: "
+                "held past the claim log's retention, or never logged)"
+            )
+            continue
+        age_s = (now - started).total_seconds()
+        reported.append(f"{subspace} held {_fmt_age(age_s)} by {claimant}")
+        if age_s > threshold_s:
+            over.append(
+                f"{subspace} by {claimant} (held {_fmt_age(age_s)}, over "
+                f"{_fmt_age(threshold_s)})"
+            )
+
+    if over:
+        return [HealthResult(
+            label=label, ok=False, warn=True,
+            detail=f"{len(over)} lock(s) held past the renewal bound: " + "; ".join(over),
+            fix_suggestions=[
+                "Ask the named holder whether it is still working; a holder "
+                "that has stopped leaves the lock blocked until it releases "
+                "or stops renewing.",
+            ],
+        )]
+    return [HealthResult(label=label, ok=True, detail="; ".join(reported))]
+
+
 _TUPLE_BLOAT_LABEL = "tuples.dead_tuple_ratio"
 
 
@@ -8970,6 +9150,9 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # three doctor rows. All three degrade internally (route_predates_floor
     # gate; managed/local-not-configured skip on the two psql-backed rows).
     results.extend(_check_tuple_unclaimed_age())
+    # nexus-sis0m.7: a lock claim renewed without end; not applicable
+    # (never reaches psql) when no lock is held.
+    results.extend(_check_tuple_lock_held())
     results.extend(_check_tuple_table_bloat())
     results.extend(_check_tuple_sweep_freshness())
     # RDR-211 Phase 1 Step 3 (bead nexus-rplay.12): park-slot use and queue
