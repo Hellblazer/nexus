@@ -463,6 +463,17 @@ def _run_auto_approve_raw(payload: dict, env: dict[str, str] | None = None) -> s
     )
 
 
+def _assert_no_decision(payload: dict, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    """The hook ran to completion and said nothing, which is what reads-only
+    (nexus-2lf1v) gives a writer it does not deny. Empty stdout alone would
+    also pass on a crash, since _hook_boundary.guard swallows it and exits 0."""
+    result = _run_auto_approve_raw(payload, env)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "", result.stdout
+    assert "crashed" not in result.stderr and "Traceback" not in result.stderr, result.stderr
+    return result
+
+
 def _run_auto_approve(payload: dict, env: dict[str, str] | None = None) -> dict | None:
     result = _run_auto_approve_raw(payload, env)
     assert result.returncode == 0, result.stderr
@@ -548,7 +559,7 @@ class TestWorktreeDetection:
             assert not is_serena_write_tool(f"mcp__plugin_sn_serena__{name}")
 
 
-from auto_approve_sn_mcp import NEVER_AUTO_APPROVE, SERENA_READ_TOOLS  # noqa: E402
+from auto_approve_sn_mcp import NOT_AUTO_APPROVED, SERENA_READ_TOOLS  # noqa: E402
 
 
 class TestReadsOnlyApproval:
@@ -562,16 +573,19 @@ class TestReadsOnlyApproval:
         unclassified: a Serena pin bump that adds a tool fails here until it
         is named as a read, a write or never-auto-approve."""
         _, available, _ = parse_snapshot()
-        classes = {"read": SERENA_READ_TOOLS, "write": SERENA_WRITE_TOOLS, "never": NEVER_AUTO_APPROVE}
+        classes = {"read": SERENA_READ_TOOLS, "write": SERENA_WRITE_TOOLS, "not auto-approved": NOT_AUTO_APPROVED}
         for (a, x), (b, y) in [(("read", SERENA_READ_TOOLS), ("write", SERENA_WRITE_TOOLS)),
-                               (("read", SERENA_READ_TOOLS), ("never", NEVER_AUTO_APPROVE)),
-                               (("write", SERENA_WRITE_TOOLS), ("never", NEVER_AUTO_APPROVE))]:
+                               (("read", SERENA_READ_TOOLS), ("never", NOT_AUTO_APPROVED)),
+                               (("write", SERENA_WRITE_TOOLS), ("never", NOT_AUTO_APPROVED))]:
             assert not x & y, f"{a} and {b} overlap: {sorted(x & y)}"
         classified = set().union(*classes.values())
-        assert set(available) == classified, {
-            "unclassified": sorted(set(available) - classified),
-            "not in snapshot": sorted(classified - set(available)),
-        }
+        unclassified = sorted(set(available) - classified)
+        stale = sorted(classified - set(available))
+        assert not unclassified and not stale, (
+            f"unclassified snapshot tools {unclassified}: read what each does at the pinned Serena and add it "
+            "to SERENA_READ_TOOLS (auto_approve_sn_mcp.py), worktree_guard.SERENA_WRITE_TOOLS or NOT_AUTO_APPROVED; "
+            f"classified but no longer in the snapshot {stale}: remove the stale entry"
+        )
 
     @pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
     def test_every_read_tool_is_approved(self, event: str) -> None:
@@ -585,12 +599,11 @@ class TestReadsOnlyApproval:
     @pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
     def test_writers_and_never_tools_get_no_decision_in_the_primary(self, tmp_path: Path, event: str) -> None:
         primary, _ = _make_repo_with_worktree(tmp_path)
-        names = sorted(SERENA_WRITE_TOOLS | NEVER_AUTO_APPROVE)
-        assert "jet_brains_debug" in names and "replace_in_files" in names
+        names = sorted(SERENA_WRITE_TOOLS | NOT_AUTO_APPROVED)
+        assert {"jet_brains_debug", "query_project", "onboarding", "replace_in_files"} <= set(names)
         for name in names:
-            out = _run_auto_approve({"cwd": str(primary), "hook_event_name": event,
-                                     "tool_name": f"mcp__plugin_sn_serena__{name}"})
-            assert out is None, (name, out)
+            _assert_no_decision({"cwd": str(primary), "hook_event_name": event,
+                                 "tool_name": f"mcp__plugin_sn_serena__{name}"})
 
 
 class TestWorktreeGuardHook:
@@ -633,13 +646,11 @@ class TestWorktreeGuardHook:
 
     def test_write_tool_not_denied_in_primary_with_no_session_record(self, tmp_path: Path) -> None:
         primary, _ = _make_repo_with_worktree(tmp_path)
-        out = _run_auto_approve({"cwd": str(primary), "hook_event_name": "PreToolUse",
+        _assert_no_decision({"cwd": str(primary), "hook_event_name": "PreToolUse",
                                  "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
-        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
 
     def test_write_payload_without_cwd_is_not_denied(self) -> None:
-        out = _run_auto_approve({"hook_event_name": "PreToolUse", "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
-        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
+        _assert_no_decision({"hook_event_name": "PreToolUse", "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
 
     def test_context7_unaffected_in_worktree(self, tmp_path: Path) -> None:
         _, worktree = _make_repo_with_worktree(tmp_path)
@@ -675,12 +686,11 @@ class TestRelocatedSessionGuard:
         env = _isolated_state_env(tmp_path)
         start = _run_session_start({"source": "startup", "session_id": "s1", "cwd": str(primary)}, env)
         assert start.returncode == 0, start.stderr
-        out = _run_auto_approve(
+        _assert_no_decision(
             {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": "s1",
              "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
             env=env,
         )
-        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
 
     def test_session_started_in_a_worktree_is_not_denied_a_write(self, tmp_path: Path) -> None:
         """Round 2 (nexus-ebx0s): this session's OWN startup was inside the
@@ -695,12 +705,11 @@ class TestRelocatedSessionGuard:
         env = _isolated_state_env(tmp_path)
         start = _run_session_start({"source": "startup", "session_id": "s0", "cwd": str(worktree)}, env)
         assert start.returncode == 0, start.stderr
-        out = _run_auto_approve(
+        _assert_no_decision(
             {"cwd": str(worktree), "hook_event_name": "PreToolUse", "session_id": "s0",
              "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
             env=env,
         )
-        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
 
     def test_relocated_session_denied_even_though_cwd_is_the_primary(self, tmp_path: Path) -> None:
         """The bead's own shape: Serena rooted at a WORKTREE (this session
@@ -768,6 +777,7 @@ class TestRelocatedSessionGuard:
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "", result.stdout  # not denied; reads-only leaves the write to Claude Code
         assert "no recorded Serena root" in result.stderr
+        assert "crashed" not in result.stderr, result.stderr
 
     def test_resume_does_not_overwrite_the_startup_record(self, tmp_path: Path) -> None:
         """Only SessionStart's ``source == "startup"`` writes
@@ -835,12 +845,11 @@ class TestPerSessionRecordStorage:
         assert "/" not in files[0].name and "\\" not in files[0].name
         assert not (tmp_path / "etc").exists(), "the malicious session_id escaped the roots directory"
 
-        out = _run_auto_approve(
+        _assert_no_decision(
             {"cwd": str(primary), "hook_event_name": "PreToolUse", "session_id": malicious,
              "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
             env=env,
         )
-        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
 
     def test_different_all_unsafe_session_ids_do_not_collide(self, tmp_path: Path) -> None:
         """Two session_ids that are ENTIRELY unsafe characters (so the

@@ -45,10 +45,15 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
-- nexus-2lf1v: `sn/hooks/scripts/auto_approve_sn_mcp.py` auto-approves Serena
-  READ tools only (`SERENA_READ_TOOLS`). Serena's writers, `jet_brains_debug`
-  and `restart_language_server` now get no decision, so Claude Code's own
-  prompt or auto-mode classifier decides (Sam, 2026-09-29).
+- nexus-2lf1v: `sn/hooks/scripts/auto_approve_sn_mcp.py` stops auto-approving
+  Serena's write tools, `jet_brains_debug` (arbitrary Groovy/Java in the IDE's
+  JVM), `query_project`, `onboarding` and `restart_language_server`. They were
+  all approved before, which skipped your prompt and the auto-mode classifier.
+  Reads and Context7 are still approved. To keep editing through Serena without
+  prompts, add the writers you use by name to `permissions.allow`.
+- nexus-2lf1v: `sn/hooks/scripts/serena-section.md` tells subagents that Serena
+  writes now go through the permission flow, and to fall back to Edit or Write
+  rather than retry a denied one.
 
 ## Deferred to the next client release
 

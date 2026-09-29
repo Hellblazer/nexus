@@ -3803,8 +3803,11 @@ both source versions.
 | `--sn-dir`, `--conexus-dir` | Read the parts from these directories instead of the paths in `~/.claude/plugins/installed_plugins.json` (a dev checkout, or tests). |
 | `--dest` | Write somewhere other than `~/.claude/agents/<name>.md`. |
 
-After installing, allow `mcp__serena-wt__*` in `~/.claude/settings.json`
-permissions; the sn auto-approve covers only the plugin's own server.
+After installing, allow the `mcp__serena-wt__*` tools the agent needs in
+`~/.claude/settings.json` permissions; the sn auto-approve covers only the
+plugin's own server. Name them: the wildcard also allows `jet_brains_debug`
+(arbitrary Groovy/Java in the IDE's JVM), `query_project` and every writer,
+with no prompt.
 `nx doctor` warns (non-fatal) when the generated file lags the installed
 plugins, so drift is caught without anyone remembering `--check`.
 `--check` and `--dry-run` are mutually exclusive.

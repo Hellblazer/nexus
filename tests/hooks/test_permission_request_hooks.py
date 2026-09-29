@@ -247,16 +247,25 @@ class TestSnPermissionHook:
         output = _run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__search_for_pattern")
         assert output == ""
 
-    def test_approves_every_snapshot_tool(self) -> None:
-        """The allowlist is the generated snapshot, not a hand-kept case list (nexus-jbt5x)."""
+    def test_approves_exactly_the_snapshot_reads(self) -> None:
+        """Snapshot tools are approved when they are reads and get no decision
+        otherwise (nexus-2lf1v): a writer, jet_brains_debug or query_project
+        goes to Claude Code's own permission flow."""
+        sys.path.insert(0, str(SN_SCRIPT.parent))
+        from auto_approve_sn_mcp import SERENA_READ_TOOLS  # noqa: PLC0415 — the hook's own module, on its own path
+
         snapshot = SN_SCRIPT.parent / "serena-tools.txt"
         names = [l.strip() for l in snapshot.read_text().splitlines() if l.strip() and not l.startswith("#")]
-        assert len(names) > 20
+        assert len(names) > 20 and 10 < len(SERENA_READ_TOOLS) < len(names)
         for name in names:
-            assert _parse_decision(_run_hook(SN_SCRIPT, f"mcp__plugin_sn_serena__{name}")) == "allow", name
+            output = _run_hook(SN_SCRIPT, f"mcp__plugin_sn_serena__{name}")
+            if name in SERENA_READ_TOOLS:
+                assert _parse_decision(output) == "allow", name
+            else:
+                assert output == "", (name, output)
 
     def test_output_is_valid_json(self) -> None:
-        output = _run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__replace_in_files")
+        output = _run_hook(SN_SCRIPT, "mcp__plugin_sn_serena__find_symbol")
         data = json.loads(output)
         assert "hookSpecificOutput" in data
         assert data["hookSpecificOutput"]["hookEventName"] == "PermissionRequest"

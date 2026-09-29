@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Auto-approve sn plugin read tools (Serena + Context7) by explicit full name.
 
-Reads only (nexus-2lf1v): Serena's writers, ``jet_brains_debug`` and
-``restart_language_server`` get no decision, so Claude Code's own permission
-flow decides. See ``SERENA_READ_TOOLS``.
+Reads only (nexus-2lf1v): Serena's writers and the ``NOT_AUTO_APPROVED`` tools
+get no decision, so Claude Code's own permission flow decides. See
+``SERENA_READ_TOOLS``.
 
 Declared in exec form (RDR-215 bead nexus-q02nx.23; launcher nexus-j4iy0) as
 ``uv run --no-project --no-config --quiet
@@ -77,7 +77,11 @@ SERENA_PREFIX = "mcp__plugin_sn_serena__"
 #: for its own Edit and Write. Default-deny: a tool the snapshot adds is not
 #: approved until it is named here, and tests/test_sn_plugin.py fails until
 #: every snapshot tool is classified as a read, a write
-#: (worktree_guard.SERENA_WRITE_TOOLS) or NEVER_AUTO_APPROVE.
+#: (worktree_guard.SERENA_WRITE_TOOLS) or NOT_AUTO_APPROVED.
+#:
+#: "Read" here means this plugin checked what the tool does at the pinned
+#: Serena revision, not that Serena calls it read-only: Serena's own test is
+#: only the absence of its CanEdit marker, which jet_brains_debug also lacks.
 SERENA_READ_TOOLS: frozenset[str] = frozenset({
     "find_declaration",
     "find_implementations",
@@ -98,14 +102,18 @@ SERENA_READ_TOOLS: frozenset[str] = frozenset({
     "jet_brains_type_hierarchy",
     "list_memories",
     "list_queryable_projects",
-    "onboarding",
-    "query_project",  # Serena asserts the tool it runs in the other project is read-only
     "read_memory",
     "serena_info",
 })
-#: Neither reads nor writes through the project root, and never approved:
-#: code evaluation, and a server restart.
-NEVER_AUTO_APPROVE: frozenset[str] = frozenset({"jet_brains_debug", "restart_language_server"})
+#: Not writers through the project root, and still never approved: each can do
+#: something a read cannot. Distinct from the sync script's NEVER_APPROVE,
+#: which keeps tools out of the snapshot altogether.
+NOT_AUTO_APPROVED: frozenset[str] = frozenset({
+    "jet_brains_debug",  # evaluates arbitrary Groovy/Java in the IDE's JVM
+    "onboarding",  # seeds .serena/memories/memory_maintenance.md when absent
+    "query_project",  # runs any tool Serena calls read-only (no CanEdit marker) in another project, jet_brains_debug included
+    "restart_language_server",
+})
 
 
 def allowed_tools(snapshot: pathlib.Path) -> frozenset[str]:
