@@ -147,7 +147,7 @@ executed. A STRUCTURAL parser will always be one construct behind. So round
 4 inverts the approach entirely:
 
 PRIMARY RULE (structure-agnostic, fail-closed) — ``_primary_match`` /
-``_GIT_RE`` / ``_VERB_RE``: over the RAW command text, after normalizing
+``_first_git_command`` / ``_VERB_RE``: over the RAW command text, after normalizing
 line endings, collapsing backslash-newline continuations, collapsing
 backslash-escapes, and stripping quote characters
 (``_normalize_for_primary_scan`` — the ONLY "parsing" this rule does), deny
@@ -410,6 +410,27 @@ from before the design that made them true (or made them moot) existed, and
 should have been dropped rather than restated — verify empirically before
 adding a new KNOWN LIMITS entry, not just before removing one.
 
+nexus-0r5l8 (round 10 of this guard's history, Sam's option A ruling,
+2026-09-29): ``git`` used to arm the primary rule as ANY ``\\bgit\\b`` in the
+text, so a path or word that merely contained ``git`` (``nexus-git-policy.py``,
+``.git/hooks``, ``~/git/nexus``, ``git-workflow.md``, ``git.py``) followed by
+an ordinary word (``reset``, ``add``, ``commit``) denied, and agents routed
+around the guard with globs. Now ``git`` arms it only as the git COMMAND:
+``_first_git_command`` cuts the normalized text into path-ish tokens and
+requires a token whose basename is ``git`` or ``git-<word>`` (``git``,
+``/usr/bin/git``, ``git-checkout``). The verb scan after that token, the
+normalizer, both adjacency branches (which now key on the same test) and the
+zero-expansion pass are unchanged, so every bypass catalogued above still
+denies. What was NOT built is a command-POSITION analysis: ``printf 'git
+checkout f' | sh``, ``eval 'git checkout f'`` and ``sh -c '...'`` carry
+``git`` in argument position and are told from ``echo git add`` only by
+parsing the shell, the unbounded surface rounds 1-3 lost to. So a standalone
+``git`` token in ANY position arms the scan (unsure means deny); accepted
+false positives are ``echo git add`` and a directory literally named ``git``
+(``cd ~/git && echo add``). ``=`` and ``$`` end a token, keeping ``g=git; $g
+checkout`` armed. Both copies of this module carry the change identically
+(``tests/test_routing_subagent_git_write.py`` pins that they do).
+
 ``run_hook(fail_closed=False)`` is unchanged: a crash in the hook ITSELF
 still allows, since a broken guard must not brick every agent's Bash.
 """
@@ -488,18 +509,66 @@ _PRIMARY_VERB_ALT = (
 #: two separate linear searches (find the first ``git``, then search
 #: UNBOUNDED for a verb token anywhere after it), not one combined regex
 #: with a distance cap. There is no longer any distance to pad past.
-_GIT_RE = re.compile(r"\bgit\b")
 _VERB_RE = re.compile(r"\b(" + _PRIMARY_VERB_ALT + r")\b")
+
+#: nexus-0r5l8 (Sam's option A, 2026-09-29): ``git`` arms the scan only as the
+#: git COMMAND, not as a substring of a path or word. The old ``\bgit\b`` armed
+#: it for ``nexus-git-policy.py``, ``.git/hooks``, ``~/git/nexus``,
+#: ``git-workflow.md`` and ``git.py``, so ``cat nexus-git-policy.py | grep
+#: reset`` denied.
+#:
+#: A TOKEN rule, not a position analysis. The text is cut into path-ish tokens
+#: (``_PATHISH_TOKEN_RE``: word characters plus ``. - / ~ + % #``; whitespace,
+#: quotes-already-stripped, ``; & | ( ) < > = $ { } ` !`` and the rest all end
+#: a token), and ``git`` arms the scan when a token's BASENAME is exactly
+#: ``git`` (``git``, ``/usr/bin/git``, ``./git``) or the dispatch spelling
+#: ``git-<letters>`` (``git-checkout``, ``/usr/lib/git-core/git-add``) or
+#: ``git.exe``. Tokens
+#: like ``nexus-git-policy.py``, ``.git``, ``foo.git``, ``git.py``,
+#: ``git-workflow.md`` and ``~/git/nexus`` do not qualify. ``=`` and ``$``
+#: end a token on purpose: ``g=git; $g checkout`` must still arm.
+#:
+#: Position is deliberately NOT part of the rule. ``printf 'git checkout f' |
+#: sh``, ``eval 'git checkout f'`` and ``sh -c 'git checkout f'`` all carry
+#: ``git`` in ARGUMENT position (the shell that runs it sits elsewhere in the
+#: text), and telling them from ``echo git`` needs a shell parser, which is
+#: the unbounded surface the round-4 redesign exists to avoid. When unsure
+#: whether a standalone ``git`` token is command-position, it arms the scan.
+#: The accepted false positives are therefore ``echo git add`` and a bare
+#: directory named ``git`` (``cd ~/git && ...``); the fixed false positives are
+#: every path or word that merely CONTAINS ``git``.
+_PATHISH_TOKEN_RE = re.compile(r"[\w.\-/~+%#]+")
+_GIT_BASENAME_RE = re.compile(r"git(?:-[A-Za-z][A-Za-z-]*|\.exe)?")
+
+
+def _first_git_command(text: str) -> int | None:
+    """Index just past the ``git`` of the first git-command token in *text*
+    (see ``_PATHISH_TOKEN_RE``), or ``None``.
+
+    The returned index is the end of the literal ``git``, not of the token,
+    so the verb scan still sees ``checkout`` inside ``git-checkout``. One
+    linear pass: ``finditer`` over tokens, an ``rfind`` and an anchored
+    ``fullmatch`` per token that contains ``git`` at all.
+    """
+    for m in _PATHISH_TOKEN_RE.finditer(text):
+        tok = m.group()
+        if "git" not in tok:
+            continue
+        base_start = tok.rfind("/") + 1
+        if _GIT_BASENAME_RE.fullmatch(tok, base_start):
+            return m.start() + base_start + 3
+    return None
 
 
 def _primary_match(normalized_text: str) -> re.Match[str] | None:
-    """First verb-token match anywhere after the first ``git`` occurrence,
-    or ``None``. Two linear passes, no catastrophic-backtracking risk: each
-    is a plain alternation/boundary search with no nested quantifiers."""
-    git_match = _GIT_RE.search(normalized_text)
-    if git_match is None:
+    """First verb-token match anywhere after the first git COMMAND token
+    (``_first_git_command``), or ``None``. Two linear passes, no
+    catastrophic-backtracking risk: a token walk, then a plain
+    alternation/boundary search with no nested quantifiers."""
+    git_end = _first_git_command(normalized_text)
+    if git_end is None:
         return None
-    return _VERB_RE.search(normalized_text, git_match.end())
+    return _VERB_RE.search(normalized_text, git_end)
 
 
 #: Shell line-continuation (a trailing, unescaped ``\`` — optionally followed
@@ -855,7 +924,7 @@ def _find_spliced_expansion(normalized_text: str) -> str | None:
     under the round-8/9 rule, or ``None``. See the module-level comment
     above ``_EXPANSION_CONSTRUCT_RE`` for the two-branch rule and the
     comment directly above for why runs (not individual matches) are used."""
-    literal_git_present = _GIT_RE.search(normalized_text) is not None
+    literal_git_present = _first_git_command(normalized_text) is not None
     for start, end in _expansion_construct_runs(normalized_text):
         joined = _adjacent_letter_fragments(normalized_text, start, end)
         if literal_git_present:
@@ -1330,7 +1399,7 @@ def body(payload: dict[str, Any]) -> HookResult:
     agent_type = str(payload.get("agent_type") or "")
 
     if spliced_fragment:
-        git_present = _GIT_RE.search(normalized) is not None
+        git_present = _first_git_command(normalized) is not None
         _lib.log_routing_event(
             rule=RULE_NAME, outcome="deny", tool_name="Bash",
             command_fragment=command,
