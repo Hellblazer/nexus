@@ -505,6 +505,51 @@ def test_sentinel_absent_denies(tmp_env):
     assert "not yours to reach for" in decision["reason"]
 
 
+def test_a_close_quoted_in_another_commands_text_allows(tmp_env):
+    """nexus-t0dt8: close-shaped prose inside a quoted value is text, not
+    a close. The quote-blind regex read it as one and denied."""
+    pid = os.getpid()
+    _write_bd_stub(tmp_env["bin_dir"], title="RDR-112 Phase 1 review gate")
+    _make_session_addr(tmp_env["config_dir"], pid)
+    command = 'bd comment nexus-99999 -m "remember to bd close nexus-abc next"'
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        env_extra={"NX_FAKE_CLAUDE_PID": str(pid)},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert "permissionDecision" not in _decision(proc)
+
+
+def test_every_real_close_is_checked_not_only_the_first(tmp_env):
+    """nexus-t0dt8: a quoted mention first, a non-gate close second and the
+    gate close third. Only the first match was ever checked."""
+    pid = os.getpid()
+    stub = tmp_env["bin_dir"] / "bd"
+    stub.write_text(textwrap.dedent("""\
+        #!/usr/bin/env python3
+        import sys
+        if sys.argv[1:2] == ["show"]:
+            gate = sys.argv[2] == "nexus-gate"
+            print("RDR-112 Phase 1 review gate" if gate else "Implement the parser")
+            print()
+            print("DESCRIPTION")
+            print("")
+        sys.exit(0)
+        """))
+    stub.chmod(0o755)
+    _make_session_addr(tmp_env["config_dir"], pid)
+    command = (
+        'bd comment nexus-x -m "then bd close nexus-other" && '
+        "bd close nexus-impl && bd close nexus-gate"
+    )
+    proc = _run_hook(
+        {"tool_name": "Bash", "tool_input": {"command": command}},
+        env_extra={"NX_FAKE_CLAUDE_PID": str(pid)},
+        bin_dir=tmp_env["bin_dir"],
+    )
+    assert _decision(proc)["permissionDecision"] == "deny"
+
+
 def test_sentinel_stale_denies(tmp_env):
     pid = os.getpid()
     _write_bd_stub(

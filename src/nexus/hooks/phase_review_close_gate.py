@@ -73,7 +73,11 @@ from typing import Any
 
 from nexus._hook_runtime._io import HookResult, configure_hook_logging
 from nexus.hooks import _routing_lib as _lib
-from nexus.hooks.pre_close_verification import iter_shell_boundaries
+from nexus.hooks.pre_close_verification import (
+    _HEREDOC_RE,
+    _quoted_spans,
+    iter_shell_boundaries,
+)
 
 RULE_NAME = "phase_review_close_requires_gate"
 
@@ -302,40 +306,9 @@ def body(payload: dict[str, Any]) -> HookResult | None:
     if not command:
         return _lib.pass_result()
 
-    match = _BD_CLOSE_RE.search(command)
-    if not match:
-        # nexus-2b24o sibling: `bd update <id> --status closed` sets the
-        # identical transition. Only counts when the status-closed flag
-        # is found in the text AFTER the matched `bd update <id>` --
-        # matching this file's existing convention of not modeling flags
-        # between the verb and the id.
-        #
-        # BOUNDED to that bd update invocation's OWN argv (round 2 ship-
-        # blocker, code review of 5ba250e92): the first port searched from
-        # the match's end to the END OF THE WHOLE COMMAND, so
-        # 'bd update nexus-x --status open && echo "ticket --status
-        # closed elsewhere"' and 'bd update nexus-x --priority 1 &&
-        # othertool sync --status closed' both false-positived on a
-        # status-closed-shaped substring sitting in an UNRELATED &&-joined
-        # command. Stop the scan at the first shell boundary after the
-        # match, exactly where this bd invocation's own argument list
-        # ends -- via the SHARED, heredoc-aware finder (round 3: a bare
-        # newline and `|&` are boundaries too, the same class of gap this
-        # file's own scoping fix closed for &&/;/|/then/do).
-        update_match = _BD_UPDATE_RE.search(command)
-        if not update_match:
-            return _lib.pass_result()
-        tail_start = update_match.end()
-        boundary = next(
-            (m for m, _is_strong in iter_shell_boundaries(command) if m.start() >= tail_start),
-            None,
-        )
-        tail_end = boundary.start() if boundary else len(command)
-        own_argv_text = command[tail_start:tail_end]
-        if _STATUS_CLOSED_RE.search(own_argv_text):
-            match = update_match
-        else:
-            return _lib.pass_result()
+    bead_ids = _closed_bead_ids(command)
+    if not bead_ids:
+        return _lib.pass_result()
 
     # Escape token takes precedence; audit and pass through.
     if _lib.should_skip_for_reason(command):
@@ -346,12 +319,75 @@ def body(payload: dict[str, Any]) -> HookResult | None:
         )
         return _lib.pass_result()
 
-    bead_id = match.group("bead_id")
+    # nexus-t0dt8: every close in the command is checked. Only the first
+    # match used to be, so a gate bead closed after another bead in the
+    # same command skipped its sentinel check.
+    approvals: list[str] = []
+    for bead_id in bead_ids:
+        verdict = _check_bead(command, bead_id)
+        if isinstance(verdict, str):
+            approvals.append(verdict)
+        elif verdict is not None:
+            return verdict
+    if approvals:
+        return _lib.pass_result("; ".join(approvals))
+    return _lib.pass_result()
+
+
+def _literal_text_spans(command: str) -> list[tuple[int, int]]:
+    """Heredoc bodies and quoted values: text, never an invocation."""
+    heredocs = [(m.start(), m.end()) for m in _HEREDOC_RE.finditer(command)]
+    return heredocs + _quoted_spans(command, skip_spans=heredocs)
+
+
+def _closed_bead_ids(command: str) -> list[str]:
+    """Each bead id this command closes with ``bd close``/``bd done`` or a
+    status-closed ``bd update``, in order, skipping matches that start
+    inside quoted text or a heredoc body (nexus-t0dt8: ``-m "... bd close
+    nexus-x ..."`` in a ``bd comment`` was read as a close of nexus-x).
+    Accepted cost: a close that is quoted AND executed (``sh -c '...'``,
+    ``eval "..."``) is not seen here either. This check is advisory; the
+    review-marker gate in ``pre_close_verification`` still sees those,
+    because a wrapper forces its whole-command scan.
+
+    ``bd update <id>`` counts only when the status-closed flag appears in
+    that invocation's OWN argv (round 2 ship-blocker, code review of
+    5ba250e92): ``bd update nexus-x --status open && echo "ticket --status
+    closed elsewhere"`` must not count. The argv ends at the first shell
+    boundary after the match, found by the SHARED, heredoc-aware finder
+    (round 3: a bare newline and ``|&`` are boundaries too).
+    """
+    spans = _literal_text_spans(command)
+
+    def _is_text(pos: int) -> bool:
+        return any(start <= pos < end for start, end in spans)
+
+    boundaries = [m.start() for m, _is_strong in iter_shell_boundaries(command)]
+    found: list[tuple[int, str]] = []
+    for m in _BD_CLOSE_RE.finditer(command):
+        if not _is_text(m.start()):
+            found.append((m.start(), m.group("bead_id")))
+    for m in _BD_UPDATE_RE.finditer(command):
+        if _is_text(m.start()):
+            continue
+        tail_end = next((b for b in boundaries if b >= m.end()), len(command))
+        if _STATUS_CLOSED_RE.search(command[m.end():tail_end]):
+            found.append((m.start(), m.group("bead_id")))
+    ids: list[str] = []
+    for _pos, bead_id in sorted(found):
+        if bead_id not in ids:
+            ids.append(bead_id)
+    return ids
+
+
+def _check_bead(command: str, bead_id: str) -> HookResult | str | None:
+    """A deny for *bead_id*, its approval text, or ``None`` when it is not
+    a phase-review gate bead (or its type cannot be determined)."""
     bd_output = _bd_show(bead_id)
     if not bd_output:
         # Cannot determine if this is a phase-review bead. Allow rather
         # than fail-closed; we have no signal to deny on.
-        return _lib.pass_result()
+        return None
 
     # Trigger: match against the bead's TITLE line only (the first non-empty
     # line of bd show output), and only for the narrow "Phase N ... review
@@ -360,7 +396,7 @@ def body(payload: dict[str, Any]) -> HookResult | None:
     # or "review" no longer false-positive (GH #931 / nexus-1pr9n).
     title_line = _bd_header_line(bd_output)
     if not _GATE_TITLE_RE.search(title_line):
-        return _lib.pass_result()
+        return None
 
     rdr_id, phase = _extract_rdr_phase(bd_output)
     if not rdr_id or not phase:
@@ -392,9 +428,7 @@ def body(payload: dict[str, Any]) -> HookResult | None:
         rule=RULE_NAME, outcome="allow", tool_name="Bash",
         command_fragment=command,
     )
-    return _lib.pass_result(
-        f"phase-review close approved by sentinel (RDR-{rdr_id} phase {phase})"
-    )
+    return f"phase-review close approved by sentinel (RDR-{rdr_id} phase {phase})"
 
 def run(payload: dict | None) -> HookResult:
     """Decide whether this ``bd close`` may proceed. Fail-closed."""

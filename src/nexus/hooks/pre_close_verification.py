@@ -724,8 +724,139 @@ _FLAG_VALUE_RE = re.compile(
 )
 
 
+_BEAD_ID_RE = re.compile(r'\bnexus-[a-z0-9]+\b', re.IGNORECASE)
+_ENV_ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+#: Any mention of ``bd`` as a word, including ``sudo bd``, ``(bd``,
+#: ``xargs bd`` and ``sh -c "bd ..."``. A segment carrying one is a
+#: possible close unless it is exactly one plain non-closing bd verb.
+_BD_WORD_RE = re.compile(r'(?<![\w.-])bd(?![\w.-])')
+
+#: bd verbs that never close a bead. ``update`` is non-closing only when
+#: it does not set status closed, checked separately. Deliberately short:
+#: a verb missing here only sends the command to the whole-command scan.
+#: Leaf commands only: ``dolt`` is absent on purpose, because it wraps a
+#: subcommand tree that could one day carry a raw status write.
+_NON_CLOSING_BD_VERBS = frozenset({
+    'blocked', 'comment', 'comments', 'count', 'dep', 'history',
+    'label', 'list', 'prime', 'ready', 'remember', 'reopen', 'search',
+    'show', 'stats', 'version',
+})
+
+
+#: A close segment's positional argument that is exactly one bead id
+#: (``nexus-abcde``, ``nexus-q02nx.17``). Anything else makes scoping
+#: decline, so the id it might carry is found by the whole-command scan.
+_LITERAL_BEAD_ARG_RE = re.compile(r'nexus-[a-z0-9]+(?:\.[0-9]+)*', re.IGNORECASE)
+
+#: ``bd update``'s status flag; its separate value (``closed``) is not an id.
+_STATUS_FLAGS = frozenset({'--status', '-s'})
+
+
+def _close_segment_ids(cmd: str) -> list[str] | None:
+    """Bead ids from the arguments of the close-verb segments only, or
+    ``None`` when scoping cannot be trusted to be complete.
+
+    Uses :func:`_pipeline_segments`, the segmentation :func:`_bd_verbs`
+    detects the close with, so a sibling command (``&& bd comment
+    nexus-a``, ``| grep nexus-18``, an earlier line) contributes nothing.
+
+    All or nothing (nexus-t0dt8 review): a result is returned only when
+    every other segment is provably not a close, meaning it mentions no
+    ``bd`` word at all, or it is a single plain ``bd <verb>`` with a verb
+    in :data:`_NON_CLOSING_BD_VERBS` (or a non-closing ``update``).
+    Anything else (``bd batch``/``import``/``sql``, ``sudo bd close``,
+    ``(bd close x)``, ``bd -q close``, a heredoc feeding bd), any segment
+    whose quoting will not tokenize, and any close segment with a
+    positional that is not a literal id (``bd close "$ID"``) returns
+    ``None``, so the caller scans the whole command, as before this bead.
+    A partial set would let the missed close through unchecked.
+
+    KNOWN LIMIT, decided rather than missed (nexus-t0dt8 critique round
+    2): a segment that closes through a name this hook cannot read, such
+    as a wrapper script, alias or shell function (``scripts/close.sh
+    nexus-c``), mentions no ``bd`` and counts as non-closing. Before this
+    bead the whole-command scan caught such an id only when a literal
+    close happened to sit in the same command; alone, the gate has never
+    seen a wrapper close (:func:`_bd_verbs` finds no close and allows).
+    Keeping that accidental catch would mean treating every unrecognized
+    command as a possible close, which brings back the collisions this
+    function removes. ``TestHarvestIsScopedToTheCloseSegment`` pins it.
+    """
+    segments, _groups = _pipeline_segments(cmd)
+    seen: set[str] = set()
+    ids: list[str] = []
+    for seg in segments:
+        try:
+            tokens = shlex.split(seg, posix=True)
+        except ValueError:
+            return None
+        i = 0
+        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+            i += 1
+        rest = tokens[i:]
+        while rest and rest[0] in ('{', '('):
+            rest = rest[1:]
+        is_close = len(rest) >= 2 and rest[0] == 'bd' and (
+            rest[1] in ('close', 'done')
+            or (rest[1] == 'update' and _update_sets_closed_status(rest[2:]))
+        )
+        if not is_close:
+            mentions = len(_BD_WORD_RE.findall(seg))
+            if mentions == 0:
+                continue
+            plain_non_closing = (
+                mentions == 1
+                and len(rest) >= 2
+                and rest[0] == 'bd'
+                and (rest[1] in _NON_CLOSING_BD_VERBS or rest[1] == 'update')
+            )
+            if plain_non_closing:
+                continue
+            return None
+        args = rest[2:]
+        j = 0
+        while j < len(args):
+            tok = args[j]
+            if tok.split('=', 1)[0] in _VALUE_FLAGS | _STATUS_FLAGS:
+                j += 1 if '=' in tok else 2
+                continue
+            if not tok.startswith('-'):
+                # Every positional must be a literal id. "$ID", a path, or
+                # an unknown flag's value may hide a target: scan it all.
+                if not _LITERAL_BEAD_ARG_RE.fullmatch(tok):
+                    return None
+                bead = tok.split('.', 1)[0].lower()  # a child id gates as its parent, as before
+                if bead not in seen:
+                    seen.add(bead)
+                    ids.append(bead)
+            j += 1
+    return ids
+
+
 def _bead_ids(cmd: str) -> list[str]:
     """Every literal bead id this command names as a close target.
+
+    nexus-t0dt8: the close-verb segments' own arguments first
+    (:func:`_close_segment_ids`). The whole-command scan below remains the
+    fallback whenever that finds nothing or cannot vouch for completeness
+    (``None``: a segment it cannot prove is not a close), which keeps
+    the property the paragraph after next defends: a scoping miss (a
+    ``bd batch`` close on stdin, an id behind a variable, a subshell the
+    segmenter does not strip) harvests the broad set, as before, rather
+    than routing to the INDETERMINATE allow. Only a command whose close
+    segment names a literal id is narrowed, and then only to that id.
+    """
+    scoped = _close_segment_ids(cmd)
+    if scoped:
+        return scoped
+    return _whole_command_ids(cmd)
+
+
+def _whole_command_ids(cmd: str) -> list[str]:
+    """Every bead-id-shaped token in the command, outside flag values and
+    paths. The fallback for :func:`_bead_ids`.
 
     Carried verbatim with ONE correction. ``_scan_text`` ran on every
     non-flag token, a path included: once the worktree convention landed
@@ -737,16 +868,15 @@ def _bead_ids(cmd: str) -> list[str]:
     bead-SHAPED and reads as a real id -- the version that costs an hour.
 
     The fix excludes tokens containing ``/``, because a bead id never
-    does. DELIBERATELY NOT the tighter rule of scanning only bd segments,
-    although :func:`_bd_verbs` already does exactly that and it would be
-    more principled: getting segment detection wrong makes the harvester
-    find NOTHING, and finding nothing routes to the INDETERMINATE branch,
-    which ALLOWS. A mistake in the tight rule is silently permissive; a
-    mistake in this one can only decline to scan a path. Every historical
-    defect in this file failed open, so a fix must not add a new way.
+    does. It deliberately did not scan only bd segments, because getting
+    segment detection wrong makes a harvester find NOTHING, and finding
+    nothing routes to the INDETERMINATE branch, which ALLOWS. Every
+    historical defect in this file failed open. :func:`_bead_ids` now
+    scopes first (nexus-t0dt8) and keeps this scan as its fallback, so a
+    scoping miss still lands here rather than on an allow.
     """
     VALUE_FLAGS = _VALUE_FLAGS
-    BEAD_RE = re.compile(r'\bnexus-[a-z0-9]+\b', re.IGNORECASE)
+    BEAD_RE = _BEAD_ID_RE
     OPERATORS = {';', '&&', '||', '|', 'then', 'do'}
     seen, ids = set(), []
 
