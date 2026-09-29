@@ -1306,6 +1306,80 @@ class TestLoopVariableDatum:
         assert drop_path.exists(), "override on an unreadable-id close was not audited"
 
 
+class TestUnreadableCloseIdNextToAnUnrelatedLiteralId:
+    """nexus-nmzsg: the unreadable-id ask must not be defeated by a sibling.
+
+    ``bd show nexus-x; bd close "$ID"`` used to fall back to the
+    whole-command scan, harvest ``nexus-x`` from the ``bd show`` and check
+    THAT bead's marker: a covered ``nexus-x`` passed the close ("Review
+    completed for nexus-x") and an uncovered one denied it, while the bead
+    actually being closed was never looked at."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'bd show nexus-xxxxx; bd close "$ID"',
+            "bd comment nexus-xxxxx 'noted' && bd close $(cat /tmp/id.txt)",
+            'bd ready && bd show nexus-xxxxx && bd close "$ID"',
+        ],
+    )
+    def test_an_unrelated_literal_sibling_does_not_hide_the_unreadable_close(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        # nexus-xxxxx IS covered: pre-fix this passed the close on its marker.
+        fake_bin = fake_nx(
+            _marker("review-completed,nexus-xxxxx", "review-completed: nexus-xxxxx")
+        )
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "ask", (command, parsed)
+        assert "cannot see which beads" in _get_reason(parsed)
+
+    def test_an_uncovered_unrelated_sibling_asks_rather_than_denies(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='bd show nexus-xxxxx; bd close "$ID"'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        # Pre-fix: deny, naming nexus-xxxxx, a bead this command never closes.
+        assert _get_decision(_parse_stdout(result.stdout)) == "ask"
+
+    def test_override_precedence_is_unchanged_for_this_shape(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='NX_REVIEW_GATE_OVERRIDE=1 bd show nexus-xxxxx; bd close "$ID"'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
+
+    def test_a_loop_list_is_still_a_source_of_ids_for_the_close(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """The counterpart: the fix must not drop a sibling that DEFINES the
+        variable. An uncovered id in the ``for`` list still denies."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command="for b in nexus-xxxxx; do bd close $b; done"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
+
+
 class TestOverride:
     """nexus-4av2n item 4: an explicit, auditable override."""
 
@@ -1408,6 +1482,10 @@ class TestCapabilityHonestBothSourcesDown:
         assert hso["permissionDecision"] == "ask"
         assert "nexus-abc12" in hso["permissionDecisionReason"]
         assert "unverified" in hso["permissionDecisionReason"]
+        # The stamp is written BEFORE the prompt, so a declined close leaves
+        # an open bead stamped too: the prompt must not imply that approving
+        # is what causes the stamp.
+        assert "either way" in hso["permissionDecisionReason"]
         assert result.returncode == 0
 
     def test_several_uncertain_ids_are_all_named_and_all_stamped_unverified(

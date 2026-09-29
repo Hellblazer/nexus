@@ -47,6 +47,16 @@ or an absent ``nx`` lets the close proceed with verification stamped
 auto-mode classifier approve a close the gate knows it could not check. A
 broken verification path must not brick every close, and making this gate
 fail-closed is a decision the RDR deliberately does not take.
+
+**"Fail-open" now holds only when a user is present.** An ``ask`` needs
+something to answer it. In an unattended session with no permission host
+(``claude -p``, ``dontAsk``, an SDK session with no permission callback) the
+prompt cannot be shown and the ask very likely resolves to a denial, so
+there a T1 outage or an unreadable close id blocks the close instead of
+letting it through. That is inferred from how those modes treat any
+permission request, NOT measured against this hook; nexus-mcfaj owns a live
+verification of it. Until that lands, do not assume an unattended close
+survives a T1 outage.
 """
 from __future__ import annotations
 
@@ -854,7 +864,96 @@ def _bead_ids(cmd: str) -> list[str]:
     scoped = _close_segment_ids(cmd)
     if scoped:
         return scoped
+    unreadable = _unreadable_close_ids(cmd)
+    if unreadable is not None:
+        return unreadable
     return _whole_command_ids(cmd)
+
+
+def _unreadable_close_ids(cmd: str) -> list[str] | None:
+    """Ids for a close whose own target is unreadable, or ``None`` to fall
+    through to the whole-command scan.
+
+    nexus-nmzsg. ``bd show nexus-x; bd close "$ID"`` used to reach the
+    whole-command scan, which harvested ``nexus-x`` from the ``bd show`` and
+    checked THAT bead's marker: a covered ``nexus-x`` passed the close and an
+    uncovered one denied it, while the bead actually closed was never looked
+    at, and the unreadable-id ask (:func:`_ask_unreadable_ids`) never fired.
+
+    Applies only when a close segment has a positional that is not a literal
+    id, and every OTHER segment is one this module can classify: no ``bd``
+    word at all, or a plain non-closing ``bd`` verb (the same test
+    :func:`_close_segment_ids` uses). Anything else (``bd batch``, ``sudo bd
+    close``, unparseable quoting) returns ``None`` and keeps the broad scan,
+    so this can only narrow a case the scoper already understands.
+
+    The ids returned are the ones that can actually define the unreadable
+    positional: the close segment's own text (``$(echo nexus-b)``,
+    ``bd close nexus-a "$ID"``) plus sibling segments that DEFINE a variable,
+    a ``for`` list or a ``NAME=value`` assignment
+    (``for b in nexus-a nexus-b; do bd close $b``). A plain non-closing ``bd``
+    sibling contributes nothing, and neither does any other command: an
+    empty result means the gate cannot see the target and asks. A pipeline
+    feeding ``while read`` is not treated as a source, so it now asks where
+    it used to check the ids it printed; asking is the safe direction.
+    """
+    segments, _groups = _pipeline_segments(cmd)
+    ids: list[str] = []
+    unreadable = False
+
+    def _add(found: list[str]) -> None:
+        for bead in found:
+            if bead not in ids:
+                ids.append(bead)
+
+    for seg in segments:
+        try:
+            tokens = shlex.split(seg, posix=True)
+        except ValueError:
+            return None
+        i = 0
+        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+            i += 1
+        assignment_only = i > 0 and i == len(tokens)
+        rest = tokens[i:]
+        while rest and rest[0] in ('{', '('):
+            rest = rest[1:]
+        is_close = len(rest) >= 2 and rest[0] == 'bd' and (
+            rest[1] in ('close', 'done')
+            or (rest[1] == 'update' and _update_sets_closed_status(rest[2:]))
+        )
+        if is_close:
+            args = rest[2:]
+            j = 0
+            seg_unreadable = False
+            while j < len(args):
+                tok = args[j]
+                if tok.split('=', 1)[0] in _VALUE_FLAGS | _STATUS_FLAGS:
+                    j += 1 if '=' in tok else 2
+                    continue
+                if not tok.startswith('-') and not _LITERAL_BEAD_ARG_RE.fullmatch(tok):
+                    seg_unreadable = True
+                j += 1
+            if seg_unreadable:
+                unreadable = True
+                _add(_whole_command_ids(seg))
+            else:
+                _add(_close_segment_ids(seg) or [])
+            continue
+        mentions = len(_BD_WORD_RE.findall(seg))
+        if mentions:
+            plain_non_closing = (
+                mentions == 1
+                and len(rest) >= 2
+                and rest[0] == 'bd'
+                and (rest[1] in _NON_CLOSING_BD_VERBS or rest[1] == 'update')
+            )
+            if plain_non_closing:
+                continue
+            return None
+        if assignment_only or (rest and rest[0] == 'for'):
+            _add(_whole_command_ids(seg))
+    return ids if unreadable else None
 
 
 def _whole_command_ids(cmd: str) -> list[str]:
@@ -1564,8 +1663,9 @@ def _ask_uncertain(uncertain: list[str]) -> HookResult:
     reason = (
         f"Review gate could not verify review-completed coverage for {ids}: "
         "T1 scratch is unreachable (the nx binary is absent, or 'nx scratch "
-        "list' failed; check 'nx doctor --check-t1'). Approving closes "
-        "anyway, with verification stamped 'unverified', not 'passed'. "
+        "list' failed; check 'nx doctor --check-t1'). These beads are "
+        "marked 'unverified' either way (the mark is written before this "
+        "prompt): approving closes them anyway, declining leaves them open. "
         "Decline to run the review or restore T1 first."
     )
     context = (

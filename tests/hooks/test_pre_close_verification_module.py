@@ -208,6 +208,38 @@ class TestHarvestIsScopedToTheCloseSegment:
         assert gate._bead_ids(command) == ["nexus-aaaaa"], command
 
 
+class TestUnreadableCloseDoesNotBorrowSiblingIds:
+    """nexus-nmzsg: a close segment whose own id is unreadable is not
+    completed with ids from sibling segments that cannot define it."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'bd show nexus-xxxxx; ' + CLOSE + ' "$ID"',
+            "bd comment nexus-xxxxx 'n' && " + CLOSE + " $(cat f)",
+            UPDATE + " nexus-xxxxx --priority 1; " + CLOSE + ' "$ID"',
+        ],
+    )
+    def test_plain_non_closing_bd_siblings_contribute_nothing(self, command):
+        assert gate._bead_ids(command) == [], command
+
+    @pytest.mark.parametrize(
+        "command, expected",
+        [
+            ('ID=nexus-aaaaa; ' + CLOSE + ' "$ID"', ["nexus-aaaaa"]),
+            ("for b in nexus-aaaaa nexus-bbbbb; do " + CLOSE + " $b; done",
+             ["nexus-aaaaa", "nexus-bbbbb"]),
+            (CLOSE + " $(echo nexus-aaaaa)", ["nexus-aaaaa"]),
+            ('bd show nexus-xxxxx; ID=nexus-aaaaa; ' + CLOSE + ' "$ID"', ["nexus-aaaaa"]),
+        ],
+    )
+    def test_a_sibling_that_defines_the_variable_still_does(self, command, expected):
+        assert gate._bead_ids(command) == expected, command
+
+    def test_segment_scoping_for_a_readable_close_is_untouched(self):
+        assert gate._bead_ids("bd show nexus-xxxxx && " + CLOSE + " nexus-aaaaa") == ["nexus-aaaaa"]
+
+
 class TestNexus2b24oTransitionNotVerb:
     """bd's own binary (1.0.5), probed live rather than guessed, sets the
     identical CLOSED status transition through spellings ``_bd_verbs``
