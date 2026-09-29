@@ -34,6 +34,7 @@ below maps to an exact ``case`` in the Java handler's switch:
   POST  /v1/catalog/manifest/purge      {doc_id}
   GET   /v1/catalog/manifest/chashes?collection=X
   POST  /v1/catalog/manifest/docs_for_chashes  {chashes}
+  POST  /v1/catalog/manifest/chash_positions  {chashes}
   POST  /v1/catalog/owners/upsert       upsert owner
   GET   /v1/catalog/owners/list
   GET   /v1/catalog/owners/by_repo?repo_hash=X
@@ -80,6 +81,8 @@ import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+
+import time
 
 import httpx
 import structlog
@@ -249,6 +252,22 @@ _COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
 #: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
 #: register_many (nexus-xedhp).
 _UPDATE_MANY_PAGE = 1000
+#: How long a 404 from /manifest/chash_positions is trusted before the route
+#: is probed again (nexus-opxwd): long enough that an old engine costs one
+#: extra round trip per interval, short enough that a process outliving an
+#: engine upgrade starts using the route without a restart.
+_CHASH_POSITIONS_RETRY_S: float = 600.0
+
+#: How long a failure of a PRESENT route (an error status other than 404, a
+#: malformed or truncated page) is trusted: shorter, since it is not the
+#: expected pre-upgrade state, but long enough that a broken route costs one
+#: extra round trip per interval rather than one per search.
+_CHASH_POSITIONS_FAILURE_RETRY_S: float = 60.0
+
+#: Clock for the chash_positions backoff; a module alias so a test can move
+#: it without freezing time.monotonic for the whole process.
+_monotonic = time.monotonic
+
 #: Page size for /manifest/docs_for_chashes POSTs — mirrors the engine's
 #: CatalogHandler.MAX_BATCH_DOC_IDS cap on handleDocsForChashes (nexus-uu4b9):
 #: the endpoint had NO client-side cap, so an unbounded chash list (a
@@ -3512,6 +3531,60 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         :meth:`docs_and_manifests_for_chashes`, which does the work and also
         returns the manifests it fetched on the way."""
         return self.docs_and_manifests_for_chashes(chashes)[0]
+
+    def chash_positions(self, chashes: list[str]) -> list[dict] | None:
+        """``[{chash, doc_id, position, chunk_count}, ...]`` for every live
+        manifest row holding one of *chashes*, ordered by doc_id then position
+        (nexus-opxwd). ``chunk_count`` counts the whole document's rows.
+
+        Search's reverse lookup: :meth:`docs_and_manifests_for_chashes` pulls
+        every referencing document's FULL manifest to learn these four facts,
+        about 3.4 s of a warm cloud search (nexus-w032x); this route's payload
+        is proportional to the hits.
+
+        ``None`` when the engine predates the route (404, engines before
+        engine-service-v0.1.139): the caller falls back to the manifest path.
+        The miss is remembered for :data:`_CHASH_POSITIONS_RETRY_S` (any other
+        failure for :data:`_CHASH_POSITIONS_FAILURE_RETRY_S`), so an old
+        engine costs one 404 per interval rather than one per search, and a
+        long-lived process (this client is a process-lifetime singleton) picks
+        the route up after an engine upgrade without a restart. Paged and
+        count-reconciled like :meth:`docs_and_manifests_for_chashes`.
+        """
+        backoff = getattr(self, "_chash_positions_backoff", None)
+        if backoff is not None and _monotonic() - backoff[0] < backoff[1]:
+            return None
+        unique = list(dict.fromkeys(c for c in chashes if c))
+        rows: list[dict] = []
+        for start in range(0, len(unique), _DOCS_FOR_CHASHES_PAGE):
+            batch = unique[start : start + _DOCS_FOR_CHASHES_PAGE]
+            try:
+                result = self._post("/manifest/chash_positions", {"chashes": batch}, mutates=False)
+            except httpx.HTTPStatusError as exc:
+                if exc.response is not None and exc.response.status_code == 404:
+                    self._chash_positions_backoff = (_monotonic(), _CHASH_POSITIONS_RETRY_S)
+                    _log.debug("http_catalog_client.chash_positions_route_absent")
+                    return None
+                self._chash_positions_backoff = (_monotonic(), _CHASH_POSITIONS_FAILURE_RETRY_S)
+                raise
+            except Exception:
+                # A transport failure (connect, timeout) backs off like any
+                # other failure of a present route (review of 3a712ce53).
+                self._chash_positions_backoff = (_monotonic(), _CHASH_POSITIONS_FAILURE_RETRY_S)
+                raise
+            result = result if isinstance(result, dict) else {}
+            page = result.get("rows")
+            if not isinstance(page, list) or "count" not in result or len(page) != int(result["count"]):
+                # A present-but-broken route backs off too, more briefly: every
+                # failed call costs the caller this round trip AND the manifest
+                # path it falls back to (critique of 6159510c1).
+                self._chash_positions_backoff = (_monotonic(), _CHASH_POSITIONS_FAILURE_RETRY_S)
+                raise RuntimeError(
+                    "manifest/chash_positions response is malformed or truncated "
+                    f"(keys {sorted(result)}); refusing a partial reverse lookup"
+                )
+            rows.extend(page)
+        return rows
 
     def docs_and_manifests_for_chashes(
         self, chashes: list[str],
