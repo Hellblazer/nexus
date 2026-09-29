@@ -46,6 +46,7 @@ from nexus.db.gateway_backoff import (
     _is_embed_server_side_write_path,
     is_non_idempotent_sweep_path,
 )
+from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON, error_reason
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import is_deadline_abort
 from nexus.redact import redact_credentials
@@ -1709,7 +1710,7 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         if remedy:
             msg += f"\n{remedy}"
         raise VectorServiceError(
-            msg, code=e.code, edge_refusal=bool(edge_server), reason=_error_reason(err),
+            msg, code=e.code, edge_refusal=bool(edge_server), reason=error_reason(err),
         ) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         # Connection-level failure (bad/unreachable endpoint). Reframe with a
@@ -1738,20 +1739,6 @@ def _note_request(exc: BaseException, method: str, path: str) -> None:
     exc.add_note(f"request: {method} {base}{path}")
 
 
-#: The engine's ``reason`` on the typed 422 for a write or read naming a
-#: collection with no catalog row (nexus-bgvnx; ``HttpUtil.
-#: UNREGISTERED_COLLECTION_REASON``). corpus.py matches the same literal.
-UNREGISTERED_COLLECTION_REASON: str = "unregistered_collection"
-
-
-def _error_reason(err: Any) -> str | None:
-    """The engine's machine-readable ``reason`` from a decoded error body, or None."""
-    if not isinstance(err, dict):
-        return None
-    reason = err.get("reason")
-    return reason if isinstance(reason, str) and reason else None
-
-
 def _unregistered_collection_message(code: int, err: Any) -> str | None:
     """A readable message for the engine's typed "not registered" 422, or None.
 
@@ -1772,15 +1759,19 @@ def _unregistered_collection_message(code: int, err: Any) -> str | None:
     name = err.get("collection")
     if not name:
         return None
-    reason = _error_reason(err)
+    reason = error_reason(err)
     if reason is None:
         if "is not registered" not in str(err.get("error", "")):
             return None
     elif reason != UNREGISTERED_COLLECTION_REASON:
         return None
-    # Keep the words "not registered": an older client's (and the wording
-    # fallback's) corpus._looks_like_stale_registration_error detects this 422
-    # by them to drive write_with_registration_retry (nexus-mp8ys).
+    # Keep the words "not registered": the wording fallback of
+    # corpus._looks_like_stale_registration_error (an engine with no reason)
+    # detects this 422 by them to drive write_with_registration_retry
+    # (nexus-f5wwx), and the rewrite's own text was pinned by nexus-zdzm5.
+    # Bead nexus-mp8ys (refuse writes to a superseded name) is why the words
+    # must not be reused for any other refusal: the reason code, not the
+    # wording, is what tells the two apart.
     return (
         f"collection {name!r} is not registered in this tenant, so it does not "
         "exist here. Check the name with `nx collection list`; a collection is "
@@ -1814,7 +1805,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         if remedy:
             msg += f"\n{remedy}"
         raise VectorServiceError(
-            msg, code=e.code, edge_refusal=bool(edge_server), reason=_error_reason(err),
+            msg, code=e.code, edge_refusal=bool(edge_server), reason=error_reason(err),
         ) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         remedy = _managed_remedy()

@@ -2213,13 +2213,6 @@ def expire_cached_registration(name: str) -> None:
             _REGISTERED_COLLECTIONS_SCOPED.expire(entry)
 
 
-#: The engine's ``reason`` on the typed 422 for a collection with no catalog
-#: row (nexus-bgvnx). The same literal as ``nexus.db.http_vector_client.
-#: UNREGISTERED_COLLECTION_REASON``, repeated here because this module must
-#: not import that one (it deferred-imports THIS module; see below).
-_UNREGISTERED_COLLECTION_REASON = "unregistered_collection"
-
-
 def _reason_verdict(reason: object) -> bool | None:
     """True/False when the engine named a ``reason``; None when it named none.
 
@@ -2227,8 +2220,10 @@ def _reason_verdict(reason: object) -> bool | None:
     unregistered-collection reason is the retryable shape, any other reason
     is not, whatever its prose says. No reason (every engine that predates
     nexus-bgvnx) leaves the decision to the wording fallback."""
+    from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON  # noqa: PLC0415 — deferred: this module keeps no top-level nexus imports
+
     if isinstance(reason, str) and reason:
-        return reason == _UNREGISTERED_COLLECTION_REASON
+        return reason == UNREGISTERED_COLLECTION_REASON
     return None
 
 
@@ -2247,7 +2242,9 @@ def _looks_like_stale_registration_error(exc: BaseException) -> bool:
     failure as a transient one: it keys on the engine's ``reason``
     (``unregistered_collection``, nexus-bgvnx) and falls back to the
     "not registered" wording only for a body that carries no ``reason``
-    (an older engine, whose wording nexus-mp8ys pinned).
+    (an older engine; the wording match was pinned by nexus-f5wwx and
+    nexus-zdzm5). The reason is what keeps a future refusal that reuses the
+    words, such as nexus-mp8ys' superseded-name refusal, from being retried.
 
     Two HTTP-error families reach here, mirroring
     :func:`nexus.retry._extract_status_and_retry_after`'s own
