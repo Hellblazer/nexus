@@ -765,7 +765,8 @@ class DataTokenManager:
         :meth:`bearer_for` currently returns, which is a fresh mint when
         this call returned ``True`` and the unchanged current token
         otherwise (see the module docstring). The whole check-then-pop
-        sequence (futility peek + cache compare + pop) is atomic under
+        sequence (futility peek + cache compare + pop + lease delete,
+        nexus-vj72t) is atomic under
         this key's :meth:`_lock_for` lock — the same lock
         :meth:`bearer_for` and :meth:`invalidate` use — so a concurrent
         winner's ``bearer_for`` mint-on-miss and a loser's
