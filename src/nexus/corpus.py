@@ -10,6 +10,8 @@ from typing import TypeVar
 import click
 import structlog
 
+from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
+
 _log = structlog.get_logger(__name__)
 
 # ChromaDB collection name constraints:
@@ -1645,31 +1647,6 @@ class QuarantineSiblingNotRegisteredError(LookupError):
     repair it and names the reason instead."""
 
 
-class SupersededCollectionWriteError(RuntimeError):
-    """A write named a collection the catalog has retired (``superseded_by``
-    is set) and no explicit registration asked for it back (nexus-wwuzp).
-
-    Raised from :func:`ensure_collection_registered` when re-validating an
-    aged or rename-marked cache entry, and from
-    :func:`write_with_registration_retry` before its re-registration. The
-    ``/collections/upsert`` that a registration issues clears
-    ``superseded_by`` unconditionally, so re-registering here would un-retire
-    a deliberate supersede or a Phase-4 legacy name; refusing names the
-    successor instead. Only an explicit registration (a cold process's first
-    write, ``nx collection reindex``'s discard-then-register) revives.
-    """
-
-    def __init__(self, name: str, successor: str) -> None:
-        self.name = name
-        self.successor = successor
-        super().__init__(
-            f"collection {name!r} was superseded by {successor!r}; refusing to "
-            f"write to the retired name. Write to {successor!r} instead. "
-            f"(To deliberately bring {name!r} back, register it explicitly "
-            f"rather than writing to it.)"
-        )
-
-
 def _is_quarantine_sibling(name: str) -> bool:
     from nexus.catalog.chunk_quarantine import is_quarantine_sibling_name  # noqa: PLC0415 — circular-dep avoidance (catalog imports corpus)
     return is_quarantine_sibling_name(name)
@@ -1690,6 +1667,7 @@ class _StampedSet(set):
     def __init__(self, *args: object) -> None:
         super().__init__(*args)  # type: ignore[arg-type]
         self._at: dict[object, float] = {}
+        self._gen: dict[object, int] = {}
         for item in self:
             self._at[item] = _registration_clock()
 
@@ -1718,11 +1696,27 @@ class _StampedSet(set):
     def clear(self) -> None:  # type: ignore[override]
         super().clear()
         self._at.clear()
+        self._gen.clear()
 
     def expire(self, item: object) -> None:
-        """Mark *item* (if present) as due for re-validation on next use."""
+        """Mark *item* (if present) as due for re-validation on next use, and
+        bump its generation so a re-validation whose read started BEFORE this
+        call cannot re-stamp the entry fresh over it (see
+        :func:`_revalidate_cached_registration`)."""
         if item in self:
             self._at[item] = float("-inf")
+            self._gen[item] = self._gen.get(item, 0) + 1
+
+    def generation(self, item: object) -> int:
+        """How many times *item* has been expired; read before a re-validation
+        read and compared at re-stamp time."""
+        return self._gen.get(item, 0)
+
+    def defer(self, item: object, seconds: float) -> None:
+        """Keep *item* stale but not due again for *seconds* (a short backoff
+        after a failed re-validation read)."""
+        if item in self:
+            self._at[item] = _registration_clock() - _REGISTRATION_TTL_SECONDS + seconds
 
     def is_stale(self, item: object) -> bool:
         """True when *item* is due for re-validation. Caller checks membership."""
@@ -1762,6 +1756,10 @@ _REGISTERED_COLLECTIONS_LOCK = threading.Lock()
 #: stranding window; the value matches ``mcp_infra._COLLECTIONS_CACHE_TTL``,
 #: the other cross-process staleness bound on collection state.
 _REGISTRATION_TTL_SECONDS: float = 60.0
+
+#: After a re-validation read FAILS, the entry is not re-read for this long, so
+#: a catalog outage costs one read per name per backoff, not one per write.
+_REVALIDATION_BACKOFF_SECONDS: float = 5.0
 
 
 def _registration_clock() -> float:
@@ -1809,25 +1807,53 @@ def _superseded_successor(row: object) -> str:
     return successor if isinstance(successor, str) else ""
 
 
+def _row_from_client(client: object, name: str) -> object:
+    """*name*'s catalog row via *client*. A scoped registrar hands back a full
+    catalog client; the ambient writer is a write-only proxy whose
+    ``get_collection`` raises ``AttributeError``, so its reads go through the
+    ambient reader."""
+    try:
+        getter = client.get_collection  # type: ignore[attr-defined]
+    except AttributeError:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (catalog)
+        return make_catalog_reader().get_collection(name)  # type: ignore[union-attr]
+    return getter(name)
+
+
 def _read_collection_row(name: str, registrar: "Callable[[], object] | None") -> object:
-    """Read *name*'s catalog row through the same endpoint *registrar* writes
-    to. A scoped registrar returns a full catalog client; the ambient writer
-    is a write-only proxy, so its reads go through the ambient reader."""
+    """Read *name*'s catalog row through the endpoint *registrar* writes to."""
     if registrar is None:
         from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (catalog)
         registrar = make_catalog_writer
     client = registrar()
     try:
-        try:
-            getter = client.get_collection  # type: ignore[attr-defined]
-        except AttributeError:
-            getter = None
-        if getter is not None:
-            return getter(name)
+        return _row_from_client(client, name)
     finally:
         client.close()  # type: ignore[attr-defined]
-    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (catalog)
-    return make_catalog_reader().get_collection(name)  # type: ignore[union-attr]
+
+
+def refuse_if_superseded(
+    name: str, *, registrar: "Callable[[], object] | None" = None,
+) -> None:
+    """Raise :class:`SupersededCollectionWriteError` if *name*'s catalog row is
+    retired. One READ; never registers. A read that fails is logged and lets the
+    caller proceed (a catalog outage fails the caller's own write anyway).
+
+    For a caller about to register with EXPLICIT kwargs on a name it took from
+    stale state (``nx index repo`` after a failed Phase-4 migration): that
+    upsert would un-retire the tombstone. Deliberate registrations
+    (``nx collection reindex``) do not call this.
+    """
+    try:
+        row = _read_collection_row(name, registrar)
+    except Exception as exc:  # noqa: BLE001 — fail open; logged
+        _log.warning(
+            "collection_superseded_check_read_failed", collection=name, error=repr(exc),
+        )
+        return
+    successor = _superseded_successor(row)
+    if successor:
+        raise SupersededCollectionWriteError(name, successor)
 
 
 def _revalidate_cached_registration(
@@ -1836,32 +1862,48 @@ def _revalidate_cached_registration(
 ) -> bool:
     """Re-validate a stale cache entry with a READ. Never registers or upserts.
 
-    Returns ``True`` when the entry may be trusted again (re-stamped), and
-    ``False`` when the row is gone (the caller falls through to ordinary
-    registration, which is what a swept collection has always needed).
-    Raises :class:`SupersededCollectionWriteError` when the row is retired.
-    A read that itself fails leaves the entry as it was and lets the write
-    proceed: a blip must not fail writes that used to succeed, and the next
-    write retries the read. The network call runs outside the cache lock.
+    Returns ``True`` when the write may proceed, and ``False`` when the row is
+    gone (the caller falls through to ordinary registration, which is what a
+    swept collection has always needed).
+
+    * Superseded: the entry is kept, still stale, and
+      :class:`SupersededCollectionWriteError` is raised, so EVERY later write
+      re-reads and is refused again. Evicting it would make the next write cold
+      and its upsert would revive the tombstone.
+    * Live: the entry is re-stamped, unless an ``expire`` landed after this
+      read began (the entry's generation moved): then it stays stale and the
+      next write re-reads, so a rename that raced the read is not overwritten.
+    * The read fails: logged, the write proceeds on the cached entry, and the
+      entry backs off for :data:`_REVALIDATION_BACKOFF_SECONDS` before the next
+      read, so an outage is not one read and one log line per write.
+
+    The network call runs outside the cache lock.
     """
+    cache = _registration_cache_set(scope)
+    key = _registration_cache_key(scope, name)
+    generation = cache.generation(key)
     try:
         row = _read_collection_row(name, registrar)
-    except Exception as exc:  # noqa: BLE001 — fail open on a read blip; logged, retried next write
+    except Exception as exc:  # noqa: BLE001 — fail open on a read blip; logged, backed off, retried
         _log.warning(
             "collection_registration_revalidation_read_failed",
-            name=name, error=repr(exc),
+            collection=name, error=repr(exc),
         )
+        with _REGISTERED_COLLECTIONS_LOCK:
+            if cache.generation(key) == generation:
+                cache.defer(key, _REVALIDATION_BACKOFF_SECONDS)
         return True
     successor = _superseded_successor(row)
     if successor:
         with _REGISTERED_COLLECTIONS_LOCK:
-            _registration_cache_discard(scope, name)
+            cache.expire(key)  # kept and stale: every later write is refused too
         raise SupersededCollectionWriteError(name, successor)
     with _REGISTERED_COLLECTIONS_LOCK:
         if row is None:
             _registration_cache_discard(scope, name)
             return False
-        _registration_cache_add(scope, name)  # re-stamp; no register, no upsert
+        if cache.generation(key) == generation:
+            _registration_cache_add(scope, name)  # re-stamp; no register, no upsert
     return True
 
 
@@ -2028,6 +2070,13 @@ def ensure_collection_registered(
         # registers explicitly; only the name-derived path skips.
         _log.debug("collection_registration_skipped_quarantine_sibling", name=name)
         return
+    # A cold IMPLICIT write (nexus-wwuzp) is one whose name came from the write
+    # path, not from a deliberate registration. The upsert below clears
+    # ``superseded_by``, so it reads the row first (once per name per process,
+    # on the same writer it registers with) and refuses a retired name instead
+    # of reviving it. Explicit-kwargs callers (``nx collection reindex``,
+    # backfill) register on purpose and skip the read.
+    implicit = kwargs is None
     again = False
     with _REGISTERED_COLLECTIONS_LOCK:
         current = _registration_cache_state(scope, name)
@@ -2051,6 +2100,18 @@ def ensure_collection_registered(
             writer = registrar()
             try:
                 import httpx  # noqa: PLC0415 — deferred: keeps this module httpx-free at import time
+                if implicit:
+                    try:
+                        cold_row = _row_from_client(writer, name)
+                    except Exception as exc:  # noqa: BLE001 — fail open: a catalog outage fails the registration below anyway
+                        _log.warning(
+                            "collection_superseded_check_read_failed",
+                            collection=name, error=repr(exc),
+                        )
+                        cold_row = None
+                    cold_successor = _superseded_successor(cold_row)
+                    if cold_successor:
+                        raise SupersededCollectionWriteError(name, cold_successor)
                 try:
                     writer.register_collection(name, **kwargs)
                 except httpx.HTTPStatusError as exc:
@@ -2253,8 +2314,12 @@ def write_with_registration_retry(
         # alternative is reviving a tombstone on a guess.
         successor = _superseded_successor(_read_collection_row(name, registrar))
         if successor:
+            # Keep the entry, stale: evicting it would make the NEXT write cold
+            # and, before the cold-read guard, its upsert would revive the name.
             with _REGISTERED_COLLECTIONS_LOCK:
-                _registration_cache_discard(getattr(registrar, "scope", None), name)
+                _registration_cache_set(getattr(registrar, "scope", None)).expire(
+                    _registration_cache_key(getattr(registrar, "scope", None), name),
+                )
             raise SupersededCollectionWriteError(name, successor) from exc
         _log.info(
             "collection_registration_stale_after_boot_sweep_retry",

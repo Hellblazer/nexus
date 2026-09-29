@@ -91,6 +91,7 @@ class _StorageBackendGuardGroup(click.Group):
     def invoke(self, ctx: click.Context):
         import urllib.error  # noqa: PLC0415 — deferred: keep CLI import surface light
 
+        from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred: keep CLI import surface light
         from nexus.db.storage_mode import StorageModeFlagError  # noqa: PLC0415 — deferred: keep CLI import surface light
@@ -100,6 +101,10 @@ class _StorageBackendGuardGroup(click.Group):
             return super().invoke(ctx)
         except StorageModeFlagError as exc:
             raise click.UsageError(str(exc)) from exc
+        except SupersededCollectionWriteError as exc:
+            # nexus-wwuzp: a write named a retired collection. The message
+            # names the successor; a traceback buried it.
+            raise click.ClickException(str(exc)) from exc
         except ServiceEndpointUnresolvableError as exc:
             # nexus-sis0m.1: no service to talk to (a stopped local service,
             # no managed endpoint). The message names the remedy; a
