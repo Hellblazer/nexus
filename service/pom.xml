@@ -69,6 +69,21 @@
         <onnx.native.dir>linux-x64</onnx.native.dir>
         <djl.native.dir>linux-x86_64</djl.native.dir>
 
+        <!-- Mac ABI floor for the -Pnative image (nexus-280ei). GraalVM native-image
+             drives its own clang/ld invocation for the final link (and the query-code
+             compile step); a MACOSX_DEPLOYMENT_TARGET env var alone does not reliably
+             reach that subprocess, so the floor is pinned via explicit native-image
+             options instead: -H:NativeLinkerOption sets the LINK step's minos (this is
+             what fixes the shipped binary's Mach-O LC_BUILD_VERSION), -H:CCompilerOption
+             covers native-image's own query-code compile. Default EMPTY here (linux/
+             windows): the resulting buildArg becomes an empty-valued native-image
+             option, verified as a no-op (empty-value tolerance measured locally,
+             nexus-280ei — `-H:NativeLinkerOption=` / `-H:CCompilerOption=` with no
+             suffix build cleanly). native-libs-mac below overrides this to
+             `-mmacosx-version-min=14.0`, matching the "Assert binary ABI floor" gate's
+             ceiling in engine-service-release.yml — keep the two in lockstep. -->
+        <native.image.mac.deployment.target.opt></native.image.mac.deployment.target.opt>
+
         <!-- Surefire tag exclusion: skip @Tag("integration") by default -->
         <!-- Override with: mvn test -Dtest.excluded.groups="" -Dgroups=integration -->
         <test.excluded.groups>integration</test.excluded.groups>
@@ -667,6 +682,13 @@
             <properties>
                 <onnx.native.dir>osx-aarch64</onnx.native.dir>
                 <djl.native.dir>osx-aarch64</djl.native.dir>
+                <!-- nexus-280ei: the mac Mach-O ABI floor, consumed by the two
+                     -H:NativeLinkerOption / -H:CCompilerOption buildArgs in the
+                     `native` profile above. Without this a mac-arm64 native build
+                     inherits the BUILD HOST's SDK/OS as its minos (e.g. hellmini's
+                     macOS 27 -> minos 27.0), which the release workflow's "Assert
+                     binary ABI floor" step then refuses (ceiling 14.0). -->
+                <native.image.mac.deployment.target.opt>-mmacosx-version-min=14.0</native.image.mac.deployment.target.opt>
             </properties>
         </profile>
         <profile>
@@ -813,6 +835,11 @@
                                         <!-- nexus-9yrus (2) optimization level (see profile properties):
                                              -O2 for release, -Ob (quick-build) for PR/smoke. -->
                                         <buildArg>${native.image.opt}</buildArg>
+                                        <!-- nexus-280ei: mac ABI floor (see the property's own comment
+                                             above, near onnx.native.dir/djl.native.dir). Empty on non-mac
+                                             hosts (verified no-op); native-libs-mac sets the mac value. -->
+                                        <buildArg>-H:NativeLinkerOption=${native.image.mac.deployment.target.opt}</buildArg>
+                                        <buildArg>-H:CCompilerOption=${native.image.mac.deployment.target.opt}</buildArg>
                                     </buildArgs>
                                     <metadataRepository>
                                         <enabled>true</enabled>
