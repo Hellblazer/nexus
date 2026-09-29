@@ -3504,9 +3504,19 @@ def _t3_free_port() -> int:
         return s.getsockname()[1]
 
 
+class _T3DeepBacklogThreadingHTTPServer(_Umue1ThreadingHTTPServer):
+    """nexus-vj72t: see ``DeepBacklogThreadingHTTPServer`` in
+    tests/db/_fake_t2_server.py (file-local per this section's convention
+    of duplicating small helpers). The default listen queue of 5 overflows
+    when 7 threads connect at once, macOS answers with a connection reset,
+    and the reset caller retries on a different bearer."""
+
+    request_queue_size = 128
+
+
 def _t3_start_server(threaded: bool = False) -> tuple[_Umue1HTTPServer, int]:
     port = _t3_free_port()
-    cls = _Umue1ThreadingHTTPServer if threaded else _Umue1HTTPServer
+    cls = _T3DeepBacklogThreadingHTTPServer if threaded else _Umue1HTTPServer
     server = cls(("127.0.0.1", port), _T3AlwaysUnauthorizedHandler)
     thread = _umue1_threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

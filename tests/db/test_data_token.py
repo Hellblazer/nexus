@@ -695,6 +695,99 @@ def test_invalidate_if_current_concurrent_single_flight() -> None:
     assert mgr.has_live_token(BASE_URL, TENANT) is False, "the winner popped the cache"
 
 
+def _borrower_during_lease_delete(
+    mgr: DataTokenManager, seen: list[str | None],
+) -> list[threading.Thread]:
+    """Wrap ``mgr._delete_lease`` so a second thread calls ``bearer_for``
+    just before the real delete runs, and wait long enough for it to finish
+    if (and only if) nothing stops it -- nexus-vj72t.
+
+    Models the loser of a 401 storm: it reaches ``bearer_for`` between the
+    winner's cache pop and the winner's lease-file delete. The wait is a
+    fixed 0.5s ceiling, not a race: a borrower that is allowed to run
+    finishes in microseconds, and one that is correctly held behind the
+    per-key lock is still blocked when the wait ends, then runs after the
+    delete.
+    """
+    real_delete = mgr._delete_lease
+    borrowers: list[threading.Thread] = []
+
+    def delete_after_a_borrow(*args: Any, **kwargs: Any) -> None:
+        def borrow() -> None:
+            seen.append(mgr.bearer_for(BASE_URL, TENANT))
+
+        t = threading.Thread(target=borrow)
+        borrowers.append(t)
+        t.start()
+        t.join(timeout=0.5)
+        real_delete(*args, **kwargs)
+
+    mgr._delete_lease = delete_after_a_borrow  # type: ignore[method-assign]
+    return borrowers
+
+
+def _join_all(threads: list[threading.Thread]) -> None:
+    assert len(threads) == 1, "the invalidate must have reached the lease delete"
+    for t in threads:
+        t.join(timeout=10)
+    assert all(not t.is_alive() for t in threads), "the borrower thread hung"
+
+
+def test_invalidate_if_current_does_not_let_a_borrower_resurrect_the_token() -> None:
+    """nexus-vj72t: the winner's cache pop and its lease-file delete must be
+    one atomic step under the per-key lock.
+
+    Before the fix the delete ran after the lock was released, so a loser's
+    ``bearer_for`` could take the lock in between, miss the cache, find the
+    just-invalidated token still in the lease file, and re-cache it. The
+    winner then retried with the SAME rejected token, got a second 401, and
+    marked the key futile: zero re-mints where one was owed (measured 3 of
+    200 runs of test_concurrent_401s_remint_bounded under 48 CPU burners).
+
+    Mutation check: moving ``_delete_lease`` back outside the ``with`` block
+    in ``invalidate_if_current`` makes this test fail (the borrower returns
+    ``tok-1``).
+    """
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock())
+
+    token = mgr.bearer_for(BASE_URL, TENANT)
+    assert token == "tok-1"
+
+    seen: list[str | None] = []
+    borrowers = _borrower_during_lease_delete(mgr, seen)
+    assert mgr.invalidate_if_current(BASE_URL, TENANT, token) is True
+    _join_all(borrowers)
+
+    assert seen == ["tok-2"], (
+        f"a borrower racing the invalidate got {seen}: it must mint a fresh "
+        "token, never resurrect the invalidated one from the lease file"
+    )
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-2"
+    assert len(poster.calls) == 2
+
+
+def test_invalidate_does_not_let_a_borrower_resurrect_the_token() -> None:
+    """nexus-vj72t: same atomicity for the unconditional ``invalidate`` (the
+    connection-error path), which had the identical pop-then-delete gap."""
+    poster = _FakePoster()
+    poster.queue(200, {"data_token": "tok-1", "expires_in_seconds": 300})
+    poster.queue(200, {"data_token": "tok-2", "expires_in_seconds": 300})
+    mgr = _manager(poster, _FakeClock())
+
+    assert mgr.bearer_for(BASE_URL, TENANT) == "tok-1"
+
+    seen: list[str | None] = []
+    borrowers = _borrower_during_lease_delete(mgr, seen)
+    mgr.invalidate(BASE_URL, TENANT)
+    _join_all(borrowers)
+
+    assert seen == ["tok-2"]
+    assert len(poster.calls) == 2
+
+
 def test_is_remint_futile_false_by_default() -> None:
     poster = _FakePoster()
     mgr = _manager(poster, _FakeClock())
