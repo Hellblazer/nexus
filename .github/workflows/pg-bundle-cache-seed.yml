@@ -17,9 +17,10 @@
 # compiles as before); the versions live in the key precisely so a stale
 # bundle of the WRONG version can never be restored silently. Same reasoning
 # for MACOSX_DEPLOYMENT_TARGET (nexus-cd8b7): the PG bundle's own floor is
-# pinned 13.0, deliberately lower than the engine binary's 14.0 — see the
-# pom.xml native-libs-mac profile comment for why 14.0 is the binding floor
-# for a mac-arm64 local install regardless. The <runner>
+# pinned 13.0 here. The 13.0-vs-14.0 split (PG bundle vs engine binary) and
+# why 14.0 is the floor that actually binds a mac-arm64 local install is
+# recorded ONCE, canonically, in service/pom.xml's native-libs-mac profile
+# comment — read it there rather than here. The <runner>
 # segment is the resolved runner LABEL (e.g. "hellmini", "macos-14"). This
 # file seeds BOTH mac-arm64 labels on push/schedule (nexus-n7q28: keeps the
 # macos-14 fallback's cache warm too, not just whichever label the release

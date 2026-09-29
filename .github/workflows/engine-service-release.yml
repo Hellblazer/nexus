@@ -652,9 +652,13 @@ jobs:
               mkdir -p "$dylib_dir/onnx" "$dylib_dir/djl"
               # -x excludes the .dSYM debug-symbol dirs onnxruntime bundles
               # alongside each dylib — same exclusion native-libs-mac's own
-              # -H:ExcludeResources applies at embed time.
+              # -H:ExcludeResources applies at embed time. djl-tokenizers
+              # 0.30.0 ships none today (verified), but carrying the same
+              # exclusion on both lines means a future djl release that
+              # starts bundling .dSYM dirs doesn't silently start feeding
+              # debug-symbol companions into the minos loop below.
               unzip -q -o "$onnx_jar" "ai/onnxruntime/native/osx-aarch64/*.dylib" -x "*.dSYM/*" -d "$dylib_dir/onnx"
-              unzip -q -o "$djl_jar" "native/lib/osx-aarch64/*.dylib" -d "$dylib_dir/djl"
+              unzip -q -o "$djl_jar" "native/lib/osx-aarch64/*.dylib" -x "*.dSYM/*" -d "$dylib_dir/djl"
               dylib_count=0
               while IFS= read -r -d '' dylib; do
                 dylib_count=$((dylib_count + 1))

@@ -686,7 +686,24 @@
                  see native-build-tools' own docs for this exact pattern
                  (maven-plugin.adoc "Appending Build Arguments in Child POM").
                  Keep 14.0 in lockstep with the "Assert binary ABI floor" gate's
-                 ceiling in engine-service-release.yml. -->
+                 ceiling in engine-service-release.yml.
+
+                 DECISION (nexus-cd8b7, the canonical statement — other sites
+                 point here rather than restating it): the engine binary's
+                 floor is 14.0 (this profile); the PG bundle's own floor is a
+                 separately-pinned 13.0 (build_pg_bundle.sh's default, pinned
+                 explicitly in engine-service-release.yml's
+                 build-publish-pg-bundle job, pg-bundle-cache-seed.yml's seed
+                 job, and ci.yml's ca3-pgvector-bundle-macos job; see
+                 tests/db/test_pg_provision_ca3_bundle.py's MACOS_MIN_FLOOR
+                 and tests/test_pg_bundle_version_parity.py for the parity
+                 net across all three). Since a mac-arm64 local install
+                 downloads and runs BOTH artifacts together, 14.0 is the
+                 floor that actually binds the end user; the PG bundle's
+                 13.0 gives no independent functional benefit on its own,
+                 but stays at 13.0 rather than being pulled up to 14.0
+                 because nothing requires it and a looser pin costs nothing
+                 the engine binary doesn't already spend. -->
             <build>
                 <plugins>
                     <plugin>
