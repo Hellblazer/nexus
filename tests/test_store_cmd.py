@@ -641,6 +641,32 @@ def test_store_delete_by_title_reports_actual_deleted_count_on_partial_anti_join
     assert "Deleted 3" not in result.output
 
 
+def test_store_delete_by_title_with_every_chunk_kept_exits_nonzero(
+    runner, real_http_vector_client, monkeypatch,
+):
+    """nexus-sis0m.5: uncataloged chunks titled X, every one still held by
+    another document, so nothing titled X was removed. That printed
+    "Deleted 0 entries" at exit 0; it now fails."""
+    def fake_post(path, body, **kw):
+        if path == "/v1/vectors/get":
+            return {"ids": ["id1", "id2"]}
+        if path == "/v1/vectors/store-delete":
+            return {"deleted": 0}
+        raise AssertionError(f"unexpected path {path}")
+
+    monkeypatch.setattr("nexus.db.http_vector_client._post", fake_post)
+
+    result = runner.invoke(main, [
+        "store", "delete",
+        "--collection", "knowledge__nexus__model-ctx__v1",
+        "--title", "doc.md", "--yes",
+    ])
+
+    assert result.exit_code != 0, result.output
+    assert "2 of 2 chunk(s) kept" in result.output, result.output
+    assert "was not fully deleted" in result.output, result.output
+
+
 # ── nx store delete --title, REAL HttpVectorClient (nexus-umvh2 regression) ──
 #
 # mock_store above is a bare MagicMock() (no spec=): it silently answers

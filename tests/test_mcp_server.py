@@ -848,6 +848,21 @@ def test_store_list_docs_groups_a_split_note_as_one_document(t3, local_mode_writ
     )
 
 
+def test_store_list_docs_lists_two_documents_that_share_every_chunk(t3, local_mode_write):
+    """nexus-sis0m.5: identical text in one collection is one T3 row by
+    design, so two titled notes with the same content share their chunk.
+    Keying each chunk to one tumbler listed the pair as one document."""
+    text = "identical body shared by two titled notes"
+    store_put(content=text, collection="fixture-subject", title="shared-a")
+    store_put(content=text, collection="fixture-subject", title="shared-b")
+
+    result = store_list(collection="fixture-subject", docs=True)
+    assert len(_docs_rows_for(result, "shared-a")) == 1, result
+    assert len(_docs_rows_for(result, "shared-b")) == 1, result
+    # Non-vacuity: the two really share one stored chunk.
+    assert "(2 documents, 1 chunks)" in result, result
+
+
 def test_store_list_docs_keeps_a_manifest_less_chunk_as_its_own_row(t3, local_mode_write):
     """A chunk with no manifest row is never merged into a neighbour.
 

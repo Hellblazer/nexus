@@ -342,9 +342,14 @@ def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: A
 
 def manifest_doc_index(
     collection: str,
-) -> tuple[dict[str, str], dict[str, str], dict[str, str], str]:
-    """``(chash -> tumbler, tumbler -> title, tumbler -> head chash, reason)``
-    for every manifested document in *collection*.
+) -> tuple[dict[str, tuple[str, ...]], dict[str, str], dict[str, str], str]:
+    """``(chash -> owning tumblers, tumbler -> title, tumbler -> head chash,
+    reason)`` for every manifested document in *collection*.
+
+    A chash maps to EVERY document whose manifest holds it (nexus-sis0m.5):
+    identical chunk text in one collection is one T3 row by design, so two
+    documents with the same text share every chunk, and mapping each chash
+    to one tumbler listed the pair as a single document.
 
     The grouping a document-level listing needs. The ``document_chunks``
     manifest is the authoritative document-to-chunk map — RDR-108 Phase 3
@@ -386,7 +391,7 @@ def manifest_doc_index(
             if (t := getattr(e, "tumbler", ""))
         }
         manifests = reader.get_manifests(list(titles)) if titles else {}
-        by_chash: dict[str, str] = {}
+        owners: dict[str, list[str]] = {}
         heads: dict[str, str] = {}
         for tumbler, rows in (manifests or {}).items():
             ordered = sorted(rows, key=lambda r: r.position)
@@ -394,8 +399,10 @@ def manifest_doc_index(
                 continue
             heads[str(tumbler)] = ordered[0].chash
             for row in ordered:
-                by_chash[row.chash] = str(tumbler)
-        return by_chash, titles, heads, ""
+                holders = owners.setdefault(row.chash, [])
+                if str(tumbler) not in holders:
+                    holders.append(str(tumbler))
+        return {c: tuple(t) for c, t in owners.items()}, titles, heads, ""
     except Exception as exc:  # noqa: BLE001 — a degraded listing is reported, never raised
         return {}, {}, {}, f"catalog unreadable ({exc.__class__.__name__})"
     finally:
@@ -404,6 +411,64 @@ def manifest_doc_index(
                 reader.close()
             except Exception:  # noqa: BLE001 — best-effort handle cleanup
                 pass
+
+
+@dataclass(frozen=True)
+class DocumentListing:
+    """One row of a document-level listing (:func:`group_documents`).
+
+    *handle* is the id ``store_get`` accepts: the manifest's head chash for a
+    manifested document, so it does not depend on which piece the paging
+    reached first, else the chunk's own id.
+    """
+
+    key: str
+    title: str
+    handle: str
+    chunks: int
+    entry: dict
+
+
+def group_documents(
+    t3: Any, collection: str, total: int,
+) -> tuple[list[DocumentListing], str]:
+    """``(rows sorted by title, degraded reason)`` for *collection*'s
+    document-level listing.
+
+    Pages every chunk row and credits it to each document whose manifest
+    holds it (:func:`manifest_doc_index`), so two documents sharing every
+    chunk list as two rows (nexus-sis0m.5). A chunk no manifest holds keys
+    by its own content hash. Both listing surfaces call this
+    (``commands/store.py`` and ``mcp/core.py``), for the reason
+    :func:`manifest_doc_index` gives: two copies of one grouping loop had to
+    be fixed twice.
+    """
+    owners, doc_titles, doc_heads, degraded = manifest_doc_index(collection)
+    seen: dict[str, dict] = {}
+    counts: dict[str, int] = {}
+    offset = 0
+    while offset < total:
+        entries = t3.list_store(collection, limit=300, offset=offset)
+        if not entries:
+            break
+        for e in entries:
+            chash = e.get("id", "")
+            for key in owners.get(chash) or (e.get("content_hash", chash),):
+                seen.setdefault(key, e)
+                counts[key] = counts.get(key, 0) + 1
+        offset += 300
+    rows = [
+        DocumentListing(
+            key=key,
+            title=doc_titles.get(key) or e.get("title") or "",
+            handle=doc_heads.get(key) or e.get("id") or key,
+            chunks=counts[key],
+            entry=e,
+        )
+        for key, e in seen.items()
+    ]
+    rows.sort(key=lambda r: r.title)
+    return rows, degraded
 
 
 def split_note_text(t3: Any, collection: str, chunk_ids: list[str]) -> tuple[str, str, int] | None:
@@ -2146,6 +2211,109 @@ def _retract_manifest_rows_for_chash(
         )
         return
     writer.write_manifest(tumbler_str, remaining, collection=collection)
+
+
+@dataclass(frozen=True)
+class TitleReap:
+    """What :func:`reap_catalog_documents_by_title` did.
+
+    *documents* are ``(tumbler, title)`` of every document tombstoned;
+    *chashes* the chunks their manifests named, which the caller then asks
+    T3 to delete; *failures* ``(tumbler, error)`` for any document that
+    could not be fully retracted and was left live.
+    """
+
+    documents: tuple[tuple[str, str], ...]
+    chashes: tuple[str, ...]
+    failures: tuple[tuple[str, str], ...]
+
+
+def reap_catalog_documents_by_title(collection: str, title: str) -> TitleReap | None:
+    """Tombstone every store_put-origin document titled *title* in
+    *collection*, retracting its own manifest rows first (nexus-sis0m.5).
+
+    ``nx store delete --title`` names documents, so the documents are found
+    by catalog title rather than through their chunks. The chash route
+    (:func:`reap_catalog_manifest_for_chashes`) refuses a chash two
+    documents share, correctly for a delete by chunk id, and so left a note
+    whose body another note duplicates live, while the chunk row's own
+    title (its last writer's) could miss it outright. Only these documents'
+    manifests are rewritten; every other document naming the same chash
+    keeps protecting it through the engine's delete anti-join.
+
+    ``None`` when the catalog is unavailable, so the caller can fall back
+    to the chunk-title path. A document whose retraction fails is left live
+    and reported in *failures*; tombstoning it with a manifest row still in
+    place would pin its chunk to a deleted document.
+    """
+    from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reader = make_catalog_reader()
+    if reader is None:
+        return None
+    writer = None
+    documents: list[tuple[str, str]] = []
+    chashes: dict[str, None] = {}
+    failures: list[tuple[str, str]] = []
+    try:
+        entries = [
+            e for e in (reader.list_by_collection(collection) or [])
+            if (getattr(e, "title", "") or "") == title
+            and e.content_type == "knowledge" and not e.file_path
+        ]
+        if not entries:
+            return TitleReap((), (), ())
+        writer = make_catalog_writer()
+        for entry in entries:
+            tumbler = str(entry.tumbler)
+            own = list(dict.fromkeys(r.chash for r in reader.get_manifest(tumbler)))
+            try:
+                for chash in own:
+                    _retract_manifest_rows_for_chash(
+                        reader, writer, entry, chash, expected_collection=collection,
+                    )
+                writer.delete_document(entry.tumbler)
+            except Exception as exc:  # noqa: BLE001 — reported per document; the caller fails loud
+                _log.warning("catalog_title_reap_failed", tumbler=tumbler, exc_info=True)
+                failures.append((tumbler, f"{type(exc).__name__}: {exc}"))
+                continue
+            documents.append((tumbler, title))
+            chashes.update(dict.fromkeys(own))
+        return TitleReap(tuple(documents), tuple(chashes), tuple(failures))
+    finally:
+        if writer is not None:
+            writer.close()
+        reader.close()
+
+
+def live_holders_of_chashes(collection: str, chashes: list[str]) -> dict[str, list[tuple[str, str]]]:
+    """``chash -> [(tumbler, title), ...]`` of the LIVE documents in
+    *collection* whose manifests still name each chash; chashes nobody
+    holds are omitted. Best-effort: ``{}`` when the catalog is unavailable
+    or unreadable, since this only names who kept a chunk."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if not chashes:
+        return {}
+    reader = make_catalog_reader()
+    if reader is None:
+        return {}
+    try:
+        live = {
+            str(e.tumbler): (getattr(e, "title", "") or "")
+            for e in (reader.list_by_collection(collection) or [])
+        }
+        out: dict[str, list[tuple[str, str]]] = {}
+        for chash, tumblers in (reader.docs_for_chashes(list(chashes)) or {}).items():
+            holders = [(str(t), live[str(t)]) for t in tumblers if str(t) in live]
+            if holders:
+                out[chash] = holders
+        return out
+    except Exception:  # noqa: BLE001 — naming holders is best-effort
+        _log.debug("live_holders_lookup_failed", exc_info=True)
+        return {}
+    finally:
+        reader.close()
 
 
 def store_delete_catalog_cleanup(

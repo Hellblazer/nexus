@@ -2239,7 +2239,7 @@ A note whose text is too large for the collection's embedding model's token wind
 |------|-------------|
 | `-c` / `--collection NAME` | Collection name (required) |
 | `--id ID` | Exact 64-char document ID from `nx store list` |
-| `--title TITLE` | Exact title metadata match (deletes all matching chunks) |
+| `--title TITLE` | Title of the document(s) to delete; a chunk another document still holds is kept and that document named |
 | `-y` / `--yes` | Skip confirmation prompt |
 
 Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` digest — RDR-180). Pre-cohort 32-hex IDs are no longer resolvable at all: the `chash_alias` legacy-reference route was retired at nexus-lgdel.l1 (its beneficiary population reached zero) — re-index the source to mint a canonical 64-hex chash. `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
@@ -2258,13 +2258,15 @@ catalog cleanup for it has already run; check 'nx catalog list' / 'nx catalog re
 
 Run `nx catalog gc` / `nx catalog reconcile` to resolve the ambiguity, then retry the delete.
 
-`--title` reports the SERVER's actual deleted count, not the number of matching chunks found (nexus-o8dil.45): `nx store delete --title 'X' -c Y` prints `Deleted K entries with title 'X' from Y.`, where K can be less than the N chunks matched, because the same anti-join can legitimately retain a chunk another live document's manifest still references. When `K < N`, a second line on stderr reports the shortfall:
+`--title` names documents (nexus-sis0m.5). Each catalog document titled X in Y is tombstoned with its own manifest rows retracted first, then its chunks are deleted. A chunk whose row carries title X but that no catalog document owns (stored before the catalog existed) goes through the chunk-id reap above alongside. Two notes with identical bodies share one chunk, so deleting one of them keeps the chunk for the other. Before nexus-sis0m.5 neither note was removed there, and the command printed `Deleted 0 entries` at exit 0 with X still live. The output is one line per removed document, then the SERVER's actual chunk count (nexus-o8dil.45), then on stderr any chunks kept and who holds them:
 
 ```
-(N-K of N requested were retained -- still referenced by another live document, not deleted.)
+Deleted document 'X' (1.2.3) from Y.
+Deleted K entries with title 'X' from Y.
+  N-K of N chunk(s) kept: still held by 'W' (1.2.4).
 ```
 
-A script that asserts an exact `Deleted N entries` count against the number of chunks it expected to match can now legitimately see a smaller number without that being a bug; check stderr for the retained-count line before treating it as a failure.
+The count line is omitted when K is 0. Exit is non-zero only when X was not removed as asked: a document whose manifest could not be retracted (left live, named on stderr), or uncataloged chunks that were all kept.
 
 `nx store expire` (removes all TTL-lapsed `knowledge__*` entries, no flags) has the same actual-count contract: it prints `Expired N entries.` where N is the count `batch_delete` actually removed, not the number of lapsed rows it found. The reap-before-delete ordering above applies here too: each expired chash's manifest row is retracted before the chunk delete is attempted, so a genuinely shared chash correctly stays retained and correctly stays out of the reported count, rather than being counted as expired while the chunk survives.
 
@@ -2275,7 +2277,7 @@ A script that asserts an exact `Deleted N entries` count against the number of c
 | `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
 | `--json` | Output as JSON |
 
-**`export` flags:**
+**`export` flags:** (`COLLECTION` is resolved as for every store verb: a bare subject or a two-segment name finds the conformant collection it promotes to, or an existing legacy collection of that name; nexus-sis0m.5)
 
 | Flag | Description |
 |------|-------------|
@@ -2288,7 +2290,7 @@ A script that asserts an exact `Deleted N entries` count against the number of c
 
 | Flag | Description |
 |------|-------------|
-| `-c` / `--collection NAME` | Override target collection name (default: from export header) |
+| `-c` / `--collection NAME` | Override target collection name (default: from export header). Resolved as every store verb resolves `-c`: a bare subject or a legacy two-segment name that has no existing collection becomes the conformant name for this install's model, and an existing legacy collection keeps its name (nexus-8o7ae, nexus-sis0m.5) |
 | `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
 | `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
 | `--skip-existing` | Skip records whose id already exists in the target collection, instead of overwriting. Useful for resuming a partial import |

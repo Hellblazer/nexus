@@ -140,8 +140,14 @@ def test_mcp_store_delete_after_cross_collection_import(t2_service_env, tmp_path
 
 def test_same_collection_shared_chash_is_still_retained(t2_service_env):
     """Control: the scoping must not weaken the within-collection rule. Two
-    notes in ONE collection sharing a chash stay ambiguous; neither is
-    reaped and the chunk stays (nexus-dleg's documented contract)."""
+    notes in ONE collection share a chash; the shared chunk stays, because
+    the other note still holds it.
+
+    Since nexus-sis0m.5 (Sam's ruling, 2026-09-29) ``--title`` names
+    documents, so the named note itself IS removed; the chash-ambiguity rule
+    governs only which document a bare chunk id resolves to, and the
+    ``--id`` path keeps it. Before, neither note was reaped and the command
+    printed "Deleted 0 entries" at exit 0 with the named note still live."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
     writer = make_catalog_writer(priority="interactive")
@@ -154,7 +160,8 @@ def test_same_collection_shared_chash_is_still_retained(t2_service_env):
     with patch("nexus.commands.store._t3", return_value=client):
         result = CliRunner().invoke(main, ["store", "delete", "-c", col, "--title", "r3cdg twin b", "-y"])
 
-    assert "Deleted 0 entries" in result.output, result.output
-    assert reader.by_source_uri(uri_a) is not None
-    assert reader.by_source_uri(uri_b) is not None
-    assert _live_in(client, col, chash)
+    assert result.exit_code == 0, result.output
+    assert reader.by_source_uri(uri_a) is not None, "the sharing note must survive"
+    assert reader.by_source_uri(uri_b) is None, "the named note must be removed"
+    assert _live_in(client, col, chash), "the shared chunk must stay for the survivor"
+    assert "r3cdg twin a" in result.output, "the survivor must be named as the holder"

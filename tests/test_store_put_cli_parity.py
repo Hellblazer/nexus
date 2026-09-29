@@ -483,7 +483,7 @@ class TestListDocumentsGroupsByTheManifest:
         ]
         monkeypatch.setattr(
             "nexus.catalog.store_hook.manifest_doc_index",
-            lambda _col: ({"aaa": "1.2.3", "bbb": "1.2.3"}, {"1.2.3": "split note"}, {"1.2.3": "aaa"}, ""),
+            lambda _col: ({"aaa": ("1.2.3",), "bbb": ("1.2.3",)}, {"1.2.3": "split note"}, {"1.2.3": "aaa"}, ""),
         )
 
         _list_documents(self._db(rows), "knowledge__subject__m__v1")
@@ -497,6 +497,28 @@ class TestListDocumentsGroupsByTheManifest:
         # The unmanifested chunk keeps its own row — a manifest-less note is
         # live by design, and a superseded one must stay visible to be found.
         assert len([ln for ln in out.splitlines() if "standalone" in ln]) == 1, out
+
+    def test_two_documents_sharing_every_chunk_list_as_two_rows(self, monkeypatch, capsys):
+        """nexus-sis0m.5: identical text in one collection is one T3 row, so
+        two documents with the same text share every chunk. Keying each chunk
+        to one tumbler listed the pair as a single document."""
+        rows = [{"id": "aaa", "content_hash": "h1", "title": "B", "indexed_at": "2026-09-29"}]
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.manifest_doc_index",
+            lambda _col: (
+                {"aaa": ("1.2.3", "1.2.4")},
+                {"1.2.3": "note A", "1.2.4": "note B"},
+                {"1.2.3": "aaa", "1.2.4": "aaa"},
+                "",
+            ),
+        )
+
+        _list_documents(self._db(rows), "knowledge__subject__m__v1")
+        out = capsys.readouterr().out
+
+        assert "(2 documents, 1 stored chunks)" in out, out
+        assert len([ln for ln in out.splitlines() if "note A" in ln]) == 1, out
+        assert len([ln for ln in out.splitlines() if "note B" in ln]) == 1, out
 
     def test_chunk_count_is_derived_not_read_from_metadata(self, monkeypatch, capsys):
         """A ``store_put`` note carries no ``chunk_count`` field, so reading it

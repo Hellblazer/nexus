@@ -490,7 +490,7 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
 def _list_documents(db: T3Database, col_name: str) -> None:
     """List documents in a collection, grouped by the catalog manifest.
 
-    Grouping is :func:`nexus.catalog.store_hook.manifest_doc_index`, shared
+    Grouping is :func:`nexus.catalog.store_hook.group_documents`, shared
     with the MCP ``store_list(docs=True)`` view, which carried an independent
     copy of the same mistake this replaces: both grouped by each chunk row's
     own ``content_hash``, on the premise that a ``store_put`` note is one
@@ -513,35 +513,13 @@ def _list_documents(db: T3Database, col_name: str) -> None:
         click.echo(f"No documents in {col_name}.")
         return
 
-    from nexus.catalog.store_hook import manifest_doc_index  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+    from nexus.catalog.store_hook import group_documents  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
 
-    by_chash, doc_titles, doc_heads, degraded = manifest_doc_index(col_name)
-
-    # Page through all chunks, grouping each under its document.
-    seen: dict[str, dict] = {}  # grouping key → a representative chunk
-    chunks_by_key: dict[str, int] = {}
-    offset = 0
-    batch = 300
-    while offset < total_chunks:
-        entries = db.list_store(col_name, limit=batch, offset=offset)
-        if not entries:
-            break
-        for e in entries:
-            chash = e.get("id", "")
-            key = by_chash.get(chash) or e.get("content_hash", chash)
-            if key not in seen:
-                seen[key] = e
-            chunks_by_key[key] = chunks_by_key.get(key, 0) + 1
-        offset += batch
-
-    if not seen:
+    docs, degraded = group_documents(db, col_name, total_chunks)
+    if not docs:
         click.echo(f"No documents in {col_name}.")
         return
 
-    docs = sorted(
-        seen.items(),
-        key=lambda kv: doc_titles.get(kv[0]) or kv[1].get("title") or "",
-    )
     click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} stored chunks)\n")
     if degraded:
         click.echo(
@@ -553,11 +531,10 @@ def _list_documents(db: T3Database, col_name: str) -> None:
     # promoted extraction_method to canonical, but this compact list table
     # wasn't extended to show it (`nx store get` displays the per-chunk
     # value — see its display path).
-    for i, (key, d) in enumerate(docs, 1):
-        title = (doc_titles.get(key) or d.get("title") or "untitled")[:60]
-        chunks = chunks_by_key.get(key, "?")
-        indexed = (d.get("indexed_at") or "")[:10]
-        click.echo(f"  {i:3d}. {title:<60}  {chunks:>4} chunks  {indexed}")
+    for i, doc in enumerate(docs, 1):
+        title = (doc.title or "untitled")[:60]
+        indexed = (doc.entry.get("indexed_at") or "")[:10]
+        click.echo(f"  {i:3d}. {title:<60}  {doc.chunks:>4} chunks  {indexed}")
 
 
 
@@ -657,7 +634,8 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str], *, expected_collection: str | 
 @click.option("--id", "doc_id", default=None,
               help="Exact 64-char content-hash document ID from 'nx store list'")
 @click.option("--title", default=None,
-              help="Exact title metadata match (deletes all matching chunks)")
+              help="Title of the document(s) to delete; a chunk another document "
+                   "still holds is kept and that document named")
 @click.option("--yes", "-y", is_flag=True, default=False,
               help="Skip confirmation prompt")
 def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool) -> None:
@@ -667,11 +645,11 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
     To remove an entire collection use: nx collection delete <name>
 
     Note (RDR-108 D1 / RDR-180): T3 chunk natural IDs are content-derived
-    (the full sha256(text) hexdigest). Two documents with different titles but
-    identical content share one T3 row; deleting one --title
-    removes the shared row, which also removes the other title's
-    content. If you need both titles to remain, store them under
-    distinct content.
+    (the full sha256(text) hexdigest), so two documents with identical
+    content share one T3 row. --title removes the named document and keeps
+    any chunk another document still holds, naming that document
+    (nexus-sis0m.5). --id names a chunk; one that two documents share is
+    kept for both.
     """
     if not doc_id and not title:
         raise click.UsageError("provide --id or --title")
@@ -723,32 +701,89 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
             )
         click.echo(f"Deleted: {doc_id}  from  {col_name}")
     else:
-        ids = db.find_ids_by_title(col_name, title)
-        if not ids:
+        _delete_by_title(db, col_name, title, yes)
+
+
+def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> None:
+    """``--title`` names documents (nexus-sis0m.5).
+
+    Catalog documents titled *title* are tombstoned with their own manifest
+    rows retracted first; their chunks are then deleted, and any chunk
+    another live document still holds is kept and that document named.
+    Chunks whose row title matches but that no catalog document owns (a
+    note stored before the catalog, or with the catalog down) go through
+    the older chunk-title path alongside.
+    """
+    from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        live_holders_of_chashes,
+        reap_catalog_documents_by_title,
+    )
+
+    row_ids = db.find_ids_by_title(col_name, title)
+    docs = reap_catalog_documents_by_title(col_name, title) if yes else None
+    if not yes:
+        # Count before asking, act after: the reap tombstones, so it cannot
+        # run ahead of the confirmation.
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        reader = make_catalog_reader()
+        n_docs = 0
+        if reader is not None:
+            try:
+                n_docs = sum(
+                    1 for e in (reader.list_by_collection(col_name) or [])
+                    if (getattr(e, "title", "") or "") == title
+                )
+            finally:
+                reader.close()
+        if not n_docs and not row_ids:
             raise click.ClickException(f"No entries with title {title!r} in {col_name}")
-        if not yes:
-            n = "entry" if len(ids) == 1 else "entries"
-            click.echo(f"Found {len(ids)} {n} with title {title!r} in {col_name}.")
-            click.confirm("Delete?", abort=True)
-        # Same reap-before-delete ordering as the --id branch above. ids
-        # here are already collection-scoped (find_ids_by_title queried
-        # col_name directly), so this branch was never exposed to the
-        # wrong-collection class of the --id bug -- expected_collection is
-        # still passed as the same cheap defense-in-depth layer.
-        _reap_catalog_for_doc_ids(ids, expected_collection=col_name)
-        # nexus-o8dil.45: report batch_delete's ACTUAL server-reported count,
-        # not len(ids) -- RDR-191 F10c's anti-join can legitimately retain a
-        # chash another live document's manifest still references, so this
-        # operator-facing message could otherwise claim a bigger cleanup
-        # than actually happened.
-        deleted = db.batch_delete(col_name, ids)
+        click.echo(
+            f"Found {n_docs} document(s) and {len(row_ids)} chunk(s) titled "
+            f"{title!r} in {col_name}."
+        )
+        click.confirm("Delete?", abort=True)
+        docs = reap_catalog_documents_by_title(col_name, title)
+
+    reaped = docs.documents if docs else ()
+    if not reaped and not row_ids and not (docs and docs.failures):
+        raise click.ClickException(f"No entries with title {title!r} in {col_name}")
+
+    # Chunks titled *title* that no reaped document named: the chunk-title
+    # path, reap-before-delete, exactly as before.
+    doc_chashes = list(docs.chashes) if docs else []
+    loose = [i for i in row_ids if i not in set(doc_chashes)]
+    if loose:
+        _reap_catalog_for_doc_ids(loose, expected_collection=col_name)
+    targets = list(dict.fromkeys(doc_chashes + loose))
+
+    for tumbler, _t in reaped:
+        click.echo(f"Deleted document {title!r} ({tumbler}) from {col_name}.")
+    # nexus-o8dil.45: the server-reported count, never len(targets): the
+    # engine's anti-join keeps a chunk another live document still holds.
+    deleted = db.batch_delete(col_name, targets) if targets else 0
+    if deleted:
         click.echo(f"Deleted {deleted} {'entry' if deleted == 1 else 'entries'} with title {title!r} from {col_name}.")
-        if deleted < len(ids):
-            click.echo(
-                f"  ({len(ids) - deleted} of {len(ids)} requested were retained -- "
-                "still referenced by another live document, not deleted.)",
-                err=True,
-            )
+    kept = len(targets) - deleted
+    holders = live_holders_of_chashes(col_name, targets) if kept > 0 else {}
+    if kept > 0:
+        named = sorted({f"{t!r} ({tb})" for hs in holders.values() for tb, t in hs})
+        click.echo(
+            f"  {kept} of {len(targets)} chunk(s) kept: still held by "
+            + (", ".join(named) if named else "another live document")
+            + ".",
+            err=True,
+        )
+    failures = docs.failures if docs else ()
+    for tumbler, err in failures:
+        click.echo(f"  document {tumbler} was NOT deleted: {err}", err=True)
+    if failures or (not reaped and deleted == 0):
+        # *title* was not removed as asked: a document left live, or only
+        # uncataloged chunks, every one of them kept.
+        raise click.ClickException(
+            f"{title!r} was not fully deleted from {col_name}; see above."
+        )
+
 
 @store.command("expire")
 def expire_cmd() -> None:
@@ -758,21 +793,31 @@ def expire_cmd() -> None:
 
 
 def _resolve_bare_subject(collection: str, *, t3: object | None = None, for_write: bool = False) -> str:
-    """Resolve a bare ``--collection`` subject for export and import;
-    pass a prefixed name through unchanged.
+    """Resolve a ``--collection`` argument for export and import the way
+    every other store verb does (:func:`t3_collection_name` with *t3*).
 
-    RDR-204 Phase 3 (nexus-ft04v.26), class (a): *collection* is the raw
-    CLI argument, not necessarily a registered name, so this is a
-    candidate-string shape check, not a row lookup. Only the bare form
-    resolves: the exporter checks a legacy two-segment name against the
-    model its prefix implies, where :func:`t3_collection_name` would
-    promote it to the install's model (nexus-8o7ae).
+    A bare subject resolved from nexus-8o7ae on; a legacy two-segment name
+    still passed raw, reached the exporter's model gate unresolved, where
+    the model is guessed from the prefix, and a bge install was refused as
+    a Voyage target, while export looked for a collection by that literal
+    name (nexus-sis0m.5). With *t3*, an existing legacy collection is
+    grandfathered and a missing one promoted to the conformant name.
+
+    A write naming a placeholder subject is refused by the resolver, except
+    into a collection that already exists under exactly that name: that is
+    a restore, the case ``allow_placeholder`` exists for, and a raw legacy
+    import such as ``knowledge__knowledge`` worked before this resolved.
     """
     from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    if split_candidate_collection_name(collection)[0]:
-        return collection
-    return t3_collection_name(collection, t3=t3, for_write=for_write)
+    restore = bool(
+        for_write and t3 is not None
+        and split_candidate_collection_name(collection)[0]
+        and t3.collection_exists(collection)  # type: ignore[attr-defined]
+    )
+    return t3_collection_name(
+        collection, t3=t3, for_write=for_write, allow_placeholder=restore,
+    )
 
 
 @store.command("export")
@@ -848,7 +893,7 @@ def export_cmd(
                 click.echo(f"ERROR exporting {col_name}: {exc}", err=True)
         click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
     else:
-        col_name = _resolve_bare_subject(collection)
+        col_name = _resolve_bare_subject(collection, t3=db)
         out_path = Path(output) if output else Path(f"{col_name}.nxexp")
         try:
             result = export_collection(
