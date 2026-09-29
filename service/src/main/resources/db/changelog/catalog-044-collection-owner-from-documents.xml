@@ -217,7 +217,12 @@ BEGIN
                  WHERE c.tenant_id = NEW.tenant_id
                    AND c.name = NEW.physical_collection
                    AND c.content_type IN ('code', 'docs', 'rdr')
-                   AND c.owner_id IS DISTINCT FROM v_new;
+                   AND c.owner_id IS DISTINCT FROM v_new
+                   -- Re-checked on the row being updated: under READ COMMITTED a concurrent
+                   -- transaction may have committed a repo owner since the SELECT above, and
+                   -- this predicate is re-evaluated against that new row version, so a curator
+                   -- (or slug) derivation cannot overwrite it.
+                   AND nexus.catalog_collection_owner_replaceable(c.tenant_id, c.owner_id);
             END IF;
         END IF;
     END IF;

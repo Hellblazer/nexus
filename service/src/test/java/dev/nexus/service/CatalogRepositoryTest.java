@@ -2039,6 +2039,94 @@ class CatalogRepositoryTest {
     }
 
     /**
+     * nexus-6pbwx: the NAME ASC tie-break is a proxy for "the conformant name", and this
+     * documents where it stops holding: a slug that starts with '0' sorts below the
+     * conformant '1-..' segment and wins the tie. The consequence is bounded. The only
+     * consumers of /collections/for_tuple (HttpCatalogClient.collection_for and
+     * _tuple_registered) read the returned name's model_version, or only that it exists,
+     * and re-render the collection name from owner_id themselves, and version dominates the
+     * ordering, so both names carry the same version here. Only which same-version name comes
+     * back changes. If this test starts failing because the ordering learned better, delete it.
+     */
+    @Test @Order(60)
+    void collectionForTuple_zeroLeadingSlugWinsTheTieAndThatIsVersionNeutral() {
+        String tenant = "own6pbwx-tuple0-tenant";
+        String conformant = "code__1-34__voyage-code-3__v1";
+        String slug = "code__0slug-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, conformant, "code", "1-34");
+        registerColl(tenant, slug, "code", "0slug-6pbwx");
+        putDoc(tenant, "1.34.1", "code", slug);
+        assertThat(ownerOf(tenant, slug)).as("guard: the slug row shares the tuple").isEqualTo("1-34");
+        var resolved = repo.collectionForTuple(tenant, "code", "1-34", OWN_MODEL);
+        assertThat(resolved.get("name")).as("the documented limit of the proxy").isEqualTo(slug);
+        assertThat(resolved.get("model_version")).as("version-neutral: same version either way")
+            .isEqualTo("v1");
+    }
+
+    /**
+     * nexus-6pbwx: the first-registration race. A curator write and a repo write land in
+     * different transactions. The curator document's trigger reads the collection while
+     * its owner is still a slug, derives the curator segment, and only then reaches its
+     * UPDATE, which blocks on the row the repo transaction holds. When the repo transaction
+     * commits, the UPDATE must be re-evaluated against the committed row and leave the repo
+     * owner alone. Without the replaceable() predicate on that UPDATE it overwrites it.
+     */
+    @Test @Order(60)
+    void collectionOwner_aConcurrentCuratorWriteDoesNotOverwriteACommittedRepoOwner() throws Exception {
+        String tenant = "own6pbwx-race-tenant";
+        putOwner(tenant, "1.22", "knowledge", "curator");
+        putOwner(tenant, "1.23", "some-repo", "repo");
+        String name = "code__race-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, name, "code", "race-6pbwx");
+        assertThat(ownerOf(tenant, name)).as("guard: registered with the slug").isEqualTo("race-6pbwx");
+
+        try (Connection repoTx = pg.createConnection("");
+             Connection curatorTx = pg.createConnection("")) {
+            repoTx.setAutoCommit(false);
+            curatorTx.setAutoCommit(true);
+            try (var st = repoTx.prepareStatement(
+                "UPDATE nexus.catalog_collections SET owner_id = '1-23' WHERE tenant_id = ? AND name = ?")) {
+                st.setString(1, tenant);
+                st.setString(2, name);
+                assertThat(st.executeUpdate()).isEqualTo(1);
+            }
+            var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try {
+                var curatorWrite = pool.submit(() -> {
+                    try (var st = curatorTx.prepareStatement(
+                        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
+                        + "VALUES (?, '1.22.1', 'curator doc', ?)")) {
+                        st.setString(1, tenant);
+                        st.setString(2, name);
+                        return st.executeUpdate();
+                    }
+                });
+                // Wait until the curator's trigger is really parked on the repo transaction's row lock.
+                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
+                boolean blocked = false;
+                try (Connection probe = pg.createConnection("")) {
+                    while (System.nanoTime() < deadline && !blocked) {
+                        try (var rs = probe.createStatement().executeQuery(
+                            "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
+                            + "AND datname = current_database() AND pid <> pg_backend_pid()")) {
+                            rs.next();
+                            blocked = rs.getInt(1) > 0;
+                        }
+                        if (!blocked) Thread.sleep(50);
+                    }
+                }
+                assertThat(blocked).as("non-vacuity: the curator's trigger UPDATE is waiting on the repo row").isTrue();
+                repoTx.commit();
+                assertThat(curatorWrite.get(20, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo(1);
+            } finally {
+                pool.shutdownNow();
+            }
+        }
+        assertThat(ownerOf(tenant, name)).as("the committed repo owner survives the curator write")
+            .isEqualTo("1-23");
+    }
+
+    /**
      * nexus-l52ms ship-blocker fixup: display_name is a DURABLE opt-in marker
      * (nexus.corpus.KNOWLEDGE_CORPUS_OPT_IN_MARKER) some callers stamp once at
      * registration time, but EVERY generic re-registration of the same
@@ -2380,32 +2468,47 @@ class CatalogRepositoryTest {
         assertThat(forTuple.get("name")).isEqualTo(name);
     }
 
+    /**
+     * nexus-bc7ps, and THIS TEST IS THE POINT rather than the predicate it guards. A
+     * quarantine sibling shares every discriminator column with its origin, so the only
+     * thing keeping it from a tuple is the {@code lifecycle_state != 'quarantine'}
+     * predicate, and the tie-break that would otherwise decide is a name ordering that
+     * has changed before (DESC until nexus-6pbwx, ASC now). Whichever direction it runs,
+     * SOME content type has its quarantine sibling on the winning side: under NAME DESC
+     * 'quarantine-code' sorted above 'code' (the live incident), under NAME ASC
+     * 'quarantine-rdr' sorts below 'rdr'. So the pin covers BOTH and each case guards, by
+     * assertion, that its sibling really is the name the tie-break would have picked
+     * under one of the two directions, or the case pins nothing.
+     *
+     * <p>The live incident: hygiene-002-1 (2026-09-08 20:25:14Z) populated
+     * content_type/owner_id/embedding_model on 8 quarantine rows, making them eligible
+     * here. 'q' sorts above 'c'/'d'/'k', so seven contested tuples began resolving to
+     * their quarantine sibling 18 seconds after the last good write. The client cannot
+     * parse 'quarantine-code' as a content_type, swallowed the ValueError, and
+     * synthesised a path-derived name -- stranding 41,032 chunks (nexus-n9xjy).
+     *
+     * <p>Falsifiability: with the {@code LIFECYCLE_STATE.ne("quarantine")} predicate
+     * removed from {@link CatalogRepository#collectionForTuple}, the rdr case fails under
+     * NAME ASC; the code case fails again if the ordering is ever flipped back to DESC.
+     */
     @Test @Order(62)
     void collectionForTuple_neverResolvesToAQuarantineSibling() {
-        // nexus-bc7ps, and THIS TEST IS THE POINT rather than the predicate it
-        // guards. collectionForTuple breaks ties with NAME DESC, so ANY future
-        // prefix that sorts above the real content types re-creates this class;
-        // the predicate fixes today's instance, this pins the property.
-        //
-        // The live incident: hygiene-002-1 (2026-09-08 20:25:14Z) populated
-        // content_type/owner_id/embedding_model on 8 quarantine rows, making them
-        // eligible here. 'q' sorts above 'c'/'d'/'k', so seven contested tuples
-        // began resolving to their quarantine sibling 18 seconds after the last
-        // good write. The client cannot parse 'quarantine-code' as a
-        // content_type, swallowed the ValueError, and synthesised a path-derived
-        // name -- stranding 41,032 chunks (nexus-n9xjy). rdr__ survived only
-        // because 'r' sorts above 'q'.
-        String real = "code__qsib__voyage-code-3__v1";
-        String quarantined = "quarantine-code__qsib__voyage-code-3__v1";
+        assertQuarantineSiblingNeverWins("code", "voyage-code-3", "qsib", false);
+        assertQuarantineSiblingNeverWins("rdr", "voyage-context-3", "qsib", true);
+    }
+
+    private void assertQuarantineSiblingNeverWins(String contentType, String model, String owner,
+                                                   boolean siblingWinsUnderAsc) {
+        String real = contentType + "__" + owner + "__" + model + "__v1";
+        String quarantined = "quarantine-" + contentType + "__" + owner + "__" + model + "__v1";
         repo.upsertCollection(TENANT_A, Map.of(
-            "name", real, "content_type", "code",
-            "owner_id", "qsib", "embedding_model", "voyage-code-3"));
+            "name", real, "content_type", contentType,
+            "owner_id", owner, "embedding_model", model));
         // Seeded through PgContainerHelper.insertCollection, which derives
         // lifecycle_state='quarantine' from the name prefix exactly as
         // gc_quarantine_orphans does in production. upsertCollection does NOT
         // carry lifecycle_state in from its map -- the first draft of this test
-        // tried that and the non-vacuity guard below caught it, which is the
-        // guard earning its place before the test had even run once.
+        // tried that and the non-vacuity guard below caught it.
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.insertCollection(
                 org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES),
@@ -2416,14 +2519,16 @@ class CatalogRepositoryTest {
         // Give it the SAME discriminators as the real row, which is what made the
         // live rows contend: hygiene-002-1 populated exactly these three columns.
         repo.importCollection(TENANT_A, Map.of(
-            "name", quarantined, "content_type", "code",
-            "owner_id", "qsib", "embedding_model", "voyage-code-3"));
+            "name", quarantined, "content_type", contentType,
+            "owner_id", owner, "embedding_model", model));
 
         // NON-VACUITY, and this test is worthless without it: the sibling must
         // actually be a candidate that WOULD WIN. It shares every discriminator
         // column, is not superseded, is not legacy-grandfathered, ties on
-        // model_version, and sorts ABOVE the real row by name. If any of that
-        // stops being true the test passes for the wrong reason.
+        // model_version, and sorts on the winning side of the CURRENT tie-break
+        // (or, for the code case, of the retired DESC one, which is what the
+        // live incident ran under). If any of that stops being true the case
+        // passes for the wrong reason.
         var sibling = repo.getCollection(TENANT_A, quarantined);
         assertThat(sibling).as("guard: the quarantine sibling must exist").isNotNull();
         // Read lifecycle_state from the COLUMN, not from getCollection: collRow
@@ -2446,12 +2551,19 @@ class CatalogRepositoryTest {
         assertThat(sibling.get("superseded_by"))
             .as("guard: it must pass the superseded_by filter, as the live rows did")
             .isEqualTo("");
-        assertThat(quarantined.compareTo(real))
-            .as("guard: it must SORT ABOVE the real name, or NAME DESC would not "
-                + "have picked it and this pins nothing")
-            .isGreaterThan(0);
+        if (siblingWinsUnderAsc) {
+            assertThat(quarantined.compareTo(real))
+                .as("guard: it must SORT BELOW the real name, or NAME ASC would not "
+                    + "have picked it and this case pins nothing")
+                .isLessThan(0);
+        } else {
+            assertThat(quarantined.compareTo(real))
+                .as("guard: it must SORT ABOVE the real name, the shape NAME DESC "
+                    + "picked in the live incident; this case guards a flip back to DESC")
+                .isGreaterThan(0);
+        }
 
-        var resolved = repo.collectionForTuple(TENANT_A, "code", "qsib", "voyage-code-3");
+        var resolved = repo.collectionForTuple(TENANT_A, contentType, owner, model);
         assertThat(resolved).as("the tuple must still resolve to something").isNotNull();
         assertThat(resolved.get("name"))
             .as("a quarantine sibling must NEVER win a tuple, however it sorts")

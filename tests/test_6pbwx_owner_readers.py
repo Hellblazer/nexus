@@ -41,19 +41,54 @@ def test_a_repaired_slug_collection_no_longer_matches_its_slug_siblings(monkeypa
     assert _sibling_names(monkeypatch, slug, [sibling], row_owner="1-15") == []
 
 
-def test_nothing_in_src_calls_list_sibling_collections() -> None:
-    """The reason the loss above is harmless. A new caller must decide the sibling rule."""
-    callers: list[str] = []
+#: The only files allowed to mention the function: its definition, and the
+#: registry's re-export (an import plus an ``__all__`` string, neither a use).
+_ALLOWED_MENTIONS = {"repo_identity.py", "registry.py"}
+_NAME = "list_sibling_collections"
+
+
+def _mentions(tree: ast.AST) -> list[int]:
+    """Line numbers of every way source can reach the function: a call, a bare name,
+    an attribute (``repo_identity.list_sibling_collections``) or a from-import alias."""
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == _NAME:
+            lines.append(node.lineno)
+        elif isinstance(node, ast.Attribute) and node.attr == _NAME:
+            lines.append(node.lineno)
+        elif isinstance(node, ast.ImportFrom):
+            lines.extend(node.lineno for a in node.names if a.name == _NAME)
+    return lines
+
+
+def test_nothing_in_src_references_list_sibling_collections() -> None:
+    """The reason the loss above is harmless. A new caller, or a new alias for the
+    function, must decide the sibling rule."""
+    refs: list[str] = []
     for path in SRC.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call):
-                f = node.func
-                name = f.id if isinstance(f, ast.Name) else f.attr if isinstance(f, ast.Attribute) else ""
-                if name == "list_sibling_collections":
-                    callers.append(f"{path.relative_to(SRC)}:{node.lineno}")
-    assert callers == [], (
-        f"list_sibling_collections has callers now: {callers}. nexus-6pbwx made its "
+        if path.name in _ALLOWED_MENTIONS:
+            continue
+        for line in _mentions(ast.parse(path.read_text(encoding="utf-8"))):
+            refs.append(f"{path.relative_to(SRC)}:{line}")
+    assert refs == [], (
+        f"list_sibling_collections is referenced now: {refs}. nexus-6pbwx made its "
         "row-owner match miss a repaired slug collection's slug siblings; decide the rule "
         "for the new caller (see the function's docstring), then update this pin."
     )
+
+
+def test_the_reference_scan_sees_calls_attributes_and_imports() -> None:
+    """Non-vacuity: the scan flags each shape it claims to, so a clean tree means something."""
+    for src in (
+        "list_sibling_collections(a, b)",
+        "mod.list_sibling_collections",
+        "from nexus.repo_identity import list_sibling_collections",
+        "from nexus.repo_identity import list_sibling_collections as lsc",
+    ):
+        assert _mentions(ast.parse(src)), src
+    assert _mentions(ast.parse("something_else(x)")) == []
+    # registry.py re-exports the function lazily, by string only (module __getattr__ and
+    # __all__), which the scan deliberately ignores; the allow-list entry is real.
+    registry = (SRC / "registry.py").read_text(encoding="utf-8")
+    assert f'"{_NAME}"' in registry
+    assert _mentions(ast.parse(registry)) == []

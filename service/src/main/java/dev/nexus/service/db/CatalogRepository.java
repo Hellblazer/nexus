@@ -7972,6 +7972,12 @@ public final class CatalogRepository {
                        // stays at zero here. Quarantine and grandfathered rows are filtered above, so
                        // no other pair of rows can tie. Version still dominates: a slug at v2 beats a
                        // conformant v1. CatalogRepositoryTest pins both; do not flip this back.
+                       // The ordering is a PROXY: a slug that starts with '0' sorts below a
+                       // conformant '1-..' segment and wins the tie (a test documents it). That
+                       // changes only WHICH of two same-version names is returned: the only consumers of
+                       // /collections/for_tuple, HttpCatalogClient.collection_for and
+                       // _tuple_registered, read the returned name's model_version (or only its
+                       // existence) and re-render the collection name from owner_id themselves.
                        .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.asc())
                        .limit(1).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
@@ -8496,11 +8502,12 @@ public final class CatalogRepository {
             // name (see the 6-arg renameCollection); absent, they are X's. Copying X's
             // unconditionally left a renamed knowledge collection carrying X's subject as its
             // owner. embedding_model, dimension and the rest stay X's.
-            // nexus-6pbwx: for code/docs/rdr that name-derived value is provisional. The insert
-            // below fires catalog-044's BEFORE trigger (Y has no documents yet, so nothing
-            // changes), and the documents re-home step further down fires its AFTER trigger,
-            // which replaces a non-tumbler-shaped or curator owner with the documents'. A
-            // knowledge collection is outside that rule and keeps exactly what is written here.
+            // nexus-6pbwx: for code/docs/rdr, a name-derived value that is a slug or a curator's
+            // segment is replaced. The insert below fires catalog-044's BEFORE trigger (Y has no
+            // documents yet, so nothing changes), and the documents re-home step further down
+            // fires its AFTER trigger, which replaces THAT kind of owner (not tumbler-shaped, or a
+            // curator's) with the documents'. A tumbler-shaped repo owner written here stands, and
+            // a knowledge collection is outside the rule and keeps exactly what is written here.
             Field<String> newContentType = newContentTypeOrNull != null
                 ? DSL.val(newContentTypeOrNull, CATALOG_COLLECTIONS.CONTENT_TYPE)
                 : CATALOG_COLLECTIONS.CONTENT_TYPE;
