@@ -257,6 +257,15 @@ class TestTheProjectionCall:
         assert emitted == ["tuple_projection_ignored"]
 
 
+def _no_lease(monkeypatch) -> None:
+    """A box with no endpoint or data-token lease, made explicitly: the ambient
+    box differs between a laptop run and a substrate-backed one."""
+    def _unresolvable(_config_dir):
+        raise tuple_ledger_project._Skip("no service endpoint resolvable")
+
+    monkeypatch.setattr(tuple_ledger_project, "_resolve_endpoint_and_token", _unresolvable)
+
+
 class TestSkippedByDesignVersusFailed:
     """nexus-8he82: SKIPPED covered a box with no lease (by design, and the
     fresh-install MVV fails on an unexpected warning, so it stays info) and
@@ -313,9 +322,10 @@ class TestSkippedByDesignVersusFailed:
         assert emitted == [("warning", "tuple_projection_write_failed")]
 
     def test_a_missing_lease_stays_info(self, monkeypatch):
-        """The by-design case, driven through the real resolver on a box
-        with no endpoint and no lease (the repo-wide isolation fixtures
-        provide that box)."""
+        """The by-design case: resolution raises _Skip. The resolver is patched
+        rather than left to the ambient box, because a substrate-backed run
+        (hellmini) has a live endpoint and lease and would POST instead."""
+        _no_lease(monkeypatch)
         emitted = self._emitted(monkeypatch)
         proj._project("start", dict(self._START))
         assert emitted == [("info", "tuple_projection_skipped")]
@@ -345,7 +355,8 @@ class TestProjectReturnsTheOutcome:
         }
         assert len(values) == 5
 
-    def test_no_lease_is_skipped(self):
+    def test_no_lease_is_skipped(self, monkeypatch):
+        _no_lease(monkeypatch)
         assert tuple_ledger_project.project("start", dict(self._START)) == tuple_ledger_project.SKIPPED
 
     def test_a_refused_post_is_failed(self, monkeypatch):

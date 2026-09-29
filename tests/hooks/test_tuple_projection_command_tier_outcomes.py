@@ -60,7 +60,14 @@ class TestEachVerbLogsItsOutcome:
         module.run(dict(payload))
         assert emitted == [("info", "tuple_projection_ok", {"verb": kind})]
 
-    def test_a_missing_lease_logs_skipped_at_info(self, emitted, module, kind, payload):
+    def test_a_missing_lease_logs_skipped_at_info(
+        self, monkeypatch, emitted, module, kind, payload
+    ):
+        # Explicit, not ambient: a substrate-backed run has a live endpoint.
+        def _unresolvable(_config_dir):
+            raise tuple_ledger_project._Skip("no service endpoint resolvable")
+
+        monkeypatch.setattr(tuple_ledger_project, "_resolve_endpoint_and_token", _unresolvable)
         module.run(dict(payload))
         assert emitted == [("info", "tuple_projection_skipped", {"verb": kind})]
 
