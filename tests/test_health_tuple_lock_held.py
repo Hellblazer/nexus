@@ -154,8 +154,22 @@ class TestLockHeldMeasured:
         assert r.ok is False and r.warn is True
         assert "not measured" in r.detail and "sess-a" in r.detail
 
-    def test_no_diag_credentials_names_holder_and_does_not_claim_clean(self, monkeypatch, tmp_path) -> None:
+    def test_managed_deployment_is_informational_naming_the_holder(self, monkeypatch, tmp_path) -> None:
+        """A held lock is normal; with no diag path the row cannot tell a
+        30-second hold from a 3-day one, so it gives no verdict either way."""
         monkeypatch.setattr("nexus.config.is_local_mode", lambda: False)
+        store = _Store(
+            [_Census("lock/push", 1)],
+            rows={"lock/push": [_Row("sess-a", _future())]},
+        )
+        r = _run(monkeypatch, store, creds_path=tmp_path / "absent")
+        assert r.ok is True and r.warn is not True
+        assert r.detail.startswith("informational:")
+        assert "lock/push by sess-a" in r.detail
+        assert "not measurable" in r.detail and "skipping" not in r.detail
+
+    def test_local_box_without_diag_role_warns_with_the_remedy(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
         store = _Store(
             [_Census("lock/push", 1)],
             rows={"lock/push": [_Row("sess-a", _future())]},
@@ -163,7 +177,36 @@ class TestLockHeldMeasured:
         r = _run(monkeypatch, store, creds_path=tmp_path / "absent")
         assert r.ok is False and r.warn is True
         assert "lock/push by sess-a" in r.detail
-        assert "managed deployment" in r.detail
+        assert "nx init --service" in r.detail
+
+    def test_claimed_subspace_with_no_template_is_named_not_dropped(self, monkeypatch) -> None:
+        store = _Store([_Census("lock2/mystery", 1)])
+        r = _run(monkeypatch, store, diag_credentials=_DIAG, diag_runner=_runner(""))
+        assert r.ok is False and r.warn is True
+        assert "lock2/mystery" in r.detail and "no resolvable template" in r.detail
+
+    def test_unresolved_template_rides_along_with_a_measured_lock(self, monkeypatch) -> None:
+        store = _Store(
+            [_Census("lock/push", 1), _Census("lock2/mystery", 1)],
+            rows={"lock/push": [_Row("sess-a", _future())]},
+        )
+        r = _run(
+            monkeypatch, store,
+            diag_credentials=_DIAG, diag_runner=_runner(_ago(minutes=5)),
+        )
+        assert r.ok is False and r.warn is True
+        assert "lock/push held 5m by sess-a" in r.detail and "lock2/mystery" in r.detail
+
+    def test_census_timeout_is_not_reported_as_unreachable(self, monkeypatch) -> None:
+        from nexus.db.t2.http_tuple_store import CensusTimeoutError
+
+        class _Slow(_Store):
+            def subspace_list(self, prefix=None):
+                raise CensusTimeoutError("statement timeout")
+
+        r = _run(monkeypatch, _Slow([]))
+        assert r.ok is False and r.warn is True
+        assert "statement_timeout" in r.detail and "unreachable" not in r.detail
 
     def test_keyword_resource_and_quote_pass_the_lint_hex_encoded(self, monkeypatch) -> None:
         """A resource named ``do`` would trip the lint's mutating-word scan
@@ -223,6 +266,9 @@ class TestLockHeldRealEngine:
         store.out(subspace, {"resource": resource})
         claim = store.in_(subspace, {"resource": resource}, claimant=claimant, lease_s=600)
         assert claim is not None
+        # The premise under test: renewing keeps the claim id, so the claim's
+        # start stays the claim row's time, not the renew's.
+        store.renew(claim[1], claimant, 600)
         diag = DiagCredentials(
             port=state["pg_port"], user=state["pg_user"], password="",
             dbname="nexus_t2_substrate",
