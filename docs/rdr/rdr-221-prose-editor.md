@@ -496,4 +496,4 @@ Phase 2.
 
 ## Revision History
 
-- 2026-09-29: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `11fddf474`; critique `nexus_rdr/221-gate-critique-2026-09-29-r1`.
+- 2026-09-29: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `a879b4653`; critique `nexus_rdr/221-gate-critique-2026-09-29-r1`.
