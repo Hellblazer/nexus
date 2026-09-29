@@ -18,14 +18,34 @@ import re
 
 import yaml
 
-WORKFLOW = (
-    Path(__file__).parent.parent
-    / ".github" / "workflows" / "engine-service-release.yml"
-)
+REPO = Path(__file__).parent.parent
+WORKFLOW = REPO / ".github" / "workflows" / "engine-service-release.yml"
+REHEARSAL = REPO / ".github" / "workflows" / "mac-signing-rehearsal.yml"
+SIGN_SCRIPT = REPO / "service" / "deploy" / "mac-sign.sh"
+G2_CER = REPO / "service" / "deploy" / "apple" / "DeveloperIDG2CA.cer"
 
 
 def _text() -> str:
     return WORKFLOW.read_text()
+
+
+def _code(text: str) -> str:
+    """Executable lines only. The signing mechanics are also NARRATED in
+    comments, and a pin that a comment can satisfy is not a pin."""
+    return "\n".join(
+        ln for ln in text.splitlines() if not ln.lstrip().startswith("#")
+    )
+
+
+def _script() -> str:
+    return _code(SIGN_SCRIPT.read_text())
+
+
+def _step_run(spec: dict, job: str, name_prefix: str) -> str:
+    for step in spec["jobs"][job]["steps"]:
+        if str(step.get("name", "")).startswith(name_prefix):
+            return str(step.get("run", ""))
+    raise AssertionError(f"{job}: no step named {name_prefix!r}")
 
 
 def test_workflow_parses_as_yaml() -> None:
@@ -50,11 +70,10 @@ def test_entitlements_disable_library_validation() -> None:
     Library Validation, which refuses the bundled onnxruntime/DJL dylibs
     local-mode embedding System.load()s — signing WITHOUT the entitlement
     ships a binary that crashes where the ad-hoc one worked."""
-    text = _text()
-    assert "--entitlements service/deploy/mac-entitlements.plist" in text
-    plist = (
-        Path(__file__).parent.parent / "service" / "deploy" / "mac-entitlements.plist"
-    )
+    script = _script()
+    assert 'ENTITLEMENTS="$HERE/mac-entitlements.plist"' in script
+    assert '--entitlements "$ENTITLEMENTS"' in script
+    plist = REPO / "service" / "deploy" / "mac-entitlements.plist"
     assert plist.exists(), "mac-entitlements.plist vanished"
     assert "com.apple.security.cs.disable-library-validation" in plist.read_text()
 
@@ -116,21 +135,21 @@ def test_partial_secrets_fail_loud() -> None:
 def test_notarize_refuses_adhoc_binary() -> None:
     """Submitting an ad-hoc binary is a guaranteed Apple rejection minutes
     later — the workflow must fail immediately with the real reason."""
-    assert "cannot notarize" in _text()
+    assert "cannot notarize" in _script()
 
 
 def test_hardened_runtime_and_timestamp() -> None:
     """Notarization REQUIRES --options runtime and a secure timestamp."""
-    assert "codesign --force --options runtime --timestamp" in _text()
+    assert "codesign --force --options runtime --timestamp" in _script()
 
 
 def test_team_identity_non_vacuity_assert() -> None:
     """The sign step must prove a real TeamIdentifier landed — a silent
     ad-hoc survivor is exactly the failure the bead documents (spctl
     rejected on v0.1.6)."""
-    text = _text()
-    assert "TeamIdentifier=" in text
-    assert "ad-hoc signature survived" in text
+    script = _script()
+    assert "TeamIdentifier=" in script
+    assert "ad-hoc signature survived" in script
 
 
 def test_keychain_cleanup_always_runs() -> None:
@@ -189,6 +208,93 @@ def test_signing_job_is_environment_scoped() -> None:
         "the codesign secrets are no longer read by build-publish — move this "
         "environment assertion to whichever job now reads them"
     )
+
+
+def test_release_steps_run_the_shared_sign_script() -> None:
+    """nexus-aq9y8: the release and the rehearsal must execute the SAME
+    signing bytes, or a green rehearsal proves nothing about the release."""
+    spec = yaml.safe_load(_text())
+    for step, verb in (
+        ("Developer ID codesign", "sign"),
+        ("Notarize (mac-arm64", "notarize"),
+        ("Clean up signing keychain", "cleanup"),
+    ):
+        run = _code(_step_run(spec, "build-publish", step))
+        assert f"service/deploy/mac-sign.sh {verb}" in run, (
+            f"{step} no longer calls mac-sign.sh {verb}"
+        )
+    # The inline mechanics must not creep back in beside the script call.
+    codesign_run = _code(_step_run(spec, "build-publish", "Developer ID codesign"))
+    assert "security import" not in codesign_run
+    assert "codesign --force" not in codesign_run
+
+
+def test_sign_script_is_executable_and_parses() -> None:
+    import os
+    import subprocess
+
+    assert os.access(SIGN_SCRIPT, os.X_OK), "mac-sign.sh lost its exec bit"
+    subprocess.run(["bash", "-n", str(SIGN_SCRIPT)], check=True)
+
+
+def test_vendored_g2_intermediate_matches_the_pinned_hash() -> None:
+    """The script refuses a G2 intermediate whose SHA-256 differs from its
+    pin; check the vendored file and the pin agree, and that the pin is
+    the published Apple fingerprint (CN=Developer ID Certification
+    Authority, OU=G2)."""
+    import hashlib
+
+    digest = hashlib.sha256(G2_CER.read_bytes()).hexdigest()
+    assert digest == (
+        "f16cd3c54c7f83cea4bf1a3e6a0819c8aaa8e4a1528fd144715f350643d2df3a"
+    )
+    assert f'G2_SHA256="{digest}"' in _script()
+
+
+def test_sign_script_keychain_shape() -> None:
+    """The v0.1.142 failure (identity imported, then "no identity found")
+    is what these pin against: intermediate imported into the temp
+    keychain, codesign told which keychain to use, a find-identity
+    preflight BEFORE codesign, and a cleanup that restores the saved
+    search list instead of forcing login.keychain-db."""
+    script = _script()
+    assert 'security import "$G2_CER" -k "$KEYCHAIN"' in script
+    assert '--keychain "$KEYCHAIN"' in script
+    g2 = script.index('security import "$G2_CER"')
+    preflight = script.index("security find-identity -v -p codesigning")
+    sign = script.index("codesign --force")
+    assert g2 < preflight < sign, (
+        "the G2 intermediate must be in the keychain before the identity "
+        "preflight, and the preflight must pass before codesign runs"
+    )
+    assert "login.keychain-db" not in script
+    assert '"$SAVED_LIST"' in script
+
+
+def test_notarize_success_is_the_status_line_not_the_exit_code() -> None:
+    assert "status:\\ Accepted" in _script()
+    assert "notarytool log" in _script()
+
+
+def test_rehearsal_workflow_shape() -> None:
+    """Dispatch-only (never push/PR), owner-only on the hellmini runner,
+    environment-scoped secrets, the shared script, loud failure on missing
+    secrets, and an always() cleanup."""
+    text = REHEARSAL.read_text()
+    spec = yaml.safe_load(text)
+    triggers = spec.get("on", spec.get(True))
+    assert set(triggers) == {"workflow_dispatch"}
+    job = spec["jobs"]["rehearse"]
+    assert job["runs-on"] == "hellmini"
+    assert job["environment"] == "apple-signing"
+    assert "github.actor == 'Hellblazer'" in job["if"]
+    code = _code(text)
+    for verb in ("sign", "notarize", "cleanup"):
+        assert f"service/deploy/mac-sign.sh {verb}" in code
+    assert "::warning" not in code, "a rehearsal must fail, never warn-and-skip"
+    assert "source=Notarized Developer ID" in code
+    cleanup = next(s for s in job["steps"] if s.get("name") == "Clean up signing keychain")
+    assert cleanup.get("if") == "always()"
 
 
 def test_mac_abi_floor_arm_is_enforced_not_informational() -> None:

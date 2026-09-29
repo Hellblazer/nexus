@@ -449,32 +449,16 @@ jobs:
             echo "FAIL: APPLE_DEV_ID_* secrets are PARTIALLY configured — refusing to silently ship ad-hoc. Provision all three or none." >&2
             exit 1
           fi
-          KEYCHAIN="$RUNNER_TEMP/sign.keychain-db"
-          KEYPASS="$(uuidgen)"
-          security create-keychain -p "$KEYPASS" "$KEYCHAIN"
-          security set-keychain-settings -lut 900 "$KEYCHAIN"
-          security unlock-keychain -p "$KEYPASS" "$KEYCHAIN"
-          printf '%s' "$APPLE_DEV_ID_CERT_P12" | base64 -d > "$RUNNER_TEMP/devid.p12"
-          security import "$RUNNER_TEMP/devid.p12" -k "$KEYCHAIN" -P "$APPLE_DEV_ID_CERT_PASSWORD" -T /usr/bin/codesign
-          rm -f "$RUNNER_TEMP/devid.p12"
-          security set-key-partition-list -S "apple-tool:,apple:" -s -k "$KEYPASS" "$KEYCHAIN" >/dev/null
-          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
-          # --entitlements is LOAD-BEARING (critique 96677bf7 Critical /
-          # nexus-2oh5q): Hardened Runtime implies Library Validation, which
-          # refuses the bundled onnxruntime/DJL dylibs the binary
-          # System.load()s for local-mode embedding — without
-          # disable-library-validation the SIGNED binary crashes where the
-          # ad-hoc one worked. See service/deploy/mac-entitlements.plist.
-          codesign --force --options runtime --timestamp \
-            --entitlements service/deploy/mac-entitlements.plist \
-            --sign "$APPLE_DEV_ID_IDENTITY" "$bin"
-          codesign --verify --strict --verbose=2 "$bin"
-          # Non-vacuity: the signature must carry a REAL team identity — an
-          # ad-hoc result here means the sign silently failed.
-          info="$(codesign -dv "$bin" 2>&1)"
-          echo "$info" | grep "TeamIdentifier=" | grep -v "not set" \
-            || { echo "FAIL: TeamIdentifier not set after codesign — ad-hoc signature survived" >&2; exit 1; }
-          echo "### mac-arm64 signing: Developer ID SIGNED ($(echo "$info" | grep TeamIdentifier=))" >> "$GITHUB_STEP_SUMMARY"
+          # Mechanics live in service/deploy/mac-sign.sh (nexus-aq9y8) so the
+          # dispatch-only mac-signing-rehearsal.yml runs the SAME bytes off-release:
+          # temp keychain + vendored G2 intermediate, find-identity preflight,
+          # codesign --force --options runtime --timestamp --keychain with
+          # --entitlements service/deploy/mac-entitlements.plist (LOAD-BEARING,
+          # nexus-2oh5q), verify --strict, and the TeamIdentifier non-vacuity
+          # assert (fails on "ad-hoc signature survived").
+          result="$(SIGN_WORKDIR="$RUNNER_TEMP" service/deploy/mac-sign.sh sign "$bin")"
+          printf '%s\n' "$result"
+          echo "### mac-arm64 signing: ${result##*$'\n'}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Notarize (mac-arm64; nexus-27i0m)
         # Requires the Developer-ID-signed binary from the step above.
@@ -509,24 +493,20 @@ jobs:
             echo "FAIL: APPLE_NOTARY_* secrets are PARTIALLY configured — refusing a silent skip." >&2
             exit 1
           fi
-          # Notarizing an ad-hoc binary is a guaranteed Apple-side rejection —
-          # fail here with the real reason instead.
-          codesign -dv "$bin" 2>&1 | grep "TeamIdentifier=" | grep -v "not set" \
-            || { echo "FAIL: binary is not Developer-ID signed (are APPLE_DEV_ID_* secrets provisioned?) — cannot notarize" >&2; exit 1; }
-          key="$RUNNER_TEMP/notary.p8"
-          printf '%s' "$APPLE_NOTARY_KEY_P8" | base64 -d > "$key"
-          /usr/bin/ditto -c -k "$bin" "$RUNNER_TEMP/notarize.zip"
-          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
-            --key "$key" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID" \
-            --wait --timeout 20m
-          rm -f "$key" "$RUNNER_TEMP/notarize.zip"
-          echo "### mac-arm64 notarization: ACCEPTED (ticket online — bare Mach-O is not stapleable)" >> "$GITHUB_STEP_SUMMARY"
+          # mac-sign.sh refuses an ad-hoc binary up front ("cannot notarize",
+          # a guaranteed Apple-side rejection otherwise) and treats only
+          # "status: Accepted" as success, printing the notary log on anything else.
+          result="$(SIGN_WORKDIR="$RUNNER_TEMP" service/deploy/mac-sign.sh notarize "$bin")"
+          printf '%s\n' "$result"
+          echo "### mac-arm64 notarization: ${result##*$'\n'}" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean up signing keychain (mac-arm64)
         if: always() && matrix.target.arch == 'mac-arm64'
         run: |
-          security delete-keychain "$RUNNER_TEMP/sign.keychain-db" 2>/dev/null || true
-          security list-keychains -d user -s login.keychain-db 2>/dev/null || true
+          # Deletes the temp keychain and restores the user search list saved
+          # by `sign` (the old `-s login.keychain-db` reset left ghrunner's
+          # list naming a login keychain that does not exist).
+          SIGN_WORKDIR="$RUNNER_TEMP" service/deploy/mac-sign.sh cleanup
 
       - name: Stage artifact + sha256
         id: stage

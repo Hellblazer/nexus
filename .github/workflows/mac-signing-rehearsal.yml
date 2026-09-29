@@ -1,0 +1,127 @@
+# nexus-aq9y8: exercise mac-arm64 Developer ID signing + notarization OFF the
+# release path, on the same runner (hellmini) and through the same script
+# (service/deploy/mac-sign.sh) that engine-service-release.yml uses.
+#
+# Why this exists: the release workflow's signing steps are tag-gated, so until
+# now the only way to run them was to cut a real release, and the first real
+# run (engine-service-v0.1.142) failed at codesign mid-release. This signs and
+# notarizes a throwaway C binary instead of the 40-minute native image, then
+# checks what the release gate checks: TeamIdentifier, Hardened Runtime, the
+# disable-library-validation entitlement, and Gatekeeper's verdict
+# ("source=Notarized Developer ID").
+#
+# workflow_dispatch only; never on push or PR. Cost: hellmini is self-hosted
+# (no per-minute billing), and the job is a few seconds plus the notary wait.
+# Unlike the release, missing secrets FAIL here: a rehearsal that skips proves
+# nothing.
+name: mac-signing-rehearsal
+
+on:
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: Also notarize and run the Gatekeeper check (up to 20m notary wait)
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-signing-rehearsal
+  cancel-in-progress: true
+
+jobs:
+  rehearse:
+    name: Sign + notarize a throwaway binary (hellmini)
+    # Same guard as hellmini-probe.yml: public repo, self-hosted runner.
+    if: github.actor == 'Hellblazer'
+    runs-on: hellmini
+    # The APPLE_* secrets are scoped to this environment; its deployment
+    # policy admits develop, which is where this is dispatched from.
+    environment: apple-signing
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
+
+      - name: Build a throwaway Mach-O
+        run: |
+          set -euo pipefail
+          printf 'int main(void){return 0;}\n' | clang -x c -o "$RUNNER_TEMP/rehearsal-bin" -
+          file "$RUNNER_TEMP/rehearsal-bin"
+
+      - name: Runner keychain context (diagnostic)
+        run: |
+          set -uo pipefail
+          echo "user=$(id -un) home=$HOME"
+          echo "--- user search list"; security list-keychains -d user || true
+          echo "--- default keychain"; security default-keychain -d user || true
+          echo "--- G2 intermediate in System.keychain"
+          security find-certificate -a -c "Developer ID Certification Authority" -Z /Library/Keychains/System.keychain || true
+
+      - name: Sign
+        env:
+          APPLE_DEV_ID_CERT_P12: ${{ secrets.APPLE_DEV_ID_CERT_P12 }}
+          APPLE_DEV_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEV_ID_CERT_PASSWORD }}
+          APPLE_DEV_ID_IDENTITY: ${{ secrets.APPLE_DEV_ID_IDENTITY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_DEV_ID_CERT_P12:-}" ] || [ -z "${APPLE_DEV_ID_CERT_PASSWORD:-}" ] || [ -z "${APPLE_DEV_ID_IDENTITY:-}" ]; then
+            echo "FAIL: APPLE_DEV_ID_* secrets missing from the apple-signing environment — a rehearsal without them proves nothing." >&2
+            exit 1
+          fi
+          SIGN_WORKDIR="$RUNNER_TEMP" service/deploy/mac-sign.sh sign "$RUNNER_TEMP/rehearsal-bin"
+
+      - name: Check the signature the release gate checks
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/rehearsal-bin"
+          info="$(codesign -dv --verbose=4 "$bin" 2>&1)"
+          printf '%s\n' "$info"
+          [[ "$info" =~ TeamIdentifier=[A-Z0-9]{10} ]] || { echo "FAIL: no TeamIdentifier" >&2; exit 1; }
+          [[ "$info" =~ flags=0x[0-9a-f]+\([^\)]*runtime ]] || { echo "FAIL: Hardened Runtime flag missing" >&2; exit 1; }
+          [[ "$info" == *"Authority=Developer ID Certification Authority"* ]] || { echo "FAIL: chain lacks the Developer ID CA" >&2; exit 1; }
+          [[ "$info" == *"Timestamp="* ]] || { echo "FAIL: no secure timestamp" >&2; exit 1; }
+          ents="$(codesign -d --entitlements - --xml "$bin" 2>/dev/null)"
+          [[ "$ents" == *"com.apple.security.cs.disable-library-validation"* ]] || { echo "FAIL: disable-library-validation entitlement missing" >&2; exit 1; }
+          "$bin"
+          echo "### signature: OK ($(printf '%s' "$info" | grep TeamIdentifier=))" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notarize
+        if: inputs.notarize
+        env:
+          APPLE_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_NOTARY_KEY_P8:-}" ] || [ -z "${APPLE_NOTARY_KEY_ID:-}" ] || [ -z "${APPLE_NOTARY_ISSUER_ID:-}" ]; then
+            echo "FAIL: APPLE_NOTARY_* secrets missing from the apple-signing environment." >&2
+            exit 1
+          fi
+          SIGN_WORKDIR="$RUNNER_TEMP" service/deploy/mac-sign.sh notarize "$RUNNER_TEMP/rehearsal-bin"
+
+      - name: Gatekeeper verdict (quarantined copy)
+        if: inputs.notarize
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/rehearsal-bin"
+          # What a browser download looks like to Gatekeeper.
+          xattr -w com.apple.quarantine "0081;$(printf '%x' "$(date +%s)");Safari;" "$bin"
+          # The ticket is looked up online and can lag acceptance by a little.
+          for _ in 1 2 3 4 5 6; do
+            out="$(spctl -a -t exec -vv "$bin" 2>&1 || true)"
+            printf '%s\n' "$out"
+            if [[ "$out" == *"accepted"* && "$out" == *"source=Notarized Developer ID"* ]]; then
+              echo "### Gatekeeper: accepted, source=Notarized Developer ID" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "FAIL: Gatekeeper did not accept the notarized binary" >&2
+          exit 1
+
+      - name: Clean up signing keychain
+        if: always()
+        run: SIGN_WORKDIR="$RUNNER_TEMP" service/deploy/mac-sign.sh cleanup
