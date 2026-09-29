@@ -154,7 +154,7 @@ _STOP_COVERAGE_DEADLINE_SECONDS = 5.0
 #: separately, for a DIFFERENT purpose, resolving the T1/engine endpoint).
 #: Every other per-session/per-install hook state this repo has --
 #: ``t1_session_lease.<session_id>``, ``t1_mint_<session_id>.lock``,
-#: ``mcp_connect_check``/``mailbox_drain``/``mcp_connect_wait``'s own
+#: ``mailbox_drain``/``mcp_connect_wait``'s own
 #: config reads -- uses ``nexus_config_dir()``, which is why an isolated
 #: test ``HOME`` or a ``NEXUS_CONFIG_DIR`` override behaves the same way
 #: here as everywhere else. The literal subdirectory name is owned by

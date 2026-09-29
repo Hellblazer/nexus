@@ -53,7 +53,7 @@ class TestPublishAndRead:
 
 
 class TestReadInfo:
-    """The TTL-unaware raw read (round 5, nexus.hooks.mcp_connect_check's signal)."""
+    """The TTL-unaware raw read, used by the owner-scoped clear (nexus-qxyqz)."""
 
     def test_published_marker_yields_this_process_pid(self, tmp_path: Path) -> None:
         publish_mcp_connect_marker("sess-G", tmp_path, ttl_seconds=3600)
@@ -104,8 +104,10 @@ class TestClear:
 class TestClearIsOwnerScoped:
     """nexus-qxyqz: on a ``/mcp`` reconnect the NEW ``nx-mcp`` publishes its
     marker (same session id) while the OLD one is still tearing down, and the
-    old one's teardown unlink used to delete the new one's marker, so
-    ``nx-hook mcp-connect-check`` reported a live server as disconnected.
+    old one's teardown unlink used to delete the new one's marker. (That made
+    the since-deleted ``mcp-connect-check`` warning read a live server as
+    disconnected; the owner-scoped clear stays because it is correct for any
+    reader of the marker.)
     """
 
     def _write_marker_for(self, session_id: str, config_dir: Path, pid: int) -> Path:

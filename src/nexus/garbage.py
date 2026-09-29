@@ -71,6 +71,19 @@ CLOSE_GATE_STATE_SUBDIR: str = "close-gate-backstop"
 #: ``expectations_sweep()``'s own 7-day floor for the closely related
 #: RDR-184 ledger family.
 CLOSE_GATE_STATE_MAX_AGE_DAYS: int = 7
+#: An ``mcp_connect_marker.<session>`` file (nx-mcp's connect-readiness
+#: marker, ``nexus.mcp.connect_marker``) older than this whose recorded pid
+#: is not alive is deleted. A clean shutdown clears its own marker; a
+#: SIGKILLed or crashed server never does (37 on the author's box). The pid
+#: is the liveness signal, so a marker naming a live process is never swept,
+#: whatever its age.
+CONNECT_MARKER_MAX_AGE_DAYS: int = 1
+#: An ``mcp_connect_check_state.<session>`` file, the retired mid-session
+#: connect check's per-session warn-once state (nexus-qxyqz). Nothing in this
+#: generation writes one (31 left on the author's box), and a session on an
+#: older generation only rewrites it on a connection change, so a day-old one
+#: is abandoned. Age only: it has no liveness signal to consult.
+CONNECT_CHECK_STATE_MAX_AGE_DAYS: int = 1
 
 _ROTATED_LOG_RE = re.compile(r"\.log\.\d+$")
 _OPERATOR_LOG_RE = re.compile(r"^operator-(timeout|budget)-.*\.log$")
@@ -88,6 +101,8 @@ _RG_CACHE_RE = re.compile(r"^.+-[0-9a-f]{8}\.cache$")
 _MINT_LOCK_PREFIX = "t1_mint_"
 _MINT_LOCK_SUFFIX = ".lock"
 _LEASE_PREFIX = "t1_session_lease."
+_CONNECT_MARKER_PREFIX = "mcp_connect_marker."
+_CONNECT_CHECK_STATE_PREFIX = "mcp_connect_check_state."
 
 
 @dataclass
@@ -115,6 +130,23 @@ def _older_than(path: Path, days: int, *, now: float) -> bool:
         return (now - path.stat().st_mtime) > days * 86_400
     except OSError:
         return False
+
+
+def _marker_names_live_pid(path: Path) -> bool:
+    """Does the connect marker at *path* record a pid that is still alive?
+
+    A malformed or unreadable marker names no owner: not live. A ``.tmp``
+    leftover from a crashed write parses as no marker either.
+    """
+    import json  # noqa: PLC0415 — only the connect-marker rows need it
+
+    from nexus.daemon.service_registry import pid_alive  # noqa: PLC0415 — deferred: heavier than this module's other rows
+
+    try:
+        pid = int(json.loads(path.read_text())["pid"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return pid_alive(pid)
 
 
 def _unlink(path: Path, kind: str, report: SweepReport) -> None:
@@ -150,6 +182,13 @@ def sweep_local_garbage(config_dir: Path, *, now: float | None = None) -> SweepR
       age already protects a live session in practice), but a live lease
       is a more direct liveness signal than "wrote something recently"
       and the set is already computed here for ``mint_lock``.
+
+    * ``connect_marker``: ``mcp_connect_marker.*`` (including a crashed
+      writer's ``.tmp`` leftover) older than
+      :data:`CONNECT_MARKER_MAX_AGE_DAYS` whose recorded pid is not alive.
+      A marker naming a live pid is never touched, whatever its age.
+    * ``connect_check_state``: ``mcp_connect_check_state.*``, written by no
+      current code, older than :data:`CONNECT_CHECK_STATE_MAX_AGE_DAYS`.
 
     Never raises on a single file: a failed unlink lands in
     ``report.failed`` and the sweep continues.
@@ -196,6 +235,17 @@ def sweep_local_garbage(config_dir: Path, *, now: float | None = None) -> SweepR
                 continue
             if _older_than(path, CLOSE_GATE_STATE_MAX_AGE_DAYS, now=now):
                 _unlink(path, "close_gate_state", report)
+
+    for path in sorted(config_dir.glob(f"{_CONNECT_MARKER_PREFIX}*")):
+        if not path.is_file() or not _older_than(path, CONNECT_MARKER_MAX_AGE_DAYS, now=now):
+            continue
+        if _marker_names_live_pid(path):
+            continue
+        _unlink(path, "connect_marker", report)
+
+    for path in sorted(config_dir.glob(f"{_CONNECT_CHECK_STATE_PREFIX}*")):
+        if path.is_file() and _older_than(path, CONNECT_CHECK_STATE_MAX_AGE_DAYS, now=now):
+            _unlink(path, "connect_check_state", report)
 
     if report.removed_count or report.failed_count:
         _log.info(

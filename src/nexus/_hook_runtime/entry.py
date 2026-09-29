@@ -289,8 +289,11 @@ VERB_TABLE: dict[str, str] = {
     "mcp-connect-wait": "nexus.hooks.mcp_connect_wait",
     # Registered, silent no-op (nexus-qxyqz): the mid-session "nx-mcp is not
     # connected" warning it printed on UserPromptSubmit was deleted, but
-    # published plugins still name this verb in hooks.json and an unknown
-    # verb exits 2, which blocks a prompt on an old plugin. Never remove it.
+    # published plugins still name this verb in hooks.json. Removing it would
+    # make main() below print the "plugin is ahead of the installed nx CLI"
+    # systemMessage on every prompt of an old plugin. Never remove it.
+    # tests/hooks/test_mcp_connect_check_verb.py pins it; hook-cli-skew fires
+    # only the current hooks.json and does not.
     "mcp-connect-check": "nexus.hooks.mcp_connect_check",
     # The RDR-205 ledger's two PROJECTORS (bead nexus-egm7p), moved for the
     # SAME reason as the RDR-184 writers above: an mcp_tool hook's

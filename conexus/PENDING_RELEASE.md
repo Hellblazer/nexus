@@ -54,16 +54,13 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - nexus-2lf1v: `sn/hooks/scripts/serena-section.md` tells subagents that Serena
   writes now go through the permission flow, and to fall back to Edit or Write
   rather than retry a denied one.
+
+## Deferred to the next client release
+
 - nexus-nmzsg: `conexus/hooks/scripts/routing/_lib.py` adds
   `ask_envelope`/`ask` (`permissionDecision: ask`, reason in
   `permissionDecisionReason`), the PreToolUse decision that forces a
   permission prompt in auto mode where a bare advisory would let the
   classifier approve silently. No plugin script calls it yet; the pre-close
-  gate that uses it ships in the wheel (`nexus.hooks._routing_lib`).
-- nexus-qxyqz: `conexus/hooks/hooks.json` drops the `UserPromptSubmit` entry for `nx-hook mcp-connect-check`, the mid-session "nx-mcp is not connected" warning (it read a session-id-keyed marker that cannot be a reliable liveness signal, and cost 270-300 ms of imports per prompt). Safe against every CLI: the verb stays registered as a silent no-op for plugins that still name it.
-
-## Deferred to the next client release
-
-_Empty. The entries deferred here (nexus-5l8i8, nexus-xxvv3, nexus-3lc5s,
-nexus-smsau, nexus-egm7p) shipped with the 7.64.0 client release, together with
-nexus-sxiay's new tumbler-footnotes skill._
+  gate that uses it ships in the wheel (`nexus.hooks._routing_lib`). Deferred because the bead also touches `src/`, which a plugin cut refuses deterministically.
+- nexus-qxyqz: `conexus/hooks/hooks.json`, `conexus/README.md` drop the `UserPromptSubmit` entry (and its hook-table row) for `nx-hook mcp-connect-check`, the mid-session "nx-mcp is not connected" warning (it read a session-id-keyed marker that cannot be a reliable liveness signal, and cost 270-300 ms of imports per prompt). Safe against every CLI: the verb stays registered as a silent no-op for plugins that still name it. Deferred because the bead also touches `src/`, which a plugin cut refuses deterministically.

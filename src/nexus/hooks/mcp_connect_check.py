@@ -23,10 +23,17 @@ went. The marker itself stays, for ``nexus.hooks.mcp_connect_wait``, the
 startup barrier, which only asks whether it has appeared.
 
 **Why the verb still exists.** Published plugins still name it in their
-``hooks.json``, and ``tests/e2e/hook-cli-skew`` (with the hook-cli-skew gate)
-fires every ``hooks.json`` entry against every CLI a user may still have. An
-unknown verb exits 2, which blocks a ``UserPromptSubmit``. So it stays in
-:data:`nexus._hook_runtime.entry.VERB_TABLE`, exits 0 and writes nothing.
+``hooks.json``. An old plugin on a current CLI is the case that matters: were
+the verb removed from :data:`nexus._hook_runtime.entry.VERB_TABLE`,
+``entry.main`` would exit 0 but write a ``systemMessage`` ("conexus plugin is
+ahead of the installed nx CLI ... Run `nx upgrade`") on EVERY prompt, a
+misleading nag about a skew that does not exist. (An unknown verb only exits 2,
+which blocks a prompt, on the 7.55 to 7.57 CLIs, and the plugin's
+``nx_hook_shim.py`` already turns that into 0.) So it stays registered, exits 0
+and writes nothing. ``tests/e2e/hook-cli-skew`` fires only the CURRENT
+``hooks.json``, which no longer names this verb, so it does not cover that
+direction; ``tests/hooks/test_mcp_connect_check_verb.py::TestSilentNoOp::
+test_registered_in_the_verb_table`` is the pin for it.
 This module must not import ``nexus.mcp`` or structlog: ``UserPromptSubmit``
 fires on every prompt, and importing ``nexus.mcp`` here cost 270-300 ms per
 prompt (it eagerly imports the whole MCP server, and structlog with it).

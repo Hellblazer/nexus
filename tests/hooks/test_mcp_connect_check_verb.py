@@ -90,3 +90,35 @@ class TestNotRegisteredInThePlugin:
         assert "mcp-connect-check" not in args
         # non-vacuity: the walker does see the other verb entries
         assert "mcp-connect-wait" in args
+
+
+def _dispatch(verb: str, stdin: bytes, tmp_path: Path) -> subprocess.CompletedProcess:
+    env = {**os.environ, "NEXUS_CONFIG_DIR": str(tmp_path)}
+    return subprocess.run(
+        [sys.executable, "-m", "nexus._hook_runtime.entry", verb],
+        input=stdin, capture_output=True, env=env, timeout=60,
+    )
+
+
+class TestThroughTheRealEntryPoint:
+    """The path a published plugin still takes: ``nx-hook mcp-connect-check``
+    through ``entry.main``, on whatever stdin Claude Code hands it."""
+
+    def test_garbage_stdin_exits_zero_with_empty_stdout(self, tmp_path: Path) -> None:
+        r = _dispatch("mcp-connect-check", b"\xff\xfenot json {{", tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == b""
+
+    def test_empty_stdin_exits_zero_with_empty_stdout(self, tmp_path: Path) -> None:
+        r = _dispatch("mcp-connect-check", b"", tmp_path)
+        assert r.returncode == 0, r.stderr
+        assert r.stdout == b""
+
+    def test_an_unregistered_verb_would_show_the_plugin_ahead_message(
+        self, tmp_path: Path,
+    ) -> None:
+        """Non-vacuity, and the reason the verb is kept: were it removed from
+        the table, an old plugin naming it would print this on EVERY prompt."""
+        r = _dispatch("no-such-verb-qxyqz", b"{}", tmp_path)
+        assert r.returncode == 0
+        assert b"ahead of the installed nx CLI" in r.stdout
