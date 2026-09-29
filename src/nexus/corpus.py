@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -1670,6 +1671,30 @@ _REGISTERED_COLLECTIONS: set[str] = set()
 _REGISTERED_COLLECTIONS_SCOPED: set[tuple[tuple[str, ...], str]] = set()
 _REGISTERED_COLLECTIONS_LOCK = threading.Lock()
 
+#: Longest a cached registration is trusted before the next write to that
+#: name re-upserts it (nexus-wwuzp). The cache exists so a hot per-chunk write
+#: path pays one round trip per NEW collection, but a name can be renamed away
+#: by ANOTHER process (``nx collection rename`` while an MCP server or indexer
+#: is running): the engine retires the old name as a superseded tombstone and
+#: this process would keep writing chunks under it, never calling the upsert
+#: that clears ``superseded_by`` (a cold process revives it). One re-upsert per
+#: name per TTL bounds that stranding window at negligible cost; matches
+#: ``mcp_infra._COLLECTIONS_CACHE_TTL``, the other cross-process staleness
+#: bound on collection state.
+_REGISTRATION_TTL_SECONDS: float = 60.0
+
+
+def _registration_clock() -> float:
+    """Monotonic seconds; a module attribute so tests can inject a clock."""
+    return time.monotonic()
+
+
+#: When each cache entry was stamped, keyed like the cache itself
+#: (``name`` ambient, ``(scope, name)`` scoped). Consulted only for an entry
+#: that IS in its cache set, and an entry with no stamp (a test seeding the
+#: set directly) never expires, so the sets stay the authority on membership.
+_REGISTERED_AT: dict[object, float] = {}
+
 
 def _registration_cache_contains(scope: "tuple[str, ...] | None", name: str) -> bool:
     """True when *name* is already known-registered in *scope*'s cache
@@ -1677,9 +1702,17 @@ def _registration_cache_contains(scope: "tuple[str, ...] | None", name: str) -> 
     None``), :data:`_REGISTERED_COLLECTIONS_SCOPED` otherwise. Caller's
     responsibility to hold :data:`_REGISTERED_COLLECTIONS_LOCK` for the
     authoritative (non-fast-path) check."""
-    if scope is None:
-        return name in _REGISTERED_COLLECTIONS
-    return (scope, name) in _REGISTERED_COLLECTIONS_SCOPED
+    key: object = name if scope is None else (scope, name)
+    present = (
+        name in _REGISTERED_COLLECTIONS if scope is None
+        else key in _REGISTERED_COLLECTIONS_SCOPED
+    )
+    if not present:
+        return False
+    stamped = _REGISTERED_AT.get(key)
+    if stamped is not None and _registration_clock() - stamped >= _REGISTRATION_TTL_SECONDS:
+        return False  # aged out: the next write re-registers (nexus-wwuzp)
+    return True
 
 
 def _registration_cache_add(scope: "tuple[str, ...] | None", name: str) -> None:
@@ -1687,8 +1720,10 @@ def _registration_cache_add(scope: "tuple[str, ...] | None", name: str) -> None:
     holds :data:`_REGISTERED_COLLECTIONS_LOCK`."""
     if scope is None:
         _REGISTERED_COLLECTIONS.add(name)
+        _REGISTERED_AT[name] = _registration_clock()
     else:
         _REGISTERED_COLLECTIONS_SCOPED.add((scope, name))
+        _REGISTERED_AT[(scope, name)] = _registration_clock()
 
 
 def _registration_cache_discard(scope: "tuple[str, ...] | None", name: str) -> None:
@@ -1696,8 +1731,10 @@ def _registration_cache_discard(scope: "tuple[str, ...] | None", name: str) -> N
     :data:`_REGISTERED_COLLECTIONS_LOCK`."""
     if scope is None:
         _REGISTERED_COLLECTIONS.discard(name)
+        _REGISTERED_AT.pop(name, None)
     else:
         _REGISTERED_COLLECTIONS_SCOPED.discard((scope, name))
+        _REGISTERED_AT.pop((scope, name), None)
 
 
 def ensure_collection_registered(
@@ -1942,7 +1979,26 @@ def discard_cached_registration(name: str) -> None:
     to observe, not by a write-time 422.
     """
     with _REGISTERED_COLLECTIONS_LOCK:
-        _REGISTERED_COLLECTIONS.discard(name)
+        _registration_cache_discard(None, name)
+
+
+def evict_registration_everywhere(name: str) -> None:
+    """Evict *name* from EVERY registration-cache partition (ambient and
+    every scoped one).
+
+    nexus-wwuzp: called after a rename retires *name* as a superseded
+    tombstone. The rename's catalog client does not know which registrar
+    scopes wrote *name* earlier in this process, so it evicts them all; a
+    later write to the renamed-away name then re-upserts it (reviving it,
+    which is what a cold process does) instead of skipping the upsert and
+    stranding chunks under a dead identity. A no-op for an uncached name.
+    Other processes converge through :data:`_REGISTRATION_TTL_SECONDS`.
+    """
+    with _REGISTERED_COLLECTIONS_LOCK:
+        _registration_cache_discard(None, name)
+        for entry in [e for e in _REGISTERED_COLLECTIONS_SCOPED if e[1] == name]:
+            _REGISTERED_COLLECTIONS_SCOPED.discard(entry)
+            _REGISTERED_AT.pop(entry, None)
 
 
 def _looks_like_stale_registration_error(exc: BaseException) -> bool:

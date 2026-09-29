@@ -3347,6 +3347,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # so it reports an all-zero `renamed` map for a rename that fully
         # succeeded -- the same misreport class purge_trash closes above.
         result = self._post("/collections/rename", body, idempotent=False)
+        # nexus-wwuzp: the old name is now a superseded tombstone. Drop this
+        # process's cached registration so a later write to it re-upserts
+        # (reviving it) instead of skipping the upsert and stranding chunks.
+        # Other processes converge through the cache's TTL.
+        from nexus.corpus import evict_registration_everywhere  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+
+        evict_registration_everywhere(old)
         renamed = (result or {}).get("renamed", {}) or {}
         return {k: int(v) for k, v in renamed.items()}
 
