@@ -114,7 +114,16 @@ public final class ChashCensus {
         new Exclusion("aspect_extraction_queue", "content", "free content"),
         new Exclusion("aspect_extraction_queue", "content_hash",
             "sha256 of source CONTENT (a document identity, not a chunk id) — "
-            + "legacy-width source hashes are historical facts, not pointers"));
+            + "legacy-width source hashes are historical facts, not pointers"),
+        // nexus-6u63y: install_pings is GLOBAL (no RLS), so this column is
+        // scanned in every tenant's finalize. source_hash is the first 16 hex
+        // chars of an HMAC-SHA256 install-source digest (InstallPingHandler,
+        // nexus-5zv4j) -- byte-for-byte the LEGACY_SHAPE 16-hex chunk ref, so
+        // once the cloud held a hash key every populated row read as residue
+        // and /v1/staging/finalize failed for every tenant.
+        new Exclusion("install_pings", "source_hash",
+            "HMAC-SHA256 digest prefix of an install source (16 hex) — an identity, "
+            + "not a chunk pointer"));
 
     // BYTEA_EXCLUSIONS' sole entry (chash_alias.old_bytes) LEFT the list at
     // nexus-lgdel.l1 along with the table (see TEXT_EXCLUSIONS' comment).

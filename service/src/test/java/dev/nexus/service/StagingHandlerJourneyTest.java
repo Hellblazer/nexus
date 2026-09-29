@@ -287,6 +287,13 @@ class StagingHandlerJourneyTest {
         Map<String, Object> promoted = postOk("/v1/staging/promote", Map.of("collection", COLL));
         assertThat(((Number) promoted.get("promoted")).intValue()).isEqualTo(2);
 
+        // nexus-6u63y: install_pings is global (no RLS) and its source_hash is a
+        // 16-hex HMAC prefix -- once populated it must NOT trip the post-finalize
+        // census as legacy residue for every tenant.
+        new dev.nexus.service.db.InstallPingRepository(svcDs, java.time.Clock.systemUTC())
+            .record(new dev.nexus.service.db.InstallPingRepository.Ping(java.util.UUID.randomUUID(),
+                "7.67.0", "cloud", "linux", "amd64", "3.12", "0123456789abcdef"));
+
         Map<String, Object> fin = postOk("/v1/staging/finalize", Map.of("orphan_policy", "drop"));
         assertThat(((Number) fin.get("manifest_promoted")).intValue()).isEqualTo(1);
         assertThat(((Number) fin.get("residual_mismatched")).intValue()).isEqualTo(0);
