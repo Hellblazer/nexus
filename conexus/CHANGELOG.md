@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.66.0] - 2026-09-29
+
+Plugin version aligned with conexus 7.66.0. No plugin-side changes: nothing
+under `conexus/` or `sn/` changed since v7.65.0, and the pending-release ledger
+had no entries to clear. The background-agent ledger's per-outcome logging
+(nexus-uzntx) lives in the CLI's hook code, so it takes effect when the CLI is
+updated.
+
 ## [7.65.0] - 2026-09-28
 
 Plugin version aligned with conexus 7.65.0. No plugin-side changes: nothing

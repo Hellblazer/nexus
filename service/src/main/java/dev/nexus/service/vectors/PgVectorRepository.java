@@ -2629,7 +2629,8 @@ public final class PgVectorRepository {
      * @return one entry per (collection, dim):
      *         {@code [{"name": ..., "dim": 384, "count": N, "last_write": "...",
      *         "content_type": ..., "owner_id": ..., "embedding_model": ...,
-     *         "lifecycle_state": ...}]}, name ascending. {@code last_write} is
+     *         "lifecycle_state": ...}]}, name ascending; a rename tombstone
+     *         also carries {@code "superseded_by"} (nexus-4w07i). {@code last_write} is
      *         ISO-8601 with offset, or absent if null. Collections with zero live
      *         chunks do not appear (the two-arg overload adds a lifecycle filter,
      *         nexus-bc7ps). The four catalog-joined keys are ABSENT
@@ -2685,15 +2686,24 @@ public final class PgVectorRepository {
      * accept the prefix. Routing consumers now ask for {@code live}.
      */
     public List<Map<String, Object>> collectionStats(String tenant, String lifecycleFilter) {
-        org.jooq.Condition lifecycleCond = (lifecycleFilter == null || lifecycleFilter.isBlank())
+        org.jooq.Condition byState = (lifecycleFilter == null || lifecycleFilter.isBlank())
             ? org.jooq.impl.DSL.noCondition()
             : CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq(lifecycleFilter);
+        // nexus-4w07i: a rename keeps the old name's row as a tombstone
+        // (superseded_by = the new name) with lifecycle_state still 'live', so the
+        // routing view excluded nothing for it. A tombstone that holds chunks (a
+        // stale writer, say) was then a search target under a retired name. 'live'
+        // here is the ROUTING view, so it also requires the row not be superseded;
+        // an empty string is the column's "not superseded" value, as NULL is.
+        org.jooq.Condition lifecycleCond = "live".equals(lifecycleFilter)
+            ? byState.and(CATALOG_COLLECTIONS.SUPERSEDED_BY.isNull().or(CATALOG_COLLECTIONS.SUPERSEDED_BY.eq("")))
+            : byState;
         var result = tenantScope.withTenant(tenant, ctx ->
             ctx.select(COLLECTION_VECTOR_STATS.COLLECTION, COLLECTION_VECTOR_STATS.DIM,
                        COLLECTION_VECTOR_STATS.CHUNK_COUNT, COLLECTION_VECTOR_STATS.LAST_WRITE,
                        CATALOG_COLLECTIONS.CONTENT_TYPE, CATALOG_COLLECTIONS.OWNER_ID,
                        CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.LIFECYCLE_STATE,
-                       COLLECTION_VECTOR_STATS.STORED_COUNT)
+                       COLLECTION_VECTOR_STATS.STORED_COUNT, CATALOG_COLLECTIONS.SUPERSEDED_BY)
                .from(COLLECTION_VECTOR_STATS)
                .leftJoin(CATALOG_COLLECTIONS)
                .on(CATALOG_COLLECTIONS.TENANT_ID.eq(COLLECTION_VECTOR_STATS.TENANT_ID)
@@ -2734,6 +2744,12 @@ public final class PgVectorRepository {
             }
             if (lifecycleState != null) {
                 row.put("lifecycle_state", lifecycleState);
+            }
+            // nexus-4w07i: present only on a rename tombstone, so a client can
+            // tell a retired name from a live one without a second route.
+            String supersededBy = rec.value10();
+            if (supersededBy != null && !supersededBy.isEmpty()) {
+                row.put("superseded_by", supersededBy);
             }
             out.add(row);
         }

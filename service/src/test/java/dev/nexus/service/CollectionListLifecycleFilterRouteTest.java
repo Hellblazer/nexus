@@ -22,6 +22,7 @@ import java.sql.Connection;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -55,6 +56,8 @@ class CollectionListLifecycleFilterRouteTest {
 
     private static final String LIVE       = "code__bc7ps-owner__voyage-code-3__v1";
     private static final String QUARANTINE = "quarantine-code__bc7ps-owner__voyage-code-3__v1";
+    /** A rename's old name: lifecycle 'live', superseded_by = LIVE, still holding a chunk. */
+    private static final String TOMBSTONE  = "code__bc7ps-owner-old__voyage-code-3__v1";
 
     private static final TypeReference<Map<String, Object>> MAP_T = new TypeReference<>() {};
     private static final TypeReference<List<Map<String, Object>>> LIST_T = new TypeReference<>() {};
@@ -94,6 +97,14 @@ class CollectionListLifecycleFilterRouteTest {
         // nothing to delete and both have a collection_vector_stats row to list or hide.
         seedChunk(LIVE, "a1");
         seedChunk(QUARANTINE, "b2");
+        seedChunk(TOMBSTONE, "c3");
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+               .set(CATALOG_COLLECTIONS.SUPERSEDED_BY, LIVE)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(TENANT).and(CATALOG_COLLECTIONS.NAME.eq(TOMBSTONE)))
+               .execute();
+        }
     }
 
     @AfterAll
@@ -145,6 +156,25 @@ class CollectionListLifecycleFilterRouteTest {
         var bad = get("/v1/vectors/stats?lifecycle_state=Live");
         assertThat(bad.statusCode()).isEqualTo(400);
         assertThat(bad.body()).contains("Live").contains("quarantine").contains("all");
+    }
+
+    @Test
+    void vectorStats_liveLeavesOutARenameTombstone_andEveryRowSaysWhetherItIsOne() throws Exception {
+        // nexus-4w07i: the tombstone is lifecycle 'live' and holds a chunk, so
+        // before the fix the routing view listed it under its retired name.
+        var live = get("/v1/vectors/stats?lifecycle_state=live");
+        assertThat(statsNames(live)).contains(LIVE).doesNotContain(TOMBSTONE);
+        // The catalog route's 'live' is the same routing view (critique of edd784566).
+        var catLive = get("/v1/catalog/collections/list?lifecycle_state=live");
+        assertThat(catalogNames(catLive)).contains(LIVE).doesNotContain(TOMBSTONE);
+        assertThat(catalogNames(get("/v1/catalog/collections/list"))).contains(TOMBSTONE);
+
+        var dflt = mapper.readValue(get("/v1/vectors/stats").body(), LIST_T);
+        var byName = new java.util.HashMap<String, Map<String, Object>>();
+        dflt.forEach(r -> byName.put((String) r.get("name"), r));
+        assertThat(byName).as("the inventory still lists it").containsKey(TOMBSTONE);
+        assertThat(byName.get(TOMBSTONE)).containsEntry("superseded_by", LIVE);
+        assertThat(byName.get(LIVE)).doesNotContainKey("superseded_by");
     }
 
     // ── helpers ────────────────────────────────────────────────────────────────

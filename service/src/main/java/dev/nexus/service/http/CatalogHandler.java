@@ -180,6 +180,7 @@ public final class CatalogHandler implements HttpHandler {
                 case "/manifest/purge"        -> handleManifestPurge(exchange, tenant, method);
                 case "/manifest/chashes"      -> handleManifestChashes(exchange, tenant, method);
                 case "/manifest/docs_for_chashes" -> handleDocsForChashes(exchange, tenant, method);
+                case "/manifest/chash_positions" -> handleChashPositions(exchange, tenant, method);
                 case "/manifest/resync"       -> handleManifestResync(exchange, tenant, method);
                 case "/manifest/null_collection" -> handleManifestNullCollection(exchange, tenant, method);
                 case "/chash/conformance"     -> handleChashConformance(exchange, tenant, method);
@@ -287,6 +288,10 @@ public final class CatalogHandler implements HttpHandler {
             // transaction — the TOCTOU case that assertion exists for. It is a REFUSAL, so it
             // gets the same 409 the pre-check gives, with the message that names the remedy.
             // It fell into the generic catch below for one commit and surfaced as an opaque 500.
+            HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
+        } catch (CatalogRepository.SourceUriCollision e) {
+            // nexus-sis0m.3: the rename's source_uri rewrite would land on a URI a live
+            // document already holds; a refusal, not a server error.
             HttpUtil.send(exchange, 409, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (CatalogRepository.RehomeRefused e) {
             // nexus-wsx4l: the bounded re-home refused — same endpoints, an absent or
@@ -1372,6 +1377,30 @@ public final class CatalogHandler implements HttpHandler {
     }
 
     /**
+     * POST /v1/catalog/manifest/chash_positions (nexus-opxwd): {@code {chashes: [...]}}
+     * in, {@code {rows: [{chash, doc_id, position, chunk_count}], count: N}} out.
+     * Search's reverse lookup, with a payload proportional to the hits rather than
+     * to the referencing documents' full manifests. Same IN-list cap as its
+     * siblings; the client reconciles {@code len(rows) == count}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleChashPositions(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        Object raw = body.get("chashes");
+        List<String> chashes = raw instanceof List<?> l
+            ? l.stream().filter(o -> o instanceof String).map(o -> (String) o).toList()
+            : List.of();
+        if (chashes.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many chashes (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        var rows = repo.chashPositions(tenant, chashes);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+            Map.of("rows", rows, "count", rows.size())));
+    }
+
+    /**
      * POST /v1/catalog/manifest/get_many (nexus-7lm3q)
      *
      * <p>Batch-fetch manifest rows for multiple doc_ids in a single round-trip,
@@ -2092,6 +2121,21 @@ public final class CatalogHandler implements HttpHandler {
         out.put("done", s.done());
     }
 
+    /**
+     * nexus-sis0m.3: {@code body[key]} when present; {@code null} when absent. A present value
+     * that is not a non-blank string is an {@link IllegalArgumentException}, which the route's
+     * catch answers with 400 naming the key.
+     */
+    private static String optionalNonBlank(Map<String, Object> body, String key) {
+        if (!body.containsKey(key) || body.get(key) == null) {
+            return null;
+        }
+        if (body.get(key) instanceof String v && !v.isBlank()) {
+            return v;
+        }
+        throw new IllegalArgumentException(key + " must be a non-blank string when present");
+    }
+
     private void handleCollectionRename(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
@@ -2101,6 +2145,11 @@ public final class CatalogHandler implements HttpHandler {
         if (oldName == null || newName == null) {
             HttpUtil.send(exchange, 400, "{\"error\":\"old_name/new_name (or old/new) required\"}"); return;
         }
+        // nexus-sis0m.3: optional attributes for the new row, derived by the client from the
+        // new name (the engine does not parse names, RDR-204). Absent keeps the source's;
+        // present must be a non-blank string.
+        String newContentType = optionalNonBlank(body, "content_type");
+        String newOwnerId = optionalNonBlank(body, "owner_id");
         // Guard 0 (nexus-mxzxs) — old == new. Mirrors handleCollectionSupersede's guard 0,
         // whose comment already claimed this verb refused the case. That was only ever
         // INCIDENTALLY true: collectionExists(newName) was true when newName == oldName, so
@@ -2244,7 +2293,8 @@ public final class CatalogHandler implements HttpHandler {
         // whenever the target turns out live or absent anyway; it only compares when the
         // target is STILL a non-live tombstone at commit time, same as this handler's own
         // identityOk/empty gate above.
-        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded);
+        Map<String, Integer> counts = repo.renameCollection(tenant, oldName, newName, tgtSuperseded,
+            newContentType, newOwnerId);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(Map.of("renamed", counts)));
     }
 

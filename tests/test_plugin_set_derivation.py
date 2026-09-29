@@ -412,3 +412,21 @@ class TestFallbackPluginsStayInSync:
             f"longer matches marketplace.json's real plugin set {sorted(real_names)} "
             "-- a plugin was added/removed there and the fallback needs updating"
         )
+
+
+def test_registered_rules_on_a_virgin_box_logs_no_marketplace_warning(tmp_path, monkeypatch):
+    """Review of a89e5d72a: the same eager known_plugins() lookup lived here.
+    With no plugin hooks.json anywhere there is nothing to read, and asking
+    for the marketplace names only logged its unreachable warning."""
+    import structlog  # noqa: PLC0415 — test-local import
+
+    import nexus.plugin_registry as reg  # noqa: PLC0415 — test-local import
+    from nexus.routing_stats import registered_rules  # noqa: PLC0415 — test-local import
+
+    monkeypatch.delenv(reg.MARKETPLACE_JSON_ENV, raising=False)
+    monkeypatch.setattr(reg, "_dev_checkout_path", lambda: tmp_path / "none" / "marketplace.json")
+    monkeypatch.setattr(reg, "_default_marketplaces_path", lambda: tmp_path / "none" / "known_marketplaces.json")
+    with structlog.testing.capture_logs() as logs:
+        found = registered_rules(marketplace_dir=tmp_path / "no-marketplace", repo_root=tmp_path / "wheel-root")
+    assert found is None
+    assert not [e for e in logs if e.get("log_level") != "debug"], logs

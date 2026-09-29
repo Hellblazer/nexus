@@ -93,6 +93,56 @@ class SearchDiagnostics:
             return None
         return max(candidates, key=lambda item: item[2])
 
+def _attach_from_chash_positions(
+    results: list[SearchResult], chashes: list[str], catalog: Any,
+) -> bool:
+    """Stamp ``doc_id``, ``chunk_count`` and ``chunk_index`` from the engine's
+    chash-positions route (nexus-opxwd). ``True`` when every result that has a
+    chash was fully served, so the caller skips the manifest path; ``False``
+    (touching nothing) when the route is absent, fails, or any result is left
+    unserved, such as a legacy chunk naming a doc the route did not return.
+
+    The manifest path's stamps, with one deliberate difference: a chash held
+    by several documents resolves to the first doc_id in the engine's text
+    order, where the manifest path picked from a set in arbitrary order.
+    Otherwise the same: that doc's whole-manifest row count, the chash's
+    first position in it, a legacy ``doc_id`` already on the result kept,
+    and fields already present never overwritten.
+    """
+    lookup = getattr(catalog, "chash_positions", None)
+    if lookup is None:
+        return False
+    try:
+        rows = lookup([c for c in chashes if c])
+    except Exception:  # noqa: BLE001 — best-effort; the manifest path below still runs
+        _log.debug("attach_chash_positions_failed", exc_info=True)
+        return False
+    if not isinstance(rows, list):
+        return False
+    by_chash: dict[str, list[dict]] = {}
+    for row in rows:
+        if isinstance(row, dict) and row.get("chash") and row.get("doc_id"):
+            by_chash.setdefault(row["chash"], []).append(row)
+    plan: list[tuple[SearchResult, str, dict]] = []
+    for r, chash in zip(results, chashes):
+        if not chash:
+            continue
+        candidates = by_chash.get(chash, [])
+        wanted = r.metadata.get("doc_id")
+        match = next((c for c in candidates if c["doc_id"] == wanted), None) if wanted else (candidates[0] if candidates else None)
+        if match is None:
+            if wanted or candidates:
+                return False  # a legacy doc_id the route did not return: manifest path
+            continue  # no manifest row anywhere, same as the manifest path
+        plan.append((r, chash, match))
+    for r, _chash, match in plan:
+        if not r.metadata.get("doc_id"):
+            r.metadata["doc_id"] = match["doc_id"]
+        r.metadata.setdefault("chunk_count", int(match.get("chunk_count") or 0))
+        r.metadata.setdefault("chunk_index", int(match.get("position") or 0))
+    return True
+
+
 def _attach_doc_ids_from_catalog(
     results: list[SearchResult], catalog: Any | None,
 ) -> None:
@@ -122,6 +172,11 @@ def _attach_doc_ids_from_catalog(
     ]
     nonempty = [c for c in chashes if c]
     if not nonempty:
+        return
+    # nexus-opxwd: the engine answers (chash, doc_id, position, chunk_count)
+    # for just the hits; the manifest path below remains for an engine
+    # without the route, and for results it cannot serve.
+    if _attach_from_chash_positions(results, chashes, catalog):
         return
     # nexus-w032x: the reverse lookup fetches every referencing document's
     # manifest anyway; take them from it rather than fetching a subset of the

@@ -714,6 +714,21 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
             # before-read); faked for census parity / future callers.
             chashes = {"1.1.1": [CHASH_A]}
             self._send_json({"chashes": chashes, "count": len(chashes)})
+        elif op == "/manifest/chash_positions":
+            # nexus-opxwd: mirrors CatalogHandler.handleChashPositions --
+            # {"rows": [{chash, doc_id, position, chunk_count}], "count": N}
+            # for the requested chashes only, over the same one-doc manifest
+            # /manifest/get_many serves above (chunk_count = that doc's row
+            # count, rows ordered by doc_id then position).
+            manifest = {"1.1.1": [{"position": 0, "chash": CHASH_A}]}
+            wanted = set(body.get("chashes") or [])
+            rows = [
+                {"chash": row["chash"], "doc_id": doc_id,
+                 "position": row["position"], "chunk_count": len(doc_rows)}
+                for doc_id, doc_rows in sorted(manifest.items())
+                for row in doc_rows if row["chash"] in wanted
+            ]
+            self._send_json({"rows": rows, "count": len(rows)})
         elif op == "/manifest/docs_for_chashes":
             # Real server: {"tumblers": [tumbler_string, ...], "count": N}
             # (flat list, SELECT DISTINCT) — count reconciled client-side
@@ -1540,6 +1555,14 @@ class TestHttpCatalogClientRoundTrip:
         assert result == {CHASH_A: ["1.1.1"]}
 
         assert client.docs_for_chashes([]) == {}
+
+    def test_chash_positions_journey(self, client: HttpCatalogClient) -> None:
+        """nexus-opxwd: the hits' (chash, doc_id, position, chunk_count),
+        agreeing with the manifest /manifest/get_many serves for the same doc;
+        an unknown chash yields no row."""
+        rows = client.chash_positions([CHASH_A, "f" * 64])
+        assert rows == [{"chash": CHASH_A, "doc_id": "1.1.1", "position": 0, "chunk_count": 1}]
+        assert client.chash_positions([]) == []
 
     def test_docs_and_manifests_for_chashes_journey(self, client: HttpCatalogClient) -> None:
         """nexus-w032x: the reverse lookup returns the manifests it fetched,

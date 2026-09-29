@@ -51,7 +51,7 @@ _DRIVER = (
     "    payload = json.loads(sys.stdin.read())\n"
     "except ValueError:\n"
     "    payload = None\n"
-    "project(sys.argv[1], payload)\n"
+    "print(project(sys.argv[1], payload))\n"
 )
 
 SESSION_ID = "sess-tuple-proj"
@@ -1433,6 +1433,9 @@ def test_report_kind_falls_back_to_legacy_dims_when_engine_refuses_new_dims(
     assert second["dims"] == {"agent_type": AGENT_TYPE}
     log = _log_path(tmp_path / "state").read_text()
     assert "SCHEMA_FALLBACK kind=report" in log
+    # The row landed on the retry, so the outcome is a write (review of
+    # c520afa76: nothing pinned this path's return).
+    assert proc.stdout.strip().splitlines()[-1] == "posted", proc.stdout
 
 
 def test_report_kind_generic_400_is_not_mistaken_for_a_schema_violation(

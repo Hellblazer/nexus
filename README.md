@@ -122,7 +122,7 @@ Once a day the MCP server sends one message with six values: a random install id
 - [Research in Nexus](https://hellblazer.github.io/nexus/research-in-nexus.html): the thinking behind the method, what was borrowed from experimental science and what was left out.
 - [The Nexus Tuple Space](https://hellblazer.github.io/nexus/tuple-space.html): how sessions, agents, and hooks coordinate.
 - [Coordination](https://hellblazer.github.io/nexus/coordination.html): how sessions and agents coordinate through the tuple space, and which steps the hooks, the channel, and Claude each do.
-- [CI Status From the Board](https://hellblazer.github.io/nexus/ci-board.html): read CI status for one commit from a board in the tuple space, get told when CI changes, and check the board before you push, without polling GitHub.
+- [How Agents Build and Ship Nexus](https://hellblazer.github.io/nexus/how-agents-ship.html): how agent sessions, the conexus instance, GitHub and a second build machine coordinate through the tuple space to build, test, review and release Nexus.
 - [CLI reference](https://github.com/Hellblazer/nexus/blob/main/docs/cli-reference.md), [architecture](https://github.com/Hellblazer/nexus/blob/main/docs/architecture.md), [storage tiers](https://github.com/Hellblazer/nexus/blob/main/docs/storage-tiers.md), and the [docs tree](https://github.com/Hellblazer/nexus/blob/main/docs/README.md).
 - [Managed service](https://github.com/Hellblazer/nexus/blob/main/docs/managed-onboarding.md), for a hosted deployment with server-side embeddings.
 

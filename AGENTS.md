@@ -485,6 +485,21 @@ things to avoid carefully; they are impossible.
     write tool, whenever you are not certain your session started inside
     the worktree it is editing.
 
+12. **A second test host, `hellmini`, takes full suites and gates.** A Mac
+    mini on the tailnet (`ssh hellmini`) holds its own clone at
+    `/Volumes/Bulk/src/nexus` (primary on `develop`, never edited) with
+    worktrees in `/Volumes/Bulk/src/nexus-wt/`. Its suite and build leases
+    live in that clone's git common dir, so it runs one full suite at a time
+    independently of the laptop. Move an unpushed branch there with
+    `git push hellmini HEAD:refs/heads/<branch>` from the laptop (remote
+    `hellmini`), or `git fetch laptop <branch>` on the mini (a fetch-only
+    remote). Pushes to origin go from the laptop through
+    `scripts/git-push-develop.sh` only. Run `tests/e2e/local-service-gate.sh`
+    there with `</dev/null`. The same box is the self-hosted GitHub Actions
+    runner (label `hellmini`) for tag-triggered release jobs and the PG-bundle
+    cache seed, never pull-request jobs; see § Engine-service release. How-to
+    and host details: T2 `nexus/hellmini-second-test-host-howto`.
+
 **Moving an in-flight session.** Cherry-pick or apply into the new worktree
 FIRST and verify there, and only then revert the primary — never the
 reverse. Two methods, and the right one depends on the starting state:

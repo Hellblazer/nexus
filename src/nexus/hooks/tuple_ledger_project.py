@@ -178,7 +178,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-__all__ = ["project"]
+__all__ = ["DROPPED_ORPHAN", "IGNORED", "POSTED", "SKIPPED", "project"]
 
 #: Bound on a single POST round trip -- research 5 measured ~10ms for a
 #: healthy engine; this is a ceiling for a degraded/rate-limiting one, not
@@ -787,10 +787,17 @@ def _post_via_urllib(
         raise _Skip(f"engine returned HTTP {status} posting to {url}")
 
 
-#: What :func:`project` returns when it drops a harness-internal stop, so a
-#: caller that logs outcomes can say so instead of reporting a projection
-#: that never happened as ok (nexus-uzntx follow-up).
+#: :func:`project`'s outcomes, so a caller that logs them never reports a
+#: projection that did not happen as ok (nexus-uzntx follow-up; critique of
+#: 9601b5df6). POSTED: the tuple was written. DROPPED_ORPHAN: a
+#: harness-internal stop, dropped by design. IGNORED: nothing this ledger
+#: tracks (an unknown kind, a stop with no agent_id). SKIPPED: a projection
+#: that should have been written and was not; the reason is in the
+#: per-session log.
+POSTED: str = "posted"
 DROPPED_ORPHAN: str = "dropped_orphan"
+IGNORED: str = "ignored"
+SKIPPED: str = "skipped"
 
 
 def _transcript_exists(transcript_path: str) -> bool:
@@ -803,7 +810,7 @@ def _transcript_exists(transcript_path: str) -> bool:
         return False
 
 
-def project(kind: str, payload: dict[str, Any] | None) -> str | None:
+def project(kind: str, payload: dict[str, Any] | None) -> str:
     """Project one RDR-205 ``ledger/<session_id>`` tuple write. Never
     raises; every failure path is logged to the per-session log file and
     this function returns normally either way.
@@ -814,7 +821,7 @@ def project(kind: str, payload: dict[str, Any] | None) -> str | None:
     directly now that there is no subprocess boundary to serialize across.
     """
     if kind not in ("start", "report"):
-        return
+        return IGNORED
     session_id, agent_id, agent_type, transcript_path = _extract_fields(payload)
 
     # kind=="report" WITH NO agent_id AT ALL (nexus-aginu): the harness
@@ -826,7 +833,7 @@ def project(kind: str, payload: dict[str, Any] | None) -> str | None:
     # NOTHING, silently -- no _log_skip call, unlike every other
     # incomplete-payload case below, which keeps its diagnostic line.
     if kind == "report" and not agent_id:
-        return
+        return IGNORED
 
     # kind=="report" from a HARNESS-INTERNAL stop (nexus-uzntx): the harness
     # now supplies an agent_id for these, so the check above passes them,
@@ -851,7 +858,7 @@ def project(kind: str, payload: dict[str, Any] | None) -> str | None:
     )
     if not all(required_fields):
         _log_skip(session_id, f"SKIP kind={kind} incomplete payload fields")
-        return
+        return SKIPPED
 
     from nexus.db.t2.http_tuple_store import (  # noqa: PLC0415 — deferred to avoid a heavy import on every call
         _MAX_FIELD_VALUE_BYTES,
@@ -870,7 +877,7 @@ def project(kind: str, payload: dict[str, Any] | None) -> str | None:
     )
     if size_reason is not None:
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} oversized: {size_reason}")
-        return
+        return SKIPPED
 
     # Checkable-report dims (bead nexus-cnzei.6 item 2). Only kind=="report"
     # has a VERIFY-bearing hand-back to parse.
@@ -915,7 +922,8 @@ def project(kind: str, payload: dict[str, Any] | None) -> str | None:
             _post_via_urllib(base_url, token, fallback_body, is_local_supervisor=is_local_supervisor)
     except _Skip as exc:
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} {exc}")
-        return
+        return SKIPPED
     except Exception as exc:  # noqa: BLE001 — best-effort projection must never propagate
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} unexpected: {exc}")
-        return
+        return SKIPPED
+    return POSTED

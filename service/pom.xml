@@ -668,6 +668,44 @@
                 <onnx.native.dir>osx-aarch64</onnx.native.dir>
                 <djl.native.dir>osx-aarch64</djl.native.dir>
             </properties>
+            <!-- nexus-280ei: mac Mach-O ABI floor. MUST live here, not in the
+                 shared `native` profile's buildArgs, because these two options
+                 render UNCONDITIONALLY wherever they appear — a shared, empty-
+                 valued form (`-H:CCompilerOption=`) built and ran clean under
+                 clang (proven locally + on hellmini) but review caught that
+                 GraalVM's CCompilerInvoker.createCompilerCommand appends
+                 -H:CCompilerOption's value to the COMPILER argv unconditionally,
+                 so gcc on linux receives a literal "" argument and fails
+                 ("gcc: error: : linker input file not found", reproduced in a
+                 gcc:13 container) — this profile activates ONLY on a mac build
+                 host (activation family=mac above), so a linux build never
+                 merges this plugin config in at all; there is no empty-value
+                 case to worry about. `combine.children="append"` merges these
+                 onto the `native` profile's buildArgs (both profiles are active
+                 together on a mac -Pnative build) rather than replacing them —
+                 see native-build-tools' own docs for this exact pattern
+                 (maven-plugin.adoc "Appending Build Arguments in Child POM").
+                 Keep 14.0 in lockstep with the "Assert binary ABI floor" gate's
+                 ceiling in engine-service-release.yml. -->
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.graalvm.buildtools</groupId>
+                        <artifactId>native-maven-plugin</artifactId>
+                        <executions>
+                            <execution>
+                                <id>build-native</id>
+                                <configuration>
+                                    <buildArgs combine.children="append">
+                                        <buildArg>-H:NativeLinkerOption=-mmacosx-version-min=14.0</buildArg>
+                                        <buildArg>-H:CCompilerOption=-mmacosx-version-min=14.0</buildArg>
+                                    </buildArgs>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
+            </build>
         </profile>
         <profile>
             <id>native-libs-windows</id>

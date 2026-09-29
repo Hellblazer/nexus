@@ -262,6 +262,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/manifest/purge", "handleManifestPurge"),
         collectionOk("/manifest/chashes", "handleManifestChashes"),
         both("/manifest/docs_for_chashes", "handleDocsForChashes", null),
+        // nexus-opxwd: search's reverse lookup, chashes in (MAX_BATCH_DOC_IDS
+        // enforced), {rows: [...], count: N} out.
+        both("/manifest/chash_positions", "handleChashPositions", null),
         neither("/manifest/resync", "handleManifestResync"),
         // RDR-191 Phase 6 (nexus-o8dil.33): /manifest/backfill
         // (handleManifestBackfill) and /manifest/orphans (handleManifestOrphans)
