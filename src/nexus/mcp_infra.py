@@ -689,6 +689,30 @@ def set_t1_pre_init_hook(hook) -> None:
     _t1_pre_init_hook = hook
 
 
+#: nexus-k9sec: the borrowed-session recovery callable, ``(session_id,
+#: dead_token) -> fresh_token | None``. Registered by the lifespan when this
+#: process bound T1 by BORROWING another process's lease; attached to the T1
+#: store so a 401 from a revoked borrowed token re-mints instead of dying. The
+#: seam lives here for the same reason ``_t1_pre_init_hook``'s does: core
+#: imports this module, never the reverse.
+_t1_session_recovery_hook = None
+
+
+def set_t1_session_recovery_hook(hook) -> None:
+    """Register (or clear, with None) the borrowed-session recovery hook, and
+    apply it to the already-constructed T1 store if there is one."""
+    # Deliberately NOT under ``_t1_lock``: the deferred-mint pre-init hook
+    # runs inside get_t1()'s critical section and registers this hook when it
+    # ends up borrowing, and that lock is not reentrant. The two orders
+    # converge without it: either get_t1() sees the hook after constructing,
+    # or this call sees the instance.
+    global _t1_session_recovery_hook
+    _t1_session_recovery_hook = hook
+    instance = _t1_instance
+    if instance is not None and hasattr(instance, "session_recovery"):
+        instance.session_recovery = hook
+
+
 def get_t1():
     """Return (T1Database, is_isolated), lazy init on first call.
 
@@ -721,6 +745,10 @@ def get_t1():
                     _t1_pre_init_hook()  # raises => propagate; cache stays empty
                 from nexus.db.t1 import get_t1_database  # noqa: PLC0415 — deferred to avoid circular import (db.t1)
                 _t1_instance = get_t1_database()
+                if _t1_session_recovery_hook is not None and hasattr(
+                    _t1_instance, "session_recovery"
+                ):
+                    _t1_instance.session_recovery = _t1_session_recovery_hook
                 # nexus-4lkmz: get_t1_database() with no injected client
                 # can no longer return a T1Database (the InMemoryVectorClient
                 # leg it used to construct is retired outright — T1 is

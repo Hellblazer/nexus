@@ -4075,6 +4075,7 @@ nexus-k8s4v
 nexus-k9er
 nexus-k9i56
 nexus-k9i56.1
+nexus-k9sec
 nexus-k9zom
 nexus-k9zom.1
 nexus-kard5

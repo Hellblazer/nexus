@@ -38,6 +38,7 @@ and returns a :class:`~nexus.types.PromotionReport`.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
 import httpx
@@ -98,6 +99,12 @@ HEAL_ADOPTED_SUFFIX: str = "(heal: adopted a fresh token, retry still unauthoriz
 #: the message credit g5hzk for a re-mint heal (the inference-as-fact class
 #: this bead exists to fix, one level down).
 HEAL_REMINT_SUFFIX: str = "(heal: re-minted the data-token bearer, retry still unauthorized)"
+
+#: Appended when a BORROWED session's token was revoked (its owner exited) and
+#: this process re-minted its own token via the registered ``session_recovery``
+#: hook (nexus-k9sec) -- and the retry on that fresh token still came back
+#: unauthorized. Distinct so the guidance names the mechanism that fired.
+HEAL_RECOVERED_SUFFIX: str = "(heal: re-minted this process's own session token after its owner exited, retry still unauthorized)"
 
 
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
@@ -204,6 +211,17 @@ class HttpScratchStore:
         # bearer and the retry still 401'd; cleared by the next non-401
         # response. See _remint_data_token_and_rebuild.
         self._remint_futile = False
+        # nexus-k9sec: the borrowed-session recovery hook, ``(session_id,
+        # dead_token) -> fresh_token | None``. None (the default) for every
+        # store that does not borrow another process's token: a bare CLI, an
+        # inherited-token subprocess, the owner itself. The MCP lifespan
+        # attaches it (via ``mcp_infra``) only when this process BORROWED its
+        # lease. ``_recovery_futile`` is the ``_remint_futile`` twin: set when
+        # a recovery re-mint did not cure the 401, cleared by the next
+        # non-401, so a token that was never the cause is not re-minted per
+        # call.
+        self.session_recovery: Callable[[str, str], str | None] | None = None
+        self._recovery_futile = False
         _log.info(
             "http_scratch_store.init",
             base_url=self._base_url,
@@ -389,8 +407,11 @@ class HttpScratchStore:
         than a permanent disabling of a heal that does work in other
         failure modes.
         """
-        if resp.status_code != 401 and getattr(self, "_remint_futile", False):
-            self._remint_futile = False
+        if resp.status_code != 401:
+            if getattr(self, "_remint_futile", False):
+                self._remint_futile = False
+            if getattr(self, "_recovery_futile", False):
+                self._recovery_futile = False
 
     def _rebind_from_lease(self) -> bool:
         """nexus-om64x: on connection-refused (supervisor restarted on a new
@@ -485,21 +506,94 @@ class HttpScratchStore:
                 "http_scratch_store.session_token_refreshed_from_lease",
                 session_id=session_id,
             )
-            self._session_token = fresh
-            self._headers[_HEADER_T1_SESSION] = fresh
-            # Subprocess children resolve NX_T1_SESSION at spawn — hand them
-            # the live token, not the stranded one. Review M1: export the id
-            # alongside when absent, so a later ctor's fallback chain
-            # (session_id or NX_T1_SESSION_ID or NX_T1_SESSION) can never
-            # collapse the TOKEN into a session id.
-            os.environ[_SESSION_ENV] = fresh
-            os.environ.setdefault(_SESSION_ID_ENV, session_id)
-            try:
-                self._client.close()
-            except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
-                pass
-            self._client = self._build_client()
+            self._adopt_session_token(fresh, session_id)
             return True
+
+    def _adopt_session_token(self, fresh: str, session_id: str) -> None:
+        """Swap in *fresh* as this store's session token and rebuild the
+        client. Callers hold ``self._refresh_lock``."""
+        self._session_token = fresh
+        self._headers[_HEADER_T1_SESSION] = fresh
+        # Subprocess children resolve NX_T1_SESSION at spawn — hand them
+        # the live token, not the stranded one. Review M1: export the id
+        # alongside when absent, so a later ctor's fallback chain
+        # (session_id or NX_T1_SESSION_ID or NX_T1_SESSION) can never
+        # collapse the TOKEN into a session id.
+        os.environ[_SESSION_ENV] = fresh
+        os.environ.setdefault(_SESSION_ID_ENV, session_id)
+        try:
+            self._client.close()
+        except Exception:  # noqa: BLE001 — boundary fallback — degrade gracefully on unexpected error
+            pass
+        self._client = self._build_client()
+
+    def _recover_borrowed_session(self, sent_token: str) -> bool:
+        """nexus-k9sec: the token this store borrowed is dead (HTTP 401 after
+        the lease re-read and the bearer re-mint both failed to cure it) --
+        ask the registered ``session_recovery`` hook for a fresh one.
+
+        The hook (``mcp.core._recover_borrowed_t1_session``) owns the policy:
+        it re-mints under the session's mint flock and takes ownership, or
+        adopts a sibling recoverer's fresh lease, or declines (this process
+        is not a borrower). This method only single-flights it under
+        ``self._refresh_lock`` -- a caller whose token was already replaced
+        retries on the winner's -- and adopts what comes back.
+
+        One attempt per failed request: a hook that returns ``None`` or
+        raises is a plain miss (the 401 stands), and one that returned a token
+        which then still 401'd trips ``_recovery_futile`` until a request
+        succeeds. Returns True when a retry is worthwhile.
+        """
+        hook = getattr(self, "session_recovery", None)
+        session_id = getattr(self, "_session_id", "")
+        lock = getattr(self, "_refresh_lock", None)
+        if hook is None or not session_id or lock is None:
+            return False
+        if getattr(self, "_recovery_futile", False):
+            return False
+        with lock:
+            if self._session_token != sent_token:
+                return True  # another thread already healed the store
+            if self._recovery_futile:
+                return False
+            try:
+                fresh = hook(session_id, self._session_token)
+            except Exception as exc:  # noqa: BLE001 — recovery is best-effort; the original 401 stands
+                _log.warning(
+                    "http_scratch_store.session_recovery_failed",
+                    session_id=session_id, error=str(exc),
+                )
+                return False
+            if not fresh or fresh == self._session_token:
+                return False
+            _log.warning(
+                "http_scratch_store.session_token_recovered",
+                session_id=session_id,
+            )
+            self._adopt_session_token(fresh, session_id)
+            return True
+
+    def _retry_after_session_recovery(
+        self, path: str, payload: dict[str, Any], resp: httpx.Response, heal_suffix: str,
+    ) -> tuple[httpx.Response, str]:
+        """Last rung of the 401 ladder (after the lease re-read and the bearer
+        re-mint): a borrowed session whose owner exited gets one recovery
+        attempt and one retry. Returns the (possibly new) response and the
+        suffix naming what ran."""
+        if resp.status_code != 401 or self._edge_refusal(path, resp) is not None:
+            return resp, heal_suffix
+        if not self._recover_borrowed_session(getattr(self, "_session_token", "")):
+            return resp, heal_suffix
+        try:
+            resp = self._client.post(
+                path, json=payload,
+                headers={"Authorization": self._current_authorization_header()},
+            )
+        except httpx.HTTPError as exc:
+            raise RuntimeError(
+                f"HttpScratchStore: network error on session-recovery retry {path}: {exc}"
+            ) from exc
+        return resp, f" {HEAL_RECOVERED_SUFFIX}"
 
     def _build_client(self) -> httpx.Client:
         # RDR-198 (closed, declined): this client carries a BAKED
@@ -847,6 +941,11 @@ class HttpScratchStore:
                     raise RuntimeError(
                         f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
                     ) from exc
+            # nexus-k9sec: still 401 with the bearer and the lease excluded --
+            # the borrowed session token itself is dead (its owner exited).
+            resp, heal_suffix = self._retry_after_session_recovery(
+                path, payload, resp, heal_suffix
+            )
         self._note_bearer_accepted(resp)
         if not resp.is_success:
             edge = self._edge_refusal(path, resp)
@@ -861,6 +960,10 @@ class HttpScratchStore:
                     # comes back non-401, instead of minting once per call
                     # for as long as the session stays stale.
                     self._remint_futile = True
+                elif heal_suffix.strip() == HEAL_RECOVERED_SUFFIX:
+                    # nexus-k9sec: a recovered token that still 401s means the
+                    # session token was not the cause; stop re-minting per call.
+                    self._recovery_futile = True
                 raise RuntimeError(
                     f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
                 )
@@ -935,6 +1038,11 @@ class HttpScratchStore:
                     raise RuntimeError(
                         f"HttpScratchStore: network error on token-refresh retry {path}: {exc}"
                     ) from exc
+            # nexus-k9sec: still 401 with the bearer and the lease excluded --
+            # the borrowed session token itself is dead (its owner exited).
+            resp, heal_suffix = self._retry_after_session_recovery(
+                path, payload, resp, heal_suffix
+            )
         self._note_bearer_accepted(resp)
         if resp.status_code == 404:
             return {"found": False}
@@ -951,6 +1059,10 @@ class HttpScratchStore:
                     # comes back non-401, instead of minting once per call
                     # for as long as the session stays stale.
                     self._remint_futile = True
+                elif heal_suffix.strip() == HEAL_RECOVERED_SUFFIX:
+                    # nexus-k9sec: a recovered token that still 401s means the
+                    # session token was not the cause; stop re-minting per call.
+                    self._recovery_futile = True
                 raise RuntimeError(
                     f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
                 )

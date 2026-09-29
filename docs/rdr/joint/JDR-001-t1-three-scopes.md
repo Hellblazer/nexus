@@ -65,6 +65,20 @@ session's rows are not migrated: `/clear` separated two conversations on
 purpose. Agent-tool subagents need no handling because they share the
 parent's MCP process and see the process-wide swap.
 
+A process that BORROWED its lease (`USE_LEASED`, the mint-race loser, a
+handoff that borrowed) shares the owner's token, and the owner's teardown
+revokes it. The borrower's next T1 call is HTTP 401; once the lease re-read
+and the bearer re-mint have both failed to cure it, the borrower re-mints its
+own token for the same session id under the same mint flock
+(`nexus.mcp.core._recover_borrowed_t1_session`, nexus-k9sec, Sam's decision B
+2026-09-29) and becomes the owner: its own teardown then revokes and clears
+through `_OWNED_T1_SESSION`. A borrower that loses the flock race adopts the
+winner's lease and stays a borrower, so N recoverers mint once. A revoke does
+not hide the session's rows from the new token (they are keyed by tenant and
+session id, measured); the owner's clean exit deletes them first, its SIGTERM
+path does not, so a recovering borrower sees an empty or an inherited pad
+depending on how the owner left. Nothing migrates rows.
+
 ## Standing falsification: respawn-on-`/clear` is FALSE (nexus-ggvi0, 2026-08-22)
 
 A proposal to delete the handoff layer on the premise that Claude Code

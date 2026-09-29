@@ -168,11 +168,23 @@ def _mcp_tool_error(tool: str, e: Exception) -> str:
     from nexus.db.http_scratch_store import (  # noqa: PLC0415 — deferred import; only paid on the (rare) error path
         HEAL_ADOPTED_SUFFIX,
         HEAL_DECLINED_SUFFIX,
+        HEAL_RECOVERED_SUFFIX,
         HEAL_REMINT_SUFFIX,
         SESSION_UNAUTHORIZED_MARKER,
     )
 
     if SESSION_UNAUTHORIZED_MARKER in text:
+        if HEAL_RECOVERED_SUFFIX in text:
+            return (
+                f"Error: {text}\n"
+                "The borrowed T1 (scratch) session token was revoked (its owner "
+                "exited), and this process re-minted its own token for the "
+                "session (nexus-k9sec) -- the retry on the fresh token still "
+                "failed authorization, so the token was not the cause. Reconnect "
+                "the conexus MCP/extension; if the same failure recurs "
+                "immediately, the service-side auth state needs direct "
+                "investigation."
+            )
         if HEAL_ADOPTED_SUFFIX in text:
             return (
                 f"Error: {text}\n"
@@ -330,6 +342,23 @@ import os as _os
 #: leaking both.
 _OWNED_T1_SESSION: dict[str, Any] = {}
 
+#: nexus-k9sec: module-scope state for a T1 session this process BORROWED
+#: (USE_LEASED, the mint-race loser, a deferred mint that found a fresh
+#: lease, a handoff that borrowed) -- the counterpart of ``_OWNED_T1_SESSION``.
+#: Keys: ``session_id``, ``config_dir``, ``loop`` (the lifespan's event loop,
+#: for scheduling the refresh task from a tool worker thread once the
+#: borrower recovers as owner). Empty for the owner, for an inherited-token
+#: subprocess, and for a process with no resolvable session. Only a process
+#: named here may re-mint (:func:`_recover_borrowed_t1_session`); it is never
+#: consulted by teardown, which keys on ``_OWNED_T1_SESSION`` alone, so a
+#: borrower can neither revoke nor clear what it does not own.
+_BORROWED_T1_SESSION: dict[str, Any] = {}
+
+#: nexus-k9sec: wall-clock budget for a borrower's mint-lock wait during
+#: recovery. The recovery runs inside a tool call on a worker thread; a
+#: sibling recoverer holding the flock through a slow mint must not wedge it.
+_T1_BORROWER_RECOVERY_DEADLINE_S: float = 10.0
+
 #: Sticky flag set by :func:`_t1_shutdown` on first entry so a
 #: signal arriving mid-cleanup (the production stdin-EOF + SIGTERM
 #: race that produced spurious ``mcp_server_crashed`` events on every
@@ -389,6 +418,137 @@ def _start_t1_refresh_task(session_id: str, interval: float) -> None:
     _T1_SESSION_REFRESH_TASK = asyncio.create_task(
         _t1_session_refresh_loop(session_id, interval)
     )
+
+
+def _note_t1_borrowed(session_id: str, config_dir: Any, loop: Any) -> None:
+    """Record that this process bound T1 by BORROWING *session_id*'s lease
+    (nexus-k9sec) and arm the recovery hook, so a 401 from the owner's
+    revoked token re-mints instead of leaving T1 dead for the session."""
+    from nexus import mcp_infra  # noqa: PLC0415 — deferred to avoid import cycle at module load
+
+    _BORROWED_T1_SESSION.clear()
+    _BORROWED_T1_SESSION.update(session_id=session_id, config_dir=config_dir, loop=loop)
+    mcp_infra.set_t1_session_recovery_hook(_recover_borrowed_t1_session)
+
+
+def _clear_t1_borrowed() -> None:
+    """Drop the borrower state and disarm the recovery hook (teardown, and a
+    handoff that moves this process off the borrowed session)."""
+    from nexus import mcp_infra  # noqa: PLC0415 — deferred to avoid import cycle at module load
+
+    _BORROWED_T1_SESSION.clear()
+    mcp_infra.set_t1_session_recovery_hook(None)
+
+
+def _recover_borrowed_t1_session(session_id: str, dead_token: str) -> str | None:
+    """A borrower's T1 token was rejected (HTTP 401): recover, or decline.
+
+    nexus-k9sec (Sam's decision B, 2026-09-29). A process that bound T1 by
+    borrowing the owner's lease shares the owner's token. The owner's teardown
+    clears the lease and revokes the token (``POST /v1/sessions/close`` deletes
+    the ``session_tokens`` row), so the borrower's next call is a 401
+    (``AuthFilter`` ``session_not_minted``) and, before this, T1 stayed dead
+    for the rest of the session -- the /mcp-reconnect overlap's survivor lost
+    scratch, and a crashed owner's lease kept naming a dead token.
+
+    The borrower re-mints its own token for the SAME session id through the
+    existing mint flock (:func:`nexus.db.t1._lock_guarded_mint_or_borrow`, with
+    ``stale_token`` so a crashed owner's still-fresh lease is not re-adopted)
+    and, if it is the one that minted, becomes the owner: ``_OWNED_T1_SESSION``
+    is set, its lease is published (inside the helper), the refresh loop
+    starts, and its own teardown revokes and clears via
+    :func:`_t1_session_shutdown`. If a sibling recoverer got there first, this
+    borrower adopts the sibling's fresh lease and stays a borrower -- the
+    single-minter rule holds, so N recoverers of one departed owner mint once.
+
+    Called from ``HttpScratchStore`` after the lease re-read and the bearer
+    re-mint have both failed to cure the 401, on the calling tool's worker
+    thread, at most once per failed request. Returns the token to adopt, or
+    ``None`` to let the 401 stand: not a borrower of *session_id*, shutting
+    down, or the mint failed (logged, never retried in a loop).
+
+    Rows: a revoke does NOT hide the session's scratch rows from a new token
+    for the same id (they are keyed by tenant and session id, not by token;
+    measured against the real engine). A borrower recovering after the owner's
+    SIGTERM path therefore sees the owner's pad; after the lifespan's clean
+    exit, which deletes the rows first, it starts empty. Nothing here migrates
+    rows.
+    """
+    if _OWNED_T1_SESSION.get("session_id") == session_id:
+        # Already the owner (an earlier recovery, or a concurrent call, won):
+        # hand back the live token only if it differs from the rejected one.
+        current = _os.environ.get("NX_T1_SESSION", "").strip()
+        return current if current and current != dead_token else None
+    state = dict(_BORROWED_T1_SESSION)
+    if not state or state.get("session_id") != session_id or _SHUTDOWN_IN_FLIGHT:
+        return None
+
+    from nexus.db.t1 import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        _lock_guarded_mint_or_borrow,
+        clear_t1_session_lease_if_matches,
+    )
+
+    config_dir = state["config_dir"]
+    _log.warning("t1_borrower_recovery_start", session_id=session_id)
+    try:
+        token, minted, mint_ttl = _lock_guarded_mint_or_borrow(
+            session_id, config_dir,
+            context="borrowed-session recovery mint",
+            deadline=time.monotonic() + _T1_BORROWER_RECOVERY_DEADLINE_S,
+            stale_token=dead_token,
+        )
+    except Exception as exc:  # noqa: BLE001 — one attempt per failed request; the caller's 401 stands
+        _log.warning("t1_borrower_recovery_failed", session_id=session_id, error=str(exc))
+        return None
+
+    if not minted:
+        # A sibling recoverer won the flock and published a fresh lease.
+        if _os.environ.get("NX_T1_SESSION_ID", "").strip() == session_id:
+            _os.environ["NX_T1_SESSION"] = token
+        _log.info("t1_borrower_adopted_sibling_lease", session_id=session_id)
+        return token
+
+    if _SHUTDOWN_IN_FLIGHT or _BORROWED_T1_SESSION.get("session_id") != session_id:
+        # Teardown, or a handoff off this session, ran while the mint was in
+        # flight: owning it now would set ownership after the revoke already
+        # ran (the nexus-5daww leak class). Withdraw the lease we just
+        # published; the token itself ages out on its TTL, the same backstop
+        # the deferred-mint sentinel above relies on.
+        _log.warning("t1_borrower_recovery_abandoned", session_id=session_id)
+        try:
+            clear_t1_session_lease_if_matches(session_id, config_dir, token)
+        except Exception as exc:  # noqa: BLE001 — best-effort withdrawal
+            _log.warning("t1_borrower_recovery_lease_withdraw_failed", session_id=session_id, error=str(exc))
+        return None
+
+    # Env first, ownership second: a concurrent recovery that sees ownership
+    # reads the live token from the env.
+    _os.environ["NX_T1_SESSION"] = token
+    _os.environ["NX_T1_SESSION_ID"] = session_id
+    _OWNED_T1_SESSION["session_id"] = session_id
+    _BORROWED_T1_SESSION.clear()
+    ttl = mint_ttl if mint_ttl is not None else _T1_SESSION_DEFAULT_TTL_SECONDS
+    interval = max(ttl * _T1_SESSION_REFRESH_FRACTION, _T1_SESSION_REFRESH_MIN_INTERVAL_S)
+    try:
+        state["loop"].call_soon_threadsafe(_start_t1_refresh_task, session_id, interval)
+    except Exception as exc:  # noqa: BLE001 — refresh loss degrades to TTL expiry + 401 recovery, never fails a successful mint
+        _log.warning("t1_borrower_refresh_not_scheduled", session_id=session_id, error=str(exc))
+    _log.warning("t1_borrower_recovered_as_owner", session_id=session_id)
+    return token
+
+
+async def _end_borrowed_t1_lifespan() -> None:
+    """Teardown for the lifespan branches that borrowed T1 (nexus-k9sec).
+
+    Before recovery existed a borrower owned nothing, so these branches had no
+    teardown. One that recovered is now the owner and must revoke, clear and
+    close its rows exactly as the minting branch does, through the same
+    ``_OWNED_T1_SESSION`` path. One that never recovered owns nothing and this
+    is a no-op beyond dropping its borrower state."""
+    _clear_t1_borrowed()
+    if _OWNED_T1_SESSION:
+        await _cancel_t1_session_refresh_task()
+        _close_owned_t1_session()
 
 
 class T1UnavailableThisProcessError(RuntimeError):
@@ -516,6 +676,7 @@ def _retry_deferred_t1_mint() -> None:
             )
         _log.info("t1_session_isolation_minted", session_id=session_id, deferred=True)
     else:
+        _note_t1_borrowed(session_id, state["config_dir"], state.get("loop"))
         _log.info("t1_session_leased_after_deferred_mint", session_id=session_id)
 
     _DEFERRED_T1_MINT.clear()
@@ -1226,6 +1387,7 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         _T1_SESSION_REFRESH_TASK.cancel()
         _T1_SESSION_REFRESH_TASK = None
     _OWNED_T1_SESSION.clear()
+    _clear_t1_borrowed()  # nexus-k9sec: the old session's borrower state goes with it
 
     from nexus import mcp_infra  # noqa: PLC0415 — deferred to avoid import cycle at module load
 
@@ -1334,6 +1496,10 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         _T1_SESSION_REFRESH_TASK = asyncio.create_task(
             _t1_session_refresh_loop(new_session_id, interval)
         )
+    else:
+        # nexus-k9sec: a handoff that borrowed a live sibling's lease is a
+        # borrower of the NEW session, with the same recovery as at startup.
+        _note_t1_borrowed(new_session_id, config_dir, asyncio.get_running_loop())
 
     consume_claimed_marker(claimed_path)
     log.info(
@@ -1549,6 +1715,12 @@ async def _t1_lifespan(_app: Any):
     # accepted, pre-existing race window. Only a fresh Branch-0 MCP
     # restart for the same session id gets the recovery described here.
     #
+    # nexus-k9sec: "does NOT claim ownership" below holds at STARTUP only. A
+    # borrower whose owner exits gets a 401 and re-mints its own token,
+    # becoming the owner from then on (`_recover_borrowed_t1_session`); the
+    # single-minter rule survives because the re-mint runs under the same
+    # flock and a losing recoverer adopts the winner's lease.
+    #
     # nexus-ngcpo Finding 3 (USE_LEASED specifically): when the lease IS
     # fresh we deliberately do NOT claim ownership here (no
     # `_OWNED_T1_SESSION`, no refresh task) -- a fresh lease means its
@@ -1585,18 +1757,27 @@ async def _t1_lifespan(_app: Any):
         await _cancel_channel_waiter_task()
         await _cancel_t1_handoff_watch_task()
         _unmark_connected()
+        _clear_t1_borrowed()  # nexus-k9sec: a handoff may have borrowed a session
         return
 
     if _decision.action == T1RoutingAction.USE_LEASED:
+        import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
         _os.environ["NX_T1_SESSION"] = _decision.session_token
         _os.environ["NX_T1_SESSION_ID"] = _decision.session_id
         _svc_log.info("t1_session_leased_no_mint", session_id=_decision.session_id)
+        # nexus-k9sec: armed BEFORE the channel waiter below constructs the
+        # T1 store, so the store is born with the recovery hook attached.
+        _note_t1_borrowed(_decision.session_id, nexus_config_dir(), asyncio.get_running_loop())
         _start_channel_waiter()
         _mark_connected()
-        yield
-        await _cancel_channel_waiter_task()
-        await _cancel_t1_handoff_watch_task()
-        _unmark_connected()
+        try:
+            yield
+        finally:
+            await _cancel_channel_waiter_task()
+            await _cancel_t1_handoff_watch_task()
+            _unmark_connected()
+            await _end_borrowed_t1_lifespan()
         return
 
     # T1RoutingAction.MINT. Phase D (bead nexus-gmiaf.32.4): mint a
@@ -1749,12 +1930,18 @@ async def _t1_lifespan(_app: Any):
             _svc_log.info(
                 "t1_session_leased_after_mint_race", session_id=_t1_session_id
             )
+            import asyncio  # noqa: PLC0415 — rare/branch-local path; stdlib import deferred to call site
+
+            _note_t1_borrowed(_t1_session_id, _t1_config_dir, asyncio.get_running_loop())
             _start_channel_waiter()
             _mark_connected()
-            yield
-            await _cancel_channel_waiter_task()
-            await _cancel_t1_handoff_watch_task()
-            _unmark_connected()
+            try:
+                yield
+            finally:
+                await _cancel_channel_waiter_task()
+                await _cancel_t1_handoff_watch_task()
+                _unmark_connected()
+                await _end_borrowed_t1_lifespan()
             return
 
         else:
@@ -1835,6 +2022,7 @@ async def _t1_lifespan(_app: Any):
         # by the hook's post-mint shutdown sentinel, which re-checks this
         # state before committing ownership or scheduling a refresh.
         _DEFERRED_T1_MINT.clear()
+        _clear_t1_borrowed()  # nexus-k9sec: a deferred mint that borrowed, or a handoff that did
         from nexus import mcp_infra as _mcp_infra_fin  # noqa: PLC0415 — deferred to avoid import cycle at module load
         _mcp_infra_fin.set_t1_pre_init_hook(None)
         # Cancel the refresh task BEFORE closing the session (mirrors
@@ -1861,17 +2049,26 @@ async def _t1_lifespan(_app: Any):
         # resuming this paused generator past `yield`) leaked BOTH an
         # unrevoked, still-valid server-side session token AND its 0600
         # lease file on every SIGTERM'd session.
-        try:
-            from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-            _svc_log.info("t1_service_session_close_start")
-            store = HttpScratchStore()
-            deleted = store.close_session()
-            store.close()
-            _svc_log.info("t1_service_session_close_done", deleted=deleted)
-        except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
-            _svc_log.warning("t1_service_session_close_failed", error=str(_exc))
-        _t1_shutdown()
+        _close_owned_t1_session()
     return
+
+
+def _close_owned_t1_session() -> None:
+    """The owner's clean-exit teardown: delete the session's scratch rows
+    (promptness; the service's 24h sweep backstops it), then route the token
+    revoke and lease clear through the idempotent :func:`_t1_shutdown`.
+    Shared by the minting lifespan branch and by a borrower that recovered as
+    owner (nexus-k9sec)."""
+    try:
+        from nexus.db.http_scratch_store import HttpScratchStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+        _log.info("t1_service_session_close_start")
+        store = HttpScratchStore()
+        deleted = store.close_session()
+        store.close()
+        _log.info("t1_service_session_close_done", deleted=deleted)
+    except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
+        _log.warning("t1_service_session_close_failed", error=str(_exc))
+    _t1_shutdown()
 
 
 

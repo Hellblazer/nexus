@@ -1345,6 +1345,7 @@ def _lock_guarded_mint_or_borrow(
     *,
     context: str = "stale-lease recovery mint",
     deadline: float | None = None,
+    stale_token: str | None = None,
 ) -> tuple[str, bool, float | None]:
     """Flock-guarded double-check-then-mint-or-borrow (nexus-jwqjm).
 
@@ -1376,6 +1377,13 @@ def _lock_guarded_mint_or_borrow(
         session_id: the T1 session id to mint or borrow a token for.
         config_dir: the nexus config directory (both the lock file and the
             lease file live here).
+        stale_token: a token the caller has just seen the engine reject
+            (nexus-k9sec: a borrower whose owner exited). A lease naming
+            exactly this token is NOT borrowable, even though it reads as
+            fresh: a crashed owner never cleared it, and re-adopting it
+            would 401 again. Any OTHER fresh lease is a sibling recoverer's
+            and is borrowed as usual, so N recoverers of one departed owner
+            still end with exactly one mint.
 
     Returns:
         ``(token, minted, ttl_seconds)``. ``minted`` is ``True`` only for
@@ -1428,7 +1436,7 @@ def _lock_guarded_mint_or_borrow(
                     time.sleep(0.05)
         try:
             leased_token = read_t1_session_lease(session_id, config_dir)
-            if leased_token:
+            if leased_token and leased_token != stale_token:
                 # A concurrent recoverer already won the race and published
                 # a fresh lease while we waited for the lock -- borrow it,
                 # do not mint a competing token.
