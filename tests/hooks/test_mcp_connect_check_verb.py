@@ -1,229 +1,92 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Tests for ``nexus.hooks.mcp_connect_check`` -- the mid-session `nx-mcp`
-disconnect detector (RDR-215, bead nexus-veh77 round 5).
+"""``nx-hook mcp-connect-check`` is a silent no-op (nexus-qxyqz).
 
-Two layers, matching the bead's own proof requirement exactly:
-
-1. ``_decide`` -- the pure warn-once-per-episode state machine -- against
-   synthetic states, covering all four named cases: live marker means
-   silent; dead pid means one warning then silent; missing marker after a
-   prior one means a warning; never-connected means silent.
-2. ``run(payload)`` -- the verb's own wiring -- against REAL files (the
-   connect marker via ``nexus.mcp.connect_marker.publish_mcp_connect_marker``,
-   this OS's own live pid via ``os.getpid()`` for "alive", and an
-   unallocated pid for "dead") plus the real
-   ``nexus.daemon.service_registry.pid_alive``, never mocked.
+The mid-session "nx-mcp is not connected" warning it used to print was
+deleted: the session-id-keyed connect marker it read cannot be made a
+reliable liveness signal (a nested ``claude -p`` server, the ``nx doctor``
+probe, a ``/mcp`` reconnect overlap and ``/clear``/``/resume`` each left it
+reading a live server as disconnected). The verb stays REGISTERED, exiting 0
+with empty stdout, because published plugins still name it in ``hooks.json``
+and ``tests/e2e/hook-cli-skew`` fires every entry against every CLI.
 """
 from __future__ import annotations
 
 import json
 import os
-import time
+import subprocess
+import sys
 from pathlib import Path
 
 from nexus._hook_runtime import entry
-from nexus.daemon.service_registry import pid_alive
-from nexus.hooks.mcp_connect_check import (
-    _DISCONNECT_MESSAGE,
-    _State,
-    _decide,
-    _read_state,
-    _state_path,
-    _write_state,
-    run,
-)
-from nexus.mcp.connect_marker import publish_mcp_connect_marker
+from nexus.hooks.mcp_connect_check import run
 
-#: A pid essentially guaranteed to name no live process, for the "dead
-#: pid" cases below. Reused from the same style tests elsewhere in this
-#: suite use for an unallocated pid (very high, above any realistic
-#: allocation on the platforms this runs on).
-_DEAD_PID = 999_999_999
+REPO_ROOT = Path(__file__).resolve().parents[2]
+HOOKS_JSON = REPO_ROOT / "conexus" / "hooks" / "hooks.json"
 
 
-class TestDecidePureStateMachine:
-    def test_live_marker_means_silent(self) -> None:
-        message, new_state = _decide(currently_connected=True, state=_State())
-        assert message is None
-        assert new_state == _State(ever_connected=True, warned_since_last_connected=False)
-
-    def test_never_connected_means_silent_even_if_currently_disconnected(self) -> None:
-        message, new_state = _decide(
-            currently_connected=False, state=_State(ever_connected=False),
-        )
-        assert message is None
-        assert new_state == _State(ever_connected=False, warned_since_last_connected=False)
-
-    def test_dead_pid_after_a_prior_connection_warns_once(self) -> None:
-        message, new_state = _decide(
-            currently_connected=False, state=_State(ever_connected=True),
-        )
-        assert message == _DISCONNECT_MESSAGE
-        assert new_state == _State(ever_connected=True, warned_since_last_connected=True)
-
-    def test_dead_pid_already_warned_this_episode_stays_silent(self) -> None:
-        message, new_state = _decide(
-            currently_connected=False,
-            state=_State(ever_connected=True, warned_since_last_connected=True),
-        )
-        assert message is None
-        assert new_state == _State(ever_connected=True, warned_since_last_connected=True)
-
-    def test_reconnecting_resets_the_episode_flag(self) -> None:
-        """A session that was warned, then reconnected, must warn again on
-        a LATER disconnect -- the episode flag resets on any live sighting."""
-        message, new_state = _decide(
-            currently_connected=True,
-            state=_State(ever_connected=True, warned_since_last_connected=True),
-        )
-        assert message is None
-        assert new_state.warned_since_last_connected is False
+def _walk_args(node) -> list[str]:
+    found: list[str] = []
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if k == "args" and isinstance(v, list):
+                found.extend(str(a) for a in v)
+            else:
+                found.extend(_walk_args(v))
+    elif isinstance(node, list):
+        for item in node:
+            found.extend(_walk_args(item))
+    return found
 
 
-class TestStateFileRoundTrip:
-    def test_missing_state_file_reads_as_zero_state(self, tmp_path: Path) -> None:
-        assert _read_state(_state_path("sess-A", tmp_path)) == _State()
-
-    def test_malformed_state_file_reads_as_zero_state(self, tmp_path: Path) -> None:
-        path = _state_path("sess-B", tmp_path)
-        path.write_text("not json")
-        assert _read_state(path) == _State()
-
-    def test_write_then_read_round_trips(self, tmp_path: Path) -> None:
-        path = _state_path("sess-C", tmp_path)
-        state = _State(ever_connected=True, warned_since_last_connected=True)
-        _write_state(path, state)
-        assert _read_state(path) == state
-
-
-class TestRunWiringAgainstRealFiles:
-    def test_never_connected_is_silent_and_writes_no_state(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        result = run({"session_id": "sess-D"})
-        assert result.stdout is None
-        assert not _state_path("sess-D", tmp_path).exists()
-
-    def test_live_marker_is_silent(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        publish_mcp_connect_marker("sess-E", tmp_path, ttl_seconds=3600)
-        # This test process's own pid is definitionally alive.
-        result = run({"session_id": "sess-E"})
-        assert result.stdout is None
-        state = _read_state(_state_path("sess-E", tmp_path))
-        assert state.ever_connected is True
-        assert state.warned_since_last_connected is False
-
-    def test_dead_pid_after_a_prior_live_marker_warns_once_then_silent(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        # First: a live marker, so ever_connected becomes True.
-        publish_mcp_connect_marker("sess-F", tmp_path, ttl_seconds=3600)
-        first = run({"session_id": "sess-F"})
-        assert first.stdout is None
-
-        # Now the process dies: overwrite the marker to name a dead pid,
-        # simulating a crashed nx-mcp that never got to clear its own
-        # marker (a clean shutdown would have removed the file entirely;
-        # this exercises the "marker present, pid dead" branch).
-        marker_path = tmp_path / "mcp_connect_marker.sess-F"
-        payload = json.dumps(
-            {"pid": _DEAD_PID, "published_at": time.time(), "expires_at": time.time() + 3600}
-        )
-        marker_path.write_text(payload)
-
-        second = run({"session_id": "sess-F"})
-        assert second.stdout == _DISCONNECT_MESSAGE
-
-        third = run({"session_id": "sess-F"})
-        assert third.stdout is None  # already warned this episode
-
-    def test_missing_marker_after_a_prior_live_one_warns(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        """A clean-ish shutdown that DID clear the marker (rather than
-        leaving a dead pid behind) must still be caught: 'missing' and
-        'dead pid' are the same episode from this detector's point of
-        view."""
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        publish_mcp_connect_marker("sess-G", tmp_path, ttl_seconds=3600)
-        first = run({"session_id": "sess-G"})
-        assert first.stdout is None
-
-        (tmp_path / "mcp_connect_marker.sess-G").unlink()
-
-        second = run({"session_id": "sess-G"})
-        assert second.stdout == _DISCONNECT_MESSAGE
-
-        third = run({"session_id": "sess-G"})
-        assert third.stdout is None
-
-    def test_reconnect_after_a_warned_episode_re_arms_the_warning(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        publish_mcp_connect_marker("sess-H", tmp_path, ttl_seconds=3600)
-        run({"session_id": "sess-H"})  # ever_connected=True
-
-        (tmp_path / "mcp_connect_marker.sess-H").unlink()
-        warned = run({"session_id": "sess-H"})
-        assert warned.stdout == _DISCONNECT_MESSAGE
-
-        # Reconnect: republish under this process's own (live) pid.
-        publish_mcp_connect_marker("sess-H", tmp_path, ttl_seconds=3600)
-        silent_again = run({"session_id": "sess-H"})
-        assert silent_again.stdout is None
-
-        # A SECOND disconnect must warn again, not stay silent forever.
-        (tmp_path / "mcp_connect_marker.sess-H").unlink()
-        warned_again = run({"session_id": "sess-H"})
-        assert warned_again.stdout == _DISCONNECT_MESSAGE
-
-    def test_missing_session_id_is_a_fast_noop(self, tmp_path: Path, monkeypatch) -> None:
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        for payload in ({}, None, {"session_id": ""}, {"session_id": 12345}):
-            result = run(payload)
-            assert result.stdout is None
-        assert list(tmp_path.iterdir()) == []
-
-    def test_this_process_pid_is_alive_sanity(self) -> None:
-        """Confirms the test's own premise: os.getpid() is a genuinely
-        live pid for the 'connected' cases above to rely on."""
-        assert pid_alive(os.getpid()) is True
-
-    def test_unallocated_pid_is_dead_sanity(self) -> None:
-        assert pid_alive(_DEAD_PID) is False
-
-
-class TestReconnectDoesNotReadAsDisconnect:
-    """nexus-qxyqz: the old ``nx-mcp``'s teardown, running after the new
-    one published its marker on a ``/mcp`` reconnect, must not make the
-    prompt hook report a live server as disconnected.
-    """
-
-    def test_old_teardown_after_new_publish_stays_silent(
-        self, tmp_path: Path, monkeypatch,
-    ) -> None:
-        from nexus.mcp.connect_marker import clear_mcp_connect_marker
-
-        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
-        sid = "sess-reconnect"
-        # The session was connected; the detector has seen it.
-        publish_mcp_connect_marker(sid, tmp_path)
-        assert run({"session_id": sid}).stdout is None
-        # /mcp reconnect: the NEW server (a live pid that is not this
-        # process) publishes over the marker ...
-        path = tmp_path / f"mcp_connect_marker.{sid}"
-        data = json.loads(path.read_text())
-        data["pid"] = os.getppid()
-        path.write_text(json.dumps(data))
-        # ... then the OLD server (this process) finishes tearing down.
-        clear_mcp_connect_marker(sid, tmp_path)
-        assert run({"session_id": sid}).stdout is None
-
-
-class TestRegisteredInTheRealVerbTable:
-    def test_mcp_connect_check_resolves_to_the_new_module(self) -> None:
+class TestSilentNoOp:
+    def test_registered_in_the_verb_table(self) -> None:
         assert entry.VERB_TABLE["mcp-connect-check"] == "nexus.hooks.mcp_connect_check"
+
+    def test_no_output_where_it_used_to_warn(self, tmp_path: Path, monkeypatch) -> None:
+        """A session that was connected and whose marker now names a dead pid
+        is exactly what the verb used to warn about."""
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        sid = "sess-was-connected"
+        (tmp_path / f"mcp_connect_marker.{sid}").write_text(json.dumps(
+            {"pid": 999_999_999, "published_at": 1.0, "expires_at": 2.0}
+        ))
+        (tmp_path / f"mcp_connect_check_state.{sid}").write_text(
+            json.dumps({"ever_connected": True, "warned_since_last_connected": False})
+        )
+        before = {p.name: p.read_text() for p in tmp_path.iterdir()}
+
+        result = run({"session_id": sid})
+
+        assert not result.stdout
+        assert result.exit_code == 0
+        assert {p.name: p.read_text() for p in tmp_path.iterdir()} == before, (
+            "the verb must neither create nor rewrite any state file"
+        )
+
+    def test_a_missing_or_empty_payload_is_fine(self) -> None:
+        assert not run(None).stdout
+        assert not run({}).stdout
+
+    def test_the_prompt_hook_no_longer_pays_for_the_mcp_package(self, tmp_path: Path) -> None:
+        """The per-prompt cost the verb carried: ``nexus.mcp`` (which eagerly
+        imports the whole MCP server) plus structlog, on every UserPromptSubmit."""
+        code = (
+            "import sys\n"
+            "from nexus.hooks.mcp_connect_check import run\n"
+            "run({'session_id': 'x'})\n"
+            "bad = [m for m in ('nexus.mcp', 'nexus.mcp.core', 'structlog') if m in sys.modules]\n"
+            "print(','.join(bad))\n"
+        )
+        env = {**os.environ, "NEXUS_CONFIG_DIR": str(tmp_path)}
+        out = subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env=env, check=True,
+        ).stdout.strip()
+        assert out == ""
+
+
+class TestNotRegisteredInThePlugin:
+    def test_hooks_json_has_no_mcp_connect_check_entry(self) -> None:
+        args = _walk_args(json.loads(HOOKS_JSON.read_text()))
+        assert "mcp-connect-check" not in args
+        # non-vacuity: the walker does see the other verb entries
+        assert "mcp-connect-wait" in args

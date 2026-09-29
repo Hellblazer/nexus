@@ -287,15 +287,10 @@ VERB_TABLE: dict[str, str] = {
     # ladder measured it doing 24/24 on macOS and 20/20 on WSL2 with no
     # barrier at all.
     "mcp-connect-wait": "nexus.hooks.mcp_connect_wait",
-    # The MID-SESSION half (bead nexus-veh77 round 5): mcp-connect-wait
-    # protects only SessionStart. UserPromptSubmit, sibling to
-    # mailbox-drain rather than folded into it (unrelated concern, no
-    # network, own cost/test budget -- see the module's own docstring):
-    # warns once per disconnect episode when this session's nx-mcp
-    # connect marker names a pid that pid_alive() (the ONE shared
-    # liveness implementation, nexus.daemon.service_registry) no longer
-    # finds alive, having previously been alive. A session that never
-    # connected stays silent -- that is mcp-connect-wait's own job.
+    # Registered, silent no-op (nexus-qxyqz): the mid-session "nx-mcp is not
+    # connected" warning it printed on UserPromptSubmit was deleted, but
+    # published plugins still name this verb in hooks.json and an unknown
+    # verb exits 2, which blocks a prompt on an old plugin. Never remove it.
     "mcp-connect-check": "nexus.hooks.mcp_connect_check",
     # The RDR-205 ledger's two PROJECTORS (bead nexus-egm7p), moved for the
     # SAME reason as the RDR-184 writers above: an mcp_tool hook's

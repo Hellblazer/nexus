@@ -999,9 +999,10 @@ _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES: tuple[str, ...] = (
     # start and stop nx-mcp during any run. Seen as a transient guard failure
     # on 2026-09-26 (nexus-4vsx8 fix round), gone on an immediate rerun.
     "mcp_connect_marker.",
-    # The SessionStart/UserPromptSubmit connect-check hook's warn-once state
-    # (hooks/mcp_connect_check.py _STATE_PREFIX), written by the same live
-    # sessions' hooks, never by a unit test (the suite isolates the config dir).
+    # The retired connect-check hook's warn-once state. This tree's verb no
+    # longer writes it (nexus-qxyqz), but a live session on an older conexus
+    # generation still does, and stale files from earlier ones stay on disk.
+    # Never written by a unit test (the suite isolates the config dir).
     "mcp_connect_check_state.",
     # SessionStart hook's session-id flat file -- the actual writer is
     # `nexus.session.write_claude_session_id()` (call-time-resolved via

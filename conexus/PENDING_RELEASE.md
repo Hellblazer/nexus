@@ -60,6 +60,7 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
   permission prompt in auto mode where a bare advisory would let the
   classifier approve silently. No plugin script calls it yet; the pre-close
   gate that uses it ships in the wheel (`nexus.hooks._routing_lib`).
+- nexus-qxyqz: `conexus/hooks/hooks.json` drops the `UserPromptSubmit` entry for `nx-hook mcp-connect-check`, the mid-session "nx-mcp is not connected" warning (it read a session-id-keyed marker that cannot be a reliable liveness signal, and cost 270-300 ms of imports per prompt). Safe against every CLI: the verb stays registered as a silent no-op for plugins that still name it.
 
 ## Deferred to the next client release
 
