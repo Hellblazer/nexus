@@ -1315,6 +1315,7 @@ nexus-6o0bc
 nexus-6o0bc.1
 nexus-6o4uj
 nexus-6or3m
+nexus-6pbwx
 nexus-6ppk
 nexus-6pq
 nexus-6qhpn

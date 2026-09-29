@@ -2084,34 +2084,33 @@ class CatalogRepositoryTest {
              Connection curatorTx = pg.createConnection("")) {
             repoTx.setAutoCommit(false);
             curatorTx.setAutoCommit(true);
-            try (var st = repoTx.prepareStatement(
-                "UPDATE nexus.catalog_collections SET owner_id = '1-23' WHERE tenant_id = ? AND name = ?")) {
-                st.setString(1, tenant);
-                st.setString(2, name);
-                assertThat(st.executeUpdate()).isEqualTo(1);
-            }
+            assertThat(DSL.using(repoTx, SQLDialect.POSTGRES)
+                .update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.OWNER_ID, "1-23")
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(name))
+                .execute()).isEqualTo(1);
             var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
             try {
-                var curatorWrite = pool.submit(() -> {
-                    try (var st = curatorTx.prepareStatement(
-                        "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection) "
-                        + "VALUES (?, '1.22.1', 'curator doc', ?)")) {
-                        st.setString(1, tenant);
-                        st.setString(2, name);
-                        return st.executeUpdate();
-                    }
-                });
+                var docs = dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+                var curatorWrite = pool.submit(() ->
+                    DSL.using(curatorTx, SQLDialect.POSTGRES)
+                        .insertInto(docs, docs.TENANT_ID, docs.TUMBLER, docs.TITLE, docs.PHYSICAL_COLLECTION)
+                        .values(tenant, "1.22.1", "curator doc", name)
+                        .execute());
                 // Wait until the curator's trigger is really parked on the repo transaction's row lock.
                 long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
                 boolean blocked = false;
+                var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
                 try (Connection probe = pg.createConnection("")) {
+                    var probeCtx = DSL.using(probe, SQLDialect.POSTGRES);
                     while (System.nanoTime() < deadline && !blocked) {
-                        try (var rs = probe.createStatement().executeQuery(
-                            "SELECT count(*) FROM pg_stat_activity WHERE wait_event_type = 'Lock' "
-                            + "AND datname = current_database() AND pid <> pg_backend_pid()")) {
-                            rs.next();
-                            blocked = rs.getInt(1) > 0;
-                        }
+                        blocked = probeCtx.fetchCount(activity,
+                            DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")
+                                .and(DSL.field(DSL.name("datname"), String.class)
+                                    .eq(DSL.function("current_database", String.class)))
+                                .and(DSL.field(DSL.name("pid"), Integer.class)
+                                    .ne(DSL.function("pg_backend_pid", Integer.class)))) > 0;
                         if (!blocked) Thread.sleep(50);
                     }
                 }

@@ -10,12 +10,17 @@ import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
 import liquibase.resource.ClassLoaderResourceAccessor;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
 import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_OWNERS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -159,56 +164,48 @@ class Catalog044OwnerFromDocumentsRepairTest {
     }
 
     private static void insertCollection(Connection c, String tenant, String name, String contentType,
-                                          String ownerId) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_collections (tenant_id, name, content_type, owner_id, "
-            + "embedding_model, model_version, lifecycle_state) VALUES (?, ?, ?, ?, ?, 'v1', ?)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, name);
-            ps.setString(3, contentType);
-            ps.setString(4, ownerId);
-            ps.setString(5, contentType.contains("code") ? "voyage-code-3" : "voyage-context-3");
-            ps.setString(6, contentType.startsWith("quarantine") ? "quarantine" : "live");
-            ps.executeUpdate();
-        }
+                                          String ownerId) {
+        DSL.using(c, SQLDialect.POSTGRES)
+            .insertInto(CATALOG_COLLECTIONS,
+                CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.CONTENT_TYPE,
+                CATALOG_COLLECTIONS.OWNER_ID, CATALOG_COLLECTIONS.EMBEDDING_MODEL,
+                CATALOG_COLLECTIONS.MODEL_VERSION, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+            .values(tenant, name, contentType, ownerId,
+                contentType.contains("code") ? "voyage-code-3" : "voyage-context-3", "v1",
+                contentType.startsWith("quarantine") ? "quarantine" : "live")
+            .execute();
     }
 
     private static void insertOwner(Connection c, String tenant, String prefix, String name,
-                                     String ownerType) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root, next_seq) "
-            + "VALUES (?, ?, ?, ?, '', 0)")) {
-            ps.setString(1, tenant);
-            ps.setString(2, prefix);
-            ps.setString(3, name);
-            ps.setString(4, ownerType);
-            ps.executeUpdate();
-        }
+                                     String ownerType) {
+        DSL.using(c, SQLDialect.POSTGRES)
+            .insertInto(CATALOG_OWNERS,
+                CATALOG_OWNERS.TENANT_ID, CATALOG_OWNERS.TUMBLER_PREFIX, CATALOG_OWNERS.NAME,
+                CATALOG_OWNERS.OWNER_TYPE, CATALOG_OWNERS.REPO_ROOT, CATALOG_OWNERS.NEXT_SEQ)
+            .values(tenant, prefix, name, ownerType, "", 0L)
+            .execute();
     }
 
     private static void insertDocument(Connection c, String tenant, String tumbler, String collection,
-                                        boolean tombstoned) throws Exception {
-        try (var ps = c.prepareStatement(
-            "INSERT INTO nexus.catalog_documents (tenant_id, tumbler, title, physical_collection, deleted_at) "
-            + "VALUES (?, ?, ?, ?, " + (tombstoned ? "now()" : "NULL") + ")")) {
-            ps.setString(1, tenant);
-            ps.setString(2, tumbler);
-            ps.setString(3, "doc " + tumbler);
-            ps.setString(4, collection);
-            ps.executeUpdate();
-        }
+                                        boolean tombstoned) {
+        DSL.using(c, SQLDialect.POSTGRES)
+            .insertInto(CATALOG_DOCUMENTS,
+                CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
+                CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.DELETED_AT)
+            .values(tenant, tumbler, "doc " + tumbler, collection,
+                tombstoned ? java.time.OffsetDateTime.now() : null)
+            .execute();
     }
 
-    private static String ownerOf(Connection c, String tenant, String name) throws Exception {
-        try (var ps = c.prepareStatement(
-            "SELECT owner_id FROM nexus.catalog_collections WHERE tenant_id = ? AND name = ?")) {
-            ps.setString(1, tenant);
-            ps.setString(2, name);
-            try (var rs = ps.executeQuery()) {
-                assertThat(rs.next()).as("row %s must exist for tenant %s", name, tenant).isTrue();
-                return rs.getString(1);
-            }
-        }
+    private static String ownerOf(Connection c, String tenant, String name) {
+        String owner = DSL.using(c, SQLDialect.POSTGRES)
+            .select(CATALOG_COLLECTIONS.OWNER_ID)
+            .from(CATALOG_COLLECTIONS)
+            .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+            .and(CATALOG_COLLECTIONS.NAME.eq(name))
+            .fetchOne(CATALOG_COLLECTIONS.OWNER_ID);
+        assertThat(owner).as("row %s must exist for tenant %s", name, tenant).isNotNull();
+        return owner;
     }
 
     private static void applyRemainingChangelog(com.zaxxer.hikari.HikariDataSource adminDs) throws Exception {

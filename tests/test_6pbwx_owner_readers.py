@@ -35,8 +35,8 @@ def _sibling_names(monkeypatch, name: str, others: list[str], row_owner: str) ->
 def test_a_repaired_slug_collection_no_longer_matches_its_slug_siblings(monkeypatch) -> None:
     """The behaviour the docstring records. If this starts failing because the matcher
     learned the name's segment too, update the docstring and drop the caller pin below."""
-    slug = "code__arcaneum-2ad2825c__voyage-code-3__v1"
-    sibling = "docs__arcaneum-2ad2825c__voyage-context-3__v1"
+    slug = "code__arcaneum-2ad2825c__bge-base-en-v15-768__v1"
+    sibling = "docs__arcaneum-2ad2825c__bge-base-en-v15-768__v1"
     assert _sibling_names(monkeypatch, slug, [sibling], row_owner="arcaneum-2ad2825c") == [sibling]
     assert _sibling_names(monkeypatch, slug, [sibling], row_owner="1-15") == []
 
