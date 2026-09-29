@@ -6,6 +6,21 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [7.66.0] - 2026-09-29
+
+Pairs with engine-service-v0.1.140. The engine carries the halves of three client changes below (collection rename, rename tombstones, the chash-positions route). None has a changeset and all three are additive, so the engine deploys before this client tag. An older engine leaves the client on its previous behaviour: rename keeps the old owner, tombstones are filtered on the client only, and search uses the manifest path. engine-service-v0.1.139 was tagged and never published. Its macOS binary was linked for macOS 27 and the release's ABI check refused it.
+
+### Fixed
+
+- **A renamed collection takes its new name's owner, and its notes follow it** (nexus-sis0m.3, engine half). `nx collection rename A B` kept A's owner on B, so a renamed knowledge collection stayed filed under the old subject. Every note's source URI still read `chroma://A/<title>`, so putting that title into B again missed the note's own document and made a second one. The client now sends the owner and content type it derives from the new name, and the engine rewrites the renamed collection's `chroma://A/` URIs in the same transaction. The rewrite and its collision check touch only the rows that moved. A collision is refused with 409, naming the colliding document, before anything changes. Owner-root lookup no longer compares a hyphenated owner id against dotted tumblers, which had left every collection's repo root empty. The client half of this fix shipped in 7.65.0.
+- **A retired collection name is never searched** (nexus-4w07i). After a rename, the old name's catalog row stays behind as a tombstone that points at the new name but still reads as live. A write to the old name still succeeds, so a stale writer could put chunks there, and search then routed to them. The engine now drops tombstones from both live listings, `/v1/vectors/stats` and `/v1/catalog/collections/list`, and marks them `superseded_by` on the stats row. The client rejects any row naming a successor, so it is also safe against an older engine.
+- **The background-agent ledger logs every projection outcome under its own name** (nexus-uzntx). Every hook projection logged `tuple_projection_ok` whether it wrote, dropped an orphan, ignored an incomplete payload, or skipped for lack of a data-token lease. Each now logs as itself. `nx hook routing-stats` on a box without Claude Code no longer warns that the marketplace is unreachable.
+
+### Changed
+
+- **Search attaches document ids from the hits, not from whole manifests** (nexus-opxwd). To stamp a hit's document id, chunk count and position, search fetched every referencing document's full manifest. It now asks the engine's new `POST /v1/catalog/manifest/chash_positions` for exactly those rows, and falls back to the manifest path for anything the route cannot answer. On a cloud A/B against engine-service-v0.1.140, the attach step took 0.24 to 0.34 s through the route and 2.1 to 2.7 s on the manifest fallback, with identical result ids. Against an older engine the route answers 404, and the client remembers that for 600 s and uses the manifest path. A route that answers with an error or a malformed page backs off for 60 s.
+- **The macOS engine binary targets macOS 14 in source** (nexus-280ei). The release's mac-arm64 build moved to a macOS 27 runner, and the binary's minimum OS came from the build host, so it would have required macOS 27. The Maven native-libs-mac profile now links with `-mmacosx-version-min=14.0`, and engine-service-v0.1.140's mac binary reads minos 14.0.
+
 ## [7.65.0] - 2026-09-28
 
 Pairs with engine-service-v0.1.138, whose only change is that `GET /v1/memory/list` takes a `limit` (nexus-xn9ut). The change is additive and needs no schema change, so the engine deploys before this client tag. An older engine ignores the parameter and the client trims the result itself, so the output is the same either way.
