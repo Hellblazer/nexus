@@ -2849,7 +2849,7 @@ def _search_render(
                     lines.append("")  # blank separator between clusters
                 lines.append(f"── {cluster_label} ──")
                 current_cluster = cluster_label
-            title = r.metadata.get("title", "")
+            title = r.metadata.get("_display_title") or r.metadata.get("title", "")
             # nexus-1qed: prefer the catalog-resolved _display_path so
             # the label survives after the prune verb drops source_path.
             source = (
@@ -4803,7 +4803,7 @@ def query(
             )
             if doc_key not in docs:
                 docs[doc_key] = {
-                    "title": meta.get("title") or doc_key[:40],
+                    "title": meta.get("_display_title") or meta.get("title") or doc_key[:40],
                     "collection": r.collection,
                     "distance": r.distance,
                     # tracks the "best chunk"/doc-order key —
@@ -5531,6 +5531,19 @@ def store_get(
             where = col_name if len(scope) == 1 else f"any of {len(scope)} knowledge collections"
             return f"Not found: {doc_id!r} in {where} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"
         title = entry.get("title", "")
+        # nexus-sis0m.5: the chunk row's title is its last writer's, which
+        # names the wrong note when two share this text and a deleted one
+        # after its writer is removed. Asked by title, show that title;
+        # asked by id, name the live documents holding the chunk.
+        if not looks_like_hash:
+            title = doc_id
+        else:
+            from nexus.catalog.store_hook import live_holders_of_chashes  # noqa: PLC0415 — deferred for startup cost, as in store_put
+            from nexus.search_engine import owner_titles  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
+
+            holders = live_holders_of_chashes(col_name, [entry["id"]]).get(entry["id"], [])
+            if holders:
+                title = owner_titles([t for _tb, t in holders]) or title
         tags = entry.get("tags", "")
         indexed_at = (entry.get("indexed_at") or "")[:10]
         # nexus-1oguj: extraction_method IS in ALLOWED_TOP_LEVEL for PDF

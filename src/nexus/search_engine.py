@@ -135,7 +135,9 @@ def _attach_from_chash_positions(
                 return False  # a legacy doc_id the route did not return: manifest path
             continue  # no manifest row anywhere, same as the manifest path
         plan.append((r, chash, match))
-    for r, _chash, match in plan:
+    for r, chash, match in plan:
+        # nexus-sis0m.5: every document holding the chash, for the title.
+        r.metadata["_owner_doc_ids"] = list(dict.fromkeys(c["doc_id"] for c in by_chash[chash]))
         if not r.metadata.get("doc_id"):
             r.metadata["doc_id"] = match["doc_id"]
         r.metadata.setdefault("chunk_count", int(match.get("chunk_count") or 0))
@@ -210,10 +212,13 @@ def _attach_doc_ids_from_catalog(
         # pre-Phase-3 chunk that still has the field), preserve it.
         # The manifest lookup is the FALLBACK for chunks where the
         # field is absent, not an override.
+        docs = chash_to_docs.get(chash, [])
+        if docs:
+            # nexus-sis0m.5: every document holding the chash, for the title.
+            r.metadata["_owner_doc_ids"] = list(dict.fromkeys(docs))
         if r.metadata.get("doc_id"):
             resolved_doc_ids[chash] = r.metadata["doc_id"]
             continue
-        docs = chash_to_docs.get(chash, [])
         if docs:
             # Multiple docs sharing the same chash is uncommon but
             # possible (content-identical files across docs). Pick
@@ -324,12 +329,14 @@ def _attach_display_paths(
         r.metadata.get("doc_id", "") for r in results
         if r.metadata.get("doc_id")
     }
+    doc_ids |= {o for r in results for o in r.metadata.get("_owner_doc_ids", ())}
     if not doc_ids:
         return
     # Batch-resolve all doc_ids in one call when the catalog backend
     # supports resolve_many() (nexus-7lm3q).  Falls back to the per-doc
     # by_doc_id() loop for older/local catalogs that lack the method.
     cache: dict[str, str] = {}
+    titles: dict[str, str] = {}  # live documents only (resolve skips tombstones)
     _resolve_many = getattr(catalog, "resolve_many", None)
     if _resolve_many is not None:
         try:
@@ -337,6 +344,8 @@ def _attach_display_paths(
             for did, entry in (batch or {}).items():
                 if entry is not None and entry.file_path:
                     cache[did] = entry.file_path
+                if entry is not None:
+                    titles[did] = entry.title or ""
         except Exception:  # noqa: BLE001 — best-effort batch resolve; failure logged at debug, display path dropped for set (see comment)
             _log.debug("attach_display_paths_batch_failed", exc_info=True)
             # Degradation granularity (CR Med-1 / critic obs): a single
@@ -353,13 +362,32 @@ def _attach_display_paths(
                 continue
             if entry is not None and entry.file_path:
                 cache[did] = entry.file_path
-    if not cache:
-        return
+            if entry is not None:
+                titles[did] = entry.title or ""
     for r in results:
         did = r.metadata.get("doc_id", "")
         path = cache.get(did) if did else None
         if path:
             r.metadata["_display_path"] = path
+        owners = r.metadata.get("_owner_doc_ids") or ([did] if did else [])
+        live = [titles[o] for o in owners if titles.get(o)]
+        if live:
+            r.metadata["_display_title"] = owner_titles(live)
+
+
+def owner_titles(titles: list[str], *, limit: int = 3) -> str:
+    """The title a hit displays for the documents holding its chunk
+    (nexus-sis0m.5).
+
+    A chunk row carries its last writer's title, which names the wrong
+    document when two share identical text, and a deleted one once that
+    writer is removed. The catalog's live owners are named instead: the one
+    title, or several joined, past *limit* with a count.
+    """
+    distinct = sorted(dict.fromkeys(t for t in titles if t))
+    if len(distinct) <= limit:
+        return " · ".join(distinct)
+    return " · ".join(distinct[:limit]) + f" (+{len(distinct) - limit} more)"
 
 
 # Maximum ID-set size for ChromaDB $in filter — cap to avoid payload bloat.

@@ -79,7 +79,14 @@ def _display_path_or_title(meta: dict, result_id: str) -> str:
     structurally valid (a real, non-empty first field) while still
     surfacing the ONLY identity the result actually carries.
     """
-    return _colon_safe(str(_display_path(meta) or meta.get("title") or result_id))
+    return _colon_safe(str(_display_path(meta) or display_title(meta) or result_id))
+
+
+def display_title(meta: dict) -> str:
+    """The catalog's title for a hit's document(s) when the search attached
+    one (``_display_title``, nexus-sis0m.5), else the chunk row's own title,
+    which is only its last writer's."""
+    return meta.get("_display_title") or meta.get("title") or ""
 
 
 def _find_matching_lines(chunk_text: str, query: str) -> list[int]:
@@ -453,7 +460,7 @@ def format_plain(results: list[SearchResult]) -> list[str]:
     for r in results:
         source_path = _display_path(r.metadata)
         if not source_path:
-            title = r.metadata.get("title") or r.id
+            title = display_title(r.metadata) or r.id
             snippet = r.content.splitlines()[0] if r.content else ""
             lines.append(f"[{r.distance:.4f}] {title}")
             if snippet:
