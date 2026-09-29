@@ -160,9 +160,8 @@ so the row is written either way, never dropped.
 
 Every failure path -- unresolvable endpoint, no fresh data-token lease,
 transport failure, a non-2xx response -- appends one line to the per-session
-log file and returns normally (never raises). :func:`project` is called
-from a daemon thread (:mod:`nexus.hooks.tuple_projection`); its own return
-value carries no signal, and the log file is the only diagnostic surface.
+log file and returns normally (never raises). :func:`project` returns the
+outcome (:data:`POSTED` ... :data:`FAILED`); the log file carries the reason.
 """
 from __future__ import annotations
 
@@ -178,7 +177,18 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-__all__ = ["DROPPED_ORPHAN", "IGNORED", "POSTED", "SKIPPED", "project"]
+from nexus._hook_runtime._io import _emit
+
+__all__ = [
+    "DROPPED_ORPHAN",
+    "FAILED",
+    "IGNORED",
+    "POSTED",
+    "SKIPPED",
+    "log_command_tier_outcome",
+    "outcome_event",
+    "project",
+]
 
 #: Bound on a single POST round trip -- research 5 measured ~10ms for a
 #: healthy engine; this is a ceiling for a degraded/rate-limiting one, not
@@ -791,13 +801,58 @@ def _post_via_urllib(
 #: projection that did not happen as ok (nexus-uzntx follow-up; critique of
 #: 9601b5df6). POSTED: the tuple was written. DROPPED_ORPHAN: a
 #: harness-internal stop, dropped by design. IGNORED: nothing this ledger
-#: tracks (an unknown kind, a stop with no agent_id). SKIPPED: a projection
-#: that should have been written and was not; the reason is in the
-#: per-session log.
+#: tracks (an unknown kind, a stop with no agent_id). SKIPPED: no endpoint or
+#: no usable credential resolved, which is the normal state of a box with no
+#: data-token lease and never a fault. FAILED: a projection that should have
+#: been written and was not because something went wrong (a refused or
+#: unreachable POST, a schema fallback that also failed, an incomplete or
+#: oversized payload, a crash) (nexus-8he82). The reason for SKIPPED and
+#: FAILED is in the per-session log.
 POSTED: str = "posted"
 DROPPED_ORPHAN: str = "dropped_orphan"
 IGNORED: str = "ignored"
 SKIPPED: str = "skipped"
+FAILED: str = "failed"
+
+#: outcome -> (log level, event). SKIPPED stays at info: a box with no
+#: data-token lease skips every projection by design, and the fresh-install
+#: MVV fails on an unexpected warning. FAILED is the one warning. The event
+#: is ``tuple_projection_write_failed``, not ``tuple_projection_failed``,
+#: which the mcp_tool path already uses for an exception in its own thread.
+_OUTCOME_EVENTS: dict[str, tuple[str, str]] = {
+    POSTED: ("info", "tuple_projection_ok"),
+    DROPPED_ORPHAN: ("info", "tuple_projection_dropped_orphan"),
+    IGNORED: ("info", "tuple_projection_ignored"),
+    SKIPPED: ("info", "tuple_projection_skipped"),
+    FAILED: ("warning", "tuple_projection_write_failed"),
+}
+
+
+def outcome_event(outcome: object) -> tuple[str, str]:
+    """``(level, event)`` for a :func:`project` outcome. An unrecognised value
+    maps to the ok event, the behaviour before outcomes existed."""
+    return _OUTCOME_EVENTS.get(outcome, _OUTCOME_EVENTS[POSTED])  # type: ignore[call-overload]
+
+
+#: Outcomes the command tier does not log. Both are decided before any file
+#: or network work and are ~95% of SubagentStop events (nexus-zfxo3); logging
+#: them would pay a log write per harness-internal stop for a line that holds
+#: nothing to diagnose.
+_UNLOGGED_ON_COMMAND_TIER = frozenset({DROPPED_ORPHAN, IGNORED})
+
+
+def log_command_tier_outcome(verb: str, outcome: object) -> None:
+    """Log a :func:`project` outcome from a command-tier verb (nexus-8he82).
+
+    ``hooks.json`` wires SubagentStart/SubagentStop to the command-tier verbs,
+    which used to discard the return, so a live dispatch logged no
+    ``tuple_projection_*`` event at all. Never raises and never writes stdout
+    (:func:`~nexus._hook_runtime._io._emit`'s contract).
+    """
+    if outcome in _UNLOGGED_ON_COMMAND_TIER:
+        return
+    level, event = outcome_event(outcome)
+    _emit(level, event, verb=verb)
 
 
 def _transcript_exists(transcript_path: str) -> bool:
@@ -858,7 +913,7 @@ def project(kind: str, payload: dict[str, Any] | None) -> str:
     )
     if not all(required_fields):
         _log_skip(session_id, f"SKIP kind={kind} incomplete payload fields")
-        return SKIPPED
+        return FAILED
 
     from nexus.db.t2.http_tuple_store import (  # noqa: PLC0415 — deferred to avoid a heavy import on every call
         _MAX_FIELD_VALUE_BYTES,
@@ -877,7 +932,7 @@ def project(kind: str, payload: dict[str, Any] | None) -> str:
     )
     if size_reason is not None:
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} oversized: {size_reason}")
-        return SKIPPED
+        return FAILED
 
     # Checkable-report dims (bead nexus-cnzei.6 item 2). Only kind=="report"
     # has a VERIFY-bearing hand-back to parse.
@@ -893,8 +948,20 @@ def project(kind: str, payload: dict[str, Any] | None) -> str:
     from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred, same reason as above
 
     config_dir = nexus_config_dir()
+    # Resolution and POST fail differently (nexus-8he82). A _Skip out of
+    # resolution is a box with no endpoint or no usable lease -- the normal
+    # state of a fresh install, SKIPPED. A _Skip out of the POST is an engine
+    # that was reachable in principle and refused or dropped the write --
+    # FAILED, so a caller can log it as the fault it is.
     try:
         base_url, token, is_local_supervisor = _resolve_endpoint_and_token(config_dir)
+    except _Skip as exc:
+        _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} {exc}")
+        return SKIPPED
+    except Exception as exc:  # noqa: BLE001 — best-effort projection must never propagate
+        _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} unexpected: {exc}")
+        return FAILED
+    try:
         body = {
             "subspace": subspace,
             "keys": {"agent_id": agent_id, "kind": kind},
@@ -922,8 +989,8 @@ def project(kind: str, payload: dict[str, Any] | None) -> str:
             _post_via_urllib(base_url, token, fallback_body, is_local_supervisor=is_local_supervisor)
     except _Skip as exc:
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} {exc}")
-        return SKIPPED
+        return FAILED
     except Exception as exc:  # noqa: BLE001 — best-effort projection must never propagate
         _log_skip(session_id, f"SKIP kind={kind} agent_id={agent_id} unexpected: {exc}")
-        return SKIPPED
+        return FAILED
     return POSTED

@@ -83,5 +83,6 @@ def run(payload: dict | None) -> HookResult:
     extraction. Always returns a silent, exit-0 result; see
     :mod:`nexus.hooks.subagent_start_tuple` for why.
     """
-    tuple_ledger_project.project("report", payload)
+    outcome = tuple_ledger_project.project("report", payload)
+    tuple_ledger_project.log_command_tier_outcome("report", outcome)
     return HookResult()
