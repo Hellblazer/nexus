@@ -172,8 +172,8 @@ models = body.get("embedding_models")
 if not (isinstance(models, list) and models):
     errs.append(
         f"embedding_models missing/empty through the edge (got {models!r}) — "
-        "nx init and nx service report no embedding models for this "
-        "service (nexus.db.managed_endpoint capabilities)"
+        "`nx service probe` and `nx init` list no embedding models "
+        "for this service (nexus.db.managed_endpoint capabilities)"
     )
 # RDR-196 .p1c (nexus-nyry9.9): nx_answer_steps_supported is a compile-time-
 # constant true on any engine build carrying the handler, unconditionally
