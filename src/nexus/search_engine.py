@@ -352,8 +352,8 @@ def _attach_display_paths(
                 if entry is not None and entry.file_path:
                     cache[did] = entry.file_path
                 if entry is not None:
-                    titles[did] = entry.title or ""
-                    homes[did] = entry.physical_collection or ""
+                    titles[did] = getattr(entry, "title", "") or ""
+                    homes[did] = getattr(entry, "physical_collection", "") or ""
         except Exception:  # noqa: BLE001 — best-effort batch resolve; failure logged at debug, display path dropped for set (see comment)
             _log.debug("attach_display_paths_batch_failed", exc_info=True)
             # Degradation granularity (CR Med-1 / critic obs): a single
@@ -371,8 +371,8 @@ def _attach_display_paths(
             if entry is not None and entry.file_path:
                 cache[did] = entry.file_path
             if entry is not None:
-                titles[did] = entry.title or ""
-                homes[did] = entry.physical_collection or ""
+                titles[did] = getattr(entry, "title", "") or ""
+                homes[did] = getattr(entry, "physical_collection", "") or ""
     for r in results:
         did = r.metadata.get("doc_id", "")
         path = cache.get(did) if did else None

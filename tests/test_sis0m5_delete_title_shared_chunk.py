@@ -255,3 +255,25 @@ def test_a_ghost_is_reaped_when_its_twin_wrote_the_chunk_last(t2_service_env):
     assert f"Deleted document 'sis0m5 early ghost' ({ghost})" in result.output, result.output
     assert reader.by_source_uri(ub) is not None
     assert _live(client, col, chash)
+
+
+def test_the_kept_chunk_message_names_only_this_collections_holders(t2_service_env):
+    """chash owner lookups are tenant-wide; a copy of the same text in
+    another collection neither protects this chunk nor belongs in the
+    "still held by" line."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    col, other = _coll("holders-home"), _coll("holders-other")
+    body = "sis0m5 body in two collections"
+    _note(writer, client, owner, col, "sis0m5 home gone", body)
+    _tk, _uk, chash = _note(writer, client, owner, col, "sis0m5 home kept", body)
+    t_other, _uo, _co = _note(writer, client, owner, other, "sis0m5 elsewhere", body)
+
+    with patch("nexus.commands.store._t3", return_value=client):
+        result = CliRunner().invoke(main, ["store", "delete", "-c", col, "--title", "sis0m5 home gone", "-y"])
+
+    assert result.exit_code == 0, result.output
+    assert "sis0m5 home kept" in result.output, result.output
+    assert "sis0m5 elsewhere" not in result.output and t_other not in result.output, result.output
+    assert _live(client, col, chash)

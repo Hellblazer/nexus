@@ -2423,7 +2423,11 @@ def catalog_chashes_for_title(collection: str, title: str) -> list[list[str]]:
 
     A chunk row's title is its last writer's, so a title lookup against T3
     misses a note whose text another note wrote later; the catalog keeps
-    each document's own title. ``[]`` when the catalog is unavailable.
+    each document's own title. Uses the catalog's exact title lookup, so
+    the cost follows how many documents carry the title, not the
+    collection's size. A ghost qualifies only when the caller can load its
+    chunk from *collection* (``store_get`` reads it with ``get_by_id``).
+    ``[]`` when the catalog is unavailable.
     """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -2432,7 +2436,7 @@ def catalog_chashes_for_title(collection: str, title: str) -> list[list[str]]:
         return []
     try:
         docs = []
-        for e in reader.list_by_collection(collection) or []:
+        for e in reader.find_by_title_exact(title, content_type="knowledge") or []:
             if not _is_title_reap_candidate(e, title, collection):
                 continue
             rows = sorted(reader.get_manifest(str(e.tumbler)), key=lambda r: r.position)
