@@ -2045,9 +2045,12 @@ def _no_leaked_engine_db_env():
         pytest.fail(
             "test left engine DB env changed in os.environ (restored now): "
             f"{sorted(leaked)}. An engine spawned later inherits these; set "
-            "them with monkeypatch, or monkeypatch.setenv(key, '') before code "
-            "that writes os.environ directly (delenv(key, raising=False) records "
-            "no undo when the key is absent, so it does not protect).",
+            "them with monkeypatch, or before code that writes os.environ "
+            "directly call monkeypatch.setenv(key, 'x') then "
+            "monkeypatch.delenv(key): that records the undo and leaves the key "
+            "absent (delenv(key, raising=False) records no undo when the key "
+            "starts absent; setenv(key, '') is not absent to the engine, which "
+            "treats an empty NX_DB_ADMIN_* as set).",
             pytrace=False,
         )
 
@@ -2068,13 +2071,10 @@ def _restore_pg_bin_env():
     (nexus-4h20a). Restored rather than failed, because the write is the
     behaviour under test.
     """
-    before = os.environ.get("NEXUS_PG_BIN")
-    yield
-    if os.environ.get("NEXUS_PG_BIN") != before:
-        if before is None:
-            os.environ.pop("NEXUS_PG_BIN", None)
-        else:
-            os.environ["NEXUS_PG_BIN"] = before
+    from tests._env_restore import restore_env_after  # noqa: PLC0415 — conftest-local helper
+
+    with restore_env_after("NEXUS_PG_BIN"):
+        yield
 
 
 @pytest.fixture(autouse=True)
