@@ -1637,47 +1637,74 @@ class CatalogRepositoryTest {
      * the owner segment it parses out of the NAME (a slug such as
      * {@code dbgslug-2ad2825c}, not an owner). That is name-derived, the class
      * RDR-204 forbids the engine to trust, and it used to overwrite an owner a
-     * caller had registered on purpose. Measured on the engine substrate: register
-     * with owner '1.1', write a chunk, read back the slug.
+     * caller had registered on purpose. The column holds the hyphenated owner
+     * segment ({@code 1-1}, what owner_segment_for_tumbler gives), never the dotted
+     * tumbler.
      */
     @Test @Order(60)
     void collection_upsert_onConflict_keepsRegisteredOwnerId() {
         String name = "code__dbgslug-2ad2825c__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
-            "name", name, "content_type", "code", "owner_id", "1.1",
+            "name", name, "content_type", "code", "owner_id", "1-1",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         // What ensure_collection_registered sends on a cache miss: the name's owner segment.
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code", "owner_id", "dbgslug-2ad2825c",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
-            .as("a re-registration never replaces a registered owner_id").isEqualTo("1.1");
+            .as("a re-registration never replaces a registered owner_id").isEqualTo("1-1");
     }
 
     /**
-     * nexus-7tys2: the one row whose owner_id is known garbage still takes the
-     * incoming value. hygiene-002-1 stamps a row it cannot classify 'disputed' with
-     * the tenant id as its owner; a re-registration used to repair that, and
+     * nexus-7tys2: the one owner_id that is known garbage still takes the incoming
+     * value. hygiene-002-1 branch D stamps a row it cannot classify with the tenant
+     * id as its owner (and 'disputed'); a re-registration used to repair that, and
      * pinning owner_id for every row would have stopped it.
      */
     @Test @Order(60)
-    void collection_upsert_onConflict_disputedRowTakesIncomingOwnerId() throws Exception {
+    void collection_upsert_onConflict_placeholderOwnerTakesIncomingOwnerId() throws Exception {
         String name = "code__disputed-own__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code", "owner_id", TENANT_A,
             "embedding_model", "voyage-code-3", "model_version", "v1"));
+        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
+            .as("guard: the row holds the tenant-id placeholder").isEqualTo(TENANT_A);
+        markDisputed(name);
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "disputed-own",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
+            .as("a placeholder owner is repaired by a re-registration")
+            .isEqualTo("disputed-own");
+    }
+
+    /**
+     * nexus-7tys2: 'disputed' alone is not the exception. hygiene-002-1 branches A
+     * and C mark rows 'disputed' while they hold a real name segment, and the state
+     * never clears, so keying the repair on it would leave those rows
+     * last-writer-wins.
+     */
+    @Test @Order(60)
+    void collection_upsert_onConflict_disputedRowWithRealOwnerKeepsIt() throws Exception {
+        String name = "code__disputed-real__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "1-1",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        markDisputed(name);
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "disputed-real",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
+            .as("a disputed row that holds a real owner keeps it").isEqualTo("1-1");
+    }
+
+    private void markDisputed(String name) throws Exception {
         try (Connection su = pg.createConnection("");
              var st = su.prepareStatement(
                  "UPDATE nexus.catalog_collections SET lifecycle_state='disputed' WHERE name=?")) {
             st.setString(1, name);
             assertThat(st.executeUpdate()).as("guard: the row was marked disputed").isEqualTo(1);
         }
-        repo.upsertCollection(TENANT_A, Map.of(
-            "name", name, "content_type", "code", "owner_id", "disputed-own",
-            "embedding_model", "voyage-code-3", "model_version", "v1"));
-        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
-            .as("a disputed row's placeholder owner is repaired by a re-registration")
-            .isEqualTo("disputed-own");
     }
 
     /**

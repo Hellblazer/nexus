@@ -7248,7 +7248,8 @@ public final class CatalogRepository {
      * <p>An existing row's {@code owner_id} is kept too (nexus-7tys2): the client
      * sends the owner segment of the collection's NAME on every first write in a
      * process, and letting that replace an owner somebody registered turned a
-     * real owner into a slug. Only a {@code disputed} row takes the incoming value.
+     * real owner into a slug. Only a row whose {@code owner_id} is its own tenant id
+     * (the placeholder hygiene-002-1 branch D stamps) takes the incoming value.
      *
      * <p>A NEW row's {@code lifecycle_state} is {@code quarantine} when
      * either the request's {@code content_type} or {@code name} starts with
@@ -7283,7 +7284,7 @@ public final class CatalogRepository {
                     "registering collection '" + name + "' requires content_type; none was supplied");
             }
 
-            var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+            var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.OWNER_ID)
                     .from(CATALOG_COLLECTIONS)
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
                     .and(CATALOG_COLLECTIONS.NAME.eq(name))
@@ -7295,6 +7296,15 @@ public final class CatalogRepository {
 
             if (existingRow != null) {
                 String existingModel = existingRow.value1();
+                // nexus-7tys2: the SET arm below keeps this owner_id; say so when the
+                // caller sent a different one (a name-derived segment, in practice).
+                String existingOwner = existingRow.value2();
+                String incomingOwner = s(coll, "owner_id");
+                if (existingOwner != null && !existingOwner.isEmpty()
+                        && !existingOwner.equals(tenant) && !existingOwner.equals(incomingOwner)) {
+                    log.debug("event=collection_upsert_owner_kept tenant={} name={} kept={} ignored={}",
+                              tenant, name, existingOwner, incomingOwner);
+                }
                 if (requestedModel != null && !requestedModel.isBlank()
                         && !requestedModel.equals(existingModel)) {
                     throw new EmbeddingProfileConflictException(
@@ -7396,12 +7406,16 @@ public final class CatalogRepository {
                // the owner segment it parses out of the NAME -- a slug, not an owner.
                // The engine does not parse names (RDR-204), so it cannot tell that
                // value from a deliberate one; a value already on the row is the one
-               // somebody registered, and it stands. The row's own owner_id is
-               // replaced only when it is the placeholder hygiene-002-1 stamped on a
-               // 'disputed' row (the tenant id), so a re-registration still repairs
-               // that one. rename writes its own owner through its own upsert.
+               // somebody registered, and it stands. The one exception is the
+               // placeholder itself: hygiene-002-1 branch D stamps a row it cannot
+               // classify with owner_id = the row's own tenant_id (the fingerprint
+               // hygiene-004 keys on), and a re-registration still repairs that.
+               // Keyed on the value, not on lifecycle_state: branches A and C mark
+               // rows 'disputed' while they hold a real name segment, and 'disputed'
+               // never clears, so keying on it left those rows last-writer-wins.
+               // rename writes its own owner through its own upsert.
                .set(CATALOG_COLLECTIONS.OWNER_ID,
-                    DSL.when(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("disputed"),
+                    DSL.when(CATALOG_COLLECTIONS.OWNER_ID.eq(CATALOG_COLLECTIONS.TENANT_ID),
                              DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
                        .otherwise(CATALOG_COLLECTIONS.OWNER_ID))
                // RDR-204 1a: embedding_model/model_version/dimension/lifecycle_state are

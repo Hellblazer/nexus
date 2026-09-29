@@ -20,6 +20,8 @@ from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.db.http_vector_client import HttpVectorClient
 
 _MODEL = "bge-base-en-v15-768"
+# The production shape: the hyphenated owner segment (owner_segment_for_tumbler), not the dotted tumbler.
+OWNER_SEGMENT = "1-1"
 
 
 @pytest.fixture(autouse=True)
@@ -37,9 +39,9 @@ def test_chunk_upsert_keeps_the_owner_the_collection_was_registered_with(t2_serv
     writer = make_catalog_writer(priority="interactive")
     reader = make_catalog_reader()
     writer.register_collection(
-        name, content_type="code", owner_id="1.1", embedding_model=_MODEL,
+        name, content_type="code", owner_id=OWNER_SEGMENT, embedding_model=_MODEL,
     )
-    assert reader.get_collection(name)["owner_id"] == "1.1", "guard: registered with 1.1"
+    assert reader.get_collection(name)["owner_id"] == OWNER_SEGMENT, "guard: registered with the owner segment"
 
     # A fresh process has an empty registration cache, so the write below
     # re-registers the name with the owner segment parsed from it.
@@ -59,4 +61,4 @@ def test_chunk_upsert_keeps_the_owner_the_collection_was_registered_with(t2_serv
         "the path that sent the name's segment"
     )
 
-    assert reader.get_collection(name)["owner_id"] == "1.1"
+    assert reader.get_collection(name)["owner_id"] == OWNER_SEGMENT

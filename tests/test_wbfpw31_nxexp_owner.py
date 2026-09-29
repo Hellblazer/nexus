@@ -465,7 +465,11 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     writer = make_catalog_writer(priority="interactive")
     owner = writer.register_owner("wbfpw33-slug-repo", "repo", repo_hash="wbfpw33slugrepocafe")
     dst = f"code__wbfpw33e2e-2ad2825c__{_MODEL}__v1"
-    writer.register_collection(dst, content_type="code", owner_id=str(owner), embedding_model=_MODEL)
+    slug = "wbfpw33e2e-2ad2825c"
+    # The row holds the slug as its owner, the shape a collection first
+    # registered by name carries (and what the chunk write used to leave here
+    # on every collection); the resolver must fall through it.
+    writer.register_collection(dst, content_type="code", owner_id=slug, embedding_model=_MODEL)
 
     records = []
     for i in range(2):
@@ -482,12 +486,16 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     result = import_collection(db=client, input_path=f, target_collection=dst, skip_existing=True)
     assert result["owned_count"] == 2
 
-    # The chunk write rewrote the row's owner_id to the name's slug, which is
-    # no owner; the import still lands owned, under the curator here since
-    # the collection holds no documents yet.
+    # The row's owner_id is the slug, which is no owner, and the chunk write
+    # kept it (nexus-7tys2); the import still lands owned, under the curator
+    # here since the collection holds no documents yet.
+    assert reader.get_collection(dst)["owner_id"] == slug, "guard: the slug-in-row shape is what is exercised"
+    curator = writer.register_owner("knowledge", "curator")
+    assert _resolve_import_owner_tumbler(dst, reader, writer) == curator
     doc = reader.by_source_uri(f"nxexp://{dst}/{f.name}")
     assert doc is not None
     assert doc.physical_collection == dst
+    assert doc.tumbler.owner_address() == curator
 
     # With a live document already in the collection, its owner is used.
     existing = writer.register(
