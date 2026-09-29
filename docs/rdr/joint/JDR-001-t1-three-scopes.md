@@ -66,18 +66,44 @@ purpose. Agent-tool subagents need no handling because they share the
 parent's MCP process and see the process-wide swap.
 
 A process that BORROWED its lease (`USE_LEASED`, the mint-race loser, a
-handoff that borrowed) shares the owner's token, and the owner's teardown
-revokes it. The borrower's next T1 call is HTTP 401; once the lease re-read
-and the bearer re-mint have both failed to cure it, the borrower re-mints its
-own token for the same session id under the same mint flock
-(`nexus.mcp.core._recover_borrowed_t1_session`, nexus-k9sec, Sam's decision B
+deferred mint or a handoff that borrowed) shares the owner's token, and the
+owner's teardown revokes it. The borrower's next T1 call is HTTP 401; once the
+lease re-read and the bearer re-mint have both failed to cure it, the borrower
+re-mints its own token for the same session id under the same mint flock
+(`nexus.mcp.core._recover_t1_session`, nexus-k9sec, Sam's decision B
 2026-09-29) and becomes the owner: its own teardown then revokes and clears
-through `_OWNED_T1_SESSION`. A borrower that loses the flock race adopts the
-winner's lease and stays a borrower, so N recoverers mint once. A revoke does
-not hide the session's rows from the new token (they are keyed by tenant and
-session id, measured); the owner's clean exit deletes them first, its SIGTERM
-path does not, so a recovering borrower sees an empty or an inherited pad
-depending on how the owner left. Nothing migrates rows.
+through `_OWNED_T1_SESSION`. A recoverer that loses the flock race adopts the
+winner's lease and keeps its role, so N recoverers mint once. Only a process
+recorded as owner or borrower of that session id may mint; teardown keys on
+ownership alone, so a borrower never revokes or clears what it does not own.
+
+The 401 body is `{"error":"unauthorized"}` for every cause, so a client cannot
+tell a revoked token from an expired one, and a live owner can be displaced:
+its token expires before its refresh tick, or a lease publish is late or fails
+and a borrower re-mints under it. Two things bound the damage. An OWNER whose
+token 401s recovers the same way (same flock, same `stale_token` rule), so a
+successor's later revoke-by-session-id does not leave it dead. Every recovery
+mint, failed or completed, starts a 30s per-session cooldown, and at most 3
+recovery mints run per 10 minutes, so two processes that each think the
+other's token is dead cannot rotate each other faster than that. Owner
+teardown revokes and clears only when the published lease names a token this
+process minted (`_OWNED_T1_MINTED`, not `NX_T1_SESSION`, which the store's
+own 401 self-heal overwrites with an adopted token); when the lease names a
+successor's token it leaves lease and token alone. What remains: a displaced
+live owner and its displacer both keep a refresh loop and settle on whichever
+minted last, the other adopting that lease on its next 401, so the churn is
+one rotation per refresh tick, not an outage; and a token that was never the
+cause of a 401 costs at most one mint per cooldown before the store's own
+60s latch (`_RECOVERY_FUTILE_WINDOW_S`) stops asking.
+
+Rows. A revoke does not hide a session's rows from a new token for the same
+id (they are keyed by tenant and session id; measured against the engine).
+The owner's clean exit no longer deletes them: it used to, which emptied the
+pad before the flagged-row drain ran (so flagged notes were lost on the
+stdin-EOF path) and deleted it under the surviving borrower. The SIGTERM path
+never deleted rows, and the engine's scheduled sweep
+(`NexusService.runScheduledSweep`, 24h) reaps what nobody claims, so a
+recovering borrower inherits the owner's pad. Nothing migrates rows.
 
 ## Standing falsification: respawn-on-`/clear` is FALSE (nexus-ggvi0, 2026-08-22)
 

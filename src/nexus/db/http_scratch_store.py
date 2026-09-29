@@ -38,6 +38,7 @@ and returns a :class:`~nexus.types.PromotionReport`.
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
 from typing import Any, TYPE_CHECKING
 
@@ -100,11 +101,18 @@ HEAL_ADOPTED_SUFFIX: str = "(heal: adopted a fresh token, retry still unauthoriz
 #: this bead exists to fix, one level down).
 HEAL_REMINT_SUFFIX: str = "(heal: re-minted the data-token bearer, retry still unauthorized)"
 
-#: Appended when a BORROWED session's token was revoked (its owner exited) and
-#: this process re-minted its own token via the registered ``session_recovery``
-#: hook (nexus-k9sec) -- and the retry on that fresh token still came back
-#: unauthorized. Distinct so the guidance names the mechanism that fired.
-HEAL_RECOVERED_SUFFIX: str = "(heal: re-minted this process's own session token after its owner exited, retry still unauthorized)"
+#: Appended when the registered ``session_recovery`` hook (nexus-k9sec) handed
+#: back a token -- freshly minted by this process, or a sibling recoverer's
+#: lease adopted; the store cannot tell which -- and the retry on it still came
+#: back unauthorized. Distinct so the guidance names the mechanism that fired.
+HEAL_RECOVERED_SUFFIX: str = "(heal: session recovery adopted a fresh token, retry still unauthorized)"
+
+#: nexus-k9sec: how long a recovered token that still 401s suppresses further
+#: recovery attempts. The latch clears sooner on any non-401 response. Without
+#: a bound, a recovery that adopted a DEAD sibling lease would latch until a
+#: success that nothing could produce; with it, one more attempt runs per
+#: window, naming the dead token so the mint-or-borrow helper mints past it.
+_RECOVERY_FUTILE_WINDOW_S: float = 60.0
 
 
 # RDR-152 nexus-fjwxh: env-only resolution replaced by the centralized
@@ -211,17 +219,17 @@ class HttpScratchStore:
         # bearer and the retry still 401'd; cleared by the next non-401
         # response. See _remint_data_token_and_rebuild.
         self._remint_futile = False
-        # nexus-k9sec: the borrowed-session recovery hook, ``(session_id,
-        # dead_token) -> fresh_token | None``. None (the default) for every
-        # store that does not borrow another process's token: a bare CLI, an
-        # inherited-token subprocess, the owner itself. The MCP lifespan
-        # attaches it (via ``mcp_infra``) only when this process BORROWED its
-        # lease. ``_recovery_futile`` is the ``_remint_futile`` twin: set when
-        # a recovery re-mint did not cure the 401, cleared by the next
-        # non-401, so a token that was never the cause is not re-minted per
-        # call.
+        # nexus-k9sec: the session recovery hook, ``(session_id, dead_token)
+        # -> fresh_token | None``. None (the default) for every store that
+        # holds no session of its own: a bare CLI, an inherited-token
+        # subprocess. The MCP lifespan attaches it (via ``mcp_infra``) when
+        # this process owns or borrowed a session. ``_recovery_futile_at`` is
+        # the ``_remint_futile`` twin: set (monotonic) when a recovered token
+        # still 401'd, cleared by the next non-401 or after
+        # ``_RECOVERY_FUTILE_WINDOW_S``, so a token that was never the cause
+        # is not re-minted per call.
         self.session_recovery: Callable[[str, str], str | None] | None = None
-        self._recovery_futile = False
+        self._recovery_futile_at: float | None = None
         _log.info(
             "http_scratch_store.init",
             base_url=self._base_url,
@@ -410,8 +418,7 @@ class HttpScratchStore:
         if resp.status_code != 401:
             if getattr(self, "_remint_futile", False):
                 self._remint_futile = False
-            if getattr(self, "_recovery_futile", False):
-                self._recovery_futile = False
+            self._recovery_futile_at = None
 
     def _rebind_from_lease(self) -> bool:
         """nexus-om64x: on connection-refused (supervisor restarted on a new
@@ -532,7 +539,7 @@ class HttpScratchStore:
         the lease re-read and the bearer re-mint both failed to cure it) --
         ask the registered ``session_recovery`` hook for a fresh one.
 
-        The hook (``mcp.core._recover_borrowed_t1_session``) owns the policy:
+        The hook (``mcp.core._recover_t1_session``) owns the policy:
         it re-mints under the session's mint flock and takes ownership, or
         adopts a sibling recoverer's fresh lease, or declines (this process
         is not a borrower). This method only single-flights it under
@@ -541,7 +548,7 @@ class HttpScratchStore:
 
         One attempt per failed request: a hook that returns ``None`` or
         raises is a plain miss (the 401 stands), and one that returned a token
-        which then still 401'd trips ``_recovery_futile`` until a request
+        which then still 401'd latches ``_recovery_futile_at`` until a request
         succeeds. Returns True when a retry is worthwhile.
         """
         hook = getattr(self, "session_recovery", None)
@@ -549,12 +556,12 @@ class HttpScratchStore:
         lock = getattr(self, "_refresh_lock", None)
         if hook is None or not session_id or lock is None:
             return False
-        if getattr(self, "_recovery_futile", False):
+        if self._recovery_is_futile():
             return False
         with lock:
             if self._session_token != sent_token:
                 return True  # another thread already healed the store
-            if self._recovery_futile:
+            if self._recovery_is_futile():
                 return False
             try:
                 fresh = hook(session_id, self._session_token)
@@ -572,6 +579,12 @@ class HttpScratchStore:
             )
             self._adopt_session_token(fresh, session_id)
             return True
+
+    def _recovery_is_futile(self) -> bool:
+        """True while a recovered token that still 401'd suppresses recovery
+        (see ``_RECOVERY_FUTILE_WINDOW_S``)."""
+        at = getattr(self, "_recovery_futile_at", None)
+        return at is not None and time.monotonic() - at < _RECOVERY_FUTILE_WINDOW_S
 
     def _retry_after_session_recovery(
         self, path: str, payload: dict[str, Any], resp: httpx.Response, heal_suffix: str,
@@ -963,7 +976,7 @@ class HttpScratchStore:
                 elif heal_suffix.strip() == HEAL_RECOVERED_SUFFIX:
                     # nexus-k9sec: a recovered token that still 401s means the
                     # session token was not the cause; stop re-minting per call.
-                    self._recovery_futile = True
+                    self._recovery_futile_at = time.monotonic()
                 raise RuntimeError(
                     f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
                 )
@@ -1062,7 +1075,7 @@ class HttpScratchStore:
                 elif heal_suffix.strip() == HEAL_RECOVERED_SUFFIX:
                     # nexus-k9sec: a recovered token that still 401s means the
                     # session token was not the cause; stop re-minting per call.
-                    self._recovery_futile = True
+                    self._recovery_futile_at = time.monotonic()
                 raise RuntimeError(
                     f"{SESSION_UNAUTHORIZED_MARKER} on {path}{heal_suffix}: {resp.text[:200]}"
                 )
