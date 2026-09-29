@@ -197,6 +197,33 @@ class TestRunWiringAgainstRealFiles:
         assert pid_alive(_DEAD_PID) is False
 
 
+class TestReconnectDoesNotReadAsDisconnect:
+    """nexus-qxyqz: the old ``nx-mcp``'s teardown, running after the new
+    one published its marker on a ``/mcp`` reconnect, must not make the
+    prompt hook report a live server as disconnected.
+    """
+
+    def test_old_teardown_after_new_publish_stays_silent(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        from nexus.mcp.connect_marker import clear_mcp_connect_marker
+
+        monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+        sid = "sess-reconnect"
+        # The session was connected; the detector has seen it.
+        publish_mcp_connect_marker(sid, tmp_path)
+        assert run({"session_id": sid}).stdout is None
+        # /mcp reconnect: the NEW server (a live pid that is not this
+        # process) publishes over the marker ...
+        path = tmp_path / f"mcp_connect_marker.{sid}"
+        data = json.loads(path.read_text())
+        data["pid"] = os.getppid()
+        path.write_text(json.dumps(data))
+        # ... then the OLD server (this process) finishes tearing down.
+        clear_mcp_connect_marker(sid, tmp_path)
+        assert run({"session_id": sid}).stdout is None
+
+
 class TestRegisteredInTheRealVerbTable:
     def test_mcp_connect_check_resolves_to_the_new_module(self) -> None:
         assert entry.VERB_TABLE["mcp-connect-check"] == "nexus.hooks.mcp_connect_check"

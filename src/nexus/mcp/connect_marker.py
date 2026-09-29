@@ -207,7 +207,10 @@ def read_mcp_connect_marker(session_id: str, config_dir: Path) -> bool:
 
 
 def clear_mcp_connect_marker(session_id: str, config_dir: Path) -> None:
-    """Remove *session_id*'s marker, best-effort. Missing file is not an error.
+    """Remove *session_id*'s marker if this process owns it, best-effort.
+
+    Missing file is not an error. A marker naming a different pid (a
+    successor ``nx-mcp`` after a ``/mcp`` reconnect) is left alone.
 
     Called at every one of ``_t1_lifespan``'s teardown points, mirroring
     :func:`nexus.db.t1.clear_t1_session_lease`'s own unconditional-unlink-
@@ -216,6 +219,15 @@ def clear_mcp_connect_marker(session_id: str, config_dir: Path) -> None:
     this process's lifespan has ended.
     """
     path = _marker_path(session_id, config_dir)
+    # nexus-qxyqz: unlink only a marker THIS process published. On a
+    # ``/mcp`` reconnect the new ``nx-mcp`` publishes under the same
+    # session id while the old one is still tearing down; the old one's
+    # unconditional unlink deleted the successor's marker, and
+    # ``nx-hook mcp-connect-check`` then reported a live server as
+    # disconnected. A malformed marker names no owner and is removed.
+    info = read_mcp_connect_marker_info(session_id, config_dir)
+    if info is not None and info.pid != os.getpid():
+        return
     try:
         path.unlink()
     except OSError:
