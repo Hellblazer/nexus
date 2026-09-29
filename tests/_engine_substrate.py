@@ -1006,6 +1006,9 @@ def _boot() -> dict:
         "pg_port": pg_port,
         "pg_user": pg_user,
         "pg_dbname": _DBNAME,
+        # The provisioned ONNX model dir (None when the posture needs none), so a
+        # test that spawns its own engine can hand it the same models (nexus-o5xyx.2).
+        "onnx_root": str(onnx_root) if onnx_root is not None else None,
         "svc": svc,
     }
     atexit.register(_teardown)
