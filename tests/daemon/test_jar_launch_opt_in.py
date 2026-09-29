@@ -433,3 +433,92 @@ def test_mismatch_genuinely_different_files_still_raises(monkeypatch, tmp_path):
             tmp_path,
             {"artifact": str(binary_b.resolve(strict=False)), "launch_kind": "native"},
         )
+
+
+# ── hs_err reaping (nexus-o5xyx.2) ───────────────────────────────────────────
+
+
+def _seed_hs_err(logs: Path, n: int) -> list[Path]:
+    """*n* crash reports with strictly increasing mtimes; index 0 is the OLDEST."""
+    logs.mkdir(parents=True, exist_ok=True)
+    made = []
+    for i in range(n):
+        f = logs / f"hs_err_{1000 + i}.log"
+        f.write_text("# crash")
+        os.utime(f, (1_000_000 + i, 1_000_000 + i))
+        made.append(f)
+    return made
+
+
+def test_reap_old_hs_err_keeps_the_newest_five(tmp_path):
+    logs = tmp_path / "logs"
+    made = _seed_hs_err(logs, 8)
+    (logs / "storage_service_native.log").write_text("keep me")
+    (logs / "unrelated.log").write_text("keep me")
+
+    reaped = ssd._reap_old_hs_err(logs)
+
+    assert sorted(reaped) == sorted(made[:3])
+    assert [f.exists() for f in made] == [False] * 3 + [True] * 5
+    assert (logs / "storage_service_native.log").exists()
+    assert (logs / "unrelated.log").exists()
+
+
+def test_reap_old_hs_err_is_a_no_op_at_or_under_the_limit(tmp_path):
+    logs = tmp_path / "logs"
+    made = _seed_hs_err(logs, 5)
+    assert ssd._reap_old_hs_err(logs) == []
+    assert all(f.exists() for f in made)
+
+
+def test_reap_old_hs_err_tolerates_a_missing_directory(tmp_path):
+    assert ssd._reap_old_hs_err(tmp_path / "no-such-logs") == []
+
+
+def _supervisor(tmp_path, *, launch_kind, artifact):
+    return StorageServiceSupervisor(
+        config_dir=tmp_path,
+        pg_port=5432,
+        service_port=0,
+        creds={"NX_SERVICE_TOKEN": "tok"},
+        binary_path=artifact,
+        launch_kind=launch_kind,
+    )
+
+
+def _stub_spawn(monkeypatch, captured=None):
+    class _FakeProc:
+        pid = 4242
+
+    def _popen(argv, **kw):
+        if captured is not None:
+            captured["argv"] = argv
+        return _FakeProc()
+
+    monkeypatch.setattr(ssd, "_popen", _popen)
+    monkeypatch.setattr(ssd, "_allocate_free_port", lambda host="127.0.0.1": 55000)
+    monkeypatch.setattr(ssd, "_resolve_java_executable", lambda: "/usr/bin/java")
+
+
+def test_a_jar_launch_reaps_old_crash_reports_at_start(monkeypatch, tmp_path):
+    _stub_spawn(monkeypatch)
+    made = _seed_hs_err(tmp_path / "logs", 7)
+    _supervisor(tmp_path, launch_kind="jar", artifact=Path("/build/svc.jar"))._spawn_service()
+    assert [f.exists() for f in made] == [False] * 2 + [True] * 5
+
+
+def test_a_native_launch_leaves_crash_reports_alone(monkeypatch, tmp_path):
+    _stub_spawn(monkeypatch)
+    made = _seed_hs_err(tmp_path / "logs", 7)
+    _supervisor(
+        tmp_path, launch_kind="native", artifact=Path("/opt/nexus/nexus-service"),
+    )._spawn_service()
+    assert all(f.exists() for f in made)
+
+
+def test_the_jar_argv_points_error_file_into_the_logs_dir(monkeypatch, tmp_path):
+    """The path the JVM writes to is the one the exit warning and the reaper look in."""
+    captured: dict = {}
+    _stub_spawn(monkeypatch, captured)
+    _supervisor(tmp_path, launch_kind="jar", artifact=Path("/build/svc.jar"))._spawn_service()
+    assert f"-XX:ErrorFile={tmp_path}/logs/hs_err_%p.log" in captured["argv"]

@@ -35,10 +35,14 @@ from __future__ import annotations
 import ast
 import re
 import shlex
+import subprocess
+import tempfile
 import warnings
 from pathlib import Path
 
 import pytest
+
+from tests.db import _service_fixture as fx
 
 pytestmark = pytest.mark.lint
 
@@ -353,31 +357,22 @@ def test_shell_line_numbers_after_a_continuation_are_physical() -> None:
 def test_with_error_file_injects_before_jar_and_is_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import tempfile
-
-    from tests.db._service_fixture import with_error_file
-
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     flag = f"-XX:ErrorFile={tmp_path}/hs_err_%p.log"
     cmd = ["/usr/bin/java", "-Xmx1g", "-jar", "a.jar"]
-    out = with_error_file(cmd)
+    out = fx.with_error_file(cmd)
     assert out == ["/usr/bin/java", "-Xmx1g", flag, "-jar", "a.jar"]
-    assert with_error_file(out) == out, "must not add a second flag"
+    assert fx.with_error_file(out) == out, "must not add a second flag"
     assert cmd == ["/usr/bin/java", "-Xmx1g", "-jar", "a.jar"], "input must not be mutated"
     own = ["java", "-XX:ErrorFile=/elsewhere/e_%p.log", "-jar", "a.jar"]
-    assert with_error_file(own) == own, "a caller's own flag wins"
+    assert fx.with_error_file(own) == own, "a caller's own flag wins"
     native = ["/opt/nexus-service", "-Duser.timezone=UTC"]
-    assert with_error_file(native) == native, "a native launch has no -jar and no flag"
+    assert fx.with_error_file(native) == native, "a native launch has no -jar and no flag"
 
 
 def test_spawn_service_hands_popen_the_injected_argv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import subprocess
-    import tempfile
-
-    from tests.db import _service_fixture as fx
-
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     seen: dict = {}
 

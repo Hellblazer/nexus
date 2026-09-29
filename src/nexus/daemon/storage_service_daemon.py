@@ -527,6 +527,36 @@ def _ipv4_only_disabled(env_value: str | None) -> bool:
     )
 
 
+#: How many ``hs_err_<pid>.log`` JVM crash reports the logs directory keeps
+#: (nexus-o5xyx.2). Each is ~100 KB and a crash-looping service writes one per
+#: start, so the newest few are kept and the rest are reaped at each launch.
+_HS_ERR_KEEP = 5
+
+
+def _reap_old_hs_err(logs_dir: Path, keep: int = _HS_ERR_KEEP) -> list[Path]:
+    """Delete all but the newest *keep* ``hs_err_*.log`` files in *logs_dir*.
+
+    Best-effort by design: a reap failure must never stop a service from starting,
+    and a missing directory simply has nothing to reap. Returns the deleted paths.
+    """
+    try:
+        found = sorted(
+            logs_dir.glob("hs_err_*.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return []
+    reaped: list[Path] = []
+    for old in found[max(keep, 0):]:
+        try:
+            old.unlink()
+            reaped.append(old)
+        except OSError:
+            continue
+    return reaped
+
+
 def _resolve_java_executable() -> str:
     """Return the ``java`` launcher for the JAR path, or fail loud with a remedy.
 
@@ -1205,6 +1235,10 @@ class StorageServiceSupervisor:
         from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         svc_log = open_child_log_or_devnull(self._svc_log_name, self._config_dir)
+        if self._launch_kind == "jar":
+            # nexus-o5xyx.2: keep the newest few JVM crash reports, drop the rest,
+            # alongside the log rotation above. The JVM writes the new one there.
+            _reap_old_hs_err(self._config_dir / "logs")
         # nexus-8vp0i: capture the readiness log-tailer's starting offset NOW
         # — after any open-time rotation (open_child_log_or_devnull), before
         # this process writes a single byte. Without this a respawn's tailer
@@ -2231,6 +2265,12 @@ class StorageServiceSupervisor:
             # nexus-ovbr7: the returncode is the single cheapest diagnostic a
             # dead service process leaves behind (137=SIGKILL/oom, 143=SIGTERM,
             # 1=error) — record it, plus where the process's own output went.
+            # nexus-o5xyx.2: a JVM launch that crashed left its report at
+            # logs/hs_err_<pid>.log (-XX:ErrorFile, see _spawn_service); name it
+            # so the operator does not have to know where to look. Only present
+            # when the file exists: a native launch or a clean exit leaves none.
+            _hs_err = self._config_dir / "logs" / f"hs_err_{self._proc.pid}.log"
+            _hs_err_field = {"hs_err": str(_hs_err)} if _hs_err.exists() else {}
             _log.warning(
                 "storage_service_exit_detected",
                 pid=self._proc.pid,
@@ -2238,6 +2278,7 @@ class StorageServiceSupervisor:
                 service_log=str(
                     self._config_dir / "logs" / f"{self._svc_log_name}.log"
                 ),
+                **_hs_err_field,
             )
             return False, False  # process exited; signal the run loop to exit
 
