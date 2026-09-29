@@ -108,6 +108,30 @@ def test_2_next_test_is_clean():
     result.stdout.fnmatch_lines(["*test left engine DB env changed*NX_DB_ADMIN_URL*"])
 
 
+def test_the_guards_wrap_every_conftest_monkeypatch(pytester, monkeypatch) -> None:
+    # Ordering pin: plugin autouse fixtures set up before conftest ones and tear
+    # down after them, so a conftest fixture's monkeypatch.setenv is undone before
+    # the guard compares. Moved inside that scope, the guard would see the value
+    # still set and fail a test that leaked nothing.
+    monkeypatch.delenv("NX_DB_ADMIN_URL", raising=False)
+    pytester.makeconftest('''
+import pytest
+pytest_plugins = ["tests._env_restore"]
+
+@pytest.fixture(autouse=True)
+def _conftest_sets_engine_env(monkeypatch):
+    monkeypatch.setenv("NX_DB_ADMIN_URL", "jdbc:postgresql://127.0.0.1:1/set-by-conftest")
+''')
+    pytester.makepyfile('''
+import os
+
+def test_sees_the_conftest_value():
+    assert os.environ["NX_DB_ADMIN_URL"].endswith("set-by-conftest")
+''')
+    result = pytester.runpytest_inprocess("-p", "no:randomly", "-p", "no:cacheprovider", "-q")
+    result.assert_outcomes(passed=1)
+
+
 def test_conftest_registers_the_env_plugin() -> None:
     src = (Path(__file__).parent / "conftest.py").read_text()
     m = re.search(r"^pytest_plugins = \[(?P<plugins>[^\]]*)\]", src, re.M)
