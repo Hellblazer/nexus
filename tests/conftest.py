@@ -2045,10 +2045,36 @@ def _no_leaked_engine_db_env():
         pytest.fail(
             "test left engine DB env changed in os.environ (restored now): "
             f"{sorted(leaked)}. An engine spawned later inherits these; set "
-            "them with monkeypatch, or delenv them before code that writes "
-            "os.environ directly.",
+            "them with monkeypatch, or monkeypatch.setenv(key, '') before code "
+            "that writes os.environ directly (delenv(key, raising=False) records "
+            "no undo when the key is absent, so it does not protect).",
             pytrace=False,
         )
+
+
+@pytest.fixture(autouse=True)
+def _restore_pg_bin_env():
+    """Put ``NEXUS_PG_BIN`` back after every test.
+
+    ``nexus.commands.init._select_bundled_pg`` writes ``os.environ["NEXUS_PG_BIN"]``
+    by design (it points ``provision`` at the extracted bundle), and the tests
+    that exercise it assert on that write. Their ``monkeypatch.delenv(...,
+    raising=False)`` records no undo when the key starts absent, so the value
+    survived the test: a single-process ``pytest tests/daemon`` ran
+    ``test_pg_bundle_install.py``'s round trip first, and
+    ``test_storage_service_daemon_pg_monitor_backfill.py``'s fixture then took
+    the leaked path, a fake bundle whose ``psql`` is ``exit 0``, as an operator
+    override. Every query printed nothing and its revoke precondition failed
+    (nexus-4h20a). Restored rather than failed, because the write is the
+    behaviour under test.
+    """
+    before = os.environ.get("NEXUS_PG_BIN")
+    yield
+    if os.environ.get("NEXUS_PG_BIN") != before:
+        if before is None:
+            os.environ.pop("NEXUS_PG_BIN", None)
+        else:
+            os.environ["NEXUS_PG_BIN"] = before
 
 
 @pytest.fixture(autouse=True)
