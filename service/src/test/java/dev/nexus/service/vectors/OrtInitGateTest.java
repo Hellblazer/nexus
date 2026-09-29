@@ -87,24 +87,86 @@ class OrtInitGateTest {
         assertThat(gate.quiesce(100)).as("both closed").isTrue();
     }
 
+    /** Records the handlers a gate installs, instead of touching real JVM signals. */
+    private static final class FakeSignals implements OrtInitGate.SignalInstaller {
+        final java.util.Map<String, java.util.function.IntConsumer> handlers = new java.util.LinkedHashMap<>();
+        @Override
+        public void install(String name, java.util.function.IntConsumer onSignal) {
+            handlers.put(name, onSignal);
+        }
+    }
+
     @Test
-    void installedHookQuiescesAndInstallIsIdempotent() throws Exception {
-        List<Thread> registered = new ArrayList<>();
-        OrtInitGate gate = new OrtInitGate(5_000, registered::add);
-        gate.installShutdownHook();
-        gate.installShutdownHook();
-        assertThat(registered).as("the hook registers exactly once").hasSize(1);
+    void installTakesOverTermIntHupExactlyOnce() {
+        FakeSignals signals = new FakeSignals();
+        OrtInitGate gate = new OrtInitGate(5_000, signals, status -> { });
+        gate.installSignalHandlers();
+        var first = new java.util.LinkedHashMap<>(signals.handlers);
+        gate.installSignalHandlers();
+        assertThat(signals.handlers.keySet()).containsExactly("TERM", "INT", "HUP");
+        assertThat(signals.handlers).as("second install is a no-op").isEqualTo(first);
+    }
+
+    @Test
+    void aSignalDuringAnInitDefersExitUntilTheInitEndsThenExitsWithTheSignalStatus() throws Exception {
+        FakeSignals signals = new FakeSignals();
+        java.util.concurrent.atomic.AtomicInteger exited = new java.util.concurrent.atomic.AtomicInteger(-1);
+        CountDownLatch exitCalled = new CountDownLatch(1);
+        OrtInitGate gate = new OrtInitGate(10_000, signals, status -> {
+            exited.set(status);
+            exitCalled.countDown();
+        });
+        gate.installSignalHandlers();
 
         OrtInitGate.Scope scope = gate.enter("test-model");
-        Thread hook = registered.get(0);
-        hook.start();
-        hook.join(300);
-        assertThat(hook.isAlive()).as("the hook blocks while an init is in flight").isTrue();
-        scope.close();
-        hook.join(5_000);
-        assertThat(hook.isAlive()).as("the hook finishes once the init ends").isFalse();
-        assertThatThrownBy(() -> gate.enter("after"))
+        signals.handlers.get("TERM").accept(143);
+
+        assertThat(exitCalled.await(400, TimeUnit.MILLISECONDS))
+                .as("exit must be DEFERRED while an init is in flight")
+                .isFalse();
+        assertThatThrownBy(() -> gate.enter("late-model"))
+                .as("no new native init may start once shutdown began")
                 .isInstanceOf(OrtInitGate.ShutdownInProgressException.class);
+
+        scope.close();
+        assertThat(exitCalled.await(5, TimeUnit.SECONDS)).as("exit proceeds once the init ends").isTrue();
+        assertThat(exited.get()).as("exit status is the default handler's 128+n").isEqualTo(143);
+    }
+
+    @Test
+    void aSignalWithNothingInFlightExitsPromptly() throws Exception {
+        FakeSignals signals = new FakeSignals();
+        java.util.concurrent.atomic.AtomicInteger exited = new java.util.concurrent.atomic.AtomicInteger(-1);
+        CountDownLatch exitCalled = new CountDownLatch(1);
+        OrtInitGate gate = new OrtInitGate(10_000, signals, status -> {
+            exited.set(status);
+            exitCalled.countDown();
+        });
+        gate.installSignalHandlers();
+        signals.handlers.get("INT").accept(130);
+        assertThat(exitCalled.await(5, TimeUnit.SECONDS)).isTrue();
+        assertThat(exited.get()).isEqualTo(130);
+    }
+
+    @Test
+    void aStuckInitDoesNotHoldExitPastTheBound() throws Exception {
+        FakeSignals signals = new FakeSignals();
+        CountDownLatch exitCalled = new CountDownLatch(1);
+        OrtInitGate gate = new OrtInitGate(300, signals, status -> exitCalled.countDown());
+        gate.installSignalHandlers();
+        gate.enter("stuck-model"); // never closed
+        signals.handlers.get("TERM").accept(143);
+        assertThat(exitCalled.await(5, TimeUnit.SECONDS))
+                .as("exit proceeds after the bound even if the init never returns")
+                .isTrue();
+    }
+
+    @Test
+    void anUnavailableSignalIsSkippedNotFatal() {
+        OrtInitGate gate = new OrtInitGate(5_000, (name, h) -> {
+            throw new IllegalArgumentException("Unknown signal: " + name);
+        }, status -> { });
+        gate.installSignalHandlers(); // must not throw
     }
 
     @Test
@@ -119,14 +181,14 @@ class OrtInitGateTest {
     // ── wiring, by source scan (same pattern as OnnxIntraOpWiringTest) ─────────
 
     @Test
-    void mainInstallsTheHookBeforeAnyModelIsConstructed() throws IOException {
+    void mainInstallsTheGateBeforeAnyModelIsConstructed() throws IOException {
         String main = Files.readString(MAIN_SRC.resolve("Main.java"));
-        int hook = main.indexOf("OrtInitGate.process().installShutdownHook()");
+        int hook = main.indexOf("OrtInitGate.process().installSignalHandlers()");
         int bge = main.indexOf("new Bge768Embedder()");
-        assertThat(hook).as("Main must install the OrtInitGate shutdown hook").isNotEqualTo(-1);
+        assertThat(hook).as("Main must install the OrtInitGate signal handlers").isNotEqualTo(-1);
         assertThat(bge).as("Main constructs Bge768Embedder").isNotEqualTo(-1);
         assertThat(hook)
-                .as("the hook must be installed BEFORE the first native model init — a SIGTERM "
+                .as("the gate must be installed BEFORE the first native model init — a SIGTERM "
                         + "before it exists is the nexus-o5xyx.1 crash")
                 .isLessThan(bge);
     }

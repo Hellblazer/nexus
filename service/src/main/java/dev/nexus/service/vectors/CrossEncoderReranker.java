@@ -143,6 +143,17 @@ public final class CrossEncoderReranker implements Reranker {
                             + " / -Dnexus.crossencoder.tokenizerPath.");
                 }
             }
+            // nexus-o5xyx.1: this init runs on a request thread, so a SIGTERM can land in
+            // it long after boot. Hold process exit off until ORT init returns (see
+            // OrtInitGate); once exit has begun, degrade this request loudly instead of
+            // starting native init the JVM is about to tear down.
+            OrtInitGate.Scope initScope;
+            try {
+                initScope = OrtInitGate.process().enter("cross-encoder");
+            } catch (OrtInitGate.ShutdownInProgressException e) {
+                throw new RerankUpstreamException(
+                        "local cross-encoder unavailable: service is shutting down", e);
+            }
             OrtSession          sess = null;
             HuggingFaceTokenizer tok = null;
             try (var sessionOpts = new OrtSession.SessionOptions()) {
@@ -175,6 +186,8 @@ public final class CrossEncoderReranker implements Reranker {
                         "local cross-encoder failed to initialise from " + modelPath + ": "
                         + e.getMessage() + ". Re-provision via `nx init` (the artifact may be"
                         + " truncated or a fused export onnxruntime-java cannot run).", e);
+            } finally {
+                initScope.close();
             }
         }
     }

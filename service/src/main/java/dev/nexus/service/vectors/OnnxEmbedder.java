@@ -74,6 +74,8 @@ public final class OnnxEmbedder implements Embedder {
      * @param tokenizerPath path to {@code tokenizer.json}
      */
     public OnnxEmbedder(String modelPath, String tokenizerPath) {
+        // nexus-o5xyx.1: hold process exit off until ORT init returns (see OrtInitGate).
+        OrtInitGate.Scope initScope = OrtInitGate.process().enter("onnx-minilm");
         try {
             this.ortEnv = OrtEnvironment.getEnvironment();
 
@@ -99,6 +101,8 @@ public final class OnnxEmbedder implements Embedder {
             log.info("event=onnx_embedder_loaded model={} tokenizer={}", modelPath, tokenizerPath);
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialise OnnxEmbedder: " + e.getMessage(), e);
+        } finally {
+            initScope.close();
         }
     }
 

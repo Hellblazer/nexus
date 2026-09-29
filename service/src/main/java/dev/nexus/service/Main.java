@@ -6,6 +6,7 @@ import dev.nexus.service.db.SchemaMigrator;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.Bge768Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.OrtInitGate;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -57,6 +58,12 @@ public final class Main {
             log.error("event=jvm_timezone_pin_failed_at_boot error=\"{}\"", e.getMessage(), e);
             System.exit(1);
         }
+        // nexus-o5xyx.1: FIRST, before anything can start native ONNX init. A SIGTERM
+        // during OrtSession creation otherwise lets onnxruntime-java's own shutdown hook
+        // free ORT's logging manager under the live init and the JVM SEGVs (exit 134
+        // instead of 143). This defers signal-driven exit until in-flight model inits
+        // finish (bounded), before any hook runs; see OrtInitGate.
+        OrtInitGate.process().installSignalHandlers();
         int port   = intEnv("NX_SERVICE_PORT", 8080);
         // RDR-152 bead nexus-gmiaf.32.5: NX_SERVICE_TOKEN is the persistent random
         // root bearer token (minted + persisted by `nx init --service`). Auth resolves
@@ -193,7 +200,17 @@ public final class Main {
             var onnxRoot = dev.nexus.service.vectors.OnnxModelPaths.resolved();
             log.info("event=onnx_model_root root={} source={}",
                     onnxRoot.root(), onnxRoot.source());
-            Bge768Embedder bge = new Bge768Embedder();
+            Bge768Embedder bge;
+            try {
+                bge = new Bge768Embedder();
+            } catch (OrtInitGate.ShutdownInProgressException e) {
+                // A signal arrived before model init began: the gate is closed and its
+                // deferred exit is already running on another thread. Do not start ORT;
+                // wait for the exit rather than dying on a stack trace.
+                log.info("event=boot_aborted_by_shutdown stage=bge768_init");
+                Thread.currentThread().join();
+                return;
+            }
             // nexus-00wsf residual, review round 2 (T2 [24238]/[24239]): ONE
             // LocalOnnxAdmission per process, shared by BOTH routers and the
             // reranker below — wrapping "bge" separately per router (round 1's

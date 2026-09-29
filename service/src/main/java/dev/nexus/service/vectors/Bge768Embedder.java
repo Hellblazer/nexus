@@ -246,6 +246,12 @@ public final class Bge768Embedder implements Embedder {
             log.warn("event=bge_model_size_check_failed path={} error={}", modelPath, e.getMessage());
         }
 
+        // nexus-o5xyx.1: from the first ORT touch (getEnvironment creates ORT's logging
+        // manager) until the session and tokenizer are built, process exit must wait —
+        // a SIGTERM here otherwise tears the logging manager down under a live
+        // InferenceSession::Initialize and the JVM SEGVs. Throws ShutdownInProgressException
+        // (deliberately outside the catch below) if exit has already begun.
+        OrtInitGate.Scope initScope = OrtInitGate.process().enter("bge768");
         this.ortEnv = OrtEnvironment.getEnvironment();
 
         OrtSession          sess = null;
@@ -279,6 +285,8 @@ public final class Bge768Embedder implements Embedder {
             if (tok != null)  { try { tok.close();  } catch (Exception ignored) {} }
             if (sess != null) { try { sess.close(); } catch (Exception ignored) {} }
             throw new RuntimeException("Failed to initialise Bge768Embedder: " + e.getMessage(), e);
+        } finally {
+            initScope.close();
         }
     }
 

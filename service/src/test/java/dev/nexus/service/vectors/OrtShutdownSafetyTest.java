@@ -29,7 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>The crash is native and timing-bound, so an in-JVM assertion cannot see it.
  * This test spawns {@link OrtShutdownProbe} (the real {@link Bge768Embedder} on
- * a main thread, hook installed first as {@code Main} does) and sends SIGTERM at
+ * a main thread, gate installed first as {@code Main} does) and sends SIGTERM at
  * a sweep of delays after {@code INIT_BEGIN}. On the reference machine
  * (hellmini, macOS arm64, ORT 1.20.0) the unguarded process crashes for
  * delays around 300 to 400 ms; the sweep straddles that window so the result

@@ -597,7 +597,7 @@
                                     <arg value="--no-man-pages"/>
                                     <arg value="--compress=zip-6"/>
                                     <arg value="--add-modules"/>
-                                    <arg value="java.base,java.sql,java.management,java.naming,java.logging,jdk.crypto.ec,jdk.net,jdk.httpserver"/>
+                                    <arg value="java.base,java.sql,java.management,java.naming,java.logging,jdk.crypto.ec,jdk.net,jdk.httpserver,jdk.unsupported"/>
                                 </exec>
                                 <!-- Launcher script: runs fat jar with jlinked JRE -->
                                 <echo file="${jlink.output}/bin/nexus-service"
