@@ -124,7 +124,7 @@ class OrtShutdownSafetyTest {
         }
         if (delayMs > 0) Thread.sleep(delayMs);
         long killedAt = System.nanoTime();
-        p.destroy(); // SIGTERM
+        OrtTestProcesses.sigterm(p); // not destroy(): that closes the streams we still need to read
 
         if (!p.waitFor(60, TimeUnit.SECONDS)) {
             p.destroyForcibly();

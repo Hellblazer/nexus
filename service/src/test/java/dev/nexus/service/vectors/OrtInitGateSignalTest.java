@@ -65,7 +65,7 @@ class OrtInitGateSignalTest {
         assertThat(holding.await(60, TimeUnit.SECONDS)).as("probe reached HOLDING; output: %s", lines).isTrue();
         Thread.sleep(KILL_AFTER_MS);
         long killedAt = System.nanoTime();
-        p.destroy(); // SIGTERM
+        OrtTestProcesses.sigterm(p); // not destroy(): that closes the streams we still need to read
         assertThat(p.waitFor(60, TimeUnit.SECONDS)).as("probe exits after SIGTERM; output: %s", lines).isTrue();
         long exitedAfterMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - killedAt);
         reader.join(5_000);
