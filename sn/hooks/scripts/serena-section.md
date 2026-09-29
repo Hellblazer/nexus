@@ -4,7 +4,7 @@
 
 **Root is fixed at server start.** Serena resolves every path against the project root it found when the MCP server started, not against your cwd. If your cwd is a linked git worktree (dispatched with `isolation: "worktree"`), Serena's write tools are denied by the sn hook and a worktree section above this one tells you what to use instead; read tools still answer, against the primary checkout.
 
-**Serena writes are not auto-approved.** The sn plugin approves Serena's read tools only. Its write tools, `jet_brains_debug`, `query_project` and `onboarding` go through Claude Code's own permission flow, like Edit and Write. If a Serena write is denied or never answered, do not retry it: make the change with Edit or Write on the absolute path, or report that you are blocked.
+**Serena writes are not auto-approved.** The sn plugin approves Serena's read tools only. Its write tools, `jet_brains_debug`, `query_project`, `onboarding` and `restart_language_server` go through Claude Code's own permission flow, like Edit and Write. If a Serena write is denied or never answered, do not retry it: make the change with Edit or Write on the absolute path, or report that you are blocked.
 
 ### Setup — load tools before first use
 

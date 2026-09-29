@@ -575,8 +575,8 @@ class TestReadsOnlyApproval:
         _, available, _ = parse_snapshot()
         classes = {"read": SERENA_READ_TOOLS, "write": SERENA_WRITE_TOOLS, "not auto-approved": NOT_AUTO_APPROVED}
         for (a, x), (b, y) in [(("read", SERENA_READ_TOOLS), ("write", SERENA_WRITE_TOOLS)),
-                               (("read", SERENA_READ_TOOLS), ("never", NOT_AUTO_APPROVED)),
-                               (("write", SERENA_WRITE_TOOLS), ("never", NOT_AUTO_APPROVED))]:
+                               (("read", SERENA_READ_TOOLS), ("not auto-approved", NOT_AUTO_APPROVED)),
+                               (("write", SERENA_WRITE_TOOLS), ("not auto-approved", NOT_AUTO_APPROVED))]:
             assert not x & y, f"{a} and {b} overlap: {sorted(x & y)}"
         classified = set().union(*classes.values())
         unclassified = sorted(set(available) - classified)
