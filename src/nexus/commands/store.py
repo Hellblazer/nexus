@@ -721,7 +721,11 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
     )
 
     row_ids = db.find_ids_by_title(col_name, title)
-    docs = reap_catalog_documents_by_title(col_name, title, row_ids) if yes else None
+
+    def present(chash: str) -> bool:
+        return db.get_by_id(col_name, chash) is not None
+
+    docs = reap_catalog_documents_by_title(col_name, title, row_ids, present) if yes else None
     if not yes:
         # Count before asking, act after: the reap tombstones, so it cannot
         # run ahead of the confirmation. The count is the reap's own
@@ -732,7 +736,7 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
         n_docs = 0
         if reader is not None:
             try:
-                n_docs = len(title_reap_candidates(reader, col_name, title, row_ids))
+                n_docs = len(title_reap_candidates(reader, col_name, title, row_ids, present))
             finally:
                 reader.close()
         if not n_docs and not row_ids:
@@ -742,7 +746,7 @@ def _delete_by_title(db: T3Database, col_name: str, title: str, yes: bool) -> No
             f"{title!r} in {col_name}."
         )
         click.confirm("Delete?", abort=True)
-        docs = reap_catalog_documents_by_title(col_name, title, row_ids)
+        docs = reap_catalog_documents_by_title(col_name, title, row_ids, present)
 
     reaped = docs.documents if docs else ()
     if not reaped and not row_ids and not (docs and docs.failures):

@@ -2243,12 +2243,21 @@ def _is_title_reap_candidate(entry, title: str, collection: str) -> bool:
     )
 
 
-def title_reap_candidates(reader, collection: str, title: str, chashes: list[str] = ()) -> list:
+def title_reap_candidates(
+    reader, collection: str, title: str, chashes: list[str] = (),
+    present: Callable[[str], bool] | None = None,
+) -> list:
     """Every document :func:`reap_catalog_documents_by_title` would reap.
 
     Documents in *collection* come from ``list_by_collection``. A ghost has
-    no collection to list it under, so ghosts are found through the
-    manifests of *chashes* (the chunks titled *title* in T3).
+    no collection to list it under, so ghosts come from two places: the
+    manifests of *chashes* (the chunks titled *title* in T3), and an exact
+    catalog title lookup. The second does not depend on the chunk rows'
+    own titles, which are their last writer's, so a ghost whose shared chunk
+    another note wrote last is still found. A ghost from the title lookup is
+    kept only when *present* confirms one of its chunks is in *collection*,
+    because a ghost has no collection to scope it by; without *present*
+    that source is skipped.
     """
     found = {
         str(e.tumbler): e
@@ -2271,11 +2280,19 @@ def title_reap_candidates(reader, collection: str, title: str, chashes: list[str
                 e = reader.resolve(t)
                 if e is not None and not e.physical_collection and _is_title_reap_candidate(e, title, collection):
                     found[str(t)] = e
+    if present is not None:
+        for e in reader.find_by_title_exact(title, content_type="knowledge") or []:
+            t = str(e.tumbler)
+            if t in found or e.physical_collection or not _is_title_reap_candidate(e, title, collection):
+                continue
+            if any(present(r.chash) for r in reader.get_manifest(t)):
+                found[t] = e
     return list(found.values())
 
 
 def reap_catalog_documents_by_title(
     collection: str, title: str, chashes: list[str] = (),
+    present: Callable[[str], bool] | None = None,
 ) -> TitleReap | None:
     """Tombstone every document ``--title`` names (:func:`title_reap_candidates`),
     retracting its own manifest first (nexus-sis0m.5).
@@ -2310,7 +2327,7 @@ def reap_catalog_documents_by_title(
     failures: list[tuple[str, str]] = []
     held: dict[str, None] = {}
     try:
-        entries = title_reap_candidates(reader, collection, title, list(chashes))
+        entries = title_reap_candidates(reader, collection, title, list(chashes), present)
         if not entries:
             return TitleReap((), (), ())
         writer = make_catalog_writer()

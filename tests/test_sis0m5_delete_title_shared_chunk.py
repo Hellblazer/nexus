@@ -223,3 +223,35 @@ def test_a_ghost_titled_document_is_reaped_too(t2_service_env):
     assert f"Deleted document 'sis0m5 ghost' ({ghost})" in result.output, result.output
     assert reader.by_source_uri(ub) is not None
     assert _live(client, col, chash)
+
+
+def test_a_ghost_is_reaped_when_its_twin_wrote_the_chunk_last(t2_service_env):
+    """The chunk row's title is its last writer's. With the live twin
+    written after the ghost, no chunk is titled with the ghost's title, so
+    the ghost must come from the catalog's own title, not from the chunks."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    col = _coll("ghost-first")
+    body = "sis0m5 ghost-first shared body"
+    ghost = str(writer.register(owner=owner, title="sis0m5 early ghost", content_type="knowledge"))
+    chash = hashlib.sha256(body.encode()).hexdigest()
+    client.upsert_chunks_with_embeddings(
+        col, ids=[chash], documents=[body], embeddings=[],
+        metadatas=[{"title": "sis0m5 early ghost", "chunk_text_hash": chash,
+                    "indexed_at": datetime.now(UTC).isoformat()}],
+    )
+    writer.write_manifest(ghost, [{"chash": chash, "position": 0}], collection=col)
+    # The twin writes the same chunk last, so its row now carries the twin's title.
+    _tb, ub, _c = _note(writer, client, owner, col, "sis0m5 late twin", body)
+    row = client.get_collection(col).get(ids=[chash], include=["metadatas"])
+    assert row["metadatas"][0]["title"] == "sis0m5 late twin"  # the condition the test names
+
+    with patch("nexus.commands.store._t3", return_value=client):
+        result = CliRunner().invoke(main, ["store", "delete", "-c", col, "--title", "sis0m5 early ghost", "-y"])
+
+    assert result.exit_code == 0, result.output
+    assert f"Deleted document 'sis0m5 early ghost' ({ghost})" in result.output, result.output
+    assert reader.by_source_uri(ub) is not None
+    assert _live(client, col, chash)
