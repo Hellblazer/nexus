@@ -6,6 +6,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1947,11 +1948,29 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                     # nexus-trwxr): a second copy of this selector drifted
                     # on arrival.
                     drifted: list[str] = []
+                    malformed: list[str] = []
                     for name in installed:
                         if canonical_by_hook.get(name) is None:
                             continue
-                        if _stanza_state(repo_path, name) == "stale":
+                        _state = _stanza_state(repo_path, name)
+                        if _state == "stale":
                             drifted.append(name)
+                        elif _state == "malformed":
+                            malformed.append(name)
+                    if malformed:
+                        # nexus-sis0m.6: a begin sentinel with no end is not
+                        # drift -- `nx hooks update` refuses it, so it gets
+                        # no update suggestion, same as `nx hooks status`.
+                        results.append(HealthResult(
+                            label="git hooks (malformed stanza)",
+                            ok=False,
+                            detail=(
+                                f"{repo_path} — malformed sentinel (begin without "
+                                f"end) in {', '.join(malformed)}; repair by hand: "
+                                + ", ".join(str(hdir / n) for n in malformed)
+                            ),
+                            fatal=False,
+                        ))
                     if drifted:
                         results.append(HealthResult(
                             label="git hooks (stanza drift)",
@@ -1961,10 +1980,12 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                                 f"current template ({', '.join(drifted)}). "
                                 "May be missing pile-up guard or other fixes."
                             ),
-                            fix_suggestions=[f"nx hooks update {repo_path}"],
+                            fix_suggestions=[
+                                f"nx hooks update {shlex.quote(str(repo_path))}"
+                            ],
                             fatal=False,
                         ))
-                    else:
+                    if not malformed and not drifted:
                         results.append(HealthResult(
                             label="git hooks", ok=True,
                             detail=f"{repo_path} ({', '.join(installed)})",
@@ -1973,7 +1994,7 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                     results.append(HealthResult(
                         label="git hooks", ok=True,
                         detail=f"{repo_path} — not installed",
-                        fix_suggestions=[f"nx hooks install {repo_path}"],
+                        fix_suggestions=[f"nx hooks install {shlex.quote(str(repo_path))}"],
                     ))
             except Exception as exc:  # noqa: BLE001 — git-hook probe is best-effort; degrade to an HONEST signal, never a silent ok=True (nexus-9t86i / nexus-7kl32: a check that could not read state must never render ✓)
                 # nexus-7kl32: the dominant cause of a probe failure here is

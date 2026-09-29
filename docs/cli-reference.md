@@ -2610,7 +2610,11 @@ Hooks run `nx index repo` in the background after each qualifying git operation,
 
 **Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
 
-`owned` and `appended` carry `, stanza stale` when the installed stanza differs from the current template. That is the same comparison `nx doctor` uses for its stanza-drift line, and the remedy is the same: `nx hooks update [PATH]`. Outside a git repository every `nx hooks` verb exits with `Not a git repository: <path>` instead of a traceback.
+`owned` and `appended` carry `, stanza stale` (and a `!` in place of the `✓`) when the installed stanza differs from the current template. That is the same comparison `nx doctor` uses for its stanza-drift line, and the remedy is the same: `nx hooks update [PATH]`; the repo path in the printed command is shell-quoted.
+
+A hook with a begin sentinel but no end sentinel reports `malformed sentinel (begin without end) — repair by hand: <path>` (also `!`). It is not `stale`: nx cannot tell where the stanza ends, and stripping from the begin marker to end of file could delete your own hook content. `install`, `uninstall` and `update` refuse while any of the three hooks is malformed, naming each file and leaving every hook untouched; `nx doctor` reports the same file as `git hooks (malformed stanza)` with no `nx hooks update` suggestion. Repair the file by hand, then re-run. The hidden `update-all` sweep skips a malformed hook, prints its path, and counts it as an error.
+
+The four verbs that take a `PATH` (`status`, `install`, `uninstall`, `update`) exit with a one-line error instead of a traceback when `PATH` is not a git repository (`Not a git repository: <path>`) or does not exist (`Not a directory: <path>`).
 
 ### nx hook routing-stats
 

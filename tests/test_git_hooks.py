@@ -213,9 +213,133 @@ class TestStatus:
             result = runner.invoke(main, ["hooks", "status", str(fake_repo)])
         line = next(ln for ln in result.output.splitlines() if "post-commit" in ln)
         assert ("stale" in line) == (state == "stale"), (state, line)
-        # Non-vacuity: the stale-producing setups really are stale.
-        if setup in ("stale", "malformed"):
+        assert ("malformed" in line) == (state == "malformed"), (state, line)
+        # Non-vacuity: the drift-producing setups really produce their state.
+        if setup == "stale":
             assert state == "stale"
+        if setup == "malformed":
+            assert state == "malformed"
+
+    # ── malformed sentinel (begin without end) ────────────────────────────
+
+    def _write_malformed(self, repo: Path, name: str = "post-commit") -> Path:
+        hook = _hooks_dir(repo) / name
+        hook.write_text(
+            f"#!/bin/sh\necho 'my own hook'\n{SENTINEL_BEGIN}\nnx index repo ...\n"
+            "echo 'user content after an unterminated stanza'\n"
+        )
+        return hook
+
+    def test_malformed_sentinel_is_reported_not_called_stale(self, runner, fake_repo):
+        hook = self._write_malformed(fake_repo)
+        with _mock_git(fake_repo):
+            result = runner.invoke(main, ["hooks", "status", str(fake_repo)])
+        assert result.exit_code == 0, result.output
+        line = next(ln for ln in result.output.splitlines() if "post-commit" in ln)
+        assert "malformed sentinel (begin without end)" in line, line
+        assert f"repair by hand: {hook}" in line, line
+        assert "stale" not in line, line
+        # Nothing here is fixable by update, so it must not be suggested.
+        assert "nx hooks update" not in result.output
+
+    @pytest.mark.parametrize("verb", ["install", "uninstall", "update"])
+    def test_malformed_sentinel_fails_loudly_and_leaves_the_file_alone(
+        self, runner, fake_repo, verb,
+    ):
+        """A remedy that reports success and changes nothing is the defect
+        (update used to print 'refreshed: already installed'). It must fail,
+        name the file, and not touch the user's own hook content."""
+        hook = self._write_malformed(fake_repo)
+        before = hook.read_bytes()
+        with _mock_git(fake_repo):
+            result = runner.invoke(main, ["hooks", verb, str(fake_repo)])
+        assert result.exit_code != 0, result.output
+        assert str(hook) in result.output
+        assert "refreshed" not in result.output
+        assert "already installed" not in result.output
+        assert "stanza removed" not in result.output
+        assert hook.read_bytes() == before
+
+    def test_malformed_hook_blocks_update_before_any_hook_is_rewritten(
+        self, runner, fake_repo,
+    ):
+        """No partial success: a stale post-commit is left as it was when
+        post-merge is malformed, so a retry after the hand repair starts
+        from a known state."""
+        _install(runner, fake_repo)
+        stale = _hooks_dir(fake_repo) / "post-commit"
+        stale.write_text(stale.read_text().replace("pgrep -f", "pgrep -x"))
+        self._write_malformed(fake_repo, "post-merge")
+        before = stale.read_bytes()
+        with _mock_git(fake_repo):
+            result = runner.invoke(main, ["hooks", "update", str(fake_repo)])
+        assert result.exit_code != 0
+        assert stale.read_bytes() == before
+
+    def test_status_with_stale_and_malformed_does_not_send_you_to_a_failing_update(
+        self, runner, fake_repo,
+    ):
+        _install(runner, fake_repo)
+        stale = _hooks_dir(fake_repo) / "post-commit"
+        stale.write_text(stale.read_text().replace("pgrep -f", "pgrep -x"))
+        self._write_malformed(fake_repo, "post-merge")
+        with _mock_git(fake_repo):
+            result = runner.invoke(main, ["hooks", "status", str(fake_repo)])
+        assert result.exit_code == 0, result.output
+        assert "repair" in result.output
+        # update refuses while a hook is malformed, so the hint must order
+        # the repair first rather than bare "Run: nx hooks update".
+        hint = [ln for ln in result.output.splitlines() if "nx hooks update" in ln]
+        assert hint and all("repair" in ln.lower() for ln in hint), result.output
+
+    # ── the remedy actually remedies ──────────────────────────────────────
+
+    @pytest.mark.parametrize("shape", ["owned", "appended"])
+    def test_update_clears_the_drift_status_reports(self, runner, fake_repo, shape):
+        """Run the remedy status names. A remedy that does nothing leaves
+        the hook stale and this goes red."""
+        from nexus.commands.hooks import hook_stanza_state
+
+        hook = _hooks_dir(fake_repo) / "post-commit"
+        if shape == "appended":
+            hook.write_text("#!/bin/sh\necho 'pre-existing'\n")
+        _install(runner, fake_repo)
+        hook.write_text(hook.read_text().replace("pgrep -f", "pgrep -x"))
+        with _mock_git(fake_repo):
+            assert hook_stanza_state(fake_repo, "post-commit") == "stale"
+            drifted = runner.invoke(main, ["hooks", "status", str(fake_repo)])
+            assert "stale" in drifted.output
+            fixed = runner.invoke(main, ["hooks", "update", str(fake_repo)])
+            assert fixed.exit_code == 0, fixed.output
+            after = runner.invoke(main, ["hooks", "status", str(fake_repo)])
+            state = hook_stanza_state(fake_repo, "post-commit")
+        assert state == "armed", state
+        assert "stale" not in after.output, after.output
+        assert "pgrep -f" in hook.read_text()
+        if shape == "appended":
+            assert "pre-existing" in hook.read_text()
+
+    def test_status_quotes_the_repo_path_in_the_update_hint(self, runner, tmp_path):
+        import shlex
+
+        repo = tmp_path / "my repo"
+        repo.mkdir()
+        (repo / ".git" / "hooks").mkdir(parents=True)
+        _install(runner, repo)
+        hook = _hooks_dir(repo) / "post-commit"
+        hook.write_text(hook.read_text().replace("pgrep -f", "pgrep -x"))
+        with _mock_git(repo):
+            result = runner.invoke(main, ["hooks", "status", str(repo)])
+        assert f"nx hooks update {shlex.quote(str(repo))}" in result.output, result.output
+        assert f"nx hooks update {repo}\n" not in result.output
+
+    @pytest.mark.parametrize("verb", ["status", "install", "uninstall", "update"])
+    def test_a_missing_path_is_a_clean_error(self, runner, tmp_path, verb):
+        gone = tmp_path / "does" / "not" / "exist"
+        result = runner.invoke(main, ["hooks", verb, str(gone)])
+        assert result.exit_code != 0
+        assert str(gone) in result.output
+        assert not isinstance(result.exception, (OSError, RuntimeError)), repr(result.exception)
 
     def test_outside_a_git_repo_is_a_clean_error(self, runner, tmp_path, monkeypatch):
         """nexus-sis0m.6: a RuntimeError traceback (rc 1) before; now a
@@ -396,6 +520,32 @@ class TestUpdateAll:
         (repo / ".git" / "hooks").mkdir(parents=True)
         return repo
 
+    def test_malformed_hook_is_reported_not_refreshed_and_left_alone(
+        self, runner, tmp_path, monkeypatch,
+    ):
+        """The sweep must not claim 'refreshed' for a hook it cannot repair
+        (nexus-sis0m.6), and must still refresh that repo's other hooks."""
+        from nexus.cli import main
+
+        repo = self._make_repo(tmp_path, "repo_m")
+        hd = repo / ".git" / "hooks"
+        self._legacy_stanza_file(hd / "post-commit")
+        broken = hd / "post-merge"
+        broken.write_text(f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
+        before = broken.read_bytes()
+        monkeypatch.setattr(
+            "nexus.commands.hooks._iter_managed_repo_roots", lambda: [repo],
+        )
+        monkeypatch.setattr(
+            "nexus.commands.hooks._effective_hooks_dir", lambda r: r / ".git" / "hooks",
+        )
+        result = runner.invoke(main, ["hooks", "update-all"])
+        assert result.exit_code == 0, result.output
+        assert broken.read_bytes() == before
+        assert "pgrep -f" in (hd / "post-commit").read_text()
+        assert "malformed" in result.output and str(broken) in result.output
+        assert "1 hook(s) refreshed" in result.output
+
     def test_refreshes_all_managed_repos(self, runner, tmp_path, monkeypatch):
         from nexus.cli import main
 
@@ -481,18 +631,19 @@ class TestUpdateAll:
         self, runner, tmp_path, monkeypatch,
     ):
         """nexus-g76yf: the sibling test above mocks ``_effective_hooks_dir``
-        to raise ``click.ClickException`` directly -- but ``_effective_hooks_dir``
-        is a BARE passthrough to ``nexus._git_hooks_meta.effective_hooks_dir``,
-        which raises a raw ``RuntimeError`` ("Not a git repository: <path>")
-        for a non-git directory, never a ClickException. That mock gave false
-        confidence: the loop's ``except click.ClickException`` never actually
-        catches what production raises, so ONE stale/no-longer-a-repo registry
-        entry escapes the per-repo handler entirely, aborts the whole sweep,
-        and (via `nx upgrade`'s outer catch-all) surfaces as a single
-        top-level warning naming that one bad path -- exactly the observed
-        ``upgrade_git_hook_refresh_failed error='Not a git repository: ...'``
-        symptom. This test exercises the REAL exception shape via the real
-        ``run_bounded`` seam, with ``_effective_hooks_dir`` unmocked."""
+        to raise ``click.ClickException`` directly, which skips the real
+        lookup entirely. This test leaves ``_effective_hooks_dir`` unmocked
+        and fakes only the ``run_bounded`` seam, so the lower layer's own
+        ``RuntimeError`` ("Not a git repository: <path>", raised for a
+        non-git directory) travels the production path. Since nexus-sis0m.6
+        ``_effective_hooks_dir`` translates that ``RuntimeError`` into a
+        ``ClickException``, so the sweep's ``except click.ClickException``
+        arm is the one that catches it; the ``RuntimeError`` arm stays as a
+        defensive guard. Either way ONE stale/no-longer-a-repo registry
+        entry must not abort the sweep (before g76yf it escaped the
+        per-repo handler and surfaced, via `nx upgrade`'s outer catch-all,
+        as one ``upgrade_git_hook_refresh_failed error='Not a git
+        repository: ...'`` warning naming that single path)."""
         good = self._make_repo(tmp_path, "good")
         bad = tmp_path / "bad"  # no .git at all
         bad.mkdir()

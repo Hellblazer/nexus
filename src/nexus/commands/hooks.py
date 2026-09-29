@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nx hooks — git hook management for automatic repo indexing."""
 import re
+import shlex
 import stat
 from pathlib import Path
 
@@ -29,13 +30,27 @@ def _effective_hooks_dir(repo):
     ``nx hooks`` verb resolves the directory through here, so translate
     once at the CLI boundary (nexus-sis0m.6: ``status``, ``install``,
     ``uninstall`` and ``update`` printed a traceback outside a repo).
-    ``ClickException`` is not a ``RuntimeError``; the callers that catch
-    both (``refresh_all_managed_hooks``) already name it.
+    ``ClickException`` is not a ``RuntimeError``;
+    ``refresh_all_managed_hooks`` catches both, the ``RuntimeError`` arm
+    being a defensive guard now. A nonexistent path is NOT refused here
+    (``nx doctor`` resolves registered repos through this and renders a
+    vanished one as ``unknown``); the verbs that take a path use
+    ``_verb_hooks_dir``.
     """
     try:
         return _ghm.effective_hooks_dir(repo)
     except RuntimeError as exc:
         raise click.ClickException(str(exc))
+
+
+def _verb_hooks_dir(repo: Path) -> Path:
+    """Hooks directory for a path a user typed to ``status`` / ``install`` /
+    ``uninstall`` / ``update``. ``git`` runs with the path as its cwd, so a
+    missing path would otherwise escape as a ``FileNotFoundError``
+    traceback (nexus-sis0m.6)."""
+    if not repo.is_dir():
+        raise click.ClickException(f"Not a directory: {repo}")
+    return _effective_hooks_dir(repo)
 
 
 def _git_common_dir_raw(repo):
@@ -155,14 +170,46 @@ def _remove_stanza(content: str) -> str:
     )
 
 
+def _has_unterminated_sentinel(content: str) -> bool:
+    """True when *content* has a nexus begin marker with no end marker after
+    it. There is no safe automatic repair: the stanza's extent is unknown,
+    so stripping from the begin marker to EOF could delete the user's own
+    hook content. Every verb that would rewrite the file refuses instead."""
+    start = content.find(SENTINEL_BEGIN)
+    return start != -1 and content.find(SENTINEL_END, start) == -1
+
+
+def _malformed_message(hook_file: Path) -> str:
+    return (
+        f"Malformed nexus sentinel in {hook_file}: begin marker without an end "
+        "marker. Repair it by hand (complete or remove the stanza), then re-run."
+    )
+
+
+def _refuse_malformed(hooks_dir: Path) -> None:
+    """Raise ``ClickException`` naming every malformed hook in *hooks_dir*,
+    before any verb has rewritten anything, so a refusal never leaves a
+    half-updated set behind."""
+    bad = [
+        hooks_dir / n for n in _HOOK_NAMES
+        if (hooks_dir / n).is_file()
+        and _has_unterminated_sentinel((hooks_dir / n).read_text())
+    ]
+    if bad:
+        raise click.ClickException("\n".join(_malformed_message(p) for p in bad))
+
+
 def _hook_status(hooks_dir: Path, hook_name: str) -> str:
-    """Return status string: 'not installed' | 'unmanaged' | 'owned' | 'appended'."""
+    """Return status string: 'not installed' | 'unmanaged' | 'malformed' |
+    'owned' | 'appended'."""
     hook_file = hooks_dir / hook_name
     if not hook_file.exists():
         return "not installed"
     content = hook_file.read_text()
     if SENTINEL_BEGIN not in content:
         return "unmanaged"
+    if _has_unterminated_sentinel(content):
+        return "malformed"
     remainder = _remove_stanza(content).strip()
     if remainder in ("", "#!/bin/sh"):
         return "owned"
@@ -175,7 +222,9 @@ def hook_stanza_state(repo: Path, hook_name: str = "post-commit") -> str:
     ``armed``: the installed stanza equals the current template.
     ``stale``: a nexus stanza is installed but differs from the template
     (a release changed it and ``nx hooks update`` has not run,
-    nexus-trwxr). ``unmanaged``: a hook exists without a nexus sentinel.
+    nexus-trwxr). ``malformed``: a begin sentinel with no end sentinel;
+    ``nx hooks update`` cannot repair it (nexus-sis0m.6), so it is not
+    ``stale``. ``unmanaged``: a hook exists without a nexus sentinel.
     ``not installed``: no hook file. ``unknown``: not a git repository.
 
     ``nx doctor`` has computed the stale case since nexus-mkj6u, but as a
@@ -200,7 +249,7 @@ def _stanza_state_in(hooks_dir: Path, hook_name: str) -> str:
     an unreadable hook file; the public wrapper degrades to ``unknown``.
     """
     status = _hook_status(hooks_dir, hook_name)
-    if status in ("not installed", "unmanaged"):
+    if status in ("not installed", "unmanaged", "malformed"):
         return status
     installed = (hooks_dir / hook_name).read_text()
     return "armed" if stanza_body(installed) == stanza_body(_stanza_for(hook_name)) else "stale"
@@ -225,6 +274,10 @@ def _install_hook(hooks_dir: Path, hook_name: str) -> str:
         return "created"
 
     content = hook_file.read_text()
+    if _has_unterminated_sentinel(content):
+        # "already installed" would be a false success: the stanza is not
+        # in a runnable state and nothing here can fix it.
+        raise click.ClickException(_malformed_message(hook_file))
     if SENTINEL_BEGIN in content:
         return "already installed"
 
@@ -241,6 +294,10 @@ def _uninstall_hook(hooks_dir: Path, hook_name: str) -> str:
     content = hook_file.read_text()
     if SENTINEL_BEGIN not in content:
         return "not installed"
+    if _has_unterminated_sentinel(content):
+        # _remove_stanza matches nothing here, so "stanza removed" would
+        # rewrite the file unchanged and claim success.
+        raise click.ClickException(_malformed_message(hook_file))
 
     new_content = _remove_stanza(content)
     if new_content.strip() in ("", "#!/bin/sh"):
@@ -274,10 +331,8 @@ def hooks_install(path: Path) -> None:
     """
     repo = path.resolve()
 
-    try:
-        hooks_dir = _effective_hooks_dir(repo)
-    except click.ClickException as exc:
-        raise exc
+    hooks_dir = _verb_hooks_dir(repo)
+    _refuse_malformed(hooks_dir)
 
     # Check writeability
     if hooks_dir.exists() and not _is_writable(hooks_dir):
@@ -306,7 +361,8 @@ def hooks_uninstall(path: Path) -> None:
     content intact.
     """
     repo = path.resolve()
-    hooks_dir = _effective_hooks_dir(repo)
+    hooks_dir = _verb_hooks_dir(repo)
+    _refuse_malformed(hooks_dir)
 
     click.echo(f"Removing nexus hooks from {repo}…")
 
@@ -332,7 +388,8 @@ def hooks_update(path: Path) -> None:
     sentinel block); never touches unmanaged hook files.
     """
     repo = path.resolve()
-    hooks_dir = _effective_hooks_dir(repo)
+    hooks_dir = _verb_hooks_dir(repo)
+    _refuse_malformed(hooks_dir)
 
     if hooks_dir.exists() and not _is_writable(hooks_dir):
         raise click.ClickException(
@@ -369,6 +426,7 @@ def _refresh_managed_hooks(hooks_dir: Path) -> list[tuple[str, str]]:
     Only rewrites hooks that already carry the sentinel block; never touches
     unmanaged or absent hook files. Returns a list of ``(hook_name, action)``
     where action is ``refreshed:<install-action>`` | ``unmanaged`` |
+    ``malformed`` (begin sentinel without an end; left untouched) |
     ``not installed``.
     """
     results: list[tuple[str, str]] = []
@@ -377,8 +435,13 @@ def _refresh_managed_hooks(hooks_dir: Path) -> list[tuple[str, str]]:
         if not hook_file.exists():
             results.append((name, "not installed"))
             continue
-        if SENTINEL_BEGIN not in hook_file.read_text():
+        content = hook_file.read_text()
+        if SENTINEL_BEGIN not in content:
             results.append((name, "unmanaged"))
+            continue
+        if _has_unterminated_sentinel(content):
+            # Not refreshable, and not "refreshed:already installed" either.
+            results.append((name, "malformed"))
             continue
         _uninstall_hook(hooks_dir, name)
         action = _install_hook(hooks_dir, name)
@@ -430,19 +493,17 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
     summary = {"repos": 0, "refreshed": 0, "errors": 0}
     for repo in _iter_managed_repo_roots():
         try:
-            # nexus-g76yf: ``_effective_hooks_dir`` is a BARE passthrough to
-            # ``nexus._git_hooks_meta.effective_hooks_dir`` -- unlike
-            # ``_git_common_dir`` above, it does NOT translate the
-            # lower layer's raw ``RuntimeError`` ("Not a git repository:
-            # <path>", raised when a repo entry no longer resolves as a
-            # git checkout -- moved, deleted, or a stale/bad registry
-            # entry) into a ``ClickException``. Catching only
-            # ``click.ClickException`` here let that RuntimeError escape
-            # this per-repo handler entirely: it aborted the WHOLE sweep
-            # (every repo after the bad one silently unrefreshed) and
-            # surfaced, via `nx upgrade`'s outer catch-all, as one
-            # top-level warning naming the single bad path -- instead of
-            # the per-repo skip this docstring already promises.
+            # nexus-g76yf: the lower layer raises a raw ``RuntimeError``
+            # ("Not a git repository: <path>") when a repo entry no longer
+            # resolves as a git checkout -- moved, deleted, or a stale/bad
+            # registry entry. Before nexus-sis0m.6 ``_effective_hooks_dir``
+            # passed it through untranslated, and catching only
+            # ``click.ClickException`` here let it abort the WHOLE sweep
+            # (every repo after the bad one silently unrefreshed). It now
+            # translates to ``ClickException``, so that arm is the one that
+            # fires; the ``RuntimeError`` arm below is kept as a defensive
+            # guard for any other path that raises it, because one bad
+            # entry must stay a per-repo skip, never a sweep abort.
             hooks_dir = _effective_hooks_dir(repo)
             if hooks_dir.exists() and not _is_writable(hooks_dir):
                 summary["errors"] += 1
@@ -456,6 +517,15 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
                 msg = exc.format_message() if isinstance(exc, click.ClickException) else str(exc)
                 click.echo(f"  ! {repo}  ({msg})")
             continue
+
+        for n, a in results:
+            if a == "malformed":
+                summary["errors"] += 1
+                if echo:
+                    click.echo(
+                        f"  ! {hooks_dir / n}  (malformed sentinel, begin without "
+                        "end; not refreshed, repair by hand)"
+                    )
 
         refreshed = [n for n, a in results if a.startswith("refreshed")]
         if refreshed:
@@ -497,15 +567,22 @@ def hooks_update_all() -> None:
 def hooks_status(path: Path) -> None:
     """Show nexus git hook status for PATH (default: current directory)."""
     repo = path.resolve()
-    hooks_dir = _effective_hooks_dir(repo)
+    hooks_dir = _verb_hooks_dir(repo)
 
     click.echo(f"Hooks directory: {hooks_dir}")
 
     stale: list[str] = []
+    malformed: list[str] = []
     for name in _HOOK_NAMES:
         s = _hook_status(hooks_dir, name)
         symbol = "✓" if s.startswith(("owned", "appended")) else "·"
-        if s in ("owned", "appended"):
+        if s == "malformed":
+            # A begin sentinel with no end: nothing in nx can repair it
+            # safely, so no `nx hooks update` suggestion for this one.
+            s = f"malformed sentinel (begin without end) — repair by hand: {hooks_dir / name}"
+            symbol = "!"
+            malformed.append(name)
+        elif s in ("owned", "appended"):
             # Ownership says who wrote the file; it does not say the
             # stanza is current. Same comparison as nx doctor's drift line.
             try:
@@ -519,7 +596,15 @@ def hooks_status(path: Path) -> None:
         click.echo(f"  {symbol} {name}: {s}")
 
     if stale:
-        click.echo(f"Stanza drift in {', '.join(stale)}. Run: nx hooks update {repo}")
+        cmd = f"nx hooks update {shlex.quote(str(repo))}"
+        if malformed:
+            # update refuses while any hook is malformed, so order the repair first.
+            click.echo(
+                f"Stanza drift in {', '.join(stale)}. Repair the malformed "
+                f"hook(s) by hand first, then run: {cmd}"
+            )
+        else:
+            click.echo(f"Stanza drift in {', '.join(stale)}. Run: {cmd}")
 
 
 # ── internal ──────────────────────────────────────────────────────────────────
