@@ -1617,22 +1617,67 @@ class CatalogRepositoryTest {
      * critique of the nexus-uxd2a landing): hygiene-005's GC functions copy a
      * quarantine sibling's model_version from the origin's row, which is only
      * ever right if a same-name re-registration cannot move the origin's value.
-     * The mutable attributes (owner_id here) still update on conflict.
      */
     @Test @Order(60)
-    void collection_upsert_onConflict_pinsModelVersion_updatesMutableAttributes() {
+    void collection_upsert_onConflict_pinsModelVersion() {
         String name = "code__pin-mv__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code", "owner_id", "pin-mv",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         repo.upsertCollection(TENANT_A, Map.of(
-            "name", name, "content_type", "code", "owner_id", "pin-mv-renamed",
+            "name", name, "content_type", "code", "owner_id", "pin-mv",
             "embedding_model", "voyage-code-3", "model_version", "v7"));
-        var coll = repo.getCollection(TENANT_A, name);
-        assertThat(coll.get("model_version"))
+        assertThat(repo.getCollection(TENANT_A, name).get("model_version"))
             .as("a same-name re-registration never moves model_version").isEqualTo("v1");
-        assertThat(coll.get("owner_id"))
-            .as("owner_id is not pinned and follows the re-registration").isEqualTo("pin-mv-renamed");
+    }
+
+    /**
+     * nexus-7tys2: a registered owner_id survives a later registration. The client
+     * registers a collection before its first chunk write in every process, sending
+     * the owner segment it parses out of the NAME (a slug such as
+     * {@code dbgslug-2ad2825c}, not an owner). That is name-derived, the class
+     * RDR-204 forbids the engine to trust, and it used to overwrite an owner a
+     * caller had registered on purpose. Measured on the engine substrate: register
+     * with owner '1.1', write a chunk, read back the slug.
+     */
+    @Test @Order(60)
+    void collection_upsert_onConflict_keepsRegisteredOwnerId() {
+        String name = "code__dbgslug-2ad2825c__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "1.1",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        // What ensure_collection_registered sends on a cache miss: the name's owner segment.
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "dbgslug-2ad2825c",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
+            .as("a re-registration never replaces a registered owner_id").isEqualTo("1.1");
+    }
+
+    /**
+     * nexus-7tys2: the one row whose owner_id is known garbage still takes the
+     * incoming value. hygiene-002-1 stamps a row it cannot classify 'disputed' with
+     * the tenant id as its owner; a re-registration used to repair that, and
+     * pinning owner_id for every row would have stopped it.
+     */
+    @Test @Order(60)
+    void collection_upsert_onConflict_disputedRowTakesIncomingOwnerId() throws Exception {
+        String name = "code__disputed-own__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", TENANT_A,
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        try (Connection su = pg.createConnection("");
+             var st = su.prepareStatement(
+                 "UPDATE nexus.catalog_collections SET lifecycle_state='disputed' WHERE name=?")) {
+            st.setString(1, name);
+            assertThat(st.executeUpdate()).as("guard: the row was marked disputed").isEqualTo(1);
+        }
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "disputed-own",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
+            .as("a disputed row's placeholder owner is repaired by a re-registration")
+            .isEqualTo("disputed-own");
     }
 
     /**
