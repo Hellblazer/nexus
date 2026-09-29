@@ -1,6 +1,6 @@
 # sn — Serena + Context7 MCP Plugin for Claude Code
 
-A Claude Code plugin that bundles two MCP servers, injects their usage guidance into every subagent, and auto-approves their tools. It has no dependency on Nexus (see [Relationship to conexus](#relationship-to-conexus)); if you're also setting up the [Nexus CLI and its plugin](https://hellblazer.github.io/nexus/), the site's [install guide](https://hellblazer.github.io/nexus/) covers that separately.
+A Claude Code plugin that bundles two MCP servers, injects their usage guidance into every subagent, and auto-approves their read tools. It has no dependency on Nexus (see [Relationship to conexus](#relationship-to-conexus)); if you're also setting up the [Nexus CLI and its plugin](https://hellblazer.github.io/nexus/), the site's [install guide](https://hellblazer.github.io/nexus/) covers that separately.
 
 ## What It Does
 
@@ -10,7 +10,7 @@ Subagents spawned by Claude Code don't see your CLAUDE.md instructions. They hav
 
 1. **Bundling MCP servers**: Serena (code intelligence, JetBrains or LSP backend) and Context7 (live library documentation), both pinned to an exact revision in `.mcp.json`.
 2. **Injecting usage guidance**: a `SubagentStart` hook injects the tool routing table and workflow into every subagent's context, and a `SessionStart` hook prints a short reminder into the main conversation.
-3. **Auto-approving MCP tools**: `PreToolUse` and `PermissionRequest` hooks approve every `mcp__plugin_sn_serena__*` tool the pinned Serena exposes and both `mcp__plugin_sn_context7__*` tools, so agents never hit a permission prompt. The Serena list is a generated snapshot, not a hand-kept list.
+3. **Auto-approving read tools**: `PreToolUse` and `PermissionRequest` hooks approve Serena's read and navigation tools and both `mcp__plugin_sn_context7__*` tools, so lookups never hit a permission prompt. Serena's file and memory writers, `jet_brains_debug` (which evaluates arbitrary Groovy/Java in the IDE's JVM) and `restart_language_server` get no decision: a hook allow would skip both your prompt and the auto-mode classifier, so these go through Claude Code's own permission flow, as its Edit and Write do. To stop being asked, add the ones you want to `permissions.allow` in your own settings. The tool list is a generated snapshot of the pinned Serena; each tool in it is classified as a read, a write, or never-approve, and an unclassified new tool is not approved.
 
 ## Install
 

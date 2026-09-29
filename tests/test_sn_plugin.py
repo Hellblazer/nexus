@@ -548,6 +548,51 @@ class TestWorktreeDetection:
             assert not is_serena_write_tool(f"mcp__plugin_sn_serena__{name}")
 
 
+from auto_approve_sn_mcp import NEVER_AUTO_APPROVE, SERENA_READ_TOOLS  # noqa: E402
+
+
+class TestReadsOnlyApproval:
+    """nexus-2lf1v (Sam, 2026-09-29): sn auto-approves reads only. A PreToolUse
+    allow skips the user's prompt and the auto-mode classifier, so a writer or
+    jet_brains_debug (arbitrary Groovy/Java in the IDE's JVM) must get no
+    decision and reach Claude Code's own permission flow."""
+
+    def test_every_snapshot_tool_is_classified_exactly_once(self) -> None:
+        """Default-deny only works if a new upstream tool cannot slip through
+        unclassified: a Serena pin bump that adds a tool fails here until it
+        is named as a read, a write or never-auto-approve."""
+        _, available, _ = parse_snapshot()
+        classes = {"read": SERENA_READ_TOOLS, "write": SERENA_WRITE_TOOLS, "never": NEVER_AUTO_APPROVE}
+        for (a, x), (b, y) in [(("read", SERENA_READ_TOOLS), ("write", SERENA_WRITE_TOOLS)),
+                               (("read", SERENA_READ_TOOLS), ("never", NEVER_AUTO_APPROVE)),
+                               (("write", SERENA_WRITE_TOOLS), ("never", NEVER_AUTO_APPROVE))]:
+            assert not x & y, f"{a} and {b} overlap: {sorted(x & y)}"
+        classified = set().union(*classes.values())
+        assert set(available) == classified, {
+            "unclassified": sorted(set(available) - classified),
+            "not in snapshot": sorted(classified - set(available)),
+        }
+
+    @pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
+    def test_every_read_tool_is_approved(self, event: str) -> None:
+        for name in sorted(SERENA_READ_TOOLS):
+            out = _run_auto_approve({"hook_event_name": event, "tool_name": f"mcp__plugin_sn_serena__{name}"})
+            assert out is not None, name
+            hso = out["hookSpecificOutput"]
+            decision = hso["permissionDecision"] if event == "PreToolUse" else hso["decision"]["behavior"]
+            assert decision == "allow", name
+
+    @pytest.mark.parametrize("event", ["PreToolUse", "PermissionRequest"])
+    def test_writers_and_never_tools_get_no_decision_in_the_primary(self, tmp_path: Path, event: str) -> None:
+        primary, _ = _make_repo_with_worktree(tmp_path)
+        names = sorted(SERENA_WRITE_TOOLS | NEVER_AUTO_APPROVE)
+        assert "jet_brains_debug" in names and "replace_in_files" in names
+        for name in names:
+            out = _run_auto_approve({"cwd": str(primary), "hook_event_name": event,
+                                     "tool_name": f"mcp__plugin_sn_serena__{name}"})
+            assert out is None, (name, out)
+
+
 class TestWorktreeGuardHook:
     """No session_id on any payload here, deliberately: these pin the FALLBACK
     path (nexus-ebx0s round 2) that runs only when no per-session recorded
@@ -586,15 +631,15 @@ class TestWorktreeGuardHook:
                                  "tool_name": "mcp__plugin_sn_serena__find_symbol"})
         assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
-    def test_write_tool_allowed_in_primary_with_no_session_record(self, tmp_path: Path) -> None:
+    def test_write_tool_not_denied_in_primary_with_no_session_record(self, tmp_path: Path) -> None:
         primary, _ = _make_repo_with_worktree(tmp_path)
         out = _run_auto_approve({"cwd": str(primary), "hook_event_name": "PreToolUse",
                                  "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
-        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
 
-    def test_payload_without_cwd_falls_through_to_allowlist(self) -> None:
+    def test_write_payload_without_cwd_is_not_denied(self) -> None:
         out = _run_auto_approve({"hook_event_name": "PreToolUse", "tool_name": "mcp__plugin_sn_serena__replace_in_files"})
-        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
 
     def test_context7_unaffected_in_worktree(self, tmp_path: Path) -> None:
         _, worktree = _make_repo_with_worktree(tmp_path)
@@ -625,7 +670,7 @@ class TestWorktreeGuardHook:
 
 
 class TestRelocatedSessionGuard:
-    def test_session_whose_cwd_matches_serena_root_is_allowed(self, tmp_path: Path) -> None:
+    def test_session_whose_cwd_matches_serena_root_is_not_denied(self, tmp_path: Path) -> None:
         primary, _ = _make_repo_with_worktree(tmp_path)
         env = _isolated_state_env(tmp_path)
         start = _run_session_start({"source": "startup", "session_id": "s1", "cwd": str(primary)}, env)
@@ -635,9 +680,9 @@ class TestRelocatedSessionGuard:
              "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
             env=env,
         )
-        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
 
-    def test_session_started_in_a_worktree_is_allowed_a_write(self, tmp_path: Path) -> None:
+    def test_session_started_in_a_worktree_is_not_denied_a_write(self, tmp_path: Path) -> None:
         """Round 2 (nexus-ebx0s): this session's OWN startup was inside the
         worktree, so Serena really is rooted there and the write is
         legitimate. is_linked_worktree(cwd) is True here too, same as the
@@ -655,7 +700,7 @@ class TestRelocatedSessionGuard:
              "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
             env=env,
         )
-        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
 
     def test_relocated_session_denied_even_though_cwd_is_the_primary(self, tmp_path: Path) -> None:
         """The bead's own shape: Serena rooted at a WORKTREE (this session
@@ -708,11 +753,11 @@ class TestRelocatedSessionGuard:
         )
         assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
 
-    def test_missing_record_allows_and_logs(self, tmp_path: Path) -> None:
+    def test_missing_record_does_not_deny_and_logs(self, tmp_path: Path) -> None:
         """Fail-open (nexus-ebx0s requirement): no SessionStart ever recorded a
         root for this session_id, so the mismatch cannot be established --
-        allow, but say why on stderr rather than looking identical to 'checked
-        and it matched'."""
+        do not deny, but say why on stderr rather than looking identical to
+        'checked and it matched'."""
         primary, _ = _make_repo_with_worktree(tmp_path)
         env = _isolated_state_env(tmp_path)
         result = _run_auto_approve_raw(
@@ -721,8 +766,7 @@ class TestRelocatedSessionGuard:
             env=env,
         )
         assert result.returncode == 0, result.stderr
-        out = json.loads(result.stdout)
-        assert out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert result.stdout.strip() == "", result.stdout  # not denied; reads-only leaves the write to Claude Code
         assert "no recorded Serena root" in result.stderr
 
     def test_resume_does_not_overwrite_the_startup_record(self, tmp_path: Path) -> None:
@@ -796,7 +840,7 @@ class TestPerSessionRecordStorage:
              "tool_name": "mcp__plugin_sn_serena__replace_in_files"},
             env=env,
         )
-        assert out and out["hookSpecificOutput"]["permissionDecision"] == "allow"
+        assert out is None, out  # not denied; reads-only (nexus-2lf1v) leaves the write to Claude Code
 
     def test_different_all_unsafe_session_ids_do_not_collide(self, tmp_path: Path) -> None:
         """Two session_ids that are ENTIRELY unsafe characters (so the

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Regenerate the sn plugin's Serena tool snapshot from the pinned checkout.
 
-The sn plugin auto-approves Serena MCP tools by full name and documents them
-to subagents. Both lists rot silently when Serena adds or excludes tools
+The sn plugin auto-approves Serena's read tools by full name and documents
+every tool to subagents. Both lists rot silently when Serena adds or excludes tools
 (nexus-jbt5x: five live tools were prompting, and three documented tools had
 been excluded upstream). This script is the one place that knows the real
 tool set: it reads the Serena revision pinned in ``sn/.mcp.json``, finds the
@@ -47,11 +47,12 @@ SNAPSHOT = REPO_ROOT / "sn" / "hooks" / "scripts" / "serena-tools.txt"
 
 _PIN_RE = re.compile(r"^git\+(?P<url>https://[^@\s]+)@(?P<rev>[0-9a-f]{7,40})$")
 
-#: Tools the plugin never auto-approves even though the context exposes them:
-#: they act on Serena's own project registry or open UI, not on the code, and
-#: a subagent has no business doing either unprompted. Everything else the
-#: context exposes is approved, including the destructive symbol editors,
-#: because the plugin's purpose is that code work never hits a prompt.
+#: Tools left out of the snapshot altogether even though the context exposes
+#: them: they act on Serena's own project registry or open UI, not on the
+#: code. Of what remains, only reads are auto-approved (nexus-2lf1v):
+#: sn/hooks/scripts/auto_approve_sn_mcp.py classifies every snapshot tool as a
+#: read, a write or never-auto-approve, and tests/test_sn_plugin.py fails on a
+#: new tool until it is classified.
 NEVER_APPROVE: frozenset[str] = frozenset({"remove_project", "open_dashboard"})
 
 

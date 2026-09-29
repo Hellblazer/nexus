@@ -45,6 +45,11 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
+- nexus-2lf1v: `sn/hooks/scripts/auto_approve_sn_mcp.py` auto-approves Serena
+  READ tools only (`SERENA_READ_TOOLS`). Serena's writers, `jet_brains_debug`
+  and `restart_language_server` now get no decision, so Claude Code's own
+  prompt or auto-mode classifier decides (Sam, 2026-09-29).
+
 ## Deferred to the next client release
 
 _Empty. The entries deferred here (nexus-5l8i8, nexus-xxvv3, nexus-3lc5s,
