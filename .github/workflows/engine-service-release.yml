@@ -623,7 +623,7 @@ jobs:
               # routine dependency bump could silently push either past the
               # ceiling while the outer-binary check above stays green.
               #
-              # Source: the resolved Maven jars in ~/.m2, not any
+              # Source: the resolved Maven jars in the local repository, not any
               # native-image build-staging directory. GraalVM extracts
               # embedded resources internally at image-build time and
               # leaves no stable on-disk staging dir to re-read afterward;
@@ -639,8 +639,18 @@ jobs:
                 echo "FAIL: could not read onnxruntime.version/djl.tokenizers.version from service/pom.xml — cannot locate the embedded dylibs to check" >&2
                 exit 1
               fi
-              onnx_jar="$HOME/.m2/repository/com/microsoft/onnxruntime/onnxruntime/$onnx_version/onnxruntime-$onnx_version.jar"
-              djl_jar="$HOME/.m2/repository/ai/djl/huggingface/tokenizers/$djl_version/tokenizers-$djl_version.jar"
+              # Ask Maven where its local repository is rather than assuming
+              # ~/.m2/repository: a runner can relocate it with
+              # MAVEN_OPTS=-Dmaven.repo.local=... (hellmini does), and the
+              # hardcoded path failed engine-service-v0.1.141's mac-arm64
+              # leg there (nexus-zwn92).
+              m2_repo=$(cd service && ./mvnw -q help:evaluate -Dexpression=settings.localRepository -DforceStdout)
+              if [ -z "$m2_repo" ] || [ ! -d "$m2_repo" ]; then
+                echo "FAIL: could not resolve Maven's local repository (got '$m2_repo')" >&2
+                exit 1
+              fi
+              onnx_jar="$m2_repo/com/microsoft/onnxruntime/onnxruntime/$onnx_version/onnxruntime-$onnx_version.jar"
+              djl_jar="$m2_repo/ai/djl/huggingface/tokenizers/$djl_version/tokenizers-$djl_version.jar"
               for jar in "$onnx_jar" "$djl_jar"; do
                 if [ ! -f "$jar" ]; then
                   echo "FAIL: resolved dependency jar missing at $jar — can't check its embedded dylibs" >&2
