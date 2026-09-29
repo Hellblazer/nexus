@@ -43,9 +43,8 @@ from nexus.exporter import (
     import_collection,
 )
 
-# nexus-wbfpw.31: only the tests that touch a real catalog/T3 substrate are
-# integration-marked (per-function below); test_accumulate_owner_group_*
-# is pure-unit (fakes only) and stays in the default fast suite.
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself
+# and CI's default selection must run these import-owner pins.
 
 _MODEL = "bge-base-en-v15-768"
 _DIM = 768
@@ -191,7 +190,6 @@ def test_manifest_rows_orders_and_renumbers_colliding_positions():
 # ── Round trip: multi-batch documents stay owned ────────────────────────────
 
 
-@pytest.mark.integration
 def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, monkeypatch):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -281,7 +279,6 @@ def test_round_trip_multi_batch_document_stays_owned(t2_service_env, tmp_path, m
 # ── Legacy export (no owner, no doc_id): one document per import file ──────
 
 
-@pytest.mark.integration
 def test_legacy_export_gets_file_fallback_owner_and_is_idempotent(t2_service_env, tmp_path):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -324,7 +321,6 @@ def test_legacy_export_gets_file_fallback_owner_and_is_idempotent(t2_service_env
 # ── --skip-existing: a skipped record still ends up owned ──────────────────
 
 
-@pytest.mark.integration
 def test_skip_existing_records_still_end_up_owned(t2_service_env, tmp_path):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -363,7 +359,6 @@ def test_skip_existing_records_still_end_up_owned(t2_service_env, tmp_path):
 # ── One owner group failing does not strand the others ─────────────────────
 
 
-@pytest.mark.integration
 def test_one_failed_owner_group_does_not_strand_the_rest(t2_service_env, tmp_path, monkeypatch):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -401,7 +396,6 @@ def test_one_failed_owner_group_does_not_strand_the_rest(t2_service_env, tmp_pat
 # ── Export fails loud when the catalog cannot answer ────────────────────────
 
 
-@pytest.mark.integration
 def test_export_fails_loud_when_catalog_unreachable(t2_service_env, tmp_path, monkeypatch):
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -425,7 +419,6 @@ def test_export_fails_loud_when_catalog_unreachable(t2_service_env, tmp_path, mo
 # ── Owner-tumbler resolution: code/docs use the collection's owner segment ─
 
 
-@pytest.mark.integration
 def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_service_env):
     """nexus-wbfpw.33: the owner comes from the collection's catalog row.
     An owner segment is not always tumbler-derived (gate-xr789's
@@ -460,7 +453,6 @@ def test_resolve_import_owner_tumbler_reads_the_collection_row_not_the_name(t2_s
     assert _resolve_import_owner_tumbler(odd, reader, writer) == curator
 
 
-@pytest.mark.integration
 def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_path):
     """The conexus-sdyq failure end to end: re-import into a code collection
     whose owner segment is a slug, --skip-existing, chunks already stored."""
@@ -532,7 +524,6 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
         assert r["id"] in client.get_collection(dst).get(ids=[r["id"]], include=[])["ids"]
 
 
-@pytest.mark.integration
 def test_resolve_import_owner_tumbler_uses_knowledge_curator_for_knowledge_collection(
     t2_service_env,
 ):
@@ -553,7 +544,6 @@ def test_resolve_import_owner_tumbler_uses_knowledge_curator_for_knowledge_colle
 # ── Legacy doc_id records: owned whether their document is live, dead or gone ─
 
 
-@pytest.mark.integration
 def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_path):
     """The gate-xr789 shape (conexus-sdyq): chunks already in the target with
     no manifest, carrying meta.doc_id that names a live document, a
@@ -624,7 +614,6 @@ def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_p
         assert [r.chash for r in rows] == by_doc[orig]
 
 
-@pytest.mark.integration
 def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service_env, tmp_path):
     """A live document whose chunks arrive partly as owner-tagged records
     (with a stale meta.doc_id beside the owner) and partly as legacy
