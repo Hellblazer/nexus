@@ -231,9 +231,14 @@ def _update_sets_closed_status(tokens: list[str]) -> bool:
 #: quoted-mention/cross-segment class nexus-fv65m already closed for the
 #: verb-position detector, reopened one call away for batch/import. See
 #: :func:`_pipeline_segments` for what "same shell segment" means here.
+#: A bead id, child suffixes included (nexus-x, nexus-x.1, nexus-x.1.2). The one
+#: spelling every id pattern below is built from (nexus-qhskl): the child
+#: suffix was once missing from some and present in others.
+_BEAD_ID = r'nexus-[a-z0-9]+(?:\.[0-9]+)*'
+
 _BD_BATCH_CLOSE_RE = re.compile(
-    r'\b(?:close|done)\s+(?:nexus-[a-z0-9]+(?:\.[0-9]+)*)\b'
-    r'|\bupdate\s+nexus-[a-z0-9]+(?:\.[0-9]+)*\s+[^\n]*?\bstatus\s*=\s*closed\b',
+    r'\b(?:close|done)\s+(?:' + _BEAD_ID + r')\b'
+    r'|\bupdate\s+' + _BEAD_ID + r'\s+[^\n]*?\bstatus\s*=\s*closed\b',
     re.IGNORECASE,
 )
 
@@ -246,7 +251,7 @@ _BD_BATCH_CLOSE_RE = re.compile(
 #: line that only touches unrelated fields does not match. SCOPED to the
 #: prior pipe stage(s) the same way :data:`_BD_BATCH_CLOSE_RE` is, for the
 #: same round-2 reason.
-_BD_IMPORT_ID_RE = re.compile(r'"id"\s*:\s*"nexus-[a-z0-9]+(?:\.[0-9]+)*"', re.IGNORECASE)
+_BD_IMPORT_ID_RE = re.compile(r'"id"\s*:\s*"' + _BEAD_ID + r'"', re.IGNORECASE)
 _BD_IMPORT_CLOSED_RE = re.compile(r'"status"\s*:\s*"closed"', re.IGNORECASE)
 
 #: `bd sql <query>` (a real bd subcommand, `bd sql --help`: "Execute a raw
@@ -740,7 +745,7 @@ _FLAG_VALUE_RE = re.compile(
 #: nexus-qhskl: a child id (nexus-x.1) is its own bead, with its own review
 #: marker. The pattern once stopped at the dot, so the gate checked the
 #: parent and any child's marker covered every sibling.
-_BEAD_ID_RE = re.compile(r'\bnexus-[a-z0-9]+(?:\.[0-9]+)*\b', re.IGNORECASE)
+_BEAD_ID_RE = re.compile(r'\b' + _BEAD_ID + r'\b', re.IGNORECASE)
 _ENV_ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 
@@ -764,7 +769,7 @@ _NON_CLOSING_BD_VERBS = frozenset({
 #: A close segment's positional argument that is exactly one bead id
 #: (``nexus-abcde``, ``nexus-q02nx.17``). Anything else makes scoping
 #: decline, so the id it might carry is found by the whole-command scan.
-_LITERAL_BEAD_ARG_RE = re.compile(r'nexus-[a-z0-9]+(?:\.[0-9]+)*', re.IGNORECASE)
+_LITERAL_BEAD_ARG_RE = re.compile(_BEAD_ID, re.IGNORECASE)
 
 #: ``bd update``'s status flag; its separate value (``closed``) is not an id.
 _STATUS_FLAGS = frozenset({'--status', '-s'})
@@ -1153,7 +1158,7 @@ def _coverage(
             return True
         # Exact id: nexus-x.1 must not cover nexus-x, nor nexus-x.12 cover
         # nexus-x.1 (nexus-qhskl). A sentence-ending dot still ends the id.
-        pat = re.compile(r'(?<![A-Za-z0-9.-])' + re.escape(bead_id) + r'(?![A-Za-z0-9-]|\.[0-9])', re.IGNORECASE)
+        pat = re.compile(r'(?<![A-Za-z0-9-])' + re.escape(bead_id) + r'(?![A-Za-z0-9-]|\.[0-9])', re.IGNORECASE)
         return bool(pat.search(content_line))
 
     def _parse_entries(raw):
@@ -1261,6 +1266,7 @@ def _deny_message(
     lines.append('marker to T1 scratch (this session; the MCP scratch tool and the CLI converge):')
     lines.append('  nx scratch put "review-completed: <bead-id> reviewers=code-review-expert,substantive-critic" --tags "review-completed,<bead-id>"')
     lines.append('The marker MUST name both reviewers; naming one (or neither) is refused. T2 memory markers do not satisfy this gate (nexus-fgekf).')
+    lines.append('It must also name each exact bead id, .N suffix included: a parent\'s or a sibling\'s marker does not cover a child, and a close of several ids needs a marker for each (nexus-qhskl).')
     lines.append('then re-run this close. A subagent hands the close back to its orchestrator instead of writing this marker itself (CONTEXT_PROTOCOL.md: the marker is reserved to the gate-owning session).')
     lines.append('An override (NX_REVIEW_GATE_OVERRIDE=1) exists for this gate, but only on explicit instruction from the user to use it -- it is not yours to reach for.')
     return chr(10).join(lines)

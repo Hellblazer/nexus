@@ -2603,9 +2603,18 @@ class TestQhsklChildBeadIds:
         assert _get_decision(parsed) == "deny"
         assert "nexus-qhs01.2" in _get_reason(parsed)
 
-    def test_a_longer_siblings_marker_does_not_cover_a_child(self, mock_config_env, fake_nx) -> None:
-        parsed = self._close(mock_config_env, fake_nx, "nexus-qhs01.12", "nexus-qhs01.1")
+    def test_a_grandchilds_marker_does_not_cover_its_parent_child(self, mock_config_env, fake_nx) -> None:
+        # The id is followed by ".2": only the \.[0-9] half of the lookahead
+        # refuses this; the alphanumeric half alone would match.
+        parsed = self._close(mock_config_env, fake_nx, "nexus-qhs01.1.2", "nexus-qhs01.1")
         assert _get_decision(parsed) == "deny"
+
+    def test_a_sentence_ending_dot_still_ends_the_id(self, mock_config_env, fake_nx) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(_marker("review-completed", "review-completed: nexus-qhs01.1."))
+        result = _run_hook(_make_payload(command="bd " + "close nexus-qhs01.1"),
+                           path_prefix=str(fake_bin), env_overrides=env)
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
 
     def test_the_parents_marker_does_not_cover_a_child(self, mock_config_env, fake_nx) -> None:
         assert _get_decision(self._close(mock_config_env, fake_nx, "nexus-qhs01", "nexus-qhs01.3")) == "deny"

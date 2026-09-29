@@ -67,6 +67,7 @@ class TestTheDenyTextIsACarriedContract:
             "Run the marker write as a SEPARATE tool call",
             "Run the stacked reviewers (code-review-expert + substantive-critic)",
             "The marker MUST name both reviewers; naming one (or neither) is refused",
+            "It must also name each exact bead id, .N suffix included",
             "the marker is reserved to the gate-owning session",
             "it is not yours to reach for",
         ],
@@ -1034,7 +1035,12 @@ class TestQhsklChildIds:
     def test_a_batch_update_closing_a_child_is_a_close(self) -> None:
         cmd = "printf 'update nexus-qhs01.3 status=closed\\n' | bd batch"
         assert gate._bd_verbs(cmd)["has_close_or_done"] is True
+        assert gate._bead_ids(cmd) == ["nexus-qhs01.3"]
 
     def test_an_import_closing_a_child_is_a_close(self) -> None:
         cmd = """echo '{"id":"nexus-qhs01.3","status":"closed"}' | bd import -"""
         assert gate._bd_verbs(cmd)["has_close_or_done"] is True
+        assert gate._bead_ids(cmd) == ["nexus-qhs01.3"]
+
+    def test_a_grandchild_keeps_both_suffixes(self) -> None:
+        assert gate._bead_ids("bd " + "close nexus-qhs01.1.2") == ["nexus-qhs01.1.2"]
