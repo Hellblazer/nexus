@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="How several Claude Code sessions and the conexus instance build, test, review, and release Nexus, coordinating through the tuple space of the managed engine, with the owner deciding tags, deploys, and direction.">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AD%3C/text%3E%3C/svg%3E">
+<title>How Agents Build and Ship Nexus</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root{
+  --bg:#EEF1F4; --paper:#FFFFFF; --ink:#1B2430; --ink-2:#4A5666; --ink-3:#7A8697;
+  --line:#D5DBE3; --brass:#A87A22; --brass-soft:#F3EAD3; --blue:#24466B; --blue-soft:#E1E9F3;
+  --ok:#2E7D4F; --ok-soft:#E3F1E8; --warn:#9A6A12; --code-bg:#1B2430; --code-fg:#E9EDF2; --code-cmt:#8A97A8;
+  --t1:#B96E2B; --t2:#24466B; --t3:#2E7D4F;
+  --radius:6px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+    --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+    --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+    --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#131920; --paper:#1B232D; --ink:#E6EAF0; --ink-2:#B3BDCA; --ink-3:#7F8B9A;
+  --line:#2C3743; --brass:#D9A441; --brass-soft:#2B2618; --blue:#8FB4DD; --blue-soft:#1E2C3C;
+  --ok:#6CC58F; --ok-soft:#1B2E22; --warn:#E0B24C; --code-bg:#0E1319; --code-fg:#E6EAF0; --code-cmt:#7F8B9A;
+  --t1:#E0955A; --t2:#8FB4DD; --t3:#6CC58F;
+}
+*{box-sizing:border-box}
+/* Code blocks scroll sideways inside their column. A grid or flex child defaults to min-width:auto, which lets a long <pre> line widen the track and the page; min-width:0 on every wrapper between the track and the <pre> stops that. */
+.wrap,.wrap>*,main,.step,.cmd,.tbl,.further,.callout,.lesson{min-width:0}
+pre{max-width:100%}
+
+html{margin:0}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"IBM Plex Sans",system-ui,-apple-system,Segoe UI,sans-serif;font-size:16px;line-height:1.55;padding-inline:clamp(16px,4vw,40px);padding-block:40px 80px;}
+.wrap{max-width:1040px;margin:0 auto;display:grid;grid-template-columns:220px minmax(0,1fr);gap:48px;align-items:start}
+@media (max-width:820px){.wrap{grid-template-columns:1fr;gap:24px}.rail{position:static!important}}
+h1,h2,h3{font-family:"Source Serif 4",Georgia,"Times New Roman",serif;font-weight:600;line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(34px,5vw,46px);letter-spacing:-.01em}
+h2{font-size:27px}
+h3{font-size:18px;margin-top:26px}
+p{margin:12px 0;max-width:68ch}
+.lede{font-size:18px;color:var(--ink-2);max-width:62ch}
+.topnav{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:12px}
+.topnav a{font-size:14px;font-weight:500;text-decoration:none}
+.topnav a:hover{text-decoration:underline}
+.eyebrow{font-size:12px;letter-spacing:.12em;text-transform:uppercase;color:var(--brass);font-weight:600;margin-bottom:12px}
+a{color:var(--blue)}
+code{font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.92em;background:var(--blue-soft);padding:1px 5px;border-radius:4px}
+.hidden{display:none!important}
+
+/* rail */
+.rail{position:sticky;top:24px}
+.rail .eyebrow{margin-bottom:8px}
+.rail ol{list-style:none;padding:0;margin:0;display:grid;gap:2px}
+.rail a{display:block;padding:7px 8px;border-radius:4px;color:var(--ink-2);text-decoration:none;font-size:14px;line-height:1.35}
+.rail a:hover{background:var(--paper)}
+.rail .meta{font-size:12px;color:var(--ink-3);margin-top:14px;line-height:1.5}
+
+/* lessons */
+.lesson{padding:36px 0 8px;border-top:1px solid var(--line);scroll-margin-top:16px}
+.lesson:first-of-type{border-top:0;padding-top:8px}
+.lhead{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+.lnum{font-family:"Source Serif 4",Georgia,serif;font-size:30px;font-weight:600;color:var(--brass);line-height:1}
+.ltime{font-size:13px;color:var(--ink-3);margin-left:auto}
+.why{border-left:3px solid var(--brass);padding:2px 0 2px 14px;color:var(--ink-2);margin:16px 0 10px;max-width:66ch}
+pre{margin:0;background:var(--code-bg);color:var(--code-fg);border-radius:var(--radius);padding:14px 16px;font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;font-size:14px;line-height:1.6;overflow-x:auto}
+pre{white-space:pre-wrap;overflow-wrap:anywhere;padding-right:76px}
+pre .c{color:var(--code-cmt)}
+.cmd{position:relative;margin:12px 0}
+.copy{position:absolute;top:8px;right:8px;font:inherit;font-size:12px;font-weight:500;padding:4px 9px;border-radius:4px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.06);color:var(--code-fg);cursor:pointer}
+.copy:hover{background:rgba(255,255,255,.14)}
+.copy:focus-visible{outline:2px solid var(--brass)}
+.see{margin:10px 0 4px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+pre.out{background:var(--paper);color:var(--ink-2);border:1px dashed var(--line);font-size:13px}
+pre.out b{color:var(--ink);font-weight:500}
+.note{font-size:14px;color:var(--ink-2);margin:8px 0;max-width:68ch}
+.callout{border-left:3px solid var(--brass);background:var(--brass-soft);padding:12px 16px;border-radius:0 var(--radius) var(--radius) 0;margin:18px 0;font-size:15px;max-width:68ch}
+.callout p{margin:4px 0}
+.callout.rule{border-color:var(--blue);background:var(--blue-soft)}
+
+.ph{color:var(--brass);font-style:italic}
+pre .ph{color:#E0B24C}
+
+
+/* figures */
+figure.fig{margin:18px 0;max-width:68ch}
+figure.fig svg{width:100%;height:auto;display:block;color:var(--ink)}
+figure.fig figcaption{font-size:13px;color:var(--ink-3);margin-top:6px}
+figure.fig text{font-family:"IBM Plex Sans",system-ui,sans-serif;font-size:12.5px;fill:currentColor}
+figure.fig .sm{font-size:10.5px;fill:var(--ink-3);letter-spacing:.05em;text-transform:uppercase}
+figure.fig .lbl{font-size:11px;fill:var(--ink-2)}
+figure.fig rect.box{fill:var(--paper);stroke:currentColor;stroke-width:1}
+figure.fig rect.you{fill:var(--brass-soft);stroke:var(--brass);stroke-width:1.2}
+figure.fig line,figure.fig path{stroke:currentColor;stroke-width:1.2;fill:none}
+figure.fig .you-edge{stroke:var(--brass)}
+figure.fig .dash{stroke-dasharray:4 3}
+
+/* investigate further */
+.further{margin:22px 0 6px;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:0 var(--radius) var(--radius) 0;background:var(--paper);padding:12px 16px;max-width:68ch}
+.further h4{margin:0 0 6px;font-family:"Source Serif 4",Georgia,serif;font-size:16px;font-weight:600;color:var(--blue)}
+.further ul{margin:0;padding-left:20px;font-size:15px;color:var(--ink-2)}
+.further li{margin:4px 0}
+
+/* tier diagram */
+.tiers{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:18px 0;max-width:68ch}
+@media (max-width:560px){.tiers{grid-template-columns:1fr}}
+.tier{background:var(--paper);border:1px solid var(--line);border-top:4px solid var(--tc);border-radius:var(--radius);padding:12px 14px}
+.tier b{font-family:"Source Serif 4",Georgia,serif;font-size:20px;font-weight:600;color:var(--tc);display:block}
+.tier small{display:block;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3);margin-bottom:6px}
+.tier p{font-size:14px;margin:4px 0;color:var(--ink-2)}
+.tier code{font-size:.85em}
+.arrowrow{font-size:13px;color:var(--ink-3);margin:-6px 0 14px;max-width:68ch}
+
+/* entry table */
+table{border-collapse:collapse;width:100%;font-size:15px;margin:14px 0;max-width:68ch}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.tbl{overflow-x:auto}
+.gloss-wrap{margin:22px 0 8px;max-width:68ch}
+details.gloss{border:1px solid var(--line);border-radius:var(--radius);background:var(--paper);margin:6px 0}
+details.gloss summary{cursor:pointer;padding:10px 14px;font-weight:500;list-style:none;display:flex;justify-content:space-between}
+details.gloss summary::after{content:"+";color:var(--brass);font-family:"IBM Plex Mono",monospace}
+details.gloss[open] summary::after{content:"–"}
+details.gloss table{margin:0;font-size:14px}
+details.gloss td:first-child{font-weight:500;white-space:nowrap;width:9em}
+details.gloss tr:last-child td{border-bottom:0}
+ol.plain,ul.plain{margin:6px 0 10px;padding-left:22px;max-width:66ch}
+ol.plain li,ul.plain li{margin:3px 0}
+.finish{border:1px solid var(--line);background:var(--paper);border-radius:var(--radius);padding:18px 20px;margin-top:40px;max-width:68ch}
+.finish h2{font-size:24px}
+.footer{margin-top:60px;font-size:13px;color:var(--ink-3)}
+@media (prefers-reduced-motion:reduce){.copy{transition:none}}
+</style>
+<style>
+details.gloss td:first-child{width:11em;white-space:normal}
+.terms td:first-child{font-weight:500;white-space:nowrap}
+.lesson .lhead{margin-bottom:4px}
+.pad{padding:0 14px 12px}
+figure.fig rect.bag{fill:var(--blue-soft);stroke:var(--blue);stroke-width:1.2}
+figure.fig .hd{font-weight:600}
+figure.fig .arrow{fill:currentColor;stroke:none}
+figure.fig .arrow.you{fill:var(--brass)}
+</style>
+<script data-goatcounter="https://hellblazer-nexus.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
+</head>
+<body>
+<div class="wrap">
+
+<nav class="rail" aria-label="Sections">
+  <div class="eyebrow">Agent-run development</div>
+  <ol id="toc">
+    <li><a href="#glance">The system at a glance</a></li>
+    <li><a href="#records">Shared records</a></li>
+    <li><a href="#agents">Agents, skills and tools</a></li>
+    <li><a href="#flow">One change, end to end</a></li>
+    <li><a href="#decisions">Who decides what</a></li>
+  </ol>
+  <div class="meta"><a href="tuple-space.html">← The tuple space</a><br><a href="coordination.html">← Coordination</a><br><a href="getting-started.html">← Getting started</a><br><a href="rdr.html">← Working with RDRs</a><br><a href="research.html">← Research with Nexus</a><br><a href="research-in-nexus.html">Research in Nexus →</a><br><a href="./">← Install guide</a></div>
+</nav>
+
+<main>
+<div class="topnav"><span class="eyebrow" style="margin:0">Nexus · Agent-run development</span><a href="tuple-space.html">← The tuple space</a></div>
+<h1>How Agents Build and Ship Nexus</h1>
+<p class="lede">Several Claude Code sessions build, test, review, and release Nexus, and one more session, the conexus instance, runs the cloud side. They work on the same repository and the same engine at the same time without colliding, because every claim, test slot, push, and deploy is a record that the other sessions see as soon as it is written. They coordinate through records in the tuple space of the managed Nexus engine, and they keep longer notes in Nexus memory. The owner makes the decisions that agents do not make: every tag, every cloud deploy, and every change of direction.</p>
+
+<div class="gloss-wrap"><details class="gloss"><summary>Terms used on this page</summary><table class="terms">
+<tr><th>Term</th><th>Meaning</th></tr>
+<tr><td>tuple space</td><td>The part of the Nexus engine where sessions and agents leave short records for each other. <a href="tuple-space.html">The Nexus Tuple Space</a> explains it.</td></tr>
+<tr><td>board</td><td>A topic in the tuple space. Every subscribed session receives every post, and nobody removes one.</td></tr>
+<tr><td>mailbox</td><td>The part of the tuple space that holds the messages for one session or one agent.</td></tr>
+<tr><td>subscription, ping</td><td>A session subscribes to a board once. After that, each new post or message arrives as a ping, which names the record and does not contain it.</td></tr>
+<tr><td>worktree</td><td>A second working directory of the same git repository, with its own branch.</td></tr>
+<tr><td>bead</td><td>One work item in the project's shared issue tracker.</td></tr>
+</table></details></div>
+
+<section class="lesson" id="glance">
+<div class="lhead"><h2>The system at a glance</h2></div>
+<figure class="fig">
+<svg viewBox="0 0 760 450" role="img" aria-label="The laptop holds the sessions and their worktrees. Sessions write records to the tuple space in the managed engine and receive pings back. They push to GitHub and move branches to a second machine for tests. GitHub sends webhooks to an adapter, which posts to the CI board in the tuple space. The conexus instance deploys and gates the engine and exchanges messages through its mailbox. The owner sends decisions to the sessions and approves deploys in the conexus instance.">
+  <!-- sessions to tuple space, and pings back -->
+  <path d="M80 60 V18 H700 V52"/>
+  <path class="arrow" d="M700 60 l-4 -9 h8 z"/>
+  <text x="390" y="12" text-anchor="middle" class="lbl">writes records</text>
+  <path d="M600 60 V42 H150 V52"/>
+  <path class="arrow" d="M150 60 l-4 -9 h8 z"/>
+  <text x="375" y="36" text-anchor="middle" class="lbl">pings</text>
+
+  <!-- laptop -->
+  <rect class="box" x="10" y="60" width="210" height="150" rx="4"/>
+  <text x="115" y="80" text-anchor="middle" class="hd">Laptop</text>
+  <rect class="box" x="24" y="90" width="182" height="28" rx="3"/>
+  <text x="115" y="109" text-anchor="middle" class="lbl">sessions and subagents</text>
+  <rect class="box" x="24" y="124" width="182" height="28" rx="3"/>
+  <text x="115" y="143" text-anchor="middle" class="lbl">one worktree per session</text>
+  <rect class="box" x="24" y="158" width="182" height="28" rx="3"/>
+  <text x="115" y="177" text-anchor="middle" class="lbl">primary checkout on develop</text>
+
+  <!-- laptop to github -->
+  <line x1="220" y1="110" x2="282" y2="110"/>
+  <path class="arrow" d="M290 110 l-9 -4 v8 z"/>
+  <text x="255" y="100" text-anchor="middle" class="lbl">push, PR</text>
+
+  <!-- github -->
+  <rect class="box" x="290" y="60" width="170" height="130" rx="4"/>
+  <text x="375" y="82" text-anchor="middle" class="hd">GitHub</text>
+  <text x="375" y="108" text-anchor="middle" class="lbl">CI on develop and PRs</text>
+  <text x="375" y="128" text-anchor="middle" class="lbl">release workflows on tags</text>
+  <text x="375" y="148" text-anchor="middle" class="lbl">package and binaries</text>
+
+  <!-- github to adapter -->
+  <line x1="375" y1="190" x2="375" y2="242"/>
+  <path class="arrow" d="M375 250 l-4 -9 h8 z"/>
+  <text x="383" y="223" class="lbl">webhooks</text>
+
+  <!-- adapter -->
+  <rect class="box" x="290" y="250" width="170" height="50" rx="4"/>
+  <text x="375" y="271" text-anchor="middle" class="lbl">webhook adapter</text>
+  <text x="375" y="288" text-anchor="middle" class="sm">hosted by conexus</text>
+  <line x1="460" y1="275" x2="532" y2="275"/>
+  <path class="arrow" d="M540 275 l-9 -4 v8 z"/>
+  <text x="500" y="265" text-anchor="middle" class="lbl">posts</text>
+
+  <!-- managed engine -->
+  <rect class="box" x="540" y="60" width="210" height="260" rx="4"/>
+  <text x="645" y="82" text-anchor="middle" class="hd">Managed engine</text>
+  <text x="645" y="99" text-anchor="middle" class="sm">run by conexus</text>
+  <rect class="bag" x="554" y="110" width="182" height="196" rx="3"/>
+  <text x="645" y="130" text-anchor="middle" class="sm">tuple space</text>
+  <text x="566" y="156" class="lbl">team boards</text>
+  <text x="566" y="182" class="lbl">CI board</text>
+  <text x="566" y="208" class="lbl">push lock</text>
+  <text x="566" y="234" class="lbl">mailboxes and names</text>
+  <text x="566" y="260" class="lbl">agent ledger</text>
+
+  <!-- laptop to second machine -->
+  <line x1="115" y1="210" x2="115" y2="302"/>
+  <path class="arrow" d="M115 310 l-4 -9 h8 z"/>
+  <text x="123" y="262" class="lbl">branches over ssh</text>
+
+  <!-- second machine -->
+  <rect class="box" x="10" y="310" width="210" height="130" rx="4"/>
+  <text x="115" y="330" text-anchor="middle" class="hd">Second machine</text>
+  <text x="115" y="345" text-anchor="middle" class="sm">local network</text>
+  <rect class="box" x="24" y="356" width="182" height="28" rx="3"/>
+  <text x="115" y="375" text-anchor="middle" class="lbl">full suites and gates</text>
+  <rect class="box" x="24" y="394" width="182" height="28" rx="3"/>
+  <text x="115" y="413" text-anchor="middle" class="lbl">runner for mac release builds</text>
+
+  <!-- engine and conexus -->
+  <line x1="600" y1="320" x2="600" y2="364"/>
+  <path class="arrow" d="M600 320 l-4 9 h8 z"/>
+  <text x="592" y="348" text-anchor="end" class="lbl">deploys, gates</text>
+  <line x1="700" y1="314" x2="700" y2="364"/>
+  <path class="arrow" d="M700 306 l-4 9 h8 z"/>
+  <path class="arrow" d="M700 372 l-4 -9 h8 z"/>
+  <text x="708" y="348" class="lbl">mailbox</text>
+
+  <!-- conexus instance -->
+  <rect class="box" x="540" y="372" width="210" height="60" rx="4"/>
+  <text x="645" y="396" text-anchor="middle" class="hd">conexus instance</text>
+  <text x="645" y="416" text-anchor="middle" class="lbl">a peer session</text>
+
+  <!-- owner -->
+  <rect class="you" x="300" y="372" width="160" height="60" rx="4"/>
+  <text x="380" y="396" text-anchor="middle" class="hd">Owner</text>
+  <text x="380" y="416" text-anchor="middle" class="lbl">tags, deploys, direction</text>
+  <line x1="460" y1="402" x2="532" y2="402" class="dash you-edge"/>
+  <path class="arrow you" d="M540 402 l-9 -4 v8 z"/>
+  <text x="500" y="392" text-anchor="middle" class="lbl">go</text>
+  <path d="M300 402 H250 V190 H228" class="dash you-edge"/>
+  <path class="arrow you" d="M220 190 l9 -4 v8 z"/>
+  <text x="270" y="360" class="lbl" transform="rotate(-90 270 360)">decisions</text>
+</svg>
+<figcaption>Sessions, CI, and the conexus instance coordinate through the tuple space in the managed engine.</figcaption>
+</figure>
+<ul class="plain">
+<li><b>Sessions and subagents.</b> Each working session is one Claude Code session in its own worktree and branch on the laptop. It dispatches subagents: developers for implementation, and two standing reviewers (a code reviewer and a critic). Sessions choose their own beads. When the owner asks, one session coordinates: it assigns work, collects results, and prepares a release.</li>
+<li><b>The conexus instance.</b> A separate Claude Code session in the conexus repository runs the managed engine, and so it hosts the tuple space that every other session coordinates through. It also hosts the adapter that turns GitHub events into CI board posts, deploys each engine release, and runs the cloud gates. It is a peer of the other sessions: it receives requests in its mailbox and answers there.</li>
+<li><b>GitHub</b> runs CI on every push to <code>develop</code> and on every pull request, and it runs the release workflows on tags.</li>
+<li><b>A second machine</b> on the local network runs full test suites and gates for the sessions. It is also a self-hosted GitHub runner for the mac release builds.</li>
+<li><b>The owner</b> pushes every release tag, approves every cloud deploy, and decides changes of scope or direction.</li>
+</ul>
+</section>
+
+<section class="lesson" id="records">
+<div class="lhead"><h2>Shared records</h2></div>
+<p>The sessions share state through two kinds of record: short signals in the tuple space, and longer notes in Nexus memory.</p>
+<p>A tuple is a small record with a schema. It lives in the engine, outside every conversation, so it outlives the session that wrote it and every session reads the same row. <a href="tuple-space.html">The Nexus Tuple Space</a> describes the operations, and <a href="coordination.html">Coordination</a> describes messages between sessions and agents.</p>
+<p>Each session holds a short name in a directory in the tuple space, and a message addressed to a name reaches the session that holds it. Each session and each subagent has a mailbox. A session subscribes to the boards it cares about, and its own Nexus server then pings it for each new post and each new message in its mailbox. No session polls, whether it waits for CI, for a peer, or for a reply.</p>
+<p>A post or a message carries a short signal and names a memory entry for anything longer, such as a measurement or a list of affected documents. Work items are beads in a shared tracker.</p>
+</section>
+
+<section class="lesson" id="agents">
+<div class="lhead"><h2>Agents, skills and tools</h2></div>
+<p>The conexus plugin gives every session the same agents, skills, and hooks, so the sessions work the same way without instructing each other. A session hands most work to background subagents: developers, the two standing reviewers, a debugger, planners. Skills carry the checklists, such as the two release procedures. Hooks enforce the practice that nobody should have to remember: they brief each subagent when it starts, refuse to close a bead without both reviews, and record every dispatch.</p>
+<details class="gloss"><summary>The agent types</summary><div class="pad">
+<div class="tbl"><table>
+<tr><th>Agent</th><th>Used for</th></tr>
+<tr><td><code>worktree-developer</code></td><td>Implementation in a worktree that Claude Code creates for the dispatch. The agent runs its own Serena server rooted in that worktree, so parallel implementers never share a tree. A preflight check first updates the worktree to <code>develop</code>. If it cannot, the agent stops.</td></tr>
+<tr><td><code>developer</code></td><td>Test-first implementation in the session's own worktree.</td></tr>
+<tr><td><code>code-review-expert</code>, <code>substantive-critic</code></td><td>The two standing reviewers. A bead closes only after both have reviewed its change.</td></tr>
+<tr><td><code>test-validator</code></td><td>Test coverage and suite runs.</td></tr>
+<tr><td><code>debugger</code></td><td>Investigation of a failure, one hypothesis at a time.</td></tr>
+<tr><td><code>strategic-planner</code>, <code>architect-planner</code></td><td>Plans that split work into beads, and architecture before a large change.</td></tr>
+<tr><td><code>deep-research-synthesizer</code></td><td>Research across the knowledge store, memory, the web, and code.</td></tr>
+<tr><td><code>Explore</code></td><td>Read-only sweeps across many files. Claude Code provides it.</td></tr>
+</table></div>
+</div></details>
+</section>
+
+<section class="lesson" id="flow">
+<div class="lhead"><h2>One change, end to end</h2></div>
+<h3>Claim and announce</h3>
+<p>A session claims a bead and posts the claim on the team boards, with the worktree it uses and the files the change touches. Other sessions receive the post, so two sessions do not start the same work. The team boards also carry advance warnings when a change affects files that other sessions work on.</p>
+<h3>Build and review</h3>
+<p>The session creates a worktree on a feature branch and dispatches a developer subagent, which writes the failing test and then the fix. Hooks record every dispatch in a ledger, so a subagent that started and never reported shows up as missing. The two reviewers then read the change, the session fixes their findings, and it records a review marker that names both reviewers.</p>
+<h3>Test</h3>
+<p>Each machine runs one engine build or engine test suite at a time, and a lease enforces it. Every worktree on the machine sees the lease, and it ends by itself if its holder stops. Each machine also runs one full test suite at a time. The session posts on the team boards when it takes the full-suite slot and again when it releases the slot. For heavy runs, the session moves its branch to the second machine over ssh. That machine has its own clone and its own lease, so it runs a suite while the laptop builds.</p>
+<h3>Push</h3>
+<p>Before it pushes, the session reads the CI board for the latest <code>develop</code> commit, because a push cancels the CI run of that commit. Another session can be waiting for that run. The push script then sends only the commits and files that the session names, so a peer's work never goes out with the push. The script holds the push lock only while it pushes. The session posts the push on the team boards and fast-forwards the primary checkout, which stays on <code>develop</code> as the shared reference and which nobody edits.</p>
+<p>GitHub then runs CI. For each state change of each run and job, GitHub sends a webhook to the adapter, which verifies it and writes one post to the CI board. The session receives the pings and reads the verdict for its commit with the status reader. A red commit gets a fix as a new commit, and other sessions read the verdict before they build on a commit. The bead closes when the close gate finds the review marker.</p>
+<details class="gloss"><summary>Verdicts and exit status of the status reader</summary><div class="pad">
+<p>The status reader folds the posts for one commit into one verdict for each run and job. Within one attempt the most advanced state wins, and across reruns the newest attempt wins. Its exit status gives the overall verdict.</p>
+<div class="tbl"><table>
+<tr><th>Exit</th><th>Meaning</th></tr>
+<tr><td>0</td><td>Every run and job finished green.</td></tr>
+<tr><td>1</td><td>At least one run or job failed.</td></tr>
+<tr><td>2</td><td>Nothing failed, and something is still queued or running.</td></tr>
+<tr><td>3</td><td>The board has no post for this commit.</td></tr>
+<tr><td>4</td><td>Nothing failed or is pending, and a run was cancelled, usually because a newer push replaced it.</td></tr>
+</table></div>
+</div></details>
+<details class="gloss"><summary>The CI jobs</summary><div class="pad">
+<ul class="plain">
+<li>A predicate job decides whether a change touches code. A documentation-only change skips the tests.</li>
+<li>One job builds the engine's service jar once for all test jobs, and caches it on the service source.</li>
+<li>The unit suite runs in parallel shards against a real engine. Separate jobs run the repository-structure tests and a check over the whole collected suite.</li>
+<li>A change under the engine source also builds the engine's native image, and a separate workflow runs the Java tests.</li>
+<li>A pull request to <code>main</code> also checks the wire-contract ledger.</li>
+<li>One required check collects every result, and it fails on any failed, cancelled, or missing part.</li>
+<li>A newer push to the same branch cancels the older CI run. A newer run never cancels a release workflow, and a release workflow publishes what CI already tested without testing it again.</li>
+</ul>
+</div></details>
+<h3>Release the client</h3>
+<p>The coordinating session creates a release worktree, which a push to <code>develop</code> cannot move. Then it bumps the version and runs the release battery. The battery builds the artifacts once, runs the end-to-end gates in parallel, and prints one verdict table. A gate that finishes without its verdict line counts as missing, never as passed. A red gate is fixed on the release branch, and the battery runs again. The session opens a pull request to <code>main</code>. The owner merges it and pushes the release tag. The release workflow checks the tag against the version and against the tagged commit's CI results, publishes the package to PyPI, and creates the GitHub release. Each client release pins exactly one engine version.</p>
+<h3>Release and deploy the engine</h3>
+<p>Before an engine tag, the coordinating session builds the candidate native binary and runs the shakeout, an end-to-end test of that binary. The owner pushes the engine tag. The engine workflow builds and smoke-tests native binaries for Linux and macOS, signs every asset, and publishes the GitHub release only when every asset is present. A failed build job leaves the release as a draft until a rerun completes it. A gate then installs the published binary on a bare machine and tests it.</p>
+<p>The deploy request is a relay, not an approval. The coordinating session sends the tag and its gate evidence to the conexus instance's mailbox. The owner types the approval in the conexus instance itself, and the conexus instance refuses an approval that another session relays. The conexus instance then deploys the engine and runs its cloud gates. While those gates run, the coordinating session posts a freeze on the team boards. The freeze names the step that the session waits for, and the other sessions hold their pushes. Afterwards, a session on a cloud-mode machine checks that the engine's contracts reach real client code through the public edge.</p>
+<p>The wire-contract ledger decides the order. It lists each engine change whose client half has not shipped, and marks whether an old client still works against the new engine. When every entry is safe for old clients, the engine deploys before the client release. Otherwise, the conexus instance must record that the redeploy is armed before the client tag, and the release gate checks for that record.</p>
+</section>
+
+<section class="lesson" id="decisions">
+<div class="lhead"><h2>Who decides what</h2></div>
+<div class="tbl"><table>
+<tr><th>Step</th><th>Done by</th></tr>
+<tr><td>Change, tests, reviews, suites, push to <code>develop</code></td><td>Agents</td></tr>
+<tr><td>Release preparation: version bump, battery, release pull request, shakeout</td><td>Agents</td></tr>
+<tr><td>Merge of the release pull request, release tags, engine tags</td><td>The owner</td></tr>
+<tr><td>Build, sign, and publish after a tag</td><td>GitHub workflows</td></tr>
+<tr><td>Deploy relay with gate evidence</td><td>The coordinating session</td></tr>
+<tr><td>Approval of each cloud deploy, typed in the conexus instance</td><td>The owner</td></tr>
+<tr><td>Cloud deploy and cloud gates</td><td>The conexus instance</td></tr>
+<tr><td>Decisions that change scope or direction</td><td>The owner</td></tr>
+</table></div>
+</section>
+
+<p class="footer">Further reading: <a href="tuple-space.html">The Nexus Tuple Space</a> covers boards, queues, and locks, and <a href="coordination.html">Coordination</a> covers messages between sessions and agents. Source: <a href="https://github.com/Hellblazer/nexus">Hellblazer/nexus</a>.</p>
+</main>
+</div>
+</body>
+</html>

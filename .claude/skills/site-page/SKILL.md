@@ -9,11 +9,12 @@ Authority: this file. Origin: the five pages shipped 2026-09-10/11 (install, get
 
 ## 1. Pick the genre first
 
-Two genres exist. Never mix them in one document.
+Three genres exist. Never mix them in one document.
 
 | Genre | Lives at | Shape | Reader wants |
 |---|---|---|---|
 | How-to | `web/<name>.html` | Numbered lessons with action titles. Each lesson: `You might say` block, `What happens` / `What you see`, rendered output in a dropdown. Mechanism in a collapsed appendix at the end. | To use it now. |
+| Overview | `web/<name>.html` | Present tense, third person, no second-person instructions, no history, no versions. The system's shape first (a figure and its participants), then one end-to-end use case as the spine, introducing each mechanism at the step where it acts, then who decides what. Reference detail collapsed. Model: `web/how-agents-ship.html`. | To understand how a system runs today. |
 | Exploration essay | `docs/exploration/<idea>-in-nexus.md` | Lineage named in sentence one, the practical problem, how the suite leverages it, what we borrowed, what we left out, what it changes for you, further reading. Model: `docs/exploration/xanadu-in-nexus.md`. | To understand the thinking and what it means for them. |
 
 History, earlier attempts, and design rationale belong in the essay, once. A how-to that narrates them was rejected by a reader ("a project development history lesson"); the same material in the essay genre was praised.
