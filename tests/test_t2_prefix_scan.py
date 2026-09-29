@@ -69,14 +69,54 @@ def test_cap_constants_are_consistent() -> None:
 
 
 class _RowStore:
+    """Fake ``HttpMemoryStore`` surface ``_build_output`` calls against
+    (nexus-fow78: ``list_entries`` + targeted ``get``, not ``get_all`` —
+    proves the render-cap algorithm against the scoped fetch path)."""
+
     def __init__(self) -> None:
         self._rows: dict[str, list[dict[str, Any]]] = {}
+        self.limits_requested: list[int | None] = []
+        self.reports_total = True
+        self.get_calls: list[tuple[str, str]] = []
 
     def put(self, project: str, title: str, content: str) -> None:
         self._rows.setdefault(project, []).append({"title": title, "content": content})
 
-    def get_all(self, project: str) -> list[dict[str, Any]]:
-        return list(self._rows.get(project, []))
+    def list_entries(
+        self,
+        project: str | None = None,
+        agent: str | None = None,
+        limit: int | None = None,
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
+    ) -> list[dict[str, Any]]:
+        self.limits_requested.append(limit)
+        all_rows = self._rows.get(project or "", [])
+        rows = [{"title": r["title"], "project": project} for r in all_rows]
+        if limit is None:
+            return rows
+        # An engine honouring the bound reports the full match count on
+        # each row (nexus-xn9ut); an old engine does not.
+        return [
+            dict(r, matching_total=len(all_rows)) if self.reports_total else r
+            for r in rows[:limit]
+        ]
+
+    def get(
+        self,
+        project: str | None = None,
+        title: str | None = None,
+        id: int | None = None,
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
+    ) -> dict[str, Any] | None:
+        self.get_calls.append((project or "", title or ""))
+        for r in self._rows.get(project or "", []):
+            if r["title"] == title:
+                return dict(r)
+        return None
 
     def namespaces(self) -> list[dict[str, Any]]:
         return [{"project": p} for p in self._rows]
@@ -116,14 +156,36 @@ def test_entries_snippet_limit_to_title_limit_are_title_only() -> None:
 
 def test_entries_beyond_title_limit_appear_as_count() -> None:
     """Entries beyond ``_TITLE_LIMIT`` per namespace are summarised as
-    '… (N more)' -- N derived from the constant (nexus-h33x8.5 fix-pass;
-    was hardcoded "12 entries -> 3 more" against the pre-tune _TITLE_LIMIT=8)."""
+    '… (N more)' (nexus-h33x8.5). Since nexus-xn9ut the scan lists only
+    ``_TITLE_LIMIT + 1`` rows per namespace (the whole-project list cost
+    2.4s of the hook's 9s bound) and N comes from the engine's
+    matching_total. Pinned: the bound reaches the store, and N is exact."""
     overflow = 3
     store = _RowStore()
     for i in range(1, _TITLE_LIMIT + overflow + 1):
         store.put("repo", f"entry-{i}.md", f"Content {i}")
     output = _run_scan(store, "repo")
     assert f"… ({overflow} more)" in output
+    assert store.limits_requested and all(
+        lim == _TITLE_LIMIT + 1 for lim in store.limits_requested
+    ), store.limits_requested
+
+
+def test_an_engine_without_matching_total_still_marks_more() -> None:
+    """An engine older than the limit parameter returns no matching_total;
+    the extra row still says more exist."""
+    store = _RowStore()
+    store.reports_total = False
+    for i in range(1, _TITLE_LIMIT + 4):
+        store.put("repo", f"entry-{i}.md", f"Content {i}")
+    assert "… (more)" in _run_scan(store, "repo")
+
+
+def test_exactly_title_limit_entries_have_no_more_marker() -> None:
+    store = _RowStore()
+    for i in range(1, _TITLE_LIMIT + 1):
+        store.put("repo", f"entry-{i}.md", f"Content {i}")
+    assert "… (more)" not in _run_scan(store, "repo")
 
 
 def test_hard_cap_across_namespaces() -> None:
@@ -142,6 +204,32 @@ def test_hard_cap_across_namespaces() -> None:
     ]
     assert rendered, "the cap proves nothing over an empty render"
     assert len(rendered) <= _HARD_CAP
+
+
+def test_a_large_first_namespace_leaves_the_cap_budget_to_the_next() -> None:
+    """nexus-xn9ut review: the overflow count must not overwrite the
+    cross-namespace cap accumulator, or a first namespace with
+    matching_total >= _HARD_CAP silently drops every namespace after it."""
+    store = _RowStore()  # reports matching_total, as the bounded engine does
+    for ns in ["repo", "repo_rdr"]:
+        for i in range(1, 11):
+            store.put(ns, f"{ns}-entry-{i}.md", f"Content {i}")
+    output = _run_scan(store, "repo")
+    assert "### T2 Memory\n" in output
+    assert "### T2 Memory (rdr)" in output, output
+
+
+def test_content_fetch_is_scoped_to_snippet_ranks() -> None:
+    """nexus-fow78: ``get()`` (the per-entry content fetch) must only be
+    issued for the ranks that actually render a snippet (``_SNIPPET_LIMIT``
+    per namespace) — never once per entry in the namespace, however large.
+    """
+    store = _RowStore()
+    for i in range(1, 51):
+        store.put("repo", f"entry-{i}.md", f"Content {i}")
+    _run_scan(store, "repo")
+    assert len(store.get_calls) == _SNIPPET_LIMIT
+    assert store.get_calls == [("repo", f"entry-{i}.md") for i in range(1, _SNIPPET_LIMIT + 1)]
 
 
 def test_namespace_header_appears_per_namespace() -> None:

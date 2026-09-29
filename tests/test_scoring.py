@@ -146,10 +146,11 @@ def test_hybrid_scoring_code_detection_pinned(coll: str, is_code_like: bool, mon
     r = _r(coll=coll, dist=0.2, frecency=0.8)
     with patch("nexus.scoring._log") as mock_log:
         results = apply_hybrid_scoring([r], hybrid=True)
+    # nexus-zdzm5: a debug event now; nx search prints the user-facing note.
     warned = any(
-        call.kwargs.get("event") == "--hybrid has no effect — no code corpus in scope"
-        or (call.args and call.args[0] == "--hybrid has no effect — no code corpus in scope")
-        for call in mock_log.warning.call_args_list
+        call.kwargs.get("event") == "hybrid_no_code_corpus_in_scope"
+        or (call.args and call.args[0] == "hybrid_no_code_corpus_in_scope")
+        for call in mock_log.debug.call_args_list
     )
     assert warned == (not is_code_like)
     assert results[0].hybrid_score is not None
@@ -545,6 +546,15 @@ def test_no_circular_imports():
     finally:
         sys.modules.clear()
         sys.modules.update(saved)
+        # The re-imports above bound fresh submodules as attributes on the
+        # parent packages, which sys.modules.update does not undo. Left split,
+        # monkeypatch.setattr("nexus.x.attr") patches the package attribute
+        # while `from nexus.x import attr` reads sys.modules, so later tests'
+        # patches silently miss (test_sis0m4_cli_polish on CI shard 4).
+        for name, mod in saved.items():
+            parent_name, _, child = name.rpartition(".")
+            if parent_name.startswith("nexus") and parent_name in saved:
+                setattr(saved[parent_name], child, mod)
 
 
 # ── formatter spot-checks ────────────────────────────────────────────────────
@@ -951,15 +961,27 @@ class TestTopicBoost:
             apply_topic_boost,
         )
 
+        # nexus-2yshe: the credit is a fraction of the window's spread.
         r1 = self._make_result(doc_id="doc-a", distance=0.5)
-        r2 = self._make_result(doc_id="doc-b", distance=0.5)
+        r2 = self._make_result(doc_id="doc-b", distance=0.3)
 
         assignments = {"doc-a": 1, "doc-b": 1}
         apply_topic_boost([r1, r2], assignments)
 
-        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST, abs=0.001)
-        assert r2.topic_boost == pytest.approx(_TOPIC_SAME_BOOST, abs=0.001)
-        assert (r1.distance, r2.distance) == (0.5, 0.5)
+        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST * 0.2, abs=1e-9)
+        assert r2.topic_boost == pytest.approx(_TOPIC_SAME_BOOST * 0.2, abs=1e-9)
+        assert (r1.distance, r2.distance) == (0.5, 0.3)
+
+    def test_equal_distances_take_the_constants_as_absolute_credit(self) -> None:
+        """nexus-2yshe: an all-equal set is one tie, the case a tie-break is
+        for; with no distance difference to overturn, the constants apply
+        (tests/test_ekn9n_topic_link_pairs_contract.py pins the linked one)."""
+        from nexus.scoring import _TOPIC_SAME_BOOST, apply_topic_boost
+
+        r1 = self._make_result(doc_id="doc-a", distance=0.5)
+        r2 = self._make_result(doc_id="doc-b", distance=0.5)
+        apply_topic_boost([r1, r2], {"doc-a": 1, "doc-b": 1})
+        assert (r1.topic_boost, r2.topic_boost) == (_TOPIC_SAME_BOOST, _TOPIC_SAME_BOOST)
 
     def test_combined_same_and_linked_boost(self) -> None:
         """Results get both same-topic and linked-topic distance reduction."""
@@ -971,7 +993,7 @@ class TestTopicBoost:
 
         r1 = self._make_result(doc_id="doc-a", distance=0.5)
         r2 = self._make_result(doc_id="doc-b", distance=0.5)
-        r3 = self._make_result(doc_id="doc-c", distance=0.5)
+        r3 = self._make_result(doc_id="doc-c", distance=0.3)  # spread 0.2
 
         # doc-a and doc-b in topic 1, doc-c in topic 2
         assignments = {"doc-a": 1, "doc-b": 1, "doc-c": 2}
@@ -981,11 +1003,11 @@ class TestTopicBoost:
 
         # r1 gets same-topic (with r2) + linked-topic (with r3)
         assert r1.topic_boost == pytest.approx(
-            _TOPIC_SAME_BOOST + _TOPIC_LINKED_BOOST, abs=0.001,
+            (_TOPIC_SAME_BOOST + _TOPIC_LINKED_BOOST) * 0.2, abs=1e-9,
         )
         # r3 gets linked-topic (with r1 and r2)
-        assert r3.topic_boost == pytest.approx(_TOPIC_LINKED_BOOST, abs=0.001)
-        assert (r1.distance, r2.distance, r3.distance) == (0.5, 0.5, 0.5)
+        assert r3.topic_boost == pytest.approx(_TOPIC_LINKED_BOOST * 0.2, abs=1e-9)
+        assert (r1.distance, r2.distance, r3.distance) == (0.5, 0.5, 0.3)
 
     def test_the_floor_at_zero_moved_to_the_effective_distance(self) -> None:
         """The clamp still exists; it just is not applied to ``distance``.
@@ -999,16 +1021,17 @@ class TestTopicBoost:
         """
         from nexus.scoring import _TOPIC_SAME_BOOST, _effective_distance, apply_topic_boost
 
-        r1 = self._make_result(doc_id="doc-a", distance=0.05)
-        r2 = self._make_result(doc_id="doc-b", distance=0.05)
+        r1 = self._make_result(doc_id="doc-a", distance=0.005)
+        r2 = self._make_result(doc_id="doc-b", distance=0.005)
+        far = self._make_result(doc_id="doc-z", distance=1.005)  # spread 1.0
 
-        assignments = {"doc-a": 1, "doc-b": 1}
-        apply_topic_boost([r1, r2], assignments)
+        assignments = {"doc-a": 1, "doc-b": 1, "doc-z": 2}
+        apply_topic_boost([r1, r2, far], assignments)
 
-        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST, abs=0.001)
-        assert r1.topic_boost > 0.05, "fixture must over-credit, or the clamp is untested"
-        assert r1.distance == 0.05
-        assert r2.distance == 0.05
+        assert r1.topic_boost == pytest.approx(_TOPIC_SAME_BOOST * 1.0, abs=1e-9)
+        assert r1.topic_boost > 0.005, "fixture must over-credit, or the clamp is untested"
+        assert r1.distance == 0.005
+        assert r2.distance == 0.005
         assert _effective_distance(r1, {}) == 0.0
         assert _effective_distance(r2, {}) == 0.0
 

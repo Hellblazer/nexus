@@ -111,6 +111,9 @@ class _FakeCatalog:
         self.find_calls.append((query, content_type))
         return list(self._entries)
 
+    def find_all(self, query: str, *, content_type: str | None = None) -> list:
+        return self.find(query, content_type=content_type)
+
     def descendants(self, prefix: str) -> list[dict]:
         self.descendants_calls.append(prefix)
         return list(self._descendants)

@@ -164,6 +164,28 @@ stamping. After **any** pull/rebase that touches `service/`, rebuild with
 client probe hard-rejects it). Symptom of forgetting: the entire suite errors
 instantly at setup (thousands of `E`s in seconds).
 
+## A fresh test host: what it needs, and what the suite provisions itself
+
+The suite provisions its own PostgreSQL bundle and the engine's ONNX models
+on first use, each once per box under a cross-process lock: the PG bundle
+under `$XDG_CACHE_HOME/nexus-test-substrate/<tag>/` (`~/.cache/...` when
+`XDG_CACHE_HOME` is unset), the models under the engine's onnx_models root
+(`$NX_ONNX_MODEL_DIR`, else `~/.cache/nexus/onnx_models`). A box that is
+offline on its first run gets a message naming the fix, not a wall of setup
+errors. Port shards scale with the xdist worker count, so `-n auto` fits any
+core count (nexus-wvyvn).
+
+What the host itself must supply:
+
+- A JDK and a Docker socket for `scripts/build-gate-jar.sh` (jOOQ codegen runs
+  Testcontainers). Under colima, export both `DOCKER_HOST` and
+  `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`; without them the jar build fails in
+  seconds and every substrate test then errors at setup.
+- `shellcheck`, bash 5 and GNU coreutils for the shell lints and the e2e
+  scripts (macOS ships bash 3.2 and BSD coreutils).
+- A git identity (`user.name`, `user.email`): tests that commit in a temp repo
+  fail without one.
+
 ## E2E isolation: a sandboxed HOME does NOT isolate a service install
 
 **Only a container isolates the service unit. `HOME` / `NEXUS_CONFIG_DIR` do

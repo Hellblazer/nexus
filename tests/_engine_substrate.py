@@ -156,6 +156,30 @@ _WORKER_SHARD_BASE = _LOW_PORT_RANGE.start
 _WORKER_SHARD_MAX_INDEX = (
     (_LOW_PORT_RANGE.stop - _LOW_PORT_RANGE.start) // _WORKER_SHARD_WIDTH - 1
 )
+#: The narrowest slice a worker is ever given. A worker boots one PG and one
+#: engine per session, plus the odd test-local listener, so 50 ports is ample;
+#: below it the random bind-probe would start to exhaust its own slice.
+_WORKER_SHARD_MIN_WIDTH = 50
+
+
+def _worker_shard_width() -> int:
+    """The slice width for this run: :data:`_WORKER_SHARD_WIDTH`, narrowed so
+    every worker of the run gets its own slice.
+
+    nexus-wvyvn: a fixed 500-port width fits 18 workers in the 9000-port range,
+    and ``-n auto`` on a 15-core box already spawned 19, which dropped the
+    extras onto the shared full range the sharding exists to avoid. xdist sets
+    ``PYTEST_XDIST_WORKER_COUNT`` in every worker, so the width is derived from
+    it; a run of 18 or fewer workers keeps the 500-port width exactly.
+    """
+    try:
+        count = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", ""))
+    except ValueError:
+        return _WORKER_SHARD_WIDTH
+    if count <= 0:
+        return _WORKER_SHARD_WIDTH
+    span = _LOW_PORT_RANGE.stop - _LOW_PORT_RANGE.start
+    return max(_WORKER_SHARD_MIN_WIDTH, min(_WORKER_SHARD_WIDTH, span // count))
 
 #: nexus-v460j: resolution is LAZY — the import-time ``pg_bin_dir()`` call
 #: this replaced could DOWNLOAD the PG bundle at collection start (cold
@@ -173,6 +197,8 @@ _WORKER_SHARD_MAX_INDEX = (
 #: import-time resolution note).
 _PG_AMBIENT_ENV_KEYS = (
     "NEXUS_PG_BIN", "NEXUS_PG_BUNDLE", "NEXUS_CONFIG_DIR", "HOME", "PATH",
+    "XDG_CACHE_HOME", "NX_ONNX_MODEL_DIR", "NX_SERVICE_BGE_DIR",
+    "NX_SERVICE_CROSSENCODER_DIR",
 )
 _PG_AMBIENT_ENV: dict[str, str | None] = {
     k: os.environ.get(k) for k in _PG_AMBIENT_ENV_KEYS
@@ -181,30 +207,146 @@ _pg_bin_resolved: Path | None = None
 _pg_bin_lock = threading.Lock()
 
 
+@contextmanager
+def _ambient_env() -> Iterator[None]:
+    """Run the body under the import-time ambient env snapshot. The lock
+    serializes the env-swap window against any concurrent in-process caller
+    (review round 2: ``sweep_stale_substrate_clusters`` can reach
+    :func:`_pg_bin` from a test body).
+
+    The swap has to cover the whole body, downloads included, because the
+    product seams read the env at call time; so the lock spans a cold PG
+    bundle download (as it always has in :func:`_pg_bin`) and a cold ONNX
+    fetch. Both run once per process, inside ``_boot``'s own lock."""
+    with _pg_bin_lock:
+        saved = {k: os.environ.get(k) for k in _PG_AMBIENT_ENV_KEYS}
+        try:
+            for k, v in _PG_AMBIENT_ENV.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            yield
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
 def _pg_bin() -> Path:
     """The PG bundle ``bin/`` dir, resolved once on FIRST REAL USE under the
     import-time ambient env snapshot (may download on a cold cache — which is
-    exactly why it must not run at collection time). The lock serializes the
-    env-swap window against any concurrent in-process caller (review round 2:
-    ``sweep_stale_substrate_clusters`` can reach here from a test body)."""
+    exactly why it must not run at collection time)."""
     global _pg_bin_resolved
-    with _pg_bin_lock:
-        if _pg_bin_resolved is None:
-            saved = {k: os.environ.get(k) for k in _PG_AMBIENT_ENV_KEYS}
-            try:
-                for k, v in _PG_AMBIENT_ENV.items():
-                    if v is None:
-                        os.environ.pop(k, None)
-                    else:
-                        os.environ[k] = v
+    if _pg_bin_resolved is None:
+        with _ambient_env():
+            if _pg_bin_resolved is None:
                 _pg_bin_resolved = pg_bin_dir()
+    return _pg_bin_resolved
+
+
+def _no_pg_message() -> str:
+    """The setup error when no PG bundle is usable, naming the provisioning
+    failure when there was one.
+
+    nexus-wvyvn: a fresh host reported ~23k setup errors reading "no
+    PostgreSQL binaries discoverable ... Install the PG bundle (nx init)",
+    which points at discovery, while the real cause (the self-provisioning
+    download failing) had gone to a warning nobody could find among them.
+    """
+    from tests.db._service_fixture import last_provision_failure, substrate_cache_root  # noqa: PLC0415 — deferred, matches this module's lazy PG resolution
+
+    failure = last_provision_failure()
+    if failure:
+        return (
+            "T2 engine substrate unavailable: self-provisioning the pinned PG "
+            f"bundle into {substrate_cache_root()} failed ({failure}). Fix "
+            "connectivity and rerun, or set NEXUS_PG_BIN to a PostgreSQL bin "
+            "dir that has pgvector."
+        )
+    return (
+        "T2 engine substrate unavailable: no PostgreSQL binaries "
+        "discoverable (NEXUS_PG_BIN / config-dir bundle / Homebrew / "
+        "PATH). Install the PG bundle (nx init) or set NEXUS_PG_BIN."
+    )
+
+
+def _ensure_onnx_models(spawn_env: dict[str, str]) -> Path | None:
+    """Make sure the engine's local-mode ONNX models exist before it boots;
+    return the onnx_models root the engine must read, or ``None`` when the
+    engine will run on Voyage and loads no local model.
+
+    nexus-wvyvn: on a fresh host with an empty ``~/.cache/nexus/onnx_models``
+    the engine died constructing ``Bge768Embedder`` and the substrate reported
+    only "service did not bind port", so every substrate-backed test errored
+    at setup with a message that names the port rather than the missing
+    model (hellmini, 2026-09-28). Provisioning goes through the product's own
+    fetchers under one cross-process lock, since they stream straight into
+    the destination file and two xdist workers must never write it at once.
+    bge-768 is required (the engine cannot boot without it); the
+    cross-encoder only degrades rerank, so its failure warns.
+
+    Resolved under the import-time ambient env, like :func:`_pg_bin`, so a
+    test's monkeypatched HOME cannot move the check somewhere the engine
+    does not read. The caller passes the root to the engine as
+    ``NX_ONNX_MODEL_DIR``, so both sides use one directory by construction.
+    """
+    if spawn_env.get("NX_VOYAGE_API_KEY", "").strip():
+        return None
+    from nexus.db import service_bge_model as bge  # noqa: PLC0415 — deferred, heavy imports stay off collection
+    from nexus.db import service_crossencoder_model as ce  # noqa: PLC0415 — deferred, heavy imports stay off collection
+    from nexus.db.onnx_model_root import service_onnx_models_root  # noqa: PLC0415 — deferred, heavy imports stay off collection
+
+    with _ambient_env():
+        root = service_onnx_models_root()
+        # The engine reads only <root>/<model>/onnx; a Python-only per-model
+        # override pointed elsewhere would provision one dir while the engine
+        # crashes on another (production warns on the same check at spawn,
+        # storage_service_daemon; critique of 5ded8b067).
+        for env_name, mismatch in (
+            ("NX_SERVICE_BGE_DIR", bge.service_bge_engine_dir_mismatch()),
+            ("NX_SERVICE_CROSSENCODER_DIR", ce.service_crossencoder_engine_dir_mismatch()),
+        ):
+            if mismatch is not None:
+                raise RuntimeError(
+                    f"T2 engine substrate unavailable: {env_name} points at "
+                    f"{mismatch[0]}, but the engine reads only {mismatch[1]}. "
+                    f"Unset {env_name}, or set NX_ONNX_MODEL_DIR so the override "
+                    "sits at <root>/<model>/onnx."
+                )
+        present = lambda: bge.service_bge_model_present() and ce.service_crossencoder_model_present()  # noqa: E731 — two call sites, one line
+        if present():
+            return root
+        root.mkdir(parents=True, exist_ok=True)
+        with (root.parent / "onnx_models.provision.lock").open("a+") as lock_fh:
+            lock_file(lock_fh, blocking=True)
+            try:
+                # A waiter takes the holder's result rather than fetching again.
+                if present():
+                    return root
+                try:
+                    bge.fetch_service_bge_onnx()
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"T2 engine substrate unavailable: the engine's bge-768 ONNX "
+                        f"model is not provisioned under {root} and fetching it "
+                        f"failed ({exc}). Run `nx init --service` once on this "
+                        "host, or point NX_ONNX_MODEL_DIR at a provisioned "
+                        "onnx_models root."
+                    ) from exc
+                try:
+                    ce.fetch_service_crossencoder_onnx()
+                except RuntimeError as exc:
+                    warnings.warn(
+                        f"nexus test substrate: cross-encoder ONNX not provisioned "
+                        f"({exc}); rerank tests will see a degraded engine.",
+                        stacklevel=2,
+                    )
             finally:
-                for k, v in saved.items():
-                    if v is None:
-                        os.environ.pop(k, None)
-                    else:
-                        os.environ[k] = v
-        return _pg_bin_resolved
+                unlock_file(lock_fh)
+    return root
 
 
 def _worker_shard_range() -> range:
@@ -214,8 +356,9 @@ def _worker_shard_range() -> range:
     plain ``pytest`` / ``-n 0`` invocation, or a non-pytest caller, gets
     the FULL range, identical to pre-sharding behaviour).
 
-    A worker index at or beyond the range's sharding capacity (more
-    workers than 500-port slices fit in 9000 ports), or a malformed
+    The slice width comes from :func:`_worker_shard_width`, so a run's
+    workers always fit. A worker index beyond the capacity at that width
+    (more than 180 workers, or a stale worker count), or a malformed
     worker id, falls back to the full range rather than computing an
     out-of-bounds or empty slice — still bind-probed, still loud on
     exhaustion, just without the disjoint-shard guarantee.
@@ -227,21 +370,23 @@ def _worker_shard_range() -> range:
         index = int(worker[2:])
     except ValueError:
         return _LOW_PORT_RANGE
-    if index < 0 or index > _WORKER_SHARD_MAX_INDEX:
-        if index > _WORKER_SHARD_MAX_INDEX:
+    width = _worker_shard_width()
+    max_index = (_LOW_PORT_RANGE.stop - _LOW_PORT_RANGE.start) // width - 1
+    if index < 0 or index > max_index:
+        if index > max_index:
             # Beyond-capacity fallback loses the disjoint-shard TOCTOU
             # guarantee — say so, matching _free_port's loud-on-exhaustion
             # pattern (critique T2 [21526] round 3, Minor (b)).
             warnings.warn(
                 f"PYTEST_XDIST_WORKER={worker!r} exceeds the "
-                f"{_WORKER_SHARD_MAX_INDEX + 1}-shard port-sharding "
+                f"{max_index + 1}-shard port-sharding "
                 "capacity; falling back to the full range without the "
                 "disjoint-shard guarantee (nexus-lgdy1)",
                 stacklevel=2,
             )
         return _LOW_PORT_RANGE
-    start = _WORKER_SHARD_BASE + index * _WORKER_SHARD_WIDTH
-    return range(start, start + _WORKER_SHARD_WIDTH)
+    start = _WORKER_SHARD_BASE + index * width
+    return range(start, start + width)
 
 
 def _free_port(
@@ -637,6 +782,11 @@ def _boot() -> dict:
             f"{exc}",
             stacklevel=2,
         )
+    # The cheapest precondition first: before PG is booted or models fetched
+    # (critique of 5ded8b067).
+    java = shutil.which("java")
+    if java is None:
+        raise RuntimeError("T2 engine substrate: no java on PATH")
     stale = _jar_ready_reason(_JAR)
     if stale:
         raise RuntimeError(
@@ -646,11 +796,12 @@ def _boot() -> dict:
         )
     bin_dir = _pg_bin()
     if not bin_dir.exists():
-        raise RuntimeError(
-            "T2 engine substrate unavailable: no PostgreSQL binaries "
-            "discoverable (NEXUS_PG_BIN / config-dir bundle / Homebrew / "
-            "PATH). Install the PG bundle (nx init) or set NEXUS_PG_BIN."
-        )
+        raise RuntimeError(_no_pg_message())
+    # Before PG boots and before any port is probed: a cold fetch is slow, and
+    # a probed port is released the moment the probe returns (review of
+    # 5ded8b067). The engine's spawn env is os.environ plus fixed NX_* keys,
+    # none of which is NX_VOYAGE_API_KEY, so os.environ decides the posture.
+    onnx_root = _ensure_onnx_models(dict(os.environ))
 
     pg_port = _free_port()
     pg_user = os.environ["USER"]
@@ -793,10 +944,8 @@ def _boot() -> dict:
         "NX_DB_ADMIN_PASS": "",
     }
     env.pop("NX_STORAGE_BACKEND", None)
-    java = shutil.which("java")
-    if java is None:
-        _kill_pg()
-        raise RuntimeError("T2 engine substrate: no java on PATH")
+    if onnx_root is not None:
+        env["NX_ONNX_MODEL_DIR"] = str(onnx_root)
     # Engine output goes to a FILE, never a PIPE (nexus-j0nec root cause):
     # an undrained 64KB stdout pipe fills after ~250 tenant mints of
     # Logback console logging, write(2) blocks holding the PrintStream

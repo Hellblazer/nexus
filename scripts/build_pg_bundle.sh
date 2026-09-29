@@ -33,7 +33,13 @@
 #   PGVECTOR_VERSION        default v0.8.2 (>=0.8 is the RDR-155 iterative_scan floor)
 #   WORK_DIR                scratch dir for sources; default `mktemp -d`
 #   MACOSX_DEPLOYMENT_TARGET (darwin only) default 13.0 — Mach-O minos floor
-#   SKIP_PREREQS            when "1", do not attempt to install flex/bison/perl
+#   SKIP_PREREQS            LINUX ONLY: when "1", do not attempt to install
+#                           flex/bison/perl/patchelf (dnf/apt-get). Darwin
+#                           ignores this var entirely (nexus-yd9po) — it
+#                           always installs flex/bison if missing (never
+#                           unconditionally) and always exports their keg-only
+#                           PATH, since skipping the export would silently
+#                           fall back to macOS's ancient system bison.
 #
 # Usage:
 #   BUNDLE_PREFIX=/opt/nexus-pg scripts/build_pg_bundle.sh
@@ -55,12 +61,12 @@ uname_s="$(uname -s)"
 log() { echo "=== $* ==="; }
 
 install_prereqs() {
-    if [ "$SKIP_PREREQS" = "1" ]; then
-        log "SKIP_PREREQS=1 — assuming flex/bison/perl present"
-        return
-    fi
     case "$uname_s" in
         Linux)
+            if [ "$SKIP_PREREQS" = "1" ]; then
+                log "SKIP_PREREQS=1 — assuming flex/bison/perl present"
+                return
+            fi
             # manylinux_2_28 base toolchain lacks these.
             if command -v dnf >/dev/null 2>&1; then
                 dnf -y -q install flex bison perl patchelf >/dev/null
@@ -78,7 +84,19 @@ install_prereqs() {
         Darwin)
             # PG's build needs a newer flex/bison than macOS ships; Xcode CLT
             # provides clang/make. curl/perl/otool are present on the runner.
-            brew install -q flex bison >/dev/null
+            #
+            # Deliberately does NOT honour SKIP_PREREQS (nexus-yd9po): a CI
+            # user with no Homebrew write access (e.g. hellmini's non-admin
+            # ghrunner) can still run this, because it installs only when
+            # flex/bison are actually missing rather than unconditionally
+            # (a host admin installs them once; ghrunner can then read them
+            # even without brew-write access) — and the PATH export below
+            # must ALWAYS run regardless of SKIP_PREREQS, because flex/bison
+            # are Homebrew KEG-ONLY formulae (not symlinked into brew
+            # --prefix/bin), so skipping it would silently fall back to
+            # macOS's ancient system bison and produce a confusing failure
+            # deep in PG's configure/build instead of here.
+            brew list --formula flex >/dev/null 2>&1 && brew list --formula bison >/dev/null 2>&1 || brew install -q flex bison >/dev/null
             export PATH="$(brew --prefix bison)/bin:$(brew --prefix flex)/bin:$PATH"
             ;;
     esac

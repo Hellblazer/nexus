@@ -642,6 +642,7 @@ def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
 
 def resolve_knowledge_doc_for_chash(
     reader, chash: str, *, log_event: str, collection: str | None = None,
+    owner_collection: str | None = None,
 ):
     """Resolve *chash* to the single store_put-origin catalog document it
     identifies, or ``None`` if there is no match or the match is ambiguous.
@@ -652,14 +653,27 @@ def resolve_knowledge_doc_for_chash(
     pure function of chunk text, collection-independent — so an
     unscoped call can match a document registered under a DIFFERENT
     collection whose manifest happens to reference an identical chunk.
-    That is correct for a raw "which document owns this chash" query
-    (the delete-path and tombstone-reap callers, which omit *collection*
-    and keep the original catalog-wide behavior — they act on the chash
-    itself, not on one particular collection's identity), but wrong for
-    a store_put RECONCILE, whose contract is keyed on (collection,
-    title): pass *collection* there so a cross-collection chash
-    coincidence can never be mistaken for "this document already
-    exists in the collection I am writing to."
+    Pass *collection* for a store_put RECONCILE, whose contract is keyed
+    on (collection, title), so a cross-collection chash coincidence can
+    never be mistaken for "this document already exists in the
+    collection I am writing to."
+
+    *owner_collection* is the delete-path scope (nexus-r3cdg): candidates
+    are entries whose ``physical_collection`` equals it OR is blank (a
+    ghost, which has no collection to mismatch; nexus-sz89e). A chunk row
+    lives in one collection, and the engine's delete anti-join and
+    live(c) both count only manifest rows in that collection, so an
+    owner in another collection neither owns nor protects it. This scopes
+    by the document's ``physical_collection``, the engine by the manifest
+    row's own ``collection`` column; the schema does not force the two
+    equal (see ``manifest_backfill.py``), but every writer sets them
+    together, and a document whose rows name another collection is
+    already outside what the delete path can repair. Before
+    this scope the delete callers resolved catalog-wide: after an
+    ``.nxexp`` import into another collection the chash had two owners,
+    resolution called it ambiguous, nothing was reaped, and the home
+    document's own manifest row then protected the chunk (shakeout
+    7.64.1 F2: "Deleted 0 entries", exit 0).
 
     nexus-5axey: ``by_doc_id`` is a TUMBLER-only lookup on the engine (the
     settled wji11 contract: tumbler is the only document identity); it
@@ -712,6 +726,11 @@ def resolve_knowledge_doc_for_chash(
             and entry.content_type == "knowledge"
             and not entry.file_path
             and (collection is None or entry.physical_collection == collection)
+            and (
+                owner_collection is None
+                or not entry.physical_collection
+                or entry.physical_collection == owner_collection
+            )
         ):
             candidates.append(entry)
     if len(candidates) > 1:
@@ -760,8 +779,10 @@ def _find_ghost_by_title(reader, owner, title: str):
     """
     if not title:
         return None
-    for entry in reader.find(title, content_type="knowledge"):
-        if entry.title == title and entry.chunk_count == 0 and owner.is_prefix_of(entry.tumbler):
+    # Every exact-title match, not find()'s first 50: a ghost past row 50
+    # went unmatched and register() minted a duplicate (nexus-3bafq sibling).
+    for entry in reader.find_by_title_exact(title, content_type="knowledge"):
+        if entry.chunk_count == 0 and owner.is_prefix_of(entry.tumbler):
             return entry
     return None
 
@@ -925,6 +946,19 @@ def catalog_store_hook_tracked(
             reader, doc_id, log_event="catalog_store_hook_dedup",
             collection=collection_name,
         )
+        # nexus-enej7: the same content under a DIFFERENT title is a second
+        # document sharing the chunk (RDR-108), not a re-put of this one.
+        # Reconciling onto it rewrote the first document's source_uri to the
+        # new title and never registered the new one (shakeout 7.64.1 F1).
+        # Only a row with the same identity, or a legacy row with no
+        # source_uri to compare, reconciles here.
+        if (
+            existing is not None
+            and source_uri is not None
+            and getattr(existing, "source_uri", "")
+            and existing.source_uri != source_uri
+        ):
+            existing = None
         if existing is not None:
             # nexus-k54nk fix-round 1: capture the row's meta.doc_id AS IT
             # STOOD before this call's own writer.update below overwrites
@@ -2134,14 +2168,11 @@ def store_delete_catalog_cleanup(
     exercising ambiguity-detection or the "nothing to clean" miss path,
     where no live document exists to protect either way) — that is a
     deliberate, visible choice, not an accident of a default nobody
-    noticed. When given (nexus-c53hy defense-in-depth): the resolved
-    entry's ``physical_collection`` must match it, or cleanup is
-    skipped (returns ``("", "")``, same as "nothing to clean"). The chash
-    -> document resolution below is GLOBAL (no collection scoping of its
-    own — see :func:`resolve_knowledge_doc_for_chash`), so without this
-    check a chash that happens to also be a live document's natural id in
-    a DIFFERENT physical collection than the one the caller is deleting
-    from would get tombstoned by mistake. Callers that have already
+    noticed. When given, the chash -> document resolution below is scoped
+    to it plus blank-collection ghosts (``owner_collection``; nexus-c53hy,
+    nexus-sz89e, nexus-r3cdg): a document in another collection is neither
+    tombstoned nor counted as a second owner, and a miss returns
+    ``("", "")``, same as "nothing to clean". Callers that have already
     confirmed (via a collection-scoped T3 existence check) that this chash
     exists in a specific collection should pass that collection here; this
     is the second of two layers — see ``mcp/core.py::store_delete``'s own
@@ -2204,7 +2235,8 @@ def store_delete_catalog_cleanup(
         # and already applies the content_type == "knowledge" / no
         # file_path filter below.
         entry = resolve_knowledge_doc_for_chash(
-            reader, chash_doc_id, log_event="store_delete_catalog_lookup"
+            reader, chash_doc_id, log_event="store_delete_catalog_lookup",
+            owner_collection=expected_collection,
         )
     except Exception as exc:  # noqa: BLE001 — lookup failure must not mask the successful T3 delete; surfaced to caller
         _log.warning(
@@ -2222,25 +2254,9 @@ def store_delete_catalog_cleanup(
     if entry is None:
         return "", ""
 
-    # nexus-c53hy cross-collection protection, with the nexus-sz89e rule: a
-    # GHOST (blank physical_collection — the documented live population) has
-    # no collection to mismatch. Every production caller passes a real
-    # expected_collection, so without this rule a ghost was never cleaned up
-    # by store_delete at all (the guard fired before the nexus-d9fwj
-    # retraction guard below was ever reached). A NON-blank collection that
-    # differs is still refused, unchanged.
-    if (
-        expected_collection is not None
-        and entry.physical_collection
-        and entry.physical_collection != expected_collection
-    ):
-        _log.debug(
-            "store_delete_catalog_cleanup_collection_mismatch",
-            doc_id=chash_doc_id, expected_collection=expected_collection,
-            actual_collection=entry.physical_collection, tumbler=str(entry.tumbler),
-        )
-        return "", ""
-
+    # nexus-c53hy's cross-collection guard and nexus-sz89e's ghost rule now
+    # live in the resolve above (owner_collection, nexus-r3cdg): an entry
+    # it returns is in expected_collection or a blank-collection ghost.
     tumbler = str(entry.tumbler)
     writer = None
     retract_reader = None
@@ -2304,13 +2320,13 @@ def reap_catalog_manifest_for_chashes(
     protect either way) pass ``expected_collection=None`` explicitly —
     a visible decision, not an accident.
 
-    When given as a real collection name: a resolved entry only gets
-    reaped if its ``physical_collection`` matches. The per-chash
-    resolution below is a GLOBAL chash lookup with no collection scoping
-    of its own, so without this guard a chash that is ALSO (coincidentally,
-    or via duplicate content) a live document's natural id in a DIFFERENT
-    physical collection than the one being acted on would get tombstoned
-    by mistake. This is a second, cheap layer — the primary defense is the
+    When given as a real collection name, the per-chash resolution below
+    is scoped to it plus blank-collection ghosts (``owner_collection``;
+    nexus-c53hy, nexus-sz89e, nexus-r3cdg): a document in another
+    collection that shares the chash (an ``.nxexp`` import copy, duplicate
+    content) is neither tombstoned nor counted as a second owner, matching
+    the engine's collection-scoped delete anti-join. That is the second
+    layer — the primary defense is the
     caller doing a collection-scoped T3 existence check before calling
     this at all (see ``commands/store.py::delete_cmd``'s ``--id`` branch).
 
@@ -2378,23 +2394,10 @@ def reap_catalog_manifest_for_chashes(
         writer = make_catalog_writer()
         for chash in chashes:
             entry = resolve_knowledge_doc_for_chash(
-                reader, chash, log_event="catalog_reap"
+                reader, chash, log_event="catalog_reap",
+                owner_collection=expected_collection,
             )
             if entry is None:
-                continue
-            # nexus-sz89e: a ghost's blank physical_collection cannot mismatch
-            # (see store_delete_catalog_cleanup); a non-blank other collection
-            # is still skipped (nexus-c53hy).
-            if (
-                expected_collection is not None
-                and entry.physical_collection
-                and entry.physical_collection != expected_collection
-            ):
-                _log.debug(
-                    "catalog_reap_collection_mismatch",
-                    chash=chash, expected_collection=expected_collection,
-                    actual_collection=entry.physical_collection, tumbler=str(entry.tumbler),
-                )
                 continue
             # nexus-mmkqe/rnqbw: retract THIS chash's own manifest row(s)
             # BEFORE tombstoning — see _retract_manifest_rows_for_chash and

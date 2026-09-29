@@ -75,6 +75,60 @@ def _file_path_matches(entry_path: str, wanted: str) -> bool:
     return long_.endswith("/" + short_)
 
 
+def _parse_user_tumbler(raw: str, field: str):
+    """Parse a caller-supplied tumbler, or raise a ValueError that says why.
+
+    ``Tumbler.parse`` leaks int()'s "invalid literal for int() with base 10"
+    for anything that is not dotted integers; every tool here that took a
+    tumbler from its caller returned that text (nexus-zdzm5; ``resolve`` had
+    its own fix, now shared). The dashed form ``nx doctor`` prints
+    ("1-2188") is a physical collection prefix, not a tumbler.
+    """
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
+
+    try:
+        return Tumbler.parse(raw)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"{field}={raw!r}: not a dotted tumbler (e.g. '1.2.3'). "
+            f"If you have a physical collection prefix like "
+            f"'1-2188' from `nx doctor`, that is NOT a tumbler. "
+            f"underlying: {exc}"
+        ) from exc
+
+
+def _file_path_candidates(cat, wanted: str) -> list:
+    """Every catalog document *wanted* can name under :func:`_file_path_matches`.
+
+    The engine's owner-agnostic lookup is exact, while the catalog stores
+    paths relative to the owner root and a caller usually holds the absolute
+    form. So look up *wanted* plus each trailing multi-segment suffix of it
+    in one batched call, then add stored-absolute rows the relative form
+    names (the mirror case). The final filter is :func:`_file_path_matches`
+    itself, so this can widen the search but never the match.
+    """
+    from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
+
+    w = wanted.rstrip("/")
+    parts = [p for p in w.split("/") if p]
+    keys = list(dict.fromkeys([w, *("/".join(parts[i:]) for i in range(len(parts) - 1))]))
+    found: dict = {}
+    for entries in cat.find_all_by_file_paths(keys).values():
+        for e in entries:
+            found.setdefault(str(e.tumbler), e)
+    if not w.startswith("/"):
+        for d in cat.docs_with_absolute_paths():
+            t = d.get("tumbler", "")
+            if t and t not in found and _file_path_matches(d.get("file_path", ""), wanted):
+                e = cat.resolve(Tumbler.parse(t), follow_alias=False)
+                if e is not None:
+                    found[t] = e
+    return sorted(
+        (e for e in found.values() if _file_path_matches(e.file_path, wanted)),
+        key=lambda e: str(e.tumbler),
+    )
+
+
 # Note: core server also registers a "search" tool. No collision — Claude Code
 # disambiguates by server prefix (mcp__plugin_conexus_nexus-catalog__search vs
 # mcp__plugin_conexus_nexus__search).
@@ -114,80 +168,56 @@ def catalog_search(
         return [{"error": err}]
     try:
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — function-local import avoids catalog import at module load
-        import json as _json  # noqa: PLC0415 — deliberate function-local import
 
-        # Structured filters via SQL when there's NO free-text query. The
-        # SQL path filters by exact-match structural fields (owner, corpus,
-        # file_path, content_type, author). When ``query`` IS provided
-        # alongside content_type, the FTS5 path below handles both via
-        # ``cat.find(query, content_type=...)``. The previous routing put
-        # content_type unconditionally on the SQL side, which silently
-        # dropped the ``query`` filter for the (query + content_type)
-        # combination — nexus-a414 Part 1.
-        if not query.strip() and (
-            owner or corpus or file_path or content_type or author
-        ):
-            # Route through catalog API — no direct ._db access (service-mode compatible).
-            # The /list endpoint dispatches on a single filter; fetch via the most specific
-            # one available and Python-filter the rest.
+        owner_prefix = f"{_parse_user_tumbler(owner, 'owner')}." if owner else ""
+
+        def _keep(e) -> bool:
+            # Every filter, applied to every candidate regardless of which
+            # source produced it, so no branch can silently drop one.
+            if owner_prefix and not str(e.tumbler).startswith(owner_prefix):
+                return False
+            if corpus and e.corpus != corpus:
+                return False
+            if content_type and e.content_type != content_type:
+                return False
+            if file_path and not _file_path_matches(e.file_path, file_path):
+                return False
+            if author and author.lower() not in (e.author or "").lower():
+                return False
+            return True
+
+        if query.strip():
+            if owner or corpus or file_path or author:
+                # Post-filtering a capped page reports absence for matches
+                # past the cap, so take every full-text match first.
+                matches = [e for e in cat.find_all(query, content_type=content_type or None) if _keep(e)]
+            else:
+                matches = cat.find(
+                    query, content_type=content_type or None, limit=offset + limit + 1,
+                )
+        elif owner or corpus or file_path or content_type or author:
+            # Each source below is COMPLETE for its own filter (nexus-3bafq:
+            # the old fallback read one limit+offset+1 page of all_documents
+            # and filtered it, so file_path or author alone saw the first
+            # ~21 of 23,334 rows and reported absence for the rest).
             if owner:
-                candidates = cat.by_owner(Tumbler.parse(owner))
-                if corpus:
-                    candidates = [e for e in candidates if e.corpus == corpus]
-                if file_path:
-                    candidates = [e for e in candidates if _file_path_matches(e.file_path, file_path)]
-                if author:
-                    candidates = [e for e in candidates if author.lower() in (e.author or "").lower()]
-                if content_type:
-                    candidates = [e for e in candidates if e.content_type == content_type]
-                entries = candidates[offset:offset + limit + 1]
+                candidates = cat.by_owner(_parse_user_tumbler(owner, "owner"))
             elif corpus:
                 candidates = cat.by_corpus(corpus)
-                if file_path:
-                    candidates = [e for e in candidates if _file_path_matches(e.file_path, file_path)]
-                if author:
-                    candidates = [e for e in candidates if author.lower() in (e.author or "").lower()]
-                if content_type:
-                    candidates = [e for e in candidates if e.content_type == content_type]
-                entries = candidates[offset:offset + limit + 1]
             elif content_type:
                 candidates = cat.by_content_type(content_type)
-                if file_path:
-                    candidates = [e for e in candidates if _file_path_matches(e.file_path, file_path)]
-                if author:
-                    candidates = [e for e in candidates if author.lower() in (e.author or "").lower()]
-                entries = candidates[offset:offset + limit + 1]
+            elif file_path:
+                candidates = _file_path_candidates(cat, file_path)
             else:
-                # No major filter — fetch paged chunk and apply remaining Python filters.
-                # HttpCatalogClient.all_documents() supports offset; SQLite Catalog does not.
-                import inspect as _inspect  # noqa: PLC0415 — branch-local import, only needed on the no-major-filter path
-                sig = _inspect.signature(cat.all_documents)
-                if "offset" in sig.parameters:
-                    batch = cat.all_documents(limit=limit + offset + 1, offset=0)
-                else:
-                    batch = cat.all_documents(limit + offset + 1)
-                if file_path:
-                    batch = [e for e in batch if _file_path_matches(e.file_path, file_path)]
-                if author:
-                    batch = [e for e in batch if author.lower() in (e.author or "").lower()]
-                entries = batch[offset:offset + limit + 1]
-            has_more = len(entries) > limit
-            entries = entries[:limit]
-            result = [e.to_dict() for e in entries]
-            if has_more:
-                result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
-            return result
-
-        # FTS5 free-text search (append author to query if both provided)
-        fts_query = query
-        if author and query:
-            fts_query = f"{query} {author}"
-        if not fts_query.strip():
+                # author alone: the engine has no author filter.
+                candidates = cat.all_documents()
+            matches = [e for e in candidates if _keep(e)]
+        else:
             return [{"error": "query or at least one filter required"}]
-        all_results = cat.find(fts_query, content_type=content_type or None)
-        page = all_results[offset:offset + limit]
-        result = [e.to_dict() for e in page]
-        if offset + limit < len(all_results):
+        entries = matches[offset:offset + limit + 1]
+        has_more = len(entries) > limit
+        result = [e.to_dict() for e in entries[:limit]]
+        if has_more:
             result.append({"_pagination": {"next_offset": offset + limit, "limit": limit}})
         return result
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
@@ -219,7 +249,7 @@ def catalog_show(
 
         entry = None
         if tumbler:
-            t = Tumbler.parse(tumbler)
+            t = _parse_user_tumbler(tumbler, "tumbler")
             # nexus-v3w9n: catalog-034 grammar makes tumbler depth
             # unambiguous — an owner prefix is EXACTLY 2 segments, a
             # document tumbler is >= 3. cat.resolve() never consults
@@ -280,7 +310,7 @@ def catalog_list(
         from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deliberate function-local import
 
         if owner:
-            entries = cat.by_owner(Tumbler.parse(owner))
+            entries = cat.by_owner(_parse_user_tumbler(owner, "owner"))
             if content_type:
                 entries = [e for e in entries if e.content_type == content_type]
             entries = entries[offset:offset + limit + 1]
@@ -430,7 +460,7 @@ def catalog_register(
             }
 
         tumbler = writer.register(
-            Tumbler.parse(owner), title,
+            _parse_user_tumbler(owner, "owner"), title,
             content_type=content_type, file_path=fp,
             corpus=corpus, author=author, year=year,
             physical_collection=physical_collection,
@@ -504,10 +534,10 @@ def catalog_update(
         if meta:
             fields["meta"] = _json.loads(meta)
         if alias_of:
-            fields["alias_of"] = str(Tumbler.parse(alias_of))
+            fields["alias_of"] = str(_parse_user_tumbler(alias_of, "alias_of"))
         if not fields:
             return {"error": "No fields to update"}
-        writer.update(Tumbler.parse(tumbler), **fields)
+        writer.update(_parse_user_tumbler(tumbler, "tumbler"), **fields)
         return {"tumbler": tumbler, "updated": list(fields.keys())}
     except Exception as e:  # noqa: BLE001 — MCP tool handler: catch-and-return-error-dict so the tool call never crashes the client
         return {"error": str(e)}
@@ -702,20 +732,9 @@ def catalog_resolve(
         # physical-collection prefix shape, NOT a tumbler. Tumbler.parse
         # used to leak its int() ValueError to the caller; catch and
         # surface an actionable diagnostic instead.
-        def _parse_tumbler_or_raise(raw: str, field: str) -> Tumbler:
-            try:
-                return Tumbler.parse(raw)
-            except (ValueError, TypeError) as exc:
-                raise ValueError(
-                    f"{field}={raw!r}: not a dotted tumbler (e.g. '1.2.3'). "
-                    f"If you have a physical collection prefix like "
-                    f"'1-2188' from `nx doctor`, that is NOT a tumbler. "
-                    f"underlying: {exc}"
-                ) from exc
-
         collections: set[str] = set()
         if tumbler:
-            entry = cat.resolve(_parse_tumbler_or_raise(tumbler, "tumbler"))
+            entry = cat.resolve(_parse_user_tumbler(tumbler, "tumbler"))
             if entry and entry.physical_collection:
                 collections.add(entry.physical_collection)
         if owner:
@@ -727,7 +746,7 @@ def catalog_resolve(
                 owner_tumbler = resolve_owner_scope(cat, owner)
             except OwnerScopeError as exc:
                 raise ValueError(f"owner {exc}") from exc
-            entries = cat.by_owner(_parse_tumbler_or_raise(owner_tumbler, "owner"))
+            entries = cat.by_owner(_parse_user_tumbler(owner_tumbler, "owner"))
             for e in entries:
                 if e.physical_collection:
                     collections.add(e.physical_collection)

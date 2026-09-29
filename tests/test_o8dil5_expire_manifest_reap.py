@@ -301,3 +301,48 @@ def test_expire_does_not_reap_a_twin_owned_by_a_different_collection(t2_service_
     assert not _chunk_present(client, chash), (
         "the TTL-lapsed chunk in _COLLECTION must actually be gone"
     )
+
+
+def test_expire_reclaims_a_cataloged_note_whose_twin_lives_in_another_collection(t2_service_env):
+    """nexus-r3cdg: the TTL note HAS its own catalog document, and a copy
+    (an ``.nxexp`` import, say) owns the same chash in another collection.
+    The reap used to resolve the chash catalog-wide, see two owners, call it
+    ambiguous and reap nothing; the note's own manifest row then protected
+    its chunk and expire() reported 0. Owners in another collection neither
+    co-own nor protect the chunk, so the note is reclaimed and the twin is
+    untouched."""
+    import nexus.db.http_vector_client as hvc
+    from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title
+
+    cat = ActiveCatalog()
+    client = hvc.HttpVectorClient(tenant=t2_service_env)
+
+    content = "r3cdg expire fixture: cataloged TTL note with a twin in another collection"
+    chash = _seed_ttl_lapsed_note(client, cat, content, title="r3cdg-expire-note")
+
+    other_collection = "knowledge__r3cdg-expire-twin__bge-base-en-v15-768__v1"
+    owner = cat.register_owner("r3cdg-expire-twin-owner", "curator")
+    twin_title = "r3cdg-expire-twin"
+    twin_tumbler = cat.register(
+        owner, twin_title, content_type="knowledge",
+        physical_collection=other_collection, meta={"doc_id": chash},
+    )
+    client.upsert_chunks_with_embeddings(
+        other_collection, ids=[chash], documents=[content], embeddings=[],
+        metadatas=[{"title": twin_title, "chunk_text_hash": chash}],
+    )
+    cat.append_manifest_chunks(
+        str(twin_tumbler), [{"chash": chash, "position": 0}], collection=other_collection,
+    )
+    cat.resync_chunk_count_cache(str(twin_tumbler))
+
+    assert len(documents_by_title("r3cdg-expire-note")) == 1
+    assert _chunk_present(client, chash)
+
+    count = client.expire()
+
+    assert count == 1, "the note's own chunk must be reclaimed, not retained by a twin elsewhere"
+    assert not _chunk_present(client, chash)
+    assert documents_by_title("r3cdg-expire-note") == [], "the note's document must be tombstoned"
+    assert len(documents_by_title(twin_title)) == 1
+    assert chash in client.existing_ids(other_collection, [chash])

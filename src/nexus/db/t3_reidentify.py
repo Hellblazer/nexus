@@ -94,6 +94,7 @@ def reidentify_collection(
     collection_name: str,
     *,
     dry_run: bool = True,
+    known_to_exist: bool = False,
 ) -> ReidentifyResult:
     """Re-upsert every chunk in ``collection_name`` under the full chunk_text_hash (RDR-180).
 
@@ -156,7 +157,13 @@ def reidentify_collection(
         # it appears in (src/nexus/db/), not by which handle arrives. A db/
         # helper called from commands/ with a make_t3() handle is invisible to
         # that lint by construction.
-        col = t3.get_collection(collection_name)
+        # nexus-5z0us sibling: a caller walking a listing it just made
+        # (--all-collections) passes known_to_exist; get_collection would
+        # re-list the whole tenant for every collection.
+        col = (
+            t3.get_or_create_collection(collection_name) if known_to_exist
+            else t3.get_collection(collection_name)
+        )
     except collection_not_found_errors():
         _log.info(
             "reidentify_collection_absent",

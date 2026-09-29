@@ -13,7 +13,8 @@ caller named. A ``doc_id`` paired with the WRONG ``--collection``/
 ``collection`` argument therefore silently tombstones a live, unrelated
 catalog document while the caller reports a clean "not found" -- the exact
 inverse of the F10c bug class (unconditional destructive action with no
-verification).
+verification). (The resolution itself is collection-scoped since
+nexus-r3cdg; these tests still pin the existence-check-first layer.)
 
 These tests use a REAL catalog (``ActiveCatalog`` / the live factories) and a
 REAL T3 (``T3Database`` over ``InMemoryVectorClient``) so the catalog

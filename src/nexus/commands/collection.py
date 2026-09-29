@@ -71,19 +71,42 @@ def _catalog_collection_rows() -> tuple[dict[str, dict], str]:
 
 
 @collection.command("list")
-def list_cmd() -> None:
-    """List T3 collections: live chunk counts, and the catalog's columns
-    (content type, owner, embedding model, dimension, lifecycle state).
+@click.option(
+    "--all", "show_all", is_flag=True,
+    help="Also list retired names (a rename's old name) that hold no chunks.",
+)
+def list_cmd(show_all: bool) -> None:
+    """List T3 collections: live and stored chunk counts, and the catalog's
+    columns (content type, owner, embedding model, dimension, lifecycle state).
 
     RDR-204 Day 2 (nexus-ft04v.32): every column is read from the
     collection's catalog row, never derived from its name, so a row whose
     name disagrees with its columns is visible rather than hidden behind a
     consistent-looking name. A collection with no catalog row prints ``-``
     in every column; a catalog row with no chunks prints 0.
+
+    nexus-sis0m.3: a rename keeps the old name's catalog row as a retired
+    tombstone (superseded_by names the new one). An empty tombstone is not a
+    collection and is left out unless ``--all``; one still holding chunks is
+    listed, with STATE ``superseded-><new name>``.
     """
-    counts = {c["name"]: c.get("count", 0) for c in _t3().list_collections()}
+    # nexus-sis0m.1: strict, so a service error is reported rather than read
+    # as "No collections found." at exit 0.
+    listed = _t3().list_collections(strict=True)
+    counts = {c["name"]: c.get("count", 0) for c in listed}
+    # nexus-7q8zg: CHUNKS is live (owned) chunks; STORED is what physically
+    # sits in the collection. They differ for quarantine siblings and for
+    # chunks with no manifest owner, which shape and catalog verify count.
+    stored = {c["name"]: c.get("stored_count", c.get("count", 0)) for c in listed}
     rows, rows_error = _catalog_collection_rows()
-    names = sorted(set(counts) | set(rows))
+
+    def _successor(name: str) -> str:
+        return str(rows.get(name, {}).get("superseded_by") or "")
+
+    names = sorted(
+        n for n in set(counts) | set(rows)
+        if show_all or not _successor(n) or stored.get(n, 0)
+    )
     if not names:
         click.echo("No collections found.")
         return
@@ -91,6 +114,8 @@ def list_cmd() -> None:
         click.echo(f"catalog columns could not be read ({rows_error}); names and counts only")
     width = max(len(n) for n in names)
     def _cell(name: str, key: str) -> str:
+        if key == "lifecycle_state" and _successor(name):
+            return f"superseded->{_successor(name)}"
         val = rows.get(name, {}).get(key)
         return "-" if val is None or val == "" else str(val)
 
@@ -99,12 +124,12 @@ def list_cmd() -> None:
         max(len(label), *(len(cells[n][i]) for n in names))
         for i, (label, _) in enumerate(_LIST_COLUMNS)
     ]
-    header = f"{'NAME':<{width}}  {'CHUNKS':>6}  " + "  ".join(
+    header = f"{'NAME':<{width}}  {'CHUNKS':>6}  {'STORED':>6}  " + "  ".join(
         f"{label:<{w}}" for (label, _), w in zip(_LIST_COLUMNS, col_widths)
     )
     click.echo(header.rstrip())
     for n in names:
-        line = f"{n:<{width}}  {counts.get(n, 0):>6}  " + "  ".join(
+        line = f"{n:<{width}}  {counts.get(n, 0):>6}  {stored.get(n, 0):>6}  " + "  ".join(
             f"{cell:<{w}}" for cell, w in zip(cells[n], col_widths)
         )
         click.echo(line.rstrip())
@@ -203,38 +228,72 @@ def info_cmd(name: str) -> None:
     cols = db.list_collections()
     match = next((c for c in cols if c["name"] == name), None)
     if match is None:
+        # nexus-sis0m.3: a renamed collection's old name keeps a retired
+        # catalog row naming its successor; say where it went.
+        successor = str(_catalog_collection_rows()[0].get(name, {}).get("superseded_by") or "")
+        if successor:
+            raise click.ClickException(
+                f"collection {name!r} was renamed to {successor} — use: nx collection info {successor}"
+            )
         raise click.ClickException(f"collection not found: {name!r} — use: nx collection list")
 
-    from nexus.config import is_local_mode  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    if is_local_mode():
-        from nexus.db.local_ef import LocalEmbeddingFunction  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-        ef = LocalEmbeddingFunction()
-        query_model = idx_model = f"{ef.model_name} (local)"
-    else:
+    # nexus-sis0m F8: the collection's own catalog row names its model. The
+    # local branch used to print the local embedder's name (MiniLM) for
+    # every collection, whatever it was indexed with.
+    idx_model = query_model = match.get("embedding_model") or ""
+    if not idx_model:
         query_model = embedding_model_for_collection(name)
-        idx_model   = index_model_for_collection(name)
+        idx_model = index_model_for_collection(name)
+    else:
+        # The row and the name can disagree (a disputed row, RDR-204); say so
+        # rather than print one of them as the whole truth. Only a name that
+        # encodes a model can disagree: for a subject name
+        # (knowledge__distributed-systems) the name-derived model is a
+        # prefix-table guess, not something the name says.
+        from nexus.corpus import is_conformant_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    info = db.collection_info(name)
+        named = index_model_for_collection(name) if is_conformant_collection_name(name) else ""
+        if named and named != idx_model:
+            idx_model = query_model = f"{idx_model} (catalog row; the name says {named})"
 
-    col = db.get_or_create_collection(name)
-    # Paginate for accurate MAX(indexed_at) timestamp (nexus-j857).
-    all_timestamps: list[str] = []
-    offset = 0
-    while True:
-        batch = col.get(limit=300, offset=offset, include=["metadatas"])
-        for meta in batch.get("metadatas") or []:
-            if meta and "indexed_at" in meta:
-                all_timestamps.append(meta["indexed_at"])
-        if len(batch.get("ids", [])) < 300:
-            break
-        offset += 300
-    last_indexed = max(all_timestamps) if all_timestamps else "unknown"
+    # nexus-ktsa1: the latest document indexed_at from the catalog, in one
+    # read. Paging every chunk's metadata for MAX(indexed_at) (nexus-j857)
+    # took 5 minutes on a 48k-chunk collection.
+    last_indexed = _latest_document_indexed_at(name)
 
     click.echo(f"Collection:  {match['name']}")
-    click.echo(f"Chunks:      {match['count']}")
+    stored_count = match.get("stored_count", match["count"])
+    if stored_count != match["count"]:
+        click.echo(f"Chunks:      {match['count']} live, {stored_count} stored "
+                   "(stored chunks with no live manifest owner are hidden from reads)")
+    else:
+        click.echo(f"Chunks:      {match['count']}")
     click.echo(f"Index model: {idx_model}")
     click.echo(f"Query model: {query_model}")
     click.echo(f"Indexed:     {last_indexed}")
+
+
+def _latest_document_indexed_at(name: str) -> str:
+    """Most recent ``indexed_at`` over the live catalog documents in
+    collection *name*; ``"unknown"`` when it has none, and the error when
+    the catalog cannot be read, so the two never look alike.
+
+    One row from the engine's collection-health aggregate (nexus-dsu5z), the
+    read ``nx collection health`` already makes."""
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reader = None
+    try:
+        reader = make_catalog_reader()
+        if reader is None:
+            return "unknown (no catalog)"
+        return str(reader.collection_health_meta(name).get("last_indexed") or "unknown")
+    except Exception as exc:  # noqa: BLE001 — informational line; the error is printed, not raised
+        return f"unknown (catalog could not be read: {exc})"
+    finally:
+        close = getattr(reader, "close", None)
+        if close is not None:
+            close()
 
 
 def _require_docs_collection(row: dict, name: str) -> None:
@@ -1494,7 +1553,8 @@ def backfill_hash_cmd(name: str | None, all_collections: bool) -> None:
     grand_updated = 0
     for i, col_name in enumerate(sorted(targets), 1):
         try:
-            col = db.get_collection(col_name)
+            # nexus-5z0us sibling: get_collection re-lists the tenant per call.
+            col = db.get_or_create_collection(col_name) if all_collections else db.get_collection(col_name)
         except Exception as exc:  # noqa: BLE001 — per-collection resolution failure surfaced via click.echo, loop continues
             click.echo(f"  [{i}/{len(targets)}] {col_name}: {type(exc).__name__}, skipping", err=True)
             continue
@@ -1981,7 +2041,7 @@ def merge_candidates_cmd(
     exclude_hubs: bool, hub_top_n: int,
     limit: int, fmt: str, create_link: bool,
 ) -> None:
-    """Pair-wise cross-collection overlap ranking (RDR-087 Phase 4.3).
+    """(Unavailable) Pair-wise cross-collection overlap ranking (RDR-087 Phase 4.3).
 
     Surfaces (a, b) pairs where collection *a* projects into topics in
     collection *b* with high similarity — hints at merge or bridge-
@@ -1995,7 +2055,9 @@ def merge_candidates_cmd(
         )
     from nexus.merge_candidates import run_merge_candidates  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-    click.echo(
+    # nexus-sis0m.4: the analysis is unavailable; exiting 0 with prose
+    # (even under --format json) read as an empty result.
+    raise click.ClickException(
         run_merge_candidates(
             min_shared=min_shared,
             min_similarity=min_similarity,

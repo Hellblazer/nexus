@@ -512,8 +512,8 @@ def _run_upgrade(*, dry_run: bool, auto_mode: bool, skip_t3: bool = False) -> No
 
     if not auto_mode:
         click.echo(
-            "Service mode: the local SQLite/Chroma tiers are an immutable "
-            "migration source — no local schema migration to run."
+            "Service mode: no local schema migration to run; the service "
+            "applies its own schema when it starts."
         )
 
 
@@ -641,6 +641,9 @@ def _emit_name_vs_embed_dim_advisory() -> None:
     """Run the name-vs-embed-dim doctor check and emit a one-liner
     if any collections are mislabeled. Silent on PASS, error-tolerant
     (T3 may be unavailable on a freshly-migrated install)."""
+    # nexus-5z0us: this probes one chunk per collection (~15s on a
+    # 100-collection tenant); say so rather than sit silent.
+    click.echo("Checking collection names against their vector dimensions…", err=True)
     try:
         from nexus.commands.catalog_cmds.doctor import _run_name_vs_embed_dim  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         report = _run_name_vs_embed_dim()
@@ -708,3 +711,15 @@ def _converge_plugins(*, dry_run: bool) -> None:
     except Exception:  # noqa: BLE001 — advisory step; the data convergence above already happened
         _log.warning("plugin_lockstep_error", exc_info=True)
         click.echo("Plugin lockstep: could not check the installed plugins; run /plugin update in Claude Code")
+    # nexus-qocnk: nx upgrade is the path for old installs, exactly where a
+    # retired nx plugin (with its own live hooks) is likeliest to remain.
+    try:
+        from nexus.plugin_lockstep import retired_plugin_installs  # noqa: PLC0415 — deferred, CLI cold start
+
+        for key in retired_plugin_installs():
+            click.echo(
+                f"Retired plugin {key} is still installed and its hooks are still live "
+                f"(GHSA-mc84-6gjq-vm2p). In Claude Code: /plugin uninstall {key}, then /reload-plugins"
+            )
+    except Exception:  # noqa: BLE001 — advisory step, same as the lockstep above
+        _log.warning("retired_plugin_check_error", exc_info=True)

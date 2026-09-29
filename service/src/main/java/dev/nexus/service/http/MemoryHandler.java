@@ -66,6 +66,25 @@ public final class MemoryHandler implements HttpHandler {
 
     private static final Logger log = LoggerFactory.getLogger(MemoryHandler.class);
 
+    /** nexus-xn9ut: the most rows one {@code /list?limit=} returns; larger values are clamped. */
+    public static final int LIST_LIMIT_CEILING = 10_000;
+
+    /**
+     * nexus-xn9ut: the {@code /list} bound on the newest rows returned. Absent
+     * or blank reads all (the old contract); a non-positive or non-numeric
+     * value is a 400; a value above {@link #LIST_LIMIT_CEILING} is clamped to it.
+     */
+    public static Integer parseListLimit(String rawLimit) {
+        if (rawLimit == null || rawLimit.isBlank()) {
+            return null;
+        }
+        int parsed = parseInt(rawLimit.trim(), "limit");
+        if (parsed < 1) {
+            throw new IllegalArgumentException("query param 'limit' must be a positive integer, got " + parsed);
+        }
+        return Math.min(parsed, LIST_LIMIT_CEILING);
+    }
+
     // Jackson configured to handle OffsetDateTime and include null fields in output (SQLite-parity: every column key always present, RDR-152 nexus-fjwxh).
     static final ObjectMapper MAPPER = new ObjectMapper()
             .registerModule(new JavaTimeModule())
@@ -275,8 +294,13 @@ public final class MemoryHandler implements HttpHandler {
         Map<String, String> params = queryParams(ex.getRequestURI());
         String project = params.get("project");
         String agent   = params.get("agent");
+        Integer limit = parseListLimit(params.get("limit"));
 
-        var rows = repo.listEntries(tenant, project, agent);
+        var rows = repo.listEntries(tenant, project, agent, limit);
+        // A bounded read also reports how many rows match in total, on each
+        // row (the response stays a list, so an older client ignores the
+        // key); the prefix scan prints "N more" from it.
+        Integer matchingTotal = limit == null ? null : repo.countEntries(tenant, project, agent);
         // Mirror Python list_entries: summary view (id, project, title, agent, timestamp)
         var summaries = rows.stream().map(r -> {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -284,6 +308,9 @@ public final class MemoryHandler implements HttpHandler {
             m.put("project", r.getProject());
             m.put("title", r.getTitle());
             m.put("agent", r.getAgent());
+            if (matchingTotal != null) {
+                m.put("matching_total", matchingTotal);
+            }
             // Use same UTC second-precision format as recordToMap
             m.put("timestamp", r.getTimestamp() != null
                 ? MemoryRepository.UTC_SECOND.format(r.getTimestamp().withOffsetSameInstant(ZoneOffset.UTC))

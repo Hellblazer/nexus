@@ -62,7 +62,11 @@ class MemoryRepositoryQuarantineReadPathTest {
     private static final Set<String> NOT_READ_PATHS = Set.of(
         "upsert", "delete", "deleteById", "expire", "mergeMemories", "putOrMerge",
         "importRow", "importBatch", "reap", "restore", "insertSummary",
-        "listSummaries");
+        "listSummaries",
+        // nexus-xn9ut: a COUNT, not a row read, so the walk cannot see it by
+        // return type; its quarantine predicate is pinned by name in
+        // countEntries_excludesAQuarantinedRow below.
+        "countEntries");
 
     private static final String T = "readpath-tenant";
     private static final String QP = "readpath-proj";
@@ -174,6 +178,9 @@ class MemoryRepositoryQuarantineReadPathTest {
                 calls(new Object[] {T, Q, QP})),
             Map.entry("listEntries[class java.lang.String, class java.lang.String, class java.lang.String]",
                 calls(new Object[] {T, QP, null})),
+            // nexus-xn9ut: both the unbounded and the bounded branch.
+            Map.entry("listEntries[class java.lang.String, class java.lang.String, class java.lang.String, class java.lang.Integer]",
+                calls(new Object[] {T, QP, null, null}, new Object[] {T, QP, null, 5})),
             Map.entry("getProjectsWithPrefix[class java.lang.String, class java.lang.String]",
                 calls(new Object[] {T, QP})),
             Map.entry("searchGlob[class java.lang.String, class java.lang.String, class java.lang.String]",
@@ -249,6 +256,25 @@ class MemoryRepositoryQuarantineReadPathTest {
         assertThat(repo.listQuarantined(T, QP)).extracting(MemoryRecord::getId)
             .as("listQuarantined is the one read that sees quarantined rows")
             .containsExactly(qid);
+    }
+
+    @Test
+    void countEntries_excludesAQuarantinedRow() {
+        // Tested by name (an int, invisible to the return-type walk): the count
+        // the bounded list reports as matching_total must agree with what the
+        // list itself can return, so a quarantined row is not counted.
+        String tenant = "readpath-count-tenant";
+        String project = "readpath-count-proj";
+        repo.importRow(tenant, project, "live title", "live body", "t", null, null,
+            30, OffsetDateTime.now(ZoneOffset.UTC), 0, null);
+        long cold = repo.importRow(tenant, project, "cold title", "cold body", "t", null, null,
+            1, OffsetDateTime.now(ZoneOffset.UTC).minusDays(30), 0, null);
+        assertThat(repo.countEntries(tenant, project, null)).isEqualTo(2);
+
+        assertThat(repo.expire(tenant).quarantinedIds()).containsExactly(cold);
+
+        assertThat(repo.countEntries(tenant, project, null)).isEqualTo(1);
+        assertThat(repo.listEntries(tenant, project, null, null)).hasSize(1);
     }
 
     @Test

@@ -183,7 +183,9 @@ def collection_attributes(row: dict[str, Any]) -> CollectionAttributes:
     owner = str(row.get("owner_id") or "")
     model = str(row.get("embedding_model") or "")
     ver = str(row.get("model_version") or "")
-    quarantine = False
+    # nexus-7q8zg: since nexus-uxd2a a quarantine sibling's row carries the
+    # BASE content type; lifecycle_state is what says quarantine.
+    quarantine = str(row.get("lifecycle_state") or "") == "quarantine"
     if ct and owner:
         if ct.startswith("quarantine-"):
             ct, quarantine = ct[len("quarantine-"):], True

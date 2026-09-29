@@ -1207,10 +1207,15 @@ _drive_hook() {
         "$PROBE_PYTHON" "$HOOK_PY_DIR/drive.py" "$1"
 }
 
+# The stop carries what a real dispatch's SubagentStop carries: its agent_type
+# and a transcript file on disk. A stop with neither is a harness-internal
+# event the projector drops by design (nexus-uzntx).
+HOOK_TRANSCRIPT="$WORK/hook-transcript.jsonl"
+: >"$HOOK_TRANSCRIPT"
 printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","hook_event_name":"SubagentStart"}' \
     "$HOOK_SID" "$HOOK_AGENT" | _drive_hook start
-printf '{"session_id":"%s","agent_id":"%s","hook_event_name":"SubagentStop"}' \
-    "$HOOK_SID" "$HOOK_AGENT" | _drive_hook stop
+printf '{"session_id":"%s","agent_id":"%s","agent_type":"Explore","agent_transcript_path":"%s","hook_event_name":"SubagentStop"}' \
+    "$HOOK_SID" "$HOOK_AGENT" "$HOOK_TRANSCRIPT" | _drive_hook stop
 
 # The join inside drive.py means the POST has normally already completed
 # by here -- but poll anyway rather than assume: the join has its own

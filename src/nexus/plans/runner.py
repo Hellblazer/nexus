@@ -48,14 +48,40 @@ import json
 import os as _os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 import structlog
 
+from nexus import call_deadline
 from nexus.plans.match import Match
 
 _log = structlog.get_logger(__name__)
+
+#: nexus-5ezgn: a SYNC retrieval tool called directly on the event loop
+#: blocks it, and no ``wait_for`` can cut it: one search step ran 310 s
+#: against a 120 s budget that way. While a deadline is armed
+#: (:mod:`nexus.call_deadline`, set by :func:`plan_run` around the
+#: dispatch), :func:`_default_dispatcher` runs the tool on this executor
+#: instead. Its OWN pool, not the loop's default executor: a cut thread
+#: cannot be killed, and abandoned searches must not be able to starve the
+#: default executor that T1 minting and channel waits share. Bounded, so
+#: a burst of over-budget calls queues here; a queued call whose wait is
+#: cut is cancelled before it starts. A running one stops at its next
+#: ``call_deadline.check`` (search_cross_corpus checks between stages).
+_RETRIEVAL_EXECUTOR_WORKERS: int = 4
+_retrieval_executor: ThreadPoolExecutor | None = None
+
+
+def _get_retrieval_executor() -> ThreadPoolExecutor:
+    global _retrieval_executor
+    if _retrieval_executor is None:
+        _retrieval_executor = ThreadPoolExecutor(
+            max_workers=_RETRIEVAL_EXECUTOR_WORKERS,
+            thread_name_prefix="nx-retrieval",
+        )
+    return _retrieval_executor
 
 __all__ = [
     "PlanResult",
@@ -689,6 +715,29 @@ def _operator_timeout_sentinel(
         "aggregates": [],
         "partial_text": exc.partial_text,
         "event_count": exc.event_count,
+    }
+
+
+def _retrieval_timeout_sentinel(
+    *, tool: str, step_index: int, budget_s: float,
+) -> dict[str, Any]:
+    """Sentinel for a retrieval step cut off by the wall-clock budget.
+
+    Retrieval has no partial content to salvage (a search either returns
+    its page or not), so ``text`` and ``partial_text`` are empty; the shape
+    matches :func:`_operator_timeout_sentinel` so ``nx_answer`` builds the
+    same ``[budget exhausted (time) ...]`` marker for either (nexus-5ezgn).
+    """
+    return {
+        "error": f"{tool} step exceeded the remaining budget of {budget_s:.1f}s",
+        "status": "timeout",
+        "tool": tool,
+        "step_index": step_index,
+        "text": "",
+        "summary": "",
+        "aggregates": [],
+        "partial_text": "",
+        "event_count": 0,
     }
 
 
@@ -2235,6 +2284,17 @@ async def _default_dispatcher(tool: str, args: dict[str, Any]) -> dict[str, Any]
     # subprocess StreamReader objects, which are loop-bound.
     if inspect.iscoroutinefunction(fn):
         result = await fn(**args)
+    elif call_deadline.get() is not None:
+        # nexus-5ezgn: off the loop, so plan_run's wait_for can cut it; in a
+        # copy of this context, so the deadline reaches the worker and a cut
+        # search stops at its next stage boundary. See _retrieval_executor.
+        import contextvars  # noqa: PLC0415 — deadline path only
+        import functools  # noqa: PLC0415 — deadline path only
+
+        ctx = contextvars.copy_context()
+        result = await asyncio.get_running_loop().run_in_executor(
+            _get_retrieval_executor(), functools.partial(ctx.run, fn, **args),
+        )
     else:
         result = fn(**args)
     # Most MCP tools return str (human-readable summary); the runner
@@ -2358,10 +2418,14 @@ async def plan_run(
     reconstructed ``partial_text``/``event_count`` are captured into the
     terminal sentinel and the loop stops. Either trigger sets
     :attr:`PlanResult.budget_exhausted_at_step` (1-indexed) and
-    :attr:`PlanResult.budget_exhausted_kind` to ``"time"``. Retrieval
-    steps are never budget-cut mid-flight — they don't accept a
-    ``timeout`` kwarg — only the pre-segment deadline check can stop
-    the loop before one starts.
+    :attr:`PlanResult.budget_exhausted_kind` to ``"time"``. A retrieval
+    step takes no ``timeout`` kwarg, so it is cut from outside instead
+    (nexus-5ezgn): its dispatch runs under ``asyncio.wait_for`` with the
+    remaining budget, and the default dispatcher runs a sync tool in a
+    worker thread while that wait is armed, so the wait can fire. A cut
+    retrieval step leaves a timeout sentinel and stops the loop exactly
+    like an operator timeout. A custom dispatcher that returns a plain
+    dict (not a coroutine) runs to completion and can still overrun.
 
     ``budget_usd_remaining`` (RDR-196 .p3c, nexus-nyry9.21): an OPTIONAL
     USD ceiling on the sum of already-completed steps' ``cost_usd``
@@ -3098,13 +3162,49 @@ async def plan_run(
             # OWN internal claude_dispatch call this module never touches
             # directly. See ``_rollup_step_usage`` for the >1-entry rule.
             _step_usage: list[Any] = []
+            # nexus-5ezgn: an operator step gets its remaining budget as a
+            # ``timeout`` kwarg above. A retrieval step gets it here, as a
+            # wait_for around its dispatch; the call_deadline it sets tells
+            # the default dispatcher to run the sync tool off the event loop
+            # (so the wait can fire) and lets the tool stop itself at a stage
+            # boundary (DeadlineExceeded). Operator steps stay out of this:
+            # cancelling their coroutine mid-read would strand the
+            # persistent operator pool's pipes.
+            _cut_retrieval = deadline is not None and not is_operator_tool(tool)
+            _deadline_token = call_deadline.set_deadline(deadline) if _cut_retrieval else None
             try:
                 with _dispatch_mod.ambient_usage_sink(_step_usage):
                     raw = dispatch(tool, resolved)
                     if inspect.iscoroutine(raw):
-                        result = await raw
+                        if _cut_retrieval:
+                            result = await asyncio.wait_for(
+                                raw, timeout=max(0.0, deadline - time.monotonic()),
+                            )
+                        else:
+                            result = await raw
                     else:
                         result = raw
+            except (asyncio.TimeoutError, call_deadline.DeadlineExceeded):
+                if not _cut_retrieval:
+                    raise
+                _log.warning(
+                    "nx_answer_budget_retrieval_timeout",
+                    step_index=index,
+                    tool=tool,
+                    elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                )
+                step_outputs.append(_retrieval_timeout_sentinel(
+                    tool=tool, step_index=index,
+                    budget_s=deadline - _seg_started_at,
+                ))
+                budget_exhausted_at_step = index + 1
+                budget_exhausted_kind = "time"
+                _record_step(
+                    step_index=index, operator=tool, source="sql",
+                    elapsed_ms=int((time.monotonic() - _seg_started_at) * 1000),
+                    ok=False, usage=_rollup_step_usage(_step_usage),
+                )
+                break
             except Exception as exc:
                 # nexus-nyry9.4 review-fix: _default_dispatcher doesn't know
                 # the step index (see its docstring note); patch in the real
@@ -3174,6 +3274,9 @@ async def plan_run(
                     ok=False, usage=_rollup_step_usage(_step_usage),
                 )
                 continue
+            finally:
+                if _deadline_token is not None:
+                    call_deadline.reset(_deadline_token)
             if not isinstance(result, dict):
                 # Tool authors must follow the documented output contract;
                 # surface non-dict returns explicitly rather than letting

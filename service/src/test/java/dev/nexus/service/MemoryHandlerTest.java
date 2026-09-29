@@ -3,6 +3,7 @@ package dev.nexus.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.MemoryRepository;
+import dev.nexus.service.http.MemoryHandler;
 import dev.nexus.service.db.TenantConstants;
 import dev.nexus.service.db.TenantScope;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -378,6 +379,49 @@ class MemoryHandlerTest {
         assertThat(entries).hasSizeGreaterThanOrEqualTo(2);
         assertThat(entries.stream().map(e -> (String) e.get("title")).toList())
             .contains("list-entry-1", "list-entry-2");
+    }
+
+    @Test
+    void list_limitReturnsTheNewestNOnly() throws Exception {
+        // nexus-xn9ut: t2_prefix_scan renders 5 titles but paid for the whole
+        // project (3,840 rows, 2.4s). limit bounds the rows the engine reads.
+        for (int i = 0; i < 4; i++) {
+            post("/v1/memory/put", TENANT,
+                "{\"project\":\"list-limit-proj\",\"title\":\"limit-entry-" + i
+                    + "\",\"content\":\"c\",\"ttl\":30}");
+        }
+        var resp = get("/v1/memory/list?project=list-limit-proj&limit=2", TENANT);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var entries = mapper.readValue(resp.body(), LIST_T);
+        // Same-second timestamps tie; the id tiebreak makes the newest two
+        // the last two written.
+        assertThat(entries.stream().map(e -> (String) e.get("title")).toList())
+            .containsExactly("limit-entry-3", "limit-entry-2");
+        assertThat(entries).allSatisfy(e -> assertThat(e.get("matching_total")).isEqualTo(4));
+        var all = mapper.readValue(get("/v1/memory/list?project=list-limit-proj", TENANT).body(), LIST_T);
+        assertThat(all).hasSize(4);
+        assertThat(all.get(0)).doesNotContainKey("matching_total");
+    }
+
+    @Test
+    void list_limitAboveTheCeilingIsClampedNotRefused() throws Exception {
+        post("/v1/memory/put", TENANT,
+            "{\"project\":\"list-clamp-proj\",\"title\":\"only\",\"content\":\"c\",\"ttl\":30}");
+        var resp = get("/v1/memory/list?project=list-clamp-proj&limit=10001", TENANT);
+        assertThat(resp.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(resp.body(), LIST_T)).hasSize(1);
+        // The route answering 200 does not show the clamp; the parse does.
+        assertThat(MemoryHandler.parseListLimit("10001")).isEqualTo(MemoryHandler.LIST_LIMIT_CEILING);
+        assertThat(MemoryHandler.parseListLimit(" 7 ")).isEqualTo(7);
+        assertThat(MemoryHandler.parseListLimit(null)).isNull();
+        assertThat(MemoryHandler.parseListLimit("")).isNull();
+    }
+
+    @Test
+    void list_rejectsANonPositiveOrNonNumericLimit() throws Exception {
+        assertThat(get("/v1/memory/list?project=x&limit=0", TENANT).statusCode()).isEqualTo(400);
+        assertThat(get("/v1/memory/list?project=x&limit=-3", TENANT).statusCode()).isEqualTo(400);
+        assertThat(get("/v1/memory/list?project=x&limit=abc", TENANT).statusCode()).isEqualTo(400);
     }
 
     // ── Test 7: PROJECTS ──────────────────────────────────────────────────────

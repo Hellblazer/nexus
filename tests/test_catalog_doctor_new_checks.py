@@ -108,6 +108,9 @@ class TestChunkSizeDistribution:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
+            def get_or_create_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "code__ok"}]
 
@@ -145,6 +148,9 @@ class TestChunkSizeDistribution:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
+            def get_or_create_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "code__micros"}]
 
@@ -180,6 +186,9 @@ class TestChunkSizeDistribution:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
+            def get_or_create_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "code__big"}]
 
@@ -211,6 +220,9 @@ class TestChunkSizeDistribution:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
+            def get_or_create_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "taxonomy__centroids"}]
 
@@ -240,6 +252,9 @@ class TestChunkTextDedup:
             _client = chroma_client
 
             def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
+            def get_or_create_collection(self, name):
                 return chroma_client.get_collection(name)
 
             def list_collections(self):
@@ -278,6 +293,9 @@ class TestChunkTextDedup:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
+            def get_or_create_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
                 return [{"name": "code__bug"}]
 
@@ -311,6 +329,9 @@ class TestChunkTextDedup:
             _client = chroma_client
 
             def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
+            def get_or_create_collection(self, name):
                 return chroma_client.get_collection(name)
 
             def list_collections(self):
@@ -356,8 +377,11 @@ class TestT3VsCatalog:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
+            def get_or_create_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
-                return [{"name": "docs__clean"}]
+                return [{"name": "docs__clean", "count": chroma_client.get_collection("docs__clean").count()}]
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -387,8 +411,11 @@ class TestT3VsCatalog:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
+            def get_or_create_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
-                return [{"name": "code__orphan"}]
+                return [{"name": "code__orphan", "count": chroma_client.get_collection("code__orphan").count()}]
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -429,8 +456,11 @@ class TestT3VsCatalog:
             def get_collection(self, name):
                 return chroma_client.get_collection(name)
 
+            def get_or_create_collection(self, name):
+                return chroma_client.get_collection(name)
+
             def list_collections(self):
-                return [{"name": "docs__tombstoned"}]
+                return [{"name": "docs__tombstoned", "count": chroma_client.get_collection("docs__tombstoned").count()}]
 
         monkeypatch.setattr("nexus.db.make_t3", lambda: _FakeT3())
         result = runner.invoke(
@@ -467,6 +497,9 @@ class TestT3VsCatalog:
             _client = chroma_client
 
             def get_collection(self, name):
+                return chroma_client.get_collection(name)
+
+            def get_or_create_collection(self, name):
                 return chroma_client.get_collection(name)
 
             def list_collections(self):

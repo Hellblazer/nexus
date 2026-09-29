@@ -411,6 +411,21 @@ def gc_cmd(
     t3_db = make_t3()
     cat = _make_catalog()
 
+    # nexus-sis0m.3: refuse a name no collection carries, here, rather than
+    # surface the engine's "register it first via POST
+    # /v1/catalog/collections/upsert" 422 (shakeout 7.64.1 Surface E F10) --
+    # advice that is wrong for a typo.
+    # A registered collection with no chunks is absent from the chunk
+    # listing but is a real target, so a catalog registration counts too.
+    from nexus.catalog.membership import collection_is_known as _collection_is_known  # noqa: PLC0415 — command-local import (nexus.catalog.membership)
+
+    in_t3 = collection in {c["name"] for c in t3_db.list_collections(strict=True)}
+    if not in_t3 and not _collection_is_known(cat, collection):
+        raise click.ClickException(
+            f"no collection named {collection!r}; 'nx collection list' shows "
+            "the names t3 gc takes."
+        )
+
     try:
         # Manifest path (RDR-108 nexus-e5aw): the catalog
         # document_chunks table is the authoritative source of truth
@@ -479,9 +494,14 @@ def gc_cmd(
         raise click.exceptions.Exit(1)
 
     note_chashes = live_note_chashes(collection_documents)
-    if note_chashes:
+    # nexus-sis0m.3: count only the note chunks the manifest does not
+    # already reference; live_note_chashes returns every note-shaped
+    # document's chunk, and the label said "manifest-less" for all of them
+    # (shakeout 7.64.1 F11: census-manifest-less read 0 while this read N).
+    manifest_less_notes = note_chashes - referenced
+    if manifest_less_notes:
         click.echo(
-            f"  protecting {len(note_chashes)} manifest-less note "
+            f"  protecting {len(manifest_less_notes)} manifest-less note "
             f"chunk(s) from orphan classification (RDR-145)"
         )
     referenced = referenced | note_chashes
@@ -1391,7 +1411,9 @@ def reidentify_cmd(
             file=sys.stderr,
         )
         try:
-            res = reidentify_collection(t3_db, coll_name, dry_run=dry_run)
+            res = reidentify_collection(
+                t3_db, coll_name, dry_run=dry_run, known_to_exist=not collection,
+            )
         except MissingChunkHashError as exc:
             return idx, coll_name, None, str(exc)
         except Exception as exc:  # noqa: BLE001 — per-collection worker; error returned in result tuple, not raised

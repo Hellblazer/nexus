@@ -703,21 +703,63 @@ def test_report_kind_tolerates_missing_agent_type(tmp_path: Path, mock_engine) -
     config_dir = tmp_path / "config"
     _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
 
+    transcript = tmp_path / "agent.jsonl"
+    transcript.write_text("")  # a real agent's transcript exists; no VERIFY lines
     proc = _run(
         "report",
         tmp_path=tmp_path,
-        stdin=json.dumps({"session_id": SESSION_ID, "agent_id": AGENT_ID}),  # no agent_type
+        stdin=json.dumps({
+            "session_id": SESSION_ID, "agent_id": AGENT_ID,  # no agent_type
+            "agent_transcript_path": str(transcript),
+        }),
         env_overrides={"NX_SERVICE_URL": engine.base_url},
     )
     assert proc.returncode == 0, proc.stderr
     assert len(engine.requests) == 1
     body = engine.requests[0]
     assert body["keys"] == {"agent_id": AGENT_ID, "kind": "report"}
-    # No agent_transcript_path in this payload -- verify=absent, no
+    # An empty transcript carries no VERIFY lines -- verify=absent, no
     # commit/t2_ref (bead nexus-cnzei.6 item 2).
     assert body["dims"] == {"agent_type": "", "verify": "absent"}
     log = _log_path(tmp_path / "state")
     assert not log.exists() or "SKIP" not in log.read_text()
+
+
+def test_a_harness_internal_stop_projects_nothing(tmp_path: Path, mock_engine) -> None:
+    """nexus-uzntx: a stop with an agent_id but no agent_type and no
+    transcript on disk is the harness's own, not a subagent's. 1468 of 1530
+    report rows on ledger/8866f29d were this shape, each a synchronous POST.
+    Nothing is posted and nothing is logged (the nexus-aginu precedent)."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+    for extra in ({}, {"agent_transcript_path": str(tmp_path / "never-written.jsonl")}):
+        proc = _run(
+            "report",
+            tmp_path=tmp_path,
+            stdin=json.dumps({"session_id": SESSION_ID, "agent_id": AGENT_ID, **extra}),
+            env_overrides={"NX_SERVICE_URL": engine.base_url},
+        )
+        assert proc.returncode == 0, proc.stderr
+    assert engine.requests == []
+    log = _log_path(tmp_path / "state")
+    assert not log.exists() or "SKIP" not in log.read_text()
+
+
+def test_a_typed_report_without_a_transcript_still_projects(tmp_path: Path, mock_engine) -> None:
+    """Either signal keeps the row: an agent_type alone is a real subagent."""
+    engine = mock_engine(status=200)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+    proc = _run(
+        "report",
+        tmp_path=tmp_path,
+        stdin=json.dumps({"session_id": SESSION_ID, "agent_id": AGENT_ID, "agent_type": "Explore"}),
+        env_overrides={"NX_SERVICE_URL": engine.base_url},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(engine.requests) == 1
+    assert engine.requests[0]["dims"]["agent_type"] == "Explore"
 
 
 def test_start_kind_still_requires_agent_type(tmp_path: Path, mock_engine) -> None:

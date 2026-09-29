@@ -346,7 +346,12 @@ def _resolve_endpoint() -> tuple[str, str]:
         # RDR-155 P4b: the nexus-0rwwv migration-hint bridge died with the
         # migration module; stranded pre-PG installs are redirected by the
         # stranded-install detector at CLI/MCP startup.
-        raise RuntimeError(
+        # nexus-sis0m.1: the named not-resolvable type (a RuntimeError
+        # subclass, so existing catchers still match) lets the CLI render
+        # it as one line instead of a traceback.
+        from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred to avoid circular import
+
+        raise ServiceEndpointUnresolvableError(
             "nexus-service endpoint is not resolvable: T3 vector serving "
             "routes through the nexus-service HTTP API (RDR-155 Phase 4a — "
             "the direct Chroma serving paths are retired). Either start the "
@@ -1666,6 +1671,9 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         # nexus-8ooxn: a 401/403 body can echo the rejected credential;
         # redact where it enters the message so every renderer sees it gone.
         msg = f"POST {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"
+        _unregistered = _unregistered_collection_message(e.code, err)
+        if _unregistered:
+            msg = f"POST {path} → HTTP 422: {_unregistered}"
         # RDR-195 (nexus-kmtlp.11): a STRUCTURED error body — the engine's
         # 422 for Voyage TOO_MANY_TOKENS_IN_BATCH carries detail/sub_requests/
         # batch_size/model — must reach the caller intact. Keeping only the
@@ -1707,8 +1715,53 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
         # the original error and flow unchanged.
         remedy = _managed_remedy()
         if remedy is None:
+            # Type unchanged (callers' retries key on it); the note names the
+            # request for whoever renders the failure (nexus-sis0m.1).
+            _note_request(e, "POST", path)
             raise
         raise VectorServiceError(f"POST {path} failed: {e}\n{remedy}") from e
+
+
+def _note_request(exc: BaseException, method: str, path: str) -> None:
+    """Attach ``<method> <endpoint><path>`` to *exc* as an exception note
+    (PEP 678), leaving its type and message alone. A connection failure's
+    own text names neither host, port nor route."""
+    try:
+        # The resolved endpoint however it was found (env, config, host/port
+        # or lease); the lease cache alone left the host off for the first
+        # three (review of 3857e7cd6).
+        base = _resolve_endpoint()[0]
+    except Exception:  # noqa: BLE001 — a diagnostic note must never raise
+        base = ""
+    exc.add_note(f"request: {method} {base}{path}")
+
+
+def _unregistered_collection_message(code: int, err: Any) -> str | None:
+    """A readable message for the engine's typed "not registered" 422, or None.
+
+    The engine's text ends "register it first via POST
+    /v1/catalog/collections/upsert", which is right for a writer that skipped
+    registration and wrong for everyone who reaches it through a read tool
+    or a typo: store_list, store_get and search all surfaced it, advising a
+    write endpoint for a collection name that simply does not exist
+    (nexus-zdzm5, 7.64.1 shakeout surface C F9 / surface E F10).
+
+    A stopgap: it matches the engine's wording. nexus-bgvnx tracks a
+    machine-readable reason code on the engine's typed 422 body to key on
+    instead.
+    """
+    if code != 422 or not isinstance(err, dict):
+        return None
+    name = err.get("collection")
+    if not name or "is not registered" not in str(err.get("error", "")):
+        return None
+    # Keep the words "not registered": corpus._looks_like_stale_registration_error
+    # detects this 422 by them to drive write_with_registration_retry.
+    return (
+        f"collection {name!r} is not registered in this tenant, so it does not "
+        "exist here. Check the name with `nx collection list`; a collection is "
+        "created by the nx command that first writes to it."
+    )
 
 
 def _get(path: str, *, tenant: str = "default") -> Any:
@@ -1724,6 +1777,9 @@ def _get(path: str, *, tenant: str = "default") -> Any:
         except Exception:  # noqa: BLE001 — error-body decode is best-effort; fall back to raw bytes
             err = {"error": body_bytes.decode(errors="replace")}
         msg = f"GET {path} → HTTP {e.code}: {redact_credentials(str(err.get('error', err)))}"
+        _unregistered = _unregistered_collection_message(e.code, err)
+        if _unregistered:
+            msg = f"GET {path} → HTTP 422: {_unregistered}"
         edge_server = _edge_server(e.headers)  # nexus-1jtob — see _post
         if edge_server:
             remedy: str | None = _edge_refusal_remedy(edge_server, e.code)
@@ -1737,6 +1793,7 @@ def _get(path: str, *, tenant: str = "default") -> Any:
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         remedy = _managed_remedy()
         if remedy is None:
+            _note_request(e, "GET", path)
             raise
         raise VectorServiceError(f"GET {path} failed: {e}\n{remedy}") from e
 
@@ -4445,7 +4502,50 @@ class HttpVectorClient:
             if len(page) < page_limit:
                 break
             offset += len(page)
+        if not ids:
+            # nexus-enej7: only on a miss, so a title that its chunks carry
+            # costs no catalog round trip (store_get probes every collection
+            # in its scope).
+            ids = self._catalog_chashes_for_title(collection, title)
         return ids
+
+    @staticmethod
+    def _catalog_chashes_for_title(collection: str, title: str) -> list[str]:
+        """Manifest chashes of the live document the catalog registers under
+        (*collection*, *title*) (nexus-enej7).
+
+        A chunk row holds one ``title`` value, the last writer's. Two notes
+        with identical content in one collection are two documents sharing
+        that row, so the metadata match above finds only one of them; the
+        catalog holds both identities. Consulted only when the metadata
+        match is empty: a split note one of whose pieces is shared with
+        another document still resolves by its other pieces, without that
+        one. Best-effort: a catalog failure leaves the metadata answer as it
+        was.
+        """
+        from nexus.aspect_readers import uri_for  # noqa: PLC0415 — deferred: catalog-side helper
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle
+
+        uri = uri_for(collection, title) if title else None
+        if not uri:
+            return []
+        reader = None
+        try:
+            reader = make_catalog_reader()
+            if reader is None:
+                return []
+            doc = reader.by_source_uri(uri)
+            if doc is None or doc.physical_collection != collection:
+                return []
+            rows = sorted(reader.get_manifest(str(doc.tumbler)), key=lambda r: r.position)
+            return [r.chash for r in rows]
+        except Exception:  # noqa: BLE001 — catalog is a second source here; the T3 answer stands without it
+            _log.warning("find_ids_by_title_catalog_lookup_failed", collection=collection, exc_info=True)
+            return []
+        finally:
+            close = getattr(reader, "close", None)
+            if close is not None:
+                close()
 
     def batch_delete(self, collection: str, ids: list[str]) -> int:
         """Delete *ids* from *collection* in service-quota-bounded batches.
@@ -4828,7 +4928,10 @@ class HttpVectorClient:
         return {"count": self._count_or_key_error(name), "metadata": {}}
 
     def _count_or_key_error(self, name: str) -> int:
-        """Return the live chunk count for *name*, raising ``KeyError`` on absent.
+        """Return the STORED chunk count for *name* (every physical row, owned
+        or not: the engine's /count is a plain row count), raising
+        ``KeyError`` on absent. A live count needs the tenant-wide stats
+        route (:meth:`list_collections`).
 
         Shared by :meth:`collection_info` and :meth:`collection_metadata`
         (wave review: the block was duplicated verbatim). On the pgvector

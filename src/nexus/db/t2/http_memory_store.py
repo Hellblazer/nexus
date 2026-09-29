@@ -286,8 +286,29 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         project: str | None = None,
         title: str | None = None,
         id: int | None = None,
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
     ) -> dict[str, Any] | None:
-        """Retrieve a single entry by (project, title) or by numeric ID."""
+        """Retrieve a single entry by (project, title) or by numeric ID.
+
+        ``timeout`` (nexus-8t9w8 fold-in): the same optional per-request
+        override ``_get``/``_post`` have carried since nexus-y9t08/
+        nexus-m20mf -- ``None`` (default) rides the client-wide default
+        unchanged. Added so a bounded caller issuing several calls
+        against a SHARED wall-clock budget (``t2_prefix_scan``'s
+        per-namespace snippet fetch loop) can shrink each individual
+        call's timeout to what is actually left of that budget, rather
+        than every call independently risking the full client-wide
+        timeout regardless of how much of the budget prior calls in the
+        same loop already spent.
+
+        ``retry_read_timeout`` (nexus-8t9w8 fold-in): see ``_get``'s own
+        docstring. Default ``True`` (unchanged behavior); a caller
+        passing a shrinking budget-clamp as *timeout* should also pass
+        ``False`` here, or a timed-out call gets retried with the SAME
+        clamp, silently doubling the wait.
+        """
         if id is not None:
             params: dict[str, Any] = {"id": id}
         elif project is not None and title is not None:
@@ -302,7 +323,12 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         # not an exception, so catch specifically the 404 case here and
         # re-raise anything else untouched.
         try:
-            resp = self._get("/v1/memory/get", params=params)
+            resp = self._get(
+                "/v1/memory/get",
+                params=params,
+                timeout=timeout,
+                retry_read_timeout=retry_read_timeout,
+            )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 return None
@@ -378,15 +404,38 @@ class HttpMemoryStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         self,
         project: str | None = None,
         agent: str | None = None,
+        limit: int | None = None,
+        *,
+        timeout: float | None = None,
+        retry_read_timeout: bool = True,
     ) -> list[dict[str, Any]]:
-        """List entries (summary view) ordered by timestamp descending."""
+        """List entries (summary view) ordered by timestamp descending.
+
+        *limit* bounds the rows to the newest N (nexus-xn9ut); the engine
+        reads only those. An engine older than the parameter ignores it and
+        returns every row, so the result is also cut here: callers get at
+        most *limit* rows either way, only the cost differs.
+
+        ``timeout``/``retry_read_timeout``: see :meth:`get`'s identical
+        parameters.
+        """
+        if limit is not None and limit < 1:
+            raise ValueError(f"limit must be a positive integer, got {limit}")
         params: dict[str, str] = {}
         if project:
             params["project"] = project
         if agent:
             params["agent"] = agent
-        resp = self._get("/v1/memory/list", params=params)
-        return [_normalize_summary(r) for r in resp]
+        if limit is not None:
+            params["limit"] = str(limit)
+        resp = self._get(
+            "/v1/memory/list",
+            params=params,
+            timeout=timeout,
+            retry_read_timeout=retry_read_timeout,
+        )
+        rows = [_normalize_summary(r) for r in resp]
+        return rows[:limit] if limit is not None else rows
 
     def get_projects_with_prefix(self, prefix: str) -> list[dict[str, Any]]:
         """Return distinct project namespaces starting with *prefix*."""

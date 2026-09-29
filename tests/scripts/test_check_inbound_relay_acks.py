@@ -950,3 +950,24 @@ class TestMainMailboxIntegration:
         out = capsys.readouterr().out
         assert "RELAY-UNACKED:" in out and "20682" in out
         assert "SWEEP UNRUNNABLE (mailbox):" in out
+
+
+def test_a_mailbox_read_that_stops_at_the_bound_is_unrunnable(monkeypatch) -> None:
+    """nexus-sh1ea: ``-n 300`` read the oldest page only, so a larger mailbox
+    was swept partially and silently. The fetch now pages every row and a
+    read that stops with rows left refuses instead of passing partial data."""
+    import subprocess  # noqa: PLC0415 — test-local import
+
+    seen: list[list[str]] = []
+
+    def _fake_run(args, timeout=120):
+        seen.append(args)
+        return subprocess.CompletedProcess(
+            args, 0, stdout="[]",
+            stderr="nx tuple rd: truncated: stopped at --max-rows 5; more rows exist.",
+        )
+
+    monkeypatch.setattr(gate, "_run", _fake_run)
+    with pytest.raises(gate.SweepUnrunnableError, match="more than 5 rows"):
+        gate.fetch_tuple_rows_json("mailbox/x", 5)
+    assert "--all" in seen[0] and "-n" not in seen[0]

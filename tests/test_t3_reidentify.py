@@ -953,7 +953,8 @@ class TestReidentifyCLI:
         lock = threading.Lock()
         original = _ri.reidentify_collection
 
-        def _timed(t3, coll_name, *, dry_run):
+        def _timed(t3, coll_name, *, dry_run, known_to_exist=False):
+            assert known_to_exist, "--all-collections walks its own listing (nexus-5z0us)"
             t0 = time.monotonic()
             time.sleep(0.05)  # force overlap window
             res = original(t3, coll_name, dry_run=dry_run)
@@ -1023,7 +1024,8 @@ class TestReidentifyCLI:
         order_lock = threading.Lock()
         original = _ri.reidentify_collection
 
-        def _ordered(t3, coll_name, *, dry_run):
+        def _ordered(t3, coll_name, *, dry_run, known_to_exist=False):
+            assert known_to_exist, "--all-collections walks its own listing (nexus-5z0us)"
             with order_lock:
                 call_order.append(coll_name)
             time.sleep(0.02)

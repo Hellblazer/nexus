@@ -29,12 +29,15 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+
+from nexus.hooks.t2_prefix_scan import _SNIPPET_LIMIT
 
 _TOKEN = "test-bearer-token"
 _TS_FMT = "%Y-%m-%dT%H:%M:%SZ"
@@ -52,9 +55,15 @@ _SCAN_PROBE = (
 class _MockMemoryEngine:
     """Minimal stand-in for the Java engine's ``/v1/memory`` HTTP surface.
 
-    Serves exactly the two GET routes ``scan()`` calls through
-    ``HttpMemoryStore``: ``/v1/memory/projects?prefix=`` and
-    ``/v1/memory/all?project=``. Any other path is a 404.
+    Serves the GET routes ``scan()`` calls through ``HttpMemoryStore``:
+    ``/v1/memory/projects?prefix=`` (namespace discovery),
+    ``/v1/memory/list?project=`` (nexus-fow78: the scoped per-namespace
+    ranking — title/timestamp only, no content), and
+    ``/v1/memory/get?project=&title=`` (targeted per-entry content fetch,
+    issued only for the ranks that actually render a snippet).
+    ``/v1/memory/all?project=`` — the retired full-content-dump route the
+    fetch loop used before nexus-fow78 — is also served so a probe can
+    assert it is never called. Any other path is a 404.
     """
 
     def __init__(
@@ -64,13 +73,20 @@ class _MockMemoryEngine:
         *,
         expected_token: str = _TOKEN,
         fail_projects: set[str] | None = None,
+        get_sleep_seconds: float = 0.0,
     ) -> None:
         self.projects = projects
         self.entries_by_project = entries_by_project
         self.expected_token = expected_token
-        #: nexus-eg6qe: projects in this set get a 500 from /v1/memory/all,
+        #: nexus-eg6qe: projects in this set get a 500 from /v1/memory/list,
         #: simulating a single bad/slow namespace mid-scan.
         self.fail_projects = fail_projects or set()
+        #: nexus-8t9w8: deterministically reproduces a slow-but-working
+        #: /v1/memory/get (the per-entry content fetch) -- mirrors
+        #: pre_close_verification's own fake_nx/fake_bd sleep_seconds
+        #: idiom. Deliberately NOT applied to /v1/memory/list, so a test
+        #: can isolate the get-call clamp from the list-call clamp.
+        self.get_sleep_seconds = get_sleep_seconds
         self.requests: list[str] = []
 
         engine = self
@@ -90,7 +106,37 @@ class _MockMemoryEngine:
                     prefix = params.get("prefix", "")
                     rows = [p for p in engine.projects if p["project"].startswith(prefix)]
                     self._send_json(200, rows)
+                elif parsed.path == "/v1/memory/list":
+                    project = params.get("project", "")
+                    if project in engine.fail_projects:
+                        self._send_json(500, {"error": "simulated namespace failure"})
+                        return
+                    rows = engine.entries_by_project.get(project, [])
+                    summaries = [
+                        {
+                            "id": idx,
+                            "project": project,
+                            "title": r["title"],
+                            "agent": "",
+                            "timestamp": r["timestamp"],
+                        }
+                        for idx, r in enumerate(rows)
+                    ]
+                    self._send_json(200, summaries)
+                elif parsed.path == "/v1/memory/get":
+                    if engine.get_sleep_seconds:
+                        time.sleep(engine.get_sleep_seconds)
+                    project = params.get("project", "")
+                    title = params.get("title", "")
+                    rows = engine.entries_by_project.get(project, [])
+                    match = next((r for r in rows if r["title"] == title), None)
+                    if match is None:
+                        self._send_json(404, {"error": "not found"})
+                        return
+                    self._send_json(200, {**match, "project": project})
                 elif parsed.path == "/v1/memory/all":
+                    # Retired fetch path (pre-nexus-fow78) — served only so a
+                    # test can assert it is never hit; not used by scan().
                     project = params.get("project", "")
                     if project in engine.fail_projects:
                         self._send_json(500, {"error": "simulated namespace failure"})
@@ -215,7 +261,8 @@ def test_runs_over_http_and_surfaces_entries(tmp_path: Path, mock_engine) -> Non
     assert "rdr-129" in out
     assert "WARNING" not in out
     assert any("/v1/memory/projects" in p for p in engine.requests)
-    assert any("/v1/memory/all" in p for p in engine.requests)
+    assert any("/v1/memory/list" in p for p in engine.requests)
+    assert not [r for r in engine.requests if "/v1/memory/all" in r]
 
 
 def test_recency_ordering_within_namespace(tmp_path: Path, mock_engine) -> None:
@@ -340,7 +387,7 @@ def test_one_bad_namespace_does_not_discard_others(tmp_path: Path, mock_engine) 
 
 def test_namespace_count_is_capped(tmp_path: Path, mock_engine) -> None:
     """More matching namespaces than ``_MAX_NAMESPACES`` (5) — only the
-    most-recent 5 get a per-namespace ``/v1/memory/all`` fetch; the rest
+    most-recent 5 get a per-namespace ``/v1/memory/list`` fetch; the rest
     are reported as skipped rather than silently driving an unbounded
     number of sequential HTTP round-trips (nexus-9xado)."""
     now = _now()
@@ -351,9 +398,10 @@ def test_namespace_count_is_capped(tmp_path: Path, mock_engine) -> None:
     entries = {p["project"]: [_entry(f"entry-{p['project']}", "content", now)] for p in projects}
     engine = mock_engine(projects=projects, entries_by_project=entries)
     out = _run("nexus", config_dir=tmp_path, env=_engine_env(engine))
-    all_requests = [r for r in engine.requests if "/v1/memory/all" in r]
-    assert 0 < len(all_requests) <= 5
+    list_requests = [r for r in engine.requests if "/v1/memory/list" in r]
+    assert 0 < len(list_requests) <= 5
     assert "not checked" in out
+    assert not [r for r in engine.requests if "/v1/memory/all" in r]
 
 
 def test_scan_budget_stops_the_fetch_loop(tmp_path: Path, mock_engine) -> None:
@@ -369,7 +417,110 @@ def test_scan_budget_stops_the_fetch_loop(tmp_path: Path, mock_engine) -> None:
     engine = mock_engine(projects=projects, entries_by_project=entries)
     out = _run("nexus", config_dir=tmp_path, env=_engine_env(engine, NX_T2_SCAN_BUDGET_S="0"))
     assert "scan budget exceeded" in out
+    assert not [r for r in engine.requests if "/v1/memory/list" in r]
     assert not [r for r in engine.requests if "/v1/memory/all" in r]
+
+
+def test_get_call_timeout_is_clamped_to_the_remaining_scan_budget(
+    tmp_path: Path, mock_engine
+) -> None:
+    """Critic follow-up on nexus-fow78/9b038bfae: a degraded
+    ``/v1/memory/get`` must not burn the FULL configured
+    ``NX_T2_SCAN_TIMEOUT_S`` ceiling once most of the whole-scan budget
+    is already spent -- the same stacking-timeout defect the
+    ``_stamp_ids`` fix closed for ``pre_close_verification``.
+
+    ``/v1/memory/list`` answers instantly (isolating the get-call clamp
+    from the list-call clamp); ``/v1/memory/get`` sleeps 5.0s, longer
+    than both the 1.5s scan budget and the 3.0s configured ceiling. With
+    the fetch clamped to what's left of the budget (and
+    ``retry_read_timeout=False``, so the clamped timeout is not silently
+    retried and doubled), the first snippet attempt gives up at ~1.5s
+    (not the full 3.0s ceiling, and nowhere near 2x that from a retry)
+    and the existing per-entry deadline gate then renders the remaining
+    entries title-only rather than issuing further calls.
+
+    Measured on this box: fixed code passes comfortably under the 2.2s
+    bound below; the pre-fix code (unclamped timeout, default
+    ``retry_read_timeout=True``) measures ~6.9s for this same scenario
+    -- the mixin's own once-retry-on-ReadTimeout doubles even the
+    UNCLAMPED 3.0s ceiling, not just a clamped one.
+    """
+    now = _now()
+    engine = mock_engine(
+        projects=[{"project": "nexus", "last_updated": _iso(now)}],
+        entries_by_project={
+            "nexus": [
+                _entry(f"entry-{i}", f"Content {i}", now - timedelta(seconds=i))
+                for i in range(3)
+            ],
+        },
+        get_sleep_seconds=5.0,
+    )
+    t0 = time.monotonic()
+    out = _run(
+        "nexus",
+        config_dir=tmp_path,
+        env=_engine_env(
+            engine,
+            NX_T2_SCAN_BUDGET_S="1.5",
+            NX_T2_SCAN_TIMEOUT_S="3.0",
+        ),
+    )
+    elapsed = time.monotonic() - t0
+    assert "entry-0" in out  # the freshest entry's title still renders
+    assert elapsed < 2.2, (
+        f"scan took {elapsed:.2f}s — the get() call was not clamped to "
+        "the remaining scan budget (~1.5s) and instead waited out closer "
+        "to the full 3.0s configured ceiling"
+    )
+
+
+# ── Scoped to what is rendered (nexus-fow78) ─────────────────────────────────
+
+
+def test_data_access_is_bounded_by_what_is_rendered(tmp_path: Path, mock_engine) -> None:
+    """The live defect (T2 nexus/shakeout-7.64.1-hooks-2026-09-28 F1):
+    ``get_all('nexus')`` against production pulled 3840 rows / ~20.9MB of
+    content in ~15s to render 8 entries. A namespace with thousands of
+    large entries must never drive a full-content fetch — the ranked list
+    comes from ``/v1/memory/list`` (no content column) and content is
+    fetched with a targeted ``/v1/memory/get`` ONLY for the
+    ``_SNIPPET_LIMIT`` ranks that actually render a snippet, so the scan
+    completes in a small fraction of a second regardless of namespace
+    size or per-entry content size."""
+    now = _now()
+    n = 5000
+    big_content = "x" * 4000  # ~4KB/entry — ~20MB if the namespace were pulled whole
+    engine = mock_engine(
+        projects=[{"project": "nexus", "last_updated": _iso(now)}],
+        entries_by_project={
+            "nexus": [
+                _entry(f"entry-{i}", big_content, now - timedelta(seconds=i))
+                for i in range(n)
+            ],
+        },
+    )
+    t0 = time.monotonic()
+    out = _run("nexus", config_dir=tmp_path, env=_engine_env(engine))
+    elapsed = time.monotonic() - t0
+
+    assert "entry-0" in out  # the freshest entry (rank 1) still renders
+    assert not [r for r in engine.requests if "/v1/memory/all" in r], (
+        "the full-content /v1/memory/all route was called against a "
+        f"{n}-entry namespace — the fetch must be scoped to /v1/memory/list "
+        "+ targeted /v1/memory/get, never a whole-namespace content dump"
+    )
+    assert any("/v1/memory/list" in r for r in engine.requests)
+    get_requests = [r for r in engine.requests if "/v1/memory/get" in r]
+    assert 0 < len(get_requests) <= _SNIPPET_LIMIT, (
+        f"expected at most {_SNIPPET_LIMIT} targeted content fetches "
+        f"(one per rendered snippet), got {len(get_requests)}"
+    )
+    assert elapsed < 5.0, (
+        f"scan of a {n}-entry namespace took {elapsed:.2f}s -- data access "
+        "is not bounded by what is rendered"
+    )
 
 
 # ── NO-SQLITE lint (nexus-8fvp2 enlargement (a); de-vacuated nexus-ozfct) ────

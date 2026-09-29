@@ -299,6 +299,63 @@ def _plain_fallback(results: list[SearchResult]) -> str:
     return "\n".join(lines)
 
 
+def _file_line_no(
+    r: SearchResult, best_idx: int, text: str, file_lines: dict[str, list[str] | None],
+) -> int:
+    """The FILE line of chunk line *best_idx*, as a 1-based line number.
+
+    Code chunks carry ``line_start``; prose chunks do not, and adding the
+    chunk-relative index to a default of 0 reported a position inside the
+    chunk as a file line (an RDR's frontmatter line, for text from its
+    middle; nexus-zdzm5, 7.64.1 shakeout surface A A5). Without
+    ``line_start``:
+
+    * a result with a path looks the line up in THE FILE THAT IS PRINTED
+      (:func:`_display_path`, the catalog-resolved path when there is one;
+      review of 6385b878b: reading raw ``source_path`` could scan a
+      different file from the one shown). First matching line wins; when
+      the file is unreadable or has drifted, line 1, which is at least a
+      real line.
+    * a title-only result has no file, so its line is the position within
+      the note (1-based), as before.
+
+    *file_lines* caches each file's lines for one render. A stopgap: storing
+    line spans for prose chunks at index time would make this O(1) and
+    immune to drift.
+    """
+    if "line_start" in r.metadata:
+        return int(r.metadata["line_start"]) + best_idx
+    shown = _display_path(r.metadata)
+    if not shown:
+        return best_idx + 1
+    # The printed path first. A catalog _display_path is often REPO-RELATIVE
+    # and only opens from the repo root (review of d41e47c1f), so the chunk's
+    # own source_path / file_path, which the indexer writes absolute, are
+    # tried next, but only while nothing has opened: the first candidate
+    # that opens IS the file, and a line missing from it has drifted, so
+    # the answer is line 1 rather than a line read from another file (a
+    # catalog rename leaves source_path naming a different document;
+    # critique of b3a2f9fd1).
+    candidates = list(dict.fromkeys(
+        p for p in (shown, r.metadata.get("source_path"), r.metadata.get("file_path")) if p
+    ))
+    wanted = text.strip()
+    for path in candidates:
+        if path not in file_lines:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    file_lines[path] = [line.strip() for line in fh]
+            except OSError:
+                file_lines[path] = None
+        lines = file_lines[path]
+        if lines is None:
+            continue
+        if wanted and wanted in lines:
+            return lines.index(wanted) + 1
+        return 1
+    return 1
+
+
 def format_compact(
     results: list[SearchResult],
     query: str | None = None,
@@ -309,15 +366,15 @@ def format_compact(
     Otherwise uses the first line at ``line_start``.
     """
     output: list[str] = []
+    file_lines: dict[str, list[str] | None] = {}
     for r in results:
         source_path = _display_path_or_title(r.metadata, r.id)
-        line_start = int(r.metadata.get("line_start", 0))
         # RDR-169 Phase B fix round 1: a reference-only chunk's content is
         # None -- guard before .splitlines().
         content = r.content or ""
         chunk_lines = content.splitlines()
         if not chunk_lines:
-            output.append(f"{source_path}:{line_start}:")
+            output.append(f"{source_path}:{_file_line_no(r, 0, '', file_lines)}:")
             continue
 
         if query:
@@ -327,7 +384,7 @@ def format_compact(
             best_idx = 0
 
         best_idx = min(best_idx, len(chunk_lines) - 1)
-        line_no = line_start + best_idx
+        line_no = _file_line_no(r, best_idx, chunk_lines[best_idx], file_lines)
         output.append(f"{source_path}:{line_no}:{chunk_lines[best_idx]}")
     return output
 
@@ -339,9 +396,9 @@ def format_vimgrep(results: list[SearchResult], query: str | None = None) -> lis
     rather than always using the first line at ``line_start``.
     """
     lines: list[str] = []
+    file_lines: dict[str, list[str] | None] = {}
     for r in results:
         source_path = _display_path_or_title(r.metadata, r.id)
-        line_start = int(r.metadata.get("line_start", 0))
         # RDR-169 Phase B fix round 1: a reference-only chunk's content is
         # None -- the ternary already guarded chunk_lines, but the
         # _find_matching_lines(r.content, ...) call below did NOT: with
@@ -354,11 +411,10 @@ def format_vimgrep(results: list[SearchResult], query: str | None = None) -> lis
         if query and chunk_lines:
             matches = _find_matching_lines(content, query)
             best_idx = min(matches[0], len(chunk_lines) - 1)
-            line_no = line_start + best_idx
-            text = chunk_lines[best_idx]
         else:
-            line_no = line_start
-            text = chunk_lines[0]
+            best_idx = 0
+        text = chunk_lines[best_idx]
+        line_no = _file_line_no(r, best_idx, text, file_lines)
 
         lines.append(f"{source_path}:{line_no}:0:{text}")
     return lines

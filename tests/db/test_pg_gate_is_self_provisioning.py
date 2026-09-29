@@ -6,7 +6,8 @@ PostgreSQL it BUILDS. Never Homebrew, never a system package, never a
 pre-existing host install. The test-side seam for that policy is
 ``tests.db._service_fixture.pg_bin_dir``, which self-provisions the
 sigstore-verified ``nexus-pg-<target>`` bundle for ``PINNED_SERVICE_TAG`` into
-``~/.cache/nexus-test-substrate/<tag>/`` and returns a nonexistent sentinel ONLY
+``substrate_cache_root()/<tag>/`` (``$XDG_CACHE_HOME``, else ``~/.cache``) and
+returns a nonexistent sentinel ONLY
 when self-provisioning itself fails.
 
 WHY A LINT AND NOT A NOTE. ``nexus.db.pg_provision.discover_pg_binaries`` asks a

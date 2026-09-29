@@ -76,8 +76,19 @@ def _populate_knowledge_doc(cat: ActiveCatalog, *, title: str, chash: str,
 class TestDedupA1:
     """catalog_store_hook_tracked's chash dedup (store_hook.py A1)."""
 
-    def test_same_chash_different_title_dedups(self, tmp_path, monkeypatch):
-        """The previously-broken case: by_doc_id(chash) always mismatched,
+    def test_same_chash_different_title_is_a_second_document(self, tmp_path, monkeypatch):
+        """nexus-enej7 (shakeout 7.64.1 F1) reverses this test's original
+        assertion. It used to pin "title does not block dedup": the second
+        put reconciled onto Doc A, and the reconcile rewrote Doc A's
+        source_uri to Doc B's, so the catalog held one document titled A
+        whose URI named B and B was never registered. The identity contract
+        is (collection, title): the same content under a different title is
+        a second document sharing the chunk. The chash dedup this test was
+        written to exercise (nexus-5axey) is pinned by
+        test_same_chash_legacy_row_without_source_uri_dedups below.
+
+        Original provenance, kept for the history:
+        The previously-broken case: by_doc_id(chash) always mismatched,
         and a differing title means ghost-by-title reconciliation cannot
         mask the bug either -- pre-fix this minted a SECOND document.
 
@@ -109,9 +120,47 @@ class TestDedupA1:
             collection_name=collection,  # SAME collection
         )
 
-        assert created is False, "dedup must fire, not mint a new document"
-        assert second_tumbler == first_tumbler
-        assert count_documents() == 1, "no duplicate document was minted"
+        assert created is True, "a different title is a different document"
+        assert second_tumbler != first_tumbler
+        assert count_documents() == 2
+        from nexus.aspect_readers import uri_for
+
+        first = cat.resolve(first_tumbler)
+        assert first.title == "Doc A"
+        assert first.source_uri == uri_for(collection, "Doc A"), (
+            "the first document's identity must not be rewritten"
+        )
+
+    def test_same_chash_legacy_row_without_source_uri_dedups(self, tmp_path, monkeypatch):
+        """nexus-5axey's chash dedup, on the row shape it still serves: a
+        legacy store_put document with no source_uri (pre nexus-sdp0u) has
+        no identity to compare, so a put of its content reconciles onto it
+        and stamps the new source_uri instead of minting a duplicate."""
+        from nexus.aspect_readers import uri_for
+        from nexus.catalog.store_hook import catalog_store_hook_tracked
+
+        cat = _make_catalog(tmp_path)
+        chash = _chash("legacy-no-uri-content")
+        collection = "knowledge__test1__bge-base-en-v15-768__v1"
+        owner = cat.register_owner("knowledge", "curator")
+        legacy = str(cat.register(
+            owner, "Legacy Doc", content_type="knowledge",
+            physical_collection=collection, meta={"doc_id": chash},
+        ))
+        seed_manifest_chunks(collection, [chash])
+        cat.append_manifest_chunks(legacy, [{"chash": chash, "position": 0}], collection=collection)
+        cat.resync_chunk_count_cache(legacy)
+        assert not (cat.resolve(legacy).source_uri or "")
+        assert count_documents() == 1
+
+        tumbler, created = catalog_store_hook_tracked(
+            title="Renamed Doc", doc_id=chash, collection_name=collection,
+        )
+
+        assert created is False
+        assert tumbler == legacy
+        assert count_documents() == 1
+        assert cat.resolve(legacy).source_uri == uri_for(collection, "Renamed Doc")
 
     def test_same_chash_different_collection_does_not_dedup(self, tmp_path, monkeypatch):
         """nexus-bb6n2 round 2: a chash match in a DIFFERENT collection

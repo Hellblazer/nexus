@@ -625,3 +625,13 @@ def test_catalog_links_no_link_type_passes_none(monkeypatch):
     monkeypatch.setattr(mc, "_resolve_tumbler_mcp", lambda cat, t: (t, None))
     mc.catalog_links(tumbler="1.1")
     assert captured["link_types"] is None
+
+
+def test_a_malformed_tumbler_gets_an_actionable_error_everywhere(cat) -> None:
+    """nexus-zdzm5: show(tumbler="not-a-tumbler") returned int()'s "invalid
+    literal for int() with base 10"; resolve alone had been fixed. Every
+    tool that takes a tumbler from its caller now says what is wrong."""
+    assert "not a dotted tumbler" in catalog_show(tumbler="not-a-tumbler")["error"]
+    assert "not a dotted tumbler" in catalog_search(owner="1-2188")[0]["error"]
+    assert "not a dotted tumbler" in catalog_list(owner="nope")[0]["error"]
+    assert "not a dotted tumbler" in catalog_update(tumbler="x.y", title="t")["error"]

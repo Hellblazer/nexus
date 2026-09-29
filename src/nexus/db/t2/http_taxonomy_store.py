@@ -198,6 +198,10 @@ def _uniform_embedding_matrix(
 #: literal ``<collection>`` in the text: a remedy naming a real verb that the
 #: operator still has to fill in by hand is only half-reachable, and calling
 #: that "swept the sibling" overstated it (round-4 critique).
+#: Concurrent by-id topic reads in :meth:`HttpTaxonomyStore.get_labels_for_ids`
+#: (nexus-w032x); the engine has no batched by-id route.
+_LABEL_FETCH_WORKERS: int = 8
+
 _REBUILD_REMEDY = (
     "A rebuild cannot preserve operator labels across incommensurable "
     "centroids. Finish the embedding migration for this collection, or discard "
@@ -2703,10 +2707,37 @@ class HttpTaxonomyStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         }
 
     def get_labels_for_ids(self, topic_ids: list[int]) -> dict[int, str]:
-        """Return {topic_id: label} for given ids."""
-        result = {}
-        for tid in topic_ids:
-            topic = self.get_topic_by_id(tid)
-            if topic:
-                result[tid] = topic["label"]
-        return result
+        """Return {topic_id: label} for given ids.
+
+        The engine has no batched by-id route, and search's topic grouping
+        (the CLI default, cluster_by="semantic") calls this with every topic
+        in the result window: 9 serial GETs in the 7.64.1 shakeout profile
+        (nexus-w032x). The lookups are independent reads, so they run in a
+        small pool; the result keeps the input order.
+        """
+        from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — only when labels are fetched
+
+        ids = list(dict.fromkeys(topic_ids))
+        if len(ids) <= 1:
+            topics = [self.get_topic_by_id(t) for t in ids]
+        else:
+            # The client's self-heal (re-resolve on a 401 or reset) is
+            # unlocked and retries once per call; several pool workers
+            # failing together can each exhaust their retry where the serial
+            # loop heals on the first (review of 791bc1a81). So the ids that
+            # failed in the pool are retried serially, and only those (a
+            # blanket re-fetch doubled the load at exactly that moment;
+            # review of 80fdf540c). A genuine failure still raises.
+            fetched: dict[int, Any] = {}
+            failed: list[int] = []
+            with ThreadPoolExecutor(max_workers=min(_LABEL_FETCH_WORKERS, len(ids))) as pool:
+                futures = {tid: pool.submit(self.get_topic_by_id, tid) for tid in ids}
+            for tid, fut in futures.items():
+                try:
+                    fetched[tid] = fut.result()
+                except Exception:  # noqa: BLE001 — retried serially below
+                    failed.append(tid)
+            for tid in failed:
+                fetched[tid] = self.get_topic_by_id(tid)
+            topics = [fetched[t] for t in ids]
+        return {tid: t["label"] for tid, t in zip(ids, topics) if t}

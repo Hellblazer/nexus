@@ -787,7 +787,23 @@ def _post_via_urllib(
         raise _Skip(f"engine returned HTTP {status} posting to {url}")
 
 
-def project(kind: str, payload: dict[str, Any] | None) -> None:
+#: What :func:`project` returns when it drops a harness-internal stop, so a
+#: caller that logs outcomes can say so instead of reporting a projection
+#: that never happened as ok (nexus-uzntx follow-up).
+DROPPED_ORPHAN: str = "dropped_orphan"
+
+
+def _transcript_exists(transcript_path: str) -> bool:
+    """True when *transcript_path* names an existing file. Never raises."""
+    if not transcript_path:
+        return False
+    try:
+        return Path(transcript_path).is_file()
+    except (OSError, ValueError):
+        return False
+
+
+def project(kind: str, payload: dict[str, Any] | None) -> str | None:
     """Project one RDR-205 ``ledger/<session_id>`` tuple write. Never
     raises; every failure path is logged to the per-session log file and
     this function returns normally either way.
@@ -811,6 +827,20 @@ def project(kind: str, payload: dict[str, Any] | None) -> None:
     # incomplete-payload case below, which keeps its diagnostic line.
     if kind == "report" and not agent_id:
         return
+
+    # kind=="report" from a HARNESS-INTERNAL stop (nexus-uzntx): the harness
+    # now supplies an agent_id for these, so the check above passes them,
+    # but they carry no agent_type and have no transcript on disk. Measured on
+    # ledger/8866f29d (2026-09-28, read at 1592 rows; the shakeout's earlier
+    # read at 1585 rows counted 1462): 1468 of 1530 report rows
+    # were this shape, none with a START tuple or a transcript file, while all
+    # 62 real reports had an agent_type, a START and a transcript. Each cost a
+    # synchronous POST (nexus-wgalh). Either signal alone keeps the row, so a
+    # real agent whose payload lacks one of them still projects (the
+    # nexus-0zsmg tolerance). START presence is not consulted: it is a GET, as
+    # costly as the POST this saves. The hook's interpreter start remains.
+    if kind == "report" and not agent_type and not _transcript_exists(transcript_path):
+        return DROPPED_ORPHAN
 
     # kind=="report" otherwise tolerates a missing agent_type (nexus-0zsmg):
     # the ledger.yaml template's agent_type dimension is declared WITHOUT

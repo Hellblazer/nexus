@@ -78,6 +78,14 @@ def _order_key(pair: tuple) -> tuple:
     return (0, start, _cid) if start is not None else (1, 0, _cid)
 
 
+def _content_hash(entry: Any) -> str:
+    """The whole-file hash the entry's chunks carry. ``meta.content_hash``
+    is written when a run completes; a document whose first run failed has
+    none yet, so fall back to ``index_content_hash``, the hash the fence
+    begin recorded for the run that wrote the chunks (nexus-0ntxj)."""
+    return (entry.meta or {}).get("content_hash") or getattr(entry, "index_content_hash", "") or ""
+
+
 def heal_manifest_gaps(
     entries: list,
     cat: Any,
@@ -120,7 +128,7 @@ def heal_manifest_gaps(
     candidates = [
         e for e in entries
         if e.chunk_count > 0
-        or ((e.meta or {}).get("content_hash") and e.physical_collection)
+        or (_content_hash(e) and e.physical_collection)
     ]
     result.candidates = len(candidates)
     if not candidates:
@@ -157,7 +165,7 @@ def heal_manifest_gaps(
 
     by_coll: dict[str, list] = defaultdict(list)
     for entry in gapped:
-        content_hash = (entry.meta or {}).get("content_hash", "")
+        content_hash = _content_hash(entry)
         if not content_hash or not entry.physical_collection:
             _classify_unmatched(entry)
             continue

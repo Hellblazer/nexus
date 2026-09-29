@@ -488,3 +488,77 @@ def test_bat_line_range_is_relative_to_the_stdin_start(monkeypatch) -> None:
     assert argv_seen, "bat must have been invoked"
     cmd = argv_seen[0]
     assert cmd[cmd.index("--line-range") + 1] == "1:3", cmd
+
+
+# nexus-zdzm5 (7.64.1 shakeout surface A A5): prose chunks carry no
+# line_start, and vimgrep/compact added the chunk-relative index to 0, so a
+# line from the middle of an RDR pointed at its frontmatter.
+
+
+def test_a_prose_line_is_located_in_its_file(tmp_path) -> None:
+    doc = tmp_path / "rdr-223.md"
+    doc.write_text("---\ntitle: x\n---\n# Heading\n\nPositive: atomic chunk plus owner write\n")
+    r = SearchResult(id="r1", content="# Heading\n\nPositive: atomic chunk plus owner write",
+                     distance=0.1, collection="rdr__x", metadata={"source_path": str(doc)})
+    assert format_vimgrep([r], query="atomic chunk owner")[0].split(":")[1] == "6"
+    assert format_compact([r], query="atomic chunk owner")[0].split(":")[1] == "6"
+
+
+def test_a_prose_line_whose_file_is_unreadable_reports_line_one() -> None:
+    r = SearchResult(id="r1", content="a\nb", distance=0.1, collection="rdr__x",
+                     metadata={"source_path": "/no/such/file.md"})
+    assert format_vimgrep([r])[0].split(":")[1] == "1"
+
+
+def test_the_line_is_looked_up_in_the_printed_file_not_raw_metadata(tmp_path) -> None:
+    """Review of 6385b878b: the printed path is the catalog-resolved
+    _display_path, and the line must come from that file, not from a stale
+    raw source_path."""
+    moved = tmp_path / "moved.md"
+    moved.write_text("a\nb\nc\nthe line\n")
+    stale = tmp_path / "stale.md"
+    stale.write_text("the line\n")
+    r = SearchResult(id="r1", content="the line", distance=0.1, collection="docs__x",
+                     metadata={"_display_path": str(moved), "source_path": str(stale)})
+    out = format_vimgrep([r])[0]
+    assert out.startswith(f"{moved}:4:0:")
+
+
+def test_a_title_only_result_reports_its_position_in_the_note() -> None:
+    r = SearchResult(id="r1", content="one\ntwo\nthree", distance=0.1, collection="knowledge__x",
+                     metadata={"title": "A Note"})
+    assert format_compact([r], query="three")[0] == "A Note:3:three"
+
+
+def test_an_empty_prose_chunk_never_prints_line_zero() -> None:
+    r = SearchResult(id="r1", content="", distance=0.1, collection="docs__x",
+                     metadata={"source_path": "/no/such.md"})
+    assert format_compact([r])[0] == "/no/such.md:1:"
+
+
+def test_a_repo_relative_display_path_falls_back_to_the_absolute_source_path(tmp_path, monkeypatch) -> None:
+    """Review of d41e47c1f: a catalog _display_path is often repo-relative
+    and does not open from another cwd; the chunk's absolute source_path
+    still locates the line."""
+    doc = tmp_path / "docs" / "architecture.md"
+    doc.parent.mkdir()
+    doc.write_text("a\nb\nc\nd\nthe line\n")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    r = SearchResult(id="r1", content="the line", distance=0.1, collection="docs__x",
+                     metadata={"_display_path": "docs/architecture.md", "source_path": str(doc)})
+    assert format_vimgrep([r])[0] == "docs/architecture.md:5:0:the line"
+
+
+def test_a_printed_file_that_opens_but_drifted_never_borrows_a_line_from_another_file(tmp_path) -> None:
+    """Critique of b3a2f9fd1: when the printed file opens but no longer holds
+    the line, the answer is line 1, not a line number read from the chunk's
+    source_path, which after a catalog rename names a different document."""
+    shown = tmp_path / "renamed.md"
+    shown.write_text("edited since indexing\n")
+    other = tmp_path / "old-name.md"
+    other.write_text("a\nb\nthe line\n")
+    r = SearchResult(id="r1", content="the line", distance=0.1, collection="docs__x",
+                     metadata={"_display_path": str(shown), "source_path": str(other)})
+    assert format_vimgrep([r])[0] == f"{shown}:1:0:the line"

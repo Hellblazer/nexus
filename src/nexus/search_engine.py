@@ -10,6 +10,7 @@ from typing import Any
 
 import structlog
 
+from nexus import call_deadline
 from nexus.config import TuningConfig, get_telemetry_config, load_config
 from nexus.corpus import embedding_model_for_collection_name
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
@@ -122,8 +123,16 @@ def _attach_doc_ids_from_catalog(
     nonempty = [c for c in chashes if c]
     if not nonempty:
         return
+    # nexus-w032x: the reverse lookup fetches every referencing document's
+    # manifest anyway; take them from it rather than fetching a subset of the
+    # same manifests again below (one ~2.5 s cloud round trip).
+    prefetched: dict[str, list[Any]] | None = None
+    _with_manifests = getattr(catalog, "docs_and_manifests_for_chashes", None)
     try:
-        chash_to_docs = catalog.docs_for_chashes(nonempty)
+        if _with_manifests is not None:
+            chash_to_docs, prefetched = _with_manifests(nonempty)
+        else:
+            chash_to_docs = catalog.docs_for_chashes(nonempty)
     except Exception:  # noqa: BLE001 — best-effort catalog lookup; failure logged at debug, doc_id attach skipped
         _log.debug("attach_doc_ids_lookup_failed", exc_info=True)
         return
@@ -170,6 +179,12 @@ def _attach_doc_ids_from_catalog(
     })
     manifest_cache: dict[str, list[Any]] = {}
     _get_manifests_batch = getattr(catalog, "get_manifests", None)
+    if prefetched is not None:
+        manifest_cache.update({d: prefetched[d] for d in distinct_doc_ids if d in prefetched})
+    # Whatever the prefetch did not cover is fetched as before: a legacy
+    # chunk carrying its own doc_id may name a doc the reverse lookup never
+    # found (review of f80ce4e0a: those rows lost chunk_count/chunk_index).
+    distinct_doc_ids = [d for d in distinct_doc_ids if d not in manifest_cache]
     if _get_manifests_batch is not None and distinct_doc_ids:
         try:
             batch_result = _get_manifests_batch(distinct_doc_ids)
@@ -726,6 +741,9 @@ def search_cross_corpus(
     collections = list(dict.fromkeys(collections))
 
     all_results: list[SearchResult] = []
+    #: Result ids the lexical leg returned, across every batch. Read by
+    #: :func:`_cap_enrichment_pool`, which never drops one.
+    pool_lexical_ids: set[str] = set()
     diag_per_collection: dict[str, tuple[int, int, float | None, float | None]] = {}
     failed_collections: dict[str, str] = {}
     total_dropped = 0
@@ -996,6 +1014,7 @@ def search_cross_corpus(
                 "min_dropped_distance": min_dropped_distance,
                 "min_raw_distance": min_raw_distance,
                 "rerank_meta": rerank_meta,
+                "lexical_ids": {r.id for r in results if r.id in lexical_ids},
             })
         return parts
 
@@ -1058,6 +1077,10 @@ def search_cross_corpus(
         with ThreadPoolExecutor(max_workers=workers) as pool:
             batch_results = list(pool.map(_search_batch, batches))
     partials = [part for batch in batch_results for part in batch]
+    # nexus-5ezgn: a caller that has abandoned this call (nx_answer's
+    # budget cut) stops it here and between the enrichment legs below,
+    # rather than letting it run its remaining round trips for nothing.
+    call_deadline.check("search_cross_corpus:after_retrieval")
 
     # nexus-9tsdf (GH #1113): a stale, orphaned dimension-mismatched
     # collection (leftover from a prior embedder generation) can never be
@@ -1107,6 +1130,7 @@ def search_cross_corpus(
                 )
             continue
         all_results.extend(part["results"])
+        pool_lexical_ids.update(part.get("lexical_ids", ()))
         diag_per_collection[col] = (
             part["raw_count"], part["dropped"], part["threshold"],
             part["min_dropped_distance"],
@@ -1215,6 +1239,18 @@ def search_cross_corpus(
     if topic_doc_ids is not None:
         all_results = [r for r in all_results if r.id in topic_doc_ids]
 
+    # nexus-5ezgn / nexus-w032x: every step below makes round trips that
+    # scale with the pool (manifests, taxonomy, per-collection embeddings).
+    # A loose threshold across a wide corpus pooled 7,805 rows for a 10-row
+    # answer (plan 473's threshold=2.0 over knowledge,code,docs,rdr: 80
+    # collections, 54 s of enrichment even with the embedding fetch
+    # parallel). No caller can show more than MAX_QUERY_RESULTS.
+    all_results = _cap_enrichment_pool(
+        all_results, pool_lexical_ids,
+        cap=max(QUOTAS.MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM),
+    )
+    call_deadline.check("search_cross_corpus:before_doc_ids")
+
     # nexus-rehf (RDR-108 Phase 4 review D-H1+H2): resolve doc_id via
     # the catalog manifest and inject into result metadata BEFORE any
     # downstream consumer reads ``r.metadata["doc_id"]``. Phase 3
@@ -1230,6 +1266,7 @@ def search_cross_corpus(
 
     # Compute topic assignments once for both boost and grouping (RDR-070)
     _topic_assignments: dict[str, int] | None = None
+    call_deadline.check("search_cross_corpus:before_topics")
     if all_results and taxonomy is not None:
         try:
             result_ids = [r.id for r in all_results]
@@ -1246,7 +1283,9 @@ def search_cross_corpus(
     fetched_embeddings = None
     failed_indices: set[int] = set()
     if needs_embeddings:
+        call_deadline.check("search_cross_corpus:before_embeddings")
         fetched_embeddings, failed_indices = _fetch_embeddings_for_results(all_results, t3)
+        call_deadline.check("search_cross_corpus:after_embeddings")
 
     # Contradiction detection (RDR-057 Phase 3a). Default-on; opt out via
     # search.contradiction_check=false in .nexus.yml.
@@ -1475,6 +1514,61 @@ def apply_file_diversity_cap(
     return kept + overflow
 
 
+#: nexus-5ezgn: the enrichment pool keeps this many candidates per
+#: requested row (floored at MAX_QUERY_RESULTS), so a caller's page is never
+#: larger than the pool it is cut from.
+_ENRICHMENT_POOL_HEADROOM: int = 4
+
+
+def _cap_enrichment_pool(
+    results: list[SearchResult],
+    lexical_ids: set[str],
+    cap: int | None = None,
+) -> list[SearchResult]:
+    """Keep at most *cap* non-lexical rows of *results*, best first.
+
+    ``cap`` defaults to ``QUOTAS.MAX_QUERY_RESULTS``; search_cross_corpus
+    passes ``max(MAX_QUERY_RESULTS, n_results * _ENRICHMENT_POOL_HEADROOM)``.
+    "Best" is the order a caller ranks by: rows carrying a server
+    ``rerank_score`` by that score, ahead of unscored rows, which go by
+    vector distance. A lexical row is always kept: it is threshold-exempt
+    because its vector distance is usually the worst in the window, so a
+    distance cut would drop exactly what that leg exists to find. Kept rows
+    stay in their input order, so every step after this sees the same
+    sequence it did before, minus the dropped rows.
+
+    The trade-off, stated: the client-side boosts (link, topic, and the
+    caller's hybrid/frecency/quality scoring) run after this cut, so none of
+    them can promote a row from beyond it. With the default headroom a row
+    would have to climb from past rank ``4 * n`` (at least 300) into the
+    top ``n`` on boosts alone. The cap only binds when the pool exceeds it,
+    which a thresholded search rarely does (the 7.64.1 case pooled 7,805
+    rows at threshold 2.0; the same query at the default threshold pooled
+    70).
+    """
+    from nexus.db.limits import QUOTAS  # noqa: PLC0415 — branch-local search helper import
+
+    limit = QUOTAS.MAX_QUERY_RESULTS if cap is None else cap
+    ranked = [i for i, r in enumerate(results) if r.id not in lexical_ids]
+    if len(ranked) <= limit:
+        return results
+
+    def _key(i: int) -> tuple[int, float]:
+        score = results[i].metadata.get("rerank_score")
+        if score is not None:
+            return (0, -float(score))
+        return (1, results[i].distance)
+
+    keep = set(sorted(ranked, key=_key)[:limit])
+    _log.debug(
+        "search_enrichment_pool_capped",
+        pool=len(results),
+        kept=len(keep),
+        lexical=len(results) - len(ranked),
+    )
+    return [r for i, r in enumerate(results) if i in keep or r.id in lexical_ids]
+
+
 def _fetch_embeddings_for_results(
     results: list[SearchResult],
     t3: Any,
@@ -1503,18 +1597,49 @@ def _fetch_embeddings_for_results(
 
     # First pass: determine emb_dim from a successful fetch so we can
     # allocate the output array. Collect per-collection results as we go.
+    #
+    # nexus-5ezgn / nexus-w032x: one round trip per collection, and a wide
+    # corpus with a loose threshold puts results in ~80 collections. Run
+    # serially that was 104 s of a 146 s search (80 x 1.3 s, measured on the
+    # cloud) and the whole of nx_answer's 310 s first step. Fetch in parallel
+    # under the same <=8-worker bound the search fan-out uses; the merge
+    # below walks col_groups in insertion order, so the result does not
+    # depend on completion order.
+    from concurrent.futures import ThreadPoolExecutor  # noqa: PLC0415 — branch-local; only when embeddings are fetched
+
+    def _fetch(item: tuple[str, list[int]]) -> "np.ndarray | Exception":
+        col, indices = item
+        try:
+            call_deadline.check("search_cross_corpus:embedding_fetch")
+            return t3.get_embeddings(col, [results[i].id for i in indices])
+        except Exception as exc:  # noqa: BLE001 — per-collection isolation; reported by the merge loop below
+            return exc
+
+    import contextvars  # noqa: PLC0415 — branch-local; only when embeddings are fetched
+
+    items = list(col_groups.items())
+    workers = min(8, len(items))
+    if workers <= 1:
+        fetched = [_fetch(it) for it in items]
+    else:
+        # Each worker runs in a copy of this context so call_deadline
+        # reaches it (a pool thread starts with an empty context).
+        ctx = contextvars.copy_context()
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            fetched = list(pool.map(lambda it: ctx.copy().run(_fetch, it), items))
+    for f in fetched:
+        if isinstance(f, call_deadline.DeadlineExceeded):
+            raise f
+
     col_fetched: dict[str, "np.ndarray"] = {}
     emb_dim: int | None = None
-    for col, indices in col_groups.items():
-        ids = [results[i].id for i in indices]
-        try:
-            col_emb = t3.get_embeddings(col, ids)
-        except Exception as exc:  # noqa: BLE001 — per-collection isolation; failure logged, indices marked failed, other collections proceed
+    for (col, indices), col_emb in zip(items, fetched):
+        if isinstance(col_emb, Exception):
             _log.warning(
                 "embedding_fetch_failed",
                 collection=col,
                 requested=len(indices),
-                exc_info=exc,
+                exc_info=col_emb,
             )
             failed_indices.update(indices)
             continue

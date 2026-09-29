@@ -2173,6 +2173,51 @@ class TestNxAnswerEndToEnd:
         assert isinstance(result, str)
         assert "planner" in result.lower() or "search" in result.lower()
 
+    # nexus-f9kxd: the 7.64.1 shakeout ran nx_answer with claude absent and
+    # then unauthenticated. The planner failed both times and the tool
+    # returned bare prose with answer_shape=None and isError=false, so a
+    # caller had no mechanical way to tell the failure from an answer. The
+    # test above passed throughout: it checked that some word appeared.
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("structured", [False, True])
+    async def test_planner_fail_is_marked_as_a_non_answer(self, tmp_path, structured):
+        import nexus.mcp_infra as _infra
+        import nexus.mcp.core as _core
+
+        with (
+            patch("nexus.plans.matcher.plan_match", return_value=[]),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+            patch.object(_core, "_nx_answer_plan_miss",
+                         AsyncMock(side_effect=ValueError("claude: Not logged in"))),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("unanswerable question", structured=structured)
+
+        text = result["final_text"] if structured else result
+        assert text.startswith("[non-answer: planner_error] "), text
+        assert "claude: Not logged in" in text
+        if structured:
+            assert result["answer_shape"] == "planner_error"
+
+    @pytest.mark.asyncio
+    async def test_plan_match_error_is_marked_as_a_non_answer(self, tmp_path):
+        import nexus.mcp_infra as _infra
+
+        with (
+            patch("nexus.plans.matcher.plan_match", side_effect=RuntimeError("t2 down")),
+            patch.object(_infra, "get_t1_plan_cache",
+                         return_value=MagicMock(is_available=False)),
+            patch("nexus.mcp.core._t2_ctx", _fake_t2_ctx(tmp_path)),
+        ):
+            from nexus.mcp.core import nx_answer
+            result = await nx_answer("q", structured=True)
+
+        assert result["final_text"].startswith("[non-answer: error] Error during plan match"), result
+        assert result["answer_shape"] == "error"
+
 
 class TestNxAnswerBindingAlias:
     """Library plans declare ``required_bindings`` like ``[concept]``,
@@ -5340,7 +5385,7 @@ class TestContinuationGoLiveMidPrefixFailure:
             result = await nx_answer(question="q", continuation=True, structured=True)
 
         assert summarize_calls == [], "the plan never reached the terminal step"
-        assert result["final_text"].startswith("Error during plan execution:")
+        assert result["final_text"].startswith("[non-answer: error] Error during plan execution:")
         assert result["continuation"] is None, "a crashed prefix hands off nothing"
         assert len(recorded_calls) == 1
         assert recorded_calls[0]["final_text"].startswith("Error:")
@@ -5422,7 +5467,7 @@ class TestContinuationGoLiveMidPrefixFailure:
             "fails the WHOLE plan, it does not degrade to zero evidence "
             "and keep going"
         )
-        assert result["final_text"].startswith("Error during plan execution:")
+        assert result["final_text"].startswith("[non-answer: error] Error during plan execution:")
         assert "onnx-local" in result["final_text"]
         assert "voyage-context-3" in result["final_text"]
         assert "no evidence" not in result["final_text"].lower()

@@ -11778,7 +11778,7 @@
     "tests/test_upgrade_cmd.py::TestUpgradeRetiredSqliteOptOut::test_upgrade_under_sqlite_export_prints_redirect_and_exits_2": 0.02126774998032488,
     "tests/test_upgrade_cmd.py::TestUpgradeServiceModeShortCircuit::test_auto_mode_is_silent_but_still_a_no_op": 0.03121520800050348,
     "tests/test_upgrade_cmd.py::TestUpgradeServiceModeShortCircuit::test_never_creates_or_touches_the_local_db": 0.049874123971676454,
-    "tests/test_upgrade_cmd.py::TestUpgradeServiceModeShortCircuit::test_reports_immutable_source_and_exits_zero": 0.04877012496581301,
+    "tests/test_upgrade_cmd.py::TestUpgradeServiceModeShortCircuit::test_reports_no_local_migration_and_exits_zero": 0.04877012496581301,
     "tests/test_upgrade_e2e.py::TestSC5McpVersionCheck::test_no_crash_on_missing_db": 0.019564832968171686,
     "tests/test_upgrade_e2e.py::TestSC6Delegation::test_memory_store_round_trip": 0.09596079197945073,
     "tests/test_upgrade_e2e.py::TestSC6Delegation::test_plan_library_round_trip": 0.09096695797052234,

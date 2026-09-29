@@ -3032,13 +3032,44 @@ def _check_plugin_name() -> list[HealthResult]:
                 "(renamed 2026-05-23, nexus-mkj6u)"
             ),
             fix_suggestions=[
+                f"/plugin uninstall {plugin_name}@nexus-plugins",
                 "/plugin install conexus@nexus-plugins",
                 "/reload-plugins",
-                "(both run in Claude Code; install registers the new plugin, reload activates it)",
+                "(all run in Claude Code; the old plugin keeps its own hooks until it is "
+                "uninstalled, nexus-qocnk)",
             ],
             fatal=False,
         )
     ]
+
+
+def _check_retired_plugin_installed(registry_path: Path | None = None) -> list[HealthResult]:
+    """nexus-qocnk: flag a retired plugin (``nx@nexus-plugins``) still in
+    Claude Code's plugin registry, whichever plugin this session runs.
+
+    Installing ``conexus`` does not remove ``nx``, and the old plugin keeps
+    its own hooks: a stale ``nx`` kept v4.34.x hooks that auto-approved
+    every Bash command (nexus-452oy, GHSA-mc84-6gjq-vm2p). Not applicable
+    (ok row) on a box with no registry or no retired install.
+    """
+    from nexus.plugin_lockstep import retired_plugin_installs  # noqa: PLC0415 — deferred, keeps health import light
+
+    label = "Retired Claude Code plugin"
+    stale = retired_plugin_installs(registry_path)
+    if not stale:
+        return [HealthResult(label=label, ok=True, detail="none installed")]
+    # A failure, not a soft warn: warn never moves the exit code (RDR-129
+    # B4), and a live auto-approve-every-Bash hook is not benign or
+    # transient (critique of 3a3afaf5a). Not fatal: everything still runs.
+    return [HealthResult(
+        label=label, ok=False,
+        detail=(
+            f"{', '.join(stale)} still installed; it keeps its own hooks "
+            "(v4.34.x auto-approved every Bash command, GHSA-mc84-6gjq-vm2p)"
+        ),
+        fix_suggestions=[f"/plugin uninstall {key}" for key in stale]
+        + ["/reload-plugins (in Claude Code)"],
+    )]
 
 
 def _check_worktree_developer_agent() -> list[HealthResult]:
@@ -5388,6 +5419,12 @@ def _check_tuple_unclaimed_age() -> list[HealthResult]:
             # rows are never claimed by design, so "oldest unclaimed" carries
             # no signal here (nexus-em75s.12 review fix).
             continue
+        template = _resolve_tuple_template(templates, census.subspace)
+        if template is not None and template.get("lock"):
+            # nexus-sis0m.2: a lock template's available token IS the idle
+            # lock; its age is how long nobody has held it, not stuck work
+            # (shakeout 7.64.1 Surface E F7 flagged lock/ci-develop-push).
+            continue
         census_oldest_dt = _parse_tuple_timestamp(census.oldest_created_at)
         if census_oldest_dt is not None:
             census_age_s = (datetime.now(UTC) - census_oldest_dt).total_seconds()
@@ -7425,7 +7462,7 @@ _MAX_TRACKED_RUN_IDS = 5000
 _MAX_TRACKED_UNSTAMPED = 1000
 
 
-def _check_stale_indexing_runs() -> list[HealthResult]:
+def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResult]:
     """Name documents stranded in ``index_state='indexing'`` beyond a
     threshold (nexus-5xn3k.6, bead-text amendment 2026-08-02 —
     substantive-critic on .3's client diff, T2 nexus/5xn3k3-critique-2026-08-02).
@@ -7524,7 +7561,7 @@ def _check_stale_indexing_runs() -> list[HealthResult]:
         # nexus-ft7eg: share this walk with _check_next_seq_drift
         # (_highest_child_seqs' identical `all_documents(limit=0)` scan) —
         # doctor currently pays for the full-corpus walk TWICE per run.
-        for entry in cat.all_documents(limit=0):
+        for entry in (documents if documents is not None else cat.all_documents(limit=0)):
             reported = bool(getattr(entry, "index_state_reported", True))
             state = getattr(entry, "index_state", None)
             if not reported:
@@ -8277,6 +8314,80 @@ def _check_next_seq_drift() -> list[HealthResult]:
     )]
 
 
+def _walk_documents_for_doctor() -> list | None:
+    """Every catalog document, walked once for the rows that share it, or
+    ``None`` when the walk cannot run (each row then walks and degrades on
+    its own)."""
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return None
+        return list(cat.all_documents(limit=0))
+    except Exception as exc:  # noqa: BLE001 — best-effort: each row degrades on its own
+        _log.debug("doctor_document_walk_failed", error=str(exc))
+        return None
+
+
+def _check_failed_runs_hidden_chunks(documents: list | None = None) -> list[HealthResult]:
+    """Name failed documents whose stored chunks have no manifest owner
+    (nexus-0ntxj).
+
+    An index run upserts chunks before their manifest rows. When it fails
+    between the two, the chunks stay stored with no owner, and engine
+    v0.1.137's live(c) hides them from every read. Measured 2026-09-28
+    (shakeout 7.64.1): FootPrintRAGVA 1.82.146/147, 395 chunks, repaired
+    by hand with ``nx catalog reconcile``. ``_fence_fail`` now heals the
+    document at failure time; this row finds what that could not (a run
+    killed outright, a heal that failed, anything written before the
+    heal existed). Like the heal, it covers documents with no manifest yet
+    (a failed first run); a failed re-index keeps its old, readable
+    manifest and is not counted.
+
+    Walks the corpus for ``index_state='failed'`` documents, then runs the
+    shared heal core in dry-run mode over just those, so the count is the
+    number of documents ``nx catalog reconcile`` would repair. Read-only;
+    degrades to a skip.
+    """
+    label = "failed index runs with hidden chunks"
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid circular import
+        from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred to avoid circular import
+
+        cat = make_catalog_reader()
+        if cat is None:
+            return [HealthResult(label=label, ok=True, detail="skipped (no catalog)")]
+        failed = [
+            e for e in (documents if documents is not None else cat.all_documents(limit=0))
+            if getattr(e, "index_state", None) == "failed"
+        ]
+        if not failed:
+            return [HealthResult(label=label, ok=True, detail="not applicable (no failed index runs)")]
+        result = heal_manifest_gaps(failed, cat, make_t3, None, dry_run=True)
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.debug("doctor_failed_runs_hidden_chunks_check_failed", error=str(exc))
+        return [HealthResult(label=label, ok=True, detail="skipped (catalog or T3 unavailable)")]
+
+    if not result.reconciled:
+        return [HealthResult(
+            label=label, ok=True,
+            detail=f"none ({len(failed)} failed document(s), none with stored chunks hidden)",
+        )]
+    return [HealthResult(
+        label=label, ok=False, warn=True,
+        detail=(
+            f"{result.reconciled} of {len(failed)} failed document(s) have "
+            "chunks stored with no manifest owner, so every read hides them"
+        ),
+        fix_suggestions=[
+            "nx catalog reconcile   (rebuilds their manifests from the stored chunks)",
+            "then re-index the named sources; the documents stay 'failed' until a run completes",
+        ],
+    )]
+
+
 def _highest_child_seqs(cat: Any) -> dict[str, int]:
     """Highest numeric child sequence per owner prefix, tombstones INCLUDED.
 
@@ -8782,7 +8893,14 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # nexus-5xn3k.6 (bead-text amendment): a document's fence never
     # cleared — a different failure class from the missing-chunk aggregates
     # above (surfaced ALONGSIDE, not folded in).
-    results.extend(_check_stale_indexing_runs())
+    # nexus-0ntxj: one corpus walk feeds both index-run rows (the second
+    # row would otherwise add a walk; nexus-ft7eg tracks the others). A
+    # failed walk here passes None and each check walks, and degrades, alone.
+    _index_run_docs = _walk_documents_for_doctor()
+    results.extend(_check_stale_indexing_runs(_index_run_docs))
+    # nexus-0ntxj: a failed run's chunks stored with no manifest owner are
+    # hidden by live(c). Degrades internally.
+    results.extend(_check_failed_runs_hidden_chunks(_index_run_docs))
     # nexus-rte90: PDF chunks left with the upload placeholder metadata
     # (nexus-w94eo). Degrades internally.
     results.extend(_check_pdf_stub_metadata())
@@ -8902,6 +9020,16 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
         results.append(HealthResult(
             label="Legacy catalog file", ok=False, warn=True,
             detail=f"check failed ({exc}) — could not verify legacy catalog state",
+        ))
+
+    # nexus-qocnk: a retired plugin still installed keeps its own hooks.
+    try:
+        results.extend(_check_retired_plugin_installed())
+    except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
+        _log.warning("doctor_retired_plugin_check_failed", error=str(exc))
+        results.append(HealthResult(
+            label="Retired Claude Code plugin", ok=False, warn=True,
+            detail=f"check failed ({exc}) — could not read the plugin registry",
         ))
 
     # nexus-3xg21: plugin-floor check for the RDR-184 orchestration hooks —

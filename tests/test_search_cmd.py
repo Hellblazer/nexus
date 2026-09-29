@@ -1313,3 +1313,19 @@ def test_repo_flag_names_an_unknown_owner(runner: CliRunner, cloud_env) -> None:
         result = runner.invoke(main, ["search", "query", "--repo", "no-such-repo"])
     assert result.exit_code != 0
     assert "--repo 'no-such-repo' is neither a dotted tumbler" in result.output, result.output
+
+
+def test_the_silent_zero_hint_never_suggests_a_threshold_below_the_top_distance(capsys) -> None:
+    """nexus-zdzm5 (7.64.1 shakeout surface A A4): with --threshold 0.1 and
+    a top distance of 0.452, the hint said "Use --threshold 0.300", which
+    surfaces nothing; the filter drops a candidate above the threshold."""
+    from nexus.commands.search_cmd import _maybe_emit_silent_zero_note
+    from nexus.search_engine import SearchDiagnostics
+
+    diag = SearchDiagnostics(
+        per_collection={"rdr__1-1__model__v1": (5, 5, 0.1, 0.4523)},
+        total_dropped=5, total_raw=5, failed_collections={},
+    )
+    _maybe_emit_silent_zero_note([diag], quiet=False, config={})
+    err = capsys.readouterr().err
+    assert "Use --threshold 0.453 to surface" in err, err

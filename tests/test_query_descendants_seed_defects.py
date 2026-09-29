@@ -70,6 +70,9 @@ class _FakeCatalogSpy:
     def find(self, query, *, content_type=None):
         return []
 
+    def find_all(self, query, *, content_type=None):
+        return self.find(query, content_type=content_type)
+
     def by_content_type(self, content_type):
         return []
 
@@ -96,6 +99,29 @@ def _wire_service(monkeypatch, t3, cat, target=None):
 # ═════════════════════════════════════════════════════════════════════════
 
 class TestGraphHopSeedCapDisclosure:
+    def test_large_author_seed_list_is_capped_and_disclosed(self, monkeypatch):
+        """Review finding on 2a87def15: find_all made the author seed list
+        complete, and unlike the subtree branch it had no cap, so a broad
+        author handed the graph hop every matching document."""
+        from types import SimpleNamespace
+
+        n = core._MAX_GRAPH_HOP_SEEDS + 500
+        entries = [SimpleNamespace(tumbler=f"1.2.{i}", author="Ada Lovelace") for i in range(n)]
+
+        class _AuthorCatalog(_FakeCatalogSpy):
+            def find(self, query, *, content_type=None):
+                return list(entries)
+
+        t3 = _FakeServiceT3(graph_rows=[])
+        _wire_service(monkeypatch, t3, _AuthorCatalog([]))
+
+        result = core.query("q", author="Lovelace", follow_links="cites", structured=True)
+
+        assert len(t3.graph_calls[0][1]) == core._MAX_GRAPH_HOP_SEEDS
+        assert result.get("seed_scope") == {
+            "total": n, "used": core._MAX_GRAPH_HOP_SEEDS, "truncated": True,
+        }
+
     def test_large_subtree_seed_list_is_capped_and_disclosed(self, monkeypatch):
         n = core._MAX_GRAPH_HOP_SEEDS + 500
         tumblers = [f"1.2.{i}" for i in range(n)]

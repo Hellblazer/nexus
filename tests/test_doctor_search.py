@@ -455,3 +455,220 @@ class TestRetrievalQualityProbe:
         assert by_name["knowledge__drop"] == "threshold_drop"
         assert by_name["docs__drifted"] == "model_drift"
         assert by_name["code__boom"] == "error"
+
+
+# nexus-dhvzx: the 7.64.1 shakeout ran --check-search on the live tenant; the
+# canned query "example test probe" was irrelevant to most collections, the
+# per-collection threshold correctly dropped it, 58 of 111 collections read
+# threshold_drop, and the check exited 2 on every real tenant. The fix queries
+# with one of the collection's own chunks and judges only that chunk's OTHER
+# neighbours: the chunk finds itself at distance ~0, and a first version that
+# counted the self-hit could never fire on RDR-087's incident, a healthy
+# collection whose natural floor sits above its threshold (critique
+# nexus/critique-6c06ab9c4-check-search-probe-self-text-tautology). The
+# incident test below pins that the probe still fires.
+
+COLS = ["code__a__model-code__v1", "rdr__a__model-ctx__v1"]
+
+
+class _ChunkT3:
+    def __init__(self, n_chunks: int = 3):
+        self.n_chunks = n_chunks
+
+    def get_or_create_collection(self, col):
+        n = self.n_chunks
+
+        class _Coll:
+            def get(self, include=None, limit=None):
+                k = min(n, limit or n)
+                return {"ids": [f"{col}#{i}" for i in range(k)],
+                        "documents": [f"text {i} of {col}" for i in range(k)]}
+        return _Coll()
+
+
+def _neighbour_search(neighbour_distance, self_distance=0.0, include_self=True):
+    """Unthresholded search: the probe chunk's own row (at self_distance,
+    or absent) plus four neighbours at neighbour_distance(col)."""
+    from nexus.search_engine import SearchResult
+
+    def search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None):
+        col = cols[0]
+        sid = f"{col}#{query.split()[1]}"
+        rows = [SearchResult(id=f"{col}-n{j}", content="", distance=neighbour_distance(col) + j * 0.01,
+                             collection=col, metadata={}) for j in range(4)]
+        if include_self:
+            rows.insert(0, SearchResult(id=sid, content="", distance=self_distance,
+                                        collection=col, metadata={}))
+        return rows
+    return search
+
+
+def _probe(t3, search, **kw):
+    from nexus.doctor_search import run_retrieval_quality_probe
+
+    return {r.name: r for r in run_retrieval_quality_probe(
+        t3=t3, collections=COLS, search_fn=search,
+        model_for=lambda c: "", metadata_fn=lambda c: {},
+        threshold_for=lambda c: 0.5, **kw)}
+
+
+def _default(t3):
+    from nexus.doctor_search import _default_probe_for
+    return {"probe_for": lambda c: _default_probe_for(t3, c)}
+
+
+def test_the_canned_query_reads_threshold_drop_on_healthy_collections() -> None:
+    """The defect, reproduced: a canned query far from every collection."""
+    from nexus.search_engine import SearchDiagnostics
+
+    def canned_search(query, cols, n_results, t3, diagnostics_out=None):
+        diagnostics_out.append(SearchDiagnostics(
+            per_collection={cols[0]: (4, 4, 0.5, 0.8)}, total_dropped=4, total_raw=4,
+            failed_collections={}))
+        return []
+
+    rows = _probe(_ChunkT3(), canned_search)
+    assert {r.outcome for r in rows.values()} == {"threshold_drop"}
+
+
+def test_a_collection_with_close_neighbours_matches() -> None:
+    t3 = _ChunkT3()
+    rows = _probe(t3, _neighbour_search(lambda c: 0.3), **_default(t3))
+    assert {r.outcome for r in rows.values()} == {"matched"}
+    assert {r.probe_chunks for r in rows.values()} == {3}
+
+
+def test_a_collection_whose_floor_sits_above_its_threshold_reads_drop() -> None:
+    """RDR-087's incident: related text exists, but every real neighbour
+    lands past the threshold."""
+    t3 = _ChunkT3()
+    high = COLS[1]
+    rows = _probe(t3, _neighbour_search(lambda c: 0.7 if c == high else 0.3), **_default(t3))
+    assert rows[COLS[0]].outcome == "matched"
+    assert rows[high].outcome == "threshold_drop"
+    assert rows[high].nearest_distance == 0.7
+
+
+def test_a_self_hit_that_lands_far_is_excluded_by_id_not_assumed() -> None:
+    """Critique of 29fab0df4: a re-embedded snippet of a context-embedded
+    chunk need not sit near its own stored vector. The probe must neither
+    count that far self-row as a neighbour nor subtract a self-hit that is
+    not there."""
+    t3 = _ChunkT3()
+    far_self = _probe(t3, _neighbour_search(lambda c: 0.3, self_distance=0.9), **_default(t3))
+    no_self = _probe(t3, _neighbour_search(lambda c: 0.3, include_self=False), **_default(t3))
+    assert {r.outcome for r in far_self.values()} == {"matched"}
+    assert {r.outcome for r in no_self.values()} == {"matched"}
+    high_floor_no_self = _probe(t3, _neighbour_search(lambda c: 0.7, include_self=False), **_default(t3))
+    assert {r.outcome for r in high_floor_no_self.values()} == {"threshold_drop"}
+
+
+def test_the_verdict_is_the_median_over_the_samples() -> None:
+    """One borderline chunk cannot decide the verdict alone."""
+    t3 = _ChunkT3()
+    from nexus.search_engine import SearchResult
+
+    def search(query, cols, n_results, t3_, diagnostics_out=None, threshold_override=None):
+        col = cols[0]
+        i = int(query.split()[1])
+        d = 0.6 if i == 0 else 0.3  # sample 0 alone sits past the threshold
+        return [SearchResult(id=f"{col}-n", content="", distance=d, collection=col, metadata={})]
+
+    rows = _probe(t3, search, **_default(t3))
+    assert {r.outcome for r in rows.values()} == {"matched"}
+
+
+def test_a_collection_with_no_readable_chunk_falls_back_to_the_canned_query() -> None:
+    from nexus.search_engine import SearchDiagnostics
+
+    seen: list[str] = []
+
+    def search(query, cols, n_results, t3, diagnostics_out=None, **kw):
+        seen.append(query)
+        diagnostics_out.append(SearchDiagnostics(
+            per_collection={cols[0]: (1, 0, 0.5, None)}, total_dropped=0, total_raw=1,
+            failed_collections={}))
+        return []
+
+    t3 = _ChunkT3(n_chunks=0)
+    _probe(t3, search, **_default(t3))
+    assert set(seen) == {"example test probe"}
+
+
+def test_a_threshold_drop_row_names_its_evidence() -> None:
+    """Sam's ruling (2026-09-28): a threshold_drop warns, and its row says
+    what a reader needs to judge it."""
+    from nexus.doctor_search import ProbeResult, format_combined_human
+
+    row = ProbeResult(name="docs__1-45__model-ctx__v1", surface="retrieval_quality",
+                      outcome="threshold_drop", raw_count=18, kept_count=0,
+                      nearest_distance=0.6954, threshold=0.65, probe_chunks=1)
+    text = format_combined_human([], [row])
+    line = next(ln for ln in text.splitlines() if "docs__1-45" in ln)
+    assert line.lstrip().startswith("[!]")
+    assert "d=0.695 > threshold 0.650" in line
+    assert "rests on 1 probe chunk(s) and 18 neighbour(s)" in line
+    assert "threshold_drop (warning)" in text
+
+
+def test_check_search_exits_zero_when_the_only_finding_is_a_threshold_drop(monkeypatch) -> None:
+    import nexus.doctor_search as ds
+
+    drop = ds.ProbeResult(name="c", surface="retrieval_quality", outcome="threshold_drop",
+                          raw_count=4, kept_count=0, nearest_distance=0.7,
+                          threshold=0.65, probe_chunks=1)
+    monkeypatch.setattr(ds, "_load_canaries", lambda: [])
+    monkeypatch.setattr(ds, "run_name_resolution_probe", lambda *a, **k: [])
+    monkeypatch.setattr(ds, "_list_collections", lambda: ["c"])
+    monkeypatch.setattr(ds, "_make_t3", lambda: object())
+    monkeypatch.setattr(ds, "run_retrieval_quality_probe", lambda **k: [drop])
+    ds.run_check_search(json_out=False)  # returns: no SystemExit(2)
+
+    drift = ds.ProbeResult(name="c", surface="retrieval_quality", outcome="model_drift")
+    monkeypatch.setattr(ds, "run_retrieval_quality_probe", lambda **k: [drift])
+    with pytest.raises(SystemExit) as exc:
+        ds.run_check_search(json_out=False)
+    assert exc.value.code == 2
+
+
+def test_a_near_duplicate_neighbour_does_not_make_a_high_floor_collection_healthy() -> None:
+    """Review of 29fab0df4: a second chunk with nearly the same text sits at
+    distance ~0 and says nothing about the floor; counting it read a real
+    threshold_drop as matched."""
+    from nexus.search_engine import SearchResult
+
+    def search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None):
+        col = cols[0]
+        return [SearchResult(id=f"{col}-dup", content="", distance=0.001, collection=col, metadata={}),
+                SearchResult(id=f"{col}-far", content="", distance=0.7, collection=col, metadata={})]
+
+    t3 = _ChunkT3()
+    rows = _probe(t3, search, **_default(t3))
+    assert {r.outcome for r in rows.values()} == {"threshold_drop"}
+
+
+def test_the_neighbour_count_is_the_window_judged_not_the_overfetched_pool() -> None:
+    """Critique of 634cc2b66: search_cross_corpus returns its whole
+    over-fetched pool, so the evidence line counted up to 4x more
+    neighbours than the probe's own depth."""
+    from nexus.search_engine import SearchResult
+
+    def wide_search(query, cols, n_results, t3, diagnostics_out=None, threshold_override=None):
+        col = cols[0]
+        return [SearchResult(id=f"{col}-n{j}", content="", distance=0.3 + j * 0.01,
+                             collection=col, metadata={}) for j in range(24)]
+
+    t3 = _ChunkT3(n_chunks=1)
+    rows = _probe(t3, wide_search, **_default(t3))
+    assert {r.raw_count for r in rows.values()} == {5}
+
+
+def test_a_close_self_hit_is_excluded_by_id_when_real_neighbours_are_far() -> None:
+    """Review of 634cc2b66: the far-self test cannot tell whether the id
+    exclusion exists (a far self-row is never the minimum). The shape the
+    exclusion guards: the self-row lands close (past the duplicate filter,
+    inside the threshold) while every real neighbour is past the threshold.
+    Counting the self-row would read the collection healthy."""
+    t3 = _ChunkT3()
+    rows = _probe(t3, _neighbour_search(lambda c: 0.7, self_distance=0.1), **_default(t3))
+    assert {r.outcome for r in rows.values()} == {"threshold_drop"}

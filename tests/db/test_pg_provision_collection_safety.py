@@ -84,8 +84,11 @@ def test_lazy_resolver_uses_the_import_time_ambient_env(monkeypatch, tmp_path):
 
 
 def _cold_cache(monkeypatch, tmp_path):
-    """Point the provisioning cache at an empty HOME so the download leg runs."""
+    """Point the provisioning cache at an empty HOME so the download leg runs.
+    XDG_CACHE_HOME outranks HOME for this cache (nexus-wvyvn), so an ambient
+    one is cleared or the test would provision into the developer's cache."""
     monkeypatch.setenv("HOME", str(tmp_path / "virgin-home"))
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
 
 
 def test_download_failure_degrades_to_skip_sentinel(monkeypatch, tmp_path):
@@ -217,3 +220,53 @@ def test_kill_control_without_the_lock_every_caller_downloads(monkeypatch, tmp_p
     for t in threads:
         t.join(timeout=30)
     assert state["calls"] > 1, "the lock is what serialises provisioning; without it the race is back"
+
+
+# nexus-wvyvn: the substrate cache honours XDG_CACHE_HOME.
+
+
+def test_the_provision_leg_caches_under_xdg_cache_home_when_it_is_set(monkeypatch, tmp_path):
+    """A host that moves its caches with XDG_CACHE_HOME must not grow a second
+    bundle cache under HOME. Observed on hellmini, 2026-09-28."""
+    from nexus.daemon.binary_install import PINNED_SERVICE_TAG  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    _cold_cache(monkeypatch, tmp_path)
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(xdg))
+    seen: list[Path] = []
+
+    def _install(tag, cache_dir):
+        seen.append(cache_dir)
+
+    _wire_fake_bundle(monkeypatch, tmp_path, lambda st: None)
+    monkeypatch.setattr("nexus.daemon.binary_install.install_pg_bundle", _install)
+    monkeypatch.setattr("nexus.db.pg_bundle.ensure_pg_bundle", lambda cache_dir, search_dirs: cache_dir)
+    assert sf._self_provision_pg_bundle() == xdg / "nexus-test-substrate" / PINNED_SERVICE_TAG
+    assert seen == [xdg / "nexus-test-substrate" / PINNED_SERVICE_TAG]
+    assert not (tmp_path / "virgin-home" / ".cache").exists()
+
+
+def test_a_blank_xdg_cache_home_falls_back_to_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "h"))
+    monkeypatch.setenv("XDG_CACHE_HOME", "  ")
+    assert sf.substrate_cache_root() == tmp_path / "h" / ".cache" / "nexus-test-substrate"
+
+
+def test_a_failed_provision_is_named_in_the_substrate_setup_error(monkeypatch, tmp_path):
+    """nexus-wvyvn: the setup error every substrate test reports must carry the
+    provisioning failure, not "no PostgreSQL binaries ... Install the PG bundle
+    (nx init)", which sent the reader to discovery (hellmini, 2026-09-28)."""
+    from tests import _engine_substrate as es  # noqa: PLC0415 — deferred import, function-local by this file's convention
+
+    _cold_cache(monkeypatch, tmp_path)
+    monkeypatch.setattr(sf, "_last_provision_failure", None)
+
+    def _reset(*a, **k):
+        raise BinaryDownloadError("failed to download nexus-pg-x.txz: connection reset")
+
+    monkeypatch.setattr("nexus.daemon.binary_install.install_pg_bundle", _reset)
+    with pytest.warns(UserWarning):
+        assert sf._self_provision_pg_bundle() is None
+    msg = es._no_pg_message()
+    assert "BinaryDownloadError" in msg and "connection reset" in msg, msg
+    assert "nx init" not in msg

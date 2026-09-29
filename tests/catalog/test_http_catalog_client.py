@@ -1541,6 +1541,17 @@ class TestHttpCatalogClientRoundTrip:
 
         assert client.docs_for_chashes([]) == {}
 
+    def test_docs_and_manifests_for_chashes_journey(self, client: HttpCatalogClient) -> None:
+        """nexus-w032x: the reverse lookup returns the manifests it fetched,
+        so search's doc-id attach does not fetch them a second time. Same
+        edges as docs_for_chashes, plus each referencing doc's manifest rows
+        against the real fake-server routes."""
+        docs, manifests = client.docs_and_manifests_for_chashes([CHASH_A])
+        assert docs == {CHASH_A: ["1.1.1"]}
+        assert set(manifests) == {"1.1.1"}
+        assert CHASH_A in {row.chash for row in manifests["1.1.1"]}
+        assert client.docs_and_manifests_for_chashes([]) == ({}, {})
+
     # ── nexus-h8rf6.3: return-type regression pins ───────────────────────────
     #
     # Three call sites previously returned the WRONG wire-adjacent type
@@ -2846,3 +2857,20 @@ class TestEmbeddingProfileAccessor:
         c = self._client_get_returning(monkeypatch, None)
         with pytest.raises(ValueError, match="embedding_profile"):
             c.embedding_profile()
+
+
+def test_traverse_returns_each_edge_and_node_once() -> None:
+    """nexus-zdzm5 (7.64.1 shakeout surface C F10): a BFS past depth 1
+    reaches the same edge from both ends and the wire repeats it; links
+    (depth=2) listed 1.11.560 -> 1.1.4325 twice."""
+    client = object.__new__(HttpCatalogClient)
+    edge = {"from_tumbler": "1.11.560", "to_tumbler": "1.1.4325", "link_type": "relates", "from_span": "",
+            "to_span": "", "created_by": "t", "created_at": "", "meta": {}}
+    node = {"tumbler": "1.1.4325", "title": "t", "content_type": "code"}
+    client._post = lambda path, body, mutates=False: {
+        "nodes": [node, dict(node)], "edges": [edge, dict(edge)],
+    }
+    result = client._traverse({"seeds": ["1.11.560"], "depth": 2})
+    assert [str(n.tumbler) for n in result["nodes"]] == ["1.1.4325"]
+    assert [(str(e.from_tumbler), str(e.to_tumbler), e.link_type) for e in result["edges"]] == [
+        ("1.11.560", "1.1.4325", "relates")]

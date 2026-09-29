@@ -425,6 +425,13 @@ def test_manifest_hook_exception_when_self_heal_is_also_faulted(
         monkeypatch.setattr(
             catalog_factory, "make_catalog_writer", faulting_make_catalog_writer,
         )
+        # nexus-0ntxj: the run's exit handler fail-stamps the unfinished
+        # document, and _fence_fail now heals it too. This test is about
+        # the run where NO repair lands, so that second heal path is
+        # faulted as well.
+        monkeypatch.setattr(
+            "nexus.doc_indexer._heal_failed_document", lambda doc_id: None,
+        )
         result = runner.invoke(main, ["index", "repo", str(repo)])
 
     assert self_heal_writer_faulted[0], (

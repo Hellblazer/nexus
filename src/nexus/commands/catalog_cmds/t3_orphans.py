@@ -81,10 +81,14 @@ def classify_t3_orphan_collections(cat: "CatalogReader", t3_db: Any) -> list[dic
     """
     from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — command-local import (nexus.db.t3)
 
-    t3_names = {
-        c["name"] for c in t3_db.list_collections()
+    # nexus-5z0us sibling: the listing carries each collection's physical
+    # chunk count (stored_count; an older engine sends count only). Asking
+    # get_collection per name re-listed the whole tenant each time.
+    listing = {
+        c["name"]: c for c in t3_db.list_collections()
         if not c["name"].startswith(_BYPASS_SCHEMA_PREFIXES)
     }
+    t3_names = set(listing)
     docs_per_coll: dict[str, int] = cat.collection_doc_counts()
     docs_per_coll_all: dict[str, int] = cat.collection_doc_counts(include_deleted=True)
 
@@ -95,12 +99,15 @@ def classify_t3_orphan_collections(cat: "CatalogReader", t3_db: Any) -> list[dic
         # Only flag if the T3 collection actually has chunks; an empty T3
         # collection with no docs is a "zombie", a different class entirely
         # (see doctor.py's ``_run_t3_vs_catalog``).
-        try:
-            col = t3_db.get_collection(name=name)
-            count = col.count()
-        except Exception as exc:  # noqa: BLE001 — boundary catch; recorded, never swallowed (nexus-pyv0e class)
-            orphans.append({"name": name, "error": str(exc)})
+        row = listing[name]
+        raw = row.get("stored_count", row.get("count"))
+        if raw is None or int(raw) < 0:
+            # A row with no count, or the -1 the pre-catalog-005 fallback
+            # listing reports for a failed count, is unreadable, never
+            # "0 chunks".
+            orphans.append({"name": name, "error": "no chunk count in the collection listing"})
             continue
+        count = int(raw)
         if count <= 0:
             continue
         tombstoned_count = docs_per_coll_all.get(name, 0)

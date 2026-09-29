@@ -1878,9 +1878,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return int(result.get("id", 0))
 
     def find(
-        self, query: str, *, content_type: str | None = None
+        self, query: str, *, content_type: str | None = None, limit: int = 0,
     ) -> list[CatalogEntry]:
         """Full-text search over title/author/corpus/file_path.
+
+        ``limit`` 0 sends none and takes the engine's default cap (50 rows);
+        a positive ``limit`` asks for that many. A caller that pages or
+        post-filters must pass one, or it sees at most the first 50 matches
+        and reads the cut as the whole answer (nexus-3bafq).
 
         Order contract (nexus-fgxmk): the engine returns matches ordered by
         tumbler as TEXT — string order, stable across heap churn — not by
@@ -1898,7 +1903,29 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         params: dict = {"q": query}
         if content_type:
             params["content_type"] = content_type
+        if limit > 0:
+            params["limit"] = limit
         return self._docs_from(self._get("/search", **params))
+
+    def find_all(
+        self, query: str, *, content_type: str | None = None,
+    ) -> list[CatalogEntry]:
+        """EVERY full-text match for *query*, not the first 50.
+
+        For a caller that filters, counts, or pages the matches: over a
+        capped page any of those reports absence or a short count for rows
+        past the cap (nexus-3bafq; ``nx catalog update --search`` updated
+        only the first 50 matches). The engine honours an explicit limit
+        with no ceiling, so grow the request until a page comes back short.
+        That terminates at the size of the match set, which is at most the
+        catalog.
+        """
+        want = 500
+        while True:
+            rows = self.find(query, content_type=content_type, limit=want)
+            if len(rows) < want:
+                return rows
+            want *= 4
 
     def find_by_title_exact(
         self, title: str, *, content_type: str | None = None
@@ -1917,7 +1944,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         whose tokens match more documents than that, resolve by identity
         (:meth:`by_source_uri` / :meth:`by_file_path`) instead.
         """
-        return [e for e in self.find(title, content_type=content_type) if e.title == title]
+        return [e for e in self.find_all(title, content_type=content_type) if e.title == title]
 
     def by_file_path(
         self, owner: Tumbler | str, file_path: str
@@ -2772,10 +2799,19 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         degraded or crashed in service mode.
         """
         result = self._post("/traverse", payload, mutates=False) or {"nodes": [], "edges": []}
-        return {
-            "nodes": [_to_entry(n) for n in result.get("nodes", [])],
-            "edges": [_link_from_dict(e) for e in result.get("edges", [])],
-        }
+        # nexus-zdzm5: a BFS past depth 1 reaches the same edge from both of
+        # its ends, and the wire carries it once per visit (the 7.64.1
+        # shakeout: links(depth=2) listed 1.11.560 -> 1.1.4325 twice). One
+        # edge per (from, to, type), one node per tumbler, first seen wins.
+        nodes: dict[str, Any] = {}
+        for n in result.get("nodes", []):
+            entry = _to_entry(n)
+            nodes.setdefault(str(entry.tumbler), entry)
+        edges: dict[tuple[str, str, str], Any] = {}
+        for e in result.get("edges", []):
+            link = _link_from_dict(e)
+            edges.setdefault((str(link.from_tumbler), str(link.to_tumbler), link.link_type), link)
+        return {"nodes": list(nodes.values()), "edges": list(edges.values())}
 
     def graph(
         self,
@@ -3460,7 +3496,23 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         return [row.chash for row in rows if row.chash]
 
     def docs_for_chashes(self, chashes: list[str]) -> dict[str, list[str]]:
-        """Reverse-lookup: chash -> [doc_id, ...] — dict-shape parity with local
+        """Reverse-lookup: chash -> [doc_id, ...]. See
+        :meth:`docs_and_manifests_for_chashes`, which does the work and also
+        returns the manifests it fetched on the way."""
+        return self.docs_and_manifests_for_chashes(chashes)[0]
+
+    def docs_and_manifests_for_chashes(
+        self, chashes: list[str],
+    ) -> tuple[dict[str, list[str]], dict[str, list[ManifestRow]]]:
+        """``(chash -> [doc_id, ...], doc_id -> manifest rows)``.
+
+        The reverse lookup already fetches every referencing document's
+        manifest to rebuild the chash -> doc_id edges; a caller that needs
+        those manifests too (search's chunk_count / chunk_index attach) used
+        to fetch them again, a second ``/manifest/get_many`` for a subset of
+        the same documents, about 2.5 s on the cloud (nexus-w032x).
+
+        Reverse-lookup: chash -> [doc_id, ...] — dict-shape parity with local
         ``Catalog.docs_for_chashes`` (nexus-h8rf6.3).
 
         ``CatalogRepository.docsForChashes()`` runs a single SELECT DISTINCT on
@@ -3511,13 +3563,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         a set of doc ids that reference the chash).
         """
         if not chashes:
-            return {}
+            return {}, {}
         prefix_to_inputs: dict[str, list[str]] = defaultdict(list)
         for c in chashes:
             if c:
                 prefix_to_inputs[c].append(c)
         if not prefix_to_inputs:
-            return {}
+            return {}, {}
         unique_chashes = list(prefix_to_inputs.keys())
         tumblers: set[str] = set()
         for start in range(0, len(unique_chashes), _DOCS_FOR_CHASHES_PAGE):
@@ -3563,7 +3615,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 )
             tumblers.update(batch_tumblers)
         if not tumblers:
-            return {}
+            return {}, {}
         manifests = self.get_manifests(list(tumblers))  # {doc_id: [ManifestRow, ...]}
         wanted_prefixes = set(prefix_to_inputs.keys())
         prefix_to_docs: dict[str, list[str]] = defaultdict(list)
@@ -3575,7 +3627,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         for prefix, doc_ids in prefix_to_docs.items():
             for input_form in prefix_to_inputs[prefix]:
                 out[input_form] = list(doc_ids)
-        return out
+        return out, manifests
 
     def _manifest_chashes_reconciled(
         self, physical_collection: str, result: dict,

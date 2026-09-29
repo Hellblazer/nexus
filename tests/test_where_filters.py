@@ -100,3 +100,14 @@ def test_same_key_same_value_twice_still_raises() -> None:
     silent here would mean the guard only fires when values differ."""
     with pytest.raises(ValueError, match="k"):
         parse_where(["k=a", "k=a"])
+
+
+@pytest.mark.parametrize("pair", ["score>>1", "score=>1", "score<<2", "k==v", "k!=!v"])
+def test_a_value_starting_with_an_operator_is_refused(pair: str) -> None:
+    """nexus-zdzm5: search(where="score>>1") answered "No results." because
+    the pair parsed as score > ">1", a filter no row can satisfy. A value
+    that begins with an operator character is a typo'd operator; say so."""
+    from nexus.filters import parse_where_str
+
+    with pytest.raises(ValueError, match="Invalid where operator"):
+        parse_where_str(pair)

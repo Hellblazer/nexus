@@ -263,10 +263,24 @@ class TestNoMachineWideActiveBeadLine:
 def _make_t2_memory_handler(
     token: str, seen_prefixes: list[str], entries: list[dict[str, str]],
 ) -> type[FakeT2HandlerBase]:
-    """A fake T2 engine serving exactly the two GET routes
-    ``nexus.hooks.t2_prefix_scan.scan`` calls (via ``HttpMemoryStore``),
-    recording every ``prefix`` value ``/v1/memory/projects`` was called
-    with in *seen_prefixes*."""
+    """A fake T2 engine serving the THREE GET routes
+    ``nexus.hooks.t2_prefix_scan.scan`` calls (via ``HttpMemoryStore``)
+    since nexus-fow78, recording every ``prefix`` value
+    ``/v1/memory/projects`` was called with in *seen_prefixes*.
+
+    nexus-fow78 scoped the per-namespace fetch from ``/v1/memory/all``
+    (whole-namespace content dump) to ``/v1/memory/list`` (title/
+    timestamp only) plus a targeted ``/v1/memory/get`` per rendered
+    snippet — this fake fell out of sync with that (it kept serving only
+    ``/v1/memory/all``, 404ing ``/v1/memory/list``), so every T2-memory
+    test through this handler rendered a "WARNING: ... unreachable: ...
+    404" instead of the entries, discovered by
+    ``TestT2MemorySectionInProcess``/``TestWorktreeProjectResolution``
+    against the real fow78+8t9w8 fix. ``/v1/memory/all`` is kept too —
+    harmless, and other tests through this handler may still assert on
+    it existing as a route even though ``scan()`` itself no longer calls
+    it.
+    """
 
     class _Handler(FakeT2HandlerBase):
         TOKEN = token
@@ -280,6 +294,26 @@ def _make_t2_memory_handler(
                 prefix = params.get("prefix", "")
                 seen_prefixes.append(prefix)
                 self._send(200, [{"project": prefix, "last_updated": "2026-01-01T00:00:00Z"}])
+            elif path == "/v1/memory/list":
+                project = params.get("project", "")
+                summaries = [
+                    {
+                        "id": idx,
+                        "project": project,
+                        "title": e.get("title", ""),
+                        "agent": "",
+                        "timestamp": e.get("timestamp", "2026-01-01T00:00:00Z"),
+                    }
+                    for idx, e in enumerate(entries)
+                ]
+                self._send(200, summaries)
+            elif path == "/v1/memory/get":
+                title = params.get("title", "")
+                match = next((e for e in entries if e.get("title") == title), None)
+                if match is None:
+                    self._send(404, {"error": "not found"})
+                    return
+                self._send(200, {**match, "project": params.get("project", "")})
             elif path == "/v1/memory/all":
                 self._send(200, entries)
             else:

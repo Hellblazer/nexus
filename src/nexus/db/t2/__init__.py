@@ -509,8 +509,9 @@ class T2Database:
         self,
         project: str | None = None,
         agent: str | None = None,
+        limit: int | None = None,
     ) -> list[dict[str, Any]]:
-        return self.memory.list_entries(project=project, agent=agent)
+        return self.memory.list_entries(project=project, agent=agent, limit=limit)
 
     def get_projects_with_prefix(self, prefix: str) -> list[dict[str, Any]]:
         return self.memory.get_projects_with_prefix(prefix)

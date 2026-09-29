@@ -454,7 +454,10 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
 
     shown_start = offset + 1
     shown_end = offset + len(entries)
-    click.echo(f"{col_name}  (showing {shown_start}-{shown_end} of {total})\n")
+    # nexus-sis0m.3: `total` is the collection's STORED chunk count (the
+    # cheap count); the rows listed are live ones, so after a delete the
+    # two differ (shakeout 7.64.1 F10). Name it rather than imply live.
+    click.echo(f"{col_name}  (showing {shown_start}-{shown_end}; {total} stored)\n")
     from datetime import datetime, timedelta  # noqa: PLC0415  — stdlib deferred to call site (datetime)
     for e in entries:
         doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
@@ -477,7 +480,10 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
         tag_str = f"  [{tags}]" if tags else ""
         click.echo(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
 
-    if shown_end < (total if isinstance(total, int) else float("inf")):
+    # A full page is the live signal that more rows may follow; the stored
+    # total can exceed the live rows and point at an empty page (review of
+    # 56bb2e88e).
+    if len(entries) >= limit:
         click.echo(f"\n  Next page: --offset {shown_end}")
 
 
@@ -498,8 +504,13 @@ def _list_documents(db: T3Database, col_name: str) -> None:
     """
     try:
         total_chunks = db.collection_info(col_name)["count"]
-    except Exception:  # noqa: BLE001 — collection-open failure (incl. KeyError) surfaced to user via click.echo, returns
-        click.echo(f"Collection not found: {col_name}")
+    except KeyError:
+        # nexus-sis0m.1: only an absent or empty collection lands here
+        # (collection_info cannot tell the two apart), and it is reported the
+        # way plain `store list` reports it, at exit 0. Every other failure,
+        # a stopped service among them, used to print "Collection not found"
+        # too, which reads as data loss; those now propagate.
+        click.echo(f"No documents in {col_name}.")
         return
 
     from nexus.catalog.store_hook import manifest_doc_index  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule)
@@ -531,7 +542,7 @@ def _list_documents(db: T3Database, col_name: str) -> None:
         seen.items(),
         key=lambda kv: doc_titles.get(kv[0]) or kv[1].get("title") or "",
     )
-    click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} chunks)\n")
+    click.echo(f"{col_name}  ({len(docs)} documents, {total_chunks} stored chunks)\n")
     if degraded:
         click.echo(
             f"  NOTE: grouped by chunk, not by manifest — {degraded}. "
@@ -622,11 +633,10 @@ def _reap_catalog_for_doc_ids(doc_ids: list[str], *, expected_collection: str | 
     CALL BEFORE deleting the T3 chunk(s), not after — see the relocated
     function's docstring for why the order is load-bearing (RDR-191 F10c's
     anti-join). CALL ONLY after confirming *doc_ids* actually exist in the
-    target T3 collection (nexus-c53hy) — this function's own chash
-    resolution has no collection scoping, so calling it unconditionally
-    (e.g. before knowing whether the T3 delete will find anything) can
-    tombstone an unrelated live document that happens to share a chash
-    registered under a different collection. See ``delete_cmd``'s ``--id``
+    target T3 collection (nexus-c53hy) — its chash resolution is scoped to
+    *expected_collection* plus blank-collection ghosts (nexus-r3cdg), so
+    calling it before knowing whether the T3 delete will find anything can
+    still tombstone a ghost that happens to share the chash. See ``delete_cmd``'s ``--id``
     branch for the existence-check-first call shape.
 
     *doc_ids* are T3 chunk natural ids (chashes), not tumblers.
@@ -676,11 +686,12 @@ def delete_cmd(collection: str, doc_id: str | None, title: str | None, yes: bool
         # reaping. A collection-scoped T3 existence check runs FIRST -- a
         # doc_id that is not actually in col_name (bogus/stale, or paired
         # with the wrong --collection) is caught here, before the catalog
-        # reap ever fires. Without this check the reap below (which
-        # resolves purely by chash, with no collection scoping of its
-        # own) could tombstone a live, unrelated document that happens to
-        # own this exact chash under a DIFFERENT collection -- the inverse
-        # of the F10c bug class this whole area exists to fix.
+        # reap ever fires. When this landed the reap resolved purely by
+        # chash and could tombstone a live, unrelated document owning this
+        # exact chash under a DIFFERENT collection -- the inverse of the
+        # F10c bug class this whole area exists to fix. The reap is now
+        # collection-scoped itself (nexus-r3cdg); this check stays as the
+        # primary layer.
         if db.get_by_id(col_name, doc_id) is None:
             raise click.ClickException(f"Entry {doc_id!r} not found in {col_name}")
 
@@ -746,6 +757,24 @@ def expire_cmd() -> None:
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
 
 
+def _resolve_bare_subject(collection: str, *, t3: object | None = None, for_write: bool = False) -> str:
+    """Resolve a bare ``--collection`` subject for export and import;
+    pass a prefixed name through unchanged.
+
+    RDR-204 Phase 3 (nexus-ft04v.26), class (a): *collection* is the raw
+    CLI argument, not necessarily a registered name, so this is a
+    candidate-string shape check, not a row lookup. Only the bare form
+    resolves: the exporter checks a legacy two-segment name against the
+    model its prefix implies, where :func:`t3_collection_name` would
+    promote it to the install's model (nexus-8o7ae).
+    """
+    from nexus.corpus import split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    if split_candidate_collection_name(collection)[0]:
+        return collection
+    return t3_collection_name(collection, t3=t3, for_write=for_write)
+
+
 @store.command("export")
 @click.argument("collection", default="", required=False)
 @click.option("--output", "-o", default=None,
@@ -777,7 +806,6 @@ def export_cmd(
     """
     from datetime import date  # noqa: PLC0415 — stdlib import kept branch-local
 
-    from nexus.corpus import split_candidate_collection_name, t3_collection_name as _t3col  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.errors import EmbeddingModelMismatch, FormatVersionError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
     from nexus.exporter import export_collection  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
@@ -820,11 +848,7 @@ def export_cmd(
                 click.echo(f"ERROR exporting {col_name}: {exc}", err=True)
         click.echo(f"\nTotal: {total_exported} records across {len(collections_info)} collections.")
     else:
-        # RDR-204 Phase 3 (nexus-ft04v.26), class (a): `collection` is the
-        # raw --collection CLI argument, not necessarily an existing
-        # registered name (a bare/legacy arg falls through to _t3col's
-        # promotion) -- candidate-string shape check, not a row lookup.
-        col_name = collection if split_candidate_collection_name(collection)[0] else _t3col(collection)
+        col_name = _resolve_bare_subject(collection)
         out_path = Path(output) if output else Path(f"{col_name}.nxexp")
         try:
             result = export_collection(
@@ -905,6 +929,15 @@ def import_cmd(
 
     db = _t3()
     input_path = Path(file)
+    # nexus-8o7ae: passed raw, a bare subject reached the exporter's model
+    # gate unresolved and was refused as a voyage-code-3 target on a bge
+    # install. The resolve's two profile refusals name their remedy; exit
+    # cleanly with it, as put does (7.38.0 shakeout), not with a traceback.
+    if collection:
+        try:
+            collection = _resolve_bare_subject(collection, t3=db, for_write=True)
+        except (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError) as exc:
+            raise click.ClickException(str(exc)) from exc
 
     # nexus-s71lr: "nx store put"/import bulk writes had NO progress signal at
     # all -- import_collection is one opaque call with no per-record callback,

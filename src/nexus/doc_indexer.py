@@ -544,7 +544,10 @@ def _fence_fail(doc_id: str, error: str) -> None:
 
     Also discards any superseded-vector sweep ``_manifest_write_loop``
     deferred for *doc_id* (nexus-4pj54): a failed run's manifest is not
-    complete, so its held candidates are dropped, never swept."""
+    complete, so its held candidates are dropped, never swept.
+
+    Then rebuilds *doc_id*'s manifest from any chunks the failed run did
+    store (:func:`_heal_failed_document`, nexus-0ntxj)."""
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
     from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
 
@@ -557,6 +560,69 @@ def _fence_fail(doc_id: str, error: str) -> None:
         _log.warning("index_run_fail_write_failed", doc_id=doc_id)
     finally:
         close = getattr(w, "close", None)
+        if close is not None:
+            close()
+    _heal_failed_document(doc_id)
+
+
+def _heal_failed_document(doc_id: str) -> None:
+    """Give a failed run's stored chunks their owner rows (nexus-0ntxj).
+
+    Every index path upserts chunks before it writes their manifest rows. A
+    run that fails between the two leaves chunks with no manifest owner,
+    and engine v0.1.137's live(c) hides such chunks from every read: the
+    content is stored and unreachable (shakeout 7.64.1, FootPrintRAGVA
+    1.82.146/147, 395 chunks). ``nx index repo``'s end-of-run self-heal
+    repairs this only when the run reaches it and only for that verb.
+
+    This runs the same :func:`~nexus.catalog.manifest_heal.heal_manifest_gaps`
+    core on the one document, so its stored chunks stay readable. The
+    document stays ``failed`` and the next run re-indexes it; a run that
+    stored only part of a file leaves that part readable until then.
+
+    Scope: a document whose FIRST run failed (no manifest yet). A failed
+    re-index of a document that completed before is left alone on
+    purpose: its old manifest still makes the old content readable, and
+    rebuilding the manifest from the new run's chunks would replace a
+    whole document with a possibly partial one. The new run's orphaned
+    chunks stay hidden until the next run writes them again; the source
+    is still on disk, so nothing readable is lost.
+
+    Stopgap until RDR-223 writes chunks and owner rows in one request
+    (nexus-z0o2p.13/.14 and siblings); when those land this has nothing to
+    heal and can be retired.
+
+    Never raises: it runs inside a failure path whose own exception must
+    propagate unmasked.
+    """
+    reader = None
+    try:
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+        from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
+        from nexus.db import make_t3  # noqa: PLC0415 — deferred import
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return
+        entry = reader.resolve(doc_id)
+        if entry is None:
+            return
+        result = heal_manifest_gaps([entry], reader, make_t3, make_catalog_writer)
+        if result.reconciled or result.write_failed:
+            # short_of_chunk_count: the rebuild found fewer chunks than the
+            # document's recorded count, so a partial run is now readable
+            # as a partial document. index_state stays 'failed', which is
+            # what makes the next run redo it.
+            _log.warning(
+                "index_run_fail_healed_stored_chunks",
+                doc_id=doc_id, reconciled=result.reconciled,
+                write_failed=result.write_failed,
+                short_of_chunk_count=bool(result.dup_collapsed),
+            )
+    except Exception:  # noqa: BLE001 — boundary catch: the heal is advisory; must never mask the original failure
+        _log.warning("index_run_fail_heal_failed", doc_id=doc_id, exc_info=True)
+    finally:
+        close = getattr(reader, "close", None)
         if close is not None:
             close()
 

@@ -4285,6 +4285,9 @@ def preamble_rdr_fix(args: tuple[str, ...]) -> None:
     id_match = re.match(r"\d+", _id_token) if _id_token else None
     if not id_match:
         print("> **Usage**: `nx rdr preamble rdr-fix <id>`")
+        # Exit 0 on purpose: conexus/commands/rdr-fix.md runs this with no
+        # id as a context preload on every /rdr-fix (review of 5f7ab8e97),
+        # the same shape as the gate/accept/close preambles.
         return
     rdr_file = _preamble_find_rdr_file(rdr_path, id_match.group(0))
     if not rdr_file:
@@ -4781,7 +4784,9 @@ def preamble_rdr_verdict(args: tuple[str, ...]) -> None:
     tokens = [a for a in args if a.strip()]
     if len(tokens) < 2 or not re.search(r"\d+", tokens[0]):
         print("> **Usage**: `nx rdr preamble rdr-verdict <id> <critique-title>`")
-        return
+        # nexus-sis0m.4: a malformed call is a usage error, not a result a
+        # caller could read as a computed verdict.
+        raise SystemExit(2)
     id_match = re.search(r"\d+", tokens[0])
     critique_title = tokens[1].strip()
     critique_title = re.sub(r"\s*\[\d+\]\s*$", "", critique_title).rsplit("/", 1)[-1]

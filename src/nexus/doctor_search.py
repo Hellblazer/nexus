@@ -19,8 +19,9 @@ query; classifies each as:
 
 - ``matched``        — raw>0 AND kept>0. Healthy.
 - ``empty``          — raw==0. Empty or corrupt.
-- ``threshold_drop`` — raw>0 AND kept==0. nexus-rc45 class (silent
-  threshold-drop). Regression-level signal.
+- ``threshold_drop`` — the collection's nearest real neighbours fall past
+  its threshold (nexus-rc45 class, silent threshold-drop). A WARNING, not
+  an exit-2 failure; see below.
 - ``model_drift``    — registered ``embedding_model`` metadata
   disagrees with :func:`corpus.voyage_model_for_collection`.
   Regression.
@@ -28,7 +29,10 @@ query; classifies each as:
   metadata lookup.
 
 The CLI exits ``2`` when either probe produced any ``error`` /
-``threshold_drop`` / ``model_drift`` outcome, ``0`` otherwise.
+``model_drift`` outcome, ``0`` otherwise. A ``threshold_drop`` WARNS
+(Sam, 2026-09-28, nexus-dhvzx): its row names the nearest real-neighbour
+distance, the threshold, and the sample the verdict rests on, so a reader
+can judge it.
 ``--json`` emits a parseable payload covering both probes.
 """
 from __future__ import annotations
@@ -44,8 +48,11 @@ import click
 _CHASH_SHAPE = re.compile(r"chash:[0-9a-f]{64}(:\d+-\d+)?")
 
 
-# Retrieval-quality outcomes that signal a regression (exit 2).
-_FAIL_OUTCOMES = {"error", "threshold_drop", "model_drift"}
+# Retrieval-quality outcomes that signal a regression (exit 2). A
+# threshold_drop warns instead: it rests on one sampled chunk and is often
+# borderline (0.655 against 0.65 on the live tenant), so it is shown with
+# its evidence and left to the reader (Sam, 2026-09-28, nexus-dhvzx).
+_FAIL_OUTCOMES = {"error", "model_drift"}
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,12 @@ class ProbeResult:
     kept_count: int | None = None
     expected_model: str | None = None
     actual_model: str | None = None
+    # threshold_drop evidence (nexus-dhvzx): the nearest dropped (real)
+    # neighbour's distance, the collection's threshold, and how many probe
+    # chunks the verdict rests on (0 = the canned query was used).
+    nearest_distance: float | None = None
+    threshold: float | None = None
+    probe_chunks: int | None = None
 
 
 # ── Surface runners (probe 3a, production-wired) ────────────────────────────
@@ -186,6 +199,120 @@ def _default_model_for(col: str) -> str:
     return voyage_model_for_collection(col)
 
 
+#: Probe text drawn from a chunk is cut to this many characters. The whole
+#: chunk, not a prefix: a 400-char prefix of a code chunk is mostly the
+#: shared SPDX header, which finds every file's header (review, 29fab0df4).
+_PROBE_QUERY_CHARS: int = 2000
+
+#: A neighbour closer than this is duplicate text, not a real neighbour: it
+#: says nothing about the collection's distance floor.
+_DUPLICATE_DISTANCE: float = 0.02
+
+
+#: Chunks sampled per collection; the verdict is the MEDIAN of their nearest
+#: real-neighbour distances. One chunk was too noisy: 2 of 3 live drops sat
+#: within 0.005 of the threshold (critique, 29fab0df4).
+_PROBE_SAMPLES: int = 3
+
+
+def _default_probe_for(t3, col: str) -> list[tuple[str, str]]:
+    """``[(chunk_text, chunk_id), ...]``: up to ``_PROBE_SAMPLES`` of *col*'s
+    own chunks, the queries for :func:`_neighbour_probe`.
+
+    nexus-dhvzx. One canned query ("example test probe") for every
+    collection was irrelevant to most of them, so the threshold correctly
+    dropped it, 58 of 111 collections read ``threshold_drop``, and the check
+    exited 2 on every real tenant. What RDR-087 built this probe to catch is
+    a healthy collection whose natural distance floor sits above its
+    threshold (docs__art-grossberg-papers, MVV item 2): related text exists
+    but every real neighbour lands past the cut. A chunk's own text finds
+    the chunk itself, which proves nothing, so the neighbour probe excludes
+    it BY ID; a document-title query was tried and rejected on measurement
+    (chunk titles are often synthetic, "README.md:chunk-20").
+    """
+    got = t3.get_or_create_collection(col).get(include=["documents"], limit=_PROBE_SAMPLES)
+    out: list[tuple[str, str]] = []
+    for cid, doc in zip(got.get("ids") or [], got.get("documents") or []):
+        text = " ".join((doc or "").split())[:_PROBE_QUERY_CHARS]
+        if text and cid:
+            out.append((text, cid))
+    return out
+
+
+def _default_threshold_for(col: str) -> float | None:
+    from nexus.config import load_config  # noqa: PLC0415 — deferred, like this module's other imports
+    from nexus.search_engine import _threshold_for_collection  # noqa: PLC0415 — deferred import
+
+    return _threshold_for_collection(col, load_config())
+
+
+def _neighbour_probe(
+    col: str,
+    samples: list[tuple[str, str]],
+    *,
+    t3,
+    search_fn: Callable[..., Any],
+    n_results: int,
+    threshold_for: Callable[[str], float | None] | None,
+    expected: str,
+    actual: str,
+) -> "ProbeResult":
+    """Judge *col* by its sample chunks' nearest REAL neighbours.
+
+    Each sample is searched with the threshold off, its own row is removed
+    by id and near-duplicate text (distance under ``_DUPLICATE_DISTANCE``)
+    is ignored (never assumed: a re-embedded snippet of a context-embedded chunk
+    need not land near its stored vector, and counting on the self-hit
+    either hid the incident or invented one; critique, 29fab0df4), and the
+    nearest remaining distance is taken. The verdict compares the median of
+    those against the collection's threshold. No sample with a real
+    neighbour reads ``empty``.
+
+    ``raw_count`` / ``kept_count`` on the result are the real neighbours
+    judged across all samples and how many of them individually fall within
+    the threshold. They are context, not the verdict: the verdict is the
+    median of each sample's NEAREST distance, so a row can read ``matched``
+    with a low ``kept_count``.
+    """
+    import statistics  # noqa: PLC0415 — probe path only
+
+    threshold = (threshold_for or _default_threshold_for)(col)
+    nearest: list[float] = []
+    seen = kept = 0
+    try:
+        for text, self_id in samples:
+            rows = search_fn(text, [col], n_results + 1, t3,
+                             diagnostics_out=[], threshold_override=float("inf"))
+            # search_cross_corpus over-fetches (up to 4x) and returns the
+            # whole pool; judge only the n_results nearest real neighbours so
+            # the evidence line's count is the window actually used. The
+            # nearest distance is the same either way (critique, 634cc2b66).
+            real = sorted(r.distance for r in rows or []
+                          if r.id != self_id and r.distance >= _DUPLICATE_DISTANCE)[:n_results]
+            seen += len(real)
+            if threshold is not None:
+                kept += sum(1 for d in real if d <= threshold)
+            if real:
+                nearest.append(min(real))
+    except Exception as exc:  # noqa: BLE001 — probe captures any failure as ProbeResult outcome=error (diagnostic)
+        return ProbeResult(name=col, surface="retrieval_quality", outcome="error",
+                           error=f"{type(exc).__name__}: {exc}",
+                           expected_model=expected, actual_model=actual)
+    median = statistics.median(nearest) if nearest else None
+    if median is None:
+        outcome = "empty"
+    elif threshold is None or median <= threshold:
+        outcome = "matched"
+    else:
+        outcome = "threshold_drop"
+    return ProbeResult(
+        name=col, surface="retrieval_quality", outcome=outcome,
+        raw_count=seen, kept_count=kept if threshold is not None else seen,
+        expected_model=expected, actual_model=actual,
+        nearest_distance=median, threshold=threshold, probe_chunks=len(samples),
+    )
+
+
 def run_retrieval_quality_probe(
     *,
     t3,
@@ -194,6 +321,8 @@ def run_retrieval_quality_probe(
     model_for: Callable[[str], str] = _default_model_for,
     metadata_fn: Callable[[str], dict[str, Any]] | None = None,
     query: str = "example test probe",
+    probe_for: Callable[[str], list[tuple[str, str]]] | None = None,
+    threshold_for: Callable[[str], float | None] | None = None,
     n_results: int = 5,
 ) -> list[ProbeResult]:
     """Query each registered collection and classify retrieval health.
@@ -209,8 +338,13 @@ def run_retrieval_quality_probe(
         model_for: maps collection name → expected embedding_model.
         metadata_fn: ``col_name -> metadata dict``. Defaults to
             ``t3.collection_metadata`` when *None*.
-        query: canned probe query. Short so we stay inside the budget
-            (≤400 ms per A-2 measurement).
+        query: canned probe query, used for a collection when
+            ``probe_for`` is unset or yields nothing (no readable chunk).
+        probe_for: ``col_name -> [(chunk_text, chunk_id), ...]``;
+            ``run_check_search`` passes :func:`_default_probe_for`. When it
+            yields samples, :func:`_neighbour_probe` decides the verdict.
+        threshold_for: ``col_name -> distance threshold`` for the neighbour
+            probe; defaults to the search engine's per-collection threshold.
         n_results: small probe depth.
     """
     from nexus.search_engine import SearchDiagnostics  # noqa: F401,PLC0415 — deferred import; presence-probe only needed in this diagnostic
@@ -250,6 +384,14 @@ def run_retrieval_quality_probe(
                     actual_model=actual,
                 )
             )
+            continue
+
+        samples = probe_for(col) if probe_for is not None else None
+        if samples:
+            out.append(_neighbour_probe(
+                col, samples, t3=t3, search_fn=search_fn, n_results=n_results,
+                threshold_for=threshold_for, expected=expected, actual=actual,
+            ))
             continue
 
         try:
@@ -303,6 +445,9 @@ def run_retrieval_quality_probe(
                 kept_count=kept,
                 expected_model=expected,
                 actual_model=actual,
+                nearest_distance=per_col[3] if len(per_col) > 3 else None,
+                threshold=per_col[2] if len(per_col) > 2 else None,
+                probe_chunks=0,
             )
         )
     return out
@@ -315,7 +460,7 @@ _GLYPH = {
     "matched": "[\u2713]",
     "empty": "[-]",
     "error": "[\u2717]",
-    "threshold_drop": "[\u2717]",
+    "threshold_drop": "[!]",
     "model_drift": "[\u2717]",
 }
 
@@ -327,6 +472,15 @@ def _format_probe_section(title: str, results: list[ProbeResult]) -> list[str]:
         detail_parts: list[str] = []
         if r.raw_count is not None:
             detail_parts.append(f"raw={r.raw_count} kept={r.kept_count}")
+        if r.outcome == "threshold_drop":
+            near = f"{r.nearest_distance:.3f}" if r.nearest_distance is not None else "?"
+            thr = f"{r.threshold:.3f}" if r.threshold is not None else "?"
+            basis = (f"{r.probe_chunks} probe chunk(s) and {r.raw_count} neighbour(s)"
+                     if r.probe_chunks else "the canned query (no readable chunk)")
+            label = "median nearest real neighbour" if r.probe_chunks else "nearest dropped candidate"
+            detail_parts.append(
+                f"{label} d={near} > threshold {thr}; verdict rests on {basis}"
+            )
         if r.outcome == "model_drift":
             detail_parts.append(
                 f"expected={r.expected_model} actual={r.actual_model}"
@@ -366,7 +520,7 @@ def format_combined_human(
     lines.append(
         f"Summary: {rq.get('matched', 0)} matched, "
         f"{rq.get('empty', 0)} empty, "
-        f"{rq.get('threshold_drop', 0)} threshold_drop, "
+        f"{rq.get('threshold_drop', 0)} threshold_drop (warning), "
         f"{rq.get('model_drift', 0)} model_drift, "
         f"{rq.get('error', 0)} error."
     )
@@ -441,6 +595,7 @@ def run_check_search(*, json_out: bool) -> None:
                     run_retrieval_quality_probe(
                         t3=t3,
                         collections=collections,
+                        probe_for=lambda col: _default_probe_for(t3, col),
                     )
                 )
 

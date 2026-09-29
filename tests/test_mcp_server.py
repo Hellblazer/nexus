@@ -2026,6 +2026,36 @@ def test_search_structured_true_wire_call_unchanged():
     assert "truncated_chars" not in result
 
 
+def test_search_structured_tumblers_carry_the_attached_doc_id():
+    """nexus-kkqv7: every structured row's tumbler was "" because the
+    envelope read metadata["tumbler"] while search_cross_corpus attaches the
+    catalog tumbler as metadata["doc_id"]. A plan step reading
+    $stepN.tumblers (plan 473's traverse seeds) got empties. This runs the
+    REAL attach step, so the test fails whenever the two sides disagree on
+    the key, not just when this read changes."""
+    from nexus.search_engine import _attach_doc_ids_from_catalog
+
+    _mock_t3([{"name": "code__test", "count": 1}])
+
+    class _Catalog:
+        def docs_for_chashes(self, chashes):
+            return {c: ["1.1.4830"] for c in chashes}
+
+    def _cross_corpus(*a, **kw):
+        rows = [SearchResult(id="r1", content="x", distance=0.1,
+                             collection="code__test",
+                             metadata={"chunk_text_hash": "a" * 64})]
+        _attach_doc_ids_from_catalog(rows, _Catalog())
+        return rows
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        # A query no other test uses: the page-turn cache (nexus-e4srp) is
+        # process-wide and would serve another test's rows for query="x".
+        result = search(query="kkqv7 tumbler probe", corpus="code__test", structured=True)
+    assert result["tumblers"] == ["1.1.4830"]
+
+
 def test_search_structured_partial_mismatch_carries_warnings_key():
     """nexus-vply6 fix round 2, point 2: a call that DID return results
     but also skipped a collection (the SAME SearchDiagnostics.
@@ -2755,3 +2785,149 @@ def test_resolve_corpus_target_funnel_pinned(monkeypatch):
         "rgcache,quarantine-docs__x,code__myrepo__voyage-code-3__v1", t3=None,
     )
     assert target == all_names
+
+
+def test_search_refuses_a_limit_past_the_documented_cap():
+    """nexus-zdzm5: limit=301 returned 301 rows (118 KB) though the tool
+    documents limit <= 300. It is refused, with the paging remedy."""
+    text = search(query="zdzm5 limit probe", corpus="code__test", limit=301)
+    assert text.startswith("Error: limit must be between 1 and 300, got 301")
+    assert "offset" in text
+    assert search(query="zdzm5 limit probe", corpus="code__test", limit=0,
+                  structured=True)["error"].startswith("limit must be")
+
+
+def test_search_error_is_marked_in_structured_content():
+    """nexus-zdzm5: a failed search rode out as empty ids in a success-shaped
+    structuredContent, the error only in the text block, so a client that
+    reads structuredContent (nexus's own does) saw "no hits"."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+    result = search(query="zdzm5 error probe", corpus="no_such_corpus_zz")
+    assert result.isError is True
+    assert "no_such_corpus_zz" in result.structuredContent["error"]
+    assert result.structuredContent["ids"] == []
+
+
+def test_lexical_search_asks_for_the_rerank_and_orders_by_it():
+    """nexus-zdzm5 (surface A A2, RDR-217): MCP search never requested the
+    server rerank, so a lexical row (vector distance usually the worst in the
+    window) was ordered by distance and cut; lexical=true changed the scores
+    and not the rows. It now reranks, and rerank-scored rows lead."""
+    t3 = _mock_t3([{"name": "code__test", "count": 1}])
+    t3.supports_server_rerank = True
+    seen: dict = {}
+
+    def _cross_corpus(*a, **kw):
+        seen.update(kw)
+        return [
+            SearchResult(id="vector-near", content="x", distance=0.1,
+                         collection="code__test", metadata={}),
+            SearchResult(id="lexical-far", content="x", distance=0.9,
+                         collection="code__test", metadata={"rerank_score": 0.95}),
+            SearchResult(id="scored-mid", content="x", distance=0.2,
+                         collection="code__test", metadata={"rerank_score": 0.5}),
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="zdzm5 lexical probe", corpus="code__test",
+                        lexical=True, structured=True)
+    assert seen["rerank"] is True
+    assert result["ids"] == ["lexical-far", "scored-mid", "vector-near"]
+
+
+def test_a_non_lexical_search_does_not_ask_for_the_rerank():
+    t3 = _mock_t3([{"name": "code__test", "count": 1}])
+    t3.supports_server_rerank = True
+    seen: dict = {}
+
+    def _cross_corpus(*a, **kw):
+        seen.update(kw)
+        return [SearchResult(id="r1", content="x", distance=0.1,
+                             collection="code__test", metadata={})]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        search(query="zdzm5 plain probe", corpus="code__test", structured=True)
+    assert seen["rerank"] is False
+
+
+def test_semantic_clustering_keeps_the_lexical_rerank_order():
+    """Review finding on a463fa4ce: cluster_by="semantic" restored the
+    pre-rerank cluster order after the rerank, putting a lexical row back
+    at its distance position. Clusters stay contiguous; the rerank orders
+    clusters and rows within them."""
+    t3 = _mock_t3([{"name": "code__test", "count": 1}])
+    t3.supports_server_rerank = True
+
+    def _cross_corpus(*a, **kw):
+        return [
+            SearchResult(id="near-a", content="x", distance=0.1, collection="code__test",
+                         metadata={"_cluster_label": "A", "rerank_score": 0.2}),
+            SearchResult(id="near-a2", content="x", distance=0.15, collection="code__test",
+                         metadata={"_cluster_label": "A", "rerank_score": 0.1}),
+            SearchResult(id="lexical-b", content="x", distance=0.9, collection="code__test",
+                         metadata={"_cluster_label": "B", "rerank_score": 0.95}),
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="zdzm5 cluster probe", corpus="code__test",
+                        lexical=True, cluster_by="semantic", structured=True)
+    assert result["ids"] == ["lexical-b", "near-a", "near-a2"]
+
+
+def test_topic_grouped_clusters_stay_contiguous_under_the_lexical_rerank():
+    """Review finding on 312751471: topic grouping labels rows _topic_label,
+    not _cluster_label; keying on _cluster_label alone collapsed every row
+    into one group and interleaved the topics."""
+    t3 = _mock_t3([{"name": "code__test", "count": 1}])
+    t3.supports_server_rerank = True
+
+    def _cross_corpus(*a, **kw):
+        return [
+            SearchResult(id="a1", content="x", distance=0.1, collection="code__test",
+                         metadata={"_topic_label": "A", "rerank_score": 0.9}),
+            SearchResult(id="b1", content="x", distance=0.2, collection="code__test",
+                         metadata={"_topic_label": "B", "rerank_score": 0.8}),
+            SearchResult(id="a2", content="x", distance=0.3, collection="code__test",
+                         metadata={"_topic_label": "A", "rerank_score": 0.1}),
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        result = search(query="topic cluster probe", corpus="code__test",
+                        lexical=True, cluster_by="semantic", structured=True)
+    assert result["ids"] == ["a1", "a2", "b1"]
+
+
+def test_the_page_cache_returns_the_note_of_the_entry_it_returns():
+    """312751471: the degrade note is read with its entry, under one lock."""
+    from nexus.mcp import core as _core
+
+    _core._page_cache_put(("k1",), ["r"], 10, [], note="degraded-1")
+    assert _core._page_cache_get(("k1",), 5) == (["r"], [], "degraded-1")
+    _core._page_cache_put(("k2",), ["s"], 10, [], note=None)
+    assert _core._page_cache_get(("k1",), 5) is None
+    assert _core._page_cache_get(("k2",), 5) == (["s"], [], None)
+
+
+def test_a_topic_grouped_text_render_prints_the_topic_headers():
+    """Critique of 29fab0df4/634cc2b66: the text header read only
+    _cluster_label, so topic-grouped results printed no headers."""
+    _mock_t3([{"name": "code__test", "count": 1}])
+
+    def _cross_corpus(*a, **kw):
+        return [
+            SearchResult(id="a1", content="alpha", distance=0.1, collection="code__test",
+                         metadata={"_topic_label": "Topic Alpha"}),
+            SearchResult(id="b1", content="beta", distance=0.2, collection="code__test",
+                         metadata={"_topic_label": "Topic Beta"}),
+        ]
+
+    with patch("nexus.search_engine.search_cross_corpus", _cross_corpus), \
+         patch("nexus.config.load_config", return_value=_HYBRID_DEFAULT_ON_CFG):
+        text = search(query="topic header probe", corpus="code__test",
+                      cluster_by="semantic").content[0].text
+    assert "── Topic Alpha ──" in text
+    assert "── Topic Beta ──" in text

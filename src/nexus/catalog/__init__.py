@@ -40,7 +40,9 @@ def resolve_tumbler(
         return None, f"Not found: {value!r}"
     except ValueError:
         pass
-    results = cat.find(value)
+    # Every match (nexus-3bafq): the exact-title pick and the ambiguity
+    # count are both wrong over the engine's 50-row default page.
+    results = cat.find_all(value)
     if results:
         exact = [r for r in results if r.title == value]
         if exact:

@@ -490,7 +490,7 @@ class TestListDocumentsGroupsByTheManifest:
         out = capsys.readouterr().out
 
         # Two documents from three chunks: the manifested pair collapses.
-        assert "(2 documents, 3 chunks)" in out, out
+        assert "(2 documents, 3 stored chunks)" in out, out
         split_rows = [ln for ln in out.splitlines() if "split note" in ln]
         assert len(split_rows) == 1, f"split note listed {len(split_rows)} times:\n{out}"
         assert "2 chunks" in split_rows[0], split_rows[0]

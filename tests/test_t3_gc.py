@@ -1456,3 +1456,38 @@ def test_gc_override_on_an_unknown_collection_says_so_out_loud(runner: CliRunner
         )
     assert "WARNING: the catalog does not know a collection named" in result.output, result.output
     assert coll in result.output
+
+
+def test_gc_counts_only_manifest_less_notes_as_protected(t3_db, active_catalog, runner):
+    """nexus-sis0m.3 (shakeout 7.64.1 F11): the "protecting N manifest-less
+    note chunk(s)" line counted every note-shaped document's chunk, including
+    ones a manifest row already referenced, while census-manifest-less read 0.
+    A note with its manifest row is not manifest-less."""
+    coll = "knowledge__test_gc_note_with_manifest"
+    long_ago = _iso(datetime.now(UTC) - timedelta(days=60))
+    chash = "e" * 64
+    tumbler = _register_note_active(active_catalog, collection=coll, chash=chash, title="owned note")
+    _seed_chunk(
+        t3_db, collection=coll, chunk_id="owned1", content="an owned note",
+        chunk_text_hash=chash, indexed_at=long_ago,
+    )
+    seed_manifest_chunks(coll, [chash])
+    active_catalog.append_manifest_chunks(tumbler, [{"chash": chash, "position": 0}], collection=coll)
+
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(main, ["t3", "gc", "-c", coll])
+
+    assert result.exit_code == 0, result.output
+    assert "manifest-less note" not in result.output, result.output
+
+
+def test_gc_refuses_an_unknown_collection_itself(t3_db, active_catalog, runner):
+    """nexus-sis0m.3 (shakeout 7.64.1 Surface E F10): a typo surfaced the
+    engine's "register it first via POST /v1/catalog/collections/upsert",
+    advice that is wrong for a typo."""
+    with patch("nexus.db.make_t3", return_value=t3_db):
+        result = runner.invoke(main, ["t3", "gc", "-c", "knowledge__no_such_collection"])
+
+    assert result.exit_code == 1, result.output
+    assert "no collection named 'knowledge__no_such_collection'" in result.output
+    assert "register it first" not in result.output

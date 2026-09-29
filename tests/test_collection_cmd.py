@@ -111,6 +111,33 @@ def test_list_prints_the_five_catalog_columns(runner, env_creds, mock_db) -> Non
         assert value in line, line
 
 
+@pytest.mark.usefixtures("cloud_mode")
+def test_list_shows_stored_beside_live_counts(runner, env_creds, mock_db) -> None:
+    """nexus-7q8zg: a quarantine sibling holds stored chunks with no live
+    owner. list printed its live count, 0, while shape and catalog verify
+    counted the stored chunks, so the two read as contradicting each other."""
+    name = "quarantine-code__1-1__voyage-code-3__v1"
+    mock_db.list_collections.return_value = [{"name": name, "count": 0, "stored_count": 8}]
+    result = _invoke_list_with_rows(runner, mock_db, [
+        _row(name, "code", "1-1", "voyage-code-3", 1024, "quarantine"),
+    ])
+    assert result.exit_code == 0, result.output
+    assert "STORED" in result.output.splitlines()[0]
+    cells = _line_for(result.output, name)[len(name):].split()
+    assert cells[:2] == ["0", "8"], cells
+
+
+def test_info_names_stored_chunks_the_live_count_hides(runner, env_creds, mock_db, monkeypatch) -> None:
+    _mock_db_for_info(mock_db, "quarantine-code__1-1__model-code__v1", 0, [{}])
+    mock_db.list_collections.return_value = [
+        {"name": "quarantine-code__1-1__model-code__v1", "count": 0, "stored_count": 8},
+    ]
+    _catalog_with_documents(monkeypatch, [])
+    result = _invoke(runner, mock_db, ["info", "quarantine-code__1-1__model-code__v1"])
+    assert result.exit_code == 0, result.output
+    assert "Chunks:      0 live, 8 stored" in result.output, result.output
+
+
 def test_list_shows_the_row_values_when_the_name_disagrees(runner, env_creds, mock_db) -> None:
     """The name says docs / owner nine / minilm-384; the catalog row says
     knowledge / 1-1 / bge 768 and is disputed. The row wins, visibly."""
@@ -231,25 +258,95 @@ def test_info_shows_embedding_model(runner, env_creds, mock_db, col_name, expect
     assert expected_model in result.output
 
 
-def test_info_shows_last_indexed_when_metadata_exists(runner, env_creds, mock_db) -> None:
-    _mock_db_for_info(mock_db, "knowledge__test", 3, [
-        {"indexed_at": "2026-02-20T08:00:00+00:00"},
-        {"indexed_at": "2026-02-22T10:23:45+00:00"},
-        {"indexed_at": "2026-02-21T12:00:00+00:00"},
+def _catalog_with_documents(monkeypatch, indexed_ats):
+    """nexus-ktsa1: info reads the latest indexed_at from the catalog's
+    documents in the collection, not by paging chunk metadata."""
+    class _Reader:
+        def collection_health_meta(self, name):
+            stamps = [t for t in indexed_ats if t]
+            return {"last_indexed": max(stamps) if stamps else None, "orphan_count": 0}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Reader())
+
+
+def test_info_shows_last_indexed_from_the_catalog(runner, env_creds, mock_db, monkeypatch) -> None:
+    _mock_db_for_info(mock_db, "knowledge__test", 3, [{}])
+    _catalog_with_documents(monkeypatch, [
+        "2026-02-20T08:00:00+00:00", "2026-02-22T10:23:45+00:00", "", "2026-02-21T12:00:00+00:00",
     ])
     result = _invoke(runner, mock_db, ["info", "knowledge__test"])
     assert result.exit_code == 0, result.output
     assert "2026-02-22T10:23:45+00:00" in result.output
+    mock_db.get_or_create_collection.return_value.get.assert_not_called()
 
 
-def test_info_shows_unknown_when_no_indexed_at(runner, env_creds, mock_db) -> None:
-    _mock_db_for_info(mock_db, "knowledge__legacy", 2, [
-        {"title": "doc_without_ts"},
-        {"title": "another_without_ts"},
-    ])
+def test_info_shows_unknown_when_no_indexed_at(runner, env_creds, mock_db, monkeypatch) -> None:
+    _mock_db_for_info(mock_db, "knowledge__legacy", 2, [{}])
+    _catalog_with_documents(monkeypatch, ["", ""])
     result = _invoke(runner, mock_db, ["info", "knowledge__legacy"])
     assert result.exit_code == 0, result.output
     assert "unknown" in result.output.lower()
+
+
+def test_info_names_a_catalog_read_failure(runner, env_creds, mock_db, monkeypatch) -> None:
+    _mock_db_for_info(mock_db, "knowledge__test", 3, [{}])
+
+    class _Broken:
+        def collection_health_meta(self, name):
+            raise RuntimeError("engine down")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda: _Broken())
+    result = _invoke(runner, mock_db, ["info", "knowledge__test"])
+    assert result.exit_code == 0, result.output
+    assert "catalog could not be read: engine down" in result.output, result.output
+
+
+def test_info_says_when_the_row_and_name_models_disagree(runner, env_creds, mock_db, monkeypatch) -> None:
+    name = "docs__nine__minilm-l6-v2-384__v1"
+    _mock_db_for_info(mock_db, name, 3, [{}])
+    mock_db.list_collections.return_value = [
+        {"name": name, "count": 3, "embedding_model": "bge-base-en-v15-768"},
+    ]
+    _catalog_with_documents(monkeypatch, [])
+    result = _invoke(runner, mock_db, ["info", name])
+    assert result.exit_code == 0, result.output
+    assert "bge-base-en-v15-768 (catalog row; the name says minilm-l6-v2-384)" in result.output, result.output
+
+
+def test_info_does_not_invent_a_disagreement_for_a_subject_name(runner, env_creds, mock_db, monkeypatch) -> None:
+    """A subject name encodes no model, so it cannot disagree with the row."""
+    name = "knowledge__distributed-systems"
+    _mock_db_for_info(mock_db, name, 3, [{}])
+    mock_db.list_collections.return_value = [
+        {"name": name, "count": 3, "embedding_model": "bge-base-en-v15-768"},
+    ]
+    _catalog_with_documents(monkeypatch, [])
+    result = _invoke(runner, mock_db, ["info", name])
+    assert result.exit_code == 0, result.output
+    assert "Index model: bge-base-en-v15-768\n" in result.output, result.output
+    assert "the name says" not in result.output
+
+
+def test_info_prints_the_rows_model_not_the_local_embedder(runner, env_creds, mock_db, monkeypatch) -> None:
+    """nexus-sis0m F8: a local install printed its local embedder's name for
+    every collection. The row's embedding_model is the truth."""
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    _mock_db_for_info(mock_db, "code__nexus__model-code__v1", 5, [{}])
+    mock_db.list_collections.return_value = [
+        {"name": "code__nexus__model-code__v1", "count": 5, "embedding_model": "model-row"},
+    ]
+    _catalog_with_documents(monkeypatch, [])
+    result = _invoke(runner, mock_db, ["info", "code__nexus__model-code__v1"])
+    assert result.exit_code == 0, result.output
+    assert "Index model: model-row" in result.output
+    assert "Query model: model-row" in result.output
+    assert "(local)" not in result.output
 
 
 # ── delete ──────────────────────────────────────────────────────────────────

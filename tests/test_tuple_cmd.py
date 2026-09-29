@@ -82,6 +82,106 @@ class TestTupleOutRd:
         assert "Error" in rd.output
 
 
+class TestTupleRdPaging:
+    """nexus-sh1ea: ``nx tuple rd`` returned the OLDEST rows, one engine read
+    caps at 300, and nothing said more existed or how to get them."""
+
+    ROWS = 310
+
+    @pytest.fixture
+    def seeded(self, t2_service_env) -> str:
+        addr = _uniq("page")
+        store = HttpTupleStore()
+        try:
+            for i in range(self.ROWS):
+                store.out(f"mailbox/{addr}", {"to": addr}, {"from": "pager"}, f"m{i:04d}", nonce=_uniq("n"))
+        finally:
+            store.close()
+        return addr
+
+    def _rd(self, addr: str, *extra: str):
+        res = CliRunner().invoke(tuple_group, ["rd", f"mailbox/{addr}", "--pattern", f"to={addr}", "--json", *extra])
+        assert res.exit_code == 0, res.output
+        return [r["body"] for r in _last_json_line(res.stdout)], res.stderr
+
+    def test_a_full_page_says_so_and_its_cursor_reaches_the_rest(self, seeded) -> None:
+        bodies, err = self._rd(seeded, "-n", "300")
+        assert bodies == [f"m{i:04d}" for i in range(300)]
+        assert "nx tuple rd: truncated" in err and "--since '" in err, err
+        cursor = err.split("--since '", 1)[1].split("'", 1)[0]
+        rest, err2 = self._rd(seeded, "-n", "300", "--since", cursor)
+        assert rest == [f"m{i:04d}" for i in range(300, self.ROWS)]
+        assert "truncated" not in err2
+
+    def test_asking_past_the_read_cap_is_not_silent(self, seeded) -> None:
+        bodies, err = self._rd(seeded, "-n", "500")
+        assert len(bodies) == 300
+        assert "asked for 500" in err and "more exist" in err, err
+
+    def test_all_reads_every_row(self, seeded) -> None:
+        bodies, err = self._rd(seeded, "--all")
+        assert bodies == [f"m{i:04d}" for i in range(self.ROWS)]
+        assert "truncated" not in err
+
+    def test_newest_returns_the_latest_rows(self, seeded) -> None:
+        bodies, _ = self._rd(seeded, "--newest", "-n", "5")
+        assert bodies == [f"m{i:04d}" for i in range(self.ROWS - 5, self.ROWS)]
+
+    def test_all_stops_at_max_rows_and_says_where_to_resume(self, seeded) -> None:
+        bodies, err = self._rd(seeded, "--all", "--max-rows", "100")
+        assert bodies == [f"m{i:04d}" for i in range(100)]
+        assert "stopped at --max-rows 100" in err and "--since '" in err, err
+
+    def test_a_page_that_ends_the_data_is_not_reported_truncated(self, seeded) -> None:
+        bodies, err = self._rd(seeded, "-n", str(self.ROWS))
+        assert len(bodies) == 300
+        assert "truncated" in err  # the engine capped at 300; rows remain
+        cursor = err.split("--since '", 1)[1].split("'", 1)[0]
+        rest, err2 = self._rd(seeded, "-n", "10", "--since", cursor)
+        assert len(rest) == 10 and "truncated" not in err2, err2
+
+    def test_a_store_that_cannot_be_built_reports_instead_of_tracing(self, monkeypatch) -> None:
+        import nexus.commands.tuple_cmd as tc  # noqa: PLC0415 — test-local import
+
+        def _boom():
+            raise RuntimeError("no T2 endpoint")
+
+        monkeypatch.setattr(tc, "_store", _boom)
+        res = CliRunner().invoke(tuple_group, ["rd", "mailbox/x"])
+        assert res.exit_code == 1
+        assert "Error: RuntimeError: no T2 endpoint" in res.output
+        assert res.exception is None or isinstance(res.exception, SystemExit)
+
+    def test_a_bare_timestamp_since_is_refused(self, t2_service_env) -> None:
+        res = CliRunner().invoke(tuple_group, ["rd", "mailbox/x", "--since", "2026-09-28T10:00:00Z"])
+        assert res.exit_code == 2
+        assert "CREATED_AT,ID" in res.output
+
+    def test_newest_past_max_rows_exits_non_zero(self, seeded) -> None:
+        res = CliRunner().invoke(tuple_group, [
+            "rd", f"mailbox/{seeded}", "--pattern", f"to={seeded}", "--json",
+            "--newest", "-n", "5", "--max-rows", "100",
+        ])
+        assert res.exit_code == 3, res.output
+        assert "not the newest" in res.stderr
+
+    def test_all_at_exactly_max_rows_is_not_reported_truncated(self, seeded) -> None:
+        bodies, err = self._rd(seeded, "--all", "--max-rows", str(self.ROWS))
+        assert len(bodies) == self.ROWS
+        assert "truncated" not in err
+
+
+def test_every_reader_of_the_truncation_marker_spells_it_as_the_cli_does() -> None:
+    """The census and the relay-ack sweep key on the marker text to refuse a
+    partial read; a rewording in the CLI alone would silently reopen the
+    undercount (critique of 195b1bb1b)."""
+    from nexus.commands.tuple_cmd import TRUNCATION_MARKER  # noqa: PLC0415 — test-local import
+
+    repo = Path(__file__).resolve().parents[1]
+    for rel in ("src/nexus/hooks/expectations.py", "scripts/check_inbound_relay_acks.py"):
+        assert f'"{TRUNCATION_MARKER}' in (repo / rel).read_text(), rel
+
+
 class TestTupleInAckNack:
     def test_in_then_ack(self, t2_service_env) -> None:
         addr = _uniq("addr")

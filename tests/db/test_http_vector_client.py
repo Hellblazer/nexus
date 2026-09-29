@@ -2224,6 +2224,57 @@ class TestPostTypedErrorDetail:
         assert str(exc.value) == "POST /v1/vectors/search → HTTP 500: internal server error"
 
 
+class TestUnregisteredCollectionMessage:
+    """nexus-zdzm5 (7.64.1 shakeout surface C F9, surface E F10): the engine's
+    typed "not registered" 422 ends "register it first via POST
+    /v1/catalog/collections/upsert". store_list, store_get, search and
+    nx t3 gc surfaced that for a collection name that simply does not exist,
+    advising a write endpoint from a read tool. The client now says the
+    collection does not exist and how to check the name, and keeps the
+    "not registered" words the write-retry detector keys on."""
+
+    _BODY = (b'{"error":"collection \'knowledge__nope__model-ctx__v1\' is not '
+             b'registered for tenant \'default\' \u2014 register it first via POST '
+             b'/v1/catalog/collections/upsert","tenant":"default",'
+             b'"collection":"knowledge__nope__model-ctx__v1"}')
+
+    def _raise(self, monkeypatch, code=422, body=None):
+        import io
+        import urllib.error
+
+        import nexus.db.http_vector_client as hv
+
+        err = urllib.error.HTTPError(url="http://svc/v1/x", code=code, msg="err", hdrs={},
+                                     fp=io.BytesIO(self._BODY if body is None else body))
+        monkeypatch.setattr(hv, "_request", lambda *a, **k: (_ for _ in ()).throw(err))
+        return hv
+
+    @pytest.mark.parametrize("verb", ["post", "get"])
+    def test_a_read_says_the_collection_does_not_exist(self, monkeypatch, verb):
+        hv = self._raise(monkeypatch)
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/get", {}) if verb == "post" else hv._get("/v1/vectors/x")
+        text = str(exc.value)
+        assert exc.value.code == 422
+        assert "'knowledge__nope__model-ctx__v1' is not registered" in text
+        assert "does not exist here" in text and "nx collection list" in text
+        assert "/v1/catalog/collections/upsert" not in text
+
+    def test_the_write_retry_detector_still_recognises_it(self, monkeypatch):
+        from nexus.corpus import _looks_like_stale_registration_error
+
+        hv = self._raise(monkeypatch)
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/upsert-chunks", {})
+        assert _looks_like_stale_registration_error(exc.value)
+
+    def test_another_422_is_untouched(self, monkeypatch):
+        hv = self._raise(monkeypatch, body=b'{"error":"names a different model"}')
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/upsert-chunks", {})
+        assert str(exc.value) == "POST /v1/vectors/upsert-chunks → HTTP 422: names a different model"
+
+
 # ── RDR-001 nexus-kf679: managed-endpoint failure reframing ───────────────────
 
 

@@ -112,13 +112,19 @@ class TestUpgradeServiceModeShortCircuit:
     def _service_backend(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("NX_STORAGE_BACKEND", "service")
 
-    def test_reports_immutable_source_and_exits_zero(
+    def test_reports_no_local_migration_and_exits_zero(
         self, runner: CliRunner, tmp_path: Path,
     ) -> None:
+        # The retired "immutable SQLite/Chroma source" wording went with
+        # 675a64725; it survived here only because tmp_path's own directory
+        # name (test_reports_immutable_...) reached the output on a box whose
+        # upgrade printed a path.
         result = runner.invoke(main, ["upgrade"])
         assert result.exit_code == 0, result.output
-        assert "immutable" in result.output.lower(), result.output
-        assert "no local schema migration to run" in result.output.lower()
+        out = result.output.lower()
+        assert "no local schema migration to run" in out, result.output
+        assert "the service applies its own schema" in out, result.output
+        assert "sqlite" not in out and "chroma" not in out, result.output
 
     def test_never_creates_or_touches_the_local_db(
         self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

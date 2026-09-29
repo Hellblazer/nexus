@@ -211,6 +211,17 @@ class TestTheProjectionCall:
         proj._project("start", {})
         assert emitted == ["tuple_projection_ok"]
 
+    def test_a_dropped_harness_internal_stop_is_not_logged_as_ok(self, monkeypatch, tmp_path):
+        """nexus-uzntx follow-up: the real project() drops a report with no
+        agent_type and no transcript, and "tuple_projection_ok" for it read as
+        a posted report, which sent a gate diagnosis after a collision that
+        did not exist. No network is reached on this path."""
+        emitted: list[str] = []
+        monkeypatch.setattr(proj, "_emit", lambda _lvl, ev, **_kw: emitted.append(ev))
+        proj._project("report", {"session_id": "s-orphan", "agent_id": "a-orphan",
+                                 "agent_transcript_path": str(tmp_path / "never-written.jsonl")})
+        assert emitted == ["tuple_projection_dropped_orphan"]
+
 
 # ── Mock /v1/tuples/out engine (mirrors tests/hooks/test_tuple_ledger_project.py) ──
 

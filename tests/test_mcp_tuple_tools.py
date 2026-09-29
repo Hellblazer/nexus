@@ -82,6 +82,9 @@ class TestTupleOutRd:
         rows = tuple_rd("no-such-subspace/xyz", {})
         assert isinstance(rows, list) and len(rows) == 1
         assert "error" in rows[0]
+        # nexus-zdzm5: was {"error": "Error: ..."}, a doubled prefix the
+        # text-tool error helper added inside a dict-shaped result.
+        assert not rows[0]["error"].startswith("Error:"), rows[0]["error"]
 
 
 class TestTupleInAckNack:
@@ -286,7 +289,10 @@ class TestTupleRenew:
         result = tuple_renew("0" * 64, "nobody", 30)
         assert isinstance(result, dict)
         assert "error" in result
-        assert "Error" in result["error"]
+        # nexus-zdzm5: the dict key already says error; the text no longer
+        # carries a second "Error:" prefix.
+        assert "no live claim" in result["error"]
+        assert not result["error"].startswith("Error:")
 
     def test_renew_by_a_different_claimant_returns_error_dict(self, t2_service_env) -> None:
         addr = _uniq("addr")

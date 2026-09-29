@@ -1908,6 +1908,15 @@ def _t1_session_shutdown() -> None:
     import structlog  # noqa: PLC0415 — branch-local logging in fallback/best-effort path
     _log = structlog.get_logger(__name__)
 
+    # nexus-mgu1k: drain flagged scratch entries to T2 BEFORE the lease and
+    # the session token go. The detached SessionEnd flush used to do this,
+    # racing this very teardown on the same stdin EOF, and it lost every time
+    # measured (6 of 6 session_end events, 2026-09-27/28): by the time it ran,
+    # the lease below was unlinked and the token revoked, so the rows were
+    # unreachable. The owner drains first; the SessionEnd flush stays as a
+    # best-effort second chance (T2 puts upsert, so running both is safe).
+    _flush_flagged_t1_entries(session_id)
+
     # nexus-c8yvj: remove the published lease FIRST so a stale lease is
     # never read by a later, unrelated process once this session has
     # genuinely ended (mirrors the existing t1_addr.<session_id>
@@ -1918,13 +1927,101 @@ def _t1_session_shutdown() -> None:
         clear_t1_session_lease(session_id, nexus_config_dir())
     except Exception as _exc:  # noqa: BLE001 — boundary catch; best-effort cleanup, must not crash teardown
         _log.warning("t1_session_lease_clear_failed", session_id=session_id, error=str(_exc))
-    try:
-        from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-        with HttpTokenStore(prefer_data_token=True) as _ts:  # nexus-maf9l
-            _ts.close_session(session_id)
-        _log.info("t1_session_token_closed", session_id=session_id)
-    except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
-        _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
+    # The revoke is bounded the same way as the flush: HttpTokenStore's client
+    # waits up to 30 s plus a 12 s rebind retry, and this runs in the SIGTERM
+    # handler's synchronous chain (critique of cf234888a). An abandoned revoke
+    # leaves the token to expire on its own TTL.
+    token_outcome: dict[str, str] = {}
+
+    def _revoke() -> None:
+        try:
+            from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            with HttpTokenStore(prefer_data_token=True) as _ts:  # nexus-maf9l
+                _ts.close_session(session_id)
+            token_outcome["ok"] = ""
+            _log.info("t1_session_token_closed", session_id=session_id)
+        except Exception as _exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning, must not crash caller
+            token_outcome["error"] = str(_exc)
+            _log.warning("t1_session_token_close_failed", session_id=session_id, error=str(_exc))
+
+    revoker = threading.Thread(target=_revoke, name="t1-token-revoke", daemon=True)
+    revoker.start()
+    revoker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
+    if not token_outcome:
+        _log.warning(
+            "t1_session_token_close_incomplete", session_id=session_id,
+            timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
+        )
+
+
+#: Upper bound on each networked teardown step, the flush and the token
+#: revoke (nexus-mgu1k). Chosen, not measured: no harness SIGTERM-to-SIGKILL
+#: grace is documented, so the worst case for the whole teardown is two of
+#: these, not a figure checked against a real grace period.
+_TEARDOWN_FLUSH_TIMEOUT_S: float = 5.0
+
+
+def _flush_flagged_t1_entries(session_id: str) -> int:
+    """Write this session's flagged T1 scratch entries to T2; return how
+    many. Never raises: a teardown step must not stop the lease clear and
+    token revoke that follow it (nexus-mgu1k).
+
+    Bounded as a whole: this runs inside _sigterm_handler's synchronous
+    chain, and a slow or unreachable engine must not delay the lease clear
+    and token revoke past the harness's shutdown grace, which would turn
+    SIGTERM into SIGKILL and skip both (the nexus-c8yvj leak). Every network
+    step (resolving the store, listing flagged entries, the T2 writes) runs
+    in one daemon thread joined for at most _TEARDOWN_FLUSH_TIMEOUT_S; work
+    still in flight at the bound is abandoned to that thread."""
+    import structlog  # noqa: PLC0415 — branch-local logging in a best-effort teardown path
+    _log = structlog.get_logger(__name__)
+    outcome: dict[str, Any] = {}
+
+    def _work() -> None:
+        try:
+            from nexus.mcp_infra import get_t1, t2_index_write  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+
+            t1, _ = get_t1()
+            entries = list(t1.flagged_entries())
+            outcome["pending"] = len(entries)
+            if not entries:
+                outcome["flushed"] = 0
+                return
+
+            def _put_all(db) -> int:
+                for entry in entries:
+                    db.memory.put(
+                        project=entry["flush_project"],
+                        title=entry["flush_title"],
+                        content=entry["content"],
+                        tags=entry.get("tags", ""),
+                        ttl=None,
+                    )
+                return len(entries)
+
+            outcome["flushed"] = t2_index_write(_put_all, op="t1_teardown_flush")
+            _log.info("t1_teardown_flush_complete", session_id=session_id, flushed=outcome["flushed"])
+        except Exception as exc:  # noqa: BLE001 — boundary catch; best-effort teardown, failure surfaced via log.warning
+            outcome["error"] = str(exc)
+            # Logged here, not by the caller, so an outcome that arrives after
+            # the bound is recorded whenever the process lives long enough to
+            # reach this line: the lifespan finally and atexit paths do. The
+            # SIGTERM path does not, since _sigterm_handler calls os._exit right
+            # after the teardown and that kills this thread (review of
+            # a956bb57f; critique of 822d9dcec).
+            _log.warning("t1_teardown_flush_failed", session_id=session_id, error=str(exc))
+
+    worker = threading.Thread(target=_work, name="t1-teardown-flush", daemon=True)
+    worker.start()
+    worker.join(_TEARDOWN_FLUSH_TIMEOUT_S)
+    if "flushed" in outcome:
+        return outcome["flushed"]
+    if "error" not in outcome:
+        _log.warning(
+            "t1_teardown_flush_incomplete", session_id=session_id,
+            pending=outcome.get("pending"), timeout_s=_TEARDOWN_FLUSH_TIMEOUT_S,
+        )
+    return 0
 
 
 def _t1_shutdown() -> None:
@@ -2542,12 +2639,25 @@ def _search_render(
         # zero-hit can surface the closest dropped candidate (the MCP tool
         # turns it into an actionable message; the engine still emits no stderr).
         diag: list = []
+        #: nexus-zdzm5: set when a lexical call's server rerank degraded, so
+        #: its lexical rows went back to vector-distance order (RDR-188 Gap 2:
+        #: a degrade is surfaced, never only logged).
+        rerank_note: str | None = None
         cached = _page_cache_get(cache_key, need)
         if cached is not None:
-            results, diag = cached
+            results, diag, rerank_note = cached
         else:
             results = None
         if results is None:
+            # nexus-zdzm5 (RDR-217 A2): a lexical row's vector distance is
+            # usually the worst in its window, and RDR-217 forbids ordering
+            # across the two legs by distance. Only the server rerank scores
+            # rows on their text, and this path never asked for it, so
+            # lexical=true changed the page's scores and not its rows. Ask
+            # for it whenever lexical is on (the CLI already reranks the
+            # multi-collection case; see search_cmd.py).
+            lexical_rerank = lexical and bool(getattr(t3, "supports_server_rerank", False))
+            rerank_meta: dict = {}
             with _t2_ctx() as _t2_db:
             # ``telemetry`` wired for RDR-087 Phase 2.2 hot-path logging;
             # opt-out via ``telemetry.search_enabled=false`` in .nexus.yml.
@@ -2562,6 +2672,8 @@ def _search_render(
                     lexical=lexical,
                     telemetry=_t2_db.telemetry,
                     diagnostics_out=diag,
+                    rerank=lexical_rerank,
+                    rerank_meta_out=rerank_meta if lexical_rerank else None,
                 )
             # hybrid scoring + RDR-055 E2 quality boost — parity
             # with the CLI (search_cmd.py), which has applied both since
@@ -2575,6 +2687,22 @@ def _search_render(
                 tuning=get_tuning_config(),
                 catalog=_get_catalog(),
             )
+            if lexical_rerank:
+                # Same consumption as the CLI's: scored rows lead in server
+                # relevance order; rows a degraded collection left unscored
+                # follow in boosted order, since the two scales differ.
+                scored = [r for r in results if "rerank_score" in r.metadata]
+                for r in scored:
+                    r.hybrid_score = float(r.metadata["rerank_score"])
+                scored.sort(key=lambda r: float(r.metadata["rerank_score"]), reverse=True)
+                results = scored + [r for r in results if "rerank_score" not in r.metadata]
+                degraded = sorted(c for c, m in rerank_meta.items() if m.get("degraded"))
+                if degraded:
+                    rerank_note = (
+                        f"lexical rerank degraded in {len(degraded)} collection(s) "
+                        f"({', '.join(degraded[:3])}{', ...' if len(degraded) > 3 else ''}); "
+                        "their lexical rows are in vector-distance order and may be cut"
+                    )
             if clustered:
                 # apply_ranking_boosts sorts by hybrid_score globally, which
                 # would scatter same-cluster results apart — the text
@@ -2585,9 +2713,27 @@ def _search_render(
                 # search_cross_corpus produced.
                 _by_id = {r.id: r for r in results}
                 results = [_by_id[i] for i in _cluster_order if i in _by_id]
+                if lexical_rerank:
+                    # The restore above would put a lexical row back in its
+                    # distance position (review finding on a463fa4ce). Keep
+                    # clusters contiguous, but order the clusters by their
+                    # best rerank score and each cluster's rows by score,
+                    # scored rows first.
+                    def _score(r) -> float:
+                        s = r.metadata.get("rerank_score")
+                        return float(s) if s is not None else float("-inf")
+
+                    groups: dict[str, list] = {}
+                    for r in results:
+                        # Topic grouping labels rows _topic_label, Ward
+                        # clustering _cluster_label (search_engine.py).
+                        key = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
+                        groups.setdefault(key, []).append(r)
+                    ordered = sorted(groups.values(), key=lambda g: max(_score(r) for r in g), reverse=True)
+                    results = [r for g in ordered for r in sorted(g, key=_score, reverse=True)]
             # Non-clustered results are now ranked by hybrid_score
             # (apply_ranking_boosts' own sort) rather than raw distance.
-            _page_cache_put(cache_key, results, fetch_n, diag)
+            _page_cache_put(cache_key, results, fetch_n, diag, note=rerank_note)
         if not results:
             if structured:
                 return _structured_no_results(diag)
@@ -2659,7 +2805,10 @@ def _search_render(
             # dict literal directly at the return statement.
             return {
                 "ids": [r.id for r in page],
-                "tumblers": [r.metadata.get("tumbler", "") for r in page],
+                # nexus-kkqv7: search_cross_corpus attaches the catalog
+                # tumbler as ``doc_id`` (_attach_doc_ids_from_catalog);
+                # nothing sets ``tumbler``, so this read every row as "".
+                "tumblers": [r.metadata.get("tumbler") or r.metadata.get("doc_id", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 # The page is ORDERED by hybrid_score, so withholding it left
                 # the consumer reading one number and being served another
@@ -2671,13 +2820,15 @@ def _search_render(
                 # has to read distance; a caller wanting to know why this row
                 # is above that one has to read hybrid_score.
                 "hybrid_scores": [float(r.hybrid_score) for r in page],
-                "collections": list({r.collection for r in page}),
+                # Sorted like query()'s: list(set) was nondeterministic and
+                # read as if aligned with ids (zdzm5 F8).
+                "collections": sorted({r.collection for r in page}),
                 "chunk_collections": [r.collection for r in page],
                 "chunk_text_hash": [
                     r.metadata.get("chunk_text_hash", "") for r in page
                 ],
-                **({"warnings": [_failed_collections_note(diag)]}
-                   if _failed_collections_note(diag) else {}),
+                **({"warnings": [w for w in (_failed_collections_note(diag), rerank_note) if w]}
+                   if (_failed_collections_note(diag) or rerank_note) else {}),
             }
 
         # nexus-onn7s: the reader instruction leads every text render, and
@@ -2690,7 +2841,9 @@ def _search_render(
         current_cluster: str | None = None
         for r in page:
             # Emit cluster header when group changes
-            cluster_label = r.metadata.get("_cluster_label", "")
+            # Topic grouping sets _topic_label, Ward clustering
+            # _cluster_label; a header prints for either (critique, 29fab0df4).
+            cluster_label = r.metadata.get("_cluster_label") or r.metadata.get("_topic_label", "")
             if clustered and cluster_label and cluster_label != current_cluster:
                 if current_cluster is not None:
                     lines.append("")  # blank separator between clusters
@@ -2728,6 +2881,8 @@ def _search_render(
         _warning_line = _failed_collections_note(diag)
         if _warning_line:
             lines.append(f"\n[{_warning_line}]")
+        if rerank_note:
+            lines.append(f"\n[{rerank_note}]")
 
         # Pagination footer
         shown_end = offset + len(page)
@@ -2817,7 +2972,7 @@ def _truncated_chars_dropped(capped_text: str, tool: str) -> tuple[bool, int]:
     structured_output=False,
 )
 def search(
-    query: Annotated[str, Field(description="Search query text, up to 256 characters.")],
+    query: Annotated[str, Field(description="Search query text.")],
     corpus: Annotated[str, Field(
         description=(
             "Corpus prefixes or full collection names, comma-separated; \"all\" for "
@@ -2872,15 +3027,19 @@ def search(
     `search_graph_hop` when the search should be scoped by catalog metadata,
     an extracted aspect field, or graph neighbours, respectively.
 
-    Returns a ranked, human-readable list of chunks by default, or, when
-    `structured=True`, `{ids, tumblers, distances, hybrid_scores, collections,
-    chunk_collections, chunk_text_hash, truncated, truncated_chars, text}`:
-    `distances` is the raw vector distance (absolute, lower is better),
-    `hybrid_scores` is what the page was SORTED by (min-max normalised within
-    this result window, higher is better, so the best of two poor hits scores
-    1.0 and so does a lone poor one -- read `distances` for a relevance
-    floor). `truncated`/`truncated_chars` say whether the text rendering cut
-    the page and by how much, and `text` is that rendering.
+    Returns a ranked, human-readable list of chunks by default, whose
+    structuredContent is `{ids, tumblers, distances, hybrid_scores,
+    collections, chunk_collections, chunk_text_hash, truncated,
+    truncated_chars, text}`. With `structured=True` it returns the bare
+    `{ids, tumblers, distances, hybrid_scores, collections,
+    chunk_collections, chunk_text_hash}` instead, with no text rendering and
+    so no `truncated`/`truncated_chars`/`text`. `distances` is the raw vector
+    distance (absolute, lower is better), `hybrid_scores` is what the page
+    was SORTED by (min-max normalised within this result window, higher is
+    better, so the best of two poor hits scores 1.0 and so does a lone poor
+    one -- read `distances` for a relevance floor). `truncated`/
+    `truncated_chars` say whether the text rendering cut the page and by how
+    much, and `text` is that rendering.
 
     Constraints:
     - Paged: `limit` <= 300 per call; advance with `offset`.
@@ -2891,6 +3050,17 @@ def search(
       within a page: text applies a per-file diversity cap, structuredContent
       does not.
     """
+    # nexus-zdzm5: the documented page cap was not enforced; limit=301
+    # returned 301 rows (118 KB). Refuse, and say how to page instead.
+    # (The description's old "up to 256 characters" query limit was never
+    # enforced by anything and the engine embeds longer queries, and nx_answer
+    # passes whole questions here, so that claim is dropped, not enforced.)
+    from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches this module's convention
+
+    if not 1 <= limit <= MAX_QUERY_RESULTS:
+        msg = (f"limit must be between 1 and {MAX_QUERY_RESULTS}, got {limit}. "
+               "Page with offset for more.")
+        return {"error": msg} if structured else f"Error: {msg}"
     result = _search_render(
         query, corpus=corpus, limit=limit, offset=offset, where=where,
         cluster_by=cluster_by, topic=topic, structured=structured,
@@ -2929,9 +3099,18 @@ def search(
         # whichever representation the client chooses to read.
         "text": result,
     }
+    # nexus-zdzm5: in structured mode _search_render returns a string only
+    # for an error (an unmatched corpus, or the tool's error boundary). It
+    # used to ride out as empty ids in a success-shaped structuredContent,
+    # the error visible only in the text block, so a structuredContent
+    # reader saw "no hits" for a failed call.
+    is_error = isinstance(data, str)
+    if is_error:
+        structured_content["error"] = data
     return CallToolResult(
         content=[TextContent(type="text", text=result)],
         structuredContent=structured_content,
+        isError=is_error,
     )
 
 
@@ -2945,7 +3124,7 @@ _page_cache_lock = threading.Lock()
 _page_cache: dict[str, Any] = {}
 
 
-def _page_cache_get(key: tuple, need: int) -> tuple[list, list] | None:
+def _page_cache_get(key: tuple, need: int) -> tuple[list, list, str | None] | None:
     """``(results, diagnostics)`` when the entry matches *key*, is TTL-fresh,
     and its fetch covered the needed window (or exhausted the corpus).
 
@@ -2962,16 +3141,20 @@ def _page_cache_get(key: tuple, need: int) -> tuple[list, list] | None:
         fetched = _page_cache.get("fetch_n", 0)
         exhausted = len(results) < fetched   # corpus smaller than the ask
         if fetched >= need or exhausted:
-            return results, _page_cache.get("diag") or []
+            # The degrade note is read under the same lock as the entry it
+            # belongs to (a separate read could see a newer entry's).
+            return results, _page_cache.get("diag") or [], _page_cache.get("note")
         return None
 
 
-def _page_cache_put(key: tuple, results: list, fetch_n: int, diag: list) -> None:
+def _page_cache_put(
+    key: tuple, results: list, fetch_n: int, diag: list, note: str | None = None,
+) -> None:
     with _page_cache_lock:
         _page_cache.clear()
         _page_cache.update({
             "key": key, "results": results, "fetch_n": fetch_n,
-            "diag": diag, "at": time.monotonic(),
+            "diag": diag, "note": note, "at": time.monotonic(),
         })
 
 
@@ -4023,12 +4206,15 @@ def query(
     question: Annotated[str, Field(description="Natural-language research question.")],
     corpus: Annotated[str, Field(
         description=(
-            "Corpus prefix or full collection name. \"knowledge\" (default) means "
-            "every knowledge__* collection, not code/docs; \"all\" for every corpus. "
-            "Overridden by the resolved catalog collections when a catalog param "
-            "(author, content_type, follow_links, subtree) is set."
+            "Corpus prefix or full collection name; \"all\" for every corpus. "
+            "Empty (default) means every knowledge__* collection when no catalog "
+            "param is set; with one (author, content_type, follow_links, "
+            "subtree), the content_type's own corpus when it names one "
+            "(code, docs, rdr, knowledge) and follow_links is unset, otherwise "
+            "every corpus, since the "
+            "catalog filter does the narrowing. An explicit corpus always applies."
         ),
-    )] = "knowledge",
+    )] = "",
     where: Annotated[str, Field(
         description=(
             "Metadata filter, KEY=VALUE comma-separated (e.g. \"tags=arch\"). "
@@ -4065,7 +4251,9 @@ def query(
     `structured=True`.
 
     Constraints:
-    - `corpus` defaults to "knowledge" only, not code/docs.
+    - With no catalog param, `corpus` defaults to "knowledge" only, not
+      code/docs; with one, it defaults to the content_type's own corpus
+      when that names one and `follow_links` is unset, else every corpus.
     - Every catalog param requires an initialized catalog plus an
       HttpVectorClient-backed T3 (every local and cloud install since
       RDR-155 P4b); it errors rather than falling back without one.
@@ -4095,6 +4283,23 @@ def query(
         # mode); this is permanently None now, kept only for that reason.
         graph_batch_info: dict | None = None
         has_catalog_params = author or content_type or follow_links or subtree
+        # nexus-p5ei5: the old default "knowledge" also applied to the
+        # catalog path, so content_type="rdr" searched knowledge__* only and
+        # reported that no document matched the catalog filters, which was
+        # false. The catalog filter narrows server-side; the default corpus
+        # there is every corpus.
+        if not corpus.strip():
+            if not has_catalog_params:
+                corpus = "knowledge"
+            elif content_type in ("code", "docs", "rdr", "knowledge") and not follow_links:
+                # A content type that names a corpus narrows to it: the same
+                # rows, without querying every other corpus's collections.
+                # Not with follow_links: the hop's targets can live in any
+                # corpus (code cites an RDR), and content_type filters only
+                # the seeds.
+                corpus = content_type
+            else:
+                corpus = "all"
 
         if has_catalog_params:
             from nexus.catalog.tumbler import Tumbler  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -4179,7 +4384,8 @@ def query(
             _no_docs_msg = (
                 f"No documents found matching catalog filters "
                 f"(author={author!r}, content_type={content_type!r}, "
-                f"subtree={subtree!r}, follow_links={follow_links!r})"
+                f"subtree={subtree!r}, follow_links={follow_links!r}) "
+                f"in corpus {corpus!r}"
             )
 
             # Disclosure envelope for a capped subtree seed list
@@ -4205,12 +4411,22 @@ def query(
                     if content_type and not author:
                         seed_entries_svc = cat.by_content_type(content_type)
                     else:
-                        seed_entries_svc = cat.find(author, content_type=content_type or None)
+                        seed_entries_svc = cat.find_all(author, content_type=content_type or None)
                         seed_entries_svc = [
                             r for r in seed_entries_svc
                             if author.lower() in (r.author or "").lower()
                         ]
-                    seed_tumblers = [str(r.tumbler) for r in seed_entries_svc if r.tumbler]
+                    all_seed_tumblers = [str(r.tumbler) for r in seed_entries_svc if r.tumbler]
+                    # Same cap and disclosure as the subtree branch above:
+                    # find_all (nexus-3bafq) made the author seed list
+                    # complete, so a broad author or content_type could hand
+                    # the graph hop an unbounded seed list.
+                    seed_tumblers = all_seed_tumblers[:_MAX_GRAPH_HOP_SEEDS]
+                    seed_scope = {
+                        "total": len(all_seed_tumblers),
+                        "used": len(seed_tumblers),
+                        "truncated": len(all_seed_tumblers) > _MAX_GRAPH_HOP_SEEDS,
+                    }
                 else:
                     # follow_links only: use question as catalog seed
                     seed_results_svc = cat.find(question)
@@ -4288,11 +4504,11 @@ def query(
                     return empty_result
                 if seed_scope is not None and seed_scope["truncated"]:
                     return (
-                        f"[WARNING: subtree seed list capped at "
+                        f"[WARNING: graph-hop seed list capped at "
                         f"{seed_scope['used']} of {seed_scope['total']} "
-                        f"documents for graph-hop traversal — results may "
-                        f"be INCOMPLETE. Narrow `subtree` or split into "
-                        f"multiple queries.]\n{_no_docs_msg}"
+                        f"documents — results may be INCOMPLETE. Narrow "
+                        f"`subtree`, `author` or `content_type`, or split "
+                        f"into multiple queries.]\n{_no_docs_msg}"
                     )
                 return _no_docs_msg
 
@@ -4349,11 +4565,11 @@ def query(
                 # nexus-descendants-seed-cap: never silent — see
                 # _MAX_GRAPH_HOP_SEEDS.
                 lines_svc.append(
-                    f"[WARNING: subtree seed list capped at "
+                    f"[WARNING: graph-hop seed list capped at "
                     f"{seed_scope['used']} of {seed_scope['total']} "
-                    f"documents for graph-hop traversal — results may be "
-                    f"INCOMPLETE. Narrow `subtree` or split into multiple "
-                    f"queries.]"
+                    f"documents — results may be INCOMPLETE. Narrow "
+                    f"`subtree`, `author` or `content_type`, or split into "
+                    f"multiple queries.]"
                 )
             lines_svc.append(f"{routing_note_svc}\n{header_svc}")
             lines_svc.append(_READER_INSTRUCTION_LINE())
@@ -4491,7 +4707,10 @@ def query(
             page = results[:limit]
             structured_result: dict = {
                 "ids": [r.id for r in page],
-                "tumblers": [r.metadata.get("tumbler", "") for r in page],
+                # nexus-kkqv7: search_cross_corpus attaches the catalog
+                # tumbler as ``doc_id`` (_attach_doc_ids_from_catalog);
+                # nothing sets ``tumbler``, so this read every row as "".
+                "tumblers": [r.metadata.get("tumbler") or r.metadata.get("doc_id", "") for r in page],
                 "distances": [float(r.distance) for r in page],
                 # This page came out of apply_ranking_boosts, which sorts
                 # descending by hybrid_score -- so a structured caller was
@@ -5321,7 +5540,14 @@ def store_get(
         # before the fix shipped (new-writes-only, no backfill;
         # nexus-0qc4b — absence is "unknown", not "not mineru").
         extraction_method = entry.get("extraction_method", "")
-        lines: list[str] = [f"ID:         {entry['id']}", f"Collection: {col_name}"]
+        # nexus-spujb: a note split to its model's token window reads back whole.
+        from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+        split = split_note_text(t3, col_name, [entry["id"]])
+        # nexus-zdzm5: the ID line names the NOTE (its first chunk, the id
+        # store_put reported), not whichever of its chunks the caller passed.
+        note_id = split[0] if split is not None else entry["id"]
+        lines: list[str] = [f"ID:         {note_id}", f"Collection: {col_name}"]
         if title:
             lines.append(f"Title:      {title}")
         if tags:
@@ -5330,10 +5556,6 @@ def store_get(
             lines.append(f"Indexed:    {indexed_at}")
         if extraction_method:
             lines.append(f"Extractor:  {extraction_method}")
-        # nexus-spujb: a note split to its model's token window reads back whole.
-        from nexus.catalog.store_hook import split_note_text  # noqa: PLC0415 — deferred for startup cost, as in store_put
-
-        split = split_note_text(t3, col_name, [entry["id"]])
         if split is not None:
             lines.append(f"Chunks:     {split[2]} (split to the embedding model's token window)")
         lines.append("")
@@ -6264,8 +6486,9 @@ def memory_search(
         description=(
             "Plain-text search query, matched against title, content, and "
             "tags. Not a query grammar — no operators. A query made entirely "
-            "of English stopwords (e.g. \"and\") is reported as an error, "
-            "not a silent empty result."
+            "of English stopwords (e.g. \"and\") can only match through titles "
+            "and tags, which keep stopwords; when nothing matches that way it "
+            "is reported as an error, not a silent empty result."
         ),
     )],
     project: Annotated[str, Field(description="Optional project filter; \"\" searches every project.")] = "",
@@ -6953,7 +7176,7 @@ def tuple_rd(
             )
         return [_tuple_row_to_dict(r) for r in rows]
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return [{"error": _mcp_tool_error("tuple_rd", e)}]
+        return [{"error": _mcp_tool_error("tuple_rd", e).removeprefix("Error: ")}]
 
 
 @mcp.tool(
@@ -6997,7 +7220,7 @@ def tuple_in(
         row, claim_id = result
         return {"tuple": _tuple_row_to_dict(row), "claim_id": claim_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_in", e)}
+        return {"error": _mcp_tool_error("tuple_in", e).removeprefix("Error: ")}
 
 
 _REPLY_FIELDS: frozenset[str] = frozenset(ReplySpec.__dataclass_fields__)
@@ -7134,7 +7357,7 @@ def tuple_renew(
         )
         return {"lease_until": lease_until.isoformat()}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_renew", e)}
+        return {"error": _mcp_tool_error("tuple_renew", e).removeprefix("Error: ")}
 
 
 @mcp.tool(
@@ -7187,7 +7410,7 @@ def tuple_registry() -> dict:
         with _t2_ctx() as db:
             return db.tuples.registry()
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_registry", e)}
+        return {"error": _mcp_tool_error("tuple_registry", e).removeprefix("Error: ")}
 
 
 @mcp.tool(
@@ -7227,7 +7450,7 @@ def tuple_list(
             out.append({"_pagination": {"next_cursor": next_cursor}})
         return out
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return [{"error": _mcp_tool_error("tuple_list", e)}]
+        return [{"error": _mcp_tool_error("tuple_list", e).removeprefix("Error: ")}]
 
 
 @mcp.tool(
@@ -7245,14 +7468,16 @@ def tuple_stats(
 
     Use `tuple_list` instead to enumerate subspaces by prefix. Returns
     `{subspace, total, available, claimed, dead, consumed,
-    expired_unpurged, oldest_created_at, newest_created_at}`.
+    expired_unpurged, oldest_created_at, newest_created_at}`. `total`
+    counts rows not yet consumed; consumed rows are counted only in
+    `consumed`.
     """
     try:
         with _t2_ctx() as db:
             c = db.tuples.subspace_stats(subspace)
         return _tuple_census_to_dict(c)
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("tuple_stats", e)}
+        return {"error": _mcp_tool_error("tuple_stats", e).removeprefix("Error: ")}
 
 
 @mcp.tool(
@@ -7323,7 +7548,7 @@ def mailbox_send(
         tuple_id, address, address_kind = _t2_index_write(_send, op="mailbox_send")
         return {"tuple_id": tuple_id, "to": address, "address_kind": address_kind, "from": from_id}
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return {"error": _mcp_tool_error("mailbox_send", e)}
+        return {"error": _mcp_tool_error("mailbox_send", e).removeprefix("Error: ")}
 
 
 def _current_subscription_session_id() -> str:
@@ -7455,7 +7680,7 @@ def tuple_subscriptions() -> list[dict]:
         subs = _subscriptions.get_or_load(t1, session_id, store_factory=_t2_ctx)
         return subs.entries()
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
-        return [{"error": _mcp_tool_error("tuple_subscriptions", e)}]
+        return [{"error": _mcp_tool_error("tuple_subscriptions", e).removeprefix("Error: ")}]
 
 
 # ── Demoted tools (plain functions, no @mcp.tool()) ──────────────────────────
@@ -7488,8 +7713,9 @@ def store_delete(doc_id: str, collection: str = "knowledge") -> str:
         # surfaced, never silent.
         #
         # nexus-c53hy (RDR-191 P2 round-2 fix): resolve-and-VERIFY before
-        # cleanup. store_delete_catalog_cleanup resolves purely by chash,
-        # with no check that doc_id is actually in col_name -- a bogus/
+        # cleanup. store_delete_catalog_cleanup resolved purely by chash
+        # when this landed (collection-scoped since nexus-r3cdg), with no
+        # check that doc_id is actually in col_name -- a bogus/
         # stale doc_id, or one paired with the wrong collection, would
         # otherwise get cleanup run unconditionally and could tombstone a
         # live, unrelated document that owns this exact chash under a
@@ -7691,7 +7917,8 @@ async def operator_rank(
     """Rank items by a natural-language criterion, via an LLM subprocess.
 
     Use `operator_filter` instead for a keep/reject decision rather than an
-    ordering. Returns items in ranked order with a rationale.
+    ordering. Returns a `ranked` list: the items in ranked order, best
+    first. No per-item rationale is returned.
     """
     from nexus.operators.dispatch import claude_dispatch  # noqa: PLC0415 — rare/branch-local path; operator dispatch deferred to call time
 
@@ -8142,16 +8369,17 @@ def traverse(
     vector-ranked in one call. Accepts either `link_types` or `purpose`,
     never both.
 
-    Returns `{"tumblers": [...], "ids": [], "collections": [...]}` for
-    `$stepN.tumblers`/`$stepN.collections` references, or the same shape
-    plus a `"warning"` key
-    (`{"tumblers": [...], "ids": [], "collections": [...], "warning": "..."}`)
-    when `purpose` does not resolve to a known name.
+    Returns `{"tumblers": [...], "ids": [...], "collections": [...]}`:
+    the reachable document tumblers, the chunk ids (chashes) of those
+    documents' manifests, and their collections (sorted). `$stepN.ids` with
+    `$stepN.collections` hydrates through `store_get_many`. When `purpose`
+    does not resolve to a known name the result is
+    `{"tumblers": [...], "ids": [...], "collections": [...], "warning": "..."}`.
 
     Constraints:
-    - `ids` is ALWAYS an empty list — this tool returns document tumblers,
-      not chunk ids; do not feed `$stepN.ids` from this tool into
-      id-keyed hydration. Use `$stepN.tumblers` instead.
+    - `ids` is capped at 300 (a two-hop walk from one note reached 1,196
+      chunks); when capped, an `ids_truncated` entry carries the total and
+      kept counts. `tumblers` is not capped.
     - `link_types` and `purpose` are mutually exclusive.
     """
     from nexus.plans.purposes import resolve_purpose  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
@@ -8207,7 +8435,7 @@ def traverse(
 
     nodes = result.get("nodes") or []
     tumblers = [str(n.tumbler) for n in nodes if hasattr(n, "tumbler")]
-    collections = list({
+    collections = sorted({
         n.physical_collection
         for n in nodes
         if hasattr(n, "physical_collection") and n.physical_collection
@@ -8235,7 +8463,16 @@ def traverse(
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass  # catalog manifest unavailable — ids stays empty
 
-    return {"tumblers": tumblers, "ids": chunk_ids, "collections": collections}
+    # nexus-zdzm5: the docstring said ids was always empty while it carried
+    # every manifest chash of every reachable document, uncapped (1,196 ids,
+    # 86 KB, from one two-hop walk in the 7.64.1 shakeout). Cap it, and say so.
+    from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, like this function's other imports
+
+    out: dict = {"tumblers": tumblers, "ids": chunk_ids[:MAX_QUERY_RESULTS],
+                 "collections": collections}
+    if len(chunk_ids) > MAX_QUERY_RESULTS:
+        out["ids_truncated"] = {"total": len(chunk_ids), "kept": MAX_QUERY_RESULTS}
+    return out
 
 
 # ── nx_answer helpers (RDR-080) ───────────────────────────────────────────────
@@ -10277,11 +10514,25 @@ async def nx_answer(
             # nexus-90gyo: what final_text structurally IS — "answered",
             # or one of the non-answer shapes (hydration_dump,
             # extractions_only, ranking_only, operator_payload, retrieval_only, listing,
-            # empty). A caller must not read final_text as prose unless
-            # this is "answered". None when the plan path never
-            # classified (see the closure declaration).
+            # empty), or, set by _error_result (nexus-f9kxd), error /
+            # planner_error / no_evidence. A caller must not read final_text
+            # as prose unless this is "answered". None on the remaining
+            # unclassified paths: the single-step fast path, a continuation
+            # handoff, and the budget-exhausted marker (which carries its
+            # own prefix).
             "answer_shape": _answer_shape,
         }
+
+    # nexus-f9kxd: single emitter for every error return. The tool contract
+    # says a degraded answer is marked -- ``[non-answer: <shape>]`` in text,
+    # a non-"answered" ``answer_shape`` when structured -- and the error
+    # paths returned bare text with ``answer_shape=None``, so a caller could
+    # not tell a failure from an answer without parsing prose.
+    def _error_result(text: str, *, shape: str = "error", **kwargs: Any) -> "str | dict":
+        nonlocal _answer_shape
+        from nexus.plans.answer_shape import NON_ANSWER_NOTICE_PREFIX  # noqa: PLC0415 — deferred: error paths only
+        _answer_shape = shape
+        return _result(f"{NON_ANSWER_NOTICE_PREFIX} {shape}] {text}", **kwargs)
 
     # nexus-h33x8.6 a4 / nexus-nyry9.2 (RDR-196 .r2): single shared
     # emitter for the budget-exhausted marker. Called from TWO sites —
@@ -10500,7 +10751,7 @@ async def nx_answer(
     # fails loudly (code-review S-4) instead of silently admitting
     # every match (negative) or rejecting every cosine match (> 1.0).
     if min_confidence is not None and not (0.0 <= min_confidence <= 1.0):
-        return _result(
+        return _error_result(
             f"min_confidence must be in [0.0, 1.0], got {min_confidence!r}"
         )
     # RDR-200 Phase 1a (nexus-4e75w.3): bounds-check the same way
@@ -10508,7 +10759,7 @@ async def nx_answer(
     # fails loudly before any dispatch rather than being silently
     # coerced by a bare truthy check further down.
     if continuation is not None and not isinstance(continuation, bool):
-        return _result(
+        return _error_result(
             f"continuation must be a bool or None, got {continuation!r}"
         )
     effective_min_confidence = (
@@ -10524,7 +10775,7 @@ async def nx_answer(
     # dispatch, exactly like a degenerate min_confidence.
     if _budget_enforcement_enabled:
         if budget_usd is not None and budget_usd <= 0:
-            return _result(f"budget_usd must be > 0, got {budget_usd!r}")
+            return _error_result(f"budget_usd must be > 0, got {budget_usd!r}")
         effective_budget_usd = budget_usd if budget_usd is not None else _derived_budget_usd
 
     if force_dynamic:
@@ -10605,7 +10856,7 @@ async def nx_answer(
                 op="plan_match",
             )
         except Exception as exc:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
-            return _result(f"Error during plan match: {exc}")
+            return _error_result(f"Error during plan match: {exc}")
 
     if not matches or not _nx_answer_match_is_hit(
         matches[0].confidence, threshold=effective_min_confidence,
@@ -10652,9 +10903,10 @@ async def nx_answer(
             # "planner returned only non-dispatchable tools: Bash, grep"
             # — so the user isn't left guessing why the inline path failed.
             reason = str(exc) or "unknown error"
-            return _result(
+            return _error_result(
                 f"No matching plan found and inline planner failed: {reason}. "
-                "Try rephrasing, or use search/query directly."
+                "Try rephrasing, or use search/query directly.",
+                shape="planner_error",
             )
     else:
         best = matches[0]
@@ -11002,7 +11254,7 @@ async def nx_answer(
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
-                return _result(str(exc), plan_id=best.plan_id, step_count=0)
+                return _error_result(str(exc), plan_id=best.plan_id, step_count=0)
 
             # Resolve the same way plan_run (Step 4 below) would: caller
             # bindings autoaliased from the question, merged over the
@@ -11043,7 +11295,7 @@ async def nx_answer(
                         )
                 except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
                     pass
-                return _result(str(exc), plan_id=best.plan_id, step_count=0)
+                return _error_result(str(exc), plan_id=best.plan_id, step_count=0)
             q = step_args.get("question", question)
             # nexus-rl59s (code review [24061] Critical): this fast path
             # bypasses plan_run, so the runner's fall-through default never
@@ -11161,7 +11413,7 @@ async def nx_answer(
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
-            return _result(
+            return _error_result(
                 f"Error in single-step query: {exc}",
                 plan_id=best.plan_id,
                 step_count=1,
@@ -11234,7 +11486,7 @@ async def nx_answer(
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; the refusal must still surface
             pass
-        return _result(str(exc), plan_id=best.plan_id, step_count=0)
+        return _error_result(str(exc), plan_id=best.plan_id, step_count=0)
 
     # nexus-nyry9.5 (RDR-196 .r5 review-fix): the retrieval-only
     # deadline exemption that used to apply here was DELETED along with
@@ -11341,7 +11593,7 @@ async def nx_answer(
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
-        return _result(
+        return _error_result(
             f"Error during plan execution: {exc}",
             plan_id=best.plan_id,
             step_count=len(_exc_step_records),
@@ -11597,7 +11849,7 @@ async def nx_answer(
                     )
             except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
                 pass
-            return _result(
+            return _error_result(
                 f"Error during plan execution: {exc}",
                 plan_id=best.plan_id,
                 step_count=len(_exc_step_records),
@@ -11737,8 +11989,8 @@ async def nx_answer(
                 )
         except Exception:  # noqa: BLE001 — graceful degradation; fallback value used, must not crash caller
             pass
-        return _result(
-            no_match, plan_id=best.plan_id,
+        return _error_result(
+            no_match, shape="no_evidence", plan_id=best.plan_id,
             step_count=len(result.steps), chunks=[],
             step_records=_result_step_records,
         )

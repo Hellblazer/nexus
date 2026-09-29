@@ -569,9 +569,11 @@ def search_cmd(query: str, limit: int, offset: int, as_json: bool) -> None:
     search for exact metadata lookups. Returns tumbler, type, and title.
     """
     cat = _get_catalog()
-    all_results = cat.find(query)
-    total = len(all_results)
-    results = all_results[offset:offset + limit]
+    # nexus-3bafq: an explicit limit, or the engine's 50-row default cut
+    # every page past the 50th match and hid the "Next page" hint.
+    fetched = cat.find(query, limit=offset + limit + 1)
+    results = fetched[offset:offset + limit]
+    total = len(fetched)
     if as_json:
         click.echo(json.dumps([e.to_dict() for e in results], indent=2))
     else:
@@ -821,7 +823,9 @@ def update_cmd(
         if owner:
             entries = cat.by_owner(Tumbler.parse(owner))
         elif search_query:
-            entries = cat.find(search_query)
+            # nexus-3bafq: every match, not the first 50 (a batch update
+            # silently skipped the rest).
+            entries = cat.find_all(search_query)
         if not entries:
             raise click.ClickException("No entries matched")
         # nexus-xedhp: batch via update_many (service mode) instead of one
@@ -1030,6 +1034,10 @@ def reconcile_cmd(dry_run: bool) -> None:
     ``content_hash`` + ``physical_collection`` are candidates for the same
     T3 rebuild; register-only ghosts (no content_hash) are deliberately
     excluded — they were never indexed, so there is nothing to rebuild.
+    A document whose first run failed has no ``content_hash`` yet; the
+    hash its run's fence recorded (``index_content_hash``) stands in
+    (nexus-0ntxj), so ``nx doctor``'s "failed index runs with hidden
+    chunks" row and this command agree.
 
     This command finds every document with that gap, rebuilds its manifest
     from the T3 chunks in its ``physical_collection`` (matched by the

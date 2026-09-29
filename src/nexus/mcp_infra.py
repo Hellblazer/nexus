@@ -3594,12 +3594,42 @@ def check_version_compatibility() -> None:
                     "plugin_name_mismatch",
                     installed_plugin_name=plugin_name,
                     expected_plugin_name=EXPECTED_PLUGIN_NAME,
+                    # nexus-qocnk: installing the new name does not remove
+                    # the old plugin, which keeps its own hooks: a stale nx
+                    # plugin kept v4.34.x hooks that auto-approved every Bash
+                    # command (nexus-452oy, GHSA-mc84-6gjq-vm2p).
                     hint=(
                         f"Plugin was renamed '{plugin_name}' -> "
                         f"'{EXPECTED_PLUGIN_NAME}' (nexus-mkj6u). In "
-                        f"Claude Code, run: /plugin install "
-                        f"{EXPECTED_PLUGIN_NAME}@nexus-plugins "
-                        "&& /reload-plugins"
+                        f"Claude Code, run: /plugin uninstall "
+                        f"{plugin_name}@nexus-plugins, then /plugin install "
+                        f"{EXPECTED_PLUGIN_NAME}@nexus-plugins, then "
+                        "/reload-plugins. The old plugin keeps its own hooks "
+                        "until it is uninstalled."
+                    ),
+                )
+
+            # nexus-qocnk (critique of 3a3afaf5a): the name check above only
+            # sees the RUNNING plugin. The dangerous shape is conexus
+            # installed correctly AND nx still installed beside it, whose
+            # hooks stay live; only the registry shows that. Every session
+            # starts this server, so this is where it has to be said.
+            try:
+                from nexus.plugin_lockstep import retired_plugin_installs  # noqa: PLC0415 — deferred, startup path
+
+                _retired = retired_plugin_installs()
+            except Exception:  # noqa: BLE001 — advisory; a registry read failure must not break MCP startup
+                _retired = []
+            if _retired:
+                log.warning(
+                    "retired_plugin_still_installed",
+                    retired=_retired,
+                    hint=(
+                        "A retired plugin is still installed and its hooks are "
+                        "still live (v4.34.x nx hooks auto-approved every Bash "
+                        "command, GHSA-mc84-6gjq-vm2p). In Claude Code, run: "
+                        + ", ".join(f"/plugin uninstall {k}" for k in _retired)
+                        + ", then /reload-plugins."
                     ),
                 )
 
