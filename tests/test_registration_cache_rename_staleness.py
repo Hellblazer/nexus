@@ -11,9 +11,11 @@ would un-retire ANY tombstone (deliberate supersedes, Phase-4 legacy names)
 and erase the evidence ``collection_shape`` reports. So an aged or retired
 cache entry is re-validated with a READ instead: superseded means the write
 is refused naming the successor, not superseded means the entry is
-re-stamped, and nothing on that path calls register or upsert. Only an
-explicit registration (a name this process never cached, or one it
-deliberately discarded) revives.
+re-stamped, and nothing on that path calls register or upsert. A name this
+process has never cached is read once before its first implicit registration
+and refused if retired, and every read failure on that path or the retry path
+fails closed. Only an explicit-kwargs registration (``nx collection reindex``,
+backfill), which skips the read, revives.
 """
 from __future__ import annotations
 
@@ -332,6 +334,27 @@ def test_retry_path_refusal_is_not_one_shot() -> None:
     assert writes.call_count == 1  # later calls were refused before writing
 
 
+def test_retry_path_refusal_keeps_the_entry_stale_not_evicted() -> None:
+    """Pins keep-stale on the retry path: swapping ``expire`` for ``discard``
+    must fail this. With the entry kept, the next call revalidates (a failing
+    read is fail-open there) and reaches the write; with it evicted, the next
+    call is cold and its read fails CLOSED before any write."""
+    w = _live_then_superseded()
+    reg = _registrar(w)
+    writes = MagicMock(side_effect=_not_registered_422())
+    with pytest.raises(SupersededCollectionWriteError):
+        write_with_registration_retry(_OLD, writes, registrar=reg)
+
+    assert _OLD in corpus._REGISTERED_COLLECTIONS
+    assert corpus._REGISTERED_COLLECTIONS.is_stale(_OLD)
+
+    w.get_collection.side_effect = httpx.ConnectError("catalog down")
+    with pytest.raises(httpx.ConnectError):  # the retry-path read, fail closed
+        write_with_registration_retry(_OLD, writes, registrar=reg)
+    assert writes.call_count == 2  # revalidation failed open and reached the write
+    assert w.register_collection.call_count == 1  # and still never re-registered
+
+
 def test_not_registered_retry_still_repairs_a_swept_collection() -> None:
     w = _writer()
     w.get_collection.return_value = None  # swept: no row at all
@@ -420,11 +443,16 @@ def test_cold_implicit_write_registers_when_the_row_is_live_or_absent() -> None:
         assert w.register_collection.call_count == 1
 
 
-def test_cold_read_failure_falls_open_to_registration() -> None:
+def test_cold_read_failure_fails_closed_and_never_registers() -> None:
+    """One failed GET followed by a good POST would revive a tombstone, so a
+    cold implicit registration that cannot read the row does not register."""
     w = MagicMock()
     w.get_collection.side_effect = httpx.ConnectError("blip")
-    ensure_collection_registered(_OLD, registrar=_registrar(w))
-    assert w.register_collection.call_count == 1
+    with pytest.raises(httpx.ConnectError):
+        ensure_collection_registered(_OLD, registrar=_registrar(w))
+    assert w.register_collection.call_count == 0
+    assert _OLD not in corpus._REGISTERED_COLLECTIONS
+    w.close.assert_called_once()  # the writer is not leaked on the refusal
 
 
 def test_explicit_kwargs_registration_still_revives_without_a_read() -> None:
@@ -511,8 +539,15 @@ def test_index_repo_refuses_a_superseded_target_after_a_failed_migration(
         "nexus.corpus._read_collection_row": {"return_value": {"superseded_by": _NEW}},
     }
     with _service_mode_patches(db, extra=extra) as mocks:
-        with pytest.raises(SupersededCollectionWriteError, match=_NEW):
+        with pytest.raises(SupersededCollectionWriteError, match=_NEW) as ei:
             _run_index(repo, _reg())
+        # The indexer cannot "write to <successor>": the message names the
+        # real remedy, with commands that exist.
+        msg = str(ei.value)
+        assert "nx index repo" in msg
+        assert f"nx collection info {_NEW}" in msg
+        assert "nx catalog doctor --collections-drift" in msg
+        assert "Write to" not in msg
         assert mocks["ensure_collection_registered"].call_count == 0
         assert mocks["_index_code_file"].call_count == 0
 
@@ -591,13 +626,84 @@ def test_ambient_live_row_registers_and_later_revalidates_by_reader(
 
 
 def test_retry_path_read_failure_propagates_and_never_re_registers() -> None:
-    w = _writer()
-    reg = _registrar(w)
+    """The cold read succeeds (live), the write 422s "not registered", and the
+    retry's read then fails: that propagates and nothing re-registers."""
+    w = MagicMock()
+    w.get_collection.side_effect = itertools.chain(
+        [{"superseded_by": ""}], itertools.repeat(httpx.ConnectError("catalog down")),
+    )
     writes = MagicMock(side_effect=_not_registered_422())
-    w.get_collection.side_effect = httpx.ConnectError("catalog down")
 
     with pytest.raises(httpx.ConnectError):
-        write_with_registration_retry(_OLD, writes, registrar=reg)
+        write_with_registration_retry(_OLD, writes, registrar=_registrar(w))
 
     assert w.register_collection.call_count == 1  # the cold registration only
     assert writes.call_count == 1
+
+
+# -- a discard that overlaps a revalidation read is not undone by it ---------
+
+
+def test_discard_during_the_read_is_not_undone_by_the_restamp(
+    clock: list[float],
+) -> None:
+    w = _writer()
+    reg = _registrar(w)
+    _prime(w, reg)
+    _age_out(clock)
+
+    def read_during_which_the_entry_is_discarded(name: str) -> dict:
+        corpus.discard_cached_registration(name)  # e.g. `nx collection reindex`
+        return {"superseded_by": ""}
+
+    w.get_collection.side_effect = read_during_which_the_entry_is_discarded
+    ensure_collection_registered(_OLD, registrar=reg)
+
+    assert _OLD not in corpus._REGISTERED_COLLECTIONS  # not re-added fresh
+
+
+@pytest.mark.parametrize("removal", ["discard", "remove", "pop", "clear"])
+def test_every_removal_bumps_the_generation(removal: str) -> None:
+    cache = corpus._REGISTERED_COLLECTIONS
+    cache.add(_OLD)
+    before = cache.generation(_OLD)
+    if removal == "discard":
+        cache.discard(_OLD)
+    elif removal == "remove":
+        cache.remove(_OLD)
+    elif removal == "pop":
+        cache.pop()
+    else:
+        cache.clear()
+    assert _OLD not in cache
+    assert cache.generation(_OLD) > before
+
+
+# -- a retired name reports the refusal, not an unrelated failure ------------
+
+
+def test_cold_refusal_is_reported_before_kwargs_derivation_and_profile_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def must_not_run(*_a, **_k):
+        raise AssertionError("derived kwargs for a name that is already retired")
+
+    monkeypatch.setattr(corpus, "collection_registration_kwargs", must_not_run)
+    monkeypatch.setattr(corpus, "_profile_model_for_content_type", must_not_run)
+    w = MagicMock()
+    w.get_collection.return_value = {"superseded_by": _NEW}
+
+    with pytest.raises(SupersededCollectionWriteError, match=_NEW):
+        ensure_collection_registered(_OLD, registrar=_registrar(w))
+    assert w.register_collection.call_count == 0
+
+
+def test_cold_profile_mismatch_still_reports_for_a_live_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(corpus, "_profile_model_for_content_type", lambda _ct: "some-other-model")
+    w = MagicMock()
+    w.get_collection.return_value = {"superseded_by": ""}
+    with pytest.raises(corpus.EmbeddingProfileMismatchError):
+        ensure_collection_registered(_OLD, registrar=_registrar(w))
+    assert w.register_collection.call_count == 0

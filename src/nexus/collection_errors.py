@@ -21,10 +21,18 @@ class SupersededCollectionWriteError(RuntimeError):
     successor instead. Exposes ``name`` and ``successor``.
     """
 
-    def __init__(self, name: str, successor: str) -> None:
+    def __init__(self, name: str, successor: str, *, remedy: str | None = None) -> None:
         self.name = name
         self.successor = successor
+        # A caller that is not itself writing to a name of its choosing (the
+        # indexer takes it from the repo's registry) says what to do instead;
+        # ``{name}`` and ``{successor}`` in *remedy* are filled in.
+        advice = (
+            remedy.format(name=name, successor=successor)
+            if remedy is not None
+            else f"Write to {successor!r} instead."
+        )
         super().__init__(
             f"collection {name!r} was superseded by {successor!r}, so a write to "
-            f"{name!r} is refused. Write to {successor!r} instead."
+            f"{name!r} is refused. {advice}"
         )
