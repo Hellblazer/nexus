@@ -844,8 +844,12 @@ smoke_verify_count "$SMOKE_PASSED" "$SMOKE_EXPECTED" || exit 1
 # these carves them out of the population it measures, which is what the
 # lived_in marker is for. Post-fix skips return to exactly 21 -- the count
 # of the last green run (32403015822, 2026-08-20T18:24).
+# Both carve-out counts collect with NX_TEST_T2_SUBSTRATE=none: collection needs
+# no engine, and a substrate-backed collect takes the machine suite lease, so a
+# peer run holding it made pytest refuse with stderr discarded here, which read
+# as "0 tests" and tripped the vacuity guard on contention, not on a count.
 LIVED_IN_EXPECTED=75  # 2026-09-05: +3 lived_in tests landed this wave
-LIVED_IN_COUNT="$(uv run pytest -m "integration and lived_in" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
+LIVED_IN_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "integration and lived_in" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$LIVED_IN_COUNT" -ne "$LIVED_IN_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: lived_in carve-out is $LIVED_IN_COUNT tests, expected exactly $LIVED_IN_EXPECTED" >&2
   echo "[gate] (a new lived_in mark must bump LIVED_IN_EXPECTED here, consciously)" >&2
@@ -880,7 +884,7 @@ fi
 # voyage/CCE embedding path has NO gate, and that is a known, recorded gap
 # rather than an accident.
 CLOUD_MODE_EXPECTED=3
-CLOUD_MODE_COUNT="$(uv run pytest -m "integration and cloud_mode" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
+CLOUD_MODE_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "integration and cloud_mode" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
 if [ "$CLOUD_MODE_COUNT" -ne "$CLOUD_MODE_EXPECTED" ]; then
   echo "[gate] VACUITY GUARD TRIPPED: cloud_mode carve-out is $CLOUD_MODE_COUNT tests, expected exactly $CLOUD_MODE_EXPECTED" >&2
   echo "[gate] (a new cloud_mode mark must bump CLOUD_MODE_EXPECTED here, consciously —" >&2
