@@ -772,11 +772,10 @@ def _port_holder(port: int) -> str | None:
     ss = shutil.which("ss")
     if ss is None:
         return None
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — collision path only
+
     try:
-        out = subprocess.run(
-            [ss, "-ltnp", f"sport = :{port}"],
-            capture_output=True, text=True, timeout=2, check=False,
-        ).stdout
+        out = run_bounded([ss, "-ltnp", f"sport = :{port}"], timeout=2).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     users = re.search(r'users:\(\((.*?)\)\)', out)
@@ -1905,6 +1904,61 @@ class StorageServiceSupervisor:
             generation=record.generation,
             port=port,
         )
+        self._project_appliance_handoff(port)
+
+    def _project_appliance_handoff(self, port: int) -> None:
+        """RDR-218 (nexus-ijue9.29): project the endpoint for the Windows client.
+
+        Only when ``NX_APPLIANCE_HANDOFF_FILE`` is set (the appliance unit sets
+        it); otherwise nothing is issued or written. Runs after the lease is
+        published, so the engine answers /health. The file carries a
+        ``mint-locked`` credential, never the root bearer (Sam's O1): the
+        credential is issued once with the root bearer, persisted beside
+        pg_credentials and reused on every later publish. Any failure is logged
+        and swallowed: the service itself is healthy, and doctor / the Windows
+        reader report the absent file distinctly.
+        """
+        from nexus.daemon.appliance_handoff import (  # noqa: PLC0415 — appliance-only path
+            HANDOFF_FILE_ENV,
+            MINT_CREDENTIAL_LABEL,
+            ROOT_TENANT,
+            ensure_mint_credential,
+            write_handoff_if_changed,
+        )
+
+        target = os.environ.get(HANDOFF_FILE_ENV, "").strip()
+        if not target:
+            return
+
+        def _issue() -> dict[str, Any]:
+            from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415
+
+            with HttpTokenStore(
+                base_url=f"http://{_SERVICE_HOST}:{port}", _token=self._service_token,
+            ) as admin:
+                issued = admin.issue_token(
+                    ROOT_TENANT, label=MINT_CREDENTIAL_LABEL, scope="mint-locked",
+                )
+            _log.info(
+                "appliance_mint_credential_issued",
+                tenant=issued.get("tenant"),
+                token_hash=issued.get("token_hash"),
+                label=MINT_CREDENTIAL_LABEL,
+            )
+            return issued
+
+        try:
+            mint_token, mint_tenant = ensure_mint_credential(self._config_dir, _issue)
+            written = write_handoff_if_changed(Path(target), port, mint_token, mint_tenant)
+        except Exception as exc:  # noqa: BLE001 — the service is healthy; report, never die
+            _log.warning(
+                "appliance_handoff_not_written",
+                path=target,
+                errno=getattr(exc, "errno", None),
+                error=str(exc),
+            )
+            return
+        _log.info("appliance_handoff_projected", path=target, port=port, written=written)
 
     def _stop_service(self) -> None:
         """Send SIGTERM (escalating to SIGKILL) to the service process group,
