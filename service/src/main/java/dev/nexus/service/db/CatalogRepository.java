@@ -7245,6 +7245,11 @@ public final class CatalogRepository {
      * refused the same way, naming the ROW's value as authoritative instead
      * of the profile's.
      *
+     * <p>An existing row's {@code owner_id} is kept too (nexus-7tys2): the client
+     * sends the owner segment of the collection's NAME on every first write in a
+     * process, and letting that replace an owner somebody registered turned a
+     * real owner into a slug. Only a {@code disputed} row takes the incoming value.
+     *
      * <p>A NEW row's {@code lifecycle_state} is {@code quarantine} when
      * either the request's {@code content_type} or {@code name} starts with
      * {@code quarantine-}, else {@code live} (bead nexus-ft04v.8 NOTES: the
@@ -7385,7 +7390,20 @@ public final class CatalogRepository {
                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                .doUpdate()
                .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
-               .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
+               // nexus-7tys2: a registered owner_id is never replaced by a later
+               // registration. The client registers a collection before its first
+               // chunk write in every process (ensure_collection_registered) and sends
+               // the owner segment it parses out of the NAME -- a slug, not an owner.
+               // The engine does not parse names (RDR-204), so it cannot tell that
+               // value from a deliberate one; a value already on the row is the one
+               // somebody registered, and it stands. The row's own owner_id is
+               // replaced only when it is the placeholder hygiene-002-1 stamped on a
+               // 'disputed' row (the tenant id), so a re-registration still repairs
+               // that one. rename writes its own owner through its own upsert.
+               .set(CATALOG_COLLECTIONS.OWNER_ID,
+                    DSL.when(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("disputed"),
+                             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
+                       .otherwise(CATALOG_COLLECTIONS.OWNER_ID))
                // RDR-204 1a: embedding_model/model_version/dimension/lifecycle_state are
                // deliberately ABSENT from this SET list — an existing row is never
                // re-pointed by the profile (or by a same-name re-registration naming its

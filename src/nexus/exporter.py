@@ -539,8 +539,9 @@ def _resolve_import_owner_tumbler(collection_name: str, reader: Any, writer: Any
 
     * A non-knowledge collection whose row's ``owner_id`` is a registered
       owner: that owner. Writers store it in the name's hyphenated form
-      (``1-1``), and ``upsertCollection`` overwrites it from the name on
-      every chunk write (nexus-7tys2), so both the stored value and its
+      (``1-1``), and before nexus-7tys2 ``upsertCollection`` overwrote it
+      from the name on every chunk write, so rows on an older engine hold
+      the name's segment. Both the stored value and its
       hyphens-as-dots form are tried, and either is used only when the
       catalog confirms it is a registered owner. A slug
       (``arcaneum-2ad2825c``) matches no owner and falls through.
