@@ -648,3 +648,47 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
     assert [r.chash for r in rows] == chashes
     for chash in chashes:
         assert chash in client.get_collection(dst).get(ids=[chash], include=[])["ids"]
+
+
+def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_env, tmp_path):
+    """nexus-wbfpw.40 (Sam, 2026-09-29: keep existing). An import that
+    resolves to a live document which already owns chunks must not replace
+    its manifest with the file's rows: the engine's manifest write deletes
+    every row for the document first, so an older export imported over a
+    re-put note hid the correction and made it reapable. The file's chunks
+    the document does not own stay unowned, and the result says how many.
+    Not integration-marked, so CI's default selection runs it."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    coll = _coll("keep-existing")
+    doc, _uri, (v1,) = _owned_doc(writer, client, coll, owner, "wbfpw40 note", ["wbfpw40 version one"])
+
+    old_export = tmp_path / "old.nxexp"
+    export_collection(db=client, collection_name=coll, output_path=old_export)
+
+    # The note is re-put: its manifest now names only v2.
+    v2_text = "wbfpw40 version two, the correction"
+    v2 = hashlib.sha256(v2_text.encode()).hexdigest()
+    client.upsert_chunks_with_embeddings(
+        coll, ids=[v2], documents=[v2_text], embeddings=[],
+        metadatas=[{"title": "wbfpw40 note", "chunk_text_hash": v2,
+                    "indexed_at": datetime.now(UTC).isoformat()}],
+    )
+    writer.write_manifest(doc, [{"chash": v2, "position": 0}], collection=coll)
+
+    result = import_collection(db=client, input_path=old_export, target_collection=coll, skip_existing=True)
+
+    assert [r.chash for r in reader.get_manifest(doc)] == [v2], "the import replaced the current manifest"
+    assert v2 in client.get_collection(coll).get(ids=[v2], include=[])["ids"], "the correction must stay visible"
+    assert v1 not in client.get_collection(coll).get(ids=[v1], include=[])["ids"], "the old export must not resurrect v1"
+    assert result["owned_count"] == 0
+    assert result["unowned_count"] == 1
+
+    # Control: re-importing a CURRENT export is a no-op that reports its chunk owned.
+    current_export = tmp_path / "current.nxexp"
+    export_collection(db=client, collection_name=coll, output_path=current_export)
+    again = import_collection(db=client, input_path=current_export, target_collection=coll, skip_existing=True)
+    assert [r.chash for r in reader.get_manifest(doc)] == [v2]
+    assert (again["owned_count"], again["unowned_count"]) == (1, 0)

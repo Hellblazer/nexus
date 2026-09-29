@@ -777,10 +777,12 @@ def import_collection(
     Returns
     -------
     dict with keys: collection_name, imported_count, skipped_count,
-    rehashed_count, owned_count, elapsed_seconds. ``owned_count``
-    (nexus-wbfpw.31) is the number of chunks that got an explicit
-    catalog-manifest row written by THIS call, which is every record in
-    the file.
+    rehashed_count, owned_count, unowned_count, elapsed_seconds.
+    ``owned_count`` (nexus-wbfpw.31) is the number of the file's chunks
+    that end the import owned by their document. ``unowned_count``
+    (nexus-wbfpw.40) is the number left unowned because their document
+    already existed with a manifest that does not name them: an existing
+    document's manifest is never replaced by an import.
 
     Every record is grouped by owner identity as it streams: a legacy
     record carrying ``meta.doc_id`` by that doc_id
@@ -1086,6 +1088,7 @@ def import_collection(
     # has been upserted -- see this function's docstring for why this
     # cannot be the per-batch manifest_write_batch_hook.
     owned_count = 0
+    unowned_count = 0
     if owner_groups and not _owners_apply(db):
         # A non-service handle (the InMemoryVectorClient unit-test
         # substrate) holds its chunks outside the engine, so the catalog
@@ -1129,6 +1132,34 @@ def import_collection(
                 rows_by_doc.setdefault(doc, []).extend(group["rows"])
             for doc, doc_rows in rows_by_doc.items():
                 rows = _manifest_rows(doc_rows)
+                # nexus-wbfpw.40 (Sam, 2026-09-29: keep existing): a live
+                # document that already owns chunks is current truth. The
+                # manifest write replaces every row the document has, so
+                # writing the file's rows over it hid its current chunks
+                # (an older export imported over a re-put note hid the
+                # correction). Leave its manifest alone; the file's chunks
+                # it does not own stay unowned, and are counted.
+                try:
+                    existing = {r.chash for r in reader.get_manifest(doc)}
+                except Exception as exc:  # noqa: BLE001 — cannot prove the document is empty: do not overwrite it
+                    _log.warning(
+                        "import_owner_manifest_read_failed",
+                        collection=collection_name, doc=doc, error=str(exc),
+                    )
+                    failures.append((doc, str(exc)))
+                    continue
+                if existing:
+                    file_chashes = {r["chash"] for r in rows}
+                    kept = len(file_chashes & existing)
+                    owned_count += kept
+                    unowned_count += len(file_chashes) - kept
+                    if kept < len(file_chashes):
+                        _log.warning(
+                            "import_owner_kept_existing_manifest",
+                            collection=collection_name, doc=doc,
+                            file_chunks=len(file_chashes), left_unowned=len(file_chashes) - kept,
+                        )
+                    continue
                 try:
                     writer.write_manifest(doc, rows, collection=collection_name)
                 except Exception as exc:  # noqa: BLE001 — collected and re-raised below as one NexusError
@@ -1148,6 +1179,7 @@ def import_collection(
             collection=collection_name,
             document_groups=len(owner_groups),
             owned_count=owned_count,
+            unowned_count=unowned_count,
             failed_groups=len(failures),
         )
         if failures:
@@ -1185,5 +1217,6 @@ def import_collection(
         "skipped_count": skipped_count,
         "rehashed_count": rehashed_count,
         "owned_count": owned_count,
+        "unowned_count": unowned_count,
         "elapsed_seconds": round(elapsed, 2),
     }
