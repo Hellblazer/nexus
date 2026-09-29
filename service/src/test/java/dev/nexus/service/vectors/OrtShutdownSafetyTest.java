@@ -37,8 +37,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>Non-vacuity: the sweep must actually land SIGTERM inside init on several
  * runs (the parent sees INIT_DONE only after it sent the signal, or never).
- * The ~416MB model is not committed; without it the test is skipped LOUDLY,
- * exactly like {@code Bge768ParityTest}.
+ * The ~416MB model is not committed; with nothing provisioned the test is skipped
+ * LOUDLY, but {@code NX_REQUIRE_ORT_MODEL=1} or a half-provisioned model directory
+ * turns the skip into a failure (see {@link OrtTestModel}). The model-free
+ * {@link OrtInitGateSignalTest} covers the real signal path on CI.
  */
 class OrtShutdownSafetyTest {
 
@@ -56,12 +58,10 @@ class OrtShutdownSafetyTest {
     void sigtermDuringSessionCreation_exitsCleanlyNeverCrashes(@TempDir Path work) throws Exception {
         Assumptions.assumeTrue(!System.getProperty("os.name", "").toLowerCase().contains("win"),
                 "SIGTERM semantics are POSIX-only");
-        Assumptions.assumeTrue(Files.isRegularFile(Path.of(Bge768Embedder.DEFAULT_MODEL_PATH)),
-                "SKIPPED (not passed): bge ONNX model not provisioned at "
-                        + Bge768Embedder.DEFAULT_MODEL_PATH + " — nexus-o5xyx.1's crash is only "
-                        + "reachable with a real model; provision via `nx init --service`");
-        Assumptions.assumeTrue(Files.isRegularFile(Path.of(Bge768Embedder.DEFAULT_TOKENIZER_PATH)),
-                "SKIPPED (not passed): bge tokenizer not provisioned");
+        // Skips ONLY when nothing is provisioned; fails when NX_REQUIRE_ORT_MODEL=1 or the
+        // model directory is half-provisioned (see OrtTestModel), so a skip cannot hide a
+        // regression on a host that is supposed to have the model.
+        OrtTestModel.requireBgeOrSkip();
 
         List<Outcome> outcomes = new ArrayList<>();
         for (int delay : KILL_DELAYS_MS) {
