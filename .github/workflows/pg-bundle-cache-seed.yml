@@ -9,13 +9,17 @@
 #
 # The cache key MUST stay byte-identical to the one in
 # engine-service-release.yml (build-publish-pg-bundle job):
-#   pg-bundle-<arch>-<runner>-pg<PG_VERSION>-pgvector<PGVECTOR_VERSION>-img-<image|native>-<sha256 of scripts/build_pg_bundle.sh>
+#   pg-bundle-<arch>-<runner>-pg<PG_VERSION>-pgvector<PGVECTOR_VERSION>-img-<image|native>-macfloor<MACOSX_DEPLOYMENT_TARGET>-<sha256 of scripts/build_pg_bundle.sh>
 # PG_VERSION / PGVECTOR_VERSION are duplicated across ci.yml, the release
 # workflow, and here (the pre-existing duplication pattern; the build script
 # holds the defaults). Bumping a version in the release workflow WITHOUT
 # bumping it here just means a cache miss at the next tag (graceful — it
 # compiles as before); the versions live in the key precisely so a stale
-# bundle of the WRONG version can never be restored silently. The <runner>
+# bundle of the WRONG version can never be restored silently. Same reasoning
+# for MACOSX_DEPLOYMENT_TARGET (nexus-cd8b7): the PG bundle's own floor is
+# pinned 13.0, deliberately lower than the engine binary's 14.0 — see the
+# pom.xml native-libs-mac profile comment for why 14.0 is the binding floor
+# for a mac-arm64 local install regardless. The <runner>
 # segment is the resolved runner LABEL (e.g. "hellmini", "macos-14"). This
 # file seeds BOTH mac-arm64 labels on push/schedule (nexus-n7q28: keeps the
 # macos-14 fallback's cache warm too, not just whichever label the release
@@ -114,6 +118,16 @@ jobs:
       # Pinned identically to engine-service-release.yml + ci.yml (see header).
       PG_VERSION: "17.5"
       PGVECTOR_VERSION: "v0.8.2"
+      # nexus-cd8b7 (follow-up to nexus-280ei): pin explicitly rather than
+      # relying on build_pg_bundle.sh's own 13.0 default. Before this, the
+      # release job's build-publish-pg-bundle job asserted 13.0 via this same
+      # var while THIS job — the one that actually compiles the bundle in the
+      # common cache-HIT path — left the floor to the script default, the
+      # exact "floor came from the script, not an asserted workflow value"
+      # anti-pattern nexus-280ei's PG-bundle-job fix was meant to close.
+      # Linux legs never read this var (harmless no-op there). Must match
+      # engine-service-release.yml's build-publish-pg-bundle job value.
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
 
@@ -122,7 +136,15 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: bundle
-          key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+          # nexus-cd8b7: macfloor${{ env.MACOSX_DEPLOYMENT_TARGET }} folds the
+          # deployment-target pin above into the key, so a future divergence
+          # between this workflow's and the release workflow's floor value
+          # produces a cache MISS (compiles fresh, correct) instead of
+          # silently serving a stale-floor bundle with no error and no
+          # signal. Keep this key line BYTE-IDENTICAL to the release
+          # workflow's build-publish-pg-bundle restore key (see header) —
+          # enforced by tests/test_pg_bundle_version_parity.py.
+          key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-macfloor${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
 
       - name: Compile PG + pgvector (cache miss only)
         if: steps.pg-bundle-cache.outputs.cache-hit != 'true'

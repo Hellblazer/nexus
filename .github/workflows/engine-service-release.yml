@@ -608,6 +608,77 @@ jobs:
                 echo "FAIL: binary requires macOS $minos > supported floor $ceiling" >&2
                 exit 1
               fi
+
+              # nexus-cd8b7 (follow-up to nexus-280ei): the outer Mach-O
+              # executable above isn't the whole ABI surface. onnxruntime
+              # and djl-tokenizers each ship their own osx-aarch64 .dylib,
+              # embedded as native-image RESOURCES (-H:IncludeResources in
+              # native-libs-mac's buildArgs, service/pom.xml) and
+              # System.load()'d/dlopen'd at runtime — never touched by
+              # -H:NativeLinkerOption/-H:CCompilerOption, which govern only
+              # the linker step that produces the OUTER binary checked
+              # above. Measured 2026-09-29: djl-tokenizers 0.30.0's
+              # libtokenizers.dylib already sits at minos 14.0 — zero
+              # headroom — while onnxruntime 1.20.0's dylibs sit at 13.3. A
+              # routine dependency bump could silently push either past the
+              # ceiling while the outer-binary check above stays green.
+              #
+              # Source: the resolved Maven jars in ~/.m2, not any
+              # native-image build-staging directory. GraalVM extracts
+              # embedded resources internally at image-build time and
+              # leaves no stable on-disk staging dir to re-read afterward;
+              # the m2 jars are guaranteed present immediately after
+              # `package` just resolved them (same maven session, same
+              # runner — see the "Build native image" step above), and
+              # their bytes are exactly what -H:IncludeResources pulled the
+              # dylibs from, so re-reading the resolved dependency jar is
+              # the more reliable source of the two, not a proxy for one.
+              onnx_version=$(sed -n 's/.*<onnxruntime\.version>\(.*\)<\/onnxruntime\.version>.*/\1/p' service/pom.xml)
+              djl_version=$(sed -n 's/.*<djl\.tokenizers\.version>\(.*\)<\/djl\.tokenizers\.version>.*/\1/p' service/pom.xml)
+              if [ -z "$onnx_version" ] || [ -z "$djl_version" ]; then
+                echo "FAIL: could not read onnxruntime.version/djl.tokenizers.version from service/pom.xml — cannot locate the embedded dylibs to check" >&2
+                exit 1
+              fi
+              onnx_jar="$HOME/.m2/repository/com/microsoft/onnxruntime/onnxruntime/$onnx_version/onnxruntime-$onnx_version.jar"
+              djl_jar="$HOME/.m2/repository/ai/djl/huggingface/tokenizers/$djl_version/tokenizers-$djl_version.jar"
+              for jar in "$onnx_jar" "$djl_jar"; do
+                if [ ! -f "$jar" ]; then
+                  echo "FAIL: resolved dependency jar missing at $jar — can't check its embedded dylibs" >&2
+                  exit 1
+                fi
+              done
+              dylib_dir="$RUNNER_TEMP/abi-floor-dylibs"
+              rm -rf "$dylib_dir"
+              mkdir -p "$dylib_dir/onnx" "$dylib_dir/djl"
+              # -x excludes the .dSYM debug-symbol dirs onnxruntime bundles
+              # alongside each dylib — same exclusion native-libs-mac's own
+              # -H:ExcludeResources applies at embed time.
+              unzip -q -o "$onnx_jar" "ai/onnxruntime/native/osx-aarch64/*.dylib" -x "*.dSYM/*" -d "$dylib_dir/onnx"
+              unzip -q -o "$djl_jar" "native/lib/osx-aarch64/*.dylib" -d "$dylib_dir/djl"
+              dylib_count=0
+              while IFS= read -r -d '' dylib; do
+                dylib_count=$((dylib_count + 1))
+                dylib_minos=$(otool -l "$dylib" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; f=0}')
+                if [ -z "$dylib_minos" ]; then
+                  echo "FAIL: could not read LC_BUILD_VERSION minos from $dylib — the ABI probe produced nothing" >&2
+                  exit 1
+                fi
+                echo "embedded dylib $(basename "$dylib"): minos $dylib_minos"
+                if [ "$(printf '%s\n%s\n' "$dylib_minos" "$ceiling" | sort -V | tail -1)" != "$ceiling" ]; then
+                  echo "FAIL: embedded dylib $dylib requires macOS $dylib_minos > supported floor $ceiling" >&2
+                  exit 1
+                fi
+              done < <(find "$dylib_dir" -name '*.dylib' -print0)
+              # Vacuity guard (nexus-moht0 doctrine): a check that finds
+              # nothing to examine is a FAILURE, not a silent pass — an
+              # unzip pattern that stopped matching (a jar layout change, a
+              # wrong version path) must not read as "all embedded dylibs
+              # are within floor".
+              if [ "$dylib_count" -eq 0 ]; then
+                echo "FAIL: zero embedded dylibs found under $dylib_dir — vacuous ABI-floor assertion, refusing to treat that as a pass" >&2
+                exit 1
+              fi
+              echo "checked $dylib_count embedded onnxruntime/djl-tokenizers dylib(s) against ceiling $ceiling"
               ;;
             *)
               echo "FAIL: unhandled arch '${{ matrix.target.arch }}' — no ABI floor check defined" >&2
@@ -769,7 +840,13 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: bundle
-          key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+          # nexus-cd8b7: macfloor${{ env.MACOSX_DEPLOYMENT_TARGET }} folds the
+          # MACOSX_DEPLOYMENT_TARGET pin above into the key — keep this line
+          # BYTE-IDENTICAL to pg-bundle-cache-seed.yml's save key (see that
+          # workflow's header), or a future divergence restores nothing here
+          # (graceful cache miss, not silent corruption) rather than the
+          # inverse (a stale-floor bundle restoring with no signal).
+          key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-macfloor${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
 
       - name: Build PG + pgvector bundle (cache miss only)
         if: steps.pg-bundle-cache.outputs.cache-hit != 'true'
