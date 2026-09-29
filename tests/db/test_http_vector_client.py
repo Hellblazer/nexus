@@ -2268,6 +2268,55 @@ class TestUnregisteredCollectionMessage:
             hv._post("/v1/vectors/upsert-chunks", {})
         assert _looks_like_stale_registration_error(exc.value)
 
+    # nexus-bgvnx: the engine's typed body carries "reason":"unregistered_collection".
+    # The client keys on it, and keeps the wording match only for an engine that
+    # predates it.
+    _REASON_BODY = (b'{"error":"the engine changed its wording entirely","reason":'
+                    b'"unregistered_collection","tenant":"default",'
+                    b'"collection":"knowledge__nope__model-ctx__v1"}')
+
+    def test_the_reason_code_alone_identifies_it_whatever_the_wording(self, monkeypatch):
+        hv = self._raise(monkeypatch, body=self._REASON_BODY)
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/get", {})
+        text = str(exc.value)
+        assert "'knowledge__nope__model-ctx__v1' is not registered" in text
+        assert "does not exist here" in text
+        assert exc.value.reason == "unregistered_collection"
+
+    def test_the_reason_reaches_the_error_on_a_get_too(self, monkeypatch):
+        hv = self._raise(monkeypatch, body=self._REASON_BODY)
+        with pytest.raises(VectorServiceError) as exc:
+            hv._get("/v1/vectors/x")
+        assert exc.value.reason == "unregistered_collection"
+
+    def test_the_write_retry_detector_keys_on_the_reason(self, monkeypatch):
+        from nexus.corpus import _looks_like_stale_registration_error
+
+        hv = self._raise(monkeypatch, body=self._REASON_BODY)
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/upsert-chunks", {})
+        # The rewritten message keeps "not registered", but the detector must not
+        # NEED it: strip it and the reason still identifies the error.
+        exc.value.args = ("POST /v1/vectors/upsert-chunks -> HTTP 422: gone",)
+        assert _looks_like_stale_registration_error(exc.value)
+
+    def test_an_older_engine_with_no_reason_still_matches_by_wording(self, monkeypatch):
+        hv = self._raise(monkeypatch)  # _BODY has no reason field
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/get", {})
+        assert exc.value.reason is None
+        assert "'knowledge__nope__model-ctx__v1' is not registered" in str(exc.value)
+
+    def test_a_different_reason_is_not_rewritten_even_if_the_words_appear(self, monkeypatch):
+        body = (b'{"error":"collection \'x\' is not registered here","reason":"something_else",'
+                b'"collection":"x"}')
+        hv = self._raise(monkeypatch, body=body)
+        with pytest.raises(VectorServiceError) as exc:
+            hv._post("/v1/vectors/upsert-chunks", {})
+        assert "does not exist here" not in str(exc.value)
+        assert exc.value.reason == "something_else"
+
     def test_another_422_is_untouched(self, monkeypatch):
         hv = self._raise(monkeypatch, body=b'{"error":"names a different model"}')
         with pytest.raises(VectorServiceError) as exc:

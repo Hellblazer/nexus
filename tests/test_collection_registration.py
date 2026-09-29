@@ -512,6 +512,64 @@ def test_a_non_http_error_is_never_retried(
     write_fn.assert_called_once()
 
 
+def test_the_retry_detector_keys_on_the_reason_code_for_the_httpx_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """nexus-bgvnx: the engine's 422 body carries reason=unregistered_collection;
+    the detector must recognise it without matching the prose."""
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.db.http_vector_client.is_vector_service_mode", lambda: True)
+    writer = _fake_writer()
+    name = "knowledge__retry-reason-code-test"
+    resp = httpx.Response(
+        422, request=httpx.Request("POST", "http://x"),
+        json={"error": "worded differently now", "reason": "unregistered_collection",
+              "collection": name},
+    )
+    err = httpx.HTTPStatusError("422", request=resp.request, response=resp)
+    write_fn = MagicMock(side_effect=[err, "ok"])
+
+    assert write_with_registration_retry(name, write_fn, registrar=lambda: writer) == "ok"
+    assert write_fn.call_count == 2
+
+
+def test_a_422_with_another_reason_is_never_retried_even_if_it_says_not_registered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("nexus.config.is_local_mode", lambda: True)
+    monkeypatch.setattr("nexus.db.http_vector_client.is_vector_service_mode", lambda: True)
+    writer = _fake_writer()
+    name = "knowledge__retry-other-reason-test"
+    resp = httpx.Response(
+        422, request=httpx.Request("POST", "http://x"),
+        json={"error": "something is not registered", "reason": "some_other_refusal"},
+    )
+    err = httpx.HTTPStatusError("422", request=resp.request, response=resp)
+    write_fn = MagicMock(side_effect=err)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        write_with_registration_retry(name, write_fn, registrar=lambda: writer)
+
+    write_fn.assert_called_once()
+
+
+def test_the_vector_client_family_is_matched_by_its_reason_attribute() -> None:
+    """The duck-typed family (VectorServiceError) carries the engine's reason
+    as ``.reason``; the folded message text is only the fallback."""
+
+    class _Err(RuntimeError):
+        code = 422
+        reason = "unregistered_collection"
+
+    assert corpus._looks_like_stale_registration_error(_Err("no wording at all"))
+
+    class _Other(RuntimeError):
+        code = 422
+        reason = "different"
+
+    assert not corpus._looks_like_stale_registration_error(_Other("is not registered"))
+
+
 class _FakeVectorServiceError(RuntimeError):
     """Duck-typed stand-in for ``nexus.db.http_vector_client.
     VectorServiceError`` (a plain ``.code`` int, message carries the

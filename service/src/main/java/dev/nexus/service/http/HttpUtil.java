@@ -276,8 +276,14 @@ public final class HttpUtil {
         if (unregisteredCollection != null) {
             log.warn("event={}_unregistered_collection {} tenant={} collection={}",
                 event, context, unregisteredCollection.tenant(), unregisteredCollection.collection());
+            // nexus-bgvnx: "reason" is the stable, machine-readable key. A client that
+            // needs to recognise this refusal (the write path's register-and-retry, the
+            // read tools' "does not exist" rewrite) keys on it instead of the prose in
+            // "error". The prose STAYS, unchanged: a client that predates "reason"
+            // still matches "is not registered" in it.
             send(exchange, 422,
                 "{\"error\":" + jsonString(unregisteredCollection.getMessage())
+                + ",\"reason\":\"" + UNREGISTERED_COLLECTION_REASON + "\""
                 + ",\"tenant\":" + jsonString(unregisteredCollection.tenant())
                 + ",\"collection\":" + jsonString(unregisteredCollection.collection())
                 + ",\"remedy\":\"register the collection first via "
@@ -450,6 +456,10 @@ public final class HttpUtil {
         }
         return null;
     }
+
+    /** The {@code reason} value on the typed 422 for an unregistered collection
+     *  (nexus-bgvnx). Part of the wire contract: clients key on it. */
+    static final String UNREGISTERED_COLLECTION_REASON = "unregistered_collection";
 
     /** PostgreSQL SQLSTATE for a plain {@code RAISE EXCEPTION} with no explicit
      *  {@code ERRCODE} (the {@code raise_exception} default class). */

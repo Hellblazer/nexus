@@ -2213,6 +2213,25 @@ def expire_cached_registration(name: str) -> None:
             _REGISTERED_COLLECTIONS_SCOPED.expire(entry)
 
 
+#: The engine's ``reason`` on the typed 422 for a collection with no catalog
+#: row (nexus-bgvnx). The same literal as ``nexus.db.http_vector_client.
+#: UNREGISTERED_COLLECTION_REASON``, repeated here because this module must
+#: not import that one (it deferred-imports THIS module; see below).
+_UNREGISTERED_COLLECTION_REASON = "unregistered_collection"
+
+
+def _reason_verdict(reason: object) -> bool | None:
+    """True/False when the engine named a ``reason``; None when it named none.
+
+    A named reason is the engine's own classification, so it decides: the
+    unregistered-collection reason is the retryable shape, any other reason
+    is not, whatever its prose says. No reason (every engine that predates
+    nexus-bgvnx) leaves the decision to the wording fallback."""
+    if isinstance(reason, str) and reason:
+        return reason == _UNREGISTERED_COLLECTION_REASON
+    return None
+
+
 def _looks_like_stale_registration_error(exc: BaseException) -> bool:
     """True when *exc* is the ONE 422 :func:`write_with_registration_retry`
     retries: the engine's per-tenant, once-per-boot ghost sweep (RDR-204
@@ -2224,8 +2243,11 @@ def _looks_like_stale_registration_error(exc: BaseException) -> bool:
     request after boot), never within one call. Any OTHER 422 (most
     notably the profile-mismatch "names a different model" refusal,
     RDR-204 Technical Design step 2) must propagate unretried — this
-    check is deliberately narrowed to the "not registered" wording so
-    it can never mask that different failure as a transient one.
+    check is deliberately narrowed so it can never mask that different
+    failure as a transient one: it keys on the engine's ``reason``
+    (``unregistered_collection``, nexus-bgvnx) and falls back to the
+    "not registered" wording only for a body that carries no ``reason``
+    (an older engine, whose wording nexus-mp8ys pinned).
 
     Two HTTP-error families reach here, mirroring
     :func:`nexus.retry._extract_status_and_retry_after`'s own
@@ -2238,7 +2260,7 @@ def _looks_like_stale_registration_error(exc: BaseException) -> bool:
     deferred-imports THIS module, to avoid exactly that cycle);
     ``VectorServiceError.__init__`` folds the engine's error body into
     its message, so ``str(exc)`` is where the text lives for that
-    family.
+    family, and its ``.reason`` attribute carries the engine's reason.
     """
     import httpx  # noqa: PLC0415 — deferred: keeps this module httpx-free at import time
 
@@ -2250,9 +2272,19 @@ def _looks_like_stale_registration_error(exc: BaseException) -> bool:
             body_text = resp.text
         except Exception:  # noqa: BLE001 — a response with no readable body is never this specific error
             return False
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001 — a non-JSON body carries no reason; the wording decides
+            body = None
+        verdict = _reason_verdict(body.get("reason") if isinstance(body, dict) else None)
+        if verdict is not None:
+            return verdict
         return "not registered" in body_text.lower()
     code = getattr(exc, "code", None)
     if code == 422:
+        verdict = _reason_verdict(getattr(exc, "reason", None))
+        if verdict is not None:
+            return verdict
         return "not registered" in str(exc).lower()
     return False
 
