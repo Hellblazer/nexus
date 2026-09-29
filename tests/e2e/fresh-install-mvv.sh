@@ -1304,6 +1304,14 @@ echo "── 9/10 generation install path on the virgin HOME (nexus-utpuw.19) �
 # tree (a generation plus shims) under the same virgin HOME, so putting it
 # earlier would let it perturb legs whose subject is the venv install.
 if [ "$PUBLISHED_MODE" = 1 ]; then
+    # nexus-qfeez: leg 1's propagation wait proves ONE uv resolution saw this
+    # release, not that this leg's separate `uv pip install` will: PyPI's
+    # simple index is CDN-served and edges catch up at different times
+    # (7.64.1, 7.65.0: "no version of conexus==X" here after legs 1-8 had
+    # installed it). generation_install_probe.py therefore retries the real
+    # installer on exactly that miss (bounded by the same
+    # FRESH_MVV_PROPAGATION_* knobs as leg 1) and still fails on anything
+    # else, or when the ceiling runs out.
     GEN_SOURCE="conexus==$EXPECTED_VERSION"
 else
     GEN_SOURCE="$WHEEL"
