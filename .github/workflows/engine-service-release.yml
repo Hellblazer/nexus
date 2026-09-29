@@ -771,13 +771,17 @@ jobs:
   # verifies for the native binary, so one identity-regexp covers both artifacts.
   #
   # mac-arm64 targets hellmini (nexus-yd9po), same fallback input as build-publish
-  # above. KNOWN GAP as of this wiring: scripts/build_pg_bundle.sh's Darwin path
-  # runs `brew install -q flex bison` on a cache miss, and hellmini's Homebrew
-  # prefix (/opt/homebrew) is owned by an admin account, not writable by the
-  # ghrunner service user — that install fails until the host is fixed (chown/
-  # chmod granting ghrunner write access, or pre-installing flex+bison as an
-  # admin and running the build with SKIP_PREREQS=1). Confirmed via the
-  # hellmini-probe.yml dispatch, not yet fixed host-side.
+  # above. HISTORY, FIXED: scripts/build_pg_bundle.sh's Darwin path used to run
+  # an unconditional `brew install -q flex bison` on a cache miss, and
+  # hellmini's Homebrew prefix (/opt/homebrew) is owned by an admin account, not
+  # writable by the ghrunner service user, so the install failed (confirmed via
+  # the hellmini-probe.yml dispatch). Fixed by 97d8ec39c: the Darwin branch now
+  # installs flex+bison only when `brew list --formula` says they are missing
+  # (ghrunner can read the admin-installed keg, so the check short-circuits past
+  # the install it cannot perform) and always exports the keg-only PATH. The
+  # host owner installed flex+bison once as an admin. A cache-miss seed run on
+  # hellmini (pg-bundle-cache-seed run 36491497942, 2026-09-28) then compiled PG
+  # + pgvector and passed. SKIP_PREREQS now gates only the Linux branch.
   build-publish-pg-bundle:
     name: Build + sign + publish PG bundle (${{ matrix.target.arch }})
     runs-on: ${{ matrix.target.runner }}
