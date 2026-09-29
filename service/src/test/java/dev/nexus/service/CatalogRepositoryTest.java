@@ -1699,11 +1699,13 @@ class CatalogRepositoryTest {
     }
 
     private void markDisputed(String name) throws Exception {
-        try (Connection su = pg.createConnection("");
-             var st = su.prepareStatement(
-                 "UPDATE nexus.catalog_collections SET lifecycle_state='disputed' WHERE name=?")) {
-            st.setString(1, name);
-            assertThat(st.executeUpdate()).as("guard: the row was marked disputed").isEqualTo(1);
+        try (Connection su = pg.createConnection("")) {
+            int updated = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                .update(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_collections")))
+                .set(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("lifecycle_state"), String.class), "disputed")
+                .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("name"), String.class).eq(name))
+                .execute();
+            assertThat(updated).as("guard: the row was marked disputed").isEqualTo(1);
         }
     }
 
