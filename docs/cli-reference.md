@@ -2610,6 +2610,8 @@ Hooks run `nx index repo` in the background after each qualifying git operation,
 
 **Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
 
+`owned` and `appended` carry `, stanza stale` when the installed stanza differs from the current template. That is the same comparison `nx doctor` uses for its stanza-drift line, and the remedy is the same: `nx hooks update [PATH]`. Outside a git repository every `nx hooks` verb exits with `Not a git repository: <path>` instead of a traceback.
+
 ### nx hook routing-stats
 
 The `nx hook` group (hidden from `nx --help`) hosts Claude Code lifecycle plumbing: `session-start`, `session-end`, `session-end-flush`, and `session-end-detach` are invoked by the conexus plugin's SessionStart/SessionEnd hooks with a JSON payload on stdin and are not intended for manual use. `mailbox-arm --session-id ID` prints the same `tuple_subscribe` instruction `session-start` emits, or nothing when it could not succeed; nothing calls it automatically any more (RDR-211 nexus-rplay.14 deleted the per-prompt re-arm it used to serve), so it stays only for manual use — the `UserPromptSubmit` drain hook is the unconditional floor regardless of whether a session ever subscribes. `routing-stats` is the group's one operator-facing verb.

@@ -169,6 +169,77 @@ class TestStatus:
             result = runner.invoke(main, ["hooks", "status", str(fake_repo)])
         assert result.exit_code == 0 and expect in result.output
 
+    def test_stale_stanza_is_not_reported_as_plain_owned(self, runner, fake_repo):
+        """nexus-sis0m.6: ``nx doctor`` reports a stanza that differs from
+        the current template as drift; status used to say plain "owned"
+        for the same file because it only looked for the sentinel."""
+        _install(runner, fake_repo)
+        hook = _hooks_dir(fake_repo) / "post-commit"
+        hook.write_text(hook.read_text().replace("pgrep -f", "pgrep -x"))
+        with _mock_git(fake_repo):
+            result = runner.invoke(main, ["hooks", "status", str(fake_repo)])
+        assert result.exit_code == 0, result.output
+        line = next(ln for ln in result.output.splitlines() if "post-commit" in ln)
+        assert "stale" in line, line
+        assert f"nx hooks update {fake_repo}" in result.output
+        # The other two hooks are untouched and stay plain owned.
+        for name in ("post-merge", "post-rewrite"):
+            other = next(ln for ln in result.output.splitlines() if name in ln)
+            assert "stale" not in other, other
+
+    @pytest.mark.parametrize(
+        "setup", ["none", "owned", "appended", "unmanaged", "stale", "malformed"],
+    )
+    def test_status_agrees_with_the_shared_stanza_state(self, runner, fake_repo, setup):
+        """One truth: status says "stale" exactly when hook_stanza_state
+        (the function nx doctor's drift check resolves through) does."""
+        from nexus.commands.hooks import hook_stanza_state
+
+        hook = _hooks_dir(fake_repo) / "post-commit"
+        if setup == "owned":
+            _install(runner, fake_repo)
+        elif setup == "appended":
+            hook.write_text("#!/bin/sh\necho 'pre-existing'\n")
+            _install(runner, fake_repo)
+        elif setup == "unmanaged":
+            hook.write_text("#!/bin/sh\necho 'third-party'\n")
+        elif setup == "stale":
+            _install(runner, fake_repo)
+            hook.write_text(hook.read_text().replace("pgrep -f", "pgrep -x"))
+        elif setup == "malformed":
+            hook.write_text(f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n")
+        with _mock_git(fake_repo):
+            state = hook_stanza_state(fake_repo, "post-commit")
+            result = runner.invoke(main, ["hooks", "status", str(fake_repo)])
+        line = next(ln for ln in result.output.splitlines() if "post-commit" in ln)
+        assert ("stale" in line) == (state == "stale"), (state, line)
+        # Non-vacuity: the stale-producing setups really are stale.
+        if setup in ("stale", "malformed"):
+            assert state == "stale"
+
+    def test_outside_a_git_repo_is_a_clean_error(self, runner, tmp_path, monkeypatch):
+        """nexus-sis0m.6: a RuntimeError traceback (rc 1) before; now a
+        ClickException with no traceback."""
+        bare = tmp_path / "not-a-repo"
+        bare.mkdir()
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+        result = runner.invoke(main, ["hooks", "status", str(bare)])
+        assert result.exit_code != 0
+        assert "Not a git repository" in result.output
+        assert "Traceback" not in result.output
+        assert not isinstance(result.exception, RuntimeError), repr(result.exception)
+
+    @pytest.mark.parametrize("verb", ["install", "uninstall", "update"])
+    def test_other_verbs_outside_a_git_repo_are_clean_errors(
+        self, runner, tmp_path, monkeypatch, verb,
+    ):
+        bare = tmp_path / "not-a-repo"
+        bare.mkdir()
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+        result = runner.invoke(main, ["hooks", verb, str(bare)])
+        assert result.exit_code != 0
+        assert not isinstance(result.exception, RuntimeError), repr(result.exception)
+
     def test_reports_hooks_directory(self, runner, fake_repo):
         with _mock_git(fake_repo):
             result = runner.invoke(main, ["hooks", "status", str(fake_repo)])

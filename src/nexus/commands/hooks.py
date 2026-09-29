@@ -23,8 +23,19 @@ from nexus._git_hooks_meta import SENTINEL_BEGIN, SENTINEL_END
 
 
 def _effective_hooks_dir(repo):
-    """Delegate to ``nexus._git_hooks_meta.effective_hooks_dir``."""
-    return _ghm.effective_hooks_dir(repo)
+    """Delegate to ``nexus._git_hooks_meta.effective_hooks_dir``.
+
+    The lower layer raises ``RuntimeError`` for a non-git path; every
+    ``nx hooks`` verb resolves the directory through here, so translate
+    once at the CLI boundary (nexus-sis0m.6: ``status``, ``install``,
+    ``uninstall`` and ``update`` printed a traceback outside a repo).
+    ``ClickException`` is not a ``RuntimeError``; the callers that catch
+    both (``refresh_all_managed_hooks``) already name it.
+    """
+    try:
+        return _ghm.effective_hooks_dir(repo)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
 
 
 def _git_common_dir_raw(repo):
@@ -175,13 +186,23 @@ def hook_stanza_state(repo: Path, hook_name: str = "post-commit") -> str:
         # core.hooksPath honoured, like install/update/status and nx doctor
         # (critique [24292]: the first cut used the common dir directly and
         # would have told a core.hooksPath user "not installed" forever).
-        hooks_dir = _effective_hooks_dir(repo)
-        status = _hook_status(hooks_dir, hook_name)
-        if status in ("not installed", "unmanaged"):
-            return status
-        installed = (hooks_dir / hook_name).read_text()
+        return _stanza_state_in(_effective_hooks_dir(repo), hook_name)
     except Exception:  # noqa: BLE001 - a census line must never traceback
         return "unknown"
+
+
+def _stanza_state_in(hooks_dir: Path, hook_name: str) -> str:
+    """``hook_stanza_state`` for an already-resolved hooks directory.
+
+    The single comparison ``nx doctor`` and ``nx hooks status`` both
+    resolve through (nexus-sis0m.6: status had its own sentinel-only
+    check and said "owned" for a hook doctor called drifted). Raises on
+    an unreadable hook file; the public wrapper degrades to ``unknown``.
+    """
+    status = _hook_status(hooks_dir, hook_name)
+    if status in ("not installed", "unmanaged"):
+        return status
+    installed = (hooks_dir / hook_name).read_text()
     return "armed" if stanza_body(installed) == stanza_body(_stanza_for(hook_name)) else "stale"
 
 
@@ -480,10 +501,25 @@ def hooks_status(path: Path) -> None:
 
     click.echo(f"Hooks directory: {hooks_dir}")
 
+    stale: list[str] = []
     for name in _HOOK_NAMES:
         s = _hook_status(hooks_dir, name)
         symbol = "✓" if s.startswith(("owned", "appended")) else "·"
+        if s in ("owned", "appended"):
+            # Ownership says who wrote the file; it does not say the
+            # stanza is current. Same comparison as nx doctor's drift line.
+            try:
+                drifted = _stanza_state_in(hooks_dir, name) == "stale"
+            except OSError:
+                drifted = False
+            if drifted:
+                s = f"{s}, stanza stale (differs from the current template)"
+                symbol = "!"
+                stale.append(name)
         click.echo(f"  {symbol} {name}: {s}")
+
+    if stale:
+        click.echo(f"Stanza drift in {', '.join(stale)}. Run: nx hooks update {repo}")
 
 
 # ── internal ──────────────────────────────────────────────────────────────────
