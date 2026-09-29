@@ -1,5 +1,17 @@
 # Changelog
 
+## [7.65.0] - 2026-09-28
+
+Plugin version aligned with conexus 7.65.0. No plugin-side changes: nothing
+under `conexus/` or `sn/` changed since v7.64.2, and the pending-release ledger
+had no entries to clear. This release's hook fixes (the SubagentStart context
+injection, nexus-fow78, nexus-8t9w8, nexus-xn9ut, and the bead-close gate's
+stamp budget, nexus-8t9w8) live in the CLI's hook code, so they take effect
+when the CLI is updated. The plugin as installed before the rename,
+`nx@nexus-plugins`, is now flagged at MCP startup, in `nx upgrade` and in
+`nx doctor` (nexus-qocnk). See the root CHANGELOG, including its correction to
+the 7.64.2 remedy (GHSA-mc84-6gjq-vm2p).
+
 ## [7.64.2] - 2026-09-28
 
 Plugin version aligned with conexus 7.64.2. Security fix (nexus-452oy): the

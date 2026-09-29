@@ -565,7 +565,14 @@ from __future__ import annotations
 #: file_path lookup (nexus-1vc0n), catalog-042/043 bounded and live-safe
 #: restore (nexus-e8h5x, nexus-brxnp), the raced-embed counter (nexus-ulrjq).
 #: v0.1.135 and v0.1.136 were tagged on the way and never deploy.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 137)
+#:
+#: 7.65.0 pairs with engine-service-v0.1.138 (tagged 2026-09-28 on 2f5859bb5):
+#: GET /v1/memory/list takes a limit and reports matching_total, so the
+#: SubagentStart T2 prefix scan lists only the rows it renders (nexus-xn9ut).
+#: No changeset. The wire ledger carries no Unshipped entry and the change is
+#: additive, so the engine deploys BEFORE this client tag (nexus-1emxn
+#: choreography (a)).
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 138)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed
