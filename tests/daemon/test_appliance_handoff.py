@@ -21,6 +21,7 @@ import pytest
 
 from nexus.daemon.appliance_handoff import (
     ABSENT,
+    DEAD_MARKER_FILENAME,
     EXPIRED,
     HANDOFF_FILE_ENV,
     HANDOFF_SCHEMA,
@@ -30,6 +31,7 @@ from nexus.daemon.appliance_handoff import (
     ROOT_TENANT,
     VERIFY_INTERVAL_S,
     ApplianceProjector,
+    CredentialDeadError,
     classify_credential,
     ensure_mint_credential,
     handoff_bytes,
@@ -365,3 +367,47 @@ def test_the_fixture_port_is_the_appliance_default() -> None:
 
 def test_root_tenant_is_the_clients_default_tenant() -> None:
     assert ROOT_TENANT == DEFAULT_TENANT
+
+
+def test_dead_is_durable_across_a_db_restore_and_a_new_lifetime(tmp_path) -> None:
+    engine, clock, log = _Engine(), _Clock(), _Log()
+    p = _projector(tmp_path, engine, clock, log)
+    p.project(29517)
+    for row in engine.rows.values():
+        row["revoked_at"] = "t"
+    clock.t += VERIFY_INTERVAL_S
+    p.project(29517)
+    assert (tmp_path / "cfg" / DEAD_MARKER_FILENAME).exists()
+    assert not (tmp_path / "cfg" / MINT_CREDENTIAL_FILENAME).exists()
+    engine.rows.clear()                      # a restore that lost the revoked row
+    p2 = _projector(tmp_path, engine, clock, log)
+    assert p2.project(29517) is False
+    assert engine.issued == 1, "a restore must not resurrect a revoked credential"
+    with pytest.raises(CredentialDeadError):
+        ensure_mint_credential(tmp_path / "cfg", engine.issue)
+
+
+def test_removing_the_dead_marker_is_the_remedy(tmp_path) -> None:
+    engine, clock, log = _Engine(), _Clock(), _Log()
+    p = _projector(tmp_path, engine, clock, log)
+    p.project(29517)
+    for row in engine.rows.values():
+        row["revoked_at"] = "t"
+    clock.t += VERIFY_INTERVAL_S
+    p.project(29517)
+    (tmp_path / "cfg" / DEAD_MARKER_FILENAME).unlink()
+    p2 = _projector(tmp_path, engine, clock, log)       # the unit restarts
+    assert p2.project(29517) is True
+    assert engine.issued == 2 and _file_token(tmp_path) == "mint-2"
+
+
+def test_other_live_credentials_under_the_label_are_reported(tmp_path) -> None:
+    engine, clock, log = _Engine(), _Clock(), _Log()
+    p = _projector(tmp_path, engine, clock, log)
+    p.project(29517)
+    engine.rows["stray"] = {"token_hash": "stray", "label": "appliance-windows-client",
+                            "scope": "mint-locked", "revoked_at": None, "expires_at": None}
+    clock.t += VERIFY_INTERVAL_S
+    p.project(29517)
+    extra = [k for _l, e, k in log.events if e == "appliance_mint_credential_extra_live"]
+    assert extra and extra[0]["token_hashes"] == ["stray"]

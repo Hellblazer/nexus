@@ -8,8 +8,8 @@ inside the WSL2 appliance projects its endpoint into one small JSON file,
 :data:`HANDOFF_FILE_ENV`). The file is rewritten whenever its bytes would
 change and left alone otherwise.
 
-What it carries is a ``mint-locked`` credential, NEVER a bearer: O1 keeps the
-root bearer inside the distro. A mint-locked token itself can only call
+What it carries is a ``mint-locked`` credential, never the root bearer: O1 keeps
+the root bearer inside the distro. A mint-locked token itself can only call
 ``POST /v1/data-tokens/mint`` for its own tenant; the Windows client turns it
 into short-lived data tokens through ``nexus.db.data_token.DataTokenManager``,
 the same path cloud mode uses. What that bounds: a leaked copy grants the
@@ -25,9 +25,11 @@ file from the volume. Revoking it invalidates only this credential; the root is
 untouched. :class:`ApplianceProjector` checks it against the engine on start
 and every :data:`VERIFY_INTERVAL_S`: absent from the engine (a re-provisioned
 database) is re-issued once per supervisor lifetime; revoked or
-rotation-expired is sticky (the handoff file is removed and
-``appliance_mint_credential_dead`` names the remedy); a failed check never
-counts as absent.
+rotation-expired is sticky and DURABLE: the credential file is renamed to
+:data:`DEAD_MARKER_FILENAME`, nothing is issued while that marker exists (so a
+database restore that loses the revoked row cannot resurrect access), the
+handoff file is removed, and ``appliance_mint_credential_dead`` names the
+remedy; a failed check never counts as absent.
 
 Schema 1, one JSON object, UTF-8 without BOM, keys sorted, one trailing newline::
 
@@ -55,6 +57,9 @@ HANDOFF_SCHEMA: int = 1
 
 #: The issued credential, persisted on the volume beside ``pg_credentials``.
 MINT_CREDENTIAL_FILENAME: str = "appliance_mint_credential"
+
+#: A dead credential's file is renamed to this; nothing is issued while it exists.
+DEAD_MARKER_FILENAME: str = MINT_CREDENTIAL_FILENAME + ".dead"
 
 #: The label the credential is issued under, so an operator can find and
 #: revoke it (``nx service token list`` / ``revoke``).
@@ -178,6 +183,17 @@ def _read_credential(path: Path) -> tuple[str, str] | None:
     return token, tenant
 
 
+class CredentialDeadError(RuntimeError):
+    """The dead marker exists: nothing may be issued until an operator removes it."""
+
+
+DEAD_REMEDY: str = (
+    f"The appliance's mint credential was revoked, rotated away, or kept "
+    f"disappearing, and it is never re-issued automatically. To issue a new one, "
+    f"remove <NEXUS_CONFIG_DIR>/{DEAD_MARKER_FILENAME} and restart the unit."
+)
+
+
 def ensure_mint_credential(
     config_dir: Path, issue: Callable[[], Mapping[str, object]],
 ) -> tuple[str, str]:
@@ -188,6 +204,12 @@ def ensure_mint_credential(
     issue response (``{"token", "tenant", ...}`` for a ``mint-locked`` token);
     it is persisted atomically with mode 0600 before being returned.
     """
+    marker = config_dir / DEAD_MARKER_FILENAME
+    if marker.exists():
+        raise CredentialDeadError(
+            f"{marker} marks the appliance's mint credential dead; refusing to issue "
+            f"a new one. {DEAD_REMEDY}"
+        )
     path = config_dir / MINT_CREDENTIAL_FILENAME
     existing = _read_credential(path)
     if existing is not None:
@@ -207,12 +229,6 @@ VERIFY_INTERVAL_S: float = 300.0
 
 #: What :func:`classify_credential` can answer.
 LIVE, ABSENT, REVOKED, EXPIRED = "live", "absent", "revoked", "expired"
-
-DEAD_REMEDY: str = (
-    f"the appliance's mint credential is no longer usable; to issue a new one, "
-    f"remove <NEXUS_CONFIG_DIR>/{MINT_CREDENTIAL_FILENAME} and restart the unit "
-    f"(a revoked credential is never re-issued automatically)"
-)
 
 
 def token_hash(token: str) -> str:
@@ -325,6 +341,12 @@ class ApplianceProjector:
 
     def _go_dead(self, state: str, mint_token: str) -> None:
         self._dead = state
+        cred = self._config_dir / MINT_CREDENTIAL_FILENAME
+        marker = self._config_dir / DEAD_MARKER_FILENAME
+        try:
+            os.replace(cred, marker)            # durable: survives restarts and DB restores
+        except FileNotFoundError:
+            _atomic_write(marker, f"state={state}\n".encode())
         with contextlib.suppress(FileNotFoundError):
             self._target.unlink()
         self._log.error(  # type: ignore[attr-defined]
@@ -332,11 +354,33 @@ class ApplianceProjector:
             token_hash=token_hash(mint_token), path=str(self._target), remedy=DEAD_REMEDY,
         )
 
+    def _report_extra_live(self, rows: list[Mapping[str, object]], mint_token: str) -> None:
+        """Warn about other live credentials under this label (a forced rotation
+        that removed the file without revoking leaves the old one live)."""
+        mine = token_hash(mint_token)
+        extra = [
+            str(r.get("token_hash")) for r in rows
+            if r.get("label") == MINT_CREDENTIAL_LABEL and r.get("token_hash") != mine
+            and not r.get("revoked_at") and not r.get("expires_at")
+        ]
+        if extra:
+            self._log.warning(  # type: ignore[attr-defined]
+                "appliance_mint_credential_extra_live", token_hashes=extra,
+                msg="other live credentials carry the appliance label; revoke them "
+                "(`nx service token revoke <hash>`) if they are not in use",
+            )
+
     def project(self, port: int) -> bool:
         """Bring the handoff file up to date. Returns True when it was written.
 
         Raises OSError / engine errors for the caller to log; never loops.
         """
+        if self._dead is None and (self._config_dir / DEAD_MARKER_FILENAME).exists():
+            self._dead = "marked"
+            self._log.error(  # type: ignore[attr-defined]
+                "appliance_mint_credential_dead", state="marked",
+                path=str(self._target), remedy=DEAD_REMEDY,
+            )
         if self._dead is not None:
             with contextlib.suppress(FileNotFoundError):
                 self._target.unlink()
@@ -354,6 +398,8 @@ class ApplianceProjector:
             else:
                 self._last_verified = now
                 state = classify_credential(rows, mint_token)
+                if state == LIVE:
+                    self._report_extra_live(rows, mint_token)
                 if state == ABSENT and not self._reissued:
                     self._reissued = True
                     self._log.warning(  # type: ignore[attr-defined]

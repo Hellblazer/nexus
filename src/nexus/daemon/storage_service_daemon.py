@@ -94,6 +94,7 @@ from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.util.process_group import KILL_SIGNAL
+from nexus.daemon.appliance_handoff import HANDOFF_FILE_ENV
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_STOP_ELECTION_BUDGET,
@@ -738,9 +739,11 @@ FIXED_PORT_ENV: str = "NX_SERVICE_FIXED_PORT"
 #: asserts equality with it instead of retyping the literal.
 APPLIANCE_DEFAULT_PORT: int = 29517
 
-#: The appliance unit's handoff-file variable, named here only for a log line
-#: (the handoff itself lives in nexus.daemon.appliance_handoff).
-HANDOFF_FILE_ENV_NAME: str = "NX_APPLIANCE_HANDOFF_FILE"
+#: nexus-ijue9.29 review round: the appliance's token-admin calls run on the
+#: heartbeat thread, so each is bounded well under the 15 s lease TTL, and a
+#: failed projection is retried from heartbeats at most once per backoff.
+_APPLIANCE_ADMIN_TIMEOUT_S: float = 5.0
+_APPLIANCE_RETRY_BACKOFF_S: float = 60.0
 
 _FIXED_PORT_REMEDY: str = (
     f"if the holder is a leftover nexus-service of this appliance, stop it "
@@ -1919,76 +1922,90 @@ class StorageServiceSupervisor:
             generation=record.generation,
             port=port,
         )
-        self._project_appliance_handoff(port)
+        self._project_appliance_handoff(port, force=True)
 
-    def _project_appliance_handoff(self, port: int) -> None:
+    def _project_appliance_handoff(self, port: int, *, force: bool = False) -> None:
         """RDR-218 (nexus-ijue9.29): project the endpoint for the Windows client.
 
         Only when ``NX_APPLIANCE_HANDOFF_FILE`` is set (the appliance unit sets
         it); otherwise nothing is issued or written. Called from ``_publish``
-        (after /health) and again from every heartbeat, so a transient failure
-        converges and a deleted file comes back; each call is a no-op when
-        nothing changed. The file carries a ``mint-locked`` credential, never
-        the root bearer (Sam's O1); the credential's lifecycle and validity
-        policy live in :class:`nexus.daemon.appliance_handoff.ApplianceProjector`.
+        (``force``, after /health) and after every healthy heartbeat, so a
+        transient failure converges and a deleted file comes back; each call is
+        a no-op when nothing changed. After a failure, heartbeat calls wait
+        :data:`_APPLIANCE_RETRY_BACKOFF_S` so a persistent fault costs one
+        attempt a minute, not one a second. The file carries a ``mint-locked``
+        credential, never the root bearer (Sam's O1); the credential's policy
+        lives in :class:`nexus.daemon.appliance_handoff.ApplianceProjector`.
         Any failure is logged and swallowed: the service itself is healthy.
         """
-        from nexus.daemon.appliance_handoff import HANDOFF_FILE_ENV  # noqa: PLC0415 — appliance-only path
-
         target = os.environ.get(HANDOFF_FILE_ENV, "").strip()
         if not target:
             return
-        projector = getattr(self, "_appliance_projector", None)
-        if projector is None:
-            projector = self._build_appliance_projector(Path(target), port)
-            self._appliance_projector = projector
+        mono = getattr(self, "_monotonic", time.monotonic)
+        retry_at = getattr(self, "_appliance_retry_at", None)
+        if not force and retry_at is not None and mono() < retry_at:
+            return
         try:
+            projector = getattr(self, "_appliance_projector", None)
+            if projector is None:
+                projector = self._build_appliance_projector(Path(target), port)
+                self._appliance_projector = projector
             written = projector.project(port)
         except Exception as exc:  # noqa: BLE001 — the service is healthy; report, never die
+            self._appliance_retry_at = mono() + _APPLIANCE_RETRY_BACKOFF_S
             _log.warning(
                 "appliance_handoff_not_written",
                 path=target,
                 errno=getattr(exc, "errno", None),
                 error=str(exc),
+                retry_in_s=_APPLIANCE_RETRY_BACKOFF_S,
             )
             return
+        self._appliance_retry_at = None
         if written:
             _log.info("appliance_handoff_projected", path=target, port=port)
 
     def _build_appliance_projector(self, target: Path, port: int) -> Any:
-        """The projector for this supervisor lifetime, wired to the engine on *port*."""
+        """The projector for this supervisor lifetime, wired to the engine on *port*.
+
+        The admin calls use a plain client with a short timeout
+        (:data:`_APPLIANCE_ADMIN_TIMEOUT_S`), not HttpTokenStore (30 s plus a
+        lease rebind): they run on the heartbeat thread, and a stalled call must
+        not outlast the 15 s lease TTL.
+        """
+        import httpx  # noqa: PLC0415 — appliance-only path
+
         from nexus.daemon.appliance_handoff import (  # noqa: PLC0415 — appliance-only path
             MINT_CREDENTIAL_LABEL,
             ROOT_TENANT,
             ApplianceProjector,
         )
-        from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415
 
         if getattr(self, "_fixed_port", None) is None:
             _log.warning(
                 "appliance_handoff_without_fixed_port",
-                msg=f"{HANDOFF_FILE_ENV_NAME} is set but {FIXED_PORT_ENV} is not: the "
+                msg=f"{HANDOFF_FILE_ENV} is set but {FIXED_PORT_ENV} is not: the "
                 "handoff will carry an ephemeral port the WSL relay does not forward",
             )
+        base_url = f"http://{_SERVICE_HOST}:{port}"
+        headers = {"Authorization": f"Bearer {self._service_token}", "X-Nexus-Tenant": ROOT_TENANT}
 
-        def _admin() -> HttpTokenStore:
-            return HttpTokenStore(
-                base_url=f"http://{_SERVICE_HOST}:{port}", _token=self._service_token,
-            )
+        def _post(path: str, body: dict[str, Any]) -> dict[str, Any]:
+            with httpx.Client(base_url=base_url, headers=headers, timeout=_APPLIANCE_ADMIN_TIMEOUT_S) as client:
+                resp = client.post(path, json=body)
+            resp.raise_for_status()
+            return resp.json()
 
         def _issue() -> dict[str, Any]:
-            with _admin() as admin:
-                return admin.issue_token(
-                    ROOT_TENANT, label=MINT_CREDENTIAL_LABEL, scope="mint-locked",
-                )
+            return _post("/v1/service-tokens/issue", {
+                "tenant": ROOT_TENANT, "label": MINT_CREDENTIAL_LABEL, "scope": "mint-locked",
+            })
 
         def _revoke(token_hash: str) -> object:
-            with _admin() as admin:
-                return admin.revoke_token(token_hash)
+            return _post("/v1/service-tokens/revoke", {"selector": token_hash})
 
         def _list_rows() -> list[dict[str, Any]]:
-            with _admin() as admin:
-                return admin.list_tokens(ROOT_TENANT)
+            return _post("/v1/service-tokens/list", {"tenant": ROOT_TENANT}).get("tokens", [])
 
         return ApplianceProjector(
             config_dir=self._config_dir,

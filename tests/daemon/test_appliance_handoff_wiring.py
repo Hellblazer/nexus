@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 
+import nexus.daemon.storage_service_daemon as ssd
 from nexus.daemon.appliance_handoff import HANDOFF_FILE_ENV
 from tests.daemon.test_storage_service_daemon import _FakeClock, _FakeProc, _make_supervisor
 
@@ -116,3 +119,83 @@ def test_the_credential_is_requested_as_mint_locked_with_the_root_bearer(tmp_pat
     assert req["body"]["tenant"] == "default"
     assert req["body"]["label"] == "appliance-windows-client"
     assert req["auth"] == "Bearer root-token-from-creds-deadbeef", "issued with the root bearer"
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.t = 100.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def test_a_failure_backs_off_heartbeat_retries_but_not_publish(tmp_path, monkeypatch) -> None:
+    sup, rec = _armed(tmp_path, monkeypatch)
+    clock = _Clock()
+    sup._monotonic = clock
+    calls = {"n": 0}
+
+    def failing(_port: int) -> bool:
+        calls["n"] += 1
+        raise RuntimeError("engine 503")
+
+    rec.project = failing  # type: ignore[method-assign]
+    sup._project_appliance_handoff(29517)
+    assert calls["n"] == 1
+    clock.t += ssd._APPLIANCE_RETRY_BACKOFF_S - 1
+    sup._project_appliance_handoff(29517)
+    assert calls["n"] == 1, "no retry inside the backoff"
+    sup._project_appliance_handoff(29517, force=True)
+    assert calls["n"] == 2, "publish always tries"
+    clock.t += ssd._APPLIANCE_RETRY_BACKOFF_S
+    sup._project_appliance_handoff(29517)
+    assert calls["n"] == 3
+
+
+def test_a_projector_that_cannot_be_built_never_escapes(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(HANDOFF_FILE_ENV, str(tmp_path / "endpoint.json"))
+    sup = _make_supervisor(tmp_path, _FakeClock(), supervised=True)
+
+    def broken(_t: Path, _p: int) -> Any:
+        raise ImportError("appliance module missing")
+
+    monkeypatch.setattr(sup, "_build_appliance_projector", broken)
+    sup._proc = _FakeProc(pid=46001)
+    sup._service_port = 29517
+    monkeypatch.setattr(sup, "_heartbeat_once_untimed", lambda _phases: (True, True))
+    assert sup.heartbeat_once() == (True, True)
+
+
+class _HangingHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:  # noqa: N802
+        time.sleep(3)
+
+    def log_message(self, *_a: Any) -> None:
+        pass
+
+
+def test_a_hanging_admin_call_is_bounded_by_the_short_timeout(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(ssd, "_APPLIANCE_ADMIN_TIMEOUT_S", 0.3)
+    server = HTTPServer(("127.0.0.1", 0), _HangingHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv(HANDOFF_FILE_ENV, str(tmp_path / "endpoint.json"))
+        sup = _make_supervisor(tmp_path, _FakeClock(), supervised=True)
+        started = time.monotonic()
+        sup._project_appliance_handoff(server.server_port, force=True)
+        elapsed = time.monotonic() - started
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert elapsed < 2.0, f"a stalled issue call held the heartbeat thread for {elapsed:.1f}s"
+    assert not (tmp_path / "endpoint.json").exists()
+
+
+def test_a_handoff_without_a_fixed_port_warns(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(HANDOFF_FILE_ENV, str(tmp_path / "endpoint.json"))
+    monkeypatch.delenv("NX_SERVICE_FIXED_PORT", raising=False)
+    sup = _make_supervisor(tmp_path, _FakeClock(), supervised=True)
+    with structlog.testing.capture_logs() as logs:
+        sup._build_appliance_projector(tmp_path / "endpoint.json", 29517)
+    assert any(e.get("event") == "appliance_handoff_without_fixed_port" for e in logs)
