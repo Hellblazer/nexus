@@ -21,6 +21,7 @@ import pytest
 
 from nexus.daemon.appliance_handoff import (
     ABSENT,
+    CHECK_RETRY_S,
     DEAD_MARKER_FILENAME,
     EXPIRED,
     HANDOFF_FILE_ENV,
@@ -411,3 +412,40 @@ def test_other_live_credentials_under_the_label_are_reported(tmp_path) -> None:
     p.project(29517)
     extra = [k for _l, e, k in log.events if e == "appliance_mint_credential_extra_live"]
     assert extra and extra[0]["token_hashes"] == ["stray"]
+
+
+def test_a_marker_that_cannot_be_written_still_takes_the_handoff_down(tmp_path) -> None:
+    engine, clock, log = _Engine(), _Clock(), _Log()
+    p = _projector(tmp_path, engine, clock, log)
+    p.project(29517)
+    for row in engine.rows.values():
+        row["revoked_at"] = "t"
+    clock.t += VERIFY_INTERVAL_S
+    (tmp_path / "cfg").chmod(0o500)          # the marker cannot be written
+    try:
+        assert p.project(29517) is False
+        assert not (tmp_path / "appliance" / "endpoint.json").exists(), "never advertise a dead credential"
+        assert "appliance_mint_credential_dead" in log.names(), "the remedy is logged even so"
+        assert "appliance_mint_credential_dead_unrecorded" in log.names()
+        assert not (tmp_path / "cfg" / DEAD_MARKER_FILENAME).exists()
+    finally:
+        (tmp_path / "cfg").chmod(0o700)
+    p.project(29517)                         # the marker is retried once writable
+    assert (tmp_path / "cfg" / DEAD_MARKER_FILENAME).exists()
+    assert engine.issued == 1
+
+
+def test_a_failed_check_is_retried_after_a_minute_not_every_heartbeat(tmp_path) -> None:
+    engine, clock, log = _Engine(), _Clock(), _Log()
+    p = _projector(tmp_path, engine, clock, log)
+    p.project(29517)
+    engine.list_error = RuntimeError("engine 503")
+    clock.t += VERIFY_INTERVAL_S
+    for _ in range(10):
+        p.project(29517)
+        clock.t += 1
+    failed = [e for e in log.names() if e == "appliance_mint_credential_check_failed"]
+    assert len(failed) == 1, "one failed check, not one per heartbeat"
+    clock.t += CHECK_RETRY_S
+    p.project(29517)
+    assert log.names().count("appliance_mint_credential_check_failed") == 2

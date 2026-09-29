@@ -227,6 +227,9 @@ def ensure_mint_credential(
 #: (which runs on start). A list call per heartbeat would be wasted load.
 VERIFY_INTERVAL_S: float = 300.0
 
+#: After a failed check, the next one waits this long (not the full interval).
+CHECK_RETRY_S: float = 60.0
+
 #: What :func:`classify_credential` can answer.
 LIVE, ABSENT, REVOKED, EXPIRED = "live", "absent", "revoked", "expired"
 
@@ -340,19 +343,46 @@ class ApplianceProjector:
             raise
 
     def _go_dead(self, state: str, mint_token: str) -> None:
+        """Take the handoff down and say why FIRST; then record durability.
+
+        The marker comes last, in its own try: a marker that cannot be written
+        (read-only or full config dir) must not leave a dead credential
+        advertised or its remedy unlogged. It is retried on later calls.
+        """
         self._dead = state
-        cred = self._config_dir / MINT_CREDENTIAL_FILENAME
-        marker = self._config_dir / DEAD_MARKER_FILENAME
-        try:
-            os.replace(cred, marker)            # durable: survives restarts and DB restores
-        except FileNotFoundError:
-            _atomic_write(marker, f"state={state}\n".encode())
         with contextlib.suppress(FileNotFoundError):
             self._target.unlink()
         self._log.error(  # type: ignore[attr-defined]
             "appliance_mint_credential_dead", state=state,
             token_hash=token_hash(mint_token), path=str(self._target), remedy=DEAD_REMEDY,
         )
+        self._record_dead_marker()
+
+    def _record_dead_marker(self) -> bool:
+        """Rename the credential to the dead marker (or write one); True when it exists."""
+        marker = self._config_dir / DEAD_MARKER_FILENAME
+        if marker.exists():
+            return True
+        cred = self._config_dir / MINT_CREDENTIAL_FILENAME
+        try:
+            try:
+                os.replace(cred, marker)        # durable: survives restarts and DB restores
+            except FileNotFoundError:
+                _atomic_write(marker, f"state={self._dead}\n".encode())
+            with contextlib.suppress(OSError):
+                dir_fd = os.open(str(self._config_dir), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            return True
+        except OSError as exc:
+            self._log.error(  # type: ignore[attr-defined]
+                "appliance_mint_credential_dead_unrecorded", path=str(marker), error=str(exc),
+                msg="the credential is dead but the durable marker could not be written; "
+                "retrying. Until it exists a restart re-derives the state from the engine",
+            )
+            return False
 
     def _report_extra_live(self, rows: list[Mapping[str, object]], mint_token: str) -> None:
         """Warn about other live credentials under this label (a forced rotation
@@ -384,6 +414,8 @@ class ApplianceProjector:
         if self._dead is not None:
             with contextlib.suppress(FileNotFoundError):
                 self._target.unlink()
+            if self._dead != "marked":
+                self._record_dead_marker()
             return False
         mint_token, mint_tenant = self._credential()
         now = self._clock()
@@ -391,8 +423,13 @@ class ApplianceProjector:
             try:
                 rows = self._list_rows()
             except Exception as exc:  # noqa: BLE001 — a failed check is not "absent"
+                # Check again after CHECK_RETRY_S, not on the next heartbeat: a
+                # failing or slow list must not cost a call (and up to the admin
+                # timeout on the heartbeat thread) every second.
+                self._last_verified = now - self._verify_interval_s + CHECK_RETRY_S
                 self._log.warning(  # type: ignore[attr-defined]
                     "appliance_mint_credential_check_failed", error=str(exc),
+                    retry_in_s=CHECK_RETRY_S,
                     msg="kept the current handoff file; will check again",
                 )
             else:

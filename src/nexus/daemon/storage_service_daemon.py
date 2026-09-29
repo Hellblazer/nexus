@@ -1991,9 +1991,16 @@ class StorageServiceSupervisor:
         headers = {"Authorization": f"Bearer {self._service_token}", "X-Nexus-Tenant": ROOT_TENANT}
 
         def _post(path: str, body: dict[str, Any]) -> dict[str, Any]:
-            with httpx.Client(base_url=base_url, headers=headers, timeout=_APPLIANCE_ADMIN_TIMEOUT_S) as client:
+            # trust_env=False: the root bearer goes to the loopback engine only,
+            # never through an HTTP(S)_PROXY in the unit's environment.
+            with httpx.Client(
+                base_url=base_url, headers=headers, timeout=_APPLIANCE_ADMIN_TIMEOUT_S,
+                trust_env=False,
+            ) as client:
                 resp = client.post(path, json=body)
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                # The engine's own reason, never the request (which carries the bearer).
+                raise RuntimeError(f"POST {path} -> {resp.status_code}: {resp.text[:300]}")
             return resp.json()
 
         def _issue() -> dict[str, Any]:
