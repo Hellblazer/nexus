@@ -529,6 +529,7 @@ class SchemaUpgradeRehearsalIntegrationTest {
                 //   tuples-004-1 nexus-8zoyp
                 //   pipeline-002-2 nexus-edjmu
                 //   hygiene-008-2 nexus-0rxvg
+                //   catalog-044-3 nexus-6pbwx
                 // SEED-COVERAGE-END ─────────────────────────────────────────────
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
@@ -1011,6 +1012,19 @@ class SchemaUpgradeRehearsalIntegrationTest {
                     registerCollection(su, "t1", "code__uxd2a1__bge-base-en-v15-768__v1__quarantine");
                     registerCollection(su, "t1", "code__uxd2a2__bge-base-en-v15-768__v1__quarantine");
 
+                    // catalog-044-3 (nexus-6pbwx): a slug-owned code collection holding a
+                    // document under 1.15.x -- the shape a legacy repo collection has, since
+                    // hygiene-002-1 (earlier in this hop) stamps owner_id from the NAME. The
+                    // repair must re-derive it as 1-15. The KEEP arm is a knowledge
+                    // collection whose document lives under 1.1.x, which must keep its
+                    // subject. Bare inserts, like every fixture above (lifecycle_state does
+                    // not exist yet at seed time). The full rule is proven separately by
+                    // Catalog044OwnerFromDocumentsRepairTest's HEAD-schema fixtures.
+                    registerCollection(su, "t1", "code__h044slug__bge-base-en-v15-768__v1");
+                    seedDocument(su, "t1", "1.15.301", "owner-derive doc", "code__h044slug__bge-base-en-v15-768__v1");
+                    registerCollection(su, "t1", "knowledge__h044subject__bge-base-en-v15-768__v1");
+                    seedDocument(su, "t1", "1.1.302", "knowledge keep doc", "knowledge__h044subject__bge-base-en-v15-768__v1");
+
                     assertThat(count(su, "SELECT count(*) FROM nexus.chash_index"))
                         .as("superuser ground truth after seeding").isEqualTo(5);
                     assertThat(count(su,
@@ -1196,6 +1210,26 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.eq("disputed"))))
                         .as("hygiene-008-2 with no registered origin strips only the literal "
                             + "quarantine- prefix and never touches lifecycle_state")
+                        .isEqualTo(1);
+                }
+
+                // ── catalog-044-3's own effect (nexus-6pbwx): the slug-owned code
+                // collection takes its document's owner segment, the knowledge
+                // collection keeps its subject, both under FORCE RLS for the
+                // NOBYPASSRLS owner. ────────────────────────────────────────────────
+                try (Connection su = pg.createConnection("")) {
+                    var c044 = DSL.using(su, SQLDialect.POSTGRES);
+                    assertThat(c044.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("code__h044slug__bge-base-en-v15-768__v1"))
+                            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("1-15"))))
+                        .as("catalog-044-3 must re-derive the slug owner from the document's tumbler")
+                        .isEqualTo(1);
+                    assertThat(c044.fetchCount(CATALOG_COLLECTIONS,
+                        CATALOG_COLLECTIONS.TENANT_ID.eq("t1")
+                            .and(CATALOG_COLLECTIONS.NAME.eq("knowledge__h044subject__bge-base-en-v15-768__v1"))
+                            .and(CATALOG_COLLECTIONS.OWNER_ID.eq("h044subject"))))
+                        .as("a knowledge collection keeps its subject")
                         .isEqualTo(1);
                 }
 

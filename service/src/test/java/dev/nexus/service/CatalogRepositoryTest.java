@@ -1709,6 +1709,183 @@ class CatalogRepositoryTest {
         }
     }
 
+    // ── nexus-6pbwx: a code/docs/rdr collection's owner_id is its documents' owner segment ──
+
+    private static final String TENANT_OWN = "own6pbwx-tenant";
+    private static final String OWN_MODEL = "voyage-code-3";
+
+    private void registerColl(String tenant, String name, String contentType, String ownerId) {
+        repo.upsertCollection(tenant, Map.of(
+            "name", name, "content_type", contentType, "owner_id", ownerId,
+            "embedding_model", contentType.equals("code") ? OWN_MODEL : "voyage-context-3",
+            "model_version", "v1"));
+    }
+
+    private void putDoc(String tenant, String tumbler, String contentType, String collection) {
+        repo.upsertDocument(tenant, mapOf(
+            "tumbler", tumbler, "title", "doc " + tumbler, "content_type", contentType,
+            "physical_collection", collection,
+            "source_uri", "file:///own6pbwx/" + tenant + "/" + tumbler));
+    }
+
+    private String ownerOf(String tenant, String name) {
+        return (String) repo.getCollection(tenant, name).get("owner_id");
+    }
+
+    /**
+     * nexus-6pbwx: the client registers a repo collection under the owner segment it
+     * parses out of the NAME, a slug for a legacy repo. The documents in it live under a
+     * tumbler, and that is the authoritative owner: registering a document into the
+     * collection replaces the slug with the hyphenated owner segment ({@code 1-15}).
+     * Both write paths that mint a document are covered.
+     */
+    @Test @Order(60)
+    void collectionOwner_documentRegistrationReplacesSlugOwner() {
+        String viaUpsert = "code__arcaneum-2ad2825c__voyage-code-3__v1";
+        registerColl(TENANT_OWN, viaUpsert, "code", "arcaneum-2ad2825c");
+        assertThat(ownerOf(TENANT_OWN, viaUpsert)).as("guard: the slug is what was registered")
+            .isEqualTo("arcaneum-2ad2825c");
+        putDoc(TENANT_OWN, "1.15.7", "code", viaUpsert);
+        assertThat(ownerOf(TENANT_OWN, viaUpsert)).isEqualTo("1-15");
+
+        String viaRegister = "docs__arcaneum-2ad2825c__voyage-context-3__v1";
+        registerColl(TENANT_OWN, viaRegister, "docs", "arcaneum-2ad2825c");
+        repo.registerDocument(TENANT_OWN, "1.16", mapOf(
+            "title", "readme", "content_type", "docs", "file_path", "README.md",
+            "physical_collection", viaRegister));
+        assertThat(ownerOf(TENANT_OWN, viaRegister)).isEqualTo("1-16");
+    }
+
+    /** nexus-6pbwx: an owner that is already tumbler-shaped is the first registration and stands. */
+    @Test @Order(60)
+    void collectionOwner_tumblerShapedOwnerIsNotReplacedByDocuments() {
+        String name = "code__1-3__voyage-code-3__v1";
+        registerColl(TENANT_OWN, name, "code", "1-3");
+        putDoc(TENANT_OWN, "1.15.8", "code", name);
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-3");
+    }
+
+    /**
+     * nexus-6pbwx: documents may be registered before their collection row exists, and a
+     * chunk write registers the collection with the name's slug every process. The
+     * registration itself must take the documents' owner, not only a later document write.
+     */
+    @Test @Order(60)
+    void collectionOwner_collectionUpsertOverExistingDocumentsTakesTheirOwner() {
+        String name = "rdr__docs-first-6pbwx__voyage-context-3__v1";
+        putDoc(TENANT_OWN, "1.17.1", "rdr", name);
+        registerColl(TENANT_OWN, name, "rdr", "docs-first-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).as("first registration").isEqualTo("1-17");
+        // The chunk-write re-registration the client sends on every cold process.
+        registerColl(TENANT_OWN, name, "rdr", "docs-first-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).as("re-registration").isEqualTo("1-17");
+    }
+
+    /** nexus-6pbwx: a collection with no documents keeps the value it was registered with. */
+    @Test @Order(60)
+    void collectionOwner_collectionWithoutDocumentsKeepsRegisteredOwner() {
+        String name = "code__empty-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, name, "code", "empty-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("empty-6pbwx");
+    }
+
+    /** nexus-6pbwx: a tombstoned document, or a tumbler that is not an owner address, gives no owner. */
+    @Test @Order(60)
+    void collectionOwner_tombstonedAndMalformedTumblersDoNotDeriveAnOwner() {
+        // Documents first, then the tombstone, then the registration: no live document
+        // is left to name an owner, so the slug stands.
+        String name = "code__dead-6pbwx__voyage-code-3__v1";
+        putDoc(TENANT_OWN, "1.18.1", "code", name);
+        assertThat(repo.deleteDocument(TENANT_OWN, "1.18.1")).isEqualTo(1);
+        registerColl(TENANT_OWN, name, "code", "dead-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).as("a tombstoned document names no owner")
+            .isEqualTo("dead-6pbwx");
+        // A live one registered afterwards does.
+        putDoc(TENANT_OWN, "1.18.2", "code", name);
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-18");
+
+        String neverLive = "code__dead3-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, neverLive, "code", "dead3-6pbwx");
+        putDoc(TENANT_OWN, "rn.2", "code", neverLive);
+        putDoc(TENANT_OWN, "1.5", "code", neverLive);
+        assertThat(ownerOf(TENANT_OWN, neverLive))
+            .as("neither a non-numeric tumbler nor a two-segment phantom names an owner")
+            .isEqualTo("dead3-6pbwx");
+    }
+
+    /**
+     * nexus-6pbwx: a knowledge collection's owner is its subject, not its documents'
+     * tumbler. Knowledge documents live under 1.1, so deriving from them would overwrite
+     * every subject with 1-1. A rename keeps taking the owner the client derived from the
+     * new name.
+     */
+    @Test @Order(60)
+    void collectionOwner_knowledgeOwnerStaysTheSubject() {
+        String name = "knowledge__distributed-systems__voyage-context-3__v1";
+        registerColl(TENANT_OWN, name, "knowledge", "distributed-systems");
+        putDoc(TENANT_OWN, "1.1.501", "knowledge", name);
+        putDoc(TENANT_OWN, "1.1.502", "knowledge", name);
+        assertThat(ownerOf(TENANT_OWN, name)).as("document registration").isEqualTo("distributed-systems");
+        registerColl(TENANT_OWN, name, "knowledge", "distributed-systems");
+        assertThat(ownerOf(TENANT_OWN, name)).as("re-registration").isEqualTo("distributed-systems");
+
+        String renamed = "knowledge__consensus__voyage-context-3__v1";
+        repo.renameCollection(TENANT_OWN, name, renamed, null, "knowledge", "consensus");
+        assertThat(ownerOf(TENANT_OWN, renamed))
+            .as("rename derives the owner from the new name, and the re-homed documents do not override it")
+            .isEqualTo("consensus");
+    }
+
+    /** nexus-6pbwx: quarantine rows keep the owner they were filed with. */
+    @Test @Order(60)
+    void collectionOwner_quarantineCollectionsAreNotRederived() {
+        String name = "quarantine-code__quar-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, name, "quarantine-code", "quar-6pbwx");
+        putDoc(TENANT_OWN, "1.20.1", "code", name);
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("quar-6pbwx");
+    }
+
+    /**
+     * nexus-6pbwx: renaming a repo collection re-homes its documents onto a row the
+     * client registered under the new name's owner segment. The new row takes the owner
+     * of the documents that moved onto it.
+     */
+    @Test @Order(60)
+    void collectionOwner_renamedRepoCollectionTakesTheDocumentsOwner() {
+        String old = "code__rn-old-6pbwx__voyage-code-3__v1";
+        String neu = "code__rn-new-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, old, "code", "rn-old-6pbwx");
+        putDoc(TENANT_OWN, "1.21.1", "code", old);
+        assertThat(ownerOf(TENANT_OWN, old)).as("guard").isEqualTo("1-21");
+        repo.renameCollection(TENANT_OWN, old, neu, null, "code", "rn-new-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, neu)).isEqualTo("1-21");
+    }
+
+    /**
+     * nexus-6pbwx: collectionOwnerRoot finds a legacy slug-named collection once its
+     * documents have given it the hyphenated owner. The owner row is keyed on the dotted
+     * tumbler prefix, the collection's owner_id is the hyphenated segment.
+     */
+    @Test @Order(60)
+    void collectionOwner_collectionOwnerRootFindsARepairedSlugCollection() {
+        String tenant = "own6pbwx-root-tenant";
+        String name = "code__arcaneum-2ad2825c__voyage-code-3__v1";
+        repo.upsertOwner(tenant, mapOf(
+            "tumbler_prefix", "1.15", "name", "arcaneum", "owner_type", "repo",
+            "repo_root", "/projects/arcaneum"));
+        registerColl(tenant, name, "code", "arcaneum-2ad2825c");
+        assertThat(repo.collectionOwnerRoot(tenant, name).get("repo_root"))
+            .as("guard: before any document, the slug matches no owner").isEqualTo("");
+        putDoc(tenant, "1.15.3", "code", name);
+
+        var root = repo.collectionOwnerRoot(tenant, name);
+        assertThat(root.get("owner_id")).isEqualTo("1-15");
+        assertThat(root.get("repo_root")).isEqualTo("/projects/arcaneum");
+        assertThat(repo.listCollections(tenant, null, "live").stream()
+                .filter(c -> "1-15".equals(c.get("owner_id"))).map(c -> c.get("name")).toList())
+            .as("what the client's collections_by_owner('1-15') filters").contains(name);
+    }
+
     /**
      * nexus-l52ms ship-blocker fixup: display_name is a DURABLE opt-in marker
      * (nexus.corpus.KNOWLEDGE_CORPUS_OPT_IN_MARKER) some callers stamp once at

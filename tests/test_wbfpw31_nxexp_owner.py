@@ -491,24 +491,31 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     result = import_collection(db=client, input_path=f, target_collection=dst, skip_existing=True)
     assert result["owned_count"] == 2
 
-    # The row's owner_id is the slug, which is no owner, and the chunk write
-    # kept it (nexus-7tys2); the import still lands owned, under the curator
-    # here since the collection holds no documents yet.
-    assert reader.get_collection(dst)["owner_id"] == slug, "guard: the slug-in-row shape is what is exercised"
+    # The chunk write kept the slug (nexus-7tys2), so the import found no owner on
+    # the row and no document in the collection and landed under the curator. That
+    # minted document is now what names the collection's owner (nexus-6pbwx): the
+    # curator's segment replaced the slug, and a later resolve reads it from the row.
     curator = writer.register_owner("knowledge", "curator")
+    assert reader.get_collection(dst)["owner_id"] == owner_segment_for_tumbler(str(curator))
     assert _resolve_import_owner_tumbler(dst, reader, writer) == curator
     doc = reader.by_source_uri(f"nxexp://{dst}/{f.name}")
     assert doc is not None
     assert doc.physical_collection == dst
     assert doc.tumbler.owner_address() == curator
 
-    # With a live document already in the collection, its owner is used.
+    # A slug-owned collection that ALREADY holds a live document resolves to that
+    # document's owner: the document gave the row the owner segment when it landed.
+    seeded = f"code__wbfpw33seeded-2ad2825c__{_MODEL}__v1"
+    writer.register_collection(
+        seeded, content_type="code", owner_id="wbfpw33seeded-2ad2825c", embedding_model=_MODEL,
+    )
     existing = writer.register(
         owner=owner, title="wbfpw33 existing", content_type="code",
-        physical_collection=dst, source_uri=f"file:///wbfpw33/{dst}/existing.py",
+        physical_collection=seeded, source_uri=f"file:///wbfpw33/{seeded}/existing.py",
     )
     assert existing is not None
-    assert _resolve_import_owner_tumbler(dst, reader, writer) == owner
+    assert reader.get_collection(seeded)["owner_id"] == owner_segment_for_tumbler(str(owner))
+    assert _resolve_import_owner_tumbler(seeded, reader, writer) == owner
     for r in records:
         assert r["id"] in client.get_collection(dst).get(ids=[r["id"]], include=[])["ids"]
 
