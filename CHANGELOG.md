@@ -27,7 +27,7 @@ Pairs with engine-service-v0.1.138, whose only change is that `GET /v1/memory/li
 
 ### Correction to 7.64.2
 
-The 7.64.2 entry's "What to do" was incomplete, and one of its commands does nothing for many users (nexus-zytwq). The 7.64.2 entry below now carries the corrected steps (nexus-qveq3). In short: update the CLI with `nx self install`, and on a CLI older than 7.19.0, which has no `self` command, run `uv tool upgrade conexus` first; `uv tool upgrade conexus` alone does not change an install that `nx self install` made. Update the plugins too, with `nx upgrade` or with `/plugin update conexus@nexus-plugins` and `/plugin update sn@nexus-plugins` in Claude Code, because from v7.54.0 one of the conexus plugin's Bash hooks runs code from the installed CLI and the other three live in the plugin. The `sn` plugin was affected from v4.33.1 through v6.1.0. The plugin as installed before the rename to conexus, `nx@nexus-plugins`, keeps its own hooks until you run `/plugin uninstall nx@nexus-plugins`. Then restart every Claude Code session. The advisory, [GHSA-mc84-6gjq-vm2p](https://github.com/Hellblazer/nexus/security/advisories/GHSA-mc84-6gjq-vm2p), is the authoritative list of affected versions and steps.
+The 7.64.2 entry's "What to do" was incomplete, and one of its commands does nothing for many users (nexus-zytwq). The 7.64.2 entry below now carries the corrected steps (nexus-qveq3); follow them there. The advisory, [GHSA-mc84-6gjq-vm2p](https://github.com/Hellblazer/nexus/security/advisories/GHSA-mc84-6gjq-vm2p), is the authoritative list of affected versions and steps.
 
 ### Fixed
 
@@ -79,7 +79,7 @@ Pairs with engine-service-v0.1.137, already deployed. A client and plugin securi
 
   If you relied on permission prompts as a safety check, review what your sessions ran while on an affected version; Claude Code keeps transcripts under `~/.claude/projects/`.
 
-  This paragraph was corrected after release (nexus-zytwq, nexus-qveq3). As first published it offered `uv tool upgrade conexus` as an alternative to `nx self install`, and it did not name the `sn` plugin, the old `nx@nexus-plugins` plugin, or the need to update both the CLI and the plugins.
+  This paragraph was corrected after release (nexus-zytwq, nexus-qveq3). As first published it offered `uv tool upgrade conexus` as an alternative to `nx self install`, and it did not name the `sn` plugin, the old `nx@nexus-plugins` plugin, or the need to update both the CLI and the plugins. A first correction, published in 7.65.0, was itself incomplete: it lacked the version gate before 7.19.0 and the `sn` update command.
 
   **Why it was missed:** our tests checked that the hooks produced the JSON we had specified. The specification itself was wrong, and no test checked what that JSON made Claude Code do.
 
