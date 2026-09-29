@@ -62,6 +62,7 @@ No direct-mode fallback — a service/PG outage is always fatal for callers.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import re
 import shutil
@@ -724,6 +725,91 @@ def _allocate_free_port(host: str = _SERVICE_HOST) -> int:
     return port
 
 
+#: RDR-218 appliance-only fixed port (nexus-ijue9.29). The WSL2 appliance's unit
+#: sets it through /etc/nexus/appliance.env so Windows reaches the engine at one
+#: known port through the WSL relay. Unset (local Linux and macOS), the supervisor
+#: allocates an ephemeral port exactly as before. Record: T2
+#: nexus/rdr-218-appliance-endpoint-handoff-decision section 2.
+FIXED_PORT_ENV: str = "NX_SERVICE_FIXED_PORT"
+
+#: The appliance's port (record section 1: IANA-unassigned, below Linux's
+#: ephemeral range and the Kubernetes NodePort range, clear of Windows' excluded
+#: ranges). The supervisor never applies it by itself; ijue9.5's env-file test
+#: asserts equality with it instead of retyping the literal.
+APPLIANCE_DEFAULT_PORT: int = 29517
+
+_FIXED_PORT_REMEDY: str = (
+    f"change {FIXED_PORT_ENV} in /etc/nexus/appliance.env and restart the unit"
+)
+
+
+def _parse_fixed_port(raw: str | None) -> int | None:
+    """Return the fixed port from *raw*, ``None`` when unset or empty.
+
+    Raises StorageServiceStartError for anything but an integer in 1024..65535.
+    """
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip()
+    try:
+        port = int(value, 10)
+    except ValueError:
+        port = None
+    if port is None or not 1024 <= port <= 65535 or str(port) != value.lstrip("+"):
+        raise StorageServiceStartError(
+            f"{FIXED_PORT_ENV}={raw!r} is not a port: it must be an integer in "
+            f"1024..65535. Remedy: {_FIXED_PORT_REMEDY}."
+        )
+    return port
+
+
+def _port_holder(port: int) -> str | None:
+    """Best effort: the process listening on *port* per ``ss -ltnp``, else None.
+
+    ``ss`` is resolved to an absolute path first (a bare name makes CPython fork
+    instead of posix_spawn); absent (macOS), there is simply no holder to name.
+    """
+    ss = shutil.which("ss")
+    if ss is None:
+        return None
+    try:
+        out = subprocess.run(
+            [ss, "-ltnp", f"sport = :{port}"],
+            capture_output=True, text=True, timeout=2, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    users = re.search(r'users:\(\((.*?)\)\)', out)
+    return users.group(1) if users else None
+
+
+def _claim_fixed_port(port: int, host: str = _SERVICE_HOST) -> int:
+    """Probe-bind *port* on *host* and release it, or fail loudly.
+
+    Same posture as :func:`_allocate_free_port`: no SO_REUSEADDR, so a port
+    another process holds is refused rather than shared. There is NO fallback to
+    an ephemeral port: a moved port is unreachable from Windows (RDR-218 Gap 1).
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            raise StorageServiceStartError(
+                f"cannot bind {FIXED_PORT_ENV} port {port} on {host}: {exc}. "
+                f"Remedy: {_FIXED_PORT_REMEDY}."
+            ) from exc
+        holder = _port_holder(port)
+        held_by = f" (held by {holder})" if holder else ""
+        raise StorageServiceStartError(
+            f"{FIXED_PORT_ENV} port {port} on {host} is already in use{held_by}; "
+            f"refusing to start on another port. Remedy: {_FIXED_PORT_REMEDY}."
+        ) from exc
+    finally:
+        sock.close()
+    return port
+
+
 def _port_accepting(host: str, port: int, timeout: float = 0.5) -> bool:
     """Return True when *host:port* accepts a TCP connection."""
     try:
@@ -962,6 +1048,9 @@ class StorageServiceSupervisor:
         # restarts because it is persisted, not because it is a function of the
         # credentials. Clients re-read it from the lease endpoint after restart.
         self._service_token: str = self._resolve_service_token()
+        # nexus-ijue9.29: validated here so a bad appliance setting fails before
+        # anything starts; None on every non-appliance install.
+        self._fixed_port: int | None = _parse_fixed_port(os.environ.get(FIXED_PORT_ENV))
 
     def _resolve_service_token(self) -> str:
         """Return the persistent NX_SERVICE_TOKEN (the bound root token).
@@ -1024,7 +1113,11 @@ class StorageServiceSupervisor:
         launch artifact. Configuration reaches the service ENTIRELY via the
         environment below.
         """
-        port = _allocate_free_port()
+        port = (
+            _claim_fixed_port(self._fixed_port)
+            if self._fixed_port is not None
+            else _allocate_free_port()
+        )
         env = dict(os.environ)
         # Credentials from pg_credentials
         # INVARIANT (nexus-hzhgl round 3 review Significant-1): self._creds
