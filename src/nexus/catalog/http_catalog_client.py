@@ -3292,6 +3292,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     f"{_engine_error_detail(exc)}"
                 ) from exc
             raise
+        # nexus-wwuzp: same rule as a rename. This process's cached
+        # registration of *old_name* must not keep vouching for a name that
+        # is now retired.
+        from nexus.corpus import expire_cached_registration  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+
+        expire_cached_registration(old_name)
         return int(result.get("updated", 0)) if isinstance(result, dict) else 0
 
     def rename_collection(self, old: str, new: str, *, cross_model: bool = False) -> int:
@@ -3347,13 +3353,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # so it reports an all-zero `renamed` map for a rename that fully
         # succeeded -- the same misreport class purge_trash closes above.
         result = self._post("/collections/rename", body, idempotent=False)
-        # nexus-wwuzp: the old name is now a superseded tombstone. Drop this
-        # process's cached registration so a later write to it re-upserts
-        # (reviving it) instead of skipping the upsert and stranding chunks.
-        # Other processes converge through the cache's TTL.
-        from nexus.corpus import evict_registration_everywhere  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+        # nexus-wwuzp: the old name is now a superseded tombstone. Mark this
+        # process's cached registration for a read so a later implicit write
+        # to it is refused naming the successor, instead of skipping the
+        # upsert check and stranding chunks (and instead of being re-upserted,
+        # which would un-retire it). Other processes converge through the
+        # cache's TTL.
+        from nexus.corpus import expire_cached_registration  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
 
-        evict_registration_everywhere(old)
+        expire_cached_registration(old)
         renamed = (result or {}).get("renamed", {}) or {}
         return {k: int(v) for k, v in renamed.items()}
 
