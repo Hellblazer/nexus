@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Every ``java ... -jar`` launch in tests/ and src/ must redirect its hs_err report.
+"""Every ``java ... -jar`` launch in src/, tests/ and scripts/ must redirect its hs_err report.
 
 WHY (nexus-o5xyx.2). A JVM that crashes writes ``hs_err_pid<N>.log`` into its cwd
 unless ``-XX:ErrorFile=`` says otherwise. The engine JVM does crash (an ONNX Runtime
@@ -16,7 +16,7 @@ WHAT IT CHECKS.
   must mention ``-XX:ErrorFile=``.
 
 A native image is not a JVM and takes no such flag, so it has no launch site here.
-``scripts/`` is outside this check's scope.
+
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ import pytest
 pytestmark = pytest.mark.lint
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_ROOTS = (_REPO_ROOT / "src", _REPO_ROOT / "tests")
+_ROOTS = (_REPO_ROOT / "src", _REPO_ROOT / "tests", _REPO_ROOT / "scripts")
 _FLAG = "-XX:ErrorFile="
 _HELPERS = frozenset({"jvm_error_file_arg"})
 
@@ -69,10 +69,10 @@ def _is_flag(node: ast.expr) -> bool:
 
 
 #: ``java`` in COMMAND position: at the start of a command (line start or after
-#: ``; & | (``), optionally after env assignments and ``exec``. A word "java" inside a
+#: ``; & | (``), optionally after ``env``, env assignments and ``exec``. A word "java" inside a
 #: message or comment is prose, not a launch.
 _SHELL_JAVA_CMD = re.compile(
-    r"(?:^|[;&|(])\s*(?:\w+=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)*(?:exec\s+)?java\s"
+    r"(?:^|[;&|(])\s*(?:env\s+)?(?:\w+=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)*(?:exec\s+)?java\s"
 )
 
 
@@ -150,6 +150,8 @@ def test_scanner_is_not_vacuous() -> None:
     assert any(p.name == "storage_service_daemon.py" for p in py), "src/ not scanned"
     assert any(p.name == "_engine_substrate.py" for p in py), "tests/ not scanned"
     assert len(py) > 500, len(py)
+    assert any(p.name == "check_release_workflow_shape.py" for p in py), "scripts/ not scanned"
+    assert any(p.name == "up.sh" for p in _files(".sh")), "scripts/*.sh not scanned"
 
 
 @pytest.mark.parametrize(
@@ -173,6 +175,7 @@ def test_python_scanner_verdicts(src: str, n: int) -> None:
     "text, n",
     [
         ("java -jar app.jar\n", 1),
+        ("env \\\n  A=1 \\\n  java -jar app.jar\n", 1),
         ("FOO=1 java -Duser.timezone=UTC -jar app.jar &\n", 1),
         ("exec java \"${jvm[@]}\" -jar x\n", 1),
         ("java -XX:ErrorFile=/tmp/e_%p.log -jar app.jar\n", 0),
