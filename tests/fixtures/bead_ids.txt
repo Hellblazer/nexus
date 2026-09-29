@@ -3256,6 +3256,7 @@ nexus-gcx2r
 nexus-gd3b9
 nexus-gdb3
 nexus-gednd
+nexus-ger02
 nexus-ger23
 nexus-ger23.1
 nexus-gete7
