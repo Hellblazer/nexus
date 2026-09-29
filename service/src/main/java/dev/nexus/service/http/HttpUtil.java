@@ -177,6 +177,24 @@ public final class HttpUtil {
      * is a fixed message (+ sqlstate for 409); the raw driver message goes to the
      * server log only, never to the client.
      *
+     * <p><b>The {@code reason} vocabulary (nexus-bgvnx).</b> {@code reason} is the
+     * discriminator for a typed 4xx body: a stable, machine-readable, lower_snake
+     * string a client decides on INSTEAD of matching the prose in {@code error}. The
+     * prose may be reworded; a {@code reason} value, once shipped, never changes
+     * meaning and is never reused. A body with no {@code reason} is either an older
+     * engine or a typed body that has not needed one. Current values:
+     * <ul>
+     *   <li>{@code unregistered_collection} (422): a request named a
+     *       {@code (tenant, collection)} with no catalog row
+     *       ({@link #UNREGISTERED_COLLECTION_REASON}); the body also carries
+     *       {@code tenant}, {@code collection} and {@code remedy}.</li>
+     * </ul>
+     * The typed 409 bodies predate the rule and discriminate on {@code status}
+     * ({@code conflict_running}, {@code stale_run}) or on {@code constraint}; those
+     * are grandfathered and are not renamed, since released clients read them. A NEW
+     * typed 4xx body adds a {@code reason} value here in the same change, and the
+     * client's copy of the vocabulary ({@code nexus.db.engine_reasons}) with it.
+     *
      * @param exchange the exchange to respond on
      * @param e        the caught exception (cause chain is walked)
      * @param log      the HANDLER's logger, so log events keep their per-handler source

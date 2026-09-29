@@ -153,7 +153,7 @@ class HttpUtilTest {
             .contains("\"collection\":\"knowledge__ghost\"")
             .contains("\"tenant\":\"t1\"");
         assertThat(ex.bodyString())
-            .as("the wording stays: an older client (nexus-mp8ys' retry) matches it")
+            .as("the wording stays: an older client's retry (nexus-f5wwx) matches it")
             .contains("is not registered");
     }
 
