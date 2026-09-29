@@ -438,7 +438,9 @@ def format_json(results: list[SearchResult]) -> str:
     items: list[dict[str, Any]] = []
     for r in results:
         item: dict[str, Any] = {
-            **r.metadata,
+            # _owner_doc_ids is the search's own working list (nexus-sis0m.5),
+            # not a result field.
+            **{k: v for k, v in r.metadata.items() if k != "_owner_doc_ids"},
             "id": r.id,
             "content": r.content,
             "distance": r.distance,

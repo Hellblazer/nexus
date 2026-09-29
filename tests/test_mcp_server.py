@@ -875,7 +875,9 @@ def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_m
     got = store_get(doc_id=chash, collection="fixture-subject")
     assert "title-a · title-b" in got, got
     # Asked by title, the answer names that title, not the last writer's.
-    assert "title-a" in store_get(doc_id="title-a", collection="fixture-subject")
+    by_title = store_get(doc_id="title-a", collection="fixture-subject")
+    assert not by_title.startswith("Not found"), by_title
+    assert text in by_title and "title-b" not in by_title.split("\n")[0], by_title
 
     hits = search(query=text, corpus="knowledge__fixture-subject").content[0].text
     line = next((ln for ln in hits.splitlines() if "title-a" in ln or "title-b" in ln), "")

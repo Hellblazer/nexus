@@ -5527,6 +5527,26 @@ def store_get(
                         + ", ".join(ids[:5]) + (" …" if len(ids) > 5 else "")
                         + ". Pass a 64-char content-hash to disambiguate."
                     )
+        if entry is None and not looks_like_hash:
+            # nexus-sis0m.5: the chunk row's title is its last writer's, so a
+            # note whose text another note wrote later is found only through
+            # its catalog document.
+            from nexus.catalog.store_hook import catalog_chashes_for_title  # noqa: PLC0415 — deferred for startup cost, as in store_put
+
+            found = [(c, docs) for c in scope if (docs := catalog_chashes_for_title(c, doc_id))]
+            if len(found) == 1 and len(found[0][1]) == 1:
+                col_name, (chashes,) = found[0]
+                entry = t3.get_by_id(col_name, chashes[0])
+                if entry is not None and len(chashes) > 1:
+                    split = split_note_text(t3, col_name, chashes)
+                    if split is not None:
+                        entry = t3.get_by_id(col_name, split[0]) or entry
+            elif found:
+                return (
+                    f"Title {doc_id!r} names {sum(len(d) for _c, d in found)} documents"
+                    + (f" in {len(found)} collections" if len(found) > 1 else "")
+                    + ". Pass one collection=, or a 64-char content-hash."
+                )
         if entry is None:
             where = col_name if len(scope) == 1 else f"any of {len(scope)} knowledge collections"
             return f"Not found: {doc_id!r} in {where} (pass a 64-char content-hash from store_list/store_put/search, or an exact title)"

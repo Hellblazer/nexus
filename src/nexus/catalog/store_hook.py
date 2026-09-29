@@ -2379,9 +2379,15 @@ def reap_catalog_documents_by_title(
 
 def live_holders_of_chashes(collection: str, chashes: list[str]) -> dict[str, list[tuple[str, str]]]:
     """``chash -> [(tumbler, title), ...]`` of the LIVE documents in
-    *collection* whose manifests still name each chash; chashes nobody
-    holds are omitted. Best-effort: ``{}`` when the catalog is unavailable
-    or unreadable, since this only names who kept a chunk."""
+    *collection* (or ghosts, which have none) whose manifests name each
+    chash; chashes nobody holds are omitted.
+
+    Resolves only the owning documents (``docs_for_chashes`` then
+    ``resolve_many``, which skips tombstones), so the cost follows the owner
+    count, not the collection's size; ``store_get`` calls it per lookup.
+    Best-effort: ``{}`` when the catalog is unavailable or unreadable, since
+    this only names who holds a chunk.
+    """
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     if not chashes:
@@ -2390,19 +2396,52 @@ def live_holders_of_chashes(collection: str, chashes: list[str]) -> dict[str, li
     if reader is None:
         return {}
     try:
-        live = {
-            str(e.tumbler): (getattr(e, "title", "") or "")
-            for e in (reader.list_by_collection(collection) or [])
-        }
+        owners = reader.docs_for_chashes(list(chashes)) or {}
+        tumblers = sorted({str(t) for ts in owners.values() for t in ts})
+        entries = reader.resolve_many(tumblers) if tumblers else {}
         out: dict[str, list[tuple[str, str]]] = {}
-        for chash, tumblers in (reader.docs_for_chashes(list(chashes)) or {}).items():
-            holders = [(str(t), live[str(t)]) for t in tumblers if str(t) in live]
+        for chash, ts in owners.items():
+            holders = [
+                (str(t), entries[str(t)].title or "")
+                for t in ts
+                if str(t) in entries
+                and (entries[str(t)].physical_collection or "") in ("", collection)
+            ]
             if holders:
                 out[chash] = holders
         return out
     except Exception:  # noqa: BLE001 — naming holders is best-effort
         _log.debug("live_holders_lookup_failed", exc_info=True)
         return {}
+    finally:
+        reader.close()
+
+
+def catalog_chashes_for_title(collection: str, title: str) -> list[list[str]]:
+    """The ordered manifest chashes of each store_put-origin document titled
+    *title* in *collection*, one list per document (nexus-sis0m.5).
+
+    A chunk row's title is its last writer's, so a title lookup against T3
+    misses a note whose text another note wrote later; the catalog keeps
+    each document's own title. ``[]`` when the catalog is unavailable.
+    """
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    reader = make_catalog_reader()
+    if reader is None:
+        return []
+    try:
+        docs = []
+        for e in reader.list_by_collection(collection) or []:
+            if not _is_title_reap_candidate(e, title, collection):
+                continue
+            rows = sorted(reader.get_manifest(str(e.tumbler)), key=lambda r: r.position)
+            if rows:
+                docs.append([r.chash for r in rows])
+        return docs
+    except Exception:  # noqa: BLE001 — a lookup fallback; the caller reports not found
+        _log.debug("catalog_title_lookup_failed", exc_info=True)
+        return []
     finally:
         reader.close()
 

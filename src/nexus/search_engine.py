@@ -329,7 +329,13 @@ def _attach_display_paths(
         r.metadata.get("doc_id", "") for r in results
         if r.metadata.get("doc_id")
     }
-    doc_ids |= {o for r in results for o in r.metadata.get("_owner_doc_ids", ())}
+    # Owners per hit are capped: a chunk many documents share (boilerplate)
+    # would otherwise make every search resolve all of them for a label
+    # that names three.
+    doc_ids |= {
+        o for r in results
+        for o in r.metadata.get("_owner_doc_ids", ())[:_OWNER_TITLE_RESOLVE_CAP]
+    }
     if not doc_ids:
         return
     # Batch-resolve all doc_ids in one call when the catalog backend
@@ -337,6 +343,7 @@ def _attach_display_paths(
     # by_doc_id() loop for older/local catalogs that lack the method.
     cache: dict[str, str] = {}
     titles: dict[str, str] = {}  # live documents only (resolve skips tombstones)
+    homes: dict[str, str] = {}  # doc_id -> physical_collection
     _resolve_many = getattr(catalog, "resolve_many", None)
     if _resolve_many is not None:
         try:
@@ -346,6 +353,7 @@ def _attach_display_paths(
                     cache[did] = entry.file_path
                 if entry is not None:
                     titles[did] = entry.title or ""
+                    homes[did] = entry.physical_collection or ""
         except Exception:  # noqa: BLE001 — best-effort batch resolve; failure logged at debug, display path dropped for set (see comment)
             _log.debug("attach_display_paths_batch_failed", exc_info=True)
             # Degradation granularity (CR Med-1 / critic obs): a single
@@ -364,15 +372,26 @@ def _attach_display_paths(
                 cache[did] = entry.file_path
             if entry is not None:
                 titles[did] = entry.title or ""
+                homes[did] = entry.physical_collection or ""
     for r in results:
         did = r.metadata.get("doc_id", "")
         path = cache.get(did) if did else None
         if path:
             r.metadata["_display_path"] = path
-        owners = r.metadata.get("_owner_doc_ids") or ([did] if did else [])
-        live = [titles[o] for o in owners if titles.get(o)]
+        owners = (r.metadata.get("_owner_doc_ids") or ([did] if did else []))[:_OWNER_TITLE_RESOLVE_CAP]
+        # The owner lookups are tenant-wide (chash is a function of text
+        # alone), so an owner in another collection is kept out: a hit
+        # names only documents in its own collection, or a ghost with none.
+        live = [
+            titles[o] for o in owners
+            if titles.get(o) and homes.get(o, "") in ("", r.collection)
+        ]
         if live:
             r.metadata["_display_title"] = owner_titles(live)
+
+
+#: The most owners of one hit's chunk resolved for its display title.
+_OWNER_TITLE_RESOLVE_CAP: int = 10
 
 
 def owner_titles(titles: list[str], *, limit: int = 3) -> str:
@@ -381,8 +400,9 @@ def owner_titles(titles: list[str], *, limit: int = 3) -> str:
 
     A chunk row carries its last writer's title, which names the wrong
     document when two share identical text, and a deleted one once that
-    writer is removed. The catalog's live owners are named instead: the one
-    title, or several joined, past *limit* with a count.
+    writer is removed. The catalog's live owners in the hit's collection are
+    named instead: the one title, or several joined, past *limit* with a
+    count. The hit's doc_id still names one of them.
     """
     distinct = sorted(dict.fromkeys(t for t in titles if t))
     if len(distinct) <= limit:
