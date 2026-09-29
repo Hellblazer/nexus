@@ -136,7 +136,7 @@ public final class OrtInitGate {
             }
         }
 
-        /** True once shutdown has run this scope's canceller. */
+        /** True once shutdown ran this scope's canceller and it returned normally. */
         public boolean cancelled() {
             synchronized (lock) {
                 return cancelled;
@@ -257,13 +257,21 @@ public final class OrtInitGate {
         }
     }
 
-    /** Caller holds {@link #lock}. A canceller that throws is logged; the wait still bounds exit. */
-    private static void runCanceller(Scope s) {
-        s.cancelled = true;
+    /**
+     * Caller holds {@link #lock}. The scope counts as cancelled only when its canceller
+     * returned normally; one that throws is logged as {@code ort_run_cancel_failed},
+     * the work is left to finish, and the wait still bounds exit.
+     *
+     * @return true when the canceller returned normally
+     */
+    private static boolean runCanceller(Scope s) {
         try {
             s.canceller.run();
+            s.cancelled = true;
+            return true;
         } catch (RuntimeException e) {
             log.warn("event=ort_run_cancel_failed error=\"{}\"", e.toString());
+            return false;
         }
     }
 
@@ -282,8 +290,7 @@ public final class OrtInitGate {
             int cancelled = 0;
             // A snapshot: a canceller may close its own scope on this thread (the lock is reentrant).
             for (Scope s : List.copyOf(active)) {
-                if (s.canceller != null && !s.cancelled) {
-                    runCanceller(s);
+                if (s.canceller != null && !s.cancelled && runCanceller(s)) {
                     cancelled++;
                 }
             }

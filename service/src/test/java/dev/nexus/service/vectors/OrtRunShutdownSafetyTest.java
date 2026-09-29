@@ -39,11 +39,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 1 - 0.95^30 = 0.79. The deterministic checks are the other two below.
  *
  * <p>Cancellation must be observed: the gate must log that it cancelled live runs on at
- * least {@value #MIN_CANCELLED} iterations. That fails on any host when the canceller
- * is gone (measured: removing its registration turns this test red), and it proves the
- * signals met live runs. The drain must also never expire its bound: an expiry means
- * exit went ahead with native work in flight, the crash window whether or not this run
- * happened to crash. Model gating follows {@link OrtTestModel} (skip only when nothing
+ * least {@value #MIN_CANCELLED} iterations, and must never log a canceller failure.
+ * That fails on any host when the canceller is not registered (measured: removing the
+ * registration turns this test red) or when it throws, and it proves the signals met
+ * live runs. It cannot see a canceller that returns without setting ORT's terminate
+ * flag: the log records that the canceller ran, not that ORT stopped. That case, and
+ * an ORT that ignored the flag, is caught only by the drain-bound check, which depends
+ * on the host being slow enough that 8 uncancelled runs outlast the bound (2.7 s for
+ * one run alone on the reference laptop). The drain must never expire its bound: an
+ * expiry means exit went ahead with native work in flight, the crash window whether
+ * or not this run happened to crash. Model gating follows {@link OrtTestModel} (skip only when nothing
  * is provisioned).
  */
 class OrtRunShutdownSafetyTest {
@@ -53,8 +58,10 @@ class OrtRunShutdownSafetyTest {
     private static final int MIN_CANCELLED = ITERATIONS / 2;
     private static final String CANCEL_LOG = "event=ort_run_cancelled count=";
     private static final String TIMEOUT_LOG = "event=ort_init_shutdown_wait_timeout";
+    private static final String CANCEL_FAILED_LOG = "event=ort_run_cancel_failed";
 
-    private record Outcome(int delayMs, int exitCode, boolean cancelled, boolean timedOut, String output) {}
+    private record Outcome(int delayMs, int exitCode, boolean cancelled, boolean timedOut,
+                           boolean cancelFailed, String output) {}
 
     @Test
     @Timeout(value = 10, unit = TimeUnit.MINUTES)
@@ -83,6 +90,9 @@ class OrtRunShutdownSafetyTest {
         assertThat(outcomes.stream().filter(Outcome::timedOut).map(Outcome::delayMs))
                 .as("the drain must finish inside its bound: cancelled runs return at a kernel "
                         + "boundary, so an expiry means exit proceeded with inference in flight")
+                .isEmpty();
+        assertThat(outcomes.stream().filter(Outcome::cancelFailed).map(Outcome::delayMs))
+                .as("no canceller may fail: a failed cancel leaves the run going at exit")
                 .isEmpty();
         long cancelled = outcomes.stream().filter(Outcome::cancelled).count();
         assertThat(cancelled)
@@ -134,6 +144,7 @@ class OrtRunShutdownSafetyTest {
         reader.join(5_000);
         boolean cancelled = lines.stream().anyMatch(l -> l.contains(CANCEL_LOG));
         boolean timedOut = lines.stream().anyMatch(l -> l.contains(TIMEOUT_LOG));
-        return new Outcome(delayMs, p.exitValue(), cancelled, timedOut, String.join("\n", lines));
+        boolean cancelFailed = lines.stream().anyMatch(l -> l.contains(CANCEL_FAILED_LOG));
+        return new Outcome(delayMs, p.exitValue(), cancelled, timedOut, cancelFailed, String.join("\n", lines));
     }
 }

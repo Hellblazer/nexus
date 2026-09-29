@@ -60,6 +60,25 @@ class GatedRunTest {
     }
 
     @Test
+    void theNativeImageRegistersOrtExceptionForJni() throws Exception {
+        // The entry is hand-added to the traced metadata (a happy-path trace never saw ORT
+        // fail); a re-trace would drop it silently. Without it a cancelled run is a fatal
+        // JNI GetMethodID error in the native binary (measured: exit 99, not 143).
+        var root = new com.fasterxml.jackson.databind.ObjectMapper().readTree(java.nio.file.Path.of(
+                "src", "main", "resources", "META-INF", "native-image", "traced",
+                "reachability-metadata.json").toFile());
+        com.fasterxml.jackson.databind.JsonNode entry = null;
+        for (var e : root.get("reflection")) {
+            if ("ai.onnxruntime.OrtException".equals(e.path("type").asText())) entry = e;
+        }
+        assertThat(entry).as("OrtException must be registered for JNI").isNotNull();
+        assertThat(entry.path("jniAccessible").asBoolean()).isTrue();
+        assertThat(entry.path("methods").toString())
+                .as("the (int, String) constructor libonnxruntime4j_jni throws through")
+                .contains("\"<init>\"").contains("\"int\"").contains("\"java.lang.String\"");
+    }
+
+    @Test
     void closeIsIdempotentAndAClosedRunIsNeverCancelled() throws Exception {
         OrtInitGate gate = new OrtInitGate();
         GatedRun run = GatedRun.open(gate, "run");

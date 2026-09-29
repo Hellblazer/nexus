@@ -524,7 +524,10 @@ if [ -f "$BGE_MODEL" ]; then
   done
   sleep 1.5
   kill -TERM "$SVCPID"
+  # Bounded: the gate waits at most 3 s; a hang past 30 s is a failure, not a stall.
+  ( sleep 30; kill -9 "$SVCPID" 2>/dev/null ) & TWATCH=$!
   wait "$SVCPID"; trc=$?
+  kill "$TWATCH" 2>/dev/null; wait "$TWATCH" 2>/dev/null
   for p in "${TPIDS[@]}"; do wait "$p" 2>/dev/null; done
   codes=$(cat /tmp/ns-term-*.code 2>/dev/null | tr '\n' ' ')
   if [ "$trc" = "143" ]; then
@@ -545,6 +548,8 @@ if [ -f "$BGE_MODEL" ]; then
     echo "  FAIL no in-flight embed answered 503 (codes: $codes); OrtException from native code may not have reached the gate"; fail=1
   fi
   SVCPID=""
+else
+  echo "  WARN SIGTERM-under-inference leg NOT covered — bge model absent at $BGE_MODEL"
 fi
 
 # ── Voyage-mode boot + egress-proxy wiring (nexus-myg2d) ──────────────────────

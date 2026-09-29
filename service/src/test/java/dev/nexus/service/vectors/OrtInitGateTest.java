@@ -152,7 +152,7 @@ class OrtInitGateTest {
         OrtInitGate.Scope scope = gate.enter("run");
         scope.onShutdown(() -> { throw new IllegalStateException("boom"); });
         assertThat(gate.quiesce(100)).as("the run never returned; the bound ends the wait").isFalse();
-        assertThat(scope.cancelled()).isTrue();
+        assertThat(scope.cancelled()).as("a canceller that threw did not cancel anything").isFalse();
     }
 
     /** Records the handlers a gate installs, instead of touching real JVM signals. */

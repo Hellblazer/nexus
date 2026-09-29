@@ -374,8 +374,9 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.sendRequestDeadlineExceeded(exchange, e);
         } catch (dev.nexus.service.vectors.OrtInitGate.ShutdownInProgressException e) {
             // nexus-o5xyx.3: write_many's server-side embed was refused or cancelled
-            // because the engine is exiting. The embed runs before any transaction,
-            // so nothing was written; 503 is inside the client's gateway retry codes.
+            // because the engine is exiting. No chunk rows were inserted (metadata-only
+            // updates may have committed first), and a retry is idempotent; 503 is
+            // inside the client's gateway retry codes.
             log.info("event=catalog_refused_shutting_down op={} tenant={} error={}", op, tenant, e.getMessage());
             HttpUtil.send(exchange, 503, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (Exception e) {
