@@ -2033,15 +2033,12 @@ def _no_leaked_engine_db_env():
     this compares. What remains is a raw ``os.environ`` write. The fixture
     puts the old values back before failing, so one leak does not cascade.
     """
+    from tests._env_restore import restore_changed_keys  # noqa: PLC0415 — conftest-local helper
+
     before = {k: os.environ.get(k) for k in _ENGINE_DB_ENV_KEYS}
     yield
-    leaked = {k: os.environ.get(k) for k in _ENGINE_DB_ENV_KEYS if os.environ.get(k) != before[k]}
+    leaked = restore_changed_keys(before)
     if leaked:
-        for k in leaked:
-            if before[k] is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = before[k]
         pytest.fail(
             "test left engine DB env changed in os.environ (restored now): "
             f"{sorted(leaked)}. An engine spawned later inherits these; set "

@@ -25,3 +25,15 @@ def restore_env_after(key: str) -> Generator[None]:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = before
+
+
+def restore_changed_keys(before: dict[str, str | None]) -> dict[str, str | None]:
+    """Put back every key in ``before`` whose value changed; return the changed
+    keys mapped to the value that was found (``None`` for a deleted key)."""
+    leaked = {k: os.environ.get(k) for k, v in before.items() if os.environ.get(k) != v}
+    for k in leaked:
+        if before[k] is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = before[k]
+    return leaked
