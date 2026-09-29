@@ -94,6 +94,20 @@ class HookRegistry:
         self._document.clear()
         self._document_with_doc_id.clear()
 
+    def without_batch(self, fn: Callable[..., None]) -> "HookRegistry":
+        """A copy of this registry with batch hook *fn* left out; every other
+        registration, and how each was classified, carries over. The source
+        registry is not changed (nexus-wbfpw.40: an import writes manifests
+        itself and must not also fire the per-batch manifest hook)."""
+        copy = HookRegistry()
+        copy._single = list(self._single)
+        copy._batch = [h for h in self._batch if h is not fn]
+        copy._batch_with_catalog_doc_id = set(self._batch_with_catalog_doc_id) - {id(fn)}
+        copy._batch_with_manifest_complete = set(self._batch_with_manifest_complete) - {id(fn)}
+        copy._document = list(self._document)
+        copy._document_with_doc_id = set(self._document_with_doc_id)
+        return copy
+
     # ── Single-doc chain ─────────────────────────────────────────────────────
 
     def register_single(self, fn: Callable[[str, str, str], None]) -> None:

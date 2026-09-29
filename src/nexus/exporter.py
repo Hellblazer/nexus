@@ -777,12 +777,14 @@ def import_collection(
     Returns
     -------
     dict with keys: collection_name, imported_count, skipped_count,
-    rehashed_count, owned_count, unowned_count, elapsed_seconds.
+    rehashed_count, owned_count, unowned_count, unowned_documents,
+    elapsed_seconds.
     ``owned_count`` (nexus-wbfpw.31) is the number of the file's chunks
     that end the import owned by their document. ``unowned_count``
     (nexus-wbfpw.40) is the number left unowned because their document
     already existed with a manifest that does not name them: an existing
     document's manifest is never replaced by an import.
+    ``unowned_documents`` names up to 5 of those documents by tumbler.
 
     Every record is grouped by owner identity as it streams: a legacy
     record carrying ``meta.doc_id`` by that doc_id
@@ -798,11 +800,11 @@ def import_collection(
     ``fire_store_chains`` call and restarts at 0 per batch, which is
     wrong the moment a document's chunks span more than one 300-record
     upsert batch (exactly the shape RDR-192 Step 5 needs this fix to
-    close for a large import). For non-legacy records the hook no-ops
-    (their group key is the empty string, which its ``if not by_doc:
-    return`` guard skips). For legacy records it still fires per upserted
-    batch, as before; the explicit write here runs after every batch and
-    is a replace, so it has the last word on the manifest either way.
+    close for a large import). The import fires its store chains without
+    that hook at all (nexus-wbfpw.40): for legacy records it used to
+    replace a live document's manifest batch by batch. The explicit write
+    is skipped for a document that already owns chunks (Sam, 2026-09-29:
+    keep existing), so an import never hides a document's current chunks.
 
     Raises
     ------
@@ -821,6 +823,13 @@ def import_collection(
         from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         hooks = HookRegistry()
         install_default_hooks(hooks)
+    # nexus-wbfpw.40: the explicit end-of-import write below is the only
+    # manifest writer an import has. The per-batch hook replaced a live
+    # document's manifest for every legacy doc_id batch before the
+    # keep-existing check could run, and then looked like that document's
+    # existing manifest to it.
+    from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred to avoid import cycle
+    hooks = hooks.without_batch(manifest_write_batch_hook)
 
     # Phase 1: read and validate header.
     with open(input_path, "rb") as f:
@@ -1089,6 +1098,7 @@ def import_collection(
     # cannot be the per-batch manifest_write_batch_hook.
     owned_count = 0
     unowned_count = 0
+    unowned_documents: list[str] = []
     if owner_groups and not _owners_apply(db):
         # A non-service handle (the InMemoryVectorClient unit-test
         # substrate) holds its chunks outside the engine, so the catalog
@@ -1154,6 +1164,7 @@ def import_collection(
                     owned_count += kept
                     unowned_count += len(file_chashes) - kept
                     if kept < len(file_chashes):
+                        unowned_documents.append(doc)
                         _log.warning(
                             "import_owner_kept_existing_manifest",
                             collection=collection_name, doc=doc,
@@ -1218,5 +1229,6 @@ def import_collection(
         "rehashed_count": rehashed_count,
         "owned_count": owned_count,
         "unowned_count": unowned_count,
+        "unowned_documents": unowned_documents[:5],
         "elapsed_seconds": round(elapsed, 2),
     }

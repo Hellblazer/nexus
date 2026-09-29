@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx store import` never replaces an existing document's chunk list** (nexus-wbfpw.40). An import that resolved to a live document wrote the file's chunks as that document's whole manifest, so importing an older export over a re-put note hid the correction from search (RDR-192 live(c)) and left it for the reaper; legacy `doc_id` exports did the same batch by batch. Now a document that already owns chunks keeps its manifest, and the file's chunks it does not own stay unowned. The command reports how many and names up to 5 documents; to restore a document from a file, delete it first, then import.
+
 ## [7.66.0] - 2026-09-29
 
 Pairs with engine-service-v0.1.140. The engine carries the halves of three client changes below (collection rename, rename tombstones, the chash-positions route). None has a changeset and all three are additive, so the engine deploys before this client tag. An older engine leaves the client on its previous behaviour: rename keeps the old owner, tombstones are filtered on the client only, and search uses the manifest path. engine-service-v0.1.139 was tagged and never published. Its macOS binary was linked for macOS 27 and the release's ABI check refused it.

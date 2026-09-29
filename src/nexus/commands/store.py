@@ -1045,11 +1045,14 @@ def import_cmd(
     if result.get("skipped_count"):
         click.echo(f"  Skipped {result['skipped_count']} existing records (--skip-existing).")
     if result.get("owned_count"):
-        click.echo(f"  Registered catalog owners for {result['owned_count']} records.")
+        click.echo(f"  {result['owned_count']} records are owned by a catalog document.")
     if result.get("unowned_count"):
+        docs = ", ".join(result.get("unowned_documents") or [])
         click.echo(
-            f"  Left {result['unowned_count']} records unowned: their documents already exist, and an "
-            "import never replaces an existing document's chunk list. Unowned chunks are not searchable."
+            f"  {result['unowned_count']} records were left unowned and are not searchable: their "
+            f"documents already exist with a different chunk list, which an import never replaces "
+            f"(documents: {docs}). To restore a document from this file instead, delete it first "
+            "(nx store delete), then import again."
         )
     if result.get("rehashed_count"):
         click.echo(

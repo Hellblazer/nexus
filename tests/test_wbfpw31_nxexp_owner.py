@@ -18,15 +18,19 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import msgpack
 import numpy as np
 import pytest
+from click.testing import CliRunner
 
+import nexus.catalog.http_catalog_client as hcc
 import nexus.exporter as exporter_mod
 from nexus.aspect_readers import uri_for
 from nexus.catalog.collection_name import owner_segment_for_tumbler
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
+from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.limits import QUOTAS
 from nexus.errors import NexusError
@@ -692,3 +696,88 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     again = import_collection(db=client, input_path=current_export, target_collection=coll, skip_existing=True)
     assert [r.chash for r in reader.get_manifest(doc)] == [v2]
     assert (again["owned_count"], again["unowned_count"]) == (1, 0)
+
+
+def test_legacy_doc_id_import_leaves_an_existing_documents_manifest_alone(t2_service_env, tmp_path):
+    """nexus-wbfpw.40 review round: the legacy meta.doc_id shape reached the
+    same replace through the per-batch manifest_write_batch_hook, which
+    fired for each upserted batch BEFORE the keep-existing check and then
+    looked like an existing manifest to it. No skip_existing, so the hook
+    path is exercised."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    coll = _coll("keep-existing-legacy")
+    doc, _uri, (v2,) = _owned_doc(writer, client, coll, owner, "wbfpw40 legacy note", ["wbfpw40 legacy current"])
+
+    v3_text = "wbfpw40 legacy stale export chunk"
+    v3 = hashlib.sha256(v3_text.encode()).hexdigest()
+    f = tmp_path / "legacy.nxexp"
+    _write_hand_crafted_nxexp(f, coll, [{
+        "id": v3, "document": v3_text,
+        "metadata": {"chunk_text_hash": v3, "doc_id": doc, "chunk_index": 0},
+    }])
+    result = import_collection(db=client, input_path=f, target_collection=coll)
+
+    assert [r.chash for r in reader.get_manifest(doc)] == [v2], "the legacy import replaced the current manifest"
+    assert v2 in client.get_collection(coll).get(ids=[v2], include=[])["ids"]
+    assert (result["owned_count"], result["unowned_count"]) == (0, 1)
+
+
+def test_a_failed_manifest_read_never_overwrites(t2_service_env, tmp_path, monkeypatch):
+    """If the existing manifest cannot be read, the document is reported as
+    failed and its manifest is not written: an unread manifest may hold
+    chunks the write would hide."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    coll = _coll("keep-existing-readfail")
+    doc, _uri, (v1,) = _owned_doc(writer, client, coll, owner, "wbfpw40 readfail note", ["wbfpw40 readfail v1"])
+    out = tmp_path / "readfail.nxexp"
+    export_collection(db=client, collection_name=coll, output_path=out)
+
+    def _boom(self, doc_id):
+        raise RuntimeError("wbfpw40 injected manifest read failure")
+
+    real_get = hcc.HttpCatalogClient.get_manifest
+    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifest", _boom)
+    writes: list[str] = []
+    real_write = hcc.HttpCatalogClient.write_manifest
+    monkeypatch.setattr(hcc.HttpCatalogClient, "write_manifest",
+                        lambda self, d, rows, **kw: (writes.append(d), real_write(self, d, rows, **kw))[1])
+    with pytest.raises(NexusError, match="injected manifest read failure"):
+        import_collection(db=client, input_path=out, target_collection=coll, skip_existing=True)
+    assert doc not in writes
+    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifest", real_get)
+    monkeypatch.setattr(hcc.HttpCatalogClient, "write_manifest", real_write)
+    assert [r.chash for r in reader.get_manifest(doc)] == [v1]
+
+
+def test_delete_then_import_restores_a_document_from_the_file(t2_service_env, tmp_path):
+    """The remedy nx store import prints for unowned records: delete the
+    document, then import. The re-import must own the file's chunks."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer(priority="interactive")
+    owner = writer.register_owner("knowledge", "curator")
+    coll = _coll("delete-then-import")
+    doc, _uri, (v1,) = _owned_doc(writer, client, coll, owner, "wbfpw40 restore note", ["wbfpw40 restore v1"])
+    out = tmp_path / "restore.nxexp"
+    export_collection(db=client, collection_name=coll, output_path=out)
+    v2_text = "wbfpw40 restore v2"
+    v2 = hashlib.sha256(v2_text.encode()).hexdigest()
+    client.upsert_chunks_with_embeddings(
+        coll, ids=[v2], documents=[v2_text], embeddings=[],
+        metadatas=[{"title": "wbfpw40 restore note", "chunk_text_hash": v2,
+                    "indexed_at": datetime.now(UTC).isoformat()}],
+    )
+    writer.write_manifest(doc, [{"chash": v2, "position": 0}], collection=coll)
+
+    with patch("nexus.commands.store._t3", return_value=client):
+        deleted = CliRunner().invoke(main, ["store", "delete", "--title", "wbfpw40 restore note", "-c", coll, "--yes"])
+    assert deleted.exit_code == 0, deleted.output
+    result = import_collection(db=client, input_path=out, target_collection=coll)
+    assert (result["owned_count"], result["unowned_count"]) == (1, 0), result
+    assert v1 in client.get_collection(coll).get(ids=[v1], include=[])["ids"], "the restored chunk must be visible"

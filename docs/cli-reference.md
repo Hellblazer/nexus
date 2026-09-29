@@ -2324,9 +2324,17 @@ is otherwise invisible to search and get.
 - A record with no owner at all (an older export predating this field, or a
   live-but-unmanifested chunk the export could not resolve) is grouped under
   one document per import file, keyed by the target collection and file name.
-- `--skip-existing` still ends every record owned: grouping happens before
-  duplicate filtering, since a chunk dropped as an existing duplicate was
-  written by a prior run and must still end up owned by this one.
+- An import never replaces the manifest of a document that already owns
+  chunks (nexus-wbfpw.40). That document's current chunk list is what search
+  shows; an older export imported over a re-put note would otherwise hide the
+  correction. The file's chunks such a document does not own stay unowned:
+  not searchable, and in a `knowledge__` collection removable by the RDR-192
+  reaper after its grace window. The command reports how many and names up
+  to 5 documents. To restore a document from the file instead, delete it
+  first, then import.
+- `--skip-existing` does not change ownership: grouping happens before
+  duplicate filtering, so a chunk dropped as an existing duplicate is owned
+  exactly as it would be without the flag.
 - An owner with no title (an export whose document had none) keeps its
   source URI as the registered document's title.
 - If an owner document or its manifest fails to write, the rest of the
