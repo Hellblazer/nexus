@@ -9,14 +9,25 @@ inside the WSL2 appliance projects its endpoint into one small JSON file,
 change and left alone otherwise.
 
 What it carries is a ``mint-locked`` credential, NEVER a bearer: O1 keeps the
-root bearer inside the distro. A mint-locked token can only call
+root bearer inside the distro. A mint-locked token itself can only call
 ``POST /v1/data-tokens/mint`` for its own tenant; the Windows client turns it
 into short-lived data tokens through ``nexus.db.data_token.DataTokenManager``,
-the same path cloud mode uses. The credential is issued ONCE, by the
-supervisor with the root bearer, persisted on the data volume beside
-``pg_credentials`` (:data:`MINT_CREDENTIAL_FILENAME`), and never re-issued: an
-image re-import regenerates the same file from the volume. Revoking it
-invalidates only this credential; the root is untouched.
+the same path cloud mode uses. What that bounds: a leaked copy grants the
+tenant's full DATA plane (through the tokens it mints, rate-limited, each at
+most the data-token TTL ceiling) until it is revoked, but no token-admin verb
+and no tenant creation. It does not bound a process running as the same Windows
+user, which can reach the distro anyway (record section 7).
+
+The credential is issued ONCE, by the supervisor with the root bearer,
+persisted on the data volume beside ``pg_credentials``
+(:data:`MINT_CREDENTIAL_FILENAME`): an image re-import regenerates the same
+file from the volume. Revoking it invalidates only this credential; the root is
+untouched. :class:`ApplianceProjector` checks it against the engine on start
+and every :data:`VERIFY_INTERVAL_S`: absent from the engine (a re-provisioned
+database) is re-issued once per supervisor lifetime; revoked or
+rotation-expired is sticky (the handoff file is removed and
+``appliance_mint_credential_dead`` names the remedy); a failed check never
+counts as absent.
 
 Schema 1, one JSON object, UTF-8 without BOM, keys sorted, one trailing newline::
 
@@ -105,11 +116,20 @@ def _atomic_write(target: Path, data: bytes) -> None:
         with contextlib.suppress(OSError):
             tmp.unlink()
         raise
-    dir_fd = os.open(str(target.parent), os.O_RDONLY)
-    try:
-        os.fsync(dir_fd)
-    finally:
-        os.close(dir_fd)
+    # The file is in place once os.replace returns; the directory fsync only
+    # hardens the rename against a power loss, so its failure is not a failed write.
+    with contextlib.suppress(OSError):
+        dir_fd = os.open(str(target.parent), os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+
+def _enforce_0600(path: Path) -> None:
+    """Tighten an existing file that is readable beyond its owner."""
+    if path.stat().st_mode & 0o077:
+        path.chmod(0o600)
 
 
 def write_handoff_if_changed(target: Path, port: int, mint_token: str, mint_tenant: str) -> bool:
@@ -125,6 +145,7 @@ def write_handoff_if_changed(target: Path, port: int, mint_token: str, mint_tena
     data = handoff_bytes(port, mint_token, mint_tenant)
     with contextlib.suppress(FileNotFoundError):
         if target.read_bytes() == data:
+            _enforce_0600(target)
             return False
     _atomic_write(target, data)
     return True
@@ -141,6 +162,7 @@ def _read_credential(path: Path) -> tuple[str, str] | None:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    _enforce_0600(path)
     values: dict[str, str] = {}
     for line in text.splitlines():
         key, sep, value = line.partition("=")
@@ -175,3 +197,181 @@ def ensure_mint_credential(
     tenant = _require_str("issued tenant", issued.get("tenant"))
     _atomic_write(path, f"{_TOKEN_KEY}={token}\n{_TENANT_KEY}={tenant}\n".encode())
     return token, tenant
+
+
+# ── credential validity and the projector (nexus-ijue9.29 review round) ─────
+
+#: Seconds between validity checks of the persisted credential after the first
+#: (which runs on start). A list call per heartbeat would be wasted load.
+VERIFY_INTERVAL_S: float = 300.0
+
+#: What :func:`classify_credential` can answer.
+LIVE, ABSENT, REVOKED, EXPIRED = "live", "absent", "revoked", "expired"
+
+DEAD_REMEDY: str = (
+    f"the appliance's mint credential is no longer usable; to issue a new one, "
+    f"remove <NEXUS_CONFIG_DIR>/{MINT_CREDENTIAL_FILENAME} and restart the unit "
+    f"(a revoked credential is never re-issued automatically)"
+)
+
+
+def token_hash(token: str) -> str:
+    """The engine's stored identity for *token* (sha256 hex, TokenHashing.java)."""
+    import hashlib  # noqa: PLC0415 — only the validity path needs it
+
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def classify_credential(rows: list[Mapping[str, object]], mint_token: str) -> str:
+    """Where *mint_token* stands among the engine's token *rows*.
+
+    ``absent``: no row carries its hash (the database was re-provisioned under
+    a surviving credential file). ``revoked``: an operator revoked it, or it is
+    not mint-locked. ``expired``: it carries an expiry, which the issued
+    credential never has: ``nx service token rotate`` grace-expired it.
+    """
+    wanted = token_hash(mint_token)
+    for row in rows:
+        if row.get("token_hash") != wanted:
+            continue
+        if row.get("revoked_at") or row.get("scope") not in (None, "mint-locked"):
+            return REVOKED
+        if row.get("expires_at"):
+            return EXPIRED
+        return LIVE
+    return ABSENT
+
+
+class ApplianceProjector:
+    """Keeps the handoff file true to a usable credential, for one supervisor lifetime.
+
+    Policy (coordinator, 2026-09-29):
+    - ``absent``: re-issue ONCE per supervisor lifetime, loudly. Absent again
+      after that means something keeps deleting it: treat as dead, no loop.
+    - ``revoked`` / ``expired``: sticky. Remove the handoff file (Windows then
+      reports "appliance has not published its endpoint") and log the remedy.
+      Revocation must stay revoked; never re-issue on it.
+    - A failed list call is never read as ``absent``: keep the current file.
+    The check runs on the first projection and then every
+    :data:`VERIFY_INTERVAL_S`; the file write itself runs on every projection
+    and is a no-op when nothing changed.
+    """
+
+    def __init__(
+        self,
+        *,
+        config_dir: Path,
+        target: Path,
+        issue: Callable[[], Mapping[str, object]],
+        revoke: Callable[[str], object],
+        list_rows: Callable[[], list[Mapping[str, object]]],
+        log: object,
+        clock: Callable[[], float],
+        verify_interval_s: float = VERIFY_INTERVAL_S,
+    ) -> None:
+        self._config_dir = config_dir
+        self._target = target
+        self._issue = issue
+        self._revoke = revoke
+        self._list_rows = list_rows
+        self._log = log
+        self._clock = clock
+        self._verify_interval_s = verify_interval_s
+        self._last_verified: float | None = None
+        self._reissued = False
+        self._dead: str | None = None
+
+    @property
+    def dead(self) -> str | None:
+        """The state that killed the credential this lifetime, else None."""
+        return self._dead
+
+    def _issue_and_account(self) -> Mapping[str, object]:
+        issued = self._issue()
+        self._log.info(  # type: ignore[attr-defined]
+            "appliance_mint_credential_issued",
+            tenant=issued.get("tenant"), token_hash=issued.get("token_hash"),
+            label=MINT_CREDENTIAL_LABEL,
+        )
+        return issued
+
+    def _credential(self) -> tuple[str, str]:
+        issued_here: list[Mapping[str, object]] = []
+
+        def _issue() -> Mapping[str, object]:
+            issued = self._issue_and_account()
+            issued_here.append(issued)
+            return issued
+
+        try:
+            return ensure_mint_credential(self._config_dir, _issue)
+        except Exception:
+            # Issued but not persisted: revoke it, or it stays a live,
+            # unaccounted, never-expiring mint credential.
+            for issued in issued_here:
+                h = str(issued.get("token_hash") or "")
+                try:
+                    self._revoke(h)
+                    self._log.warning(  # type: ignore[attr-defined]
+                        "appliance_mint_credential_orphan_revoked", token_hash=h,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._log.error(  # type: ignore[attr-defined]
+                        "appliance_mint_credential_orphaned", token_hash=h,
+                        label=MINT_CREDENTIAL_LABEL, error=str(exc),
+                        msg="issued but neither persisted nor revoked: revoke it by hash",
+                    )
+            raise
+
+    def _go_dead(self, state: str, mint_token: str) -> None:
+        self._dead = state
+        with contextlib.suppress(FileNotFoundError):
+            self._target.unlink()
+        self._log.error(  # type: ignore[attr-defined]
+            "appliance_mint_credential_dead", state=state,
+            token_hash=token_hash(mint_token), path=str(self._target), remedy=DEAD_REMEDY,
+        )
+
+    def project(self, port: int) -> bool:
+        """Bring the handoff file up to date. Returns True when it was written.
+
+        Raises OSError / engine errors for the caller to log; never loops.
+        """
+        if self._dead is not None:
+            with contextlib.suppress(FileNotFoundError):
+                self._target.unlink()
+            return False
+        mint_token, mint_tenant = self._credential()
+        now = self._clock()
+        if self._last_verified is None or now - self._last_verified >= self._verify_interval_s:
+            try:
+                rows = self._list_rows()
+            except Exception as exc:  # noqa: BLE001 — a failed check is not "absent"
+                self._log.warning(  # type: ignore[attr-defined]
+                    "appliance_mint_credential_check_failed", error=str(exc),
+                    msg="kept the current handoff file; will check again",
+                )
+            else:
+                self._last_verified = now
+                state = classify_credential(rows, mint_token)
+                if state == ABSENT and not self._reissued:
+                    self._reissued = True
+                    self._log.warning(  # type: ignore[attr-defined]
+                        "appliance_mint_credential_reissued", reason=ABSENT,
+                        old_token_hash=token_hash(mint_token),
+                        msg="the engine has no row for the persisted credential "
+                        "(re-provisioned database?); issuing a new one once",
+                    )
+                    (self._config_dir / MINT_CREDENTIAL_FILENAME).unlink()
+                    mint_token, mint_tenant = self._credential()
+                elif state == ABSENT:
+                    self._log.error(  # type: ignore[attr-defined]
+                        "appliance_mint_credential_keeps_disappearing",
+                        msg="the re-issued credential is absent again; not re-issuing",
+                    )
+                    self._go_dead(ABSENT, mint_token)
+                    return False
+                elif state in (REVOKED, EXPIRED):
+                    self._go_dead(state, mint_token)
+                    return False
+        return write_handoff_if_changed(self._target, port, mint_token, mint_tenant)

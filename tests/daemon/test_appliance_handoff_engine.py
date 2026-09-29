@@ -138,3 +138,32 @@ def test_an_unwritable_handoff_path_is_logged_not_fatal(engine, tmp_path, monkey
         _supervisor(tmp_path, root)._project_appliance_handoff(urlparse(base_url).port)
     warned = [e for e in logs if e.get("event") == "appliance_handoff_not_written"]
     assert warned and "missing-dir" in warned[0]["path"]
+
+
+def test_a_revoked_credential_takes_the_handoff_down_and_is_not_reissued(
+    engine, tmp_path, monkeypatch,
+) -> None:
+    base_url, root = engine["base_url"], engine["bearer"]
+    port = urlparse(base_url).port
+    handoff = tmp_path / "appliance" / "endpoint.json"
+    handoff.parent.mkdir()
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.setenv(HANDOFF_FILE_ENV, str(handoff))
+    monkeypatch.delenv("NX_SERVICE_TOKEN", raising=False)
+
+    _supervisor(config_dir, root)._project_appliance_handoff(port)
+    mint_token = json.loads(handoff.read_text())["mint_token"]
+    before = len(_labelled(base_url, root))
+    revoked = httpx.post(
+        base_url + "/v1/service-tokens/revoke",
+        json={"selector": hashlib.sha256(mint_token.encode()).hexdigest()},
+        headers={"Authorization": f"Bearer {root}"}, timeout=10,
+    )
+    assert revoked.status_code == 200, revoked.text
+
+    with structlog.testing.capture_logs() as logs:
+        _supervisor(config_dir, root)._project_appliance_handoff(port)   # a new lifetime checks on start
+    assert not handoff.exists(), "a dead credential takes the handoff down"
+    assert any(e.get("event") == "appliance_mint_credential_dead" and e.get("state") == "revoked" for e in logs)
+    assert len(_labelled(base_url, root)) == before, "revocation stays revoked: nothing re-issued"

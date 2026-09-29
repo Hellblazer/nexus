@@ -738,8 +738,14 @@ FIXED_PORT_ENV: str = "NX_SERVICE_FIXED_PORT"
 #: asserts equality with it instead of retyping the literal.
 APPLIANCE_DEFAULT_PORT: int = 29517
 
+#: The appliance unit's handoff-file variable, named here only for a log line
+#: (the handoff itself lives in nexus.daemon.appliance_handoff).
+HANDOFF_FILE_ENV_NAME: str = "NX_APPLIANCE_HANDOFF_FILE"
+
 _FIXED_PORT_REMEDY: str = (
-    f"change {FIXED_PORT_ENV} in /etc/nexus/appliance.env and restart the unit"
+    f"if the holder is a leftover nexus-service of this appliance, stop it "
+    f"(`nx daemon service stop`); otherwise change {FIXED_PORT_ENV} in "
+    f"/etc/nexus/appliance.env and restart the unit"
 )
 
 
@@ -751,11 +757,11 @@ def _parse_fixed_port(raw: str | None) -> int | None:
     if raw is None or not raw.strip():
         return None
     value = raw.strip()
-    try:
-        port = int(value, 10)
-    except ValueError:
-        port = None
-    if port is None or not 1024 <= port <= 65535 or str(port) != value.lstrip("+"):
+    # ASCII digits only, no sign, no leading zero, no underscores: int() alone
+    # accepts "+29517", "29_517" and non-ASCII digits.
+    canonical = value.isascii() and value.isdigit() and not value.startswith("0")
+    port = int(value) if canonical else None
+    if port is None or not 1024 <= port <= 65535:
         raise StorageServiceStartError(
             f"{FIXED_PORT_ENV}={raw!r} is not a port: it must be an integer in "
             f"1024..65535. Remedy: {_FIXED_PORT_REMEDY}."
@@ -785,12 +791,21 @@ def _port_holder(port: int) -> str | None:
 def _claim_fixed_port(port: int, host: str = _SERVICE_HOST) -> int:
     """Probe-bind *port* on *host* and release it, or fail loudly.
 
-    Same posture as :func:`_allocate_free_port`: no SO_REUSEADDR, so a port
-    another process holds is refused rather than shared. There is NO fallback to
+    An early DIAGNOSTIC, not a reservation: the engine binds only after its
+    Liquibase walk (minutes on a first boot), and a port lost in between makes
+    the engine's own bind fail, which readiness reports loudly. The probe exists
+    so the common collision is named, with its holder and remedy, before spawn.
+
+    SO_REUSEADDR, unlike :func:`_allocate_free_port`: the engine's JDK HttpServer
+    binds with it, so TIME_WAIT sockets left on this fixed port by the previous
+    engine's closed connections must not read as a collision (they would, for
+    ~60 s after every engine death, with no holder to name). A live LISTEN socket
+    on the same address still conflicts on Linux and BSD. There is NO fallback to
     an ephemeral port: a moved port is unreachable from Windows (RDR-218 Gap 1).
     """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((host, port))
     except OSError as exc:
         if exc.errno != errno.EADDRINUSE:
@@ -1910,46 +1925,25 @@ class StorageServiceSupervisor:
         """RDR-218 (nexus-ijue9.29): project the endpoint for the Windows client.
 
         Only when ``NX_APPLIANCE_HANDOFF_FILE`` is set (the appliance unit sets
-        it); otherwise nothing is issued or written. Runs after the lease is
-        published, so the engine answers /health. The file carries a
-        ``mint-locked`` credential, never the root bearer (Sam's O1): the
-        credential is issued once with the root bearer, persisted beside
-        pg_credentials and reused on every later publish. Any failure is logged
-        and swallowed: the service itself is healthy, and doctor / the Windows
-        reader report the absent file distinctly.
+        it); otherwise nothing is issued or written. Called from ``_publish``
+        (after /health) and again from every heartbeat, so a transient failure
+        converges and a deleted file comes back; each call is a no-op when
+        nothing changed. The file carries a ``mint-locked`` credential, never
+        the root bearer (Sam's O1); the credential's lifecycle and validity
+        policy live in :class:`nexus.daemon.appliance_handoff.ApplianceProjector`.
+        Any failure is logged and swallowed: the service itself is healthy.
         """
-        from nexus.daemon.appliance_handoff import (  # noqa: PLC0415 — appliance-only path
-            HANDOFF_FILE_ENV,
-            MINT_CREDENTIAL_LABEL,
-            ROOT_TENANT,
-            ensure_mint_credential,
-            write_handoff_if_changed,
-        )
+        from nexus.daemon.appliance_handoff import HANDOFF_FILE_ENV  # noqa: PLC0415 — appliance-only path
 
         target = os.environ.get(HANDOFF_FILE_ENV, "").strip()
         if not target:
             return
-
-        def _issue() -> dict[str, Any]:
-            from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415
-
-            with HttpTokenStore(
-                base_url=f"http://{_SERVICE_HOST}:{port}", _token=self._service_token,
-            ) as admin:
-                issued = admin.issue_token(
-                    ROOT_TENANT, label=MINT_CREDENTIAL_LABEL, scope="mint-locked",
-                )
-            _log.info(
-                "appliance_mint_credential_issued",
-                tenant=issued.get("tenant"),
-                token_hash=issued.get("token_hash"),
-                label=MINT_CREDENTIAL_LABEL,
-            )
-            return issued
-
+        projector = getattr(self, "_appliance_projector", None)
+        if projector is None:
+            projector = self._build_appliance_projector(Path(target), port)
+            self._appliance_projector = projector
         try:
-            mint_token, mint_tenant = ensure_mint_credential(self._config_dir, _issue)
-            written = write_handoff_if_changed(Path(target), port, mint_token, mint_tenant)
+            written = projector.project(port)
         except Exception as exc:  # noqa: BLE001 — the service is healthy; report, never die
             _log.warning(
                 "appliance_handoff_not_written",
@@ -1958,7 +1952,53 @@ class StorageServiceSupervisor:
                 error=str(exc),
             )
             return
-        _log.info("appliance_handoff_projected", path=target, port=port, written=written)
+        if written:
+            _log.info("appliance_handoff_projected", path=target, port=port)
+
+    def _build_appliance_projector(self, target: Path, port: int) -> Any:
+        """The projector for this supervisor lifetime, wired to the engine on *port*."""
+        from nexus.daemon.appliance_handoff import (  # noqa: PLC0415 — appliance-only path
+            MINT_CREDENTIAL_LABEL,
+            ROOT_TENANT,
+            ApplianceProjector,
+        )
+        from nexus.db.t2.http_token_store import HttpTokenStore  # noqa: PLC0415
+
+        if getattr(self, "_fixed_port", None) is None:
+            _log.warning(
+                "appliance_handoff_without_fixed_port",
+                msg=f"{HANDOFF_FILE_ENV_NAME} is set but {FIXED_PORT_ENV} is not: the "
+                "handoff will carry an ephemeral port the WSL relay does not forward",
+            )
+
+        def _admin() -> HttpTokenStore:
+            return HttpTokenStore(
+                base_url=f"http://{_SERVICE_HOST}:{port}", _token=self._service_token,
+            )
+
+        def _issue() -> dict[str, Any]:
+            with _admin() as admin:
+                return admin.issue_token(
+                    ROOT_TENANT, label=MINT_CREDENTIAL_LABEL, scope="mint-locked",
+                )
+
+        def _revoke(token_hash: str) -> object:
+            with _admin() as admin:
+                return admin.revoke_token(token_hash)
+
+        def _list_rows() -> list[dict[str, Any]]:
+            with _admin() as admin:
+                return admin.list_tokens(ROOT_TENANT)
+
+        return ApplianceProjector(
+            config_dir=self._config_dir,
+            target=target,
+            issue=_issue,
+            revoke=_revoke,
+            list_rows=_list_rows,
+            log=_log,
+            clock=getattr(self, "_monotonic", time.monotonic),
+        )
 
     def _stop_service(self) -> None:
         """Send SIGTERM (escalating to SIGKILL) to the service process group,
@@ -2088,6 +2128,18 @@ class StorageServiceSupervisor:
             # silently skipping a needed call, so both sides of the branch
             # are pinned, not just the happy path.
             ep = existing.endpoint
+            fixed = getattr(self, "_fixed_port", None)
+            if fixed is not None and ep.get("port") != fixed:
+                # nexus-ijue9.29: a supervisor started without the appliance env
+                # (an `nx` spawn inside the distro) owns the engine on another
+                # port. Adopting it would leave Windows pointed at nothing and
+                # this unit exiting 0, never restarted.
+                raise StorageServiceStartError(
+                    f"a storage service is already running on port {ep.get('port')}, "
+                    f"but {FIXED_PORT_ENV}={fixed}: it was started without the "
+                    f"appliance environment. Stop it (`nx daemon service stop`) and "
+                    f"restart the unit."
+                )
             _raise_or_warn_on_artifact_mismatch(self._config_dir, ep)
             _log.info(
                 "storage_service_already_running",
@@ -2321,7 +2373,7 @@ class StorageServiceSupervisor:
         mono = getattr(self, "_monotonic", time.monotonic)
         started = mono()
         try:
-            return self._heartbeat_once_untimed(phases)
+            result = self._heartbeat_once_untimed(phases)
         finally:
             elapsed = mono() - started
             ttl = ttl_for_tier(_REGISTRY_TIER)
@@ -2342,6 +2394,12 @@ class StorageServiceSupervisor:
                     ttl_s=ttl,
                     phases_s={k: round(v, 3) for k, v in phases.items()},
                 )
+        # nexus-ijue9.29: after a fully healthy tick, and outside its timing,
+        # bring the appliance handoff back in line (a no-op everywhere else, and
+        # on an appliance whenever nothing changed).
+        if result == (True, True) and getattr(self, "_proc", None) is not None:
+            self._project_appliance_handoff(self._service_port)
+        return result
 
     def _timed(self, phases: dict[str, float], name: str, fn: Callable[[], Any]) -> Any:
         mono = getattr(self, "_monotonic", time.monotonic)

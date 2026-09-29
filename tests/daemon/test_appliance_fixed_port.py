@@ -17,6 +17,8 @@ import socket
 from pathlib import Path
 from typing import Any
 
+from unittest.mock import patch
+
 import pytest
 
 import nexus.daemon.storage_service_daemon as ssd
@@ -26,6 +28,7 @@ from nexus.daemon.storage_service_daemon import (
     StorageServiceStartError,
     StorageServiceSupervisor,
 )
+from tests.daemon.test_storage_service_daemon import _FakeClock, _FakeProc, _make_supervisor
 
 _CREDS = {
     "NX_DB_URL": "jdbc:...", "NX_DB_USER": "svc", "NX_DB_PASS": "pass",
@@ -139,3 +142,60 @@ def test_an_invalid_fixed_port_is_refused_at_construction(tmp_path, monkeypatch,
 def test_the_range_edges_and_whitespace_are_accepted(tmp_path, monkeypatch, edge) -> None:
     monkeypatch.setenv(FIXED_PORT_ENV, edge)
     _supervisor(tmp_path)  # must not raise
+
+
+# ── review round (nexus-ijue9.29): TIME_WAIT, strict parsing, adoption, wiring ──
+
+
+def test_time_wait_on_the_fixed_port_is_not_a_collision(tmp_path, monkeypatch) -> None:
+    # The engine binds with SO_REUSEADDR (JDK HttpServer), so TIME_WAIT left by
+    # the previous engine's server-closed connections must not stop a restart.
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    client = socket.create_connection(("127.0.0.1", port))
+    conn, _ = server.accept()
+    conn.close()          # server side closes first: TIME_WAIT lands on the server port
+    client.close()
+    server.close()
+    monkeypatch.setenv(FIXED_PORT_ENV, str(port))
+    spawns = _Spawns(monkeypatch)
+    _proc, got = _supervisor(tmp_path)._spawn_service()
+    assert got == port and spawns.envs[0]["NX_SERVICE_PORT"] == str(port)
+
+
+@pytest.mark.parametrize("bad", ["029517", "+29517", "29_517", "２９５１７"])
+def test_only_plain_ascii_digits_are_a_port(tmp_path, monkeypatch, bad) -> None:
+    monkeypatch.setenv(FIXED_PORT_ENV, bad)
+    with pytest.raises(StorageServiceStartError):
+        _supervisor(tmp_path)
+
+
+def test_adopting_a_lease_on_another_port_is_refused(tmp_path, monkeypatch) -> None:
+    clock = _FakeClock()
+    monkeypatch.delenv(FIXED_PORT_ENV, raising=False)
+    first = _make_supervisor(tmp_path, clock, supervised=True)   # an `nx` spawn: no appliance env
+    first._proc = _FakeProc(pid=46001)
+    first._service_port = 18101
+    first._publish(18101)
+
+    monkeypatch.setenv(FIXED_PORT_ENV, str(APPLIANCE_DEFAULT_PORT))
+    unit = _make_supervisor(tmp_path, clock, supervised=True)
+    with patch.object(unit, "_spawn_service", side_effect=AssertionError("must not spawn")):
+        with pytest.raises(StorageServiceStartError) as exc:
+            unit.start()
+    assert "18101" in str(exc.value) and FIXED_PORT_ENV in str(exc.value)
+
+
+def test_adopting_a_lease_on_the_fixed_port_is_allowed(tmp_path, monkeypatch) -> None:
+    clock = _FakeClock()
+    monkeypatch.setenv(FIXED_PORT_ENV, str(APPLIANCE_DEFAULT_PORT))
+    first = _make_supervisor(tmp_path, clock, supervised=True)
+    first._proc = _FakeProc(pid=46001)
+    first._service_port = APPLIANCE_DEFAULT_PORT
+    first._publish(APPLIANCE_DEFAULT_PORT)
+    second = _make_supervisor(tmp_path, clock, supervised=True)
+    with patch.object(second, "_spawn_service", side_effect=AssertionError("must not spawn")):
+        assert second.start()["port"] == APPLIANCE_DEFAULT_PORT
