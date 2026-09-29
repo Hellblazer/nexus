@@ -115,6 +115,75 @@ class TestCitationScanner:
         displays = sorted(c.display for c in prose)
         assert displays == ["Ashby 1956", "Grossberg 2013"]
 
+    # nexus-0qqcu: a citation quoted inside inline code is an example of the
+    # syntax, not a citation, exactly like one inside a fenced block.
+
+    _CHASH = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+    @pytest.mark.parametrize("span", [
+        "`[Grossberg 2013]`",
+        "``[Grossberg 2013]``",
+        "```[Grossberg 2013]```",
+        "`` [Grossberg 2013] with a ` inside ``",
+    ])
+    def test_prose_citation_inside_inline_code_not_counted(self, span: str) -> None:
+        from nexus.doc.citations import scan_citations
+
+        cites = scan_citations(f"Write it as {span} in your notes.")
+        assert cites == []
+
+    def test_bracket_and_chash_inside_inline_code_not_counted(self) -> None:
+        from nexus.doc.citations import scan_citations
+
+        md = f"Syntax: `[12]` and `[label](chash:{self._CHASH})` are examples."
+        assert scan_citations(md) == []
+
+    def test_real_citations_beside_inline_code_keep_kind_and_column(self) -> None:
+        """A code span on the same line masks only itself: real citations
+        before and after it are still found, at their true columns."""
+        from nexus.doc.citations import scan_citations
+
+        md = "See [Ashby 1956] then `[Fake 2020]` then [Grossberg 2013]."
+        cites = scan_citations(md)
+        assert [(c.kind, c.display, c.col) for c in cites] == [
+            ("prose", "Ashby 1956", md.index("[Ashby") + 1),
+            ("prose", "Grossberg 2013", md.index("[Grossberg") + 1),
+        ]
+
+    def test_chash_display_keeps_inline_code_of_a_real_link(self) -> None:
+        """A real chash link whose visible text contains a code span is
+        still one citation, and its display is the ORIGINAL text, not the
+        masked line."""
+        from nexus.doc.citations import scan_citations
+
+        md = f"Per [the `foo()` note](chash:{self._CHASH}) it works."
+        cites = scan_citations(md)
+        assert [(c.kind, c.chash) for c in cites] == [("chash", self._CHASH)]
+        assert cites[0].display == "the `foo()` note"
+
+    def test_unclosed_backtick_does_not_hide_a_real_citation(self) -> None:
+        from nexus.doc.citations import scan_citations
+
+        cites = scan_citations("A stray ` backtick, then [Grossberg 2013] follows.")
+        assert [c.display for c in cites] == ["Grossberg 2013"]
+
+    def test_inline_code_masking_does_not_leak_across_lines(self) -> None:
+        from nexus.doc.citations import scan_citations
+
+        md = "Open ` on this line\n[Grossberg 2013] on the next ` close\n"
+        assert [c.display for c in scan_citations(md)] == ["Grossberg 2013"]
+
+    def test_tilde_fence_and_inline_code_both_excluded(self) -> None:
+        from nexus.doc.citations import scan_citations
+
+        md = (
+            "Real: [Grossberg 2013] and `[Fake 2020]`\n"
+            "~~~\n"
+            "[Fake 2021] [7]\n"
+            "~~~\n"
+        )
+        assert [c.display for c in scan_citations(md)] == ["Grossberg 2013"]
+
 
 # ── AnchorResolver — RDR-082 extension point ─────────────────────────────────
 

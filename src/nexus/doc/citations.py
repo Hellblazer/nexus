@@ -12,8 +12,12 @@ Three citation shapes are recognised:
   * ``bracket`` — ``[NN]`` numeric references that resolve to a
     bibliography elsewhere in the doc.
 
-Fenced code blocks are skipped (tutorial snippets that demonstrate
-the syntax are not scanned).
+Fenced code blocks are skipped, and so are inline code spans (single-
+or multi-backtick): tutorial snippets and prose that quote the syntax,
+such as `` `[Grossberg 2013]` ``, are examples, not citations, and must
+not inflate the grounding report (nexus-0qqcu). Indented code blocks
+are NOT skipped: a citation in an indented paragraph or list
+continuation is real prose.
 """
 from __future__ import annotations
 
@@ -106,14 +110,20 @@ _BRACKET_CITE_RE = re.compile(r"\[(?P<num>\d{1,4})\]")
 def scan_citations(md_text: str) -> list[Citation]:
     """Return every citation occurrence, in source order."""
     cites: list[Citation] = []
-    for lineno, line in iter_plain_lines(md_text):
+    source_lines = md_text.splitlines()
+    # mask_inline_code replaces each code span with \x00 in place (length
+    # preserving), so no citation regex can match inside one and every
+    # reported column still indexes the real line.
+    for lineno, line in iter_plain_lines(md_text, mask_inline_code=True):
         # chash first — consumes its bracketed text so prose / bracket
         # scanners don't double-count the same span
         chash_spans: list[tuple[int, int]] = []
         for m in _CHASH_LINK_RE.finditer(line):
             cites.append(Citation(
                 kind="chash",
-                display=m.group("display"),
+                # Slice the ORIGINAL line: a real link's visible text may
+                # itself contain a code span, which the masked line blanks.
+                display=source_lines[lineno - 1][m.start("display"):m.end("display")],
                 lineno=lineno,
                 col=m.start() + 1,
                 chash=m.group("hash"),
