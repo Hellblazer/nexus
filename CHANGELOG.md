@@ -27,7 +27,7 @@ Pairs with engine-service-v0.1.138, whose only change is that `GET /v1/memory/li
 
 ### Correction to 7.64.2
 
-The 7.64.2 entry's "What to do" was incomplete, and one of its commands does nothing for many users (nexus-zytwq). `uv tool upgrade conexus` does not change an install that `nx self install` made, so always run `nx self install`. Both the CLI and the Claude Code plugins must be updated, and updating only one leaves hooks unfixed: from v7.54.0 one of the conexus plugin's Bash hooks runs code from the installed CLI, and the other three live in the plugin. The entry also did not mention two things. First, the plugin as installed before the rename to conexus, `nx@nexus-plugins`, keeps running its own hooks until you uninstall it (`/plugin uninstall nx@nexus-plugins`). Installing conexus does not remove it. Second, the `sn` plugin was affected too, from v4.33.1 through v6.1.0. The published advisory, [GHSA-mc84-6gjq-vm2p](https://github.com/Hellblazer/nexus/security/advisories/GHSA-mc84-6gjq-vm2p), carries the authoritative list of affected versions and the steps to take. No CVE id has been assigned.
+The 7.64.2 entry's "What to do" was incomplete, and one of its commands does nothing for many users (nexus-zytwq). The 7.64.2 entry below now carries the corrected steps (nexus-qveq3). In short: update the CLI with `nx self install`, and on a CLI older than 7.19.0, which has no `self` command, run `uv tool upgrade conexus` first; `uv tool upgrade conexus` alone does not change an install that `nx self install` made. Update the plugins too, with `nx upgrade` or with `/plugin update conexus@nexus-plugins` and `/plugin update sn@nexus-plugins` in Claude Code, because from v7.54.0 one of the conexus plugin's Bash hooks runs code from the installed CLI and the other three live in the plugin. The `sn` plugin was affected from v4.33.1 through v6.1.0. The plugin as installed before the rename to conexus, `nx@nexus-plugins`, keeps its own hooks until you run `/plugin uninstall nx@nexus-plugins`. Then restart every Claude Code session. The advisory, [GHSA-mc84-6gjq-vm2p](https://github.com/Hellblazer/nexus/security/advisories/GHSA-mc84-6gjq-vm2p), is the authoritative list of affected versions and steps.
 
 ### Fixed
 
@@ -68,7 +68,18 @@ Pairs with engine-service-v0.1.137, already deployed. A client and plugin securi
 
   The hooks now return no decision when they have nothing to say, so Claude Code's normal permission handling decides. Advisory messages travel as context without a decision. The hooks still deny the commands they exist to block. The only explicit allow left is the one that auto-approves conexus's own MCP tools, which is its purpose. A new live test (cc-validation scenario 32) runs a real Claude Code session with the plugin's hooks installed and confirms an unmatched Bash command reaches Claude Code's own permission prompt.
 
-  **What to do:** update the plugin (`/plugin update conexus`) and the CLI (`nx self install`, or `uv tool upgrade conexus`), then restart your Claude Code sessions. If you relied on permission prompts as a safety check, review what your sessions ran while on an affected version; Claude Code keeps transcripts under `~/.claude/projects/`.
+  The `sn` plugin carried the same hooks from v4.33.1 through v6.1.0.
+
+  **What to do**, in this order. The advisory [GHSA-mc84-6gjq-vm2p](https://github.com/Hellblazer/nexus/security/advisories/GHSA-mc84-6gjq-vm2p) is the authoritative list of affected versions and steps.
+
+  1. Update the CLI. Run `nx --version`. On 7.19.0 or later, run `nx self install`. Before 7.19.0 the CLI has no `self` command, so run `uv tool upgrade conexus` and then `nx self install`. Always run `nx self install`, because `uv tool upgrade conexus` does not change an install that `nx self install` made.
+  2. Update the plugins with `nx upgrade`. To do it by hand instead, type these in Claude Code, in order: `/plugin marketplace update nexus-plugins`, `/plugin update conexus@nexus-plugins`, `/plugin update sn@nexus-plugins`. Update both the CLI and the plugins: from v7.54.0 one of the conexus plugin's Bash hooks runs code from the installed CLI, and the other three live in the plugin, so updating only one leaves hooks unfixed.
+  3. If `/plugin` lists `nx@nexus-plugins`, the plugin as installed before the rename to conexus, run `/plugin uninstall nx@nexus-plugins`. Installing or updating conexus does not remove it, and it keeps its own defective hooks.
+  4. Close every Claude Code session and start new ones. A running session keeps the hooks it loaded at start.
+
+  If you relied on permission prompts as a safety check, review what your sessions ran while on an affected version; Claude Code keeps transcripts under `~/.claude/projects/`.
+
+  This paragraph was corrected after release (nexus-zytwq, nexus-qveq3). As first published it offered `uv tool upgrade conexus` as an alternative to `nx self install`, and it did not name the `sn` plugin, the old `nx@nexus-plugins` plugin, or the need to update both the CLI and the plugins.
 
   **Why it was missed:** our tests checked that the hooks produced the JSON we had specified. The specification itself was wrong, and no test checked what that JSON made Claude Code do.
 
