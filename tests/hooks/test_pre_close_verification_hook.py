@@ -1088,7 +1088,7 @@ class TestT1OnlyCoverage:
         assert "T2" in _get_reason(parsed)  # the deny names the retirement
         assert not log.exists() or log.read_text().strip() == ""
 
-    def test_t1_unreachable_allows_unverified_regardless_of_t2(
+    def test_t1_unreachable_asks_unverified_regardless_of_t2(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
         """T1 unreachable is a capability gap (post-f7xyq: a dead CLI lease
@@ -1108,7 +1108,7 @@ class TestT1OnlyCoverage:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
         assert "WARNING" in _get_context(parsed) or "WARNING" in _get_reason(parsed)
         calls = log.read_text()
         assert "nexus-abc12 verification=unverified" in calls
@@ -1158,7 +1158,7 @@ class TestT1OnlyCoverage:
         assert "memory search" not in calls
         assert calls.count("scratch list") == 1
 
-    def test_t1_down_with_empty_t2_allows_unverified_the_named_corner(
+    def test_t1_down_with_empty_t2_asks_unverified_the_named_corner(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
         """THE deliberately accepted corner change (critique [23831]):
@@ -1178,7 +1178,7 @@ class TestT1OnlyCoverage:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
         calls = log.read_text()
         assert "nexus-abc12 verification=unverified" in calls
         assert "verification=passed" not in calls
@@ -1319,9 +1319,11 @@ class TestCapabilityHonestBothSourcesDown:
     """nexus-4av2n item 3(iv), narrowed at nexus-fgekf (T2 leg retired):
     'uncertain' is T1 unreachable — the nx binary absent, or `nx scratch list`
     failing (post-f7xyq that includes a dead CLI lease failing loud).
-    Never brick the close, but never claim 'passed' either."""
+    Never brick the close, but never claim 'passed' either -- and never let
+    an auto-mode classifier approve it silently either (nexus-nmzsg): the
+    close is put to the user with ``permissionDecision: ask``."""
 
-    def test_t1_unreachable_allows_with_loud_warning_and_unverified_stamp(
+    def test_t1_unreachable_asks_and_stamps_unverified(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
         env = mock_config_env({"on_close": True})
@@ -1333,11 +1335,12 @@ class TestCapabilityHonestBothSourcesDown:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
+        assert "unreachable" in _get_reason(parsed).lower() or "not verify" in _get_reason(parsed).lower()
         assert "unreachable" in _get_context(parsed).lower() or "not verify" in _get_context(parsed).lower()
         assert "nexus-abc12 verification=unverified" in log.read_text()
 
-    def test_nx_missing_entirely_allows_with_loud_warning(
+    def test_nx_missing_entirely_asks(
         self, mock_config_env, fake_bd
     ) -> None:
         env = mock_config_env({"on_close": True})
@@ -1348,8 +1351,51 @@ class TestCapabilityHonestBothSourcesDown:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
         assert "nexus-abc12 verification=unverified" in log.read_text()
+
+    def test_ask_reason_names_the_uncertain_ids_and_the_stamp(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """The reason is what the USER reads in the prompt: it must say which
+        beads could not be verified and that approving stamps them
+        ``unverified``. The ask envelope is the whole stdout -- one JSON
+        object, no second channel (a hook's stdout is a protocol channel)."""
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(scratch_unreachable=True)
+        fake_bd_bin, _log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = _parse_stdout(result.stdout)
+        hso = parsed["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "ask"
+        assert "nexus-abc12" in hso["permissionDecisionReason"]
+        assert "unverified" in hso["permissionDecisionReason"]
+        assert result.returncode == 0
+
+    def test_several_uncertain_ids_are_all_named_and_all_stamped_unverified(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """One prompt for the whole close, naming every id it could not verify."""
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(scratch_unreachable=True)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12 nexus-def34"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "ask"
+        calls = log.read_text()
+        assert "nexus-abc12 verification=unverified" in calls
+        assert "nexus-def34 verification=unverified" in calls
+        reason = _get_reason(parsed)
+        assert "nexus-abc12" in reason and "nexus-def34" in reason
 
     def test_t1_unreachable_plus_override_stamps_overridden_not_unverified(
         self, mock_config_env, fake_bd

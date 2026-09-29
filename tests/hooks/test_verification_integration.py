@@ -279,7 +279,7 @@ class TestCloseHookPipeline:
     nexus-4av2n: no longer advisory-only -- see
     tests/hooks/test_pre_close_verification_hook.py for the deny/allow/
     override matrix. These tests cover only the fast no-op and config-gate
-    paths plus the T1-unreachable capability-honest allow."""
+    paths plus the T1-unreachable capability-honest ask."""
 
     @staticmethod
     def _get_decision(output: dict) -> str:
@@ -312,7 +312,7 @@ class TestCloseHookPipeline:
         result = _run_hook(CLOSE_HOOK, payload)
         assert result.stdout == "", f"expected empty (no-decision) stdout, got: {result.stdout!r}"
 
-    def test_on_close_true_with_t1_unreachable_allows_capability_honest(
+    def test_on_close_true_with_t1_unreachable_asks_capability_honest(
         self, mock_plugin_root
     ) -> None:
         """nexus-4av2n: the hook now BLOCKS on a missing review marker when
@@ -320,9 +320,10 @@ class TestCloseHookPipeline:
         for that path in full). This PATH has no `nx` on it at all -- a
         capability gap, not a review gap -- so it allows (never brick a
         close over a broken T1) but stamps verification=unverified, not
-        the old unconditional verification=passed. nexus-452oy: that
-        "allows" is advisory only now -- no permissionDecision, the note
-        rides in additionalContext alone."""
+        the old unconditional verification=passed. nexus-nmzsg: the close
+        proceeds only through a user prompt (``ask``), because after
+        nexus-452oy a bare advisory carries no decision and an auto-mode
+        classifier could approve it silently."""
         env = mock_plugin_root({"on_close": True})
         payload = json.dumps({
             "hook_event_name": "PreToolUse",
@@ -331,7 +332,8 @@ class TestCloseHookPipeline:
         })
         result = _run_hook(CLOSE_HOOK, payload, env_overrides=env)
         out = self._parse_stdout(result.stdout)
-        assert "permissionDecision" not in out.get("hookSpecificOutput", {})
+        assert self._get_decision(out) == "ask"
+        assert "unreachable" in out["hookSpecificOutput"].get("permissionDecisionReason", "").lower()
         assert "unreachable" in out["hookSpecificOutput"].get("additionalContext", "").lower()
 
     def test_on_close_false_passes_through(self, mock_plugin_root) -> None:

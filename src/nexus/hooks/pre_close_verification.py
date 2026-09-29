@@ -39,11 +39,13 @@ appeal to.
 says the CONCEPT is in 19 files and the strings are nowhere duplicated;
 two sentences collapsed into one wrong one.)
 
-**Fail-open stays fail-open.** A missing marker denies; an unreachable T1,
-an absent ``nx``, a blown time budget all ALLOW with verification stamped
-``unverified`` rather than ``passed``. A broken verification path must not
-brick every close, and making this gate fail-closed is a decision the RDR
-deliberately does not take.
+**Fail-open stays fail-open.** A missing marker denies; an unreachable T1
+or an absent ``nx`` lets the close proceed with verification stamped
+``unverified`` rather than ``passed``, but only through a user prompt
+(``permissionDecision: ask``, nexus-nmzsg): a silent advisory would let an
+auto-mode classifier approve a close the gate knows it could not check. A
+broken verification path must not brick every close, and making this gate
+fail-closed is a decision the RDR deliberately does not take.
 """
 from __future__ import annotations
 
@@ -1530,12 +1532,65 @@ _INDETERMINATE_SOURCE_MESSAGE = (
 )
 
 
+def _ask_uncertain(uncertain: list[str]) -> HookResult:
+    """Put an unverifiable close to the user instead of letting it pass.
+
+    nexus-nmzsg. This branch used to return an advisory-only ``_allow``:
+    correct for the gate's fail-open posture (a broken verification path
+    must not brick every close), but after nexus-452oy removed the explicit
+    ``permissionDecision: allow`` an advisory carries no decision at all, so
+    in auto mode the classifier was free to approve the close silently. The
+    one case where this gate KNOWS it could not check the review and a
+    close-shaped command is definitely running was the one case with no human
+    in the loop. ``ask`` forces the prompt in auto mode as well (the
+    classifier can deny, not approve), so the close still proceeds if the
+    user says so and the gate still never denies on a capability gap.
+
+    The stamp (``unverified``) is written before the prompt, by the caller,
+    because the hook cannot see the answer. If the user declines, the bead
+    is left stamped ``unverified`` and open, which is true: it was not
+    verified. ``reason`` is what the USER reads in the prompt; the fuller
+    text the MODEL needs (remedies, the override's standing) rides in
+    ``additionalContext``.
+    """
+    # Deferred: 3 modules / ~3ms (measured 2026-09-29) on the one path that
+    # needs it; this gate fires on every Bash call and a module-scope import
+    # would charge every no-op dispatch. The lib is stdlib-only, so nothing
+    # here can pull structlog onto the hook's stdout channel.
+    from nexus.hooks._routing_lib import ask_result  # noqa: PLC0415
+
+    ids = " ".join(uncertain)
+    reason = (
+        f"Review gate could not verify review-completed coverage for {ids}: "
+        "T1 scratch is unreachable (the nx binary is absent, or 'nx scratch "
+        "list' failed; check 'nx doctor --check-t1'). Approving closes "
+        "anyway, with verification stamped 'unverified', not 'passed'. "
+        "Decline to run the review or restore T1 first."
+    )
+    context = (
+        "WARNING: could not verify review-completed coverage in T1 scratch "
+        f"for {ids} \u2014 T1 unreachable (the nx binary is "
+        "absent, or 'nx scratch list' failed; post-nexus-f7xyq that includes "
+        "a dead CLI T1 lease failing loud, check 'nx doctor --check-t1'). "
+        "The close is put to the user for confirmation rather than passing "
+        "silently, because a broken verification path must not brick every "
+        "bead close but must not be approved unseen either. If approved it is "
+        "stamped verification=unverified for those ids, NOT passed. If review "
+        "truly happened this is a capability gap, not a review gap. An "
+        "override (NX_REVIEW_GATE_OVERRIDE=1) exists for this gate, but only "
+        "on explicit instruction from the user to use it."
+    )
+    return ask_result(reason, context)
+
+
 def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
     """The decision table, in the script's order.
 
     Linear with early returns because the ORDER is the semantics. Every
-    uncertain path allows: this gate fails open by design and the RDR
-    deliberately does not revisit that.
+    uncertain path still lets the close proceed (this gate fails open by
+    design and the RDR deliberately does not revisit that), but the
+    T1-unreachable path proceeds only through a user prompt
+    (:func:`_ask_uncertain`, nexus-nmzsg), not silently.
     """
     if verbs["has_create"]:
         return _create_gate(command)
@@ -1644,17 +1699,7 @@ def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
             "T1 scratch unreachable at close time (capability gap, not a "
             "time-budget issue)",
         )
-        return _allow(
-            "WARNING: could not verify review-completed coverage in T1 scratch "
-            f"for {' '.join(uncertain)} \u2014 T1 unreachable (the nx binary is "
-            "absent, or 'nx scratch list' failed; post-nexus-f7xyq that includes "
-            "a dead CLI T1 lease failing loud, check 'nx doctor --check-t1'). "
-            "Closing anyway (a broken verification path must not brick every "
-            "bead close) but stamped verification=unverified for those ids, NOT "
-            "passed. If review truly happened this is a capability gap, not a "
-            "review gap. An override (NX_REVIEW_GATE_OVERRIDE=1) exists for this "
-            "gate, but only on explicit instruction from the user to use it."
-        )
+        return _ask_uncertain(uncertain)
 
     _stamp_ids(covered, "passed", "review-completed marker verified at close")
     return _allow(f"Review completed for {' '.join(ids)}.")

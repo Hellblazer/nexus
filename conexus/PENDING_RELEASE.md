@@ -54,6 +54,12 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 - nexus-2lf1v: `sn/hooks/scripts/serena-section.md` tells subagents that Serena
   writes now go through the permission flow, and to fall back to Edit or Write
   rather than retry a denied one.
+- nexus-nmzsg: `conexus/hooks/scripts/routing/_lib.py` adds
+  `ask_envelope`/`ask` (`permissionDecision: ask`, reason in
+  `permissionDecisionReason`), the PreToolUse decision that forces a
+  permission prompt in auto mode where a bare advisory would let the
+  classifier approve silently. No plugin script calls it yet; the pre-close
+  gate that uses it ships in the wheel (`nexus.hooks._routing_lib`).
 
 ## Deferred to the next client release
 

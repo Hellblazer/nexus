@@ -148,18 +148,16 @@ def test_the_close_gate_denies_an_unmarked_bead_over_the_real_wire(tmp_path) -> 
     assert proc.stdout.strip(), "the close gate wrote nothing at all"
     envelope = json.loads(proc.stdout)["hookSpecificOutput"]
     decision = envelope.get("permissionDecision")
-    # An unreachable T1 fails OPEN by design, and "e2e-no-such-session"
-    # has no T1 -- but nexus-452oy: fail-open now means NO decision
-    # (advisory text in additionalContext only), not an explicit allow,
-    # because an explicit allow on this path bypassed both Claude Code's
-    # own permission prompt and its auto-mode classifier for every
-    # `bd close` this gate could not verify. A reachable T1 with the
-    # marker genuinely missing still denies. What this asserts is narrower
-    # and is the thing that was broken: the verb resolves, runs, and puts
-    # a well-formed envelope on stdout either way.
-    assert decision in {None, "deny"}, proc.stdout
-    if decision is None:
-        assert envelope.get("additionalContext"), proc.stdout
+    # An unreachable T1 does not deny, and "e2e-no-such-session" has no T1.
+    # nexus-nmzsg: it is not a silent pass either -- the close is put to the
+    # user with ``ask`` (nexus-452oy had made it advisory-only, which left an
+    # auto-mode classifier free to approve a close the gate could not check).
+    # A reachable T1 with the marker genuinely missing still denies. What this
+    # asserts is narrower and is the thing that was broken: the verb
+    # resolves, runs, and puts a well-formed envelope on stdout either way.
+    assert decision in {"ask", "deny"}, proc.stdout
+    if decision == "ask":
+        assert envelope.get("permissionDecisionReason"), proc.stdout
 
 
 def test_a_non_bash_call_is_no_decision_immediately() -> None:
