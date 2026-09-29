@@ -383,7 +383,8 @@ things to avoid carefully; they are impossible.
    within one attempt the most advanced state wins, so a late `queued`
    copy cannot hide a finished job; across reruns the newest attempt wins;
    and when GitHub starts two runs of one workflow for one commit, only
-   the newest run counts (nexus-wqvv9).
+   the newest run that was not cancelled counts, and the other run's
+   jobs, failures included, are ignored (nexus-wqvv9).
    A commit whose run has no `completed` post and no newer commit posting
    behind it is live. A superseded run (the concurrency group cancelled it
    when a newer commit pushed) posts `cancelled` for the run and its jobs,

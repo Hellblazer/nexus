@@ -5,8 +5,9 @@
 The GitHub webhook adapter (conexus, RDR-220) writes one post to
 ``board/ci/<repo>-<branch>`` (the ``board/ci/<topic>`` template) for every state change of every workflow run
 and job. This script reads that topic, keeps the latest state of each
-(workflow, job, attempt) in each workflow's newest run, and prints what is
-green, what is pending, and what failed, for one commit.
+(workflow, job, attempt) in the one run of each workflow that speaks for
+the commit, and prints what is green, what is pending, and what failed,
+for one commit.
 
 It is a repository development helper, deliberately not an ``nx`` command
 or MCP tool (Sam, 2026-09-26). A session that only wants to be told reads
@@ -41,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -91,24 +93,44 @@ def _verdict(state: str, conclusion: str, run_conclusion: str | None) -> str:
     return "failed"
 
 
-def _run_id(raw: Any) -> int:
-    """The body's run id; 0 when absent or unparseable, so such posts fold as one run."""
-    try:
+_RUN_URL_RE: re.Pattern[str] = re.compile(r"/actions/runs/(\d+)")
+
+
+def _run_id(body: dict[str, Any]) -> int | None:
+    """The post's run id: the body's ``run``, else the one in its ``url``.
+
+    None when neither carries one (RDR-220 allows a null ``run``); such a
+    post is kept with its workflow's chosen run rather than dropped, so a
+    failure cannot vanish behind a numbered sibling.
+    """
+    raw = body.get("run")
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.isdigit():
         return int(raw)
-    except (TypeError, ValueError):
-        return 0
+    m = _RUN_URL_RE.search(str(body.get("url") or ""))
+    return int(m.group(1)) if m else None
+
+
+def _newer(cand: tuple[str, str, str, str], prev: tuple[str, str, str, str] | None) -> bool:
+    """Within one attempt the most advanced state wins; the newest post breaks a tie."""
+    return prev is None or (_STATE_RANK[cand[0]], cand[3]) >= (_STATE_RANK[prev[0]], prev[3])
 
 
 def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) -> list[Status]:
-    """Latest state per (workflow, job, attempt) of each workflow's newest run for *sha*.
+    """Latest state per (workflow, job, attempt) of each workflow's chosen run for *sha*.
 
-    *posts* are ``(created_at, body, dims)``. Only the newest run of each
-    workflow is kept: GitHub can start two runs of one workflow for one push,
-    both attempt 1, and the concurrency group cancels the older (nexus-wqvv9);
-    run ids only increase, so the highest is the one that speaks for the
-    commit, and jobs of an older run are dropped, not merged. Within that run
-    only the newest attempt of each job is kept, because a rerun keeps the
-    run id and supersedes the earlier attempt.
+    *posts* are ``(created_at, body, dims)``. GitHub can start two runs of
+    one workflow for one push, both attempt 1, and the concurrency group
+    cancels one (nexus-wqvv9). The run that speaks for the commit is the
+    newest whose own run row is not cancelled, or the newest outright when
+    every run was cancelled (a supersede by a newer commit). Newest is not
+    enough on its own: two runs created in the same second are cancelled in
+    queue order, which need not follow run id. Jobs of any other run are
+    dropped, not merged. Within the chosen run only the newest attempt of
+    each job is kept, because a rerun keeps the run id and supersedes the
+    earlier attempt.
+
     Within one attempt a job's state only moves forward (queued, then
     in_progress, then completed), so the most advanced state wins and the
     newest post breaks a tie. Recency alone would let a stale delivery win:
@@ -118,23 +140,24 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
     """
     # (state, conclusion, url, created_at) per key; a Status is built only
     # once its verdict is known, so no Status ever exists without one.
-    latest: dict[tuple[str, int, str, int], tuple[str, str, str, str]] = {}
+    latest: dict[tuple[str, int | None, str, int], tuple[str, str, str, str]] = {}
     for created_at, body, dims in posts:
         if dims.get("from") != "github" or body.get("sha") != sha:
             continue
         state = str(body.get("state", ""))
         if state not in _STATE_RANK:
             continue
-        key = (str(body.get("workflow", "")), _run_id(body.get("run")), str(body.get("job", "")),
+        key = (str(body.get("workflow", "")), _run_id(body), str(body.get("job", "")),
                int(body.get("attempt", 1) or 1))
         cand = (state, str(body.get("conclusion") or ""), str(body.get("url", "")), created_at)
-        prev = latest.get(key)
-        if prev is None or (_STATE_RANK[cand[0]], cand[3]) >= (_STATE_RANK[prev[0]], prev[3]):
+        if _newer(cand, latest.get(key)):
             latest[key] = cand
-    newest_run: dict[str, int] = {}
-    for wf, run, _job, _attempt in latest:
-        newest_run[wf] = max(run, newest_run.get(wf, run))
-    in_run = {(wf, job, attempt): v for (wf, run, job, attempt), v in latest.items() if run == newest_run[wf]}
+    chosen = _chosen_runs(latest)
+    in_run: dict[tuple[str, str, int], tuple[str, str, str, str]] = {}
+    for (wf, run, job, attempt), v in latest.items():
+        if run is None or run == chosen.get(wf):
+            if _newer(v, in_run.get((wf, job, attempt))):
+                in_run[(wf, job, attempt)] = v
     newest_attempt: dict[tuple[str, str], int] = {}
     for wf, job, attempt in in_run:
         newest_attempt[(wf, job)] = max(attempt, newest_attempt.get((wf, job), 0))
@@ -146,6 +169,24 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
          for (wf, job, attempt), (state, conclusion, url, created_at) in current.items()),
         key=lambda s: (s.workflow, s.job != "", s.job),
     )
+
+
+def _chosen_runs(latest: dict[tuple[str, int | None, str, int], tuple[str, str, str, str]]) -> dict[str, int]:
+    """Per workflow, the newest run whose run row (newest attempt) is not cancelled, else the newest run."""
+    run_rows: dict[tuple[str, int], tuple[int, tuple[str, str, str, str]]] = {}
+    runs: dict[str, set[int]] = {}
+    for (wf, run, job, attempt), v in latest.items():
+        if run is None:
+            continue
+        runs.setdefault(wf, set()).add(run)
+        if job == "" and attempt >= run_rows.get((wf, run), (0, v))[0]:
+            run_rows[(wf, run)] = (attempt, v)
+    chosen: dict[str, int] = {}
+    for wf, ids in runs.items():
+        alive = [r for r in ids if not (
+            (row := run_rows.get((wf, r))) and row[1][0] == "completed" and row[1][1] == "cancelled")]
+        chosen[wf] = max(alive or ids)
+    return chosen
 
 
 def exit_code(statuses: list[Status]) -> int:

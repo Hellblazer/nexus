@@ -26,9 +26,10 @@ GH = {"from": "github", "kind": "job"}
 
 
 def _p(ts: str, *, state: str, job: str = "lint", conclusion: str | None = None,
-       attempt: int = 1, sha: str = SHA, workflow: str = "CI", dims=GH, run: int = 222):
+       attempt: int = 1, sha: str = SHA, workflow: str = "CI", dims=GH, run: int | None = 222,
+       url: str = "u"):
     body = {"state": state, "workflow": workflow, "sha": sha, "run": run,
-            "attempt": attempt, "conclusion": conclusion, "url": "u"}
+            "attempt": attempt, "conclusion": conclusion, "url": url}
     if job:
         body["job"] = job
     return (ts, body, dims)
@@ -167,6 +168,51 @@ def test_a_newer_run_still_in_flight_reads_pending_over_an_older_green_one() -> 
              _p("2026-09-29T10:30:00Z", state="queued", job="lint", run=200)]
     [s] = cs.fold(posts, SHA)
     assert s.verdict == "pending"
+
+
+def test_a_post_with_no_run_id_is_kept_not_dropped() -> None:
+    # RDR-220 allows run to be null. Such a post must not lose to a numbered
+    # sibling and vanish: a failure hidden that way would read green.
+    run = {"from": "github", "kind": "run"}
+    posts = [_p("2026-09-29T10:00:00Z", state="completed", conclusion="success", job="", dims=run, run=200),
+             _p("2026-09-29T10:01:00Z", state="completed", conclusion="failure", job="lint", run=None)]
+    statuses = cs.fold(posts, SHA)
+    assert {s.job: s.verdict for s in statuses} == {"": "green", "lint": "failed"}
+    assert cs.exit_code(statuses) == 1
+
+
+def test_a_missing_run_id_is_read_from_the_run_url() -> None:
+    # The url names run 300, newer than 200, so its failure is the verdict,
+    # even though it was posted before run 200's success.
+    url = "https://github.com/Hellblazer/nexus/actions/runs/300/job/9"
+    posts = [_p("2026-09-29T10:00:00Z", state="completed", conclusion="failure", job="lint", run=None, url=url),
+             _p("2026-09-29T10:05:00Z", state="completed", conclusion="success", job="lint", run=200)]
+    [s] = cs.fold(posts, SHA)
+    assert (s.conclusion, s.verdict) == ("failure", "failed")
+
+
+def test_a_cancelled_higher_run_does_not_outrank_a_surviving_lower_one() -> None:
+    # Two runs created in the same second: the concurrency group cancels by
+    # queue order, which need not follow run id.
+    run = {"from": "github", "kind": "run"}
+    posts = [_p("2026-09-29T10:00:05Z", state="completed", conclusion="cancelled", job="", dims=run, run=200),
+             _p("2026-09-29T10:00:04Z", state="completed", conclusion="cancelled", job="lint", run=200),
+             _p("2026-09-29T10:20:00Z", state="completed", conclusion="success", job="", dims=run, run=100),
+             _p("2026-09-29T10:19:00Z", state="completed", conclusion="success", job="lint", run=100)]
+    statuses = cs.fold(posts, SHA)
+    assert {s.job: s.verdict for s in statuses} == {"": "green", "lint": "green"}
+    assert cs.exit_code(statuses) == 0
+
+
+def test_when_every_run_was_cancelled_the_newest_speaks() -> None:
+    run = {"from": "github", "kind": "run"}
+    posts = [_p("2026-09-29T10:00:05Z", state="completed", conclusion="cancelled", job="", dims=run, run=100),
+             _p("2026-09-29T10:00:06Z", state="completed", conclusion="success", job="lint", run=100),
+             _p("2026-09-29T10:01:05Z", state="completed", conclusion="cancelled", job="", dims=run, run=200),
+             _p("2026-09-29T10:01:04Z", state="completed", conclusion="failure", job="pytest-gate", run=200)]
+    statuses = cs.fold(posts, SHA)
+    assert {s.job for s in statuses} == {"", "pytest-gate"}
+    assert cs.exit_code(statuses) == 4
 
 
 def test_a_genuine_failure_outranks_a_cancelled_sibling_workflow() -> None:
