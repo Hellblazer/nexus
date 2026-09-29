@@ -439,7 +439,9 @@ def _extract_method_body(source: str, method_name: str) -> str:
     """Extract a Java method's ``{ ... }`` body via brace-balance scanning
     (not a regex match for the closing brace, which cannot reliably span
     arbitrary nesting depth). Skips braces inside string/char literals so a
-    JSON-shaped string constant elsewhere in the body can't desync the count.
+    JSON-shaped string constant elsewhere in the body can't desync the count,
+    and skips comments so an apostrophe in one ("the outer row's doc_id")
+    does not open a char literal that never closes (nexus-oy689).
     """
     sig_start = _find_method_body_start(source, method_name)
     brace_start = source.index("{", sig_start)
@@ -462,6 +464,14 @@ def _extract_method_body(source: str, method_name: str) -> str:
                 continue
             if c == "'":
                 in_char = False
+        elif source.startswith("//", i):
+            end = source.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        elif source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
         elif c == '"':
             in_string = True
         elif c == "'":
@@ -518,7 +528,9 @@ def _leaf_dict_keys(node: ast.Dict) -> set[str]:
     }
 
 
-def _fake_route_response_keys(fake_source: str, route: str) -> set[str]:
+def _fake_route_response_keys(
+    fake_source: str, route: str, envelope_key: str | None = None
+) -> set[str]:
     """Return the JSON key set FakeCatalogHandler sends for `op == route`.
 
     Walks the AST (not regex) so nested if/else within a single route branch
@@ -527,6 +539,11 @@ def _fake_route_response_keys(fake_source: str, route: str) -> set[str]:
     call found within the branch, the largest key set wins (error bodies are
     always the degenerate ``{"error": ...}`` 1-key shape; the real response
     shape is never smaller than an error stub for these routes).
+
+    With ``envelope_key``, the rows sit under that key of a multi-key
+    envelope (``{"rows": rows, "count": N}``), so the row dict is read from
+    the key's value: a literal list, a list comprehension, or a name bound
+    to either inside the same branch.
     """
     tree = ast.parse(fake_source)
     class_node = next(
@@ -600,6 +617,9 @@ def _fake_route_response_keys(fake_source: str, route: str) -> set[str]:
     # check) — deliberately NOT `matched.orelse`, which for a top-level
     # `elif` node holds the REST of the elif chain (sibling routes), not
     # part of this branch.
+    if envelope_key is not None:
+        return _enveloped_row_keys(matched, route, envelope_key)
+
     best: set[str] = set()
     for body_stmt in matched.body:
         for node in ast.walk(body_stmt):
@@ -623,17 +643,83 @@ def _fake_route_response_keys(fake_source: str, route: str) -> set[str]:
     return best
 
 
+def _row_dict_of(value: ast.expr | None) -> ast.Dict | None:
+    """The row dict a list literal or list comprehension builds."""
+    if isinstance(value, ast.List) and value.elts and isinstance(value.elts[0], ast.Dict):
+        return value.elts[0]
+    if isinstance(value, ast.ListComp) and isinstance(value.elt, ast.Dict):
+        return value.elt
+    return None
+
+
+def _enveloped_row_keys(branch: ast.If, route: str, envelope_key: str) -> set[str]:
+    """Row keys under ``envelope_key`` of the branch's ``_send_json`` envelope."""
+    bound: dict[str, ast.expr] = {}
+    envelope_values: list[ast.expr] = []
+    for body_stmt in branch.body:
+        for node in ast.walk(body_stmt):
+            if (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+            ):
+                bound[node.targets[0].id] = node.value
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "_send_json"
+                and node.args
+                and isinstance(node.args[0], ast.Dict)
+            ):
+                for k, v in zip(node.args[0].keys, node.args[0].values):
+                    if isinstance(k, ast.Constant) and k.value == envelope_key:
+                        envelope_values.append(v)
+    for value in envelope_values:
+        if isinstance(value, ast.Name):
+            value = bound.get(value.id)
+        row = _row_dict_of(value)
+        if row is not None:
+            keys = {
+                k.value
+                for k in row.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
+            if keys:
+                return keys
+    raise AssertionError(
+        f"the `op == {route!r}` branch sends no `{envelope_key!r}` envelope "
+        f"key whose value resolves to a list of literal row dicts — empty "
+        f"census trap (nexus-0948s)"
+    )
+
+
+#: Routes whose fake wraps its rows in a multi-key envelope, mapped to the
+#: key holding the rows. The one-key envelope shape needs no entry here;
+#: _leaf_dict_keys unwraps it.
+ROW_ENVELOPE_KEYS: dict[str, str] = {
+    "/manifest/chash_positions": "rows",
+}
+
+
 #: The 3 CatalogRepository.java row-builder methods the 2026-07-04 critique
 #: manually cross-referenced against FakeCatalogHandler and found accurate
 #: ("Cross-referenced 3 hand-authored wire shapes ... against the ACTUAL
 #: current CatalogRepository.java — all three accurate today.") This
 #: mechanizes exactly that manual check so its accuracy doesn't silently
 #: expire the next time either side changes.
+#:
+#: A ``+``-joined name is a composed row: the wrapper calls the base builder
+#: and appends its own keys, so the wire keys are the union of both methods'
+#: ``.put`` calls. Until nexus-oy689 these two routes were checked against
+#: ``collRow`` alone and passed only because the scanner, tripped by an
+#: apostrophe in a comment, ran past ``collRow``'s end into the next helper.
 FIELD_SHAPE_CHECKS: list[tuple[str, str]] = [
     ("stats", "/stats"),
-    ("collRow", "/collections/list"),
-    ("collRow", "/collections/get"),
+    ("collRowWithLifecycle+collRow", "/collections/list"),
+    ("collRowWithAspects+collRow", "/collections/get"),
     ("orphanedDocs", "/docs/orphaned"),
+    # nexus-oy689: the chash-positions route (nexus-opxwd), rows under "rows".
+    ("chashPositions", "/manifest/chash_positions"),
 ]
 
 
@@ -655,9 +741,20 @@ def test_field_shape_parity_for_hand_verified_methods(
     java_source = _read(_JAVA_REPOSITORY)
     fake_source = _read(_FAKE_HANDLER)
 
-    method_body = _extract_method_body(java_source, java_method)
-    java_keys = _extract_put_keys(method_body)
-    fake_keys = _fake_route_response_keys(fake_source, fake_route)
+    methods = java_method.split("+")
+    bodies = {m: _extract_method_body(java_source, m) for m in methods}
+    for wrapper, base in zip(methods, methods[1:]):
+        assert re.search(rf"\b{re.escape(base)}\s*\(", bodies[wrapper]), (
+            f"{wrapper}() no longer calls {base}(), so the wire row is no "
+            f"longer the union of their keys; split or rewrite this "
+            f"FIELD_SHAPE_CHECKS entry (nexus-oy689)"
+        )
+    java_keys: set[str] = set()
+    for body in bodies.values():
+        java_keys |= _extract_put_keys(body)
+    fake_keys = _fake_route_response_keys(
+        fake_source, fake_route, ROW_ENVELOPE_KEYS.get(fake_route)
+    )
 
     assert java_keys == fake_keys, (
         f"{java_method}() in CatalogRepository.java builds keys "
@@ -678,6 +775,27 @@ def test_field_shape_parity_for_hand_verified_methods(
         f"(tests/catalog/test_http_catalog_client.py) to add/remove/rename "
         f"the matching key so it mirrors {java_method}()'s current shape."
     )
+
+
+def test_method_body_scanner_skips_comments() -> None:
+    """nexus-oy689: an apostrophe in a comment must not open a char literal.
+    Before the fix this overran ``first``'s end and swallowed ``second``'s
+    ``.put`` into ``first``'s key set."""
+    source = (
+        "class X {\n"
+        "    private Map<String, Object> first() {\n"
+        "        // the outer row's doc_id; a /* stray } in a line comment\n"
+        "        /* a block's comment with { */\n"
+        "        m.put(\"a\", \"// not a comment }\");\n"
+        "        return m;\n"
+        "    }\n"
+        "    private Map<String, Object> second() {\n"
+        "        m.put(\"b\", 1);\n"
+        "    }\n"
+        "}\n"
+    )
+    assert _extract_put_keys(_extract_method_body(source, "first")) == {"a"}
+    assert _extract_put_keys(_extract_method_body(source, "second")) == {"b"}
 
 
 def test_field_shape_checks_reference_real_routes() -> None:
