@@ -427,9 +427,32 @@ checkout f' | sh``, ``eval 'git checkout f'`` and ``sh -c '...'`` carry
 parsing the shell, the unbounded surface rounds 1-3 lost to. So a standalone
 ``git`` token in ANY position arms the scan (unsure means deny); accepted
 false positives are ``echo git add`` and a directory literally named ``git``
-(``cd ~/git && echo add``). ``=`` and ``$`` end a token, keeping ``g=git; $g
-checkout`` armed. Both copies of this module carry the change identically
-(``tests/test_routing_subagent_git_write.py`` pins that they do).
+(``cd ~/git && echo add``, ``ls ~/git/ && echo add``). ``=`` and ``$`` end a
+token, keeping ``g=git; $g checkout`` armed; ``+ % #`` are NOT token
+characters, so ``printf 'git%s checkout f' '' | sh`` and ``sed
+'s/x/git/;...' | sh`` (trailing ``/`` stripped before the basename) arm too.
+Both copies of this module carry the change identically
+(``tests/test_routing_subagent_git_write.py`` runs every rule class against
+both and pins the regexes and ``body()``'s git-present logic by AST).
+
+Premise correction: the bead reported ``.github`` as the false-positive
+driver. It never was: ``\\bgit\\b`` does not match inside ``github`` (no word
+boundary before the ``h``). The measured driver was an absolute repo path,
+``/Users/<u>/git/nexus``, whose bare ``/git/`` segment armed the scan for any
+later ``add``/``commit``/``checkout`` word, plus ``git-push-develop.sh``
+(which arms again) and ``.git/`` paths.
+
+ACCEPTED FALSE NEGATIVES of round 10 (the mirror of the false positives
+above; a path segment ``/git/`` used to arm the scan by accident, and that
+incidental coverage is gone): a git wrapper or alias whose
+basename is not ``git``-prefixed (``./my-git checkout f``, ``x-git``), a
+``git.py`` script, ``gh pr checkout`` and ``hub checkout`` (no ``git`` text
+at all), and case variants ``GIT`` / ``Git`` (a case-insensitive filesystem
+runs ``/usr/bin/GIT`` as git; the scan was case-sensitive before this change
+too, so that gap is pre-existing, not new). A verb glued to a path token after
+a real ``git`` (``git status && ls .git/hooks/post-commit``) still denies; a
+lookbehind on the verb side is a separate, further loosening left to its own
+bead.
 
 ``run_hook(fail_closed=False)`` is unchanged: a crash in the hook ITSELF
 still allows, since a broken guard must not brick every agent's Bash.
@@ -518,13 +541,18 @@ _VERB_RE = re.compile(r"\b(" + _PRIMARY_VERB_ALT + r")\b")
 #: reset`` denied.
 #:
 #: A TOKEN rule, not a position analysis. The text is cut into path-ish tokens
-#: (``_PATHISH_TOKEN_RE``: word characters plus ``. - / ~ + % #``; whitespace,
-#: quotes-already-stripped, ``; & | ( ) < > = $ { } ` !`` and the rest all end
-#: a token), and ``git`` arms the scan when a token's BASENAME is exactly
-#: ``git`` (``git``, ``/usr/bin/git``, ``./git``) or the dispatch spelling
-#: ``git-<letters>`` (``git-checkout``, ``/usr/lib/git-core/git-add``) or
-#: ``git.exe``. Tokens
-#: like ``nexus-git-policy.py``, ``.git``, ``foo.git``, ``git.py``,
+#: (``_PATHISH_TOKEN_RE``: word characters plus ``. - / ~``; whitespace, the
+#: already-stripped quotes, ``; & | ( ) < > = $ { } ` ! + % #`` and everything
+#: else end a token, so ``git%s``, ``git+`` and ``git#`` all leave a bare
+#: ``git`` token behind). Trailing ``/`` is stripped, then ``git`` arms the
+#: scan when the token's BASENAME matches ``_GIT_BASENAME_RE``: ``git``, any
+#: ``git-<letters and hyphens>`` including a bare ``git-`` (``git-checkout``,
+#: ``git-core/git-``, whose ``${p}add`` completion is a spliced command), and
+#: any of those with a ``.exe`` / ``.cmd`` / ``.bat`` / ``.com`` / ``.sh``
+#: suffix (``git.exe``, ``git-lfs.exe``, ``git.sh`` wrappers, and
+#: ``scripts/git-push-develop.sh``, the sanctioned push wrapper, which a
+#: subagent must not run in the shared tree). Tokens like
+#: ``nexus-git-policy.py``, ``.git``, ``foo.git``, ``git.py``,
 #: ``git-workflow.md`` and ``~/git/nexus`` do not qualify. ``=`` and ``$``
 #: end a token on purpose: ``g=git; $g checkout`` must still arm.
 #:
@@ -537,8 +565,10 @@ _VERB_RE = re.compile(r"\b(" + _PRIMARY_VERB_ALT + r")\b")
 #: The accepted false positives are therefore ``echo git add`` and a bare
 #: directory named ``git`` (``cd ~/git && ...``); the fixed false positives are
 #: every path or word that merely CONTAINS ``git``.
-_PATHISH_TOKEN_RE = re.compile(r"[\w.\-/~+%#]+")
-_GIT_BASENAME_RE = re.compile(r"git(?:-[A-Za-z][A-Za-z-]*|\.exe)?")
+_PATHISH_TOKEN_RE = re.compile(r"[\w.\-/~]+")
+_GIT_BASENAME_RE = re.compile(
+    r"git(?:-[A-Za-z-]*)?(?:\.(?:exe|cmd|bat|com|sh))?"
+)
 
 
 def _first_git_command(text: str) -> int | None:
@@ -551,7 +581,7 @@ def _first_git_command(text: str) -> int | None:
     ``fullmatch`` per token that contains ``git`` at all.
     """
     for m in _PATHISH_TOKEN_RE.finditer(text):
-        tok = m.group()
+        tok = m.group().rstrip("/")
         if "git" not in tok:
             continue
         base_start = tok.rfind("/") + 1
