@@ -110,6 +110,9 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
     private static final int NUM_MANIFEST = Integer.getInteger("nx.cloMsz9i.manifest", 57_000);
     private static final int NUM_DOCS = Integer.getInteger("nx.cloMsz9i.docs", 1_000);
     private static final int K = 10;
+    /** live(c) recall@K floor, every fraction and deletion mode (Sam, 2026-09-29, nexus-wbfpw.36).
+     *  Measured at acceptance: 1.000 scattered, 0.995 at 60% correlated. */
+    private static final double LIVE_RECALL_FLOOR = 0.95;
     private static final int[] TOMBSTONE_FRACTIONS_PCT = {3, 10, 30, 60};
     private static final int LATENCY_REPS = Integer.getInteger("nx.cloMsz9i.reps", 10);
     private static final int RECALL_QUERY_COUNT = Integer.getInteger("nx.cloMsz9i.recallQueries", 20);
@@ -823,19 +826,20 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
                     NUM_CHUNKS - NUM_MANIFEST)
                 .isEqualTo(NUM_CHUNKS - NUM_MANIFEST);
 
-            // Evidence, not a hard regression gate (same discipline as the sibling
-            // class's latency test) -- but non-vacuous: each measurement must actually
-            // run and produce a real number in [0,1].
+            // live(c) is gated at LIVE_RECALL_FLOOR (Sam, 2026-09-29, nexus-wbfpw.36); the
+            // old dead-set predicate is reported only, since it is no longer in production.
             assertThat(beforeAvg).isBetween(0.0, 1.0);
-            assertThat(afterAvg).isBetween(0.0, 1.0);
+            assertThat(afterAvg)
+                .as("live(c) recall@%d at %d%% scattered deletion. Per query: %s", K, pct, afterRecalls)
+                .isBetween(LIVE_RECALL_FLOOR, 1.0);
         }
 
         // Correlated deletion (critique-wbfpw9-r3 Significant 1): the series above deletes
         // documents independently of vector position. Here one contiguous region dies
-        // together, the shape of a topically-related batch superseded at once. Recall is
-        // reported, not gated: both predicates share the same HNSW index, so a loss here
-        // would be a property of filtered ANN search, not of chunk_live_owners. The pin
-        // is that CORRELATED mode really does produce dead neighbourhoods.
+        // together, the shape of a topically-related batch superseded at once. live(c)
+        // recall is gated at LIVE_RECALL_FLOOR here too (nexus-wbfpw.36); the old
+        // predicate's is reported only. The pin that CORRELATED mode really does produce
+        // dead neighbourhoods stays below.
         System.out.println("case     | tombstone% | avg_recall@10 | per_query                     | dead-neighbourhood queries (scattered/correlated)");
         for (int pct : TOMBSTONE_FRACTIONS_PCT) {
             setTombstoneFraction(pct, Tombstones.SCATTERED);
@@ -852,7 +856,9 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             System.out.printf("%-8s | %10d | %13.3f | %-30s | %d/%d%n",
                 "c-corr", pct, avg(afterCorr), afterCorr, scatteredDead, correlatedDead);
             assertThat(avg(beforeCorr)).isBetween(0.0, 1.0);
-            assertThat(avg(afterCorr)).isBetween(0.0, 1.0);
+            assertThat(avg(afterCorr))
+                .as("live(c) recall@%d at %d%% correlated deletion. Per query: %s", K, pct, afterCorr)
+                .isBetween(LIVE_RECALL_FLOOR, 1.0);
 
             // Same deletion, every query aimed at the deleted region (critique-wbfpw9-r3
             // round-4 Observation: uniform queries put 0 of 20 in the cap at 3% and 10%).
@@ -864,7 +870,10 @@ class ChunkLiveOwnersMsz9iScaleIntegrationTest {
             System.out.printf("%-8s | %10d | %13.3f | %-30s | queries inside the deleted cap%n",
                 "c-inCap", pct, avg(afterIn), afterIn);
             assertThat(avg(beforeIn)).isBetween(0.0, 1.0);
-            assertThat(avg(afterIn)).isBetween(0.0, 1.0);
+            assertThat(avg(afterIn))
+                .as("live(c) recall@%d at %d%% correlated deletion, queries inside the deleted"
+                    + " region. Per query: %s", K, pct, afterIn)
+                .isBetween(LIVE_RECALL_FLOOR, 1.0);
 
             if (pct == 60) {
                 assertThat(correlatedDead)
