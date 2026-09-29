@@ -578,5 +578,5 @@ Phase 2.
 
 ## Revision History
 
-- 2026-09-29: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `a879b4653`; critique `nexus_rdr/221-gate-critique-2026-09-29-r1`.
+- 2026-09-29: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `d31715dda`; critique `nexus_rdr/221-gate-critique-2026-09-29-r1`.
 - 2026-09-29: Accepted with fix-check residuals dispositioned by bead (epic nexus-ger02): R1 nexus-ger02.7, nexus-ger02.10; R2 nexus-ger02.10; R3 nexus-ger02.2; R4 nexus-ger02.1, nexus-ger02.3, nexus-ger02.4; R5 nexus-ger02.8; R6 nexus-ger02.10.
