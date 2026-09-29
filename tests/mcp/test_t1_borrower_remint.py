@@ -16,6 +16,7 @@ lease files and mint flock.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import threading
 import time
@@ -878,3 +879,50 @@ def test_a_lifespan_owner_displaced_mid_session_leaves_its_successor_alone_at_ex
 
     assert read_t1_session_lease(sid, cfg) == seen["successor"]
     assert "before the successor" in _contents(sid, seen["successor"]), "the successor's token still resolves"
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_tick_records_its_rotated_token_so_teardown_still_owns_it(owner) -> None:
+    """Every token the owner's refresh loop mints joins the set teardown
+    compares the published lease against. Without the recording, the lease the
+    loop published names a token the process 'never minted', teardown reads
+    that as a displaced owner and leaves both the lease and the live token."""
+    sid, first_token, cfg = owner
+    core._OWNED_T1_SESSION["session_id"] = sid
+    core._note_t1_minted(sid, first_token)
+    task = asyncio.create_task(core._t1_session_refresh_loop(sid, 0.05))
+    try:
+        for _ in range(200):
+            if os.environ["NX_T1_SESSION"] != first_token:
+                break
+            await asyncio.sleep(0.05)
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+    rotated = os.environ["NX_T1_SESSION"]
+    assert rotated != first_token, "the refresh tick never ran"
+    assert read_t1_session_lease(sid, cfg) == rotated
+
+    core._t1_session_shutdown()
+
+    assert read_t1_session_lease(sid, cfg) is None, "the owner's exit clears the lease its refresh published"
+    with pytest.raises(RuntimeError, match="unauthorized"):
+        HttpScratchStore(session_id=sid, _session_token=rotated).list_entries()
+
+
+@pytest.mark.asyncio
+async def test_a_handoff_clears_the_old_lease_by_the_tokens_this_process_minted(owner, handoff, monkeypatch) -> None:
+    """The handoff's abandoned-lease clear compares against the mint record,
+    not the env: the store's 401 self-heal may have exported an adopted token
+    into ``NX_T1_SESSION`` by then."""
+    sid, own_token, cfg = owner
+    core._OWNED_T1_SESSION["session_id"] = sid
+    core._note_t1_minted(sid, own_token)
+    monkeypatch.setenv("NX_T1_SESSION", "token-the-401-heal-adopted")
+    assert read_t1_session_lease(sid, cfg) == own_token
+    _write_marker(str(uuid.uuid4()))  # no lease for the new session: this tick mints
+
+    await core._t1_handoff_tick(_MCP_PID, MagicMock())
+
+    assert read_t1_session_lease(sid, cfg) is None

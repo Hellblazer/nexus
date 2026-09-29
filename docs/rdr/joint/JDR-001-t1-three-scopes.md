@@ -85,7 +85,9 @@ token 401s recovers the same way (same flock, same `stale_token` rule), so a
 successor's later revoke-by-session-id does not leave it dead. Every recovery
 mint, failed or completed, starts a 30s per-session cooldown, and at most 3
 recovery mints run per 10 minutes, so two processes that each think the
-other's token is dead cannot rotate each other faster than that. Owner
+other's token is dead cannot rotate each other faster than that. Both limits
+are per process: two processes can mint up to 6 times per 10 minutes between
+them. Owner
 teardown revokes and clears only when the published lease names a token this
 process minted (`_OWNED_T1_MINTED`, not `NX_T1_SESSION`, which the store's
 own 401 self-heal overwrites with an adopted token); when the lease names a
@@ -102,8 +104,21 @@ The owner's clean exit no longer deletes them: it used to, which emptied the
 pad before the flagged-row drain ran (so flagged notes were lost on the
 stdin-EOF path) and deleted it under the surviving borrower. The SIGTERM path
 never deleted rows, and the engine's scheduled sweep
-(`NexusService.runScheduledSweep`, 24h) reaps what nobody claims, so a
-recovering borrower inherits the owner's pad. Nothing migrates rows.
+(`NexusService.runScheduledSweep`: 24h TTL, run every 6h) reaps what nobody
+claims, so a recovering borrower inherits the owner's pad. Unflagged scratch
+now outlives a clean owner exit by that bound, about 30h at worst (24h plus
+up to one 6h sweep interval). Nothing migrates rows.
+
+Two residuals are accepted and not closed. A recovery that starts while
+SIGTERM is already tearing the process down can leave a minted token and its
+lease unowned: `_t1_shutdown` returns early when nothing is owned and cannot
+set the shutdown flag then, because the SIGTERM handler treats that flag as
+"someone else is exiting" and would return without exiting; the token ages
+out on its TTL. And owner teardown unlinks the per-session mint-lock file
+when it clears the lease, so a same-id process that starts between that
+clear and the revoke can mint under a fresh lock inode and then have its
+token revoked by the owner's revoke-by-session-id; the displaced-teardown
+guard narrows the window but does not close every ordering.
 
 ## Standing falsification: respawn-on-`/clear` is FALSE (nexus-ggvi0, 2026-08-22)
 

@@ -1490,17 +1490,28 @@ async def _t1_handoff_tick(mcp_pid: int, log: Any) -> None:
         was_owner = old_session_id is not None and (
             _OWNED_T1_SESSION.get("session_id") == old_session_id
         )
-        if was_owner:
-            old_session_token = _os.environ.get("NX_T1_SESSION", "").strip() or old_session_token
+        minted_old = set(_OWNED_T1_MINTED.get(old_session_id, ())) if was_owner else set()
         _BORROWED_T1_SESSION.clear()
         _OWNED_T1_SESSION.clear()
         _OWNED_T1_MINTED.clear()
     if was_owner:
         try:
-            from nexus.db.t1 import clear_t1_session_lease_if_matches  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-            clear_t1_session_lease_if_matches(
-                old_session_id, config_dir, old_session_token or "",
+            from nexus.db.t1 import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+                clear_t1_session_lease_if_matches,
+                read_t1_session_lease,
             )
+            if minted_old:
+                # Clear the lease only if it names a token THIS process minted
+                # (the refresh loop rotates, a recovery re-mints); the
+                # compare-and-delete below still guards against a sibling
+                # publishing between this read and the delete.
+                published = read_t1_session_lease(old_session_id, config_dir)
+                expected = published if published in minted_old else ""
+            else:
+                # Ownership recorded without a mint record: the token this
+                # tick captured from the env before any swap.
+                expected = old_session_token or ""
+            clear_t1_session_lease_if_matches(old_session_id, config_dir, expected)
         except Exception as exc:  # noqa: BLE001 — best-effort; a failed clear just leaves a lease that self-heals via its own TTL, must not crash the handoff
             log.warning(
                 "t1_handoff_abandoned_lease_clear_failed",
@@ -1699,9 +1710,11 @@ async def _t1_lifespan(_app: Any):
     """
     # Branch 0 (RDR-152 bead nexus-gmiaf.13): Postgres service path.
     # NX_STORAGE_BACKEND_T1=service (or global NX_STORAGE_BACKEND=service)
-    # routes T1 through HttpScratchStore. Chroma is NOT spawned; the session is
-    # closed on exit via HttpScratchStore.close_session() so the UNLOGGED table
-    # is reaped promptly rather than waiting for the 24-h TTL sweep backstop.
+    # routes T1 through HttpScratchStore. Chroma is NOT spawned. On exit the
+    # OWNER drains its flagged rows to T2, revokes its token and clears its
+    # lease (`_t1_shutdown`); the scratch rows themselves are left for the
+    # engine's scheduled sweep (24h TTL, run every 6h), so a surviving
+    # borrower keeps its pad (nexus-k9sec).
     # RDR-158 P3 (nexus-7bomn): validation only — the non-service tail of
     # this lifespan died with the =sqlite opt-out; a stale
     # NX_STORAGE_BACKEND[_T1]=sqlite export hard-errors here with the
@@ -2132,7 +2145,7 @@ async def _t1_lifespan(_app: Any):
         # write-back with the board cursor), but its background task can
         # still be mid-`tick()`, parked on a `wait()` through the T2
         # context this teardown is about to invalidate a few lines below
-        # (`store.close_session()`, `_t1_shutdown()`). `await`ing its
+        # (the drain and revoke in `_t1_shutdown()`). `await`ing its
         # cancellation here, first, is the same "cancel before close so
         # it cannot race the session-close call" ordering this same
         # `finally` block already applies to the T1 session refresh task
