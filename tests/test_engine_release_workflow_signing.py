@@ -277,13 +277,26 @@ def test_notarize_success_is_the_status_line_not_the_exit_code() -> None:
 
 
 def test_rehearsal_workflow_shape() -> None:
-    """Dispatch-only (never push/PR), owner-only on the hellmini runner,
+    """Push to develop limited to the signing inputs, plus dispatch; never
+    pull_request (public repo, self-hosted runner). Owner-only on hellmini,
     environment-scoped secrets, the shared script, loud failure on missing
-    secrets, and an always() cleanup."""
+    secrets, notarization on push runs, and an always() cleanup."""
     text = REHEARSAL.read_text()
     spec = yaml.safe_load(text)
     triggers = spec.get("on", spec.get(True))
-    assert set(triggers) == {"workflow_dispatch"}
+    assert set(triggers) == {"push", "workflow_dispatch"}
+    assert triggers["push"]["branches"] == ["develop"]
+    paths = triggers["push"]["paths"]
+    assert "service/deploy/mac-sign.sh" in paths
+    assert all(
+        p.startswith("service/deploy/") or p == ".github/workflows/mac-signing-rehearsal.yml"
+        for p in paths
+    ), "the push trigger must stay limited to the signing inputs"
+    for name in ("Notarize", "Gatekeeper verdict (quarantined copy)"):
+        step = next(s for s in spec["jobs"]["rehearse"]["steps"] if s.get("name") == name)
+        assert "github.event_name == 'push'" in step["if"], (
+            f"{name} must run on push, where inputs.notarize is empty"
+        )
     job = spec["jobs"]["rehearse"]
     assert job["runs-on"] == "hellmini"
     assert job["environment"] == "apple-signing"
