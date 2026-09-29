@@ -447,7 +447,8 @@ public final class Bge768Embedder implements Embedder {
             // work remains -- a request whose last sub-batch just completed is never
             // aborted after doing all its work. The admission permit is released by
             // AdmissionControlledEmbedder's finally; the session.run() that just returned
-            // is the granularity floor (a native ONNX call cannot be interrupted).
+            // is the granularity floor (the deadline never interrupts a run; only
+            // shutdown does, through GatedRun's terminate flag, nexus-o5xyx.3).
             if (start < n && RequestDeadlineProbe.expired(deadlineNanos, nowNanos)) {
                 long elapsedMs = (nowNanos - callStartNanos) / 1_000_000L;
                 long pastDeadlineMs = (nowNanos - deadlineNanos) / 1_000_000L;

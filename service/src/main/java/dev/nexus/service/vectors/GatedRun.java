@@ -20,23 +20,32 @@ public final class GatedRun implements AutoCloseable {
 
     private final OrtInitGate.Scope scope;
     private final OrtSession.RunOptions options;
+    /** Owner-thread only: a run is opened, used and closed on one thread. */
+    private boolean closed;
 
     /**
      * @throws OrtInitGate.ShutdownInProgressException if shutdown has begun; nothing
      *         native was touched
      */
     public static GatedRun open(String what) throws OrtException {
-        OrtInitGate.Scope scope = OrtInitGate.process().enter(what);
+        return open(OrtInitGate.process(), what);
+    }
+
+    /** Test seam: a private gate instead of the process one. */
+    static GatedRun open(OrtInitGate gate, String what) throws OrtException {
+        OrtInitGate.Scope scope = gate.enter(what);
         OrtSession.RunOptions options = null;
         try {
             options = new OrtSession.RunOptions();
             GatedRun run = new GatedRun(scope, options);
             scope.onShutdown(run::terminate);
             return run;
-        } catch (OrtException | RuntimeException e) {
+        } catch (Throwable t) {
+            // Any failure, Errors included (UnsatisfiedLinkError): a leaked scope
+            // would hold every later shutdown for the full bound.
             if (options != null) options.close();
             scope.close();
-            throw e;
+            throw t;
         }
     }
 
@@ -73,6 +82,8 @@ public final class GatedRun implements AutoCloseable {
 
     @Override
     public void close() {
+        if (closed) return;
+        closed = true;
         try {
             scope.onShutdown(null);   // the canceller must never see released options
             options.close();

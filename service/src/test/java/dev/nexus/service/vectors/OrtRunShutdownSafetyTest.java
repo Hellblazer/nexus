@@ -33,16 +33,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * not only the exit status: a crash during exit can leave status 143 (measured,
  * ungated: 3 crash reports in 40 runs, every status 143).
  *
- * <p>Detection power is statistical. Before the fix, 12 of 180 signals crashed
- * (7 of 80 ungated, 5 of 100 with the init-only gate; macOS arm64, 8 threads), about
- * 6.7%, so {@value #ITERATIONS} iterations catch a regression with probability about
- * 1 - 0.933^30 = 0.87, not certainty.
+ * <p>Crash detection alone is statistical. With the init-only gate, 5 of 100 signals
+ * crashed (macOS arm64, 8 threads; 7 of 80 ungated), so {@value #ITERATIONS}
+ * iterations see a crash from a regression back to that gate with probability about
+ * 1 - 0.95^30 = 0.79. The deterministic checks are the other two below.
  *
- * <p>Non-vacuity: the gate must log that it cancelled live runs on at least
- * {@value #MIN_CANCELLED} iterations, or the signals never met a live run. The drain
- * must also never expire its bound: an expiry means exit went ahead with native work
- * in flight, which is the crash window whether or not this run happened to crash.
- * Model gating follows {@link OrtTestModel} (skip only when nothing is provisioned).
+ * <p>Cancellation must be observed: the gate must log that it cancelled live runs on at
+ * least {@value #MIN_CANCELLED} iterations. That fails on any host when the canceller
+ * is gone (measured: removing its registration turns this test red), and it proves the
+ * signals met live runs. The drain must also never expire its bound: an expiry means
+ * exit went ahead with native work in flight, the crash window whether or not this run
+ * happened to crash. Model gating follows {@link OrtTestModel} (skip only when nothing
+ * is provisioned).
  */
 class OrtRunShutdownSafetyTest {
 

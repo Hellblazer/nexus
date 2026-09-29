@@ -503,6 +503,50 @@ if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerExcep
   echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log | head; fail=1
 fi
 
+# ── SIGTERM during in-flight local inference (nexus-o5xyx.3) ─────────────────
+# onnxruntime-java's shutdown hook frees ORT's env under a running session.run()
+# and the process crashes in LoggingManager::Log. The engine now cancels in-flight
+# runs through the run's terminate flag before exiting (GatedRun), and a cancelled
+# run makes libonnxruntime4j_jni throw OrtException from native code, which needs
+# its own jniAccessible entry: the JVM tests cannot see that class of failure.
+# Eight concurrent large embeds, SIGTERM mid-flight: exit must be 143 (not a
+# crash status), the gate must log the cancel, and every in-flight request must
+# end 200 or 503, never 500. Requires the bge model, like the embed leg above.
+if [ -f "$BGE_MODEL" ]; then
+  echo "SIGTERM during in-flight inference:"
+  BIG=$(python3 -c "import json;print(json.dumps({'model':'bge-base-en-v15-768','texts':[str(i)+' '+'the engine embeds this sentence under load. '*40 for i in range(64)]}))")
+  rm -f /tmp/ns-term-*.code
+  TPIDS=()
+  for k in $(seq 1 8); do
+    ( curl -s -o /dev/null -w "%{http_code}\n" --max-time 60 "${A[@]}" "${J[@]}" -X POST \
+        -d "$BIG" "$U/v1/vectors/embed" > "/tmp/ns-term-$k.code" ) &
+    TPIDS+=($!)
+  done
+  sleep 1.5
+  kill -TERM "$SVCPID"
+  wait "$SVCPID"; trc=$?
+  for p in "${TPIDS[@]}"; do wait "$p" 2>/dev/null; done
+  codes=$(cat /tmp/ns-term-*.code 2>/dev/null | tr '\n' ' ')
+  if [ "$trc" = "143" ]; then
+    echo "  ok   exit 143 after SIGTERM under embed load"
+  else
+    echo "  FAIL exit $trc after SIGTERM under embed load (want 143; 134/139 = native crash)"; tail -20 /tmp/native-smoke-svc.log; fail=1
+  fi
+  if grep -q 'event=ort_run_cancelled' /tmp/native-smoke-svc.log; then
+    echo "  ok   in-flight runs cancelled ($(grep -o 'event=ort_run_cancelled count=[0-9]*' /tmp/native-smoke-svc.log | tail -1))"
+  else
+    echo "  FAIL no event=ort_run_cancelled: the signal met no live run, or the gate did not cancel"; fail=1
+  fi
+  if grep -qw 500 <<<"$codes"; then
+    echo "  FAIL an in-flight embed answered 500 (codes: $codes); a cancelled run must be a retryable 503"; fail=1
+  elif grep -qw 503 <<<"$codes"; then
+    echo "  ok   in-flight embeds answered 503, not 500 (codes: $codes)"
+  else
+    echo "  FAIL no in-flight embed answered 503 (codes: $codes); OrtException from native code may not have reached the gate"; fail=1
+  fi
+  SVCPID=""
+fi
+
 # ── Voyage-mode boot + egress-proxy wiring (nexus-myg2d) ──────────────────────
 # The local-mode boot above never exercises the CLOUD (voyage) config path — the
 # exact coverage gap that let two native-image-vs-JVM regressions ship to conexus

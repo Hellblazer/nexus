@@ -216,6 +216,30 @@ class VectorHandlerDeadlineMappingTest {
         }
     }
 
+    @Test
+    void everyEmbeddingHandlerMapsAShutdownRefusalTo503AheadOfItsGenericArms() throws Exception {
+        // nexus-o5xyx.3 review: write_many (CatalogHandler, via CombinedWriteService) and
+        // embed_fill (StagingHandler) embed too. Static pin, as for the 429/deadline arms
+        // (VectorHandlerUpstreamRateLimitedTest's proportionality argument); the live-HTTP
+        // proof of the shape is the VectorHandler test above.
+        String arm = "catch (dev.nexus.service.vectors.OrtInitGate.ShutdownInProgressException";
+        for (String handler : List.of("VectorHandler", "CatalogHandler", "StagingHandler")) {
+            String src = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src", "main", "java", "dev", "nexus", "service", "http", handler + ".java"));
+            int armIdx = src.indexOf(arm);
+            assertThat(armIdx).as("%s must catch ShutdownInProgressException", handler).isPositive();
+            assertThat(src.substring(armIdx, Math.min(src.length(), armIdx + 700)))
+                .as("%s's arm must answer 503", handler).contains("503");
+            int genericIdx = src.indexOf("catch (Exception e)", armIdx);
+            assertThat(genericIdx).as("%s: arm ahead of the generic 500 arm", handler).isGreaterThan(armIdx);
+            int iseIdx = src.indexOf("catch (IllegalStateException");
+            if (iseIdx >= 0) {
+                assertThat(armIdx).as("%s: arm ahead of the IllegalStateException arm it would fall into", handler)
+                    .isLessThan(iseIdx);
+            }
+        }
+    }
+
     /** Always throws the typed exception, simulating an expired write-path deadline. */
     private static final class ThrowingEmbedder implements Embedder {
         static volatile RequestDeadlineExceededException.Outcome outcome =

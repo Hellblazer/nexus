@@ -268,8 +268,10 @@ public final class OrtInitGate {
     }
 
     /**
-     * Close the gate to new inits and wait up to {@code timeoutMillis} for
-     * in-flight ones to finish.
+     * Close the gate to new native work, run the canceller of every open scope
+     * (an in-flight {@link GatedRun} is told to terminate), and wait up to
+     * {@code timeoutMillis} for all in-flight work to return. Inits have no
+     * canceller and are waited for.
      *
      * @return true when nothing is in flight on return; false on timeout or interrupt
      */

@@ -329,20 +329,29 @@ class OrtInitGateTest {
 
     // ── the run lint (nexus-o5xyx.3): every session.run( passes a GatedRun's options ──
 
-    private static final java.util.regex.Pattern SESSION_RUN = java.util.regex.Pattern.compile(
-            "\\bsession\\s*\\.\\s*run\\s*\\(");
+    /** Every variable or field declared as an {@code OrtSession} (e.g. {@code session}, {@code sess}). */
+    private static final java.util.regex.Pattern ORT_SESSION_DECL = java.util.regex.Pattern.compile(
+            "\\bOrtSession\\s+(\\w+)\\s*[;=,)]");
     private static final java.util.regex.Pattern GATED_RUN_OPEN = java.util.regex.Pattern.compile(
             "try\\s*\\(\\s*GatedRun\\s+(\\w+)\\s*=\\s*GatedRun\\s*\\.\\s*open\\(");
 
+    /** {@code <name>.run(} for every OrtSession name declared in {@code code}, plus {@code session}. */
+    private static java.util.regex.Pattern sessionRun(String code) {
+        var names = new java.util.TreeSet<String>(List.of("session"));
+        ORT_SESSION_DECL.matcher(code).results().forEach(m -> names.add(m.group(1)));
+        return java.util.regex.Pattern.compile(
+                "\\b(?:" + String.join("|", names) + ")\\s*\\.\\s*run\\s*\\(");
+    }
+
     /**
-     * Problems for every {@code session.run(} whose argument list (up to the matching
-     * parenthesis) does not pass {@code X.options()}, where {@code X} is the resource of
-     * the nearest preceding {@code try (GatedRun X = GatedRun.open(...))}.
+     * Problems for every {@code <session>.run(} (any OrtSession-typed name in the file)
+     * whose argument list does not pass {@code X.options()}, where {@code X} is the
+     * resource of the nearest preceding {@code try (GatedRun X = GatedRun.open(...))}.
      */
     static List<String> ungatedRunCalls(String name, String source) {
         String code = stripComments(source);
         List<String> problems = new ArrayList<>();
-        var calls = SESSION_RUN.matcher(code);
+        var calls = sessionRun(code).matcher(code);
         while (calls.find()) {
             int depth = 1;
             int i = calls.end();
@@ -370,7 +379,8 @@ class OrtInitGateTest {
         try (var files = Files.walk(MAIN_SRC)) {
             for (Path f : (Iterable<Path>) files.filter(x -> x.toString().endsWith(".java"))::iterator) {
                 String src = Files.readString(f);
-                calls += (int) SESSION_RUN.matcher(stripComments(src)).results().count();
+                String code = stripComments(src);
+                calls += (int) sessionRun(code).matcher(code).results().count();
                 problems.addAll(ungatedRunCalls(f.getFileName().toString(), src));
             }
         }
@@ -390,6 +400,8 @@ class OrtInitGateTest {
         assertThat(ungatedRunCalls("other-options",
                 "try (GatedRun run = GatedRun.open(\"r\")) { session.run(inputs, opts); }")).hasSize(1);
         assertThat(ungatedRunCalls("commented", "// session.run(inputs);")).isEmpty();
+        assertThat(ungatedRunCalls("other-name", "OrtSession sess = null; try (var r = sess.run(inputs)) { }"))
+                .as("any OrtSession-typed name is checked, not only `session`").hasSize(1);
     }
 
     @Test
