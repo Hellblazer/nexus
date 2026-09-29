@@ -816,7 +816,11 @@ FAILED: str = "failed"
 
 #: outcome -> (log level, event). SKIPPED stays at info: a box with no
 #: data-token lease skips every projection by design, and the fresh-install
-#: MVV fails on an unexpected warning. FAILED is the one warning. The event
+#: MVV fails on an unexpected warning. Note that SKIPPED is "resolution raised
+#: _Skip", so misconfiguration also lands there at info, not only a missing
+#: lease: a group-readable local-supervisor lease file, a non-integer
+#: NX_SERVICE_PORT, a HOST with no PORT. Those are visible only in the
+#: per-session projection log. FAILED is the one warning. The event
 #: is ``tuple_projection_write_failed``, not ``tuple_projection_failed``,
 #: which the mcp_tool path already uses for an exception in its own thread.
 _OUTCOME_EVENTS: dict[str, tuple[str, str]] = {

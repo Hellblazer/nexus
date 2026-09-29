@@ -323,3 +323,95 @@ def test_subagent_stop_tuple_posts_the_report_row_with_no_mcp_server_reachable(
         "commit": "cafe123",
         "t2_ref": "nexus/checkpoint",
     }
+
+
+# ── A FAILED projection logs at warning and still writes nothing to stdout ──
+#
+# nexus-8he82: the command-tier verbs now log the projection outcome, and a
+# FAILED one logs at warning. The in-process outcome tests patch ``_emit``, so
+# they cannot show that the real log path stays off stdout, which is the
+# hook's decision channel. These run the verb through this checkout's own
+# ``nx-hook`` (the one beside the interpreter running the tests), not whatever
+# generation is on PATH, because an older generation has no outcome logging
+# and would pass vacuously.
+
+
+def _checkout_nx_hook() -> str:
+    path = Path(sys.executable).parent / "nx-hook"
+    if not path.exists():
+        pytest.fail(f"no nx-hook beside {sys.executable}; run uv sync so this checkout installs it")
+    return str(path)
+
+
+def _run_checkout_verb(
+    verb: str, payload: dict, *, config_dir: Path, xdg_state_home: Path,
+    service_url: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        "XDG_STATE_HOME": str(xdg_state_home),
+        "NEXUS_CONFIG_DIR": str(config_dir),
+    }
+    if service_url:
+        env["NX_SERVICE_URL"] = service_url
+    return subprocess.run(
+        [_checkout_nx_hook(), verb], input=json.dumps(payload),
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+
+
+def _hook_log(config_dir: Path) -> str:
+    log = config_dir / "logs" / "hook.log"
+    return log.read_text() if log.exists() else ""
+
+
+@pytest.mark.parametrize(
+    ("verb", "event_name", "payload_edit"),
+    [
+        # A start needs an agent_type; a report needs a session_id. Missing
+        # what the kind requires is FAILED, not IGNORED or SKIPPED.
+        ("subagent-start-tuple", "SubagentStart", {"agent_type": ""}),
+        ("subagent-stop-tuple", "SubagentStop", {"session_id": ""}),
+    ],
+)
+def test_an_incomplete_payload_logs_a_failure_and_keeps_stdout_empty(
+    tmp_path: Path, verb: str, event_name: str, payload_edit: dict,
+) -> None:
+    config_dir = tmp_path / "config"
+    payload = {"session_id": f"{_SESSION_ID}-fail", "hook_event_name": event_name,
+               "agent_id": _AGENT_ID, "agent_type": _AGENT_TYPE, **payload_edit}
+    proc = _run_checkout_verb(verb, payload, config_dir=config_dir, xdg_state_home=tmp_path / "state")
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert proc.stdout == "", f"a FAILED outcome leaked onto stdout: {proc.stdout!r}"
+    assert "tuple_projection_write_failed" in _hook_log(config_dir)
+
+
+def test_a_refused_post_logs_a_failure_and_keeps_stdout_empty(tmp_path: Path, mock_engine) -> None:
+    engine = mock_engine(status=503)
+    config_dir = tmp_path / "config"
+    _write_data_token_lease(config_dir, base_url=engine.base_url, token="fresh-data-token")
+    proc = _run_checkout_verb(
+        "subagent-start-tuple",
+        {"session_id": f"{_SESSION_ID}-503", "hook_event_name": "SubagentStart",
+         "agent_id": _AGENT_ID, "agent_type": _AGENT_TYPE},
+        config_dir=config_dir, xdg_state_home=tmp_path / "state", service_url=engine.base_url,
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert proc.stdout == "", f"a FAILED outcome leaked onto stdout: {proc.stdout!r}"
+    assert len(engine.requests) == 1  # it really reached the POST
+    assert "tuple_projection_write_failed" in _hook_log(config_dir)
+
+
+def test_a_missing_lease_logs_skipped_at_info_and_keeps_stdout_empty(tmp_path: Path) -> None:
+    config_dir = tmp_path / "config"
+    proc = _run_checkout_verb(
+        "subagent-start-tuple",
+        {"session_id": f"{_SESSION_ID}-nolease", "hook_event_name": "SubagentStart",
+         "agent_id": _AGENT_ID, "agent_type": _AGENT_TYPE},
+        config_dir=config_dir, xdg_state_home=tmp_path / "state",
+    )
+    assert proc.returncode == 0 and proc.stdout == ""
+    log = _hook_log(config_dir)
+    assert "tuple_projection_skipped" in log
+    assert "tuple_projection_write_failed" not in log
