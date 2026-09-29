@@ -422,6 +422,15 @@ def list_sibling_collections(
       8-char length check failed.
 
     Always excludes the input + ``taxonomy__*``.
+
+    The conformant branch matches the catalog ROW's ``owner_id``. Since
+    nexus-6pbwx the engine rewrites a legacy slug-named repo collection's
+    ``owner_id`` to its documents' owner segment (``1-15``), so such a
+    collection no longer finds its slug-named siblings here. Harmless today:
+    nothing in ``src`` calls this function (``taxonomy_cmd`` stopped using it,
+    GH #238, and ``registry`` only re-exports it), and
+    ``tests/test_6pbwx_owner_readers.py`` pins that, so a new caller has to
+    decide the sibling rule deliberately.
     """
     from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (nexus.corpus)
         collection_owner,

@@ -16,49 +16,75 @@
     froze the slug. collectionOwnerRoot and the client's collections_by_owner then
     missed the collection, because both key on the hyphenated owner segment.
 
-    THE RULE. Only for content_type code, docs and rdr, and only for a row whose
-    owner_id is not tumbler-shaped (^[0-9]+(-[0-9]+)*$), the owner_id becomes the
-    owner segment of the documents in the collection. A tumbler-shaped owner is a
-    first registration that stands, exactly as nexus-7tys2 left it; a collection with
-    no live documents keeps whatever it was registered with. A knowledge collection is
-    NEVER touched: its owner is its subject, and its documents all live under 1.1, so
-    deriving from them would overwrite every subject with 1-1. Quarantine rows carry a
-    quarantine-* content_type and are outside the rule.
+    THE RULE. Only for content_type code, docs and rdr, a row's owner_id is
+    REPLACEABLE when it is not tumbler-shaped (^[0-9]+(-[0-9]+)*$: a slug, "default",
+    the tenant-id placeholder) OR when it names a CURATOR-type owner (a
+    catalog_owners row whose owner_type is 'curator'). A replaceable owner_id becomes
+    the owner segment of the collection's live documents. Any other tumbler-shaped
+    owner is a first registration that stands, exactly as nexus-7tys2 left it; a
+    collection with no live documents keeps whatever it was registered with. A
+    knowledge collection is NEVER touched: its owner is its subject, and its documents
+    all live under 1.1, so deriving from them would overwrite every subject with 1-1.
+    Quarantine rows carry a quarantine-* content_type and are outside the rule.
+
+    WHY CURATOR OWNERS ARE REPLACEABLE. nexus-wbfpw.33's import fallback mints the
+    documents of an import into an EMPTY slug-owned repo collection under the
+    knowledge curator, so the first document names the curator's segment. Without the
+    curator clause that value would be tumbler-shaped and stand for good, and a real
+    repo document registered into the collection afterwards (import, then nx index
+    repo, which is the natural restore order) could never correct it. The derivation
+    therefore ranks non-curator owners above curator owners and a curator-derived
+    owner never blocks a repo-derived one. Curator documents are NOT excluded
+    outright: the estate's one known case, docs__default__voyage-context-3__v1
+    (owner "default", 41 documents under the curator 1.14), has nothing else to
+    derive from and becomes 1-14, which is the repair Sam named. A curator-derived
+    owner that already equals the derived value is not rewritten again, so a
+    curator-only collection is not updated on every document insert.
 
     WHERE IT FIRES. Both places a fact can arrive, as triggers, so no write path has to
-    remember:
-      * BEFORE INSERT OR UPDATE OF owner_id, content_type on catalog_collections:
-        a registration (or a rename's new row) for a collection whose documents
-        already exist takes their owner, and a chunk write's slug re-registration of a
-        repaired row is a no-op because the stored owner is tumbler-shaped.
+    remember (the document writers are at least seven: upsert, register, register-many,
+    updateDocumentCollection and its batch form, the rename re-home, and the GC restore
+    SQL):
       * AFTER INSERT OR UPDATE OF physical_collection, deleted_at on
         catalog_documents: the indexer registers the collection first and mints its
         documents after, so the document write is what names the owner. It also
         covers a rename, which re-homes documents onto a row the client registered
-        under the new name's segment.
-    Triggers rather than a call from each of the five document write paths in
-    CatalogRepository, because the paths that set physical_collection are the
-    recurring miss (upsert, register, register-many, import, re-home). Both are
+        under the new name's segment, and the restore of a tombstoned document.
+      * BEFORE INSERT OR UPDATE OF owner_id, content_type on catalog_collections:
+        a registration (or a rename's new row) for a collection whose documents
+        already exist takes their owner, and a chunk write's slug re-registration of a
+        repaired row is a no-op because the stored owner is tumbler-shaped and not a
+        curator's.
+    Triggers rather than a call from each document write path in CatalogRepository,
+    because the paths that set physical_collection are the recurring miss. Both are
     SECURITY INVOKER, like the taxonomy-003 triggers: the UPDATE they issue is scoped
-    by the session's tenant GUC and the table's FORCE policy.
+    by the session's tenant GUC and the table's FORCE policy. When a trigger rewrites
+    an owner it says so with a NOTICE naming the collection, the old and the new value.
 
     A document whose tumbler is not an owner address (fewer than three numeric
     segments: the two-segment phantoms catalog-034-0 tombstones, or a test-only
-    "rn.1") names no owner. When a collection's live documents span more than one
-    owner, the owner with the most of them wins, ties to the lower segment. The
-    document trigger stops firing once the owner is tumbler-shaped, so in that case
-    the first document registered fixes the value; a collection that mixes owners is
-    not a shape any producer writes.
+    "rn.1") names no owner. At RUNTIME the first document that lands while the owner is
+    replaceable fixes it, so among several NON-curator owners the first one registered
+    wins; only the initial computation (a registration over existing documents, and the
+    repair below) sees the whole set, and there the non-curator owner with the most live
+    documents wins, ties to the lexically lower segment. A collection whose documents
+    span several repo owners is not a shape the indexer writes, but nothing enforces it;
+    the import fallback above is the producer that made mixed curator and repo owners
+    real, and it is what the curator clause handles.
 
     THE REPAIR (catalog-044-3). One boot walk that applies the same rule to rows that
-    already exist: every code / docs / rdr row whose owner_id is not tumbler-shaped and
-    that has live documents. Measured on the cloud estate the day it was decided: 112
+    already exist: every code / docs / rdr row whose owner_id is replaceable and that
+    has live documents. Measured on the cloud estate the day it was decided: 112
     collections, and the only non-tumbler repo owners were
     docs__default__voyage-context-3__v1 (owner "default", 101 live chunks) and two empty
     quarantine rows, which are outside the rule. Rows without documents are left alone.
-    Toggle-wrapped like hygiene-004-1: catalog_collections and catalog_documents both
-    carry FORCE ROW LEVEL SECURITY and the migration role is not BYPASSRLS, so under
-    FORCE the walk would see no rows and correct nothing.
+    Toggle-wrapped like hygiene-004-1: catalog_collections, catalog_documents and
+    catalog_owners (read by the curator test) all carry FORCE ROW LEVEL SECURITY and the
+    migration role is not BYPASSRLS, so under FORCE the walk would see no rows and
+    correct nothing. LOCK ORDER is documents, owners, collections: the same order the
+    document trigger takes at runtime (the document row, then the collection row it
+    updates), so a deploy walk cannot deadlock against an old instance still writing
+    documents.
 -->
 <databaseChangeLog
     xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
@@ -67,8 +93,33 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="catalog-044-1" author="nexus-6pbwx">
-        <comment>nexus.catalog_collection_doc_owner(tenant, collection): the owner segment (first two dot-segments of the tumbler, hyphenated) of the live documents in a collection, the owner with the most documents winning; NULL when no live document has an owner-address tumbler. SECURITY INVOKER, so the caller's tenant policy applies.</comment>
+        <comment>Helper functions for the nexus-6pbwx owner rule, all SECURITY INVOKER so the caller's tenant policy applies: nexus.catalog_owner_is_curator(tenant, segment), nexus.catalog_collection_owner_replaceable(tenant, owner_id) (not tumbler-shaped, or a curator's), and nexus.catalog_collection_doc_owner(tenant, collection): the owner segment (first two dot-segments of the tumbler, hyphenated) of the live documents in a collection, non-curator owners first, then the owner with the most documents, then the lower segment; NULL when no live document has an owner-address tumbler.</comment>
         <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.catalog_owner_is_curator(p_tenant text, p_segment text)
+    RETURNS boolean
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $fn$
+    SELECT EXISTS (
+        SELECT 1
+          FROM nexus.catalog_owners w
+         WHERE w.tenant_id = p_tenant
+           AND w.tumbler_prefix = replace(p_segment, '-', '.')
+           AND w.owner_type = 'curator'
+    )
+$fn$;
+
+CREATE OR REPLACE FUNCTION nexus.catalog_collection_owner_replaceable(p_tenant text, p_owner text)
+    RETURNS boolean
+    LANGUAGE sql
+    STABLE
+    SECURITY INVOKER
+AS $fn$
+    SELECT COALESCE(p_owner !~ '^[0-9]+(-[0-9]+)*$', true)
+        OR nexus.catalog_owner_is_curator(p_tenant, p_owner)
+$fn$;
+
 CREATE OR REPLACE FUNCTION nexus.catalog_collection_doc_owner(p_tenant text, p_collection text)
     RETURNS text
     LANGUAGE sql
@@ -86,15 +137,25 @@ AS $fn$
              AND d.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+'
            GROUP BY 1
       ) o
-     ORDER BY o.n DESC, o.seg
+     ORDER BY (NOT nexus.catalog_owner_is_curator(p_tenant, o.seg)) DESC, o.n DESC, o.seg
      LIMIT 1
 $fn$;
         </sql>
-        <rollback>DROP FUNCTION IF EXISTS nexus.catalog_collection_doc_owner(text, text)</rollback>
+        <rollback>
+            <sql>
+DROP FUNCTION IF EXISTS nexus.catalog_collection_doc_owner(text, text);
+DROP FUNCTION IF EXISTS nexus.catalog_collection_owner_replaceable(text, text);
+DROP FUNCTION IF EXISTS nexus.catalog_owner_is_curator(text, text);
+            </sql>
+        </rollback>
     </changeSet>
 
     <changeSet id="catalog-044-2" author="nexus-6pbwx">
-        <comment>Triggers that apply the nexus-6pbwx owner rule wherever it can arrive: BEFORE INSERT OR UPDATE OF owner_id, content_type on catalog_collections, and AFTER INSERT OR UPDATE OF physical_collection, deleted_at on catalog_documents. Both SECURITY INVOKER. No existing row changes here; catalog-044-3 repairs those.</comment>
+        <comment>Triggers that apply the nexus-6pbwx owner rule wherever it can arrive: BEFORE INSERT OR UPDATE OF owner_id, content_type on catalog_collections, and AFTER INSERT OR UPDATE OF physical_collection, deleted_at on catalog_documents. Both SECURITY INVOKER, both NOTICE when they rewrite an owner. Locks catalog_documents then catalog_collections (the document trigger's runtime order) under a 5s lock_timeout. No existing row changes here; catalog-044-3 repairs those.</comment>
+        <sql splitStatements="true" stripComments="false">
+SET LOCAL lock_timeout = '5s';
+LOCK TABLE nexus.catalog_documents, nexus.catalog_collections IN SHARE ROW EXCLUSIVE MODE;
+        </sql>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.catalog_collections_owner_from_docs()
     RETURNS TRIGGER
@@ -105,9 +166,11 @@ DECLARE
     v_owner text;
 BEGIN
     IF NEW.content_type IN ('code', 'docs', 'rdr')
-       AND NEW.owner_id !~ '^[0-9]+(-[0-9]+)*$' THEN
+       AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, NEW.owner_id) THEN
         v_owner := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.name);
-        IF v_owner IS NOT NULL THEN
+        IF v_owner IS NOT NULL AND v_owner IS DISTINCT FROM NEW.owner_id THEN
+            RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                NEW.name, NEW.owner_id, v_owner;
             NEW.owner_id := v_owner;
         END IF;
     END IF;
@@ -125,16 +188,38 @@ CREATE OR REPLACE FUNCTION nexus.catalog_documents_owner_to_collection()
     LANGUAGE plpgsql
     SECURITY INVOKER
 AS $fn$
+DECLARE
+    v_seg text;
+    v_cur text;
+    v_new text;
 BEGIN
     IF NEW.deleted_at IS NULL
        AND NEW.physical_collection &lt;&gt; ''
        AND NEW.tumbler ~ '^[0-9]+\.[0-9]+\.[0-9]+' THEN
-        UPDATE nexus.catalog_collections c
-           SET owner_id = COALESCE(nexus.catalog_collection_doc_owner(c.tenant_id, c.name), c.owner_id)
+        v_seg := split_part(NEW.tumbler, '.', 1) || '-' || split_part(NEW.tumbler, '.', 2);
+        SELECT c.owner_id INTO v_cur
+          FROM nexus.catalog_collections c
          WHERE c.tenant_id = NEW.tenant_id
            AND c.name = NEW.physical_collection
-           AND c.content_type IN ('code', 'docs', 'rdr')
-           AND c.owner_id !~ '^[0-9]+(-[0-9]+)*$';
+           AND c.content_type IN ('code', 'docs', 'rdr');
+        -- Cheap probes first: a settled repo collection (a tumbler-shaped, non-curator
+        -- owner) or one already owned by this very document's owner costs a primary-key
+        -- read and an owner-row read, never the aggregate over the collection's documents.
+        IF FOUND
+           AND v_cur IS DISTINCT FROM v_seg
+           AND nexus.catalog_collection_owner_replaceable(NEW.tenant_id, v_cur) THEN
+            v_new := nexus.catalog_collection_doc_owner(NEW.tenant_id, NEW.physical_collection);
+            IF v_new IS NOT NULL AND v_new IS DISTINCT FROM v_cur THEN
+                RAISE NOTICE 'catalog-044: collection % owner_id % -> % (from its documents)',
+                    NEW.physical_collection, v_cur, v_new;
+                UPDATE nexus.catalog_collections c
+                   SET owner_id = v_new
+                 WHERE c.tenant_id = NEW.tenant_id
+                   AND c.name = NEW.physical_collection
+                   AND c.content_type IN ('code', 'docs', 'rdr')
+                   AND c.owner_id IS DISTINCT FROM v_new;
+            END IF;
+        END IF;
     END IF;
     RETURN NULL;
 END;
@@ -158,44 +243,57 @@ DROP FUNCTION IF EXISTS nexus.catalog_collections_owner_from_docs();
     <changeSet id="catalog-044-3" author="nexus-6pbwx">
         <comment>
             nexus-6pbwx: one-off repair of existing code/docs/rdr collection rows whose
-            owner_id is not tumbler-shaped (a slug, "default", a tenant-id placeholder)
-            and that have live documents: owner_id becomes the owner segment of those
-            documents, by the same nexus.catalog_collection_doc_owner the triggers use.
-            Rows without documents, knowledge rows and quarantine rows are untouched.
+            owner_id is replaceable (not tumbler-shaped: a slug, "default", a tenant-id
+            placeholder; or a curator-type owner's segment) and that have live documents:
+            owner_id becomes the owner segment of those documents, by the same
+            nexus.catalog_collection_doc_owner the triggers use. Rows without documents,
+            knowledge rows and quarantine rows are untouched.
             DATA EFFECT: UPDATEs catalog_collections.owner_id for every code/docs/rdr
-            row whose owner_id does not match ^[0-9]+(-[0-9]+)*$ and that has at least
-            one live catalog_documents row with a three-segment numeric tumbler;
-            reversible in effect only, no rollback SQL (the prior value was a
-            name-derived slug and is recoverable from the collection name).
+            row whose owner_id does not match ^[0-9]+(-[0-9]+)*$, or names a curator-type
+            owner, and that has at least one live catalog_documents row with a
+            three-segment numeric tumbler whose derived owner differs from the stored one;
+            reversible in effect only, no rollback SQL (see the rollback note).
         </comment>
         <sql splitStatements="true" stripComments="false">
 SET LOCAL lock_timeout = '5s';
-LOCK TABLE nexus.catalog_collections, nexus.catalog_documents IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE nexus.catalog_documents, nexus.catalog_owners, nexus.catalog_collections IN ACCESS EXCLUSIVE MODE;
         </sql>
         <sql splitStatements="false" stripComments="false">
-ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
 ALTER TABLE nexus.catalog_documents NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_owners NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_collections NO FORCE ROW LEVEL SECURITY;
 
 DO $$
 DECLARE
     v_repaired BIGINT;
 BEGIN
     UPDATE nexus.catalog_collections c
-       SET owner_id = nexus.catalog_collection_doc_owner(c.tenant_id, c.name)
-     WHERE c.content_type IN ('code', 'docs', 'rdr')
-       AND c.owner_id !~ '^[0-9]+(-[0-9]+)*$'
-       AND nexus.catalog_collection_doc_owner(c.tenant_id, c.name) IS NOT NULL;
+       SET owner_id = d.seg
+      FROM (
+          SELECT c2.tenant_id, c2.name,
+                 nexus.catalog_collection_doc_owner(c2.tenant_id, c2.name) AS seg
+            FROM nexus.catalog_collections c2
+           WHERE c2.content_type IN ('code', 'docs', 'rdr')
+             AND nexus.catalog_collection_owner_replaceable(c2.tenant_id, c2.owner_id)
+      ) d
+     WHERE c.tenant_id = d.tenant_id
+       AND c.name = d.name
+       AND d.seg IS NOT NULL
+       AND c.owner_id IS DISTINCT FROM d.seg;
     GET DIAGNOSTICS v_repaired = ROW_COUNT;
     RAISE NOTICE 'catalog-044-3: re-derived owner_id from documents for % collection row(s)', v_repaired;
 END $$;
 
-ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
 ALTER TABLE nexus.catalog_collections FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_owners FORCE ROW LEVEL SECURITY;
+ALTER TABLE nexus.catalog_documents FORCE ROW LEVEL SECURITY;
         </sql>
         <rollback>
             <!-- Nothing to DROP: the changeset adds no schema object. The prior
-                 owner_id was the collection name's own segment, so a rollback has
-                 nothing a stored pre-image would recover that the name does not. -->
+                 owner_id is NOT recoverable in general: a slug is the name's own
+                 segment, but a tenant-id placeholder (hygiene-002-1 branch D) and a
+                 registered curator segment are not derivable from the name, so a
+                 rollback cannot restore them and this one does not try. -->
         </rollback>
     </changeSet>
 

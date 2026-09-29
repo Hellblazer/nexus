@@ -115,7 +115,10 @@ documents that live in the collection, hyphenated (`1-15`, what
 `owner_segment_for_tumbler` gives), replacing a name-derived slug
 (`arcaneum-2ad2825c`) when the first document lands. A collection with no
 documents keeps the value it was registered with, and an owner that is
-already tumbler-shaped is a first registration that stands. A `knowledge`
+already tumbler-shaped is a first registration that stands, unless it is the
+segment of a curator-type owner (an import into an empty collection files its
+documents under the knowledge curator; a repo document that arrives later
+replaces that provisional owner). A `knowledge`
 collection is different: its owner is its subject, whatever tumbler its
 documents live under. `catalog-044-collection-owner-from-documents.xml`
 carries the rule (two triggers) and a one-off repair of existing rows.

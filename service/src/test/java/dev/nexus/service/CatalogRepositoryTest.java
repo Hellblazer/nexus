@@ -1886,6 +1886,158 @@ class CatalogRepositoryTest {
             .as("what the client's collections_by_owner('1-15') filters").contains(name);
     }
 
+    private void putOwner(String tenant, String prefix, String name, String type) {
+        repo.upsertOwner(tenant, mapOf(
+            "tumbler_prefix", prefix, "name", name, "owner_type", type, "repo_root", ""));
+    }
+
+    /**
+     * nexus-6pbwx: the wbfpw.33 import fallback mints an import's documents under the
+     * knowledge CURATOR when the collection has no usable owner, so a curator document can
+     * be the first to land in a slug-owned repo collection. It names the collection's
+     * owner only provisionally: a repo document registered afterwards replaces it, and it
+     * never replaces a repo owner back. Curator documents are not ignored outright, because
+     * a collection with nothing else (docs__default, curator 1.14) still takes 1-14.
+     */
+    @Test @Order(60)
+    void collectionOwner_curatorDocumentsGiveWayToRepoDocuments() {
+        String tenant = "own6pbwx-curator-tenant";
+        putOwner(tenant, "1.22", "knowledge", "curator");
+        putOwner(tenant, "1.23", "some-repo", "repo");
+        String name = "code__curator-first-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, name, "code", "curator-first-6pbwx");
+
+        putDoc(tenant, "1.22.1", "code", name);
+        assertThat(ownerOf(tenant, name)).as("curator documents alone still name an owner").isEqualTo("1-22");
+        putDoc(tenant, "1.23.1", "code", name);
+        assertThat(ownerOf(tenant, name)).as("a repo document replaces the curator's segment").isEqualTo("1-23");
+        putDoc(tenant, "1.22.2", "code", name);
+        putDoc(tenant, "1.22.3", "code", name);
+        assertThat(ownerOf(tenant, name)).as("more curator documents never replace a repo owner back")
+            .isEqualTo("1-23");
+        registerColl(tenant, name, "code", "curator-first-6pbwx");
+        assertThat(ownerOf(tenant, name)).as("nor does a re-registration").isEqualTo("1-23");
+    }
+
+    /** nexus-6pbwx: over existing documents, a repo owner outranks a curator with more of them. */
+    @Test @Order(60)
+    void collectionOwner_registrationOverMixedDocumentsPrefersTheRepoOwner() {
+        String tenant = "own6pbwx-mixed-tenant";
+        putOwner(tenant, "1.22", "knowledge", "curator");
+        putOwner(tenant, "1.23", "some-repo", "repo");
+        String name = "docs__mixed-6pbwx__voyage-context-3__v1";
+        putDoc(tenant, "1.22.1", "docs", name);
+        putDoc(tenant, "1.22.2", "docs", name);
+        putDoc(tenant, "1.22.3", "docs", name);
+        putDoc(tenant, "1.23.1", "docs", name);
+        registerColl(tenant, name, "docs", "mixed-6pbwx");
+        assertThat(ownerOf(tenant, name)).isEqualTo("1-23");
+    }
+
+    /**
+     * nexus-6pbwx: a registered CURATOR segment is replaceable even though it is
+     * tumbler-shaped, and a curator-only collection settles on the curator's segment
+     * (docs__default under 1.14) and stays there while more curator documents arrive.
+     */
+    @Test @Order(60)
+    void collectionOwner_curatorOnlyCollectionSettlesAndACuratorSegmentIsReplaceable() {
+        String tenant = "own6pbwx-default-tenant";
+        putOwner(tenant, "1.14", "default", "curator");
+        putOwner(tenant, "1.23", "some-repo", "repo");
+        String name = "docs__default__voyage-context-3__v1";
+        registerColl(tenant, name, "docs", "default");
+        putDoc(tenant, "1.14.1", "docs", name);
+        assertThat(ownerOf(tenant, name)).isEqualTo("1-14");
+        putDoc(tenant, "1.14.2", "docs", name);
+        putDoc(tenant, "1.14.3", "docs", name);
+        assertThat(ownerOf(tenant, name)).isEqualTo("1-14");
+
+        // A collection REGISTERED with a curator's segment and then given a repo document.
+        String other = "code__registered-curator-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, other, "code", "1-14");
+        assertThat(ownerOf(tenant, other)).as("guard: registered with the curator segment").isEqualTo("1-14");
+        putDoc(tenant, "1.23.7", "code", other);
+        assertThat(ownerOf(tenant, other)).isEqualTo("1-23");
+    }
+
+    /**
+     * nexus-6pbwx: the document trigger's UPDATE OF deleted_at arm. A collection registered
+     * while its only document was tombstoned keeps the slug; restoring the document names
+     * the owner. restoreDocument sets deleted_at alone, so only that arm can fire.
+     */
+    @Test @Order(60)
+    void collectionOwner_restoringATombstonedDocumentNamesTheOwner() {
+        String name = "code__restore-6pbwx__voyage-code-3__v1";
+        putDoc(TENANT_OWN, "1.28.1", "code", name);
+        assertThat(repo.deleteDocument(TENANT_OWN, "1.28.1")).isEqualTo(1);
+        registerColl(TENANT_OWN, name, "code", "restore-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).as("guard: no live document yet").isEqualTo("restore-6pbwx");
+        assertThat(repo.restoreDocument(TENANT_OWN, "1.28.1")).isEqualTo(1);
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-28");
+    }
+
+    /**
+     * nexus-6pbwx: the collections trigger's UPDATE OF content_type arm. A row filed as
+     * knowledge keeps its subject however many 1.x documents it holds; re-filing it as a
+     * repo type (a change of content_type alone, not of owner_id) makes the rule apply.
+     */
+    @Test @Order(60)
+    void collectionOwner_changingContentTypeToARepoTypeAppliesTheRule() throws Exception {
+        String name = "code__retyped-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, name, "knowledge", "retyped-6pbwx");
+        putDoc(TENANT_OWN, "1.29.1", "code", name);
+        assertThat(ownerOf(TENANT_OWN, name)).as("guard: knowledge is outside the rule").isEqualTo("retyped-6pbwx");
+        try (Connection su = pg.createConnection("")) {
+            int updated = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                .update(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_collections")))
+                .set(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("content_type"), String.class), "code")
+                .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("name"), String.class).eq(name))
+                .and(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class).eq(TENANT_OWN))
+                .execute();
+            assertThat(updated).isEqualTo(1);
+        }
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-29");
+    }
+
+    /** nexus-6pbwx: over existing documents that tie, the lexically lower owner segment wins. */
+    @Test @Order(60)
+    void collectionOwner_equalDocumentCountsTieToTheLowerSegment() {
+        String name = "code__tie-6pbwx__voyage-code-3__v1";
+        putDoc(TENANT_OWN, "1.26.1", "code", name);
+        putDoc(TENANT_OWN, "1.25.1", "code", name);
+        registerColl(TENANT_OWN, name, "code", "tie-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-25");
+    }
+
+    /**
+     * nexus-6pbwx: a repaired legacy slug collection and the conformant collection of the
+     * same owner now share a (content_type, owner_id, embedding_model) tuple. The tie-break
+     * is deliberate: at equal version the lexically lower name wins, which is the conformant
+     * one (its hyphenated segment starts with a digit; the old NAME DESC picked the slug,
+     * 'z' above '1'), and a higher version still wins whatever the name.
+     */
+    @Test @Order(60)
+    void collectionForTuple_conformantNameBeatsARepairedSlugAtEqualVersion() {
+        String tenant = "own6pbwx-tuple-tenant";
+        String conformant = "code__1-27__voyage-code-3__v1";
+        String slug = "code__zslug-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, conformant, "code", "1-27");
+        registerColl(tenant, slug, "code", "zslug-6pbwx");
+        putDoc(tenant, "1.27.1", "code", slug);
+        assertThat(ownerOf(tenant, slug)).as("guard: the slug row now shares the tuple").isEqualTo("1-27");
+
+        assertThat(repo.collectionForTuple(tenant, "code", "1-27", OWN_MODEL).get("name"))
+            .as("equal version: the lexically lower, conformant name wins").isEqualTo(conformant);
+
+        String slugV2 = "code__zslug-6pbwx__voyage-code-3__v2";
+        repo.upsertCollection(tenant, Map.of(
+            "name", slugV2, "content_type", "code", "owner_id", "zslug-6pbwx",
+            "embedding_model", OWN_MODEL, "model_version", "v2"));
+        putDoc(tenant, "1.27.2", "code", slugV2);
+        assertThat(repo.collectionForTuple(tenant, "code", "1-27", OWN_MODEL).get("name"))
+            .as("a higher model_version still wins").isEqualTo(slugV2);
+    }
+
     /**
      * nexus-l52ms ship-blocker fixup: display_name is a DURABLE opt-in marker
      * (nexus.corpus.KNOWLEDGE_CORPUS_OPT_IN_MARKER) some callers stamp once at

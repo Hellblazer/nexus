@@ -44,6 +44,10 @@ class Catalog044OwnerFromDocumentsRepairTest {
     private static final String QUARANTINE = "quarantine-code__quar-6pbwx__voyage-code-3__v1";
     private static final String TOMBSTONE_ONLY = "code__tombstone-6pbwx__voyage-code-3__v1";
     private static final String PHANTOM_ONLY = "code__phantom-6pbwx__voyage-code-3__v1";
+    // nexus-6pbwx fix round: curator-typed owners are replaceable, repo owners are not.
+    private static final String MIXED = "code__mixed-6pbwx__voyage-code-3__v1";
+    private static final String CURATOR_SEGMENT = "code__curseg-6pbwx__voyage-code-3__v1";
+    private static final String CURATOR_ONLY = "docs__curonly-6pbwx__voyage-context-3__v1";
 
     @Test
     void repairsNonTumblerOwnersOfCollectionsThatHaveDocuments() throws Exception {
@@ -66,7 +70,13 @@ class Catalog044OwnerFromDocumentsRepairTest {
                 try (Connection su = pg.createConnection("")) {
                     su.setAutoCommit(true);
                     insertCollection(su, TENANT, SLUG_CODE, "code", "arcaneum-2ad2825c");
+                    insertOwner(su, TENANT, "1.14", "default", "curator");
+                    insertOwner(su, TENANT, "1.32", "knowledge", "curator");
+                    insertOwner(su, TENANT, "1.33", "some-repo", "repo");
                     insertCollection(su, TENANT, DEFAULT_DOCS, "docs", "default");
+                    insertCollection(su, TENANT, MIXED, "code", "mixed-6pbwx");
+                    insertCollection(su, TENANT, CURATOR_SEGMENT, "code", "1-32");
+                    insertCollection(su, TENANT, CURATOR_ONLY, "docs", "1-32");
                     insertCollection(su, TENANT, DOTTED_RDR, "rdr", "1.9");
                     insertCollection(su, TENANT, CORRECT_CODE, "code", "1-3");
                     insertCollection(su, TENANT, NO_DOCS_CODE, "code", "nodocs-6pbwx");
@@ -81,7 +91,18 @@ class Catalog044OwnerFromDocumentsRepairTest {
                     insertDocument(su, TENANT, "1.15.1", SLUG_CODE, false);
                     insertDocument(su, TENANT, "1.15.2", SLUG_CODE, false);
                     insertDocument(su, TENANT, "1.2.1", SLUG_CODE, false);  // minority owner
-                    insertDocument(su, TENANT, "1.4.1", DEFAULT_DOCS, false);
+                    // The estate's real case: docs__default, owner "default", every document
+                    // under the curator 1.14. Curator documents are not excluded outright.
+                    insertDocument(su, TENANT, "1.14.1", DEFAULT_DOCS, false);
+                    insertDocument(su, TENANT, "1.14.2", DEFAULT_DOCS, false);
+                    insertDocument(su, TENANT, "1.14.3", DEFAULT_DOCS, false);
+                    // Three curator documents and one repo document: the repo owner is ranked first.
+                    insertDocument(su, TENANT, "1.32.1", MIXED, false);
+                    insertDocument(su, TENANT, "1.32.2", MIXED, false);
+                    insertDocument(su, TENANT, "1.32.3", MIXED, false);
+                    insertDocument(su, TENANT, "1.33.1", MIXED, false);
+                    insertDocument(su, TENANT, "1.33.2", CURATOR_SEGMENT, false);
+                    insertDocument(su, TENANT, "1.32.9", CURATOR_ONLY, false);
                     insertDocument(su, TENANT, "1.9.5", DOTTED_RDR, false);
                     insertDocument(su, TENANT, "1.7.1", CORRECT_CODE, false); // disagrees; must stand
                     insertDocument(su, TENANT, "1.1.7", KNOWLEDGE, false);
@@ -102,7 +123,15 @@ class Catalog044OwnerFromDocumentsRepairTest {
                     assertThat(ownerOf(su, TENANT, SLUG_CODE))
                         .as("the owner with the most documents, not the first or the lowest").isEqualTo("1-15");
                     assertThat(ownerOf(su, TENANT, DEFAULT_DOCS))
-                        .as("the estate's real case: docs__default__ repaired from its documents").isEqualTo("1-4");
+                        .as("the estate's real case: docs__default__ repaired from its curator documents")
+                        .isEqualTo("1-14");
+                    assertThat(ownerOf(su, TENANT, MIXED))
+                        .as("a repo owner outranks a curator with more documents").isEqualTo("1-33");
+                    assertThat(ownerOf(su, TENANT, CURATOR_SEGMENT))
+                        .as("a curator's segment is replaceable though it is tumbler-shaped").isEqualTo("1-33");
+                    assertThat(ownerOf(su, TENANT, CURATOR_ONLY))
+                        .as("a curator-only collection already on the curator's segment is unchanged")
+                        .isEqualTo("1-32");
                     assertThat(ownerOf(su, TENANT, DOTTED_RDR))
                         .as("a dotted owner is not the column's design; it becomes the hyphenated segment")
                         .isEqualTo("1-9");
@@ -140,6 +169,19 @@ class Catalog044OwnerFromDocumentsRepairTest {
             ps.setString(4, ownerId);
             ps.setString(5, contentType.contains("code") ? "voyage-code-3" : "voyage-context-3");
             ps.setString(6, contentType.startsWith("quarantine") ? "quarantine" : "live");
+            ps.executeUpdate();
+        }
+    }
+
+    private static void insertOwner(Connection c, String tenant, String prefix, String name,
+                                     String ownerType) throws Exception {
+        try (var ps = c.prepareStatement(
+            "INSERT INTO nexus.catalog_owners (tenant_id, tumbler_prefix, name, owner_type, repo_root, next_seq) "
+            + "VALUES (?, ?, ?, ?, '', 0)")) {
+            ps.setString(1, tenant);
+            ps.setString(2, prefix);
+            ps.setString(3, name);
+            ps.setString(4, ownerType);
             ps.executeUpdate();
         }
     }

@@ -503,17 +503,29 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     assert doc.physical_collection == dst
     assert doc.tumbler.owner_address() == curator
 
+    # The mixed state (nexus-6pbwx): the import's curator document came first, a real repo
+    # document joins afterwards (nx index repo into the restored collection). The curator's
+    # segment was only provisional, so the repo owner replaces it and the next resolve
+    # returns the repo owner, not the curator.
+    existing = writer.register(
+        owner=owner, title="wbfpw33 existing", content_type="code",
+        physical_collection=dst, source_uri=f"file:///wbfpw33/{dst}/existing.py",
+    )
+    assert existing is not None
+    assert reader.get_collection(dst)["owner_id"] == owner_segment_for_tumbler(str(owner))
+    assert _resolve_import_owner_tumbler(dst, reader, writer) == owner
+
     # A slug-owned collection that ALREADY holds a live document resolves to that
     # document's owner: the document gave the row the owner segment when it landed.
     seeded = f"code__wbfpw33seeded-2ad2825c__{_MODEL}__v1"
     writer.register_collection(
         seeded, content_type="code", owner_id="wbfpw33seeded-2ad2825c", embedding_model=_MODEL,
     )
-    existing = writer.register(
-        owner=owner, title="wbfpw33 existing", content_type="code",
-        physical_collection=seeded, source_uri=f"file:///wbfpw33/{seeded}/existing.py",
+    seeded_doc = writer.register(
+        owner=owner, title="wbfpw33 seeded", content_type="code",
+        physical_collection=seeded, source_uri=f"file:///wbfpw33/{seeded}/seeded.py",
     )
-    assert existing is not None
+    assert seeded_doc is not None
     assert reader.get_collection(seeded)["owner_id"] == owner_segment_for_tumbler(str(owner))
     assert _resolve_import_owner_tumbler(seeded, reader, writer) == owner
     for r in records:

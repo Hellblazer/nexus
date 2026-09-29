@@ -7251,6 +7251,14 @@ public final class CatalogRepository {
      * real owner into a slug. Only a row whose {@code owner_id} is its own tenant id
      * (the placeholder hygiene-002-1 branch D stamps) takes the incoming value.
      *
+     * <p>That SET arm is not the last word for a {@code code}/{@code docs}/{@code rdr}
+     * collection (nexus-6pbwx, {@code catalog-044-collection-owner-from-documents.xml}):
+     * a BEFORE trigger on {@code catalog_collections} replaces an owner that is not
+     * tumbler-shaped, or that names a curator, with the owner segment of the collection's
+     * live documents, and an AFTER trigger on {@code catalog_documents} does the same when
+     * a document lands. So the value this method returns for such a collection can differ
+     * from the one written here; a knowledge collection is never touched.
+     *
      * <p>A NEW row's {@code lifecycle_state} is {@code quarantine} when
      * either the request's {@code content_type} or {@code name} starts with
      * {@code quarantine-}, else {@code live} (bead nexus-ft04v.8 NOTES: the
@@ -7298,6 +7306,9 @@ public final class CatalogRepository {
                 String existingModel = existingRow.value1();
                 // nexus-7tys2: the SET arm below keeps this owner_id; say so when the
                 // caller sent a different one (a name-derived segment, in practice).
+                // nexus-6pbwx: for code/docs/rdr the catalog-044 triggers may then replace
+                // the kept value with the documents' owner segment; this line reports the
+                // SET arm's decision only.
                 String existingOwner = existingRow.value2();
                 String incomingOwner = s(coll, "owner_id");
                 if (existingOwner != null && !existingOwner.isEmpty()
@@ -7950,7 +7961,18 @@ public final class CatalogRepository {
                               // CatalogRepositoryTest's "a quarantine sibling never
                               // wins a tuple", not this predicate.
                               .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")))
-                       .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.desc())
+                       // nexus-6pbwx: catalog-044 gives a legacy slug-named repo collection the
+                       // documents' owner segment, so it can now share a (content_type, owner_id,
+                       // embedding_model) tuple with the conformant collection of the same owner.
+                       // At equal version the tie goes to the lexically LOWER name (NAME ASC, it was
+                       // DESC): the conformant name carries the hyphenated tumbler segment right after
+                       // the content_type prefix, and a digit sorts below the letter a slug starts
+                       // with, so the conformant collection wins. That is an ordering, not a parse of
+                       // the name (RDR-204, CollectionParseGateTest), and it is the reason the census
+                       // stays at zero here. Quarantine and grandfathered rows are filtered above, so
+                       // no other pair of rows can tie. Version still dominates: a slug at v2 beats a
+                       // conformant v1. CatalogRepositoryTest pins both; do not flip this back.
+                       .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.asc())
                        .limit(1).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                         r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
@@ -8474,6 +8496,11 @@ public final class CatalogRepository {
             // name (see the 6-arg renameCollection); absent, they are X's. Copying X's
             // unconditionally left a renamed knowledge collection carrying X's subject as its
             // owner. embedding_model, dimension and the rest stay X's.
+            // nexus-6pbwx: for code/docs/rdr that name-derived value is provisional. The insert
+            // below fires catalog-044's BEFORE trigger (Y has no documents yet, so nothing
+            // changes), and the documents re-home step further down fires its AFTER trigger,
+            // which replaces a non-tumbler-shaped or curator owner with the documents'. A
+            // knowledge collection is outside that rule and keeps exactly what is written here.
             Field<String> newContentType = newContentTypeOrNull != null
                 ? DSL.val(newContentTypeOrNull, CATALOG_COLLECTIONS.CONTENT_TYPE)
                 : CATALOG_COLLECTIONS.CONTENT_TYPE;
