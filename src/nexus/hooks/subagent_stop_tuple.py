@@ -83,8 +83,8 @@ more to each. Two ways to avoid the spawn were checked and neither was taken:
   matcher would also drop a real agent whose payload lacks ``agent_type``,
   the case nexus-0zsmg made this projection tolerate.
 * Merging the two verbs into one saves one shim and one ``nx-hook`` start,
-  about 65 ms of CPU per orphan (~12 s an hour at the observed ~186 events an
-  hour), and gives up the sibling independence
+  about 48 ms of CPU per orphan (one interpreter start, 23 ms, plus one shim,
+  about 25 ms; ~9 s an hour at the observed ~186 events an hour), and gives up the sibling independence
   :mod:`nexus.hooks.tuple_projection` records as deliberate, plus a new verb
   every older CLI must tolerate through the release-floor shim.
 
