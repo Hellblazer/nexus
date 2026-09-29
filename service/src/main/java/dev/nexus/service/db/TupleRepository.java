@@ -876,6 +876,17 @@ public final class TupleRepository {
         }
     }
 
+    /**
+     * The row limit a read asking for {@code n} rows actually runs with: {@code n}
+     * (1 when non-positive) clamped to the read cap ({@code NX_TUPLE_READ_MAX}).
+     * A descending response echoes it (bead nexus-kp5q3) so a client can tell a
+     * page that is short because the subspace is exhausted from one that is short
+     * because the cap trimmed it.
+     */
+    public int readLimit(int n) {
+        return Math.min(n <= 0 ? 1 : n, readMax);
+    }
+
     /** Back-compat overload (every {@code rd}/{@code rdp} call site): announce
      *  mode off, byte-for-byte today's behaviour. See the 6-arg overload below. */
     private List<TupleRow> queryOnce(String tenant, String subspace, Map<String, String> pattern,
@@ -915,7 +926,7 @@ public final class TupleRepository {
         resolveOrThrow(subspace);
         Map<String, String> patternSafe = pattern == null ? Map.of() : pattern;
         checkPatternSizes(patternSafe);
-        int limit = Math.min(n <= 0 ? 1 : n, readMax);
+        int limit = readLimit(n);
 
         return tenantScope.withTenant(tenant, ctx -> {
             Condition cond = TUPLES.TENANT_ID.eq(tenant)

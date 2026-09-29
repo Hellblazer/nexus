@@ -91,6 +91,7 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import datetime
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 import httpx
@@ -490,17 +491,37 @@ def _add_order(payload: dict[str, Any], order: str) -> None:
         payload["order"] = "desc"
 
 
-def _require_order_echo(response: Any, order: str) -> None:
+def _require_order_echo(response: Any, order: str) -> int | None:
     """A descending read is only trusted when the engine says it was one.
 
-    The engine echoes ``"order": "desc"`` (TupleHandler, nexus-kp5q3); an
-    engine that predates the field ignores the request key and answers
-    ascending with no echo."""
-    if order == "desc" and (response or {}).get("order") != "desc":
+    The engine echoes ``"order": "desc"`` and the ``"limit"`` it ran with
+    (TupleHandler, nexus-kp5q3); an engine that predates the field ignores the
+    request key and answers ascending with neither. Returns the echoed limit
+    for a descending read, None for an ascending one."""
+    if order != "desc":
+        return None
+    body = response or {}
+    limit = body.get("limit")
+    if body.get("order") != "desc" or not isinstance(limit, int) or isinstance(limit, bool):
         raise DescendingReadUnsupportedError(
-            "the engine did not echo order=desc: it predates descending tuple reads "
-            "and answered oldest-first"
+            "the engine did not echo order=desc and its limit: it predates descending "
+            "tuple reads and answered oldest-first"
         )
+    return limit
+
+
+@dataclass(frozen=True)
+class NewestRead:
+    """One descending ``rd`` (nexus-kp5q3): the engine's newest-first page and
+    the row limit it ran with.
+
+    ``limit`` is *n* clamped to the engine's read cap. A page shorter than
+    ``limit`` means the subspace ran out (every matching row is in it); a page
+    exactly ``limit`` long while *n* asked for more was trimmed by the cap, so
+    older matching rows may exist."""
+
+    rows: list[TupleRow]
+    limit: int
 
 
 class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
@@ -627,6 +648,35 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         :class:`DescendingReadUnsupportedError` when the engine did not echo a
         descending read.
         """
+        rows, _ = self._rd_request(subspace, keys_pattern, n, since, timeout_s, order)
+        return rows
+
+    def rd_newest(
+        self,
+        subspace: str,
+        keys_pattern: dict[str, str] | None = None,
+        *,
+        n: int = 1,
+        since: tuple[str, str] | None = None,
+        timeout_s: int = 0,
+    ) -> NewestRead:
+        """:meth:`rd` with ``order="desc"``, returning the engine's echoed row
+        limit with the page (see :class:`NewestRead`). Raises
+        :class:`DescendingReadUnsupportedError` on an engine without
+        descending reads."""
+        rows, limit = self._rd_request(subspace, keys_pattern, n, since, timeout_s, "desc")
+        assert limit is not None  # _require_order_echo raised otherwise
+        return NewestRead(rows=rows, limit=limit)
+
+    def _rd_request(
+        self,
+        subspace: str,
+        keys_pattern: dict[str, str] | None,
+        n: int,
+        since: tuple[str, str] | None,
+        timeout_s: int,
+        order: str,
+    ) -> tuple[list[TupleRow], int | None]:
         if not subspace:
             raise ValueError("subspace must not be empty")
         _check_field_size("subspace", subspace, _MAX_SUBSPACE_BYTES)
@@ -642,8 +692,8 @@ class HttpTupleStore(RawHandleGuardMixin, RefreshableHttpStoreMixin):
         _add_order(payload, order)
         req_timeout = timeout_s + _PARK_TIMEOUT_MARGIN_S if timeout_s > 0 else None
         r = self._post("/rd", payload, mutates=False, timeout=req_timeout)
-        _require_order_echo(r, order)
-        return [_body_to_tuple_row(t) for t in (r or {}).get("tuples", [])]
+        limit = _require_order_echo(r, order)
+        return [_body_to_tuple_row(t) for t in (r or {}).get("tuples", [])], limit
 
     def rdp(
         self,

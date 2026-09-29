@@ -860,6 +860,16 @@ class TupleRepositoryTest {
     }
 
     @Test
+    void readLimit_isTheRequestedNClampedToTheCap_andAtLeastOne() {
+        TupleRepository smallCapRepo = new TupleRepository(tenantScope, registry,
+                /* readMax */ 3, TupleRepository.DEFAULT_CLAIM_PASSES, 10, 4, 16);
+        assertThat(smallCapRepo.readLimit(100)).as("cap-trimmed").isEqualTo(3);
+        assertThat(smallCapRepo.readLimit(2)).isEqualTo(2);
+        assertThat(smallCapRepo.readLimit(0)).as("non-positive n reads one row").isEqualTo(1);
+        assertThat(smallCapRepo.readLimit(-5)).isEqualTo(1);
+    }
+
+    @Test
     void rdp_ascendingOverloadIsTheOldBehaviour() {
         String subspace = seedLedger(repo, "session-asc-explicit-", 3);
         assertThat(ids(repo.rdp(TENANT_A, subspace, null, 10, null, TupleRepository.ReadOrder.ASC)))

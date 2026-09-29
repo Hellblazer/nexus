@@ -4298,7 +4298,7 @@ Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset o
 | `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
 | `--json` | Output as a JSON array |
 
-Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; only against an engine that predates it does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
+Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; asking for more than the engine's read cap (300 by default) returns the newest cap-many rows with the marker and a note naming the cap, exit 0. Only against an engine that predates the read does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
 
 ### nx tuple in
 

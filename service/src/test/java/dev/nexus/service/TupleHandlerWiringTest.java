@@ -331,7 +331,8 @@ class TupleHandlerWiringTest {
         }
         var ascJson = mapper.readValue(post(withRegistry, "/v1/tuples/rdp", Map.of(
                 "subspace", "mailbox/" + to, "keys_pattern", Map.of("to", to), "n", 10)).body(), MAP_T);
-        assertThat(ascJson).as("an ascending read carries no order key").doesNotContainKey("order");
+        assertThat(ascJson).as("an ascending read carries neither order nor limit")
+                .doesNotContainKeys("order", "limit");
         var asc = (java.util.List<Map<String, Object>>) ascJson.get("tuples");
         assertThat(asc).hasSize(3);
 
@@ -342,11 +343,28 @@ class TupleHandlerWiringTest {
             assertThat(resp.statusCode()).as(route).isEqualTo(200);
             var json = mapper.readValue(resp.body(), MAP_T);
             assertThat(json).as(route).containsEntry("order", "desc");
+            assertThat(json).as(route + ": the limit the read ran with").containsEntry("limit", 2);
             var tuples = (java.util.List<Map<String, Object>>) json.get("tuples");
             assertThat(tuples.stream().map(t -> t.get("id")).toList())
                     .as(route + ": the newest two, newest first")
                     .containsExactly(asc.get(2).get("id"), asc.get(1).get("id"));
         }
+    }
+
+    /**
+     * A descending read asking for more rows than the read cap echoes the cap it ran
+     * with, so the client can tell "short because cap-trimmed" (limit &lt; n, page full
+     * at the limit) from "short because the subspace ran out" (page below the limit).
+     */
+    @Test
+    void rdp_orderDesc_echoesTheReadCapWhenNExceedsIt() throws Exception {
+        var resp = post(withRegistry, "/v1/tuples/rdp", Map.of(
+                "subspace", "mailbox/wire-order-cap", "keys_pattern", Map.of("to", "wire-order-cap"),
+                "n", 1000, "order", "desc"));
+        assertThat(resp.statusCode()).isEqualTo(200);
+        var json = mapper.readValue(resp.body(), MAP_T);
+        assertThat(json).containsEntry("order", "desc")
+                .containsEntry("limit", dev.nexus.service.db.TupleRepository.DEFAULT_READ_MAX);
     }
 
     @Test

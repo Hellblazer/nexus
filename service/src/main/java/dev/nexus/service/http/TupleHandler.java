@@ -42,13 +42,15 @@ import java.util.Optional;
  * query-string parameter, not a JSON pattern body):
  * <pre>
  *   POST /v1/tuples/out             {subspace, keys, dims?, body?, nonce?, ttl_seconds?} -&gt; {"id": "&lt;hex&gt;"}
- *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?, order?} -&gt; {"tuples": [...], "order"?}
- *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?, order?} -&gt; {"tuples": [...], "order"?}
+ *   POST /v1/tuples/rd              {subspace, keys_pattern?, n?, since?, timeout_s?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}
+ *   POST /v1/tuples/rdp             {subspace, keys_pattern?, n?, since?, order?} -&gt; {"tuples": [...], "order"?, "limit"?}
  *                                   order (bead nexus-kp5q3): "asc" (default) or "desc". desc returns the
  *                                   NEWEST n rows strictly after since, newest first, and echoes
  *                                   "order":"desc" -- the client's capability signal, since an engine that
- *                                   predates the field ignores it and answers ascending with no echo. An
- *                                   ascending response carries no order key. Any other value is a 400.
+ *                                   predates the field ignores it and answers ascending with no echo -- and
+ *                                   "limit", the row limit the read ran with (n clamped to the read cap), so
+ *                                   a page short of n is known to be either the whole subspace or cap-trimmed.
+ *                                   An ascending response carries neither key. Any other order is a 400.
  *   POST /v1/tuples/wait            {subspaces: [{subspace, keys_pattern?, n?, since?, announce?}, ...], timeout_s?}
  *                                   announce: {interval_s, max, subscriber?, waiter?} -- subscriber (bead nexus-q82tk)
  *                                   keys the stamp per reader in nexus.tuple_deliveries; absent, the stamp
@@ -249,7 +251,7 @@ public final class TupleHandler implements HttpHandler {
         TupleRepository.ReadOrder order = readOrder(body.get("order"));
 
         List<TupleRepository.TupleRow> rows = repo.rd(tenant, subspace, pattern, n, since, timeoutS, order);
-        HttpUtil.send(ex, 200, renderTuples(rows, order));
+        HttpUtil.send(ex, 200, renderTuples(rows, order, n));
     }
 
     @SuppressWarnings("unchecked")
@@ -266,7 +268,7 @@ public final class TupleHandler implements HttpHandler {
         TupleRepository.ReadOrder order = readOrder(body.get("order"));
 
         List<TupleRepository.TupleRow> rows = repo.rdp(tenant, subspace, pattern, n, since, order);
-        HttpUtil.send(ex, 200, renderTuples(rows, order));
+        HttpUtil.send(ex, 200, renderTuples(rows, order, n));
     }
 
     // ── wait (multiplexed rd, RDR-211 Phase 1 Step 1, bead nexus-rplay.4) ──────
@@ -636,14 +638,19 @@ public final class TupleHandler implements HttpHandler {
 
     // ── rendering ────────────────────────────────────────────────────────────
 
-    /** {@code order} is echoed ONLY when it is not the default: an ascending
-     *  response stays byte-identical to what every released client already reads. */
+    /** {@code order} and {@code limit} are echoed ONLY for a descending read: an
+     *  ascending response stays byte-identical to what every released client
+     *  already reads. {@code limit} is the row limit the read really ran with
+     *  ({@link TupleRepository#readLimit}, the requested {@code n} clamped to the
+     *  read cap), so a client can tell a page short of {@code n} because the
+     *  subspace ran out from one the cap trimmed. */
     private String renderTuples(List<TupleRepository.TupleRow> rows,
-                                TupleRepository.ReadOrder order) throws IOException {
+                                TupleRepository.ReadOrder order, int n) throws IOException {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("tuples", rows.stream().map(this::renderTuple).toList());
         if (order == TupleRepository.ReadOrder.DESC) {
             out.put("order", "desc");
+            out.put("limit", repo.readLimit(n));
         }
         return MAPPER.writeValueAsString(out);
     }

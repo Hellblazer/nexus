@@ -152,29 +152,36 @@ def _cursor_of(row: Any) -> str:
 def _newest_by_descending_read(
     store: Any, subspace: str, pattern_map: dict[str, str] | None, *,
     n: int, since: tuple[str, str] | None, timeout_s: int,
-) -> tuple[list[Any] | None, bool]:
+) -> tuple[list[Any] | None, bool, str | None]:
     """The newest *n* rows via ONE descending engine read, oldest first.
 
-    Returns ``(rows, waited)``. *rows* is ``None`` when the read cannot stand
-    alone and the caller must page instead: the engine predates descending
-    reads (nexus-kp5q3), or it returned fewer than *n* rows, which means
-    either the subspace holds fewer or the engine's read cap
-    (NX_TUPLE_READ_MAX) hid older ones, and paging answers both (cheaply
-    when the subspace is small). *waited* is True once the engine has had
-    the park timeout, so the fallback must not spend it a second time.
+    Returns ``(rows, waited, note)``. *rows* is ``None`` only when the engine
+    predates descending reads (nexus-kp5q3) and the caller must page instead.
+    *waited* says the engine has already had the park timeout, so a fallback
+    must not spend it again: an engine without the read parks first and only
+    then answers with no echo, so this is true on that path too.
+
+    The engine echoes the row limit it ran with (n clamped to its read cap,
+    NX_TUPLE_READ_MAX), which settles every short page without a second read:
+    below the limit the subspace ran out and the page is all of it; exactly
+    the limit while *n* asked for more, the cap trimmed it. That case is still
+    the true newest rows, only fewer than asked, so it is returned with a
+    *note* (the plain read's "asked for N" precedent) rather than re-read by
+    paging up to ``--max-rows`` and exiting 3 on a large subspace.
     """
     from nexus.db.t2.http_tuple_store import DescendingReadUnsupportedError  # noqa: PLC0415 — deferred: CLI startup cost
 
     try:
-        page = store.rd(
-            subspace, pattern_map, n=n, since=since, timeout_s=timeout_s, order="desc",
-        )
+        read = store.rd_newest(subspace, pattern_map, n=n, since=since, timeout_s=timeout_s)
     except DescendingReadUnsupportedError:
-        return None, False
-    waited = bool(timeout_s)
-    if len(page) < n:
-        return None, waited
-    return page[::-1], waited
+        return None, bool(timeout_s), None
+    note = None
+    if read.limit < n and len(read.rows) >= read.limit:
+        note = (
+            f"{TRUNCATION_MARKER}: showing the newest {len(read.rows)} matching rows "
+            f"(asked for {n}; the engine's read cap is {read.limit}); older rows may exist."
+        )
+    return read.rows[::-1], bool(timeout_s), note
 
 
 @tuple_group.command(name="rd")
@@ -249,13 +256,15 @@ def tuple_rd_cmd(
             if newest:
                 # nexus-kp5q3: a descending engine read returns the real tail
                 # however large the subspace, so --max-rows does not bound it.
-                # Paging below stays for an engine that predates the read and
-                # for a short result (see _newest_by_descending_read).
-                found, waited = _newest_by_descending_read(
+                # Paging below stays only for an engine that predates the read
+                # (see _newest_by_descending_read).
+                found, waited, note = _newest_by_descending_read(
                     store, subspace, pattern_map, n=n, since=cursor, timeout_s=timeout_s,
                 )
                 if found is not None:
                     rows, descended = found, True
+                    if note:
+                        click.echo(note, err=True)
                 elif waited:
                     park_s = 0
             if not descended:
