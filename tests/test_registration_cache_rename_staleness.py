@@ -33,8 +33,8 @@ from nexus.corpus import (
     write_with_registration_retry,
 )
 
-_OLD = "docs__wwuzp-old-1-1__voyage-context-3__v1"
-_NEW = "docs__wwuzp-new-1-1__voyage-context-3__v1"
+_OLD = "docs__wwuzp-old-1-1__bge-base-en-v15-768__v1"
+_NEW = "docs__wwuzp-new-1-1__bge-base-en-v15-768__v1"
 _LEGACY = "docs__wwuzp-legacy"  # a pre-RDR-103 name, Phase-4 renames it to a conformant one
 
 
@@ -411,7 +411,7 @@ def test_explicit_discard_then_register_still_revives() -> None:
     corpus.discard_cached_registration(_OLD)
     kwargs = {
         "content_type": "docs", "owner_id": "wwuzp-old-1-1",
-        "embedding_model": "voyage-context-3", "model_version": "v1",
+        "embedding_model": "bge-base-en-v15-768", "model_version": "v1",
     }
     ensure_collection_registered(_OLD, registrar=reg, kwargs=kwargs)
     assert w.register_collection.call_count == 2
@@ -461,7 +461,7 @@ def test_explicit_kwargs_registration_still_revives_without_a_read() -> None:
     w = _writer({"superseded_by": _NEW})
     kwargs = {
         "content_type": "docs", "owner_id": "wwuzp-old-1-1",
-        "embedding_model": "voyage-context-3", "model_version": "v1",
+        "embedding_model": "bge-base-en-v15-768", "model_version": "v1",
     }
     ensure_collection_registered(_OLD, registrar=_registrar(w), kwargs=kwargs)
     assert w.register_collection.call_count == 1

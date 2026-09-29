@@ -81,7 +81,9 @@ _MIN_MCP_TOOL_ENTRIES = 5
 #: 14 -> 16 at nexus-egm7p: subagent-start-tuple and subagent-stop-tuple
 #: arrive here through the same shim, for the reason _MIN_MCP_TOOL_ENTRIES'
 #: own comment names.
-_MIN_NX_HOOK_ENTRIES = 16
+#: 16 -> 15 at nexus-qxyqz: the UserPromptSubmit mcp-connect-check entry is
+#: deleted (the verb stays registered as a silent no-op for older plugins).
+_MIN_NX_HOOK_ENTRIES = 15
 
 
 def _declared() -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
