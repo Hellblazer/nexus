@@ -689,6 +689,13 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     assert v1 not in client.get_collection(coll).get(ids=[v1], include=[])["ids"], "the old export must not resurrect v1"
     assert result["owned_count"] == 0
     assert result["unowned_count"] == 1
+    assert result["unowned_documents"] == [{"tumbler": doc, "title": "wbfpw40 note"}]
+
+    # The CLI turns that into a command the operator can run as printed.
+    with patch("nexus.commands.store._t3", return_value=client):
+        cli = CliRunner().invoke(main, ["store", "import", str(old_export), "-c", coll])
+    assert cli.exit_code == 0, cli.output
+    assert f'nx store delete -c {coll} --title "wbfpw40 note"' in cli.output, cli.output
 
     # Control: re-importing a CURRENT export is a no-op that reports its chunk owned.
     current_export = tmp_path / "current.nxexp"

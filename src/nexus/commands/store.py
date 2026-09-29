@@ -1047,13 +1047,23 @@ def import_cmd(
     if result.get("owned_count"):
         click.echo(f"  {result['owned_count']} records are owned by a catalog document.")
     if result.get("unowned_count"):
-        docs = ", ".join(result.get("unowned_documents") or [])
+        docs = result.get("unowned_documents") or []
         click.echo(
             f"  {result['unowned_count']} records were left unowned and are not searchable: their "
-            f"documents already exist with a different chunk list, which an import never replaces "
-            f"(documents: {docs}). To restore a document from this file instead, delete it first "
-            "(nx store delete), then import again."
+            f"{len(docs)} document(s) already exist with a different chunk list, which an import "
+            "never replaces. To restore one from this file instead, delete it (this discards its "
+            "current version, and --title removes every document with that title in the "
+            "collection), then import again:"
         )
+        target = result.get("collection_name", "")
+        for d in docs[:5]:
+            title = d.get("title") or ""
+            if title:
+                click.echo(f'    nx store delete -c {target} --title "{title}"')
+            else:
+                click.echo(f"    (document {d.get('tumbler')} has no title; see nx catalog show {d.get('tumbler')})")
+        if len(docs) > 5:
+            click.echo(f"    ... and {len(docs) - 5} more")
     if result.get("rehashed_count"):
         click.echo(
             f"  Re-hashed {result['rehashed_count']} non-conformant legacy "

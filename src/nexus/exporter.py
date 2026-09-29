@@ -784,7 +784,7 @@ def import_collection(
     (nexus-wbfpw.40) is the number left unowned because their document
     already existed with a manifest that does not name them: an existing
     document's manifest is never replaced by an import.
-    ``unowned_documents`` names up to 5 of those documents by tumbler.
+    ``unowned_documents`` lists those documents as ``{"tumbler", "title"}``.
 
     Every record is grouped by owner identity as it streams: a legacy
     record carrying ``meta.doc_id`` by that doc_id
@@ -1044,13 +1044,14 @@ def import_collection(
                 embeddings.append(emb)
                 metadatas.append(meta)
 
-                # nexus-wbfpw.31: group every non-legacy record for the
-                # explicit end-of-import manifest write. Uses the FINAL
-                # (possibly rehashed) rec_id -- the id that will actually
-                # be written to T3. Unconditional (before --skip-existing
-                # filtering below): a record dropped as a duplicate at
-                # flush time was already written by a prior run and must
-                # still end up owned by this one.
+                # nexus-wbfpw.31: group every record for the explicit
+                # end-of-import manifest write. Uses the FINAL (possibly
+                # rehashed) rec_id -- the id that will actually be written
+                # to T3. Unconditional (before --skip-existing filtering
+                # below), so a duplicate dropped at flush time is owned
+                # exactly as it would be without the flag -- which, for a
+                # document that already owns chunks, means not at all
+                # (nexus-wbfpw.40: an import never replaces its manifest).
                 # An export-time ``owner`` is the chunk's current owner; a
                 # ``meta.doc_id`` beside it is stale pre-RDR-108 metadata.
                 if meta.get("doc_id") and not record.get("owner"):
@@ -1098,7 +1099,8 @@ def import_collection(
     # cannot be the per-batch manifest_write_batch_hook.
     owned_count = 0
     unowned_count = 0
-    unowned_documents: list[str] = []
+    unowned_documents: list[dict[str, str]] = []
+    unowned_tumblers: list[str] = []
     if owner_groups and not _owners_apply(db):
         # A non-service handle (the InMemoryVectorClient unit-test
         # substrate) holds its chunks outside the engine, so the catalog
@@ -1150,7 +1152,13 @@ def import_collection(
                 # correction). Leave its manifest alone; the file's chunks
                 # it does not own stay unowned, and are counted.
                 try:
-                    existing = {r.chash for r in reader.get_manifest(doc)}
+                    # Rows stamped with another collection (None only from a
+                    # pre-field engine) do not make this collection's
+                    # manifest non-empty.
+                    existing = {
+                        r.chash for r in reader.get_manifest(doc)
+                        if r.collection in (None, collection_name)
+                    }
                 except Exception as exc:  # noqa: BLE001 — cannot prove the document is empty: do not overwrite it
                     _log.warning(
                         "import_owner_manifest_read_failed",
@@ -1164,7 +1172,7 @@ def import_collection(
                     owned_count += kept
                     unowned_count += len(file_chashes) - kept
                     if kept < len(file_chashes):
-                        unowned_documents.append(doc)
+                        unowned_tumblers.append(doc)
                         _log.warning(
                             "import_owner_kept_existing_manifest",
                             collection=collection_name, doc=doc,
@@ -1181,6 +1189,17 @@ def import_collection(
                     failures.append((doc, str(exc)))
                     continue
                 owned_count += len(rows)
+            if unowned_tumblers:
+                # The remedy nx store import prints is `nx store delete
+                # --title`, so name each document by its CURRENT title.
+                try:
+                    found = reader.resolve_many(unowned_tumblers)
+                except Exception:  # noqa: BLE001 — naming is best-effort; the counts above stand
+                    found = {}
+                unowned_documents = [
+                    {"tumbler": t, "title": getattr(found.get(t), "title", "") or ""}
+                    for t in unowned_tumblers
+                ]
         finally:
             _close = getattr(writer, "close", None)
             if callable(_close):
@@ -1229,6 +1248,6 @@ def import_collection(
         "rehashed_count": rehashed_count,
         "owned_count": owned_count,
         "unowned_count": unowned_count,
-        "unowned_documents": unowned_documents[:5],
+        "unowned_documents": unowned_documents,
         "elapsed_seconds": round(elapsed, 2),
     }
