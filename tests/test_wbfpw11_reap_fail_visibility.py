@@ -40,9 +40,8 @@ from nexus.mcp.core import store_put
 
 
 def _search_ids(client, collection: str, text: str) -> list[str]:
-    """Raw ``search()`` over the wire, queried with the chunk's own text so
-    an exact self-match ranks at or near the top; ``n_results`` is generous
-    because this is a visibility probe, not a relevance test."""
+    """Raw ``search()`` over the wire. ``n_results`` exceeds every
+    collection this file writes, so membership does not depend on rank."""
     return client.search(text, [collection], n_results=50, structured=True).get("ids") or []
 
 
@@ -162,22 +161,29 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
     rows["never re-put note"] = (collection, next(iter(chashes)), text)
     model_token = collection.split("__")[2]
 
-    # 2. The combined-write path: chunk and manifest in one write_many
-    # request with sweep on, as a ChunkBatcher flush sends it.
+    # 2. The combined-write path: chunks and manifest in one write_many
+    # request with sweep on, as the indexer's ChunkBatcher flush sends it.
+    # Written twice, so the sweep has something to drop: A and B, then B and
+    # C. B (carried over) and C (new) must stay visible; A must not.
     collection = f"knowledge__wbfpw11-combined__{model_token}__v1"
-    text = "wbfpw11 combined write: chunk and manifest landed in one request"
-    chash = hashlib.sha256(text.encode()).hexdigest()
+    texts = {k: f"wbfpw11 combined write, chunk {k}: landed with its manifest in one request" for k in "ABC"}
+    ch = {k: hashlib.sha256(t.encode()).hexdigest() for k, t in texts.items()}
     doc = str(writer.register(
         owner, "wbfpw11-combined.md", content_type="knowledge",
-        file_path="/tmp/wbfpw11/combined.md", physical_collection=collection, chunk_count=1,
+        file_path="/tmp/wbfpw11/combined.md", physical_collection=collection, chunk_count=2,
     ))
-    writer.write_manifest_many(
-        [(doc, [{"chash": chash, "position": 0}])],
-        collection=collection,
-        sweep=True,
-        chunks=[{"chash": chash, "text": text, "metadata": {"indexed_at": datetime.now(UTC).isoformat()}}],
-    )
-    rows["combined write"] = (collection, chash, text)
+    for keys in ("AB", "BC"):
+        writer.write_manifest_many(
+            [(doc, [{"chash": ch[k], "position": i} for i, k in enumerate(keys)])],
+            collection=collection,
+            sweep=True,
+            chunks=[{"chash": ch[k], "text": texts[k],
+                     "metadata": {"indexed_at": datetime.now(UTC).isoformat()}} for k in keys],
+        )
+    rows["combined write, carried over"] = (collection, ch["B"], texts["B"])
+    rows["combined write, new"] = (collection, ch["C"], texts["C"])
+    assert ch["A"] not in _search_ids(client, collection, texts["A"]), "the swept chunk must not stay searchable"
+    assert _get_ids(client, collection, ch["A"]) == [], "the swept chunk must not stay gettable"
 
     # 3. nx store import of an export whose note carries its manifest.
     src = f"knowledge__wbfpw11-export-src__{model_token}__v1"
@@ -212,11 +218,17 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
     assert chashes == {chash}, "the import must bring the manifest with the chunk"
     rows["imported with manifest"] = (target, chash, text)
 
-    assert len(rows) == 3
-    hidden = {
+    assert len(rows) == 4
+    visible = {
         name: {"search": chash in _search_ids(client, coll, text), "get": chash in _get_ids(client, coll, chash)}
         for name, (coll, chash, text) in rows.items()
     }
-    assert all(v["search"] and v["get"] for v in hidden.values()), (
-        f"live(c) hid a chunk that has a live own-collection owner: {hidden}"
+    assert all(v["search"] and v["get"] for v in visible.values()), (
+        f"live(c) hid a chunk that has a live own-collection owner: {visible}"
     )
+    # Independent evidence from the census: a chunk with an own-collection
+    # manifest row is never manifest-less, so it is in no bucket.
+    for name, (coll, chash, _text) in rows.items():
+        census = client.manifest_less_census(coll, limit=300)
+        bucketed = {h for hs in census["chashes"].values() for h in hs}
+        assert chash not in bucketed, f"{name}: census lists a manifest-owned chunk: {census}"
