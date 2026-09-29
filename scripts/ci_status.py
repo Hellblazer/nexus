@@ -172,19 +172,27 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
 
 
 def _chosen_runs(latest: dict[tuple[str, int | None, str, int], tuple[str, str, str, str]]) -> dict[str, int]:
-    """Per workflow, the newest run whose run row (newest attempt) is not cancelled, else the newest run."""
+    """Per workflow, the newest run not known to be cancelled, else the newest run.
+
+    A run is cancelled when its newest run row says so and no post of the run
+    carries a later attempt: a rerun of a cancelled run posts its jobs before
+    its attempt-2 run row, and is alive from the first of them.
+    """
     run_rows: dict[tuple[str, int], tuple[int, tuple[str, str, str, str]]] = {}
+    top_attempt: dict[tuple[str, int], int] = {}
     runs: dict[str, set[int]] = {}
     for (wf, run, job, attempt), v in latest.items():
         if run is None:
             continue
         runs.setdefault(wf, set()).add(run)
+        top_attempt[(wf, run)] = max(attempt, top_attempt.get((wf, run), 0))
         if job == "" and attempt >= run_rows.get((wf, run), (0, v))[0]:
             run_rows[(wf, run)] = (attempt, v)
     chosen: dict[str, int] = {}
     for wf, ids in runs.items():
         alive = [r for r in ids if not (
-            (row := run_rows.get((wf, r))) and row[1][0] == "completed" and row[1][1] == "cancelled")]
+            (row := run_rows.get((wf, r))) and row[1][0] == "completed" and row[1][1] == "cancelled"
+            and top_attempt[(wf, r)] <= row[0])]
         chosen[wf] = max(alive or ids)
     return chosen
 

@@ -204,6 +204,16 @@ def test_a_cancelled_higher_run_does_not_outrank_a_surviving_lower_one() -> None
     assert cs.exit_code(statuses) == 0
 
 
+def test_a_rerun_of_a_cancelled_run_is_alive_before_its_new_run_row() -> None:
+    run = {"from": "github", "kind": "run"}
+    posts = [_p("2026-09-29T10:00:00Z", state="completed", conclusion="success", job="", dims=run, run=50),
+             _p("2026-09-29T10:10:00Z", state="completed", conclusion="cancelled", job="", dims=run, run=100),
+             _p("2026-09-29T10:20:00Z", state="queued", job="lint", run=100, attempt=2)]
+    statuses = cs.fold(posts, SHA)
+    assert {s.job: s.verdict for s in statuses}["lint"] == "pending"
+    assert cs.exit_code(statuses) == 2
+
+
 def test_when_every_run_was_cancelled_the_newest_speaks() -> None:
     run = {"from": "github", "kind": "run"}
     posts = [_p("2026-09-29T10:00:05Z", state="completed", conclusion="cancelled", job="", dims=run, run=100),
