@@ -110,6 +110,30 @@ _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
 _BEARER = "t2-substrate-session-bearer"
 _DBNAME = "nexus_t2_substrate"
 
+
+def jvm_error_file_arg() -> str:
+    """``-XX:ErrorFile=<run temp dir>/hs_err_%p.log``: where a crashing engine JVM
+    writes its hs_err report (nexus-o5xyx.2).
+
+    Without it the JVM drops ``hs_err_pid<N>.log`` into its cwd, which for a test
+    launched from the repo is the repo. ``%p`` is expanded by the JVM to its own
+    pid, so concurrent engines do not overwrite each other. ``tempfile.gettempdir()``
+    honours ``TMPDIR``, the same root every other test artifact uses.
+
+    JVM launches ONLY. A GraalVM native image is not a JVM and has no hs_err
+    machinery, so this flag does not apply to it and is deliberately not passed to
+    a native launch (a fatal error there writes Substrate VM's own crash file, not
+    an hs_err). Every engine launch in this file's scope is ``java -jar``.
+    """
+    return f"-XX:ErrorFile={Path(tempfile.gettempdir()) / 'hs_err_%p.log'}"
+
+
+def engine_argv(java: str) -> list[str]:
+    """The substrate engine's argv. One owner, so the hs_err redirect cannot be
+    dropped from the launch without a test noticing."""
+    return [java, "-Duser.timezone=UTC", jvm_error_file_arg(), "-jar", str(_JAR)]
+
+
 _lock = threading.Lock()
 _state: dict | None = None
 _boot_error: str | None = None
@@ -956,7 +980,7 @@ def _boot() -> dict:
     svc_log_path = os.path.join(pgdata, "engine.log")
     svc_log = open(svc_log_path, "wb")  # noqa: SIM115 — lifetime spans the pytest session, closed with the process
     svc = subprocess.Popen(
-        [java, "-Duser.timezone=UTC", "-jar", str(_JAR)], env=env,
+        engine_argv(java), env=env,
         stdout=svc_log, stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
