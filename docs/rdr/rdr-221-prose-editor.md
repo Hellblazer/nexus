@@ -495,3 +495,5 @@ Phase 2.
 - Homogenization: https://www.nature.com/articles/s41562-026-02550-0 ; https://arxiv.org/abs/2508.01491
 
 ## Revision History
+
+- 2026-09-29: Gate round 1 — PASSED (0 Critical, 8 Significant, 0 ship-blocker(s)); commit `11fddf474`; critique `nexus_rdr/221-gate-critique-2026-09-29-r1`.
