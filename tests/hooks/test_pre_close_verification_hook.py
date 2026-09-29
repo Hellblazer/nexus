@@ -1256,11 +1256,15 @@ class TestLoopVariableDatum:
         assert "nexus-uncov" in _get_reason(parsed)
         assert "nexus-cotmr" not in _get_reason(parsed).split("Remedy")[0].split("found in T1 scratch for:")[1]
 
-    def test_no_literal_bead_id_is_indeterminate_not_denied(
+    def test_no_literal_bead_id_asks_not_denies(
         self, mock_config_env, fake_nx
     ) -> None:
         """A truly dynamic id (no literal nexus-* anywhere) cannot be
-        statically verified -- allow without stamping, not deny."""
+        statically verified. It is a definite close whose targets the gate
+        cannot see, so (nexus-nmzsg) it is put to the user with ``ask``
+        rather than passing on an advisory an auto-mode classifier could
+        approve silently. Not a deny, and not stamped: there is no id to
+        stamp."""
         env = mock_config_env({"on_close": True})
         fake_bin = fake_nx("No scratch entries.")
         result = _run_hook(
@@ -1269,8 +1273,37 @@ class TestLoopVariableDatum:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
+        assert "cannot see which beads" in _get_reason(parsed)
         assert "INDETERMINATE" in _get_context(parsed)
+
+    @pytest.mark.parametrize(
+        "command, extra_env",
+        [
+            ("bd close $(cat /tmp/id.txt)", {"NX_REVIEW_GATE_OVERRIDE": "1"}),
+            ("NX_REVIEW_GATE_OVERRIDE=1 bd close $(cat /tmp/id.txt)", {}),
+        ],
+        ids=["ambient-env", "inline-prefix"],
+    )
+    def test_no_literal_bead_id_with_override_does_not_ask(
+        self, command, extra_env, mock_config_env, fake_nx, tmp_path
+    ) -> None:
+        """Override precedence matches the T1-unreachable branch: an
+        explicit override wins, the close passes without a prompt, and the
+        bypass is audited (a dropped routing_events write is the observable
+        proxy in a subprocess with no engine)."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        drop_path = tmp_path / "dropped_writes.jsonl"
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides={**env, **extra_env, "NX_DROPPED_WRITES_LOG_PATH": str(drop_path)},
+        )
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", parsed
+        assert "OVERRIDE" in _get_context(parsed), parsed
+        assert drop_path.exists(), "override on an unreadable-id close was not audited"
 
 
 class TestOverride:

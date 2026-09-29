@@ -41,7 +41,8 @@ two sentences collapsed into one wrong one.)
 
 **Fail-open stays fail-open.** A missing marker denies; an unreachable T1
 or an absent ``nx`` lets the close proceed with verification stamped
-``unverified`` rather than ``passed``, but only through a user prompt
+``unverified`` rather than ``passed``, and a close whose ids cannot be read
+(``bd close $VAR``) proceeds unstamped; both only through a user prompt
 (``permissionDecision: ask``, nexus-nmzsg): a silent advisory would let an
 auto-mode classifier approve a close the gate knows it could not check. A
 broken verification path must not brick every close, and making this gate
@@ -1583,14 +1584,62 @@ def _ask_uncertain(uncertain: list[str]) -> HookResult:
     return ask_result(reason, context)
 
 
+#: The model-facing text for a close whose bead ids the gate cannot read.
+#: Kept verbatim from before nexus-nmzsg (tests and readers key on the
+#: INDETERMINATE prefix); the user-facing prompt is separate.
+_NO_LITERAL_ID_MESSAGE = (
+    "INDETERMINATE: no literal bead id (nexus-*) found anywhere in this "
+    "bd close/done command \u2014 cannot check a review marker statically, "
+    "so verification is NOT stamped. Prefer literal ids over shell "
+    "variables so the review gate can verify coverage."
+)
+
+
+def _ask_unreadable_ids(command: str, override: bool) -> HookResult:
+    """A definite close whose targets the gate cannot read: ask, not pass.
+
+    nexus-nmzsg, the sibling of :func:`_ask_uncertain`. ``bd close $VAR`` or
+    ``bd close $(cat f)`` is unquestionably a close, and the gate cannot tell
+    which beads or whether they were reviewed, so the advisory it used to
+    return left an auto-mode classifier free to approve it silently.
+
+    Override precedence is the T1-unreachable branch's: an explicit override
+    wins, the close passes without a prompt, and the bypass is audited. There
+    are no ids to stamp, so nothing is stamped either way. This is NOT the
+    ``bd batch``/``import``/``sql`` branch above, which is not known to be a
+    close and stays advisory.
+    """
+    if override:
+        _log_override_escape(["(bead ids unreadable)"], command)
+        return _allow(
+            "NX_REVIEW_GATE_OVERRIDE=1 \u2014 review gate bypassed for a close "
+            "whose bead ids could not be read. Logged as a routing escape."
+        )
+    from nexus.hooks._routing_lib import ask_result  # noqa: PLC0415 — deferred as in _ask_uncertain: on the rare path only, ~3ms, stdlib-only
+
+    return ask_result(
+        "Review gate cannot see which beads are being closed: the id comes "
+        "from a shell variable or command substitution, so no "
+        "review-completed marker can be checked and nothing is stamped. "
+        "Approve to close anyway, or decline and re-run with the literal "
+        "bead ids so the gate can verify them.",
+        _NO_LITERAL_ID_MESSAGE
+        + " The close is put to the user for confirmation rather than "
+        "passing silently. An override (NX_REVIEW_GATE_OVERRIDE=1) exists "
+        "for this gate, but only on explicit instruction from the user to "
+        "use it.",
+    )
+
+
 def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
     """The decision table, in the script's order.
 
     Linear with early returns because the ORDER is the semantics. Every
     uncertain path still lets the close proceed (this gate fails open by
     design and the RDR deliberately does not revisit that), but the
-    T1-unreachable path proceeds only through a user prompt
-    (:func:`_ask_uncertain`, nexus-nmzsg), not silently.
+    T1-unreachable and unreadable-id paths proceed only through a user
+    prompt (:func:`_ask_uncertain`, :func:`_ask_unreadable_ids`,
+    nexus-nmzsg), not silently.
     """
     if verbs["has_create"]:
         return _create_gate(command)
@@ -1634,17 +1683,11 @@ def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
         return _allow(_INDETERMINATE_SOURCE_MESSAGE)
 
     ids = _bead_ids(command)
-    if not ids:
-        return _allow(
-            "INDETERMINATE: no literal bead id (nexus-*) found anywhere in this "
-            "bd close/done command \u2014 cannot check a review marker statically, "
-            "so verification is NOT stamped. Prefer literal ids over shell "
-            "variables so the review gate can verify coverage."
-        )
-
     override = (
         os.environ.get("NX_REVIEW_GATE_OVERRIDE") == "1" or verbs["inline_override"]
     )
+    if not ids:
+        return _ask_unreadable_ids(command, override)
 
     result = _coverage(ids)
     status = result["status"]
