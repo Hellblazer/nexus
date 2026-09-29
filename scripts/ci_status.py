@@ -5,8 +5,8 @@
 The GitHub webhook adapter (conexus, RDR-220) writes one post to
 ``board/ci/<repo>-<branch>`` (the ``board/ci/<topic>`` template) for every state change of every workflow run
 and job. This script reads that topic, keeps the latest state of each
-(workflow, job, attempt), and prints what is green, what is pending, and
-what failed, for one commit.
+(workflow, job, attempt) in each workflow's newest run, and prints what is
+green, what is pending, and what failed, for one commit.
 
 It is a repository development helper, deliberately not an ``nx`` command
 or MCP tool (Sam, 2026-09-26). A session that only wants to be told reads
@@ -91,11 +91,24 @@ def _verdict(state: str, conclusion: str, run_conclusion: str | None) -> str:
     return "failed"
 
 
-def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) -> list[Status]:
-    """Latest state per (workflow, job, attempt) for *sha*.
+def _run_id(raw: Any) -> int:
+    """The body's run id; 0 when absent or unparseable, so such posts fold as one run."""
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
 
-    *posts* are ``(created_at, body, dims)``. Only the newest attempt of each
-    (workflow, job) is kept, because a rerun supersedes the earlier attempt.
+
+def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) -> list[Status]:
+    """Latest state per (workflow, job, attempt) of each workflow's newest run for *sha*.
+
+    *posts* are ``(created_at, body, dims)``. Only the newest run of each
+    workflow is kept: GitHub can start two runs of one workflow for one push,
+    both attempt 1, and the concurrency group cancels the older (nexus-wqvv9);
+    run ids only increase, so the highest is the one that speaks for the
+    commit, and jobs of an older run are dropped, not merged. Within that run
+    only the newest attempt of each job is kept, because a rerun keeps the
+    run id and supersedes the earlier attempt.
     Within one attempt a job's state only moves forward (queued, then
     in_progress, then completed), so the most advanced state wins and the
     newest post breaks a tie. Recency alone would let a stale delivery win:
@@ -105,23 +118,27 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
     """
     # (state, conclusion, url, created_at) per key; a Status is built only
     # once its verdict is known, so no Status ever exists without one.
-    latest: dict[tuple[str, str, int], tuple[str, str, str, str]] = {}
+    latest: dict[tuple[str, int, str, int], tuple[str, str, str, str]] = {}
     for created_at, body, dims in posts:
         if dims.get("from") != "github" or body.get("sha") != sha:
             continue
         state = str(body.get("state", ""))
         if state not in _STATE_RANK:
             continue
-        key = (str(body.get("workflow", "")), str(body.get("job", "")),
+        key = (str(body.get("workflow", "")), _run_id(body.get("run")), str(body.get("job", "")),
                int(body.get("attempt", 1) or 1))
         cand = (state, str(body.get("conclusion") or ""), str(body.get("url", "")), created_at)
         prev = latest.get(key)
         if prev is None or (_STATE_RANK[cand[0]], cand[3]) >= (_STATE_RANK[prev[0]], prev[3]):
             latest[key] = cand
+    newest_run: dict[str, int] = {}
+    for wf, run, _job, _attempt in latest:
+        newest_run[wf] = max(run, newest_run.get(wf, run))
+    in_run = {(wf, job, attempt): v for (wf, run, job, attempt), v in latest.items() if run == newest_run[wf]}
     newest_attempt: dict[tuple[str, str], int] = {}
-    for wf, job, attempt in latest:
+    for wf, job, attempt in in_run:
         newest_attempt[(wf, job)] = max(attempt, newest_attempt.get((wf, job), 0))
-    current = {k: v for k, v in latest.items() if k[2] == newest_attempt[(k[0], k[1])]}
+    current = {k: v for k, v in in_run.items() if k[2] == newest_attempt[(k[0], k[1])]}
     run_conclusion = {wf: v[1] for (wf, job, _a), v in current.items() if job == "" and v[0] == "completed"}
     return sorted(
         (Status(wf, job, attempt, state, conclusion, url, created_at,

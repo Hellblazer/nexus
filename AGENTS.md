@@ -381,7 +381,9 @@ things to avoid carefully; they are impossible.
    `uv run python scripts/ci_status.py <full 40-char sha>` (exit 0 green,
    1 failed, 2 pending, 3 no posts for that sha, 4 cancelled). Its fold:
    within one attempt the most advanced state wins, so a late `queued`
-   copy cannot hide a finished job; across reruns the newest attempt wins.
+   copy cannot hide a finished job; across reruns the newest attempt wins;
+   and when GitHub starts two runs of one workflow for one commit, only
+   the newest run counts (nexus-wqvv9).
    A commit whose run has no `completed` post and no newer commit posting
    behind it is live. A superseded run (the concurrency group cancelled it
    when a newer commit pushed) posts `cancelled` for the run and its jobs,

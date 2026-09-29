@@ -26,8 +26,8 @@ GH = {"from": "github", "kind": "job"}
 
 
 def _p(ts: str, *, state: str, job: str = "lint", conclusion: str | None = None,
-       attempt: int = 1, sha: str = SHA, workflow: str = "CI", dims=GH):
-    body = {"state": state, "workflow": workflow, "sha": sha, "run": 222,
+       attempt: int = 1, sha: str = SHA, workflow: str = "CI", dims=GH, run: int = 222):
+    body = {"state": state, "workflow": workflow, "sha": sha, "run": run,
             "attempt": attempt, "conclusion": conclusion, "url": "u"}
     if job:
         body["job"] = job
@@ -127,6 +127,46 @@ def test_a_cancelled_job_with_no_run_post_reads_cancelled() -> None:
     statuses = cs.fold(posts, SHA)
     assert {s.job: s.verdict for s in statuses} == {"slow": "cancelled", "lint": "green"}
     assert cs.exit_code(statuses) == 4
+
+
+def _duplicate_push_runs() -> list:
+    """The d426a1a77 shape (nexus-wqvv9, 2026-09-29): GitHub started two CI
+    runs for one push, both attempt 1. The concurrency group cancelled the
+    older one, whose matrix job never expanded its name and whose aggregator
+    failed for want of shards; the newer one passed."""
+    run = {"from": "github", "kind": "run"}
+    placeholder = "pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/4)"
+    return [
+        _p("2026-09-29T10:55:40Z", state="completed", conclusion="cancelled", job="", dims=run, run=100),
+        _p("2026-09-29T10:55:39Z", state="completed", conclusion="cancelled", job=placeholder, run=100),
+        _p("2026-09-29T10:55:41Z", state="completed", conclusion="failure", job="pytest-gate", run=100),
+        _p("2026-09-29T11:20:00Z", state="completed", conclusion="success", job="", dims=run, run=200),
+        _p("2026-09-29T11:18:00Z", state="completed", conclusion="success", job="pytest (Python 3.12, shard 1/4)", run=200),
+        _p("2026-09-29T11:19:00Z", state="completed", conclusion="success", job="pytest-gate", run=200),
+    ]
+
+
+def test_a_duplicate_run_for_the_same_commit_does_not_read_failed() -> None:
+    statuses = cs.fold(_duplicate_push_runs(), SHA)
+    assert {s.job: s.verdict for s in statuses} == {
+        "": "green", "pytest (Python 3.12, shard 1/4)": "green", "pytest-gate": "green",
+    }, "only the newest run of a workflow speaks for the commit"
+    assert cs.exit_code(statuses) == 0
+
+
+def test_a_same_named_job_takes_the_newest_run_whatever_order_posts_arrive() -> None:
+    # The older run's cancellation is posted AFTER the newer run's success.
+    posts = [_p("2026-09-29T11:00:00Z", state="completed", conclusion="success", job="lint", run=200),
+             _p("2026-09-29T11:30:00Z", state="completed", conclusion="cancelled", job="lint", run=100)]
+    [s] = cs.fold(posts, SHA)
+    assert (s.conclusion, s.verdict) == ("success", "green")
+
+
+def test_a_newer_run_still_in_flight_reads_pending_over_an_older_green_one() -> None:
+    posts = [_p("2026-09-29T10:00:00Z", state="completed", conclusion="success", job="lint", run=100),
+             _p("2026-09-29T10:30:00Z", state="queued", job="lint", run=200)]
+    [s] = cs.fold(posts, SHA)
+    assert s.verdict == "pending"
 
 
 def test_a_genuine_failure_outranks_a_cancelled_sibling_workflow() -> None:
