@@ -44,16 +44,19 @@ doing it by accident here is the specific thing the fence forbids.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
+import urllib.parse
+from collections.abc import Mapping
 from pathlib import Path
 
 import click
 
 from nexus.bounded_subprocess import run_bounded
 
-__all__ = ["self_group", "perform_self_install", "packaged_install_dir"]
+__all__ = ["self_group", "perform_self_install", "packaged_install_dir", "index_failure_hint"]
 
 
 def packaged_install_dir() -> Path:
@@ -273,6 +276,124 @@ def _build_argv(
     return build
 
 
+# ── Package-index failure diagnosis (nexus-12pyx) ───────────────────────────
+
+#: What uv prints when it cannot reach an index: DNS, connect, timeout and retry
+#: exhaustion. A resolver failure ("No solution found") is deliberately absent:
+#: blaming the network there would send the user after the wrong cause.
+_NETWORK_FAILURE_RE = re.compile(
+    r"dns error|failed to lookup address|nodename nor servname|"
+    r"temporary failure in name resolution|name or service not known|"
+    r"request failed after \d+ retries|error sending request|"
+    r"tcp connect error|connection refused|connection reset|"
+    r"timed out|failed to connect",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://[^\s'\")<>]+")
+
+#: Environment variables uv reads for the index, and the pip one (which uv does
+#: not read, but which a wrapper may forward).
+_UV_INDEX_ENV = ("UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX")
+
+
+def _redact_url(url: str) -> str:
+    """*url* without userinfo: an index URL can carry ``user:token@``."""
+    parts = urllib.parse.urlsplit(url)
+    if not (parts.username or parts.password):
+        return url
+    host = parts.hostname or ""
+    netloc = f"{host}:{parts.port}" if parts.port else host
+    return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
+
+
+def _failed_index_url(stderr: str) -> str | None:
+    """The URL uv failed to fetch: the one on its ``Failed to fetch`` line,
+    else the first URL in the output."""
+    for line in stderr.splitlines():
+        if "failed to fetch" in line.lower():
+            match = _URL_RE.search(line)
+            if match:
+                return match.group(0)
+    match = _URL_RE.search(stderr)
+    return match.group(0) if match else None
+
+
+def _where_index_is_set(host: str, *, env: Mapping[str, str], home: Path) -> list[str]:
+    """Human-readable places that name *host*: environment variables (by name,
+    never value) and uv/pip config files (by path). Empty when none does."""
+    found: list[str] = []
+    for name in (*_UV_INDEX_ENV, "PIP_INDEX_URL"):
+        value = env.get(name, "")
+        if host and host in value:
+            note = (
+                " (pip's variable; uv does not read it, so something else forwarded it)"
+                if name == "PIP_INDEX_URL" else ""
+            )
+            found.append(f"the {name} environment variable{note}")
+    xdg = Path(env.get("XDG_CONFIG_HOME") or home / ".config")
+    uv_files = [xdg / "uv" / "uv.toml", Path("/etc/uv/uv.toml")]
+    if env.get("UV_CONFIG_FILE"):
+        uv_files.insert(0, Path(env["UV_CONFIG_FILE"]))
+    pip_files = [xdg / "pip" / "pip.conf", home / ".pip" / "pip.conf", Path("/etc/pip.conf")]
+    if env.get("PIP_CONFIG_FILE"):
+        pip_files.insert(0, Path(env["PIP_CONFIG_FILE"]))
+    for path in uv_files:
+        if _file_names_host(path, host):
+            found.append(str(path))
+    for path in pip_files:
+        if _file_names_host(path, host):
+            found.append(f"{path} (a pip config; uv does not read it, so a UV_* variable or wrapper may forward it)")
+    return found
+
+
+def _file_names_host(path: Path, host: str) -> bool:
+    try:
+        return bool(host) and host in path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def index_failure_hint(
+    stderr: str, *, env: Mapping[str, str] | None = None, home: Path | None = None,
+) -> str | None:
+    """Explain a network-shaped generation-build failure, or ``None``.
+
+    ``nx self install`` used to print uv's raw output and nothing else, so an
+    unreachable corporate index (off VPN) read as a nexus fault. This names the
+    index uv was trying, where that setting most likely comes from, that the
+    running install was not changed, and the two remedies (nexus-12pyx).
+    *env* and *home* are injectable for tests; they default to the process's.
+    """
+    if not _NETWORK_FAILURE_RE.search(stderr):
+        return None
+    env = os.environ if env is None else env
+    home = Path.home() if home is None else home
+    lines: list[str] = []
+    url = _failed_index_url(stderr)
+    host = urllib.parse.urlsplit(url).hostname if url else None
+    if url:
+        lines.append(f"uv could not reach the package index at {_redact_url(url)}")
+        sources = _where_index_is_set(host or "", env=env, home=home)
+        if sources:
+            lines.append("That host is named by: " + "; ".join(sources) + ".")
+        else:
+            lines.append(
+                f"No setting naming {host} was found (checked the UV_INDEX_URL, "
+                "UV_DEFAULT_INDEX and UV_INDEX variables, uv.toml and pip.conf)."
+            )
+    else:
+        lines.append("uv could not reach the package index it was using.")
+    lines += [
+        "The install you have was not changed.",
+        "Either reach that index (connect to the VPN it needs), or build this once from PyPI:",
+        "    UV_INDEX_URL=https://pypi.org/simple nx self install",
+        "A local-mode upgrade also downloads the pinned engine from GitHub releases, "
+        "which a corporate network may block too.",
+    ]
+    return "\n".join(lines)
+
+
+
 def _build_flip_shims(build: list[str], *, install_dir: Path, tools: Path, bin_dir: Path) -> Path:
     """Run one generation build, flip ``current`` to it, write the shims.
 
@@ -287,8 +408,12 @@ def _build_flip_shims(build: list[str], *, install_dir: Path, tools: Path, bin_d
         build, capture_output=True, text=True, check=False,
     )
     if built.returncode != 0:
+        detail = built.stderr.strip()
+        hint = index_failure_hint(detail)
+        if hint is None:
+            raise click.ClickException(f"generation build failed:\n{detail}")
         raise click.ClickException(
-            f"generation build failed:\n{built.stderr.strip()}"
+            f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         )
     generation = Path(built.stdout.strip().splitlines()[-1])
     _sh(install_dir, f'nx_flip_current "{generation}" "{tools}"')
