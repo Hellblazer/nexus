@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-192 Phase 3 precondition (bead nexus-wbfpw.43, Sam 2026-09-29):
+    nexus.chunks.last_written_at, the anchor reapable(c)'s grace window keys
+    on (nexus-wbfpw.15, not part of this change).
+
+    WHY NOT created_at. created_at is write-once, so a chunk that a re-index
+    re-writes (an ON CONFLICT DO UPDATE, or the metadata-only refresh of an
+    identical-text chunk) gets no fresh grace: the reaper can see it as old,
+    delete it between the client's chunk write and the manifest write, and
+    the manifest write then fails on fk_catalog_chunks_chunk.
+
+    THE CONTRACT. DEFAULT now() stamps an insert. The column is refreshed to
+    now() by exactly the client write paths that re-write an existing chunk:
+    the content upsert and the reference-only upsert (PgVectorRepository),
+    batchUpdateMetadata (the have-vector branch of upsert-chunks and the
+    identical-text branch of the combined write), and the combined write's
+    chunk upsert (CatalogRepository#upsertManifestChunkVectors). It is NEVER
+    refreshed by maintenance or stamping updates (frecency and enrichment
+    metadata stamps, collection re-homing, the quarantine and restore
+    functions' ON CONFLICT branches): a refresh from those would keep dead
+    chunks alive forever. created_at stays write-once.
+
+    EXISTING ROWS take the value at migration time, i.e. every chunk starts
+    with a full grace window at deploy. now() is STABLE, not VOLATILE, so
+    ADD COLUMN stores it as a fast default: a catalog-only change with no
+    table rewrite and no long ACCESS EXCLUSIVE hold on a table this size.
+
+    No DATA EFFECT: a bare ADD COLUMN, no row is changed or removed. No RLS
+    or grant change: the tenant_isolation policy is row-scoped, and the
+    nexus_svc DML grants are table-level.
+
+    Placed after catalog-044 (the tail when this landed) and before the
+    grants-nexus-svc.xml runAlways block (D0.1 late-append convention).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-020-1" author="nexus-wbfpw.43">
+        <comment>nexus.chunks.last_written_at TIMESTAMPTZ NOT NULL DEFAULT now(): the reapable(c) grace anchor. Refreshed only by client re-writes of an existing chunk, never by maintenance or stamping updates; created_at stays write-once. Existing rows take the migration time. Fast default, no table rewrite.</comment>
+        <sql splitStatements="true" stripComments="false">
+ALTER TABLE nexus.chunks
+    ADD COLUMN last_written_at TIMESTAMPTZ NOT NULL DEFAULT now();
+        </sql>
+        <rollback>
+            ALTER TABLE nexus.chunks DROP COLUMN IF EXISTS last_written_at;
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

@@ -929,6 +929,13 @@ public final class PgVectorRepository {
                       // from this statement's column list); this only needs stating for
                       // the conflict branch.
                       .set(ch.retention(), "full")
+                      // nexus-wbfpw.43: a client re-write of an existing chunk restarts
+                      // reapable(c)'s grace window. created_at is write-once, so without
+                      // this a re-indexed old chunk looks old to the reaper, which can
+                      // delete it between this write and the manifest write. A fresh
+                      // INSERT takes the column DEFAULT now(), so only the conflict
+                      // branch needs stating.
+                      .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
                       // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): (xmax = 0) is the
                       // standard Postgres RETURNING idiom for "this row was genuinely
                       // INSERTed, not reached via the ON CONFLICT DO UPDATE branch" —
@@ -1008,7 +1015,11 @@ public final class PgVectorRepository {
                   // upsert-reference-only route carries no delete_keys field, and no
                   // client in src/nexus calls that route today.
                   .set(ch.metadata(),  mergeMetadata(ch.metadata(), DSL.excluded(ch.metadata()), null))
-                  .set(ch.retention(), DSL.excluded(ch.retention()));
+                  .set(ch.retention(), DSL.excluded(ch.retention()))
+                  // nexus-wbfpw.43: a reference-only re-write is a client write of an
+                  // existing chunk, so it restarts the reapable(c) grace window like
+                  // the content upsert above.
+                  .set(ch.lastWrittenAt(), DimTables.lastWrittenNow());
     }
 
     /**
@@ -3801,6 +3812,11 @@ FROM scope s
         // Same NUL defense as upsertChunks: jsonb rejects NUL just like text does
         // (nexus-rvfwj, dual-review M2).
         org.jooq.Field<JSONB> incoming = DSL.val(JSONB.jsonb(toJson(sanitizeNulDeep(metadata))));
+        // nexus-wbfpw.43: deliberately does NOT set last_written_at. This is the
+        // update-metadata route (frecency stamps, post-extraction enrichment): it
+        // annotates a chunk that already exists and re-writes nothing the reaper
+        // cares about. Refreshing the grace window here would let any periodic
+        // stamp keep a chunk with no live owner alive forever.
         return ctx.update(ch.table())
                   .set(ch.metadata(), mergeMetadata(ch.metadata(), incoming, deleteKeys))
                   .where(ch.collection().eq(collection).and(ch.chash().eq(chash)))
@@ -3915,8 +3931,17 @@ FROM scope s
                 org.jooq.Field<JSONB> value = deleteKeys == null
                     ? incoming
                     : mergeMetadata(ch.metadata(), incoming, deleteKeys);
+                // nexus-wbfpw.43: this method has exactly two callers, both client
+                // re-writes of a chunk whose text did not change: the have-vector
+                // branch of upsert-chunks (resolveNeedEmbedIdx) and the combined
+                // write's identical-text branch. A re-index of an unchanged file is
+                // this UPDATE and nothing else, so it must restart reapable(c)'s
+                // grace window. Do NOT reuse this method for a maintenance or
+                // stamping update: it would keep dead chunks alive. Those go through
+                // updateMetadataOneRow, which deliberately leaves last_written_at alone.
                 queries.add(ctx.update(ch.table())
                                .set(ch.metadata(), value)
+                               .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
                                .where(ch.collection().eq(collection).and(ch.chash().eq(ids.get(idx)))));
             }
             int[] affectedCounts = ctx.batch(queries).execute();

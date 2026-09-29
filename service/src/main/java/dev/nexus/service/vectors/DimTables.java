@@ -6,6 +6,9 @@ import dev.nexus.service.jooq.nexus.Tables;
 import org.jooq.Field;
 import org.jooq.JSONB;
 import org.jooq.Table;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
+import java.time.OffsetDateTime;
 import java.util.Map;
 
 /**
@@ -74,7 +77,12 @@ public final class DimTables {
         // before the column existed in the migrated schema jOOQ codegen
         // ran against -- a misspelled column name here still fails only
         // at runtime, exactly like every other field in this record.
-        Field<String> retention
+        Field<String> retention,
+        // nexus-wbfpw.43 (vectors-020-chunks-last-written-at.xml): TIMESTAMPTZ NOT NULL
+        // DEFAULT now(), the reapable(c) grace anchor. Set to now() ONLY by client writes
+        // that re-write an existing chunk (see lastWrittenNow()); maintenance and
+        // stamping UPDATEs must never touch it. Same runtime field lookup as retention.
+        Field<OffsetDateTime> lastWrittenAt
     ) {
         @SuppressWarnings("unchecked")
         static ChunkTable of(Table<?> t, int dim) {
@@ -89,8 +97,18 @@ public final class DimTables {
                 t.field("chunk_text", String.class),
                 (Field<Vector>) t.field(embeddingColumn(dim)),
                 t.field("metadata", JSONB.class),
-                t.field("retention", String.class));
+                t.field("retention", String.class),
+                t.field("last_written_at", OffsetDateTime.class));
         }
+    }
+
+    /**
+     * {@code now()} as the value a client re-write assigns to
+     * {@link ChunkTable#lastWrittenAt()}: the SAME expression as the column's
+     * DEFAULT, so a refreshed row and a fresh insert are stamped alike.
+     */
+    public static Field<OffsetDateTime> lastWrittenNow() {
+        return DSL.function("now", SQLDataType.TIMESTAMPWITHTIMEZONE);
     }
 
     /** {@code nexus.taxonomy_centroids} accessor, embedding column selected per dim. */

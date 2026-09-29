@@ -5310,6 +5310,12 @@ public final class CatalogRepository {
               .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
               .set(ch.embedding(), DSL.excluded(ch.embedding()))
               .set(ch.metadata(),  DSL.excluded(ch.metadata()))
+              // nexus-wbfpw.43: the combined write's chunk upsert re-writes an existing
+              // chunk (changed text, or a writer that raced this one), so it restarts
+              // reapable(c)'s grace window; see PgVectorRepository's content upsert.
+              // The identical-text branch never reaches this INSERT: it is refreshed by
+              // PgVectorRepository#batchUpdateMetadata.
+              .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
               .returningResult(ch.chash(), DSL.field(
                   DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
               .fetch();
@@ -8129,6 +8135,10 @@ public final class CatalogRepository {
     // exactly the drift this list exists to prevent (nexus-v6za0). Deliberate,
     // not a reflection workaround; the list itself and its element type
     // (CollectionScopedTable, below) are both widened together.
+    // nexus-wbfpw.43: the collection rename and move UPDATEs this list drives re-home
+    // nexus.chunks rows and deliberately leave chunks.last_written_at alone: a
+    // re-home is maintenance, not a client re-write, and would otherwise extend the
+    // reapable(c) grace window of a chunk that has no live owner.
     static final List<CollectionScopedTable> COLLECTION_SCOPED_TABLES = List.of(
         new CollectionScopedTable("chunks",                  CHUNKS,                  CHUNKS.COLLECTION),
         new CollectionScopedTable("catalog_document_chunks", CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.COLLECTION),
