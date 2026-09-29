@@ -1981,7 +1981,14 @@ def _check_git_hooks(repo_scope: str | Path | None = None) -> list[HealthResult]
                                 "May be missing pile-up guard or other fixes."
                             ),
                             fix_suggestions=[
-                                f"nx hooks update {shlex.quote(str(repo_path))}"
+                                (
+                                    # update refuses while any hook here is
+                                    # malformed: order the repair first, as
+                                    # `nx hooks status` does.
+                                    "repair the malformed hook(s) by hand first, "
+                                    "then: "
+                                    if malformed else ""
+                                ) + f"nx hooks update {shlex.quote(str(repo_path))}"
                             ],
                             fatal=False,
                         ))

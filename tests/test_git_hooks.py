@@ -545,6 +545,63 @@ class TestUpdateAll:
         assert "pgrep -f" in (hd / "post-commit").read_text()
         assert "malformed" in result.output and str(broken) in result.output
         assert "1 hook(s) refreshed" in result.output
+        # The repo WAS refreshed (partly), so it is not "skipped"; the
+        # malformed hook is counted as what it is.
+        assert "skipped" not in result.output, result.output
+        assert "1 malformed hook(s) left for hand repair" in result.output, result.output
+
+    def test_sweep_summary_counts_malformed_apart_from_skipped_repos(
+        self, tmp_path, monkeypatch,
+    ):
+        from nexus.commands.hooks import refresh_all_managed_hooks
+
+        partly = self._make_repo(tmp_path, "partly")
+        self._legacy_stanza_file(partly / ".git" / "hooks" / "post-commit")
+        (partly / ".git" / "hooks" / "post-merge").write_text(
+            f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n"
+        )
+        (partly / ".git" / "hooks" / "post-rewrite").write_text(
+            f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n"
+        )
+        gone = self._make_repo(tmp_path, "gone")
+
+        def _hooks_dir(repo: Path):
+            if repo == gone:
+                raise click.ClickException("not a git repo")
+            return repo / ".git" / "hooks"
+
+        monkeypatch.setattr(
+            "nexus.commands.hooks._iter_managed_repo_roots", lambda: [gone, partly],
+        )
+        monkeypatch.setattr("nexus.commands.hooks._effective_hooks_dir", _hooks_dir)
+        summary = refresh_all_managed_hooks(echo=False)
+        assert summary == {"repos": 1, "refreshed": 1, "errors": 1, "malformed": 2}
+
+    @pytest.mark.parametrize(
+        "summary,expected,absent",
+        [
+            ({"repos": 1, "refreshed": 2, "errors": 0, "malformed": 0},
+             "Refreshed 2 git hook(s) across 1 repo(s).", "skipped"),
+            ({"repos": 1, "refreshed": 2, "errors": 1, "malformed": 0},
+             "1 repo(s) skipped", "malformed"),
+            ({"repos": 1, "refreshed": 2, "errors": 0, "malformed": 3},
+             "3 malformed hook(s) left for hand repair", "skipped"),
+            ({"repos": 0, "refreshed": 0, "errors": 0, "malformed": 1},
+             "1 malformed hook(s) left for hand repair", "skipped"),
+        ],
+    )
+    def test_upgrade_summary_wording_matches_what_happened(
+        self, capsys, monkeypatch, summary, expected, absent,
+    ):
+        from nexus.commands.upgrade import _refresh_all_git_hooks
+
+        monkeypatch.setattr(
+            "nexus.commands.hooks.refresh_all_managed_hooks", lambda echo=False: summary,
+        )
+        _refresh_all_git_hooks()
+        out = capsys.readouterr().out
+        assert expected in out, out
+        assert absent not in out, out
 
     def test_refreshes_all_managed_repos(self, runner, tmp_path, monkeypatch):
         from nexus.cli import main
@@ -736,6 +793,76 @@ class TestDoctorStanzaDrift:
         r = drift[0]
         assert r.ok is False
         assert any("nx hooks update" in s for s in r.fix_suggestions)
+
+    def test_drift_row_orders_the_repair_first_when_a_hook_is_also_malformed(
+        self, runner, fake_repo, monkeypatch, tmp_path,
+    ):
+        """update refuses while any hook is malformed, so doctor's drift row
+        must not offer a bare ``nx hooks update`` for the stale one (same
+        ordering as ``nx hooks status``)."""
+        _install(runner, fake_repo)
+        stale = _hooks_dir(fake_repo) / "post-commit"
+        stale.write_text(stale.read_text().replace("pgrep -f", "pgrep -x"))
+        (_hooks_dir(fake_repo) / "post-merge").write_text(
+            f"#!/bin/sh\n{SENTINEL_BEGIN}\nnx index repo ...\n"
+        )
+        self._seed_registry(monkeypatch, tmp_path, fake_repo)
+        with _mock_git(fake_repo):
+            from nexus.health import _check_git_hooks
+            results = _check_git_hooks()
+        drift = [r for r in results if "stanza drift" in r.label.lower()]
+        bad = [r for r in results if "malformed" in r.label.lower()]
+        assert drift and bad, [r.label for r in results]
+        assert drift[0].fix_suggestions, "the stale hook still needs its remedy named"
+        for s in drift[0].fix_suggestions:
+            assert "nx hooks update" in s and "repair" in s.lower(), s
+            assert s.lower().index("repair") < s.index("nx hooks update"), s
+        # The malformed row itself never suggests update.
+        assert not any("nx hooks update" in s for s in bad[0].fix_suggestions)
+
+    def test_drift_row_alone_still_suggests_plain_update(
+        self, runner, fake_repo, monkeypatch, tmp_path,
+    ):
+        _install(runner, fake_repo)
+        stale = _hooks_dir(fake_repo) / "post-commit"
+        stale.write_text(stale.read_text().replace("pgrep -f", "pgrep -x"))
+        self._seed_registry(monkeypatch, tmp_path, fake_repo)
+        with _mock_git(fake_repo):
+            from nexus.health import _check_git_hooks
+            results = _check_git_hooks()
+        drift = [r for r in results if "stanza drift" in r.label.lower()]
+        assert [s for s in drift[0].fix_suggestions if "repair" in s.lower()] == []
+
+    def test_doctor_suggestions_quote_a_repo_path_with_a_space(
+        self, runner, monkeypatch, tmp_path,
+    ):
+        import shlex
+
+        from nexus.health import _check_git_hooks
+
+        # install suggestion: repo with no hooks.
+        repo = tmp_path / "my repo"
+        (repo / ".git" / "hooks").mkdir(parents=True)
+        self._seed_registry(monkeypatch, tmp_path, repo)
+        with _mock_git(repo):
+            not_installed = _check_git_hooks()
+        quoted = shlex.quote(str(repo))
+        assert quoted != str(repo)  # non-vacuity: the path really needs quoting
+        assert any(
+            f"nx hooks install {quoted}" in s
+            for r in not_installed for s in r.fix_suggestions
+        ), [(r.label, r.fix_suggestions) for r in not_installed]
+
+        # update suggestion: same repo, stale stanza.
+        _install(runner, repo)
+        hook = _hooks_dir(repo) / "post-commit"
+        hook.write_text(hook.read_text().replace("pgrep -f", "pgrep -x"))
+        with _mock_git(repo):
+            stale = _check_git_hooks()
+        assert any(
+            f"nx hooks update {quoted}" in s
+            for r in stale for s in r.fix_suggestions
+        ), [(r.label, r.fix_suggestions) for r in stale]
 
     def test_no_drift_when_stanza_matches_template(self, runner, fake_repo, monkeypatch, tmp_path):
         # Install fresh hooks (matches current template by definition)

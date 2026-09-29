@@ -482,15 +482,31 @@ def _iter_managed_repo_roots() -> list[Path]:
     return repos
 
 
+def _sweep_tail(summary: dict[str, int]) -> str:
+    """The clause after "N repo(s)" in a sweep's summary line: skipped repos
+    and malformed hooks are different things and are worded separately
+    (nexus-sis0m.6). Shared by ``update-all`` and ``nx upgrade``."""
+    parts = []
+    if summary.get("errors"):
+        parts.append(f"{summary['errors']} repo(s) skipped")
+    if summary.get("malformed"):
+        parts.append(f"{summary['malformed']} malformed hook(s) left for hand repair")
+    return "; " + "; ".join(parts) + "." if parts else "."
+
+
 def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
     """Refresh nexus-managed git hooks across every catalog-registered repo.
 
     Best-effort: a repo that can't be resolved (non-git, hooks dir not
     writable, etc.) is counted under ``errors`` and skipped — one bad repo
-    never aborts the sweep. Returns a summary dict with ``repos``,
-    ``refreshed``, and ``errors`` counts.
+    never aborts the sweep. A hook with a begin sentinel and no end sentinel
+    cannot be refreshed and is counted under ``malformed`` (per hook, not per
+    repo: the repo's other hooks are still refreshed, so it is not
+    ``errors``). Returns a summary dict with ``repos`` (repos with at least
+    one hook refreshed), ``refreshed``, ``errors`` (repos skipped) and
+    ``malformed`` (hooks left for hand repair) counts.
     """
-    summary = {"repos": 0, "refreshed": 0, "errors": 0}
+    summary = {"repos": 0, "refreshed": 0, "errors": 0, "malformed": 0}
     for repo in _iter_managed_repo_roots():
         try:
             # nexus-g76yf: the lower layer raises a raw ``RuntimeError``
@@ -520,7 +536,7 @@ def refresh_all_managed_hooks(*, echo: bool = False) -> dict[str, int]:
 
         for n, a in results:
             if a == "malformed":
-                summary["errors"] += 1
+                summary["malformed"] += 1
                 if echo:
                     click.echo(
                         f"  ! {hooks_dir / n}  (malformed sentinel, begin without "
@@ -552,13 +568,13 @@ def hooks_update_all() -> None:
     """
     click.echo("Refreshing nexus hooks across all registered repos…")
     summary = refresh_all_managed_hooks(echo=True)
-    if summary["repos"] == 0 and summary["errors"] == 0:
+    if summary["repos"] == 0 and summary["errors"] == 0 and summary["malformed"] == 0:
         click.echo("No nexus-managed hooks found in any registered repo.")
         return
     click.echo(
         f"Done. {summary['refreshed']} hook(s) refreshed across "
         f"{summary['repos']} repo(s)"
-        + (f"; {summary['errors']} repo(s) skipped." if summary["errors"] else ".")
+        + _sweep_tail(summary)
     )
 
 
