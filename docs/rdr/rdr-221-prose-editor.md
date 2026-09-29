@@ -89,6 +89,17 @@ are in T3 collection `writing-craft` and T2 project `nexus_rdr`
 
 ## Research Findings
 
+### Investigation
+
+Three rounds. Round 1 surveyed existing editing tools and agent skills,
+technical-editing practice, and editorial craft with the literature on LLMs as
+editors (T3 `writing-craft`). Round 2 re-fetched every external source cited,
+and censused which kinds of prose in this repo get any editing today. Round 3
+was a five-critic review of an earlier, larger design, with a verification
+pass that sampled real `substantive-critic` output on prose work. Two spikes
+checked what the design relies on: the T2 record shapes, and the marked-up
+copy in Typora. Each finding is a T2 record, `nexus_rdr/221-research-N`.
+
 ### Key Discoveries
 
 1. **Verified (source search).** `site-page`'s voice pass is a
@@ -261,15 +272,48 @@ a plugin can come later if it earns one.
 
 ### Alternative 1: Brief the critic as an editor, per skill, as today
 
-**Reason for rejection**: this is `site-page`'s current practice. It works
-where it is written, but remembers nothing and covers one skill (Gaps 1, 2).
+**Description**: each skill that wants a line edit writes its own brief for
+`substantive-critic`, as `site-page` §5 item 3 does now.
+
+**Pros**:
+
+- Already works: 19 cuts and a paragraph move on one page (Discovery 1).
+- Nothing new to build.
+
+**Cons**:
+
+- Nothing is remembered between documents, so corrections do not carry
+  forward (Gap 2).
+- Covers only the prose a skill happens to brief for (Gap 1).
+
+**Reason for rejection**: it leaves Gaps 1 and 2 open.
 
 ### Alternative 2: Mechanical checks (a prose linter)
+
+**Description**: encode the style rules as lint checks run over prose.
+
+**Pros**:
+
+- Deterministic and cheap.
+
+**Cons**:
+
+- A 721-edit mechanical sweep here read 19% worse (Discovery 5).
 
 **Reason for rejection**: most prose guidance needs knowing when not to apply
 it, which a linter cannot know (Discovery 5).
 
 ### Alternative 3: Ship as a plugin now
+
+**Description**: package the editor as an installable plugin from the start.
+
+**Pros**:
+
+- Usable in other repos.
+
+**Cons**:
+
+- Release work before there is evidence the editor is worth using.
 
 **Reason for rejection**: deferred until Phase 2 shows the editor is worth
 using; a project skill iterates faster and carries no release work.
@@ -340,18 +384,32 @@ the offer to add a correction to the style sheet.
 
 ### Phase 2: Validate on real work
 
+#### Step 2.1: Four real edits
+
 Use the editor on four pieces of Sam's current work: an RDR, a reference doc
 (for example `docs/storage-tiers.md`), an essay and a CHANGELOG entry. Record
 for each: proposals made, accepted, rejected, queries answered, and Sam's
-answer to "would you reach for this again?". Pass: at least half accepted
+answer to "would you reach for this again?".
+
+#### Step 2.2: Decide
+
+Pass: at least half accepted
 across the four, the essay judged still in Sam's voice, and a yes. On a fail,
 stop and revise this RDR.
 
 ### Phase 3: Adopt
 
-- `site-page` §5 item 3 dispatches the line editor with the page's voice card.
-- Exemplars for the remaining genres (`how-to`, `commit-message`).
-- Whether to move the editor into a plugin, decided on Phase 2's evidence.
+#### Step 3.1: `site-page` voice pass
+
+`site-page` §5 item 3 dispatches the line editor with the page's voice card.
+
+#### Step 3.2: Remaining genres
+
+Exemplars for `how-to` and `commit-message`.
+
+#### Step 3.3: Plugin decision
+
+Whether to move the editor into a plugin, decided on Phase 2's evidence.
 
 ### Day 2 Operations
 
