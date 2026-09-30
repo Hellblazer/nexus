@@ -2317,8 +2317,10 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         assert result.exit_code != 0, result.output
         assert str(pdf) in result.output, result.output
-        assert "orphaned" in result.output.lower(), result.output
-        assert "nx catalog reconcile" in result.output
+        # RDR-223 (nexus-z0o2p.11, .15): the chunks are not written ownerless any more; the run
+        # fails before writing anything and says so.
+        assert "no catalog document to own" in result.output, result.output
+        assert "nothing was written" in result.output, result.output
 
     def test_pdf_register_ok_summary_unchanged(self, runner, home, monkeypatch):
         from tests.test_doc_indexer import pdf_extract_patches_ctx
@@ -2335,9 +2337,9 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         reader, writer = self._broken_catalog(register_raises=False)
 
+        # RDR-223 (nexus-z0o2p.15): the write is replaced; this pins the registration-ok summary.
         with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
-             patch("nexus.doc_indexer._fence_begin"), \
-             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.doc_indexer._write_chunks_with_owner_rows"), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
              patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
              pdf_extract_patches_ctx():
@@ -2431,8 +2433,10 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         assert result.exit_code != 0, result.output
         assert str(pdf) in result.output, result.output
-        assert "orphaned" in result.output.lower(), result.output
-        assert "nx catalog reconcile" in result.output
+        # RDR-223 (nexus-z0o2p.11, .15): the chunks are not written ownerless any more; the run
+        # fails before writing anything and says so.
+        assert "no catalog document to own" in result.output, result.output
+        assert "nothing was written" in result.output, result.output
 
 
 # ── nexus-7f5qj AC4: --dir batch mode audit ─────────────────────────────────

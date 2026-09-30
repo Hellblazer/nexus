@@ -1434,7 +1434,7 @@ def run_file_loop(
       (``nexus.errors.UnextractableContentError``), deliberately NOT the
       broader ``nexus.errors.PER_RECORD_SURVIVABLE_EXCEPTIONS`` tuple
       (code-review finding, nexus-deyd5 round 2): that tuple's other
-      members (``ChunkLandingUnverifiedError``, ``IndexRunVerifyRefused``,
+      members (``IndexRunVerifyRefused``,
       ``ExtractionQualityError``, ``UnchunkableContentError``) are raised
       solely from ``doc_indexer.py``'s fence-bracketed per-record command
       path, never reachable from this loop's four ``index_one`` wrappers

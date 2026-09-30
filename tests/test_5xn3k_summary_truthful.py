@@ -327,72 +327,6 @@ class TestDtIndexRefusalPropagation:
         assert "missing=2" in result.output
 
 
-class TestDtIndexChunkLandingUnverifiedPropagation:
-    """substantive-critic CRITICAL (nexus-9800y, 2026-08-04): nexus-tp8yk's
-    D1 fix (``_upsert_skip_reembed`` raises ``ChunkLandingUnverifiedError``
-    on a "cannot tell" landing) reopened the exact nexus-2fyb/nexus-qo84l
-    regression class ``TestDtIndexRefusalPropagation`` above already fixed
-    once for the sibling ``IndexRunVerifyRefused`` — dt.py's per-record
-    catch did not include the new exception type, so an affected record
-    escaped the try/except entirely and aborted the WHOLE ``nx dt index``
-    batch. Mirrors that class's test shape exactly: mocks
-    ``nexus.doc_indexer.index_pdf`` (the boundary the REAL ``_index_record``
-    calls) and lets the real ``_index_record``/``index_cmd`` bodies run.
-    """
-
-    def _run(self, runner, monkeypatch, *, records, index_pdf_fn):
-        monkeypatch.setattr("nexus.commands.dt._gather_records", lambda **kw: records)
-        monkeypatch.setattr("nexus.commands.dt._stamp_dt_uri_on_entry", lambda *a, **kw: True)
-        monkeypatch.setattr("nexus.doc_indexer.index_pdf", index_pdf_fn)
-        return runner.invoke(main, ["dt", "index", "--uuid", records[0][0]])
-
-    def test_chunk_landing_unverified_does_not_abort_the_whole_batch(self, runner, monkeypatch):
-        """THE regression: pre-fix, U1's ChunkLandingUnverifiedError raised
-        uncaught and U2 was NEVER PROCESSED — no summary line printed at
-        all. Post-fix, U1 lands in `failed` and U2 still indexes."""
-        from nexus.errors import ChunkLandingUnverifiedError
-
-        seq = [
-            lambda *a, **kw: (_ for _ in ()).throw(ChunkLandingUnverifiedError(
-                collection="docs__dt-test__voyage-context-3__v1", count=3,
-            )),
-            lambda *a, **kw: 4,
-        ]
-
-        def _dispatch(*a, **kw):
-            return seq.pop(0)(*a, **kw)
-
-        result = self._run(
-            runner, monkeypatch,
-            records=[("U1", "/a.pdf"), ("U2", "/b.pdf")],
-            index_pdf_fn=_dispatch,
-        )
-        assert result.exit_code == 0, result.output
-        assert not seq, "U2 was never dispatched — the batch aborted after U1's error"
-        assert "1 failed" in result.output
-        assert "Indexed 1 record(s)" in result.output  # U2 still landed
-        assert "cannot confirm 3 chunk(s) landed" in result.output
-
-    def test_chunk_landing_unverified_alone_is_reported_not_raised(self, runner, monkeypatch):
-        from nexus.errors import ChunkLandingUnverifiedError
-
-        def _raise(*a, **kw):
-            raise ChunkLandingUnverifiedError(
-                collection="docs__dt-test__voyage-context-3__v1", count=1,
-            )
-        result = self._run(
-            runner, monkeypatch,
-            records=[("U1", "/a.pdf")],
-            index_pdf_fn=_raise,
-        )
-        assert result.exit_code == 0, result.output
-        assert result.exception is None or isinstance(result.exception, SystemExit), (
-            f"the error escaped as a raw traceback: {result.exception!r}"
-        )
-        assert "Traceback" not in result.output
-        assert "cannot confirm 1 chunk(s) landed" in result.output
-
-
 # ── nx index repo ────────────────────────────────────────────────────────────
 
 
@@ -715,29 +649,6 @@ class TestSingleFileRefusalRendering:
         assert "NOT fully indexed" in result.output
         assert "referenced=5" in result.output
 
-    def test_pdf_chunk_landing_unverified_renders_clean_message_and_exits_nonzero(
-        self, runner, fake_pdf,
-    ):
-        """nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04): a
-        ChunkLandingUnverifiedError from index_pdf used to exit non-zero
-        via Click's default unhandled-exception path (a raw traceback),
-        not the nexus-2fyb clean-ClickException convention every other
-        typed error on this command already gets."""
-        from nexus.errors import ChunkLandingUnverifiedError
-
-        def _raise(*a, **kw):
-            raise ChunkLandingUnverifiedError(
-                collection="docs__test__voyage-context-3__v1", count=4,
-            )
-        with patch("nexus.doc_indexer.index_pdf", side_effect=_raise):
-            result = runner.invoke(main, ["index", "pdf", str(fake_pdf)])
-        assert result.exit_code != 0
-        assert result.exception is None or isinstance(result.exception, SystemExit), (
-            f"a raw traceback escaped instead of a ClickException: {result.exception!r}"
-        )
-        assert "cannot confirm 4 chunk(s) landed" in result.output
-        assert "Traceback" not in result.output
-
     def test_md_refusal_renders_clean_message_and_exits_nonzero(self, runner, fake_md):
         """nexus-tp8yk substantive-critic SIGNIFICANT (2026-08-04):
         index_md_cmd never caught IndexRunVerifyRefused at all (unlike
@@ -756,26 +667,6 @@ class TestSingleFileRefusalRendering:
         assert "completion REFUSED" in result.output
         assert "NOT fully indexed" in result.output
         assert "referenced=5" in result.output
-        assert "Traceback" not in result.output
-
-    def test_md_chunk_landing_unverified_renders_clean_message_and_exits_nonzero(
-        self, runner, fake_md,
-    ):
-        """nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04): same
-        gap as the pdf command's identical test above."""
-        from nexus.errors import ChunkLandingUnverifiedError
-
-        def _raise(*a, **kw):
-            raise ChunkLandingUnverifiedError(
-                collection="docs__test__voyage-context-3__v1", count=2,
-            )
-        with patch("nexus.doc_indexer.index_markdown", side_effect=_raise):
-            result = runner.invoke(main, ["index", "md", str(fake_md)])
-        assert result.exit_code != 0
-        assert result.exception is None or isinstance(result.exception, SystemExit), (
-            f"a raw traceback escaped instead of a ClickException: {result.exception!r}"
-        )
-        assert "cannot confirm 2 chunk(s) landed" in result.output
         assert "Traceback" not in result.output
 
 

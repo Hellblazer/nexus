@@ -776,19 +776,15 @@ def test_index_pdf_incremental_service_mode_skips_embed_fallback(tmp_path, monke
 
     mock_hooks = MagicMock()
 
-    with patch("nexus.doc_indexer.read_checkpoint", return_value=None), \
-         patch("nexus.doc_indexer.write_checkpoint"), \
-         patch("nexus.doc_indexer.delete_checkpoint"), \
+    # RDR-223 (nexus-z0o2p.15): the chunks and their owner rows are one write to the real engine,
+    # which this test's fake handle never sees; the recorder stands in for it. This test proves the
+    # service-mode embed guard, not the write (tests/integration/test_rdr223_pdf_journey.py owns that).
+    from tests import _owner_write_double
+    _owner_write_double.install(monkeypatch)
+
+    with patch("nexus.doc_indexer.delete_checkpoint"), \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._fence_begin"), \
-         patch("nexus.doc_indexer._fence_complete"), \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)):
-        # RUNFENCE (nexus-5xn3k.4): the mocked t3 never lands chunks in the
-        # substrate the real engine's fail-closed /complete verifies against —
-        # unstubbed, _fence_complete correctly raises IndexRunVerifyRefused.
-        # This test proves the service-mode embed guard, not fence integration
-        # (nexus-5xn3k.7 owns the genuine proof); stub the fence like every
-        # other decoupled-substrate test in the suite.
         _index_pdf_incremental(
             tmp_path / "test.pdf",
             corpus="test-corpus",

@@ -144,15 +144,72 @@ PRs #1375/#1376):
   inputs; rebuild only on key miss.
 - **BILLED macOS/premium runners only where the artifact requires the
   platform** (release/tag artifact builds), never in routine push/PR CI. The
-  self-hosted runners on `hellmini` are owned hardware, billed per minute at
-  nothing, and are the exception: `hellmini` runs release jobs and the
-  PG-bundle cache seed, and `hellmini-ci` runs, on owner pushes only, the
-  Service CI Java job (Sam, 2026-09-30).
-  That job therefore tests macOS arm64 on push while PRs test linux amd64.
+  self-hosted runners on owned hardware carry no per-minute charge and are the
+  exception; see § Self-hosted runners and fork PRs.
 - **Every workflow has a concurrency group; superseded runs cancel.**
 - **Full matrix breadth only at merge boundaries.** PRs run the full
   matrix; interior branch pushes run the minimal representative.
 - **Tag cadence is a cost decision.** Batch related work into one cut.
+
+## Self-hosted runners and fork PRs
+
+This repo is public and has four self-hosted runners:
+
+| Label | Host and user | Takes |
+|---|---|---|
+| `hellmini` | Mac mini, macOS user `ghrunner` | release jobs: the engine-service release legs, the PG-bundle cache seed (Sam, 2026-09-28, nexus-yd9po) |
+| `hellmini-ci` | same Mac mini, macOS user `ghci` | the Service CI Java job, on owner pushes only (Sam, 2026-09-30, nexus-f5i1m) |
+| `qwen-linux` (`[self-hosted, Linux, X64]`) | host not recorded in this repo | no workflow in this repo; intended (Sam, 2026-09-30) |
+| `qwen-windows` (`[self-hosted, X64, Windows]`) | host not recorded in this repo | no workflow in this repo; intended (Sam, 2026-09-30) |
+
+The two qwen runners carry the generic self-hosted labels. Any job in any
+workflow file that says `runs-on: self-hosted` (or an array with `Linux` or
+`Windows`) lands on one of them, so an approved fork-PR run could reach them by
+naming the generic label. `hellmini` and `hellmini-ci` are bare custom labels
+(registered with `--no-default-labels`), so a job has to name them.
+
+**Service CI routing.** `service-ci.yml`'s comments are the one authoritative
+copy of how it works; this is the summary. An owner push (account id and
+triggering actor both the repo owner) runs the Java job on `hellmini-ci`;
+every `pull_request` and any other actor's push runs on `ubuntu-latest`.
+Setting the repository variable `SERVICE_CI_PUSH_RUNNER` to exactly
+`ubuntu-latest` moves owner pushes back to GitHub's runners with no code change;
+any other value, unset, or a typo means `hellmini-ci`, so the variable cannot
+route to `hellmini`. The job stays on `hellmini-ci` for now; after about 10
+develop runs, compare with hosted and revert unless it is clearly faster (Sam,
+2026-09-30). The Java job therefore tests macOS arm64 on push while PRs test
+linux amd64, so a platform-specific red on push has no PR-side twin. The job
+shares no lease with hand-run suites or with release legs on `hellmini`; a full
+`pytest -n auto` or a native release build on the same 24 GB box can thrash it.
+
+**What is and is not a control.** The `runs-on` expression is a routing rule,
+not a security boundary: it lives in a file whoever can push a branch controls.
+The controls are the collaborator list (owner only since 2026-09-30, when four
+write collaborators were removed), the fork-PR approval policy (all external
+contributors need an approval click), and branch protection. A merged external
+or Dependabot PR runs its code on `hellmini-ci` at the owner's next `service/**`
+push, by design.
+
+**Isolation is intended, not proven by prose.** `ghci` is a separate macOS user,
+not a sandbox. The evidence is a green run of
+`.github/workflows/hellmini-ci-isolation-probe.yml` (owner-only
+`workflow_dispatch`, runs on `hellmini-ci`): ghrunner's paths unreadable, no
+passwordless `sudo`, no Developer ID signing identity, `/Volumes/Bulk` mounted
+with ownership honoured. Until a run is green, read "isolated" as "intended".
+Both runners keep state between jobs (Maven `~/.m2`, tool caches); a job on
+`hellmini-ci` can also write the repo's Actions cache in the develop scope.
+
+**Before approving a fork-PR run, read its diff for:**
+
+- anything under `.github/` (a workflow or action can name any runner);
+- any `runs-on` that names a self-hosted label, `self-hosted`, `hellmini`,
+  `hellmini-ci`, `qwen-linux` or `qwen-windows`;
+- `service/` tests and `pom.xml` (merged, they run on `hellmini-ci` at the next
+  owner push).
+
+**Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even
+when they hold the owner's `gh` token. Report the run id and stop; the approval
+click is Sam's.
 
 ## Workflows
 
@@ -226,8 +283,7 @@ The Java **engine-service** binary is a separate release artifact with its own c
 
 Build or test the engine through `scripts/mvnw-leased.sh` (never a bare `./mvnw`/`mvn`) — one builder at a time; a concurrent `./mvnw` invocation against the same `service/target` corrupts jOOQ codegen mid-build (nexus-c00dw, see `scripts/lib/build-lease.sh`). The lease lives in the git common dir, so every worktree shares it, and a live holder is waited for rather than refused (`NX_BUILD_LEASE_WAIT`, nexus-g6xpa): one engine build or suite per box. `scripts/build-gate-jar.sh` caches the stamped jar on the exact `service/` content, so a fresh worktree with an unchanged tree gets a copy instead of a nine-minute rebuild. The Python suite reads the same lease at session start (nexus-pv93h): while a build holds it, `pytest` refuses the whole run with one line and exit 75 naming the holder, and `NX_BUILD_LEASE_WAIT=<seconds>` makes it wait instead; `NX_TEST_T2_SUBSTRATE=none` runs are never gated.
 
-- **hellmini is inside the release trust boundary (Sam, 2026-09-28, nexus-yd9po).** The mac-arm64 release legs (native build + PG bundle, in both `engine-service-release.yml` and `pg-bundle-cache-seed.yml`) build on hellmini, a self-hosted Mac mini runner — accepted as trusted infrastructure for release jobs, not merely "another CI box." That means: physical and network access to it are release-security-relevant (same footing as the GH-hosted runners' isolation, minus the ephemerality); and it PERSISTS STATE BETWEEN JOBS — the Maven `~/.m2` cache, `RUNNER_TOOL_CACHE` (GraalVM/uv installs via `actions/setup-*`), and the Homebrew install (flex/bison) all survive across runs, unlike a GH-hosted runner's throwaway VM. `workflow_dispatch`'s `mac_runner` input falls back to `macos-14` when hellmini is down (FileVault reboot waiting on KVM unlock).
-  **Widened 2026-09-30 (Sam, session nexus_654, nexus-f5i1m): the Service CI Java job (`service-ci.yml`) also runs on the hellmini box, for `push` events only, on its OWN runner.** It took 21 to 34 min on GitHub-hosted runners, timed out, and every develop push queued behind it. The runner is the `hellmini-ci` runner, which runs as the macOS user `ghci` with its own Maven repo, tool cache and per-job colima, isolated at the OS level from `ghrunner`'s release caches (m2, tool cache, Homebrew); release jobs keep the `hellmini` runner. `runs-on` picks it: a `push` by the repo owner (account id equal to the repository owner id, and the triggering actor the owner) runs on the repository variable `SERVICE_CI_PUSH_RUNNER`, default `hellmini-ci`; everything else, every `pull_request` and any other actor's push, runs on `ubuntu-latest`. That is a routing rule, not a security boundary: this workflow's routing never selects a self-hosted runner for PRs or non-owner pushes, but the expression lives in a file whoever can push a branch controls. Four write collaborators were removed from the repo on 2026-09-30 at Sam's request, so today only the owner can push or run workflows; if a write collaborator is added back, they could target a self-hosted runner from their own workflow change (a same-repo PR editing `runs-on` or adding a workflow), and the owner's later push to a tip containing their merged code would run it there. The real controls are the collaborator list, the fork-PR approval policy and branch protection. The job's first step is a consistency check of the same values, not a guard against a hostile edit. **Offline toggle:** set the repository variable `SERVICE_CI_PUSH_RUNNER=ubuntu-latest` (Settings > Secrets and variables > Actions > Variables) and the next push runs on GitHub's runners with no code change; delete the variable to return to `hellmini-ci`. A run already queued for a dead runner must be cancelled and re-run to pick it up. The job no longer queues behind release legs or the PG-bundle cache seed, which stay on `hellmini`, but it shares the machine with them. The CI Cost Discipline rule below names the self-hosted exception (its concern is billed minutes). The job tests macOS arm64 on push while PRs test linux amd64, so a platform-specific red on push has no PR-side twin, and it is not faster (the probe, on the release runner before `hellmini-ci` existed, took 24.4 min against 21 to 34 min hosted); it removes hosted-runner timeout exposure and queueing. The job's Testcontainers containers are reaped by Ryuk (pinned on in the job, confirmed enabled in the probe run), with no end-of-job sweep, because the runner starts its OWN colima VM per job and its job-completed hook prunes and stops it; the job's last step only reports leftovers. That daemon is separate from the always-on one that hand-run and agent-run `mvnw-leased.sh` suites use. Known limitation: the job shares no build lease with those suites, since it runs from the runner's own checkout, and the two compete for host RAM: a full host `pytest -n auto` uses about 23 of 24 GB, so a job's colima VM at the same time can thrash.
+- **hellmini is inside the release trust boundary (Sam, 2026-09-28, nexus-yd9po).** The mac-arm64 release legs (native build + PG bundle, in both `engine-service-release.yml` and `pg-bundle-cache-seed.yml`) build on hellmini, a self-hosted Mac mini runner — accepted as trusted infrastructure for release jobs, not merely "another CI box." That means: physical and network access to it are release-security-relevant (same footing as the GH-hosted runners' isolation, minus the ephemerality); and it PERSISTS STATE BETWEEN JOBS — the Maven `~/.m2` cache, `RUNNER_TOOL_CACHE` (GraalVM/uv installs via `actions/setup-*`), and the Homebrew install (flex/bison) all survive across runs, unlike a GH-hosted runner's throwaway VM. `workflow_dispatch`'s `mac_runner` input falls back to `macos-14` when hellmini is down (FileVault reboot waiting on KVM unlock). Since 2026-09-30 a second runner on the same box, `hellmini-ci` (user `ghci`), takes the Service CI Java job on owner pushes so that test code stays off the release runner's caches; the routing, the isolation evidence, the offline toggle and the fork-PR rules are in § Self-hosted runners and fork PRs, and `service-ci.yml`'s comments carry the mechanics.
 - **Artifact + trigger:** an `engine-service-vX.Y.Z` git tag fires `engine-service-release.yml`, which builds + cosign-signs the 3 native binaries (linux-amd64, linux-arm64, mac-arm64 — mac-arm64 now SMOKED, built on the hellmini self-hosted runner which has Docker via colima; nexus-yd9po closed the nexus-4xf5m no-Docker-on-GH-macOS gap for the default tag-push path, a `workflow_dispatch` run that falls back to `macos-14` when hellmini is offline is still unsmoked there; mac-amd64/Intel is not a supported target). It publishes **nothing to PyPI** and is **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** (the workflow header says so explicitly). **The release is a DRAFT until every asset is attached** (nexus-cl14i, after v0.1.95 published PG bundles with no binary): a final `promote-release` job flips it only when both matrices succeeded and all 21 assets are present, so a tag is consumable roughly 35 to 65 minutes (v0.1.118 took 36, a single measurement) after push, never partially; a failed leg, mac-arm64 included, leaves a draft that `gh run rerun --failed` completes and promotes. So the engine can be refreshed in the cloud at any time, independent of the unreleasable-develop state.
 - **Version is tag-stamped — there is NO manifest to bump.** `release.properties` `release_version` is blank in source and stamped at native-build time from the tag (the Maven `pom.xml` stays `1.0-SNAPSHOT`, the dev coordinate). The cut is NOT just suite-green-then-tag: the `engine-release` skill (Authority: this section) enforces a full pre-tag battery — full engine suite green on the tagged commit, `tests/e2e/migration-rehearsal/run.sh --shakeout` (must end `CANDIDATE SHAKEOUT PASSED`) — then human pushes `engine-service-vX.Y.Z`, followed by a post-publish `--acquire` gate against the published bytes. `scripts/check_client_release_precondition.py --engine-tag engine-service-vX.Y.Z` gates the **DEPLOY, never the tag cut** (Hal directive 2026-08-02 — its pre-tag wiring forced conexus 7.1.0 to ship pinned to a pre-fence engine, its own flagship feature inert on fresh local installs; a red exit means the deploy waits for the client tag carrying the listed commits, per the paired-release choreography below). **A tag gates DELIVERY, not work**: engine changes are fully testable end-to-end on develop (`scripts/mvnw-leased.sh test` + the Python suite's engine substrate + LSG against a `build-gate-jar.sh` dev jar) — "cannot deploy yet" is never "cannot do/test/tag it" (error recurred 3x: nexus-0ehwe thread 2026-07-31 twice, the 7.1.0/v0.1.62 inversion 2026-08-02). Use the `engine-release` skill as the executable checklist, not this summary.
 - **PRE-TAG gate: release-workflow SHAPE, not just content** (nexus-xihsm). Three tags burned in one day (2026-09-05) on defects invisible to every gate above because those gates run in a DIFFERENT shape from `engine-service-release.yml` on two axes: `--shakeout` drives `service/native-smoke.sh`'s real-client probes from a `uv`-tool-INSTALLED WHEEL inside its container, where the nexus-a2qhz dev-checkout production-write guard is inert by construction, while the release workflow runs the byte-identical script from the CI CHECKOUT, where the guard fires; and every local Java leg (the host suite, `--shakeout`'s own `-Ob` build, `--candidate-migration`) runs WITH Docker, while the release build (`./mvnw -Pnative -Pprebuilt-jooq -DskipTests package`) runs on runners WITHOUT it. `scripts/check_release_workflow_shape.py` closes both: phase (a) runs native-smoke.sh's client probes from THIS checkout with a non-vacuity assert that `nexus.db.service_endpoint.is_dev_checkout_process()` is actually `True` for the process doing the asserting; phase (b) parses the release's EXACT Maven invocation out of the workflow YAML (never retyped: `extract_release_native_build_argv` is pinned against drift by `tests/scripts/test_check_release_workflow_shape.py::test_extraction_matches_the_real_workflow_file`) and runs it through `test-compile` with `DOCKER_HOST` pointed at a nonexistent socket. Self-sufficient, no manual pre-step: phase (b) populates `service/target/generated-sources/jooq` itself when absent, via `scripts/mvnw-leased.sh -q generate-sources` (the SAME command the release's separate `jooq-codegen` job runs, WITH Docker, exactly matching that job's two-stage split; routed through the leased wrapper, never a bare `./mvnw`, so it respects the one-builder-per-box lease above).
@@ -444,6 +500,12 @@ things to avoid carefully; they are impossible.
    cancelled job did; (7) a cancelled job with no run post and no sign it
    started reads `cancelled` and exits 4, because the run post is a
    separate delivery and can be missing.
+   A job that never posted is not green either (nexus-vyg07). On the develop
+   topic `ci_status.py` expects Service CI's Java job once `service change
+   detection` has completed green (`EXPECTED_JOBS`); with no row it adds a
+   `missing` one, `pending` for 30 minutes after the detector finished and
+   `failed` after that. Without it, a Java job left queued for an offline
+   `hellmini-ci` read green once its `queued` post expired at six hours.
    Subscribe once per session with
    `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
    delivery starts at the subscribe time, and the posts of one wait
@@ -561,15 +623,10 @@ things to avoid carefully; they are impossible.
     `hellmini`), or `git fetch laptop <branch>` on the mini (a fetch-only
     remote). Pushes to origin go from the laptop through
     `scripts/git-push-develop.sh` only. Run `tests/e2e/local-service-gate.sh`
-    there with `</dev/null`. The same box is the self-hosted GitHub Actions
-    runner (label `hellmini`) for tag-triggered release jobs, the PG-bundle
-    cache seed. Since 2026-09-30 (Sam) a second runner on the same box, label
-    `hellmini-ci` under its own macOS user `ghci`, takes the Service CI Java job
-    on owner pushes. No workflow routes a pull-request job to either (a routing
-    rule, not a security boundary, see § Engine-service release). Set the
-    repository variable `SERVICE_CI_PUSH_RUNNER=ubuntu-latest` to move that job
-    back to GitHub's runners while hellmini is down. See § Engine-service release. How-to
-    and host details: T2 `nexus/hellmini-second-test-host-howto`.
+    there with `</dev/null`. The same box is also two self-hosted GitHub
+    Actions runners (`hellmini` for release jobs, `hellmini-ci` for the Service
+    CI Java job); see § Self-hosted runners and fork PRs. How-to and host
+    details: T2 `nexus/hellmini-second-test-host-howto`.
 
 **Moving an in-flight session.** Cherry-pick or apply into the new worktree
 FIRST and verify there, and only then revert the primary — never the

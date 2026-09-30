@@ -584,8 +584,6 @@ class TestReconcileWriteFailureIsolated:
         ``test_kill_control_without_reconcile_no_longer_wedges_after_gate2``'s
         non-vacuity control.
         """
-        import nexus.doc_indexer as doc_indexer_module
-
         from nexus.catalog.factory import make_catalog_reader
         from nexus.catalog.http_catalog_client import HttpCatalogClient
         from nexus.db.http_vector_client import HttpVectorClient
@@ -621,10 +619,10 @@ class TestReconcileWriteFailureIsolated:
         with patch("nexus.doc_indexer.PDFExtractor") as ME2, \
              patch("nexus.doc_indexer.PDFChunker") as MC2, \
              patch.object(HttpCatalogClient, "update", side_effect=RuntimeError("simulated transient reconcile-write failure")), \
-             patch("nexus.doc_indexer._fence_begin",
-                   wraps=doc_indexer_module._fence_begin) as spy_begin, \
-             patch("nexus.doc_indexer._fence_complete",
-                   wraps=doc_indexer_module._fence_complete) as spy_complete:
+             patch.object(HttpCatalogClient, "begin_index_run", autospec=True,
+                          side_effect=HttpCatalogClient.begin_index_run) as spy_begin, \
+             patch.object(HttpCatalogClient, "write_manifest_many", autospec=True,
+                          side_effect=HttpCatalogClient.write_manifest_many) as spy_write:
             ME2.return_value.extract.side_effect = _extract_side_effect(1, result)
             MC2.return_value.chunk.return_value = _fake_chunks(4, prefix="run2")
             # No pytest.raises: post-GATE-2 the manifest carries the run's
@@ -639,18 +637,20 @@ class TestReconcileWriteFailureIsolated:
         # ── Proof 1: both fence legs ran, each with the RESOLVED tumbler.
         # The nexus-ir68m damage (reconcile failure discarding the tumbler,
         # returning "") leaves both of these at zero calls, because
-        # index_pdf gates them on `if _catalog_doc_id_for_batch:`.
+        # index_pdf refuses a run with no catalog document (RDR-223).
+        # The fence begins inside the combined writer (its first request) and, for a one-request
+        # document, the completion stamp rides that same write_manifest_many.
         assert spy_begin.call_count == 1, (
-            "_fence_begin never fired — the run fell OUT of RUNFENCE, which "
+            "begin_index_run never fired — the run fell OUT of RUNFENCE, which "
             "is the nexus-ir68m damage: a failed reconcile write discarded "
             f"an already-resolved tumbler. Calls: {spy_begin.call_args_list!r}"
         )
-        assert spy_begin.call_args_list[0].args[0] == doc_id, spy_begin.call_args_list
-        assert spy_complete.call_count == 1, (
-            "_fence_complete never fired — the run began but never closed "
-            f"the fence. Calls: {spy_complete.call_args_list!r}"
+        assert spy_begin.call_args_list[0].args[1] == doc_id, spy_begin.call_args_list
+        assert spy_write.call_count == 1, spy_write.call_args_list
+        assert doc_id in (spy_write.call_args_list[0].kwargs.get("complete") or {}), (
+            "the write carried no completion stamp — the run began but never closed "
+            f"the fence. Calls: {spy_write.call_args_list!r}"
         )
-        assert spy_complete.call_args_list[0].args[0] == doc_id, spy_complete.call_args_list
 
         entry = reader.resolve(doc_id)
         assert entry is not None

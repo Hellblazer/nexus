@@ -672,13 +672,12 @@ def _index_dt_content_record(
     record), never an exception. Returns ``True`` only when chunks were written
     AND the DT identity was stamped.
 
-    ``ChunkLandingUnverifiedError`` and ``IndexRunVerifyRefused`` (both
-    ``NexusError`` subclasses ``index_markdown``'s fence can raise —
-    errors.py:196, 234) are deliberately NOT part of the except tuple below
-    and are left to propagate to the caller (nexus-hb10j) — mirroring
+    ``IndexRunVerifyRefused`` (a ``NexusError`` subclass ``index_markdown``'s
+    fence can raise) is deliberately NOT part of the except tuple below
+    and is left to propagate to the caller (nexus-hb10j) — mirroring
     ``_index_record``'s "indexer exception is a precondition" contract.
-    ``index_cmd``'s ``dt_content_active`` branch catches both at the call
-    site and converts them into a failed-record entry, exactly like the
+    ``index_cmd``'s ``dt_content_active`` branch catches it at the call
+    site and converts it into a failed-record entry, exactly like the
     file-backed branch does.
 
     The extracted text is cached at a STABLE per-UUID path
@@ -1107,12 +1106,7 @@ def index_cmd(
     # nexus-5xn3k.6 substantive-critic CRITICAL (nexus-qo84l): must be bound
     # before the per-record try/except below reaches its `except
     # IndexRunVerifyRefused` clause.
-    #
-    # nexus-tp8yk substantive-critic CRITICAL (nexus-9800y, 2026-08-04): same
-    # bind-before-use requirement for the new `except ChunkLandingUnverifiedError`
-    # clause below.
     from nexus.errors import (  # noqa: PLC0415 — deferred: rare-branch exception type, matches file convention
-        ChunkLandingUnverifiedError,
         IndexRunVerifyRefused,
         PER_RECORD_SURVIVABLE_EXCEPTIONS,
     )
@@ -1197,8 +1191,8 @@ def index_cmd(
                     # generic final `else` for any OTHER
                     # PER_RECORD_SURVIVABLE_EXCEPTIONS member. The
                     # original binary if/else assumed its else branch was
-                    # always ChunkLandingUnverifiedError-shaped (accessed
-                    # .collection/.count unconditionally); a hypothetical
+                    # always one known exception's shape (accessed its
+                    # fields unconditionally); a hypothetical
                     # THIRD tuple member without that shape would have hit
                     # AttributeError INSIDE this handler and escaped the
                     # try/except, re-aborting the batch — occurrence-4 of
@@ -1223,14 +1217,6 @@ def index_cmd(
                         )
                         refused_in_failed += 1
                         failed.append((uuid, path, _index_run_refused_message(exc, target_collection=dt_collection)))
-                    elif isinstance(exc, ChunkLandingUnverifiedError):
-                        _log.error(
-                            "dt_content_chunk_landing_unverified",
-                            uuid=uuid,
-                            collection=exc.collection,
-                            count=exc.count,
-                        )
-                        failed.append((uuid, path, str(exc)))
                     else:
                         # Generic fallback: a PER_RECORD_SURVIVABLE_
                         # EXCEPTIONS member this dispatch does not know
@@ -1291,11 +1277,7 @@ def index_cmd(
             # streaming or incremental path (index_pdf -> pipeline_index_pdf
             # / _index_pdf_incremental -> _fence_complete) can propagate
             # IndexRunVerifyRefused by contract (the fail-loud completion
-            # verify); index_pdf/index_markdown raise ChunkLandingUnverifiedError
-            # from _upsert_skip_reembed when a stale-positive existing_ids
-            # probe meets an engine response that omits "missing" (cannot
-            # tell whether the batch landed) — BEFORE any manifest row is
-            # committed. Pre-fix either fell through the narrow except tuple
+            # verify). Pre-fix either fell through the narrow except tuple
             # entirely, escaping the loop and aborting the WHOLE `nx dt
             # index` batch on the first affected record — the nexus-2fyb/
             # nexus-qo84l/nexus-9800y regression class. Convert to a
@@ -1316,8 +1298,8 @@ def index_cmd(
             # per known type, plus a generic final `else` for any OTHER
             # PER_RECORD_SURVIVABLE_EXCEPTIONS member. Identical rationale
             # to the --dt-content branch's twin fix above: the old binary
-            # if/else assumed its else branch was always
-            # ChunkLandingUnverifiedError-shaped, so a hypothetical THIRD
+            # if/else assumed its else branch was always one known
+            # exception's shape, so a hypothetical THIRD
             # tuple member without that shape would raise AttributeError
             # here and escape the try/except, re-aborting the batch —
             # exactly occurrence-4 of this bug class, invisible to both
@@ -1338,15 +1320,6 @@ def index_cmd(
                 )
                 refused_in_failed += 1
                 failed.append((uuid, path, _index_run_refused_message(exc, target_collection=resolved_collection)))
-            elif isinstance(exc, ChunkLandingUnverifiedError):
-                _log.error(
-                    "dt_index_chunk_landing_unverified",
-                    uuid=uuid,
-                    path=path,
-                    collection=exc.collection,
-                    count=exc.count,
-                )
-                failed.append((uuid, path, str(exc)))
             else:
                 # Generic fallback: a PER_RECORD_SURVIVABLE_EXCEPTIONS
                 # member this dispatch does not know about yet. No

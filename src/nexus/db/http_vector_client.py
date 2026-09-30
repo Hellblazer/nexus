@@ -4256,22 +4256,24 @@ class HttpVectorClient:
         A genuinely non-empty ``missing`` (every page reported, at least one
         id was actually stale) ALSO logs a WARNING — ``update_chunks_missing_
         reported`` — from THIS method, unconditionally, regardless of what
-        the caller does with the return value. Every call site (the
-        frecency-only reindex path, ``pipeline_stages.py``, ``indexer.py``,
-        and ``doc_indexer.py``'s repair reroute below) gets the anomaly
-        signal for free, not just the one caller that happens to act on it.
-        ``doc_indexer._upsert_skip_reembed`` additionally logs its own
-        ``update_chunks_missing_rerouted`` when it re-routes — that is the
-        separate CALLER-SIDE repair log, not a duplicate of this one.
+        the caller does with the return value. Every call site gets the
+        anomaly signal for free: the four callers left are the two streaming
+        post-passes in ``pipeline_stages.py``, ``indexer.py``'s metadata pass and
+        ``T3Database``'s own, and none of them acts on the return value.
+        (``doc_indexer._upsert_skip_reembed``, the one caller that used to
+        re-route a stale positive through a full upsert and log
+        ``update_chunks_missing_rerouted``, was removed at RDR-223: every
+        indexer writes chunks with their owner rows in one request now, so no
+        caller reroutes.)
 
-        Division of labor (nexus-5xn3k.5 vs .4): this method — and its one
-        reroute caller — repairs a STALE-POSITIVE PROBE miss: the id was
-        reported present by ``existing_ids`` but was already gone by the
-        time this metadata-only update ran. It does NOT protect against a
-        row vanishing AFTER a successful write (a post-repair race) — that
-        window is the ``/index-run/complete`` fail-closed verify's job
-        (bead nexus-5xn3k.4, RUNFENCE verify-then-stamp). Do not treat this
-        path as covering that later window.
+        Division of labor (nexus-5xn3k.5 vs .4): this method REPORTS a
+        STALE-POSITIVE miss (an id the caller believed present that was
+        already gone by the time this metadata-only update ran); it does not
+        repair one, and it cannot protect against a row vanishing AFTER a
+        successful write. That window is the ``/index-run/complete``
+        fail-closed verify's job (bead nexus-5xn3k.4, RUNFENCE
+        verify-then-stamp). The pins for the contract above live in
+        ``tests/db/test_http_vector_client.py::TestUpdateChunksMissing``.
         """
         if not ids:
             return []

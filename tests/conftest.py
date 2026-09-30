@@ -1524,7 +1524,7 @@ _MANDATORY_PIN_PROPERTY = "nx_mandatory_pin_marked"
 # pytest_collection_modifyitems -- the identical session.items-mutation
 # mechanism `-m`/`-k` deselection uses (the same mechanism nexus-8x4le's
 # `-m lint` blind spot exploited). Under that real invocation the census
-# only ever sees its own shard (~20-25% of the corpus): enforcement was
+# only ever sees its own shard (1/N of the corpus, about 17% at 6 shards): enforcement was
 # shard-placement luck, not real coverage. This section makes that state
 # structurally impossible to mistake for enforcement -- ANY
 # session.items-based census can call partial_session_view_reason(request)
@@ -1561,7 +1561,7 @@ def pytest_itemcollected(item: pytest.Item) -> None:
 # collected count), a session.items-based census cannot see enough of the
 # corpus to mean anything. 50% is generous headroom over both known shrink
 # mechanisms: `-m lint` collapses to ~6% (803/13101) and a pytest-split
-# shard to ~20-25% (2796/13101) -- either trips this floor by a wide
+# shard to 1/N (about 17% at 6 shards; 2796/13101, 21%, when it was 4-way on 2026-08-06) -- either trips this floor by a wide
 # margin. The normal default-loop reduction from
 # `-m 'not integration and not slow and not lint'` alone measures ~90%
 # (11733/13101, reproduced live 2026-08-06) and stays comfortably above it.
@@ -1709,9 +1709,10 @@ def pytest_runtest_setup(item: pytest.Item) -> None:
 #
 # The new `pytest (mode-declarations census)` job needs request.session.
 # items to be the REAL full default-loop corpus (so the guard above finds
-# it trustworthy), but must not pay to EXECUTE ~11.7k tests' fixtures
-# (engine substrate, PG, service jar -- the ~25min the sharded `test`
-# matrix already pays 4x for). Narrowing via `-k`/`-m` is not an option --
+# it trustworthy), but must not pay to EXECUTE the whole corpus's fixtures
+# (engine substrate, PG, service jar -- the 9 to 12 minutes of test time that
+# each of the six sharded `test` legs already pays, measured 2026-09-30).
+# Narrowing via `-k`/`-m` is not an option --
 # that shrinks session.items through the exact items[:] = selected
 # mechanism this whole guard exists to catch. SKIP-marking instead of
 # deselecting keeps every item in session.items (collection is untouched)

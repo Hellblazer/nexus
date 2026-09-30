@@ -239,6 +239,55 @@ class TestChunks:
         assert db.count_embedded_chunks("h1") == 2
 
 
+class TestResetUploaded:
+    """``POST /v1/pipeline/reset_uploaded`` and the ``uploaded_chunks`` count (RDR-223): the twin of
+    ``PipelineHandlerTest.resetUploaded_*``. A killed upload is re-sent from position 0 without
+    re-extracting: the flags go back, the pages and chunks stay."""
+
+    @pytest.fixture(autouse=True)
+    def _run(self, db):
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        for i in range(2):
+            db.write_page("h1", i, f"page {i}")
+        for i in range(3):
+            db.write_chunk("h1", i, f"text{i}", f"cid-{i}", embedding=b"")
+        db.update_progress("h1", total_pages=2, pages_extracted=2, chunks_created=3,
+                           chunks_embedded=3, chunks_uploaded=2)
+        db.mark_uploaded("h1", [0, 1])
+
+    def test_chunk_counts_are_embedded_and_uploaded_without_reading_rows(self, db):
+        assert db.chunk_counts("h1") == (3, 2)
+
+    def test_reset_puts_the_flags_back_and_keeps_pages_chunks_and_progress(self, db):
+        assert [r["chunk_index"] for r in db.read_uploadable_chunks("h1")] == [2]
+        assert db.reset_uploaded("h1") == 2
+        assert [r["chunk_index"] for r in db.read_uploadable_chunks("h1")] == [0, 1, 2]
+        assert db.chunk_counts("h1") == (3, 0)
+        assert len(db.read_pages("h1")) == 2
+        state = db.get_pipeline_state("h1")
+        assert state["chunks_uploaded"] == 0
+        assert (state["total_pages"], state["pages_extracted"]) == (2, 2)
+        assert (state["chunks_created"], state["chunks_embedded"]) == (3, 3)
+        assert db.reset_uploaded("h1") == 0, "idempotent"
+
+    def test_a_stale_epoch_is_refused_and_flips_nothing(self, db, engine):
+        pid = db.pipeline_id_for("h1")
+        db.mark_failed("h1", "killed")
+        stale = db.run_epoch_for("h1")
+        db.create_pipeline("h1", "/a.pdf", "docs__test")            # a takeover: the epoch moves on
+        assert db.run_epoch_for("h1") == stale + 1
+        with pytest.raises(PipelineRunFenced):
+            db._post_fenced("/v1/pipeline/reset_uploaded",
+                            {"content_hash": "h1", "pipeline_id": pid, "run_epoch": stale})
+        assert db.chunk_counts("h1") == (3, 2)
+
+    def test_an_unknown_run_resets_nothing(self, db, engine):
+        assert engine.reset_uploaded({"content_hash": "nope"}) == {"reset": 0}
+
+    def test_counts_with_no_ref_carry_a_zero_uploaded_count(self, engine):
+        assert engine.counts({})["uploaded_chunks"] == 0
+
+
 class TestCleanup:
     def test_delete_pipeline_data(self, db):
         db.create_pipeline("h1", "/a.pdf", "docs__test")

@@ -840,31 +840,25 @@ def _fake_pdf_chunks():
     ]
 
 
-def test_manifest_hook_exception_via_doc_indexer_pdf_channel_runfence_already_refuses(
+def test_index_pdf_small_document_no_longer_depends_on_the_manifest_hook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """critic round-2 (code-review Important): covers the OTHER real
-    dispatch site the manifest hook occupies unconditionally --
-    doc_indexer.py's small-document PDF path (`index_pdf`,
-    streaming="never"): ``hooks.fire_batch(...)`` there carries no
-    ``grain=`` override at all, so it fires every hook including the real
-    ``manifest_write_batch_hook`` regardless of its own ``batch_grain``
-    classification (unlike channel 3's caller, whose grain filtering is
-    exactly what round 1's test-artifact bug hinged on).
+    """The small-document PDF path (``index_pdf``, ``streaming="never"``) used to be the OTHER
+    dispatch site the manifest hook occupied unconditionally: ``hooks.fire_batch(...)`` carried no
+    ``grain=`` override, so it fired the real ``manifest_write_batch_hook``, and a fault in the hook's
+    catalog gate (``mcp_infra.get_catalog`` raising) was only caught, loudly, by RUNFENCE's completion
+    refusal (``IndexRunVerifyRefused``, referenced=0). Since RDR-223 (nexus-z0o2p.15) the chunks and
+    their owner rows are one request and the hook is dropped from this path, so the same fault cannot
+    reach the write: the run succeeds, the manifest is whole and the document is stamped complete.
+    (The markdown twin is ``test_index_markdown_no_longer_depends_on_the_manifest_hook``.)
 
-    Demonstrates why THIS bead's own collector-based signal is not what
-    surfaces a failure on this channel: RUNFENCE's own, INDEPENDENT,
-    PRE-EXISTING ``_fence_complete`` call (nexus-5xn3k, predates
-    nexus-wbfpw.29 entirely) already raises ``IndexRunVerifyRefused`` the
-    instant the manifest write comes back with zero referenced rows for a
-    claimed non-zero chunk count -- a different, older, and LOUDER failure
-    mode that fires before this bead's exit-code check is ever consulted
-    on this channel. Fault injection is the SAME seam as channel 3
-    (``mcp_infra.get_catalog`` raising), driving the REAL, unpatched hook.
+    It FAILS if the hook stays on the path: the faulting ``get_catalog`` makes the hook record a
+    manifest write failure for the document, so an empty collector is the proof the hook never ran.
     """
+    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.doc_indexer import _register_or_lookup_doc_id, index_pdf
-    from nexus.errors import IndexRunVerifyRefused
 
     import nexus.mcp_infra as mcp_infra
 
@@ -882,6 +876,19 @@ def test_manifest_hook_exception_via_doc_indexer_pdf_channel_runfence_already_re
         raise RuntimeError("nexus-wbfpw.29 fault injection (channel 4)")
 
     monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
+    # Arm the collectors the hook records into (they are no-ops until a run resets them).
+    mcp_infra.reset_manifest_write_failures()
+    mcp_infra.reset_manifest_identity_drops()
+
+    manifest_writes: list[str] = []
+    real_post = HttpCatalogClient._post
+
+    def counting_post(self, path, body=None, **kw):
+        if path in ("/manifest/write_many", "/manifest/append", "/manifest/replace"):
+            manifest_writes.append(path)
+        return real_post(self, path, body, **kw)
+
+    monkeypatch.setattr(HttpCatalogClient, "_post", counting_post)
 
     t3 = HttpVectorClient()
     with patch("nexus.doc_indexer.PDFExtractor") as ME, \
@@ -890,20 +897,21 @@ def test_manifest_hook_exception_via_doc_indexer_pdf_channel_runfence_already_re
             _fake_pdf_extraction_result()
         )
         MC.return_value.chunk.return_value = _fake_pdf_chunks()
+        n = index_pdf(
+            pdf_path, "wbfpw29-channel4-gate", t3=t3,
+            collection_name=collection, streaming="never",
+        )
 
-        with pytest.raises(IndexRunVerifyRefused) as excinfo:
-            index_pdf(
-                pdf_path, "wbfpw29-channel4-gate", t3=t3,
-                collection_name=collection, streaming="never",
-            )
-
-    # RUNFENCE's own counts prove the manifest was genuinely never
-    # written this run (referenced=0) despite one real chunk landing --
-    # exactly the shape this bead's collectors describe, caught here by
-    # an entirely separate, pre-existing mechanism.
-    assert excinfo.value.doc_id == doc_id
-    assert excinfo.value.referenced == 0
-    assert excinfo.value.chunk_count == 1
+    assert n == 1
+    # The hook did not run: had it, its faulting catalog gate would have recorded this document.
+    assert mcp_infra.get_manifest_write_failures() == []
+    assert mcp_infra.get_manifest_identity_drops() == []
+    assert manifest_writes == ["/manifest/write_many"], "the combined write is the only manifest write"
+    reader = make_catalog_reader()
+    assert reader is not None
+    assert len(reader.get_manifest(doc_id)) == 1
+    entry = reader.resolve(doc_id)
+    assert entry is not None and entry.index_state == "complete"
 
 
 def test_index_markdown_no_longer_depends_on_the_manifest_hook(

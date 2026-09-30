@@ -10,7 +10,8 @@
 # 'runner-probe/**' branch, never pull_request or push to develop/main — this
 # runner takes release jobs (Sam's directive). Since 2026-09-30 the Service CI
 # Java job (service-ci.yml; nexus-f5i1m) runs on a separate runner, label
-# `hellmini-ci` under its own macOS user, not on this one. No workflow here
+# `hellmini-ci` under its own macOS user, not on this one; its isolation from
+# this runner is checked by hellmini-ci-isolation-probe.yml. No workflow here
 # routes a pull_request job to either (a routing rule, not a security
 # boundary; see service-ci.yml), and this probe itself must not become a
 # routine PR/push trigger.

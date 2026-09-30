@@ -221,7 +221,14 @@ class TestIndexPdfPipeline:
     def test_upserts_chunks_with_real_extraction(
         self, simple_pdf: Path, monkeypatch
     ) -> None:
-        """AC-S3: Real extraction + mocked embed → upsert called, return count > 0."""
+        """AC-S3: Real extraction + mocked embed → the chunks are written (with their owner rows,
+        RDR-223), return count > 0."""
+        from tests._owner_write_double import install_streaming_writer
+
+        # The simple PDF opens with pymupdf, so it routes through the streaming pipeline, whose
+        # uploader hands the chunks to the document's multi-batch writer; this file's fake T3
+        # handle and ids cannot reach the real engine, so the writer is a recorder.
+        writer = install_streaming_writer(monkeypatch)
         set_credentials(monkeypatch)
         mock_t3, _ = self._fresh_mock_t3()
 
@@ -245,7 +252,9 @@ class TestIndexPdfPipeline:
         )
 
         assert count > 0
-        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+        mock_t3.upsert_chunks_with_embeddings.assert_not_called()
+        (w,) = writer.instances
+        assert sum(len(chunks) for _, chunks in w.batches) == count
 
     def test_skip_when_already_indexed(self, simple_pdf: Path, monkeypatch) -> None:
         """AC-S4: Same hash + model already stored → staleness guard returns 0."""

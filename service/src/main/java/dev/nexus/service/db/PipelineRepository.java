@@ -628,6 +628,52 @@ public final class PipelineRepository {
         });
     }
 
+    /**
+     * Put every chunk of ONE run back to "not yet uploaded", keeping the extracted pages, the
+     * chunks and their embeddings (RDR-223, nexus-z0o2p.11). A client killed part way through an
+     * upload took its writer's state (the pre-run manifest snapshot, the positions and chashes it
+     * wrote) with it, so the remaining chunks cannot be sent alone: the rerun re-sends the document
+     * from position 0 with a fresh writer. Re-extracting for that would repeat the expensive part;
+     * this route makes the flags the only thing the rerun has to undo. {@code chunks_uploaded} is
+     * zeroed in the SAME transaction as the flags (the counter is the flags' summary, nexus-33q80),
+     * and the run is locked with the same epoch check as every other write route, so a run that was
+     * taken over cannot reset the new owner's flags. Returns the number of flags that were set.
+     */
+    public int resetUploaded(String tenant, PipelineRef ref) {
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        return tenantScope.withTenant(tenant, ctx -> {
+            LockedRun run = lockRun(ctx, tenant, ref);
+            if (run == null) return 0;
+            long id = run.pipelineId();
+            int reset = ctx.update(PDF_CHUNKS)
+                           .set(PDF_CHUNKS.UPLOADED, Boolean.FALSE)
+                           .where(PDF_CHUNKS.TENANT_ID.eq(tenant)
+                                   .and(PDF_CHUNKS.PIPELINE_ID.eq(id))
+                                   .and(PDF_CHUNKS.UPLOADED.isTrue()))
+                           .execute();
+            ctx.update(PDF_PIPELINE)
+               .set(PDF_PIPELINE.CHUNKS_UPLOADED, 0)
+               .set(PDF_PIPELINE.UPDATED_AT, now)
+               .where(PDF_PIPELINE.TENANT_ID.eq(tenant).and(PDF_PIPELINE.PIPELINE_ID.eq(id)))
+               .execute();
+            return reset;
+        });
+    }
+
+    /** Chunks of ONE run that were embedded and flagged uploaded. With {@link #countEmbeddedChunks}
+     *  it gives the unsent count without reading a row: embedded minus uploaded. */
+    public int countUploadedChunks(String tenant, PipelineRef ref) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Long id = resolveIn(ctx, tenant, ref);
+            if (id == null) return 0;
+            return ctx.fetchCount(PDF_CHUNKS,
+                PDF_CHUNKS.TENANT_ID.eq(tenant)
+                    .and(PDF_CHUNKS.PIPELINE_ID.eq(id))
+                    .and(PDF_CHUNKS.UPLOADED.isTrue())
+                    .and(PDF_CHUNKS.EMBEDDING.isNotNull()));
+        });
+    }
+
     /** Embedded chunks of ONE run: a second document sharing the bytes starts
      *  at zero (the deadlock the key-widen attempt had: a sibling's count
      *  seeded the chunker past chunks the new row never uploaded). */

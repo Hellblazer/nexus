@@ -273,7 +273,13 @@ def owner_write(monkeypatch):
     """
     from tests import _owner_write_double
 
-    return _owner_write_double.install(monkeypatch)
+    rec = _owner_write_double.install(monkeypatch)
+    # RDR-223 (nexus-z0o2p.11): the streaming pipeline's writer, for the tests that drive a real,
+    # pymupdf-openable PDF through the streaming route.
+    rec.streaming = _owner_write_double.install_streaming_writer(monkeypatch)
+    lift_write = rec.restore_real_write
+    rec.restore_real_write = lambda: (lift_write(), rec.streaming.restore_real_writer())  # type: ignore[attr-defined]
+    return rec
 
 
 @pytest.fixture
@@ -295,6 +301,14 @@ def empty_col():
     col = MagicMock()
     col.get.return_value = {"ids": [], "metadatas": []}
     return col
+
+
+@pytest.fixture
+def throwaway_t3():
+    """A dry run's store: in-memory, the only kind a PDF dry run accepts (RDR-223)."""
+    from tests._owner_write_double import throwaway_t3 as _make
+
+    return _make()
 
 
 @pytest.fixture
@@ -493,7 +507,7 @@ class TestIndexPdfUnchunkableGuard:
 
 class TestIndexPdfDryRunNeverTouchesCatalog:
     def test_dry_run_never_calls_register_or_lookup_doc_id(
-        self, sample_pdf, mock_t3,
+        self, sample_pdf, throwaway_t3,
     ):
         """A recorded catalog fake proves ZERO catalog calls on dry_run —
         not just an empty end state — while the preview still reports a
@@ -505,13 +519,13 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
         with patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register:
             with pdf_extract_patches_ctx():
                 result = index_pdf(
-                    sample_pdf, corpus="uxg4u-dry-run", t3=mock_t3,
+                    sample_pdf, corpus="uxg4u-dry-run", t3=throwaway_t3,
                     embed_fn=_fake_embed, hooks=HookRegistry(), dry_run=True,
                 )
         mock_register.assert_not_called()
         assert result == 1  # the real chunk from pdf_extract_patches_ctx()
 
-    def test_dry_run_never_calls_catalog_pdf_hook(self, sample_pdf, mock_t3):
+    def test_dry_run_never_calls_catalog_pdf_hook(self, sample_pdf, throwaway_t3):
         """The batch-path catalog hook (``_catalog_pdf_hook``) writes
         unconditionally regardless of doc_id -- it needs its own gate,
         not just an empty doc_id, and this proves that gate holds."""
@@ -521,13 +535,13 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
         with patch("nexus.pipeline_stages._catalog_pdf_hook") as mock_hook:
             with pdf_extract_patches_ctx():
                 index_pdf(
-                    sample_pdf, corpus="uxg4u-dry-run-hook", t3=mock_t3,
+                    sample_pdf, corpus="uxg4u-dry-run-hook", t3=throwaway_t3,
                     embed_fn=_fake_embed, hooks=HookRegistry(), dry_run=True,
                 )
         mock_hook.assert_not_called()
 
     def test_dry_run_real_engine_leaves_doc_count_unchanged(
-        self, sample_pdf, mock_t3,
+        self, sample_pdf, throwaway_t3,
     ):
         """End-to-end against the REAL local test engine (autouse T2
         substrate, see ``_no_propagating_fence_complete``'s docstring) --
@@ -539,7 +553,7 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
         before = count_documents()
         with pdf_extract_patches_ctx():
             result = index_pdf(
-                sample_pdf, corpus="uxg4u-dry-run-engine", t3=mock_t3,
+                sample_pdf, corpus="uxg4u-dry-run-engine", t3=throwaway_t3,
                 embed_fn=_fake_embed, hooks=HookRegistry(), dry_run=True,
             )
         assert result == 1
@@ -547,7 +561,7 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
         assert documents_by_file_path(str(sample_pdf.resolve())) == []
 
     def test_dry_run_with_default_hooks_fires_zero_hooks(
-        self, sample_pdf, mock_t3,
+        self, sample_pdf, throwaway_t3,
     ):
         """nexus-uxg4u round 2 (Critical, both reviewers): today's
         safety is the CLI's own convention of passing an empty
@@ -565,7 +579,7 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
                 patch("nexus.aspect_worker.aspect_extraction_enqueue_hook") as mock_aspect:
             with pdf_extract_patches_ctx():
                 result = index_pdf(
-                    sample_pdf, corpus="uxg4u-dry-run-default-hooks", t3=mock_t3,
+                    sample_pdf, corpus="uxg4u-dry-run-default-hooks", t3=throwaway_t3,
                     embed_fn=_fake_embed, dry_run=True,  # hooks=None (default)
                 )
         assert result == 1
@@ -577,14 +591,28 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
 # ── nexus-uxg4u task 2: fresh-mint rollback on post-registration failure ────
 
 
+def _refusal(doc_id: str):
+    from nexus.errors import IndexRunVerifyRefused
+
+    return IndexRunVerifyRefused(
+        doc_id=doc_id, referenced=0, present=0, missing=0, chunk_count=1)
+
+
 class TestIndexPdfFreshMintRollback:
-    def test_index_run_verify_refused_rolls_back_freshly_minted_doc(
-        self, sample_pdf, mock_t3, monkeypatch,
+    def test_index_run_verify_refused_keeps_a_freshly_minted_doc(
+        self, sample_pdf, mock_t3, monkeypatch, owner_write,
     ):
-        """A run that MINTED its own catalog Document (created=True) and
-        then fails the completion fence must roll that registration back
-        exactly once, with the minted doc_id, then re-raise -- never
-        silently swallowing the refusal."""
+        """A run that MINTED its own catalog Document (created=True) and then has the engine refuse
+        the completion stamp: every request of the write had already come back, so the document
+        has its chunks, each with an owner row, and tombstoning the document would hide them. The
+        document is KEPT (no rollback), the refusal propagates, and the fence is left ``indexing``
+        (``_fence_fail`` is not called; the real-engine case is in
+        ``tests/integration/test_rdr223_pdf_journey.py``).
+
+        The recorder does what the real writer does: it reports each request that came back
+        (``on_request``) before the stamp is tried. An earlier version of this test had the write
+        itself raise the refusal without ever reporting a request, a state the real writer cannot
+        produce, and asserted a rollback it cannot reach."""
         from nexus.doc_indexer import index_pdf
         from nexus.errors import IndexRunVerifyRefused
         from nexus.hook_registry import HookRegistry
@@ -617,20 +645,21 @@ class TestIndexPdfFreshMintRollback:
         with patch(
             "nexus.doc_indexer._register_or_lookup_doc_id",
             side_effect=_register_side_effect,
-        ), patch("nexus.doc_indexer._fence_begin"), patch(
-            "nexus.doc_indexer._fence_complete", side_effect=_refuse,
-        ):
+        ), patch("nexus.doc_indexer._fence_fail") as mock_fail:
+            # RDR-223 (D2): the stamp is its own request, after the write and the hooks.
+            owner_write.complete_raises = _refusal(minted_doc_id)
             with pdf_extract_patches_ctx():
                 with pytest.raises(IndexRunVerifyRefused):
                     index_pdf(
                         sample_pdf, corpus="uxg4u-rollback", t3=mock_t3,
                         embed_fn=_fake_embed, hooks=HookRegistry(),
                     )
-        assert len(rollback_calls) == 1
-        assert rollback_calls[0][0] == minted_doc_id
+        assert rollback_calls == [], "the chunks landed: the document is kept"
+        mock_fail.assert_not_called()   # the fence stays 'indexing'
+        assert [e[0] for e in owner_write.events] == ["write", "complete"]
 
     def test_index_run_verify_refused_on_preexisting_doc_never_rolls_back(
-        self, sample_pdf, mock_t3, monkeypatch,
+        self, sample_pdf, mock_t3, monkeypatch, owner_write,
     ):
         """The SAME failure against a PRE-EXISTING document (created=False)
         must be left exactly as the fence marked it -- no rollback, since
@@ -662,9 +691,8 @@ class TestIndexPdfFreshMintRollback:
         with patch(
             "nexus.doc_indexer._register_or_lookup_doc_id",
             side_effect=_register_side_effect,
-        ), patch("nexus.doc_indexer._fence_begin"), patch(
-            "nexus.doc_indexer._fence_complete", side_effect=_refuse,
-        ) as mock_complete, patch("nexus.doc_indexer._fence_fail") as mock_fail:
+        ), patch("nexus.doc_indexer._fence_fail") as mock_fail:
+            owner_write.complete_raises = _refusal(existing_doc_id)
             with pdf_extract_patches_ctx():
                 with pytest.raises(IndexRunVerifyRefused):
                     index_pdf(
@@ -672,10 +700,9 @@ class TestIndexPdfFreshMintRollback:
                         embed_fn=_fake_embed, hooks=HookRegistry(),
                     )
         assert rollback_calls == []
-        mock_complete.assert_called_once()
-        # _fence_complete raising propagates directly (nexus-5xn3k.4
-        # contract) -- it is not routed back through _fence_fail, which
-        # is reserved for the embed/upsert try block's own exceptions.
+        assert len(owner_write.calls) == 1, "the refusal came from the stamp of the one write"
+        # A refused stamp propagates directly (nexus-5xn3k.4 contract) -- it is not routed back
+        # through _fence_fail, which is reserved for the write's own failures.
         mock_fail.assert_not_called()
 
     def test_embed_failure_after_fresh_mint_rolls_back(
@@ -727,18 +754,56 @@ class TestIndexPdfFreshMintRollback:
         assert len(rollback_calls) == 1
         assert rollback_calls[0] == minted_doc_id
 
-    def test_worktree_skip_then_fallback_mint_rolls_back_on_fence_refusal(
-        self, sample_pdf, mock_t3, monkeypatch,
+    @pytest.mark.parametrize("request_sent", [False, True], ids=["before-any-request", "after-a-request"])
+    def test_a_fresh_registration_is_rolled_back_only_if_the_writer_sent_nothing(
+        self, sample_pdf, mock_t3, monkeypatch, owner_write, request_sent,
+    ):
+        """RDR-223 (nexus-z0o2p.11 / .15): once the writer has sent a request the document may
+        have chunks in the store, every one with an owner row, and tombstoning the document would
+        hide them. So the rollback of a freshly minted registration is for a failure BEFORE the
+        first chunk-carrying request only; after it the document is left as the fence marks it.
+        The write itself is the recorder here: ``request_sent`` makes it report a request the way
+        the real writer does, just before it raises."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.hook_registry import HookRegistry
+
+        minted_doc_id = "1.1.z0o2p-rollback"
+        rollback_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.rollback_minted_catalog_entry",
+            lambda tumbler, *, original_error="": rollback_calls.append(tumbler) or True,
+        )
+        owner_write.request_sent = request_sent
+        owner_write.raises = RuntimeError("request 2 failed")
+
+        def _register(*args, with_created=False, **kwargs):
+            return (minted_doc_id, True) if with_created else minted_doc_id
+
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id", side_effect=_register), \
+                patch("nexus.doc_indexer._fence_fail") as mock_fail:
+            with pdf_extract_patches_ctx():
+                with pytest.raises(RuntimeError, match="request 2 failed"):
+                    index_pdf(
+                        sample_pdf, corpus="z0o2p-rollback", t3=mock_t3, embed_fn=_fake_embed,
+                        hooks=HookRegistry(), streaming="never",
+                    )
+        mock_fail.assert_called_once_with(minted_doc_id, "request 2 failed", heal=False)
+        assert rollback_calls == ([] if request_sent else [minted_doc_id])
+
+    def test_worktree_skip_then_fallback_mint_is_seen_by_the_rollback_and_kept_after_a_refusal(
+        self, sample_pdf, mock_t3, monkeypatch, owner_write,
     ):
         """nexus-uxg4u round 2 (code-review-expert Finding B): doc_id can
         arrive at the small-doc branch's second registration call empty
         for a reason OTHER than "no catalog" -- the worktree/tempdir
         ephemeral-skip path or a swallowed pre-flight exception both
         return ("", False). When that second call independently mints
-        (created=True), that mint must be just as rollback-eligible on a
-        later fence refusal as a pre-flight mint would have been -- not
-        invisible to the closure that only knew about the pre-flight's
-        own (empty) outcome."""
+        (created=True), the rollback closure must KNOW about that mint,
+        not only about the pre-flight's own (empty) outcome. After a
+        refused stamp (the chunks landed) it then keeps the document, and
+        the log event it writes names the fallback-minted id: proof the
+        closure saw the mint and chose to keep it because the write had
+        happened, not because it never heard of it."""
         from nexus.doc_indexer import index_pdf
         from nexus.errors import IndexRunVerifyRefused
         from nexus.hook_registry import HookRegistry
@@ -771,12 +836,14 @@ class TestIndexPdfFreshMintRollback:
             "nexus.catalog.store_hook.rollback_minted_catalog_entry",
             _fake_rollback,
         )
+        from structlog.testing import capture_logs
+
         with patch(
             "nexus.doc_indexer._register_or_lookup_doc_id",
             side_effect=_register_side_effect,
-        ), patch("nexus.doc_indexer._fence_begin"), patch(
-            "nexus.doc_indexer._fence_complete", side_effect=_refuse,
-        ):
+        ), capture_logs() as logs:
+            # RDR-223 (D2): the stamp is its own request, after the write and the hooks.
+            owner_write.complete_raises = _refusal(fallback_doc_id)
             with pdf_extract_patches_ctx():
                 with pytest.raises(IndexRunVerifyRefused):
                     index_pdf(
@@ -784,8 +851,101 @@ class TestIndexPdfFreshMintRollback:
                         embed_fn=_fake_embed, hooks=HookRegistry(),
                     )
         assert calls["n"] >= 2, "the fallback (small-doc second) call never fired"
-        assert len(rollback_calls) == 1
-        assert rollback_calls[0] == fallback_doc_id
+        assert rollback_calls == [], "the chunks landed: the fallback-minted document is kept"
+        kept = [e for e in logs if e.get("event") == "index_pdf_fresh_registration_kept_after_write"]
+        assert [e["doc_id"] for e in kept] == [fallback_doc_id], "the closure saw the fallback mint"
+
+
+class _Killed(BaseException):
+    """A hook that dies with the process: a BaseException, so no ``except Exception`` sees it."""
+
+
+class TestTheStampComesLast:
+    """RDR-223 decision D2 (2026-09-30): every non-streaming writer path sends the completion stamp
+    AFTER the post-store hooks (``fire_batch`` / ``fire_document``), as the streaming pipeline does.
+    A stamp that rode the write left a process killed in a hook with a document that read complete
+    and never got its taxonomy assignment or aspect enqueue. The recorder's shared ``events`` log
+    holds the order of the write, each hook and the stamp."""
+
+    PATHS = ["small-pdf", "incremental-pdf", "markdown"]
+
+    @staticmethod
+    def _hooks(owner_write, *, die_in: str | None = None):
+        from nexus.hook_registry import HookRegistry
+
+        reg = HookRegistry()
+
+        def _batch_hook(*a, **kw):
+            owner_write.events.append(("batch-hook",))
+            if die_in == "batch":
+                raise _Killed()
+
+        def _document_hook(*a, **kw):
+            owner_write.events.append(("document-hook",))
+            if die_in == "document":
+                raise _Killed()
+
+        reg.register_batch(_batch_hook)
+        reg.register_document(_document_hook)
+        return reg
+
+    def _drive(self, path, *, sample_pdf, sample_md, mock_t3, monkeypatch, hooks):
+        """Run one indexing of *path* against the recorder. The catalog lookups a real run makes
+        for the document-grain hook are replaced; nothing else about the path is."""
+        monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id",
+                            lambda *a, with_created=False, **kw: ("1.1.d2", False) if with_created else "1.1.d2")
+        if path == "markdown":
+            set_credentials(monkeypatch)
+            mock_chunk = MagicMock()
+            mock_chunk.text = "chunk text"
+            mock_chunk.chunk_index = 0
+            mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 10, "page_number": 0, "header_path": "Hello"}
+            with patch("nexus.doc_indexer.make_t3", return_value=mock_t3), \
+                    patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
+                chk_cls.return_value.chunk.return_value = [mock_chunk]
+                return index_markdown(sample_md, corpus="docs", t3=mock_t3, hooks=hooks, force=True)
+        if path == "incremental-pdf":
+            monkeypatch.setattr("nexus.doc_indexer._INCREMENTAL_THRESHOLD", 0)
+        monkeypatch.setattr("nexus.doc_indexer._lookup_existing_doc_id", lambda *a, **kw: "1.1.d2")
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **kw: MagicMock())
+        monkeypatch.setattr("nexus.doc_indexer._check_document_fork", lambda *a, **kw: [])
+        with pdf_extract_patches_ctx():
+            return index_pdf(sample_pdf, corpus="d2", t3=mock_t3, embed_fn=_fake_embed,
+                             hooks=hooks, streaming="never", force=True)
+
+    @pytest.mark.parametrize("path", PATHS)
+    def test_the_stamp_is_the_last_event(self, path, sample_pdf, sample_md, mock_t3, monkeypatch, owner_write):
+        self._drive(path, sample_pdf=sample_pdf, sample_md=sample_md, mock_t3=mock_t3,
+                    monkeypatch=monkeypatch, hooks=self._hooks(owner_write))
+        kinds = [e[0] for e in owner_write.events]
+        assert kinds[0] == "write" and kinds[-1] == "complete", kinds
+        assert kinds.count("complete") == 1
+        assert "batch-hook" in kinds[1:-1]
+        if path != "markdown":
+            assert "document-hook" in kinds[1:-1], "the document-grain hook also precedes the stamp"
+        assert all(p.closed >= 1 for p in owner_write.pendings), "the write's catalog client is released"
+
+    @pytest.mark.parametrize("die_in", ["batch", "document"])
+    @pytest.mark.parametrize("path", PATHS)
+    def test_a_kill_in_a_hook_leaves_the_document_unstamped_and_the_next_run_refires_the_hooks(
+        self, path, die_in, sample_pdf, sample_md, mock_t3, monkeypatch, owner_write,
+    ):
+        if path == "markdown" and die_in == "document":
+            pytest.skip("the markdown path fires no separate document-grain hook after its batch hook")
+        with patch("nexus.doc_indexer._fence_fail") as mock_fail:
+            with pytest.raises(_Killed):
+                self._drive(path, sample_pdf=sample_pdf, sample_md=sample_md, mock_t3=mock_t3,
+                            monkeypatch=monkeypatch, hooks=self._hooks(owner_write, die_in=die_in))
+            killed_run = [e[0] for e in owner_write.events]
+            assert "complete" not in killed_run, killed_run
+            mock_fail.assert_not_called()   # a kill marks nothing: the fence stays 'indexing'
+            assert all(p.closed >= 1 for p in owner_write.pendings), "even a kill releases the client"
+
+            owner_write.events.clear()
+            self._drive(path, sample_pdf=sample_pdf, sample_md=sample_md, mock_t3=mock_t3,
+                        monkeypatch=monkeypatch, hooks=self._hooks(owner_write))
+        rerun = [e[0] for e in owner_write.events]
+        assert rerun[0] == "write" and rerun[-1] == "complete" and "batch-hook" in rerun, rerun
 
 
 class TestIndexPdfPreFenceVectorFailure:
@@ -1439,13 +1599,15 @@ def test_index_pdf_never_skips_a_document_this_call_minted(sample_pdf, monkeypat
     ext_cls.assert_called()
 
 
-def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voyage_client):
+def test_index_pdf_upserts_chunks_when_new(sample_pdf, monkeypatch, mock_t3, voyage_client, owner_write):
     set_credentials(monkeypatch)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with pdf_extract_patches_ctx() as pep:
             result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
     assert result == 1
-    mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+    # RDR-223: one write of the chunks with their owner rows; no chunk upsert of its own.
+    assert len(owner_write.calls) == 1
+    mock_t3.upsert_chunks_with_embeddings.assert_not_called()
 
 
 # ── nexus-2xu6t STEP 0: does a preflight register exception feed the
@@ -1486,7 +1648,7 @@ def test_register_or_lookup_doc_id_returns_empty_when_writer_register_raises(
 
 
 def test_preflight_register_failure_feeds_identity_drop_collector(
-    sample_pdf, monkeypatch, mock_t3, voyage_client,
+    sample_pdf, monkeypatch, mock_t3, voyage_client, owner_write,
 ):
     """nexus-2xu6t STEP 0 verdict test: a catalog-register exception during
     preflight registration must not silently vanish — it must feed the
@@ -1511,6 +1673,7 @@ def test_preflight_register_failure_feeds_identity_drop_collector(
     drop_collector``, which drives the same swallow through ``uploader_
     loop``'s hook chain.
     """
+    from nexus.errors import CatalogIdentityMissingError
     from nexus.mcp_infra import (
         get_manifest_identity_drops,
         reset_manifest_identity_drops,
@@ -1529,18 +1692,21 @@ def test_preflight_register_failure_feeds_identity_drop_collector(
          patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
          patch("nexus.catalog.factory.make_catalog_writer", return_value=writer), \
          pdf_extract_patches_ctx():
-        result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
+        # RDR-223 (nexus-z0o2p.15): a chunk is written together with its owner row and there is no
+        # owner without a catalog document, so the run fails instead of writing chunks nothing
+        # owns (live(c) hides them from every read). The drop is recorded as one that wrote
+        # nothing (``written=False``), which is what the batch summaries key on.
+        with pytest.raises(CatalogIdentityMissingError, match="no catalog document to own"):
+            index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
 
-    # Collect-and-continue (nexus-9800y convention): the registration
-    # failure must NOT abort the write — chunks land regardless.
-    assert result == 1, "registration failure must not abort the chunk write"
-    mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+    assert owner_write.calls == [], "nothing was written for a document with no owner"
+    mock_t3.upsert_chunks_with_embeddings.assert_not_called()
 
     drops = get_manifest_identity_drops()
-    assert drops, (
+    assert drops and all(d.get("written") is False for d in drops), (
         "a preflight catalog-register exception did not feed the "
-        "identity-drop collector — nx dt index / nx index repo would "
-        "report plain success on this failure (nexus-2xu6t unfixed at "
+        "identity-drop collector as a document that was not written — nx dt index / nx index repo "
+        "would report plain success on this failure (nexus-2xu6t unfixed at "
         "this call site)"
     )
 
@@ -1753,19 +1919,16 @@ def test_docs_metadata_schema_complete(sample_md, monkeypatch, mock_t3, voyage_c
     assert not missing, f"Missing metadata fields: {missing}"
 
 
-def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
+def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch, owner_write):
     set_credentials(monkeypatch)
-    captured: list[dict] = []
     mock_t3 = MagicMock()
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_t3.get_or_create_collection.return_value = mock_col
     # nexus-8143o: simple_pdf is a REAL PDF pymupdf can open, so this
     # routes through the streaming pipeline (_STREAMING_THRESHOLD=0) ->
-    # uploader_loop, which now always passes force_re_embed as a kwarg.
-    mock_t3.upsert_chunks_with_embeddings.side_effect = (
-        lambda collection, ids, documents, embeddings, metadatas, **_kwargs: captured.extend(metadatas)
-    )
+    # uploader_loop, which (RDR-223) hands every batch to the document's multi-batch writer; the
+    # recorder that stands in for it holds the chunk payloads.
     # nexus-5xn3k.4: mock_t3 never actually writes chunks to the real
     # (test-scoped) engine's T3, so the fence's fail-closed verify-then-stamp
     # would correctly (but irrelevantly here) refuse completion. This test
@@ -1776,6 +1939,10 @@ def test_pdf_metadata_schema_complete(simple_pdf: Path, monkeypatch):
     # the service-mode stub (ambient test default) produces the
     # placeholder embeddings; this test only asserts metadata shape.
     index_pdf(simple_pdf, corpus="test", t3=mock_t3)
+    captured = [
+        c["metadata"] for w in owner_write.streaming.instances for _, chunks in w.batches
+        for c in chunks
+    ]
     assert captured
     # nexus-w94eo: this captures the streaming uploader's chunk-time STUB,
     # which omits title/source_author (unknown until the post-pass) rather
@@ -1811,7 +1978,7 @@ def test_sha256_does_not_call_read_bytes(tmp_path: Path):
 @pytest.mark.parametrize("indexer,expected_type", [("pdf", "pdf"), ("markdown", "markdown")])
 def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, monkeypatch, voyage_client, owner_write):
     set_credentials(monkeypatch)
-    captured: list[dict] = owner_write.metadatas if indexer == "markdown" else []
+    captured: list[dict] = owner_write.metadatas
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_t3 = MagicMock()
@@ -1894,7 +2061,7 @@ def test_index_markdown_offsets(has_fm, fm_text, body, expected_start, expected_
 # surviving proof that server-side CCE embedding is correct.
 
 
-def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
+def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch, owner_write):
     # nexus-sghyo (2026-08-06): CCE embedding is entirely server-side now
     # (no client-side Voyage mock needed) — the assertion is that docs__
     # collections route through upsert_chunks_with_embeddings (the
@@ -1912,7 +2079,9 @@ def test_index_pdf_uses_cce_for_docs_collection(sample_pdf, monkeypatch):
         chk_cls.return_value.chunk.return_value = [mock_chunk, mock_chunk]
         result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3)
     assert result == 2
-    mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+    # RDR-223: the chunks and their owner rows are one write (the engine embeds them).
+    assert len(owner_write.calls) == 1 and len(owner_write.calls[0]["ids"]) == 2
+    mock_t3.upsert_chunks_with_embeddings.assert_not_called()
     mock_col.upsert.assert_not_called()
 
 
@@ -2024,10 +2193,8 @@ def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, c
                 result = index_markdown(path, corpus="docs", t3=mock_t3, force=True, embed_fn=_fake_embed)
 
     assert result > 0
-    if indexer == "markdown":
-        assert len(owner_write.calls) == 1
-    else:
-        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+    assert len(owner_write.calls) == 1
+    mock_t3.upsert_chunks_with_embeddings.assert_not_called()
 
 
 def test_force_default_false_still_skips(sample_pdf, monkeypatch, cloud_mode):
@@ -2061,10 +2228,9 @@ def _pdf_force_setup(sample_pdf, monkeypatch, cloud_mode):
     return mock_t3
 
 
-def test_index_pdf_small_doc_force_re_embed_true_forwards_true(sample_pdf, monkeypatch, cloud_mode):
-    """--force --re-embed reaches upsert_chunks_with_embeddings as
-    force_re_embed=True (index_pdf's small-document all-at-once path,
-    the third of the bead's three _upsert_skip_reembed call sites)."""
+def test_index_pdf_small_doc_force_re_embed_true_forwards_true(sample_pdf, monkeypatch, cloud_mode, owner_write):
+    """--force --re-embed reaches the combined chunk+owner write as
+    force_re_embed=True (index_pdf's small-document all-at-once path)."""
     mock_t3 = _pdf_force_setup(sample_pdf, monkeypatch, cloud_mode)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
@@ -2080,13 +2246,12 @@ def test_index_pdf_small_doc_force_re_embed_true_forwards_true(sample_pdf, monke
                 result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3, force=True,
                                    force_re_embed=True, embed_fn=_fake_embed)
     assert result > 0
-    _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
-    assert kwargs.get("force_re_embed") is True
+    assert owner_write.calls[-1]["force_re_embed"] is True
 
 
-def test_index_pdf_small_doc_force_without_re_embed_forwards_false(sample_pdf, monkeypatch, cloud_mode):
+def test_index_pdf_small_doc_force_without_re_embed_forwards_false(sample_pdf, monkeypatch, cloud_mode, owner_write):
     """--force alone (force_re_embed defaults False) must NOT set
-    force_re_embed=True on the server call — the whole point of this bead."""
+    force_re_embed=True on the write — the whole point of this bead."""
     mock_t3 = _pdf_force_setup(sample_pdf, monkeypatch, cloud_mode)
     with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
         with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
@@ -2102,8 +2267,7 @@ def test_index_pdf_small_doc_force_without_re_embed_forwards_false(sample_pdf, m
                 result = index_pdf(sample_pdf, corpus="mybook", t3=mock_t3, force=True,
                                    embed_fn=_fake_embed)
     assert result > 0
-    _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
-    assert kwargs.get("force_re_embed") is False
+    assert owner_write.calls[-1]["force_re_embed"] is False
 
 
 def test_index_markdown_force_re_embed_true_forwards_true(sample_md, monkeypatch, cloud_mode, owner_write):
@@ -2400,24 +2564,18 @@ def test_stale_chunk_pruning_deleted_as_dead_code(sample_md, monkeypatch, voyage
 
 
 @pytest.fixture
-def incr_setup(sample_pdf, monkeypatch, cloud_mode):
+def incr_setup(sample_pdf, monkeypatch, cloud_mode, owner_write):
     """Common setup for incremental PDF tests."""
     from nexus.doc_indexer import _INCREMENTAL_THRESHOLD
     set_credentials(monkeypatch)
     ckpt_dir = sample_pdf.parent / "ckpt"
     monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
-    monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
-    # nexus-5xn3k.4 review follow-up: _index_pdf_incremental now brackets a
-    # real _fence_complete call. This fixture's t3 is a MagicMock — no
-    # chunk ever lands in the real (test-scoped) engine's T3 — so the
-    # fence's genuine verify-then-stamp would correctly (but irrelevantly
-    # for these tests, which only assert chunk/checkpoint bookkeeping)
-    # refuse completion. Same stub as test_pipeline_stages.py's
-    # _stub_fence_complete / test_pdf_subsystem.py's per-test monkeypatch.
-    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
+
+    _rec = owner_write
 
     class _Setup:
         threshold = _INCREMENTAL_THRESHOLD
+        owner_write = _rec
         path = sample_pdf
         dir = ckpt_dir
         content_hash = hashlib.sha256(sample_pdf.read_bytes()).hexdigest()
@@ -2452,55 +2610,68 @@ def incr_setup(sample_pdf, monkeypatch, cloud_mode):
 
 def test_index_pdf_incremental_indexes_all_chunks(incr_setup):
     n = incr_setup.threshold + 10
-    result, t3 = incr_setup.run(n)
+    result, _ = incr_setup.run(n)
     assert result == n
-    total = sum(len(c.args[1]) for c in t3.upsert_chunks_with_embeddings.call_args_list)
-    assert total == n
+    # RDR-223 (nexus-z0o2p.15): one document, one write, handed over in batches.
+    (call,) = incr_setup.owner_write.calls
+    assert len(call["ids"]) == n
+    from nexus.doc_indexer import _INCREMENTAL_BATCH_SIZE
+    assert call["batch_size"] == _INCREMENTAL_BATCH_SIZE
+
+
+def test_index_pdf_incremental_makes_no_chunk_upsert(incr_setup):
+    """The chunks and their owner rows are one write; the path uploads no chunk on its own."""
+    n = incr_setup.threshold + 10
+    _, t3 = incr_setup.run(n)
+    t3.upsert_chunks_with_embeddings.assert_not_called()
+    t3.update_chunks.assert_not_called()
 
 
 def test_index_pdf_incremental_force_re_embed_true_forwards_true(incr_setup):
-    """--force --re-embed reaches every batch's upsert_chunks_with_embeddings
-    call as force_re_embed=True (_index_pdf_incremental, the second of the
-    bead's three _upsert_skip_reembed call sites)."""
+    """--force --re-embed reaches the writer as force_re_embed=True (_index_pdf_incremental)."""
     n = incr_setup.threshold + 10
-    result, t3 = incr_setup.run(n, force=True, force_re_embed=True)
+    result, _ = incr_setup.run(n, force=True, force_re_embed=True)
     assert result == n
-    assert t3.upsert_chunks_with_embeddings.call_args_list
-    for c in t3.upsert_chunks_with_embeddings.call_args_list:
-        assert c.kwargs.get("force_re_embed") is True
+    assert [c["force_re_embed"] for c in incr_setup.owner_write.calls] == [True]
 
 
 def test_index_pdf_incremental_force_without_re_embed_forwards_false(incr_setup):
-    """--force alone (force_re_embed defaults False) must NOT set
-    force_re_embed=True on any batch's server call."""
+    """--force alone (force_re_embed defaults False) must NOT set force_re_embed=True."""
     n = incr_setup.threshold + 10
-    result, t3 = incr_setup.run(n, force=True)
+    result, _ = incr_setup.run(n, force=True)
     assert result == n
-    assert t3.upsert_chunks_with_embeddings.call_args_list
-    for c in t3.upsert_chunks_with_embeddings.call_args_list:
-        assert c.kwargs.get("force_re_embed") is False
+    assert [c["force_re_embed"] for c in incr_setup.owner_write.calls] == [False]
 
 
-def test_index_pdf_incremental_resumes_from_checkpoint(incr_setup):
-    from nexus.checkpoint import CheckpointData, write_checkpoint
-    n = incr_setup.threshold + 50
-    already_done = 64
-    write_checkpoint(CheckpointData(
-        pdf=str(incr_setup.path), collection="docs__test__voyage-context-3__v1",
-        content_hash=incr_setup.content_hash, chunks_upserted=already_done,
-        total_chunks=n, embedding_model="voyage-context-3",
-    ))
-    result, t3 = incr_setup.run(n)
-    assert result == n
-    total = sum(len(c.args[1]) for c in t3.upsert_chunks_with_embeddings.call_args_list)
-    assert total == n - already_done
+def _leave_old_checkpoint(incr_setup, *, chunks_upserted: int, total_chunks: int) -> None:
+    """Write the file an older client left for the document (the writer that produced it is gone:
+    RDR-223 removed ``write_checkpoint``; ``delete_checkpoint`` and the doctor scan remain)."""
+    import json
 
-
-def test_index_pdf_incremental_deletes_checkpoint_on_success(incr_setup):
     from nexus.checkpoint import checkpoint_path
-    n = incr_setup.threshold + 10
+
+    path = checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "pdf": str(incr_setup.path), "collection": "docs__test__voyage-context-3__v1",
+        "content_hash": incr_setup.content_hash, "chunks_upserted": chunks_upserted,
+        "total_chunks": total_chunks, "embedding_model": "voyage-context-3",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+    }))
+
+
+def test_index_pdf_incremental_does_not_resume_from_a_checkpoint(incr_setup):
+    """RDR-223: the writer keeps no state across processes, so a run has no resume point (a resumed
+    write would replace the manifest with only the tail it sends). Every run sends the whole
+    document, and the checkpoint an older client left is dropped."""
+    from nexus.checkpoint import checkpoint_path
+    n = incr_setup.threshold + 50
+    _leave_old_checkpoint(incr_setup, chunks_upserted=64, total_chunks=n)
+    assert checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1").exists()
     result, _ = incr_setup.run(n)
     assert result == n
+    (call,) = incr_setup.owner_write.calls
+    assert len(call["ids"]) == n, "the whole document, not the 64-chunk tail"
     assert not checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1").exists()
 
 
@@ -2552,60 +2723,30 @@ def test_index_pdf_incremental_prune_deleted_as_dead_code(incr_setup) -> None:
 def test_index_pdf_small_doc_uses_original_path(incr_setup):
     result, t3 = incr_setup.run(5)
     assert result == 5
-    assert t3.upsert_chunks_with_embeddings.call_count == 1
+    (call,) = incr_setup.owner_write.calls
+    assert len(call["ids"]) == 5 and call["batch_size"] == 0, "one request, no batching"
+    t3.upsert_chunks_with_embeddings.assert_not_called()
 
 
-def test_index_pdf_incremental_writes_checkpoints_per_batch(sample_pdf, monkeypatch):
+def test_index_pdf_incremental_writes_no_checkpoint(incr_setup):
+    from nexus.checkpoint import checkpoint_path
     from nexus.doc_indexer import _INCREMENTAL_BATCH_SIZE
-    from nexus.checkpoint import CheckpointData
-    set_credentials(monkeypatch)
-    ckpt_dir = sample_pdf.parent / "ckpt"
-    monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
-    monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
-    # nexus-5xn3k.4 review follow-up: see incr_setup's identical stub above.
-    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
     n_chunks = _INCREMENTAL_BATCH_SIZE * 3 + 10
-    mock_chunks = _make_n_chunks(n_chunks)
-    checkpoint_writes = []
-    original_write = __import__("nexus.checkpoint", fromlist=["write_checkpoint"]).write_checkpoint
-
-    def _tracking_write(data: CheckpointData):
-        checkpoint_writes.append(data.chunks_upserted)
-        original_write(data)
-
-    mock_col = MagicMock()
-    mock_col.get.return_value = {"ids": [], "metadatas": []}
-    mock_t3 = MagicMock()
-    mock_t3.get_or_create_collection.return_value = mock_col
-    with patch("nexus.doc_indexer.write_checkpoint", side_effect=_tracking_write):
-        with patch("nexus.doc_indexer.make_t3", return_value=mock_t3):
-            with patch("nexus.doc_indexer.PDFExtractor") as ext_cls:
-                with patch("nexus.doc_indexer.PDFChunker") as chk_cls:
-                    ext_cls.return_value.extract.return_value = MagicMock(
-                        text="x" * 5000,
-                        metadata={"extraction_method": "docling", "page_count": 50,
-                                  "format": "markdown", "page_boundaries": []})
-                    chk_cls.return_value.chunk.return_value = mock_chunks
-                    result = index_pdf(sample_pdf, corpus="test", t3=mock_t3, embed_fn=_fake_embed)
+    result, _ = incr_setup.run(n_chunks)
     assert result == n_chunks
-    assert len(checkpoint_writes) >= 3
-    for i in range(1, len(checkpoint_writes)):
-        assert checkpoint_writes[i] > checkpoint_writes[i - 1]
-    assert checkpoint_writes[-1] == n_chunks
+    assert not checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1").exists()
+    assert not incr_setup.dir.exists() or not list(incr_setup.dir.iterdir())
 
 
 def test_index_pdf_incremental_stale_checkpoint_deleted(incr_setup):
-    from nexus.checkpoint import CheckpointData, write_checkpoint
+    from nexus.checkpoint import checkpoint_path
     n = incr_setup.threshold + 10
-    write_checkpoint(CheckpointData(
-        pdf=str(incr_setup.path), collection="docs__test__voyage-context-3__v1",
-        content_hash="wrong_hash_from_old_version", chunks_upserted=50,
-        total_chunks=200, embedding_model="voyage-context-3",
-    ))
-    result, t3 = incr_setup.run(n)
+    _leave_old_checkpoint(incr_setup, chunks_upserted=50, total_chunks=200)
+    result, _ = incr_setup.run(n)
     assert result == n
-    total = sum(len(c.args[1]) for c in t3.upsert_chunks_with_embeddings.call_args_list)
-    assert total == n
+    (call,) = incr_setup.owner_write.calls
+    assert len(call["ids"]) == n
+    assert not checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1").exists()
 
 
 def test_index_pdf_incremental_progress_fires(incr_setup):
@@ -2615,18 +2756,39 @@ def test_index_pdf_incremental_progress_fires(incr_setup):
     assert result == n
     assert progress
     assert progress[-1] == (n, n)
+    assert [d for d, _ in progress] == sorted(d for d, _ in progress), "progress never goes back"
 
 
-def test_index_pdf_incremental_checkpoint_exceeds_total(incr_setup):
-    from nexus.checkpoint import CheckpointData, write_checkpoint
+def test_index_pdf_incremental_dry_run_puts_the_chunks_in_the_throwaway_store(incr_setup):
+    """A dry run writes no catalog row, so there is no owner row to write; the chunks go straight
+    into the caller's throwaway store, batch by batch, and the writer is never used."""
+    from nexus.doc_indexer import _INCREMENTAL_BATCH_SIZE
     n = incr_setup.threshold + 10
-    write_checkpoint(CheckpointData(
-        pdf=str(incr_setup.path), collection="docs__test__voyage-context-3__v1",
-        content_hash=incr_setup.content_hash, chunks_upserted=n + 100,
-        total_chunks=n + 100, embedding_model="voyage-context-3",
-    ))
-    result, _ = incr_setup.run(n)
+    from tests._owner_write_double import throwaway_t3 as _make_throwaway
+
+    t3 = _make_throwaway()
+    spy = MagicMock(wraps=t3.upsert_chunks_with_embeddings)
+    t3.upsert_chunks_with_embeddings = spy
+    with patch("nexus.doc_indexer.PDFExtractor") as ext_cls, patch("nexus.doc_indexer.PDFChunker") as chk_cls:
+        ext_cls.return_value.extract.return_value = MagicMock(
+            text="x" * 5000,
+            metadata={"extraction_method": "docling", "page_count": 50,
+                      "format": "markdown", "page_boundaries": []})
+        chk_cls.return_value.chunk.return_value = _make_n_chunks(n)
+        result = index_pdf(incr_setup.path, corpus="test", t3=t3, embed_fn=_fake_embed,
+                           dry_run=True, streaming="never")
     assert result == n
+    assert incr_setup.owner_write.calls == []
+    sizes = [len(c.args[1]) for c in spy.call_args_list]
+    assert sum(sizes) == n and max(sizes) <= _INCREMENTAL_BATCH_SIZE
+
+
+def test_index_pdf_incremental_without_catalog_identity_writes_nothing(incr_setup, monkeypatch):
+    from nexus.errors import CatalogIdentityMissingError
+    monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id", lambda *a, **kw: "")
+    with pytest.raises(CatalogIdentityMissingError):
+        incr_setup.run(incr_setup.threshold + 10)
+    assert incr_setup.owner_write.calls == []
 
 
 # nexus-sghyo (2026-08-06): test_token_bucket_rate_limiter,
@@ -3086,7 +3248,7 @@ def _real_engine_t3(owner_write):
 
 
 def test_index_pdf_does_not_emit_source_path(
-    sample_pdf, tmp_path, monkeypatch,
+    sample_pdf, tmp_path, monkeypatch, owner_write,
 ):
     """RDR-102 Phase B / D2: index_pdf at doc_indexer.py:794 (the
     _pdf_chunks make_chunk_metadata call) must drop source_path from
@@ -3095,6 +3257,7 @@ def test_index_pdf_does_not_emit_source_path(
     normalize() filters source_path at the schema-level removal.
     """
     t3 = _setup_phase_a_catalog(monkeypatch)
+    owner_write.forward_to(t3)
 
     with pdf_extract_patches_ctx():
         index_pdf(sample_pdf, corpus="rdr102-pdf-b", t3=t3, embed_fn=_fake_embed)
@@ -3140,50 +3303,32 @@ def test_index_markdown_does_not_emit_source_path(
 
 
 def test_index_pdf_writes_doc_id_when_catalog_initialized(
-    sample_pdf, tmp_path, monkeypatch,
+    sample_pdf, tmp_path, monkeypatch, owner_write,
 ):
-    """RDR-102 D4 #2: ``index_pdf`` must populate ``doc_id`` on chunk
-    metadata when the catalog is initialized.
-
-    Pre-Phase-A this fails because ``_pdf_chunks`` builds metadata via
-    ``make_chunk_metadata()`` with no ``doc_id`` kwarg; the catalog
-    Document is registered AFTER chunks are upserted so ``doc_id`` is
-    never threaded down. Phase A registers upfront and passes the
-    resolved tumbler through to the chunker.
-    """
-    t3 = _setup_phase_a_catalog(monkeypatch)
-    _wrap_write_batch_with_fk_seed(t3)
-    # RDR-204 Phase 1 follow-up (nexus-f5wwx): t3 is already constructed
-    # above with the chroma opt-out baked in (its own local ONNX embed
-    # fn), so lifting the opt-out here only changes what the CATALOG
-    # registration call (which reads this env var via
-    # effective_embedding_model_for_writes) derives — see _registered_token()'s
-    # docstring for why the engine's real-catalog seed needs that to
-    # match its own tier-1 embedder regardless of the client's T3 choice.
-    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+    """RDR-102 D4 #2 / RDR-108 Phase 3 / RDR-223: ``index_pdf`` no longer stamps ``doc_id`` on chunk
+    metadata; the catalog manifest is authoritative. The chunks and their owner rows are ONE write to
+    the REAL engine, so the manifest is read back from it (lifts this module's autouse write
+    double)."""
+    t3 = _real_engine_t3(owner_write)
+    collection = f"docs__rdr102-pdf__{_registered_token('docs')}__v1"
 
     with pdf_extract_patches_ctx():
-        index_pdf(sample_pdf, corpus="rdr102-pdf", t3=t3, embed_fn=_fake_embed)
+        index_pdf(sample_pdf, corpus="rdr102-pdf", t3=t3, collection_name=collection, embed_fn=_fake_embed)
 
-    col = t3.get_or_create_collection(
-        f"docs__rdr102-pdf__{_registered_token('docs')}__v1",
-    )
+    col = t3.get_or_create_collection(collection)
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
         "expected at least one chunk in docs__rdr102-pdf; staleness "
         "skip would mask the real bug"
     )
-    # RDR-108 Phase 3 retired doc_id from chunk metadata. Manifest is
-    # authoritative — verify the catalog has manifest rows for this PDF.
     for m in rows["metadatas"]:
         assert "doc_id" not in m
     cat = ActiveCatalog()
-    documents = cat.list_by_collection(f"docs__rdr102-pdf__{_registered_token('docs')}__v1")
+    documents = cat.list_by_collection(collection)
     assert documents, "catalog must have a Document for the indexed PDF"
     for entry in documents:
         assert cat.get_manifest(str(entry.tumbler)), (
-            f"manifest_write_batch_hook must populate document_chunks "
-            f"for doc_id={str(entry.tumbler)!r}"
+            f"the write must populate document_chunks for doc_id={str(entry.tumbler)!r}"
         )
 
 

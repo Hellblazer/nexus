@@ -8,8 +8,10 @@ the DEVONthink markdown path all call.
 
 The journeys (bead nexus-z0o2p.13 tests; RDR-223 Test Plan 8 for this path):
 
-* a document that fits one request is exactly one ``write_manifest_many`` (sweep on, chunks,
-  completion stamp riding it) and makes no ``upsert-chunks`` call;
+* a document that fits one request is exactly one ``write_manifest_many`` (sweep on, chunks) and
+  makes no ``upsert-chunks`` call; its completion stamp is its own request after the post-store
+  hooks (RDR-223 decision D2);
+* a kill in a post-store hook leaves the document ``indexing``, and the rerun fires the hooks again;
 * a document of several requests ends with the same manifest, chunks and stamp as one combined
   write;
 * the client dies after its first write request: no chunk that request wrote is ownerless (the
@@ -92,7 +94,7 @@ def _register(path: Path, marker: str, collection: str = _COLLECTION) -> tuple[s
 
 
 def _index(path: Path, marker: str, *, collection: str = _COLLECTION, force: bool = False,
-           force_re_embed: bool = False) -> tuple[str, int]:
+           force_re_embed: bool = False, hooks=None) -> tuple[str, int]:
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.doc_indexer import _index_document
 
@@ -100,7 +102,7 @@ def _index(path: Path, marker: str, *, collection: str = _COLLECTION, force: boo
     n = _index_document(
         path, f"z0o2p13-{marker}", _line_chunks, t3=HttpVectorClient(),
         collection_name=collection, force=force, force_re_embed=force_re_embed,
-        doc_id=doc_id, doc_just_created=created)
+        doc_id=doc_id, doc_just_created=created, hooks=hooks)
     return doc_id, n
 
 
@@ -178,7 +180,7 @@ def _traffic(*, die_after: int | None = None) -> Iterator[_Traffic]:
 # ── one request ───────────────────────────────────────────────────────────────
 
 
-def test_a_document_that_fits_one_request_is_one_write_many_with_sweep_on(tmp_path) -> None:
+def test_a_document_that_fits_one_request_is_one_write_many_with_sweep_on_then_its_own_stamp(tmp_path) -> None:
     lines = _lines("single", 10)
     path = _write_file(tmp_path, "single", lines)
     with _traffic() as t:
@@ -189,15 +191,16 @@ def test_a_document_that_fits_one_request_is_one_write_many_with_sweep_on(tmp_pa
     assert [p for p, _, _ in data] == ["/manifest/write_many"], "exactly one data request"
     body = data[0][1]
     assert body["sweep"] is True
-    assert body["complete"] == {doc: body["complete"][doc]} and body["complete"][doc]
+    assert not body.get("complete"), "the stamp does not ride the write (D2): it follows the hooks"
     assert len(body["chunks"]) == 10 and len(body["docs"][0]["rows"]) == 10
     # The chunk write is the manifest write: no separate vector upload, and the manifest hook did
     # not write the manifest a second time.
     assert t.upserts == []
     paths = [p for p, _, _ in t.catalog]
     assert paths.count("/manifest/write_many") == 1
-    # The fence begins before the first byte of content lands.
+    # The fence begins before the first byte of content lands, and the stamp is the last request.
     assert paths.index(_FENCE_BEGIN) < paths.index("/manifest/write_many")
+    assert paths.count(_FENCE_COMPLETE) == 1 and paths[-1] == _FENCE_COMPLETE
     assert data[0][2]["embed_embedded"] == 10
     assert _manifest(doc) == [(i, _sha(line)) for i, line in enumerate(lines)]
     assert _present(_COLLECTION, [_sha(x) for x in lines]) == {_sha(x) for x in lines}
@@ -276,6 +279,48 @@ def test_client_death_after_the_first_write_request_leaves_no_ownerless_chunk(tm
         _index(path, "death")
     assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
     assert _index_state(doc) == "complete"
+
+
+# ── a kill in a post-store hook ───────────────────────────────────────────────
+
+
+def test_a_kill_in_a_post_store_hook_leaves_the_document_indexing_and_the_rerun_fires_the_hooks_again(
+    tmp_path,
+) -> None:
+    """RDR-223 decision D2. The stamp used to ride the write, so a process killed in a post-store
+    hook (taxonomy assignment, aspect enqueue) left a document that read complete, and nothing
+    would ever fire those hooks for it. The stamp is now the last request: the killed run leaves the
+    fence ``indexing``, and the next run redoes the document and fires the hooks again."""
+    from nexus.hook_registry import HookRegistry
+
+    lines = _lines("hookkill", 10)
+    path = _write_file(tmp_path, "hookkill", lines)
+    every = [_sha(x) for x in lines]
+    fired: list[str] = []
+    armed = {"kill": True}
+
+    def _batch_hook(*a, **kw):
+        fired.append("batch")
+        if armed["kill"]:
+            raise ClientDied("killed in a post-store hook")
+
+    hooks = HookRegistry()
+    hooks.register_batch(_batch_hook)
+
+    with pytest.raises(ClientDied):
+        _index(path, "hookkill", hooks=hooks)
+    doc, _ = _register(path, "hookkill")
+    assert fired == ["batch"], "non-vacuity: the kill landed in the hook"
+    assert _index_state(doc) == "indexing", "the stamp had not been sent"
+    assert _present(_COLLECTION, every) == set(every), "every chunk had landed"
+
+    armed["kill"] = False
+    with _traffic() as rerun:
+        _index(path, "hookkill", hooks=hooks)
+    assert fired == ["batch", "batch"], "the rerun fired the hook again"
+    assert [p for p, _, _ in rerun.data()] == ["/manifest/write_many"], "and redid the document"
+    assert _index_state(doc) == "complete"
+    assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
 
 
 # ── re-indexing ───────────────────────────────────────────────────────────────
@@ -430,12 +475,12 @@ def test_forced_reindex_keeps_enrichment_and_clears_the_owned_keys_the_document_
 
 def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
     """Read each chunk's stored metadata back and compare it to what the previous path
-    (``_upsert_skip_reembed`` into a control collection) stored for the same chunk; only the
+    (a plain ``upsert_chunks_with_embeddings`` into a control collection, the call the removed
+    ``_upsert_skip_reembed`` made) stored for the same chunk; only the
     write time differs."""
     from datetime import UTC, datetime
 
     from nexus.corpus import index_model_for_collection
-    from nexus.doc_indexer import _upsert_skip_reembed
     from nexus.metadata_schema import rewrite_delete_keys
 
     lines = _lines("meta", 6)
@@ -448,10 +493,11 @@ def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
         datetime.now(UTC).isoformat(), "z0o2p13-meta")
     # The same chunks, through the old path, into a control collection.
     metas = [dict(m) for _, _, m in prepared]
-    _upsert_skip_reembed(
-        hvc.HttpVectorClient(), _CONTROL_COLLECTION, [p[0] for p in prepared],
-        [p[1] for p in prepared], [[] for _ in prepared], metas)
-    assert rewrite_delete_keys(metas)   # non-vacuity: the old path did name owned keys
+    delete_keys = rewrite_delete_keys(metas)
+    assert delete_keys   # non-vacuity: the old path did name owned keys
+    hvc.HttpVectorClient().upsert_chunks_with_embeddings(
+        _CONTROL_COLLECTION, [p[0] for p in prepared], [p[1] for p in prepared],
+        [[] for _ in prepared], metas, delete_keys=delete_keys)
 
     new = _stored_metadata(_COLLECTION, every)
     # The old path stored the chunks with no owner row, which live(c) hides.
