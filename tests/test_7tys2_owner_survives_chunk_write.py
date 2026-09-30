@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-7tys2: a chunk write must not replace a registered collection's owner.
+"""nexus-7tys2: re-registering a collection must not replace its owner.
 
 The client registers a collection before its first chunk write in every
 process (``ensure_collection_registered``), sending the owner segment it
@@ -8,16 +8,19 @@ used to write that over an owner someone had registered on purpose, so a
 slug-named collection (``code__arcaneum-2ad2825c__...``) ended up with the
 slug as its ``catalog_collections.owner_id``. Real engine substrate: the
 overwrite happens in the engine's ON CONFLICT arm, so no fake reproduces it.
+
+The subject is that registration call, which every chunk write makes first.
+This test calls it directly: since RDR-223 P3.1 a bare chunk write is not
+available to drive it (the engine refuses an ownerless write from Phase 3 on),
+and the chunk was never what the property is about.
 """
 from __future__ import annotations
 
-import hashlib
 
 import pytest
 
 from nexus import corpus
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-from tests._chunk_seed import seed_chunks_direct
 
 _MODEL = "bge-base-en-v15-768"
 # The production shape: the hyphenated owner segment (owner_segment_for_tumbler), not the dotted tumbler.
@@ -34,7 +37,7 @@ def _clear_registration_cache():
 
 
 @pytest.mark.integration
-def test_chunk_upsert_keeps_the_owner_the_collection_was_registered_with(t2_service_env):
+def test_reregistration_keeps_the_owner_the_collection_was_registered_with(t2_service_env):
     name = f"code__dbgslug-7tys2__{_MODEL}__v1"
     writer = make_catalog_writer(priority="interactive")
     reader = make_catalog_reader()
@@ -43,21 +46,17 @@ def test_chunk_upsert_keeps_the_owner_the_collection_was_registered_with(t2_serv
     )
     assert reader.get_collection(name)["owner_id"] == OWNER_SEGMENT, "guard: registered with the owner segment"
 
-    # A fresh process has an empty registration cache, so the write below
-    # re-registers the name with the owner segment parsed from it.
+    # A fresh process has an empty registration cache, so this call
+    # re-registers the name with the owner segment parsed from it: the exact
+    # request every chunk write makes before its first write.
     corpus._REGISTERED_COLLECTIONS.clear()
     corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
-    text = "def f():\n    return 1\n"
-    chash = hashlib.sha256(text.encode()).hexdigest()
-    seed_chunks_direct(
-        name, ids=[chash], documents=[text], embed=True,
-        metadatas=[{"chunk_text_hash": chash, "title": "f.py"}],
-    )
+    corpus.ensure_collection_registered(name)
     assert name in corpus._REGISTERED_COLLECTIONS or any(
         n == name for _scope, n in corpus._REGISTERED_COLLECTIONS_SCOPED
     ), (
-        "non-vacuity: the write went through ensure_collection_registered, "
-        "the path that sent the name's segment"
+        "non-vacuity: the call went through the registration path, "
+        "the one that sends the name's segment"
     )
 
     assert reader.get_collection(name)["owner_id"] == OWNER_SEGMENT

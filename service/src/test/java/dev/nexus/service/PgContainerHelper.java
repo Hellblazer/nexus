@@ -756,11 +756,21 @@ public final class PgContainerHelper {
      * orphan on purpose builds it here. The Python twin is {@code tests/_chunk_seed.py}.
      *
      * <p>Unlike {@link #insertChunk384} this carries the text, the metadata and the
-     * caller's real vectors, so it can stand in for an {@code upsert-chunks} POST. The
-     * embedding column is chosen by the vector width (384, 768 or 1024). A repeat of an
-     * existing {@code (tenant, collection, chash)} is left alone. The collection must
-     * already be registered ({@link #insertCollection}); the caller pairs this with
-     * {@link #ownChunks} when the test wants the chunks live.
+     * caller's real vectors, so it can stand in for an {@code upsert-chunks} POST for a
+     * FIRST write. It is deliberately looser than the Python twin
+     * ({@code tests/_chunk_seed.py}), not the same contract:
+     * <ul>
+     *   <li>it runs as whatever role {@code ctx} carries (the superuser in the existing
+     *       callers, so RLS does not apply) and sets no tenant GUC;</li>
+     *   <li>a repeat of an existing {@code (tenant, collection, chash)} is left alone
+     *       ({@code ON CONFLICT DO NOTHING}): no text or vector replace, no metadata merge,
+     *       no {@code retention} reset, no {@code last_written_at} restamp, where the route
+     *       and the Python twin all do those;</li>
+     *   <li>the embedding column follows the vector's width (384, 768 or 1024), not the
+     *       collection's registered model, so a mismatch is not refused.</li>
+     * </ul>
+     * The collection must already be registered ({@link #insertCollection}); the caller
+     * pairs this with {@link #ownChunks} when the test wants the chunks live.
      *
      * @param ctx        a {@link DSLContext} over a role that may INSERT into {@code nexus.chunks}
      *                   for {@code tenant} (the superuser used by the other seeds here, or the
