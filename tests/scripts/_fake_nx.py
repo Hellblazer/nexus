@@ -68,7 +68,11 @@ if args[:2] == ["tuple", "out"]:
             sys.exit(1)
         row = {"id": uuid.uuid4().hex, "subspace": sub, "keys": o["key"], "dims": o["dim"],
                "body": o.get("--body"), "nonce": o.get("--nonce"),
-               "created_at": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".%06dZ" % (time.time_ns() // 1000 % 1000000)}
+               # ONE clock read for both halves: seconds from gmtime() and
+               # microseconds from a later time_ns() straddled a second boundary
+               # in CI, so a clear posted after a set sorted as OLDER than it.
+               "created_at": (lambda t: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t // 10**9))
+                              + ".%06dZ" % (t // 1000 % 1000000))(time.time_ns())}
         with open(rows_path, "a") as f:
             f.write(json.dumps(row) + "\n")
         print(row["id"])
