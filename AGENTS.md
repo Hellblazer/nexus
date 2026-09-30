@@ -160,7 +160,7 @@ This repo is public and has four self-hosted runners:
 | `hellmini` | Mac mini, macOS user `ghrunner` | release jobs: the engine-service release legs, the PG-bundle cache seed (Sam, 2026-09-28, nexus-yd9po) |
 | `hellmini-ci` | same Mac mini, macOS user `ghci` | the Service CI Java job, on owner pushes only (Sam, 2026-09-30, nexus-f5i1m) |
 | `qwen-linux` (`[self-hosted, Linux, X64]`) | host not recorded in this repo | no workflow in this repo; intended (Sam, 2026-09-30) |
-| `qwen-windows` (`[self-hosted, X64, Windows]`) | host not recorded in this repo | no workflow in this repo; intended (Sam, 2026-09-30) |
+| `gtr-windows` (`[self-hosted, X64, Windows]`, registered earlier as `qwen-windows`) | host not recorded in this repo | no workflow in this repo; intended (Sam, 2026-09-30) |
 
 The two qwen runners carry the generic self-hosted labels. Any job in any
 workflow file that says `runs-on: self-hosted` (or an array with `Linux` or
@@ -203,7 +203,7 @@ Both runners keep state between jobs (Maven `~/.m2`, tool caches); a job on
 
 - anything under `.github/` (a workflow or action can name any runner);
 - any `runs-on` that names a self-hosted label, `self-hosted`, `hellmini`,
-  `hellmini-ci`, `qwen-linux` or `qwen-windows`;
+  `hellmini-ci`, `qwen-linux` or `gtr-windows`;
 - `service/` tests and `pom.xml` (merged, they run on `hellmini-ci` at the next
   owner push).
 

@@ -79,8 +79,10 @@ jobs:
           set -uo pipefail
           rc=0
           for p in /Volumes/Bulk/ghrunner /Users/ghrunner; do
-            out="$(ls -A "$p" 2>&1)"
-            status=$?
+            # GitHub runs steps under bash -e, and a refused ls is the EXPECTED
+            # result, so capture its status instead of letting -e end the step.
+            status=0
+            out="$(ls -A "$p" 2>&1)" || status=$?
             echo "--- $p: ls exit=$status"
             ls -ld "$p" 2>&1 || true
             if [ "$status" -eq 0 ]; then
