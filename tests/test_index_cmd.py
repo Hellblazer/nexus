@@ -2195,8 +2195,10 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         assert result.exit_code != 0, result.output
         assert str(md) in result.output, result.output
-        assert "orphaned" in result.output.lower(), result.output
-        assert "nx catalog reconcile" in result.output
+        # RDR-223 (nexus-z0o2p.13): the chunks are not written ownerless any more;
+        # the run fails before writing anything and says so.
+        assert "no catalog document to own" in result.output, result.output
+        assert "nothing was written" in result.output, result.output
 
     def test_md_register_ok_summary_unchanged(self, runner, home, monkeypatch):
         from nexus.cli import main as cli_main
@@ -2210,9 +2212,10 @@ class TestPdfMdIdentityDropRegisterThrow:
 
         reader, writer = self._broken_catalog(register_raises=False)
 
+        # RDR-223 (nexus-z0o2p.13): see the dt twin of this test — the write is
+        # replaced; this pins the registration-ok summary.
         with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
-             patch("nexus.doc_indexer._fence_begin"), \
-             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.doc_indexer._write_chunks_with_owner_rows"), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
              patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
             result = runner.invoke(cli_main, ["index", "md", str(md)])

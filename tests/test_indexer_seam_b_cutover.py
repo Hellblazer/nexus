@@ -611,8 +611,8 @@ def _make_doc_indexer_db():
 
 def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch):
     """In service mode, _index_document must NOT attempt any non-service
-    embed path — the service embeds server-side. Instead it calls
-    db.upsert_chunks_with_embeddings directly with a stub.
+    embed path — the service embeds server-side. Instead it hands the
+    chunks to the combined chunk+owner write (RDR-223, nexus-z0o2p.13).
 
     nexus-sghyo (2026-08-06): the legacy non-service embed path
     (``_embed_with_fallback``) is deleted outright — the client does no
@@ -635,20 +635,16 @@ def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch)
     mock_hooks = MagicMock()
 
     with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._fence_begin"), \
-         patch("nexus.doc_indexer._fence_complete"), \
+         patch("nexus.doc_indexer._write_chunks_with_owner_rows") as owner_write, \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
-        # nexus-tp8yk D2a: _index_document now calls the PROPAGATING
-        # _fence_complete explicitly (mirrors _index_pdf_incremental's
-        # pre-existing shape, see that test's identical comment below in
-        # this file) — the mocked db never lands chunks in the substrate
-        # the real engine's fail-closed /complete verifies against, so
-        # unstubbed it correctly raises IndexRunVerifyRefused. This test
-        # proves the service-mode embed guard, not fence integration
-        # (nexus-5xn3k.7 / nexus-tp8yk's own gates own the genuine proof);
-        # stub the fence like every other decoupled-substrate test here.
+        # RDR-223 (nexus-z0o2p.13): the chunks and their owner rows are one
+        # request to the real engine, which this mocked db never lands chunks
+        # in (and which would refuse the fake id and doc). This test proves the
+        # service-mode embed guard, not the write (its real-engine coverage is
+        # tests/integration/test_rdr223_index_document_journey.py): the write
+        # is replaced by a mock.
         _index_document(
             test_file,
             corpus="test-corpus",
@@ -659,8 +655,8 @@ def test_index_document_service_mode_skips_embed_fallback(tmp_path, monkeypatch)
 
 
 def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
-    """In service mode, _index_document must call upsert_chunks_with_embeddings
-    (with empty embeddings that the server discards) to complete the write."""
+    """In service mode, _index_document must hand its chunks to the combined
+    chunk+owner write (RDR-223) rather than upsert them separately."""
     from nexus.doc_indexer import _index_document
 
     monkeypatch.setenv("NX_STORAGE_BACKEND_VECTORS", "service")
@@ -676,12 +672,11 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
     mock_hooks = MagicMock()
 
     with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._fence_begin"), \
-         patch("nexus.doc_indexer._fence_complete"), \
+         patch("nexus.doc_indexer._write_chunks_with_owner_rows") as owner_write, \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
-        # nexus-tp8yk D2a: see the identical rationale on
+        # See the identical rationale on
         # test_index_document_service_mode_skips_embed_fallback above.
         _index_document(
             test_file,
@@ -690,10 +685,10 @@ def test_index_document_service_mode_calls_upsert_chunks(tmp_path, monkeypatch):
             t3=db,
             embed_fn=None,
         )
-        # upsert_chunks_with_embeddings must be called (service ignores embeddings)
-        assert db.upsert_chunks_with_embeddings.called, (
-            "expected upsert_chunks_with_embeddings call in service mode"
-        )
+        # The combined chunk+owner write must be called (the service embeds),
+        # and the chunk upsert it replaced must not be.
+        assert owner_write.called, "expected the combined chunk+owner write in service mode"
+        assert not db.upsert_chunks_with_embeddings.called
 
 
 def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monkeypatch):
@@ -729,12 +724,11 @@ def test_index_document_service_mode_t3_none_no_credentials_error(tmp_path, monk
          patch("nexus.doc_indexer.make_t3", mock_make_t3), \
          patch("nexus.doc_indexer._make_local_embed_fn") as local_embed_mock, \
          patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="doc-1"), \
-         patch("nexus.doc_indexer._fence_begin"), \
-         patch("nexus.doc_indexer._fence_complete"), \
+         patch("nexus.doc_indexer._write_chunks_with_owner_rows") as owner_write, \
          patch("nexus.doc_indexer._vector_with_retry", side_effect=lambda fn, **kw: fn(**kw)), \
          patch("nexus.hook_registry.HookRegistry", return_value=mock_hooks), \
          patch("nexus.hook_registry.install_default_hooks"):
-        # nexus-tp8yk D2a: see the identical rationale on
+        # See the identical rationale on
         # test_index_document_service_mode_skips_embed_fallback above.
         # Must NOT raise CredentialsMissingError or any credential-related error
         count = _index_document(

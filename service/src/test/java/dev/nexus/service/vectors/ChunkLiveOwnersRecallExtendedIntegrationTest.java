@@ -586,10 +586,21 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
         };
     }
 
-    /** The GUCs PgVectorRepository#searchWithTokens sets before plain_search, with
-     *  {@code hnsw.max_scan_tuples} added when the setting carries one (production never
-     *  sets it, so it is not in PgSession's whitelist and goes through set_config). */
+    /** The "prod" profile: the GUCs PgVectorRepository#searchWithTokens sets before plain_search
+     *  (nexus-wbfpw.47: including the scan budget). Any other profile is a sweep knob layered on
+     *  the pgvector defaults, with {@code hnsw.max_scan_tuples} etc. set through set_config. */
     private static void productionSession(DSLContext ctx, Setting s) {
+        if (s.name().equals("prod")) {
+            // nexus-wbfpw.47: the "prod" profile IS whatever the repository sets, through the
+            // same PgSession helpers PgVectorRepository#searchWithTokens calls, so a change to
+            // the serving settings moves this measurement with it instead of leaving a stale copy.
+            PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
+            PgSession.setHnswEfSearch(ctx, K);
+            PgSession.setHnswScanBudget(ctx);
+            PgSession.setSearchStatementTimeout(ctx);
+            PgSession.setSearchPlanCacheMode(ctx);
+            return;
+        }
         PgSession.setLocal(ctx, "hnsw.iterative_scan", s.iterativeScan());
         PgSession.setLocal(ctx, "hnsw.ef_search", Integer.toString(s.efSearch()));
         if (s.maxScan() != null) {
@@ -762,6 +773,11 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
     private List<Setting> settings() {
         List<Setting> out = new ArrayList<>();
         out.add(new Setting("prod", "relaxed_order", 200, null));
+        if (Boolean.getBoolean("nx.recallExt.legacy")) {
+            // The serving settings BEFORE nexus-wbfpw.47 (pgvector's 20000-tuple, 1x-memory
+            // defaults): the control that shows what the raised budget buys.
+            out.add(new Setting("legacy", "relaxed_order", 200, null));
+        }
         String spec = System.getProperty("nx.recallExt.settings",
             "scan1000000:relaxed_order:200:1000000,strict200:strict_order:200,"
                 + "ef1000:relaxed_order:1000,strict1000:strict_order:1000");

@@ -263,6 +263,19 @@ def _no_propagating_fence_complete(monkeypatch):
     monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **kw: None)
 
 
+@pytest.fixture(autouse=True)
+def owner_write(monkeypatch):
+    """RDR-223 (nexus-z0o2p.13): ``_index_document`` writes a document's chunks and
+    owner rows as one request to the real engine, which this file's fake T3 handles
+    never see (and which refuses this file's fake ids and model tokens). Tests here
+    assert on what the indexer PASSED to the write; the write itself is covered
+    against the real engine by tests/integration/test_rdr223_index_document_journey.py.
+    """
+    from tests import _owner_write_double
+
+    return _owner_write_double.install(monkeypatch)
+
+
 @pytest.fixture
 def sample_pdf(tmp_path: Path) -> Path:
     p = tmp_path / "sample.pdf"
@@ -1175,7 +1188,7 @@ def test_batch_index_markdowns_skips_malformed_frontmatter_and_continues(
 
 
 def test_index_md_falls_back_to_local_embedder_when_no_credentials(
-    sample_md, tmp_path, monkeypatch,
+    sample_md, tmp_path, monkeypatch, owner_write,
 ):
     """GH #336 (option 3): ``nx index md`` must work without
     Voyage/Chroma credentials in local mode — matching ``nx doctor``'s
@@ -1259,6 +1272,7 @@ def test_index_md_falls_back_to_local_embedder_when_no_credentials(
     client = make_vector_test_client()
     from nexus.db.t3 import T3Database
     local_t3 = T3Database(_client=client, local_mode=True)
+    owner_write.forward_to(local_t3)
 
     n = index_markdown(sample_md, corpus="local-fallback-test", t3=local_t3)
     assert n > 0, (
@@ -1723,12 +1737,9 @@ _BASE_REQUIRED_FIELDS = {
 _PDF_EXTRA_FIELDS: set[str] = set()
 
 
-def test_docs_metadata_schema_complete(sample_md, monkeypatch, mock_t3, voyage_client):
+def test_docs_metadata_schema_complete(sample_md, monkeypatch, mock_t3, voyage_client, owner_write):
     set_credentials(monkeypatch)
-    captured: list[dict] = []
-    mock_t3.upsert_chunks_with_embeddings.side_effect = (
-        lambda collection, ids, documents, embeddings, metadatas, **_kw: captured.extend(metadatas)
-    )
+    captured = owner_write.metadatas
     mock_chunk = MagicMock()
     mock_chunk.text = "chunk text"
     mock_chunk.chunk_index = 0
@@ -1798,9 +1809,9 @@ def test_sha256_does_not_call_read_bytes(tmp_path: Path):
 
 
 @pytest.mark.parametrize("indexer,expected_type", [("pdf", "pdf"), ("markdown", "markdown")])
-def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, monkeypatch, voyage_client):
+def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, monkeypatch, voyage_client, owner_write):
     set_credentials(monkeypatch)
-    captured: list[dict] = []
+    captured: list[dict] = owner_write.metadatas if indexer == "markdown" else []
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_t3 = MagicMock()
@@ -1843,11 +1854,11 @@ def test_index_sets_content_type(indexer, expected_type, sample_pdf, sample_md, 
     (True, "---\ntitle: Test\n---\n", "# Hello\n\nWorld content.", 20, 43),
     (False, "", "# Hello\n\nWorld.", 5, 15),
 ])
-def test_index_markdown_offsets(has_fm, fm_text, body, expected_start, expected_end, tmp_path, monkeypatch, voyage_client):
+def test_index_markdown_offsets(has_fm, fm_text, body, expected_start, expected_end, tmp_path, monkeypatch, voyage_client, owner_write):
     set_credentials(monkeypatch)
     md_path = tmp_path / "doc.md"
     md_path.write_text(fm_text + body)
-    captured: list[dict] = []
+    captured = owner_write.metadatas
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     mock_t3 = MagicMock()
@@ -1977,7 +1988,7 @@ def test_batch_index_marks_failed_on_error(kind, tmp_path):
 
 
 @pytest.mark.parametrize("indexer", ["pdf", "markdown"])
-def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, cloud_mode):
+def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, cloud_mode, owner_write):
     set_credentials(monkeypatch)
     path = sample_pdf if indexer == "pdf" else sample_md
     content_hash = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -2013,7 +2024,10 @@ def test_force_bypasses_staleness(indexer, sample_pdf, sample_md, monkeypatch, c
                 result = index_markdown(path, corpus="docs", t3=mock_t3, force=True, embed_fn=_fake_embed)
 
     assert result > 0
-    mock_t3.upsert_chunks_with_embeddings.assert_called_once()
+    if indexer == "markdown":
+        assert len(owner_write.calls) == 1
+    else:
+        mock_t3.upsert_chunks_with_embeddings.assert_called_once()
 
 
 def test_force_default_false_still_skips(sample_pdf, monkeypatch, cloud_mode):
@@ -2092,11 +2106,10 @@ def test_index_pdf_small_doc_force_without_re_embed_forwards_false(sample_pdf, m
     assert kwargs.get("force_re_embed") is False
 
 
-def test_index_markdown_force_re_embed_true_forwards_true(sample_md, monkeypatch, cloud_mode):
-    """--force --re-embed reaches upsert_chunks_with_embeddings as
+def test_index_markdown_force_re_embed_true_forwards_true(sample_md, monkeypatch, cloud_mode, owner_write):
+    """--force --re-embed reaches the combined chunk+owner write as
     force_re_embed=True via _index_document (index_markdown's only
-    upsert path, the first of the bead's three _upsert_skip_reembed
-    call sites)."""
+    write path)."""
     set_credentials(monkeypatch)
     mock_col = MagicMock()
     mock_col.get.return_value = {"ids": [], "metadatas": []}
@@ -2112,11 +2125,10 @@ def test_index_markdown_force_re_embed_true_forwards_true(sample_md, monkeypatch
             result = index_markdown(sample_md, corpus="docs", t3=mock_t3, force=True,
                                     force_re_embed=True, embed_fn=_fake_embed)
     assert result > 0
-    _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
-    assert kwargs.get("force_re_embed") is True
+    assert owner_write.calls[-1]["force_re_embed"] is True
 
 
-def test_index_markdown_force_without_re_embed_forwards_false(sample_md, monkeypatch, cloud_mode):
+def test_index_markdown_force_without_re_embed_forwards_false(sample_md, monkeypatch, cloud_mode, owner_write):
     """--force alone (force_re_embed defaults False) must NOT set
     force_re_embed=True on the server call."""
     set_credentials(monkeypatch)
@@ -2134,8 +2146,7 @@ def test_index_markdown_force_without_re_embed_forwards_false(sample_md, monkeyp
             result = index_markdown(sample_md, corpus="docs", t3=mock_t3, force=True,
                                     embed_fn=_fake_embed)
     assert result > 0
-    _, kwargs = mock_t3.upsert_chunks_with_embeddings.call_args
-    assert kwargs.get("force_re_embed") is False
+    assert owner_write.calls[-1]["force_re_embed"] is False
 
 
 def test_batch_index_markdowns_forwards_force_re_embed(tmp_path):
@@ -3063,6 +3074,17 @@ def _setup_phase_a_catalog(monkeypatch):
 # (nexus-i711w terminal deletion).
 
 
+def _real_engine_t3(owner_write):
+    """RDR-223 (nexus-z0o2p.13): a markdown index writes its chunks and owner rows to the REAL
+    engine in one request, so a test that reads the catalog back uses the real vector handle and
+    a collection name the engine will register (its tier-1 embedder's token). Lifts this
+    module's autouse write double."""
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    owner_write.restore_real_write()
+    return HttpVectorClient()
+
+
 def test_index_pdf_does_not_emit_source_path(
     sample_pdf, tmp_path, monkeypatch,
 ):
@@ -3092,13 +3114,14 @@ def test_index_pdf_does_not_emit_source_path(
 
 
 def test_index_markdown_does_not_emit_source_path(
-    sample_md, tmp_path, monkeypatch,
+    sample_md, tmp_path, monkeypatch, owner_write,
 ):
     """RDR-102 Phase B / D2: index_markdown at doc_indexer.py:874 (the
     _markdown_chunks make_chunk_metadata call) must drop source_path
     from its kwargs.
     """
     t3 = _setup_phase_a_catalog(monkeypatch)
+    owner_write.forward_to(t3)
 
     n = index_markdown(sample_md, corpus="rdr102-md-b", t3=t3)
     assert n > 0
@@ -3165,24 +3188,19 @@ def test_index_pdf_writes_doc_id_when_catalog_initialized(
 
 
 def test_index_markdown_writes_doc_id_when_catalog_initialized(
-    sample_md, tmp_path, monkeypatch,
+    sample_md, tmp_path, monkeypatch, owner_write,
 ):
     """RDR-108 Phase 3: ``index_markdown`` no longer stamps ``doc_id``
     on chunk metadata; the catalog manifest is authoritative. Verify
     the manifest has rows for the indexed markdown file.
     """
-    t3 = _setup_phase_a_catalog(monkeypatch)
-    _wrap_write_batch_with_fk_seed(t3)
-    # RDR-204 Phase 1 follow-up (nexus-f5wwx): see the matching comment in
-    # test_index_pdf_writes_doc_id_when_catalog_initialized above.
-    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
+    t3 = _real_engine_t3(owner_write)
+    collection = f"docs__rdr102-md__{_registered_token('docs')}__v1"
 
-    n = index_markdown(sample_md, corpus="rdr102-md", t3=t3)
+    n = index_markdown(sample_md, corpus="rdr102-md", t3=t3, collection_name=collection)
     assert n > 0, "expected index_markdown to upsert chunks"
 
-    col = t3.get_or_create_collection(
-        f"docs__rdr102-md__{_registered_token('docs')}__v1",
-    )
+    col = t3.get_or_create_collection(collection)
     rows = col.get(include=["metadatas"])
     assert rows["metadatas"], (
         "expected at least one chunk in docs__rdr102-md"
@@ -3197,31 +3215,28 @@ def test_index_markdown_writes_doc_id_when_catalog_initialized(
 
 
 def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, owner_write,
 ):
     """RDR-108 Phase 3: ``batch_index_markdowns`` in RDR mode (``rdr__``
     collection, ``content_type='rdr'``) must populate the catalog
     ``document_chunks`` manifest for each registered Document. Chunk
     metadata no longer carries doc_id directly.
     """
-    t3 = _setup_phase_a_catalog(monkeypatch)
-    _wrap_write_batch_with_fk_seed(t3)
+    t3 = _real_engine_t3(owner_write)
     rdr_path = tmp_path / "rdr-102-test.md"
     rdr_path.write_text(
         "---\ntitle: RDR-102 Test\nstatus: draft\n---\n\n"
         "# Section A\n\nBody text alpha.\n\n"
         "# Section B\n\nBody text beta.\n"
     )
-    # RDR-204 Phase 1 follow-up (nexus-f5wwx): see the matching comment in
-    # test_index_pdf_writes_doc_id_when_catalog_initialized above.
-    monkeypatch.delenv("NX_STORAGE_BACKEND_VECTORS", raising=False)
 
-    batch_index_markdowns(
+    results = batch_index_markdowns(
         [rdr_path], corpus="rdr102-rdrmode",
         collection_name=f"rdr__rdr102-rdrmode__{_registered_token('rdr')}__v1",
         content_type="rdr",
         t3=t3,
     )
+    assert results == {str(rdr_path): "indexed"}
 
     col = t3.get_or_create_collection(
         f"rdr__rdr102-rdrmode__{_registered_token('rdr')}__v1",
@@ -3240,7 +3255,7 @@ def test_batch_index_markdowns_rdr_mode_writes_doc_id_when_catalog_initialized(
 
 
 def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
-    sample_md, tmp_path, monkeypatch,
+    sample_md, tmp_path, monkeypatch, owner_write,
 ):
     """RDR-102 Phase A regression guard: pre-flight registration writes
     a catalog Document with ``chunk_count=0``; the post-hook
@@ -3255,9 +3270,11 @@ def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
     invisible to operators who never read the Document row but a
     structural drift between catalog + T3 chunk counts.
     """
-    t3 = _setup_phase_a_catalog(monkeypatch)
+    t3 = _real_engine_t3(owner_write)
 
-    n = index_markdown(sample_md, corpus="rdr102-chunkcount", t3=t3)
+    n = index_markdown(
+        sample_md, corpus="rdr102-chunkcount", t3=t3,
+        collection_name=f"docs__rdr102-chunkcount__{_registered_token('docs')}__v1")
     assert n > 0, "expected index_markdown to upsert at least one chunk"
 
     rows = documents_by_file_path(str(sample_md.resolve()))
@@ -3278,7 +3295,7 @@ def test_index_markdown_post_hook_updates_chunk_count_after_preflight(
 
 
 def test_frontmatter_title_year_reach_catalog_despite_preflight(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, owner_write,
 ):
     """nexus-ivzw8: the pre-flight registers with title=stem; the post-hook's
     update branch previously wrote only chunk_count/mtime — so frontmatter
@@ -3290,9 +3307,11 @@ def test_frontmatter_title_year_reach_catalog_despite_preflight(
         "---\ntitle: The Widget Specification\ncreated: 2026-03-14\n---\n\n"
         "# Widgets\n\nBody.\n"
     )
-    t3 = _setup_phase_a_catalog(monkeypatch)
+    t3 = _real_engine_t3(owner_write)
 
-    n = index_markdown(md, corpus="ivzw8-title", t3=t3)
+    n = index_markdown(
+        md, corpus="ivzw8-title", t3=t3,
+        collection_name=f"docs__ivzw8-title__{_registered_token('docs')}__v1")
     assert n > 0
 
     rows = documents_by_file_path(str(md.resolve()))
@@ -3305,14 +3324,15 @@ def test_frontmatter_title_year_reach_catalog_despite_preflight(
     assert year == 2026
 
 
-def test_curated_title_survives_reindex(tmp_path, monkeypatch):
+def test_curated_title_survives_reindex(tmp_path, monkeypatch, owner_write):
     """The stem-guard: a curated (non-stem) catalog title must NEVER be
     clobbered by a re-index — backfill applies only to the stem default."""
     md = tmp_path / "notes.md"
     md.write_text("---\ntitle: Frontmatter Title\n---\n\n# N\n\nBody.\n")
-    t3 = _setup_phase_a_catalog(monkeypatch)
+    t3 = _real_engine_t3(owner_write)
+    collection = f"docs__ivzw8-curated__{_registered_token('docs')}__v1"
 
-    assert index_markdown(md, corpus="ivzw8-curated", t3=t3) > 0
+    assert index_markdown(md, corpus="ivzw8-curated", t3=t3, collection_name=collection) > 0
 
     rows = documents_by_file_path(str(md.resolve()))
     assert len(rows) == 1
@@ -3320,7 +3340,7 @@ def test_curated_title_survives_reindex(tmp_path, monkeypatch):
 
     # touch content so the re-index actually re-runs the hook
     md.write_text("---\ntitle: Frontmatter Title\n---\n\n# N\n\nBody v2.\n")
-    assert index_markdown(md, corpus="ivzw8-curated", t3=t3) > 0
+    assert index_markdown(md, corpus="ivzw8-curated", t3=t3, collection_name=collection) > 0
 
     after = documents_by_file_path(str(md.resolve()))
     assert len(after) == 1

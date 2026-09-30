@@ -5,6 +5,7 @@ import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
 import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -33,8 +34,9 @@ import static org.assertj.core.api.Assertions.assertThat;
  * HNSW-ordered scan; the one matching row sits far from the query while every
  * near row fails the predicate, so the bounded walk admits nothing. Session
  * settings arrive as pgjdbc connection OPTIONS (never SQL): a small
- * {@code hnsw.max_scan_tuples} so the cap is reached inside a 6,000-row
- * fixture instead of a 373k-row corpus, and seq/bitmap scans penalised so the
+ * {@code hnsw.max_scan_tuples} (set through {@code PgSession}'s test seam, since
+ * every search now sets the serving budget itself, nexus-wbfpw.47) so the cap is reached
+ * inside a 6,000-row fixture instead of a 373k-row corpus, and seq/bitmap scans penalised so the
  * planner prefers the index-ordered plan as it did in production under a
  * stale generic plan. The exact fallback's {@code enable_indexscan=off} with
  * bitmap/seq/sort re-enabled then yields an exact plan over the filtered rows. Non-vacuity: the fallback COUNTER moves
@@ -49,6 +51,8 @@ class HnswScanCapExactFallbackIntegrationTest {
     static final String RARE_TEXT = "the one chunk carrying the rare metadata value";
     static final String QUERY = "scan cap query";
     static final int BIG_ROWS = 6000;
+    /** The walk is capped at this many tuples so it starves inside a 6,000-row fixture. */
+    static final int SCAN_CAP = 16;
 
     PostgreSQLContainer<?> pg;
     HikariDataSource ds;
@@ -71,9 +75,14 @@ class HnswScanCapExactFallbackIntegrationTest {
         // sort) so the planner takes the HNSW-ordered scan the way it did in
         // production under a stale generic plan. The exact fallback re-enables
         // seq scan + sort itself, so these penalties cannot mask it.
+        // nexus-wbfpw.47: the scan cap is NOT a connection option any more -- every search
+        // now SET LOCALs the serving budget, which would override a startup
+        // -c hnsw.max_scan_tuples=16 and leave the fixture unstarved. The cap goes through
+        // PgSession's test seam below instead, so the search sets IT.
         cfg.addDataSourceProperty("options",
-                "-c hnsw.max_scan_tuples=16 -c enable_seqscan=off -c enable_bitmapscan=off -c enable_sort=off");
+                "-c enable_seqscan=off -c enable_bitmapscan=off -c enable_sort=off");
         ds = new HikariDataSource(cfg);
+        PgSession.overrideScanBudgetForTests(SCAN_CAP, 1);
         var scope = new TenantScope(ds);
         embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         repo = new PgVectorRepository(scope, embedder, embedder);
@@ -126,6 +135,7 @@ class HnswScanCapExactFallbackIntegrationTest {
 
     @AfterAll
     void stopAll() {
+        PgSession.resetScanBudgetForTests();
         if (ds != null) {
             ds.close();
         }

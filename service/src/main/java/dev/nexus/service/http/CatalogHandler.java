@@ -1147,7 +1147,7 @@ public final class CatalogHandler implements HttpHandler {
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
             var combined = combinedWriteService.appendCombined(
                 tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes,
-                parseEmbeddingModel(body.get("embedding_model")));
+                parseEmbeddingModel(body.get("embedding_model")), parseMetadataMode(body));
             if (combined.tokens() > 0) {
                 exchange.getResponseHeaders().set(
                     VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
@@ -1254,12 +1254,53 @@ public final class CatalogHandler implements HttpHandler {
         }
         boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
         var combined = combinedWriteService.appendManyCombined(tenant, collection, docs, chunks, forceReEmbed,
-            parseEmbeddingModel(body.get("embedding_model")));
+            parseEmbeddingModel(body.get("embedding_model")), parseMetadataMode(body));
         if (combined.tokens() > 0) {
             exchange.getResponseHeaders().set(
                 VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
+    }
+
+    /** Most keys one request may name in {@code metadata_delete_keys}. */
+    private static final int MAX_METADATA_DELETE_KEYS = 64;
+
+    /**
+     * The request's metadata write mode (RDR-223, bead nexus-z0o2p.13): optional {@code
+     * "metadata_merge": true} makes the combined routes MERGE the incoming chunk metadata into
+     * the stored metadata of a chash that already exists (stored minus {@code
+     * metadata_delete_keys}, then the incoming keys) instead of replacing it, the semantics of
+     * {@code /v1/vectors/upsert-chunks}. Absent or false is the replace behaviour every earlier
+     * client gets. {@code metadata_delete_keys} (an array of non-blank strings, at most {@value
+     * #MAX_METADATA_DELETE_KEYS}) names the keys the writer owns and dropped from this write;
+     * it is refused without {@code metadata_merge}. Only chunks are affected, so both fields are
+     * ignored on a request that carries no {@code chunks}.
+     */
+    static dev.nexus.service.db.CombinedWriteService.MetadataMode parseMetadataMode(Map<String, Object> body) {
+        Object rawMerge = body.get("metadata_merge");
+        if (rawMerge != null && !(rawMerge instanceof Boolean)) {
+            throw new IllegalArgumentException("'metadata_merge' must be a boolean");
+        }
+        boolean merge = Boolean.TRUE.equals(rawMerge);
+        Object rawKeys = body.get("metadata_delete_keys");
+        List<String> keys = new ArrayList<>();
+        if (rawKeys != null) {
+            if (!(rawKeys instanceof List<?> l)) {
+                throw new IllegalArgumentException("'metadata_delete_keys' must be an array of strings");
+            }
+            if (l.size() > MAX_METADATA_DELETE_KEYS) {
+                throw new IllegalArgumentException("'metadata_delete_keys' has " + l.size()
+                    + " keys; the limit is " + MAX_METADATA_DELETE_KEYS);
+            }
+            for (Object o : l) {
+                if (!(o instanceof String k) || k.isBlank()) {
+                    throw new IllegalArgumentException(
+                        "'metadata_delete_keys' must be an array of non-blank strings");
+                }
+                keys.add(k);
+            }
+        }
+        return new dev.nexus.service.db.CombinedWriteService.MetadataMode(merge, keys);
     }
 
     /**
@@ -1463,7 +1504,7 @@ public final class CatalogHandler implements HttpHandler {
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
             var combined = combinedWriteService.writeManyCombined(
                 tenant, collection, chunks, docs, complete, sweep, forceReEmbed,
-                parseEmbeddingModel(body.get("embedding_model")));
+                parseEmbeddingModel(body.get("embedding_model")), parseMetadataMode(body));
             if (combined.tokens() > 0) {
                 exchange.getResponseHeaders().set(
                     VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));

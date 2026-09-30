@@ -426,7 +426,7 @@ fi
 # ── Fused rerank stage (RDR-188 P1) ──────────────────────────────────────────
 # Reranks (query, chunk) pairs through the local ms-marco cross-encoder — DJL
 # PAIR tokenization + a second OrtSession, the same native JNI risk class as the
-# bge embed above. store-put two chunks, search with rerank=true, and assert the
+# bge embed above. Write two chunks with their owner (write_many), search with rerank=true, and assert the
 # structured envelope. With the ~91MB model present (CI: prime-crossencoder-onnx)
 # the STRONG path must return real scores; absent, the LOUD-degrade contract is
 # asserted instead — either way the envelope is exercised, never silently skipped.
@@ -445,39 +445,71 @@ if [ -f "$BGE_MODEL" ]; then
   if [ "$rreg" != "200" ]; then
     echo "  FAIL rerank fixture collection register -> $rreg: $(head -c200 "$SMOKE_TMP/ns-rerank-reg.out")"; fail=1
   fi
-  put_rerank_chunk() {
-    curl -s -o "$SMOKE_TMP/ns-rerank-put.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
-      -d "{\"collection\":\"$RCOL\",\"doc_id\":\"$1\",\"content\":$2}" "$U/v1/vectors/store-put"
-  }
   CHASH1="$(printf 'e%.0s' {1..64})"
   CHASH2="$(printf 'f%.0s' {1..64})"
-  p1=$(put_rerank_chunk "$CHASH1" '"Mix flour and water, ferment the dough, bake the bread in a hot oven."')
-  p2=$(put_rerank_chunk "$CHASH2" '"Quantum chromodynamics describes the strong interaction between quarks."')
-  if [ "$p1" = "200" ] && [ "$p2" = "200" ]; then
-    # fc99baac9 (nexus-wbfpw.10, RDR-192 Step 5): every T3 content read now
-    # goes through live(c) -- nexus.chunk_live_owners(tenant, collection,
-    # chash) must find a catalog_document_chunks manifest row owned by a
-    # non-tombstoned catalog_documents row, or the chunk is invisible to
-    # search no matter how well it scores. store-put above writes only the
-    # chunks_<dim> row (chash = the doc_id it was given, verbatim -- see
-    # PgVectorRepository#upsertChunksInternal's own "chash is the caller's
-    # identity" comment) with no owning document, so the two chunks above
-    # are dead(c) the instant they land. A real client always follows a
-    # store-put with a manifest write; do the same here so the search below
-    # can see them.
-    rdoc=$(curl -s -o "$SMOKE_TMP/ns-rerank-doc.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
-      -d "{\"owner_prefix\":\"nativesmoke.rerank\",\"title\":\"native-smoke rerank fixture\",\"content_type\":\"knowledge\",\"physical_collection\":\"$RCOL\"}" \
-      "$U/v1/catalog/doc/register")
-    if [ "$rdoc" != "200" ]; then
-      echo "  FAIL rerank fixture doc register -> $rdoc: $(head -c200 "$SMOKE_TMP/ns-rerank-doc.out")"; fail=1
+  RTEXT1="Mix flour and water, ferment the dough, bake the bread in a hot oven."
+  RTEXT2="Quantum chromodynamics describes the strong interaction between quarks."
+  # RDR-223 P3: the engine refuses an ownerless chunk write (store-put and
+  # upsert-chunks), and RDR-192 Step 5 makes every T3 content read go through
+  # live(c) -- nexus.chunk_live_owners(tenant, collection, chash) must find a
+  # catalog_document_chunks manifest row owned by a non-tombstoned document, or
+  # the chunk is invisible to search no matter how well it scores. So the
+  # fixture is written the way the real client writes it: register the owning
+  # document, then ONE write_many carrying the manifest rows AND the chunks
+  # (chash = the row's chash, verbatim; the engine embeds them under the same
+  # existence partition the standalone routes used). The chunk texts and the
+  # ranking conditions are unchanged: the same two chunks in the same
+  # collection, so the rerank stage sees the same candidate pair.
+  rdoc=$(curl -s -o "$SMOKE_TMP/ns-rerank-doc.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+    -d "{\"owner_prefix\":\"nativesmoke.rerank\",\"title\":\"native-smoke rerank fixture\",\"content_type\":\"knowledge\",\"physical_collection\":\"$RCOL\"}" \
+    "$U/v1/catalog/doc/register")
+  rman="skipped"
+  if [ "$rdoc" = "200" ]; then
+    RDOC_ID=$(python3 -c "import json,os; print(json.load(open(os.environ['SMOKE_TMP'] + '/ns-rerank-doc.out'))['tumbler'])" 2>/dev/null)
+    RMANY_BODY=$(RCOL="$RCOL" RDOC_ID="$RDOC_ID" CHASH1="$CHASH1" CHASH2="$CHASH2" RTEXT1="$RTEXT1" RTEXT2="$RTEXT2" python3 -c "
+import json, os
+e = os.environ
+print(json.dumps({
+    'collection': e['RCOL'],
+    'docs': [{'doc_id': e['RDOC_ID'], 'rows': [
+        {'position': 0, 'chash': e['CHASH1']},
+        {'position': 1, 'chash': e['CHASH2']}]}],
+    'chunks': [
+        {'chash': e['CHASH1'], 'text': e['RTEXT1'], 'metadata': {}},
+        {'chash': e['CHASH2'], 'text': e['RTEXT2'], 'metadata': {}}],
+}))")
+    rman=$(curl -s -o "$SMOKE_TMP/ns-rerank-man.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      -d "$RMANY_BODY" "$U/v1/catalog/manifest/write_many")
+  fi
+  if [ "$rdoc" = "200" ] && [ "$rman" = "200" ] \
+     && python3 -c "import json,os,sys; sys.exit(0 if json.load(open(os.environ['SMOKE_TMP'] + '/ns-rerank-man.out')).get('chunks_written')==2 else 1)" 2>/dev/null; then
+    # Raw-route coverage on the native binary: re-post the SAME, now owned,
+    # chashes through /v1/vectors/upsert-chunks and /v1/vectors/store-put (the
+    # only native-image probe of the two chunk-write routes). Owned writes are
+    # valid before and after the RDR-223 P3.2 refusal of ownerless writes. Same
+    # texts as the write_many above, so the ranking conditions below do not move.
+    RCOL="$RCOL" CHASH1="$CHASH1" CHASH2="$CHASH2" RTEXT1="$RTEXT1" RTEXT2="$RTEXT2" python3 -c "
+import json, os
+e = os.environ
+json.dump({'collection': e['RCOL'], 'ids': [e['CHASH1'], e['CHASH2']],
+           'documents': [e['RTEXT1'], e['RTEXT2']], 'metadatas': [{}, {}]}, open(e['SMOKE_TMP'] + '/ns-rerank-up.in', 'w'))"
+    rup=$(curl -s -o "$SMOKE_TMP/ns-rerank-up.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      --data-binary "@$SMOKE_TMP/ns-rerank-up.in" "$U/v1/vectors/upsert-chunks")
+    if [ "$rup" = "200" ] && python3 -c "import json,os,sys; sys.exit(0 if json.load(open(os.environ['SMOKE_TMP'] + '/ns-rerank-up.out')).get('upserted')==2 else 1)" 2>/dev/null; then
+      echo "  ok   upsert-chunks (owned chashes) -> 200, upserted=2"
     else
-      RDOC_ID=$(python3 -c "import json,os; print(json.load(open(os.environ['SMOKE_TMP'] + '/ns-rerank-doc.out'))['tumbler'])" 2>/dev/null)
-      rman=$(curl -s -o "$SMOKE_TMP/ns-rerank-man.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
-        -d "{\"doc_id\":\"$RDOC_ID\",\"collection\":\"$RCOL\",\"rows\":[{\"position\":0,\"chash\":\"$CHASH1\"},{\"position\":1,\"chash\":\"$CHASH2\"}]}" \
-        "$U/v1/catalog/manifest/write")
-      if [ "$rman" != "200" ]; then
-        echo "  FAIL rerank fixture manifest write -> $rman: $(head -c200 "$SMOKE_TMP/ns-rerank-man.out")"; fail=1
-      fi
+      echo "  FAIL upsert-chunks (owned chashes) -> $rup: $(head -c200 "$SMOKE_TMP/ns-rerank-up.out")"; fail=1
+    fi
+    RCOL="$RCOL" CHASH1="$CHASH1" RTEXT1="$RTEXT1" python3 -c "
+import json, os
+e = os.environ
+json.dump({'collection': e['RCOL'], 'doc_id': e['CHASH1'], 'content': e['RTEXT1']}, open(e['SMOKE_TMP'] + '/ns-rerank-sp.in', 'w'))"
+    rsp=$(curl -s -o "$SMOKE_TMP/ns-rerank-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      --data-binary "@$SMOKE_TMP/ns-rerank-sp.in" "$U/v1/vectors/store-put")
+    if [ "$rsp" = "200" ]; then
+      echo "  ok   store-put (owned chash) -> 200"
+    else
+      echo "  FAIL store-put (owned chash) -> $rsp: $(head -c200 "$SMOKE_TMP/ns-rerank-sp.out")"; fail=1
     fi
     rcode=$(curl -s -o "$SMOKE_TMP/ns-rerank.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"query\":\"how do I bake bread\",\"collections\":[\"$RCOL\"],\"n_results\":2,\"rerank\":true}" \
@@ -513,10 +545,10 @@ PYEOF
       fi
     fi
   else
-    echo "  FAIL rerank fixture store-put -> $p1/$p2: $(head -c200 "$SMOKE_TMP/ns-rerank-put.out")"; fail=1
+    echo "  FAIL rerank fixture doc register / write_many (chunks + owner rows, want 200/200 + chunks_written=2) -> $rdoc/$rman: $(head -c200 "$SMOKE_TMP/ns-rerank-doc.out") $(head -c200 "$SMOKE_TMP/ns-rerank-man.out" 2>/dev/null)"; fail=1
   fi
 else
-  echo "  WARN rerank stage NOT covered — bge model absent (store-put needs the embedder)"
+  echo "  WARN rerank stage NOT covered — bge model absent (the chunk write needs the embedder)"
 fi
 
 if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/svc.log"; then
