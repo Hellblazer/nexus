@@ -159,6 +159,29 @@ public final class CombinedWriteService {
     public record CombinedWriteResult(Map<String, Object> response, long tokens) {}
 
     /**
+     * How a combined route writes the metadata of a chunk whose chash is already stored
+     * (RDR-223, bead nexus-z0o2p.13). {@link #REPLACE} (the default, and every request that
+     * names neither field) replaces the stored metadata with the incoming metadata. With {@code
+     * merge}, stored metadata becomes {@code (stored - deleteKeys) || incoming}: the semantics of
+     * {@code /v1/vectors/upsert-chunks}, so a writer that owns only some keys of a chunk (an
+     * indexer re-writing content keys, leaving the {@code bib_*} enrichment another writer set)
+     * does not wipe the rest. The keys the caller names in {@code deleteKeys} are the ones it
+     * owns and dropped from this write. A chunk that is not stored yet takes the incoming
+     * metadata as is under either mode.
+     */
+    public record MetadataMode(boolean merge, List<String> deleteKeys) {
+        public static final MetadataMode REPLACE = new MetadataMode(false, List.of());
+
+        public MetadataMode {
+            deleteKeys = deleteKeys == null ? List.of() : List.copyOf(deleteKeys);
+            if (!merge && !deleteKeys.isEmpty()) {
+                throw new IllegalArgumentException(
+                    "'metadata_delete_keys' requires 'metadata_merge': true");
+            }
+        }
+    }
+
+    /**
      * @param tenant        tenant principal for RLS scoping
      * @param collection    four-segment conformant collection name (drives
      *                      {@code chunks_<dim>} dispatch AND the manifest
@@ -192,8 +215,20 @@ public final class CombinedWriteService {
     public CombinedWriteResult writeManyCombined(String tenant, String collection,
             List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
             Map<String, String> complete, boolean sweep, boolean forceReEmbed, String embeddingModel) {
+        return writeManyCombined(tenant, collection, chunks, docs, complete, sweep, forceReEmbed,
+            embeddingModel, MetadataMode.REPLACE);
+    }
+
+    /**
+     * {@link #writeManyCombined(String, String, List, List, Map, boolean, boolean, String)} with a
+     * metadata write mode (RDR-223, bead nexus-z0o2p.13); see {@link MetadataMode}.
+     */
+    public CombinedWriteResult writeManyCombined(String tenant, String collection,
+            List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
+            Map<String, String> complete, boolean sweep, boolean forceReEmbed, String embeddingModel,
+            MetadataMode metadataMode) {
         checkSuppliedVectors(tenant, collection, chunks, embeddingModel);
-        ResolvedBatch batch = resolveChunks(tenant, collection, chunks, forceReEmbed);
+        ResolvedBatch batch = resolveChunks(tenant, collection, chunks, forceReEmbed, metadataMode);
 
         // Phase 3: dispatch — every actual WRITE happens inside this call,
         // one per-doc transaction at a time.
@@ -271,6 +306,17 @@ public final class CombinedWriteService {
     public CombinedWriteResult appendCombined(String tenant, String collection, String docId,
             List<Map<String, Object>> rows, List<Map<String, Object>> chunks, boolean forceReEmbed,
             List<String> sweepChashes, String embeddingModel) {
+        return appendCombined(tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes,
+            embeddingModel, MetadataMode.REPLACE);
+    }
+
+    /**
+     * {@link #appendCombined(String, String, String, List, List, boolean, List, String)} with a
+     * metadata write mode (RDR-223, bead nexus-z0o2p.13); see {@link MetadataMode}.
+     */
+    public CombinedWriteResult appendCombined(String tenant, String collection, String docId,
+            List<Map<String, Object>> rows, List<Map<String, Object>> chunks, boolean forceReEmbed,
+            List<String> sweepChashes, String embeddingModel, MetadataMode metadataMode) {
         if (docId == null || docId.isBlank()) {
             throw new IllegalArgumentException("'doc_id' required");
         }
@@ -291,7 +337,7 @@ public final class CombinedWriteService {
             else unreferenced.add(s);
         }
 
-        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed);
+        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed, metadataMode);
         CatalogRepository.AppendOutcome outcome = catalogRepo.appendManifestChunks(
             tenant, docId, collection, rows, batch.resolved(), null, sweepChashes);
         recordMismatches(collection, batch);
@@ -338,6 +384,17 @@ public final class CombinedWriteService {
     public CombinedWriteResult appendManyCombined(String tenant, String collection,
             List<Map<String, Object>> docs, List<Map<String, Object>> chunks, boolean forceReEmbed,
             String embeddingModel) {
+        return appendManyCombined(tenant, collection, docs, chunks, forceReEmbed, embeddingModel,
+            MetadataMode.REPLACE);
+    }
+
+    /**
+     * {@link #appendManyCombined(String, String, List, List, boolean, String)} with a metadata
+     * write mode (RDR-223, bead nexus-z0o2p.13); see {@link MetadataMode}.
+     */
+    public CombinedWriteResult appendManyCombined(String tenant, String collection,
+            List<Map<String, Object>> docs, List<Map<String, Object>> chunks, boolean forceReEmbed,
+            String embeddingModel, MetadataMode metadataMode) {
         checkSuppliedVectors(tenant, collection, chunks, embeddingModel);
         // Size-check every document's sweep list BEFORE the embed: the cheapest refusal.
         for (Map<String, Object> d : docs) {
@@ -374,7 +431,7 @@ public final class CombinedWriteService {
             if (!(c.get("chash") instanceof String s) || referenced.contains(s)) relevant.add(c);
             else unreferenced.add(s);
         }
-        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed);
+        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed, metadataMode);
         Map<String, Object> response =
             catalogRepo.appendManifestMany(tenant, collection, docs, batch.resolved());
         recordMismatches(collection, batch);
@@ -486,7 +543,7 @@ public final class CombinedWriteService {
      * embed the rest, all OUTSIDE any manifest transaction.
      */
     private ResolvedBatch resolveChunks(String tenant, String collection,
-            List<Map<String, Object>> chunks, boolean forceReEmbed) {
+            List<Map<String, Object>> chunks, boolean forceReEmbed, MetadataMode metadataMode) {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("'collection' is required and must be non-blank");
         }
@@ -594,6 +651,11 @@ public final class CombinedWriteService {
         Set<Integer> originalAbsentIdx = new HashSet<>();
         // RDR-223 P1.5: chashes whose stored vector (identical text) differs from the supplied one.
         List<String> mismatchedChashes = new ArrayList<>();
+        // RDR-223 (nexus-z0o2p.13): under MetadataMode.merge, the merged metadata of a stored
+        // chash that is written through the insert branch (force_re_embed, or text that changed
+        // under a colliding chash); the metadata-only branch merges in SQL instead. Reset per
+        // attempt with the rest of this transaction's outputs.
+        Map<Integer, Map<String, Object>> mergedForInsert = new HashMap<>();
         List<Integer> needEmbedIdx = dedupChashes.isEmpty() ? new ArrayList<>()
             : DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: SHARED sweep gate first, like every manifest
@@ -612,6 +674,7 @@ public final class CombinedWriteService {
                 // reset for the full rationale).
                 originalAbsentIdx.clear();
                 mismatchedChashes.clear();
+                mergedForInsert.clear();
                 List<Integer> need = new ArrayList<>();
                 List<Integer> metadataOnly = new ArrayList<>();
                 List<Integer> existingWithSupplied = new ArrayList<>();
@@ -672,8 +735,33 @@ public final class CombinedWriteService {
                     // (with identical text) at the SELECT above, so it is the
                     // zero-row-reroute class, deliberately excluded from the
                     // raced-embed count exactly like the direct upsert path.
+                    // Merge mode passes the caller's delete keys (non-null list = MERGE in
+                    // SQL: (stored - delete_keys) || incoming); replace mode passes null.
                     need.addAll(PgVectorRepository.batchUpdateMetadata(
-                        ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly));
+                        ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly,
+                        metadataMode.merge() ? metadataMode.deleteKeys() : null));
+                }
+                if (metadataMode.merge()) {
+                    // The insert branch REPLACES on conflict, so merge in Java for the stored
+                    // chashes headed there: read their metadata under this same transaction.
+                    List<Integer> storedNeed = new ArrayList<>();
+                    for (int i : need) {
+                        if (existingText.get(dedupChashes.get(i)) != null) storedNeed.add(i);
+                    }
+                    if (!storedNeed.isEmpty()) {
+                        List<String> hexes = new ArrayList<>(storedNeed.size());
+                        for (int i : storedNeed) hexes.add(dedupChashes.get(i));
+                        Map<String, Map<String, Object>> storedMeta =
+                            selectStoredMetadata(ctx, ch, tenant, collection, hexes);
+                        for (int i : storedNeed) {
+                            Map<String, Object> stored = storedMeta.get(dedupChashes.get(i));
+                            if (stored == null) continue;   // deleted meanwhile: plain insert
+                            Map<String, Object> merged = new LinkedHashMap<>(stored);
+                            for (String k : metadataMode.deleteKeys()) merged.remove(k);
+                            merged.putAll(dedupMetas.get(i));
+                            mergedForInsert.put(i, merged);
+                        }
+                    }
                 }
                 return need;
             }));
@@ -746,7 +834,8 @@ public final class CombinedWriteService {
             float[] supplied = dedupVectors.get(idx);
             String metadataJson;
             try {
-                metadataJson = CatalogRepository.MAPPER.writeValueAsString(dedupMetas.get(idx));
+                metadataJson = CatalogRepository.MAPPER.writeValueAsString(
+                    mergedForInsert.getOrDefault(idx, dedupMetas.get(idx)));
             } catch (Exception e) {
                 throw new IllegalArgumentException(
                     "chunks[].metadata for chash '" + chash + "' is not JSON-serializable", e);
@@ -795,6 +884,33 @@ public final class CombinedWriteService {
                   .and(ch.chash().in(chashes)))
            .fetch()
            .forEach(r -> { if (r.value2() != null) out.put(r.value1(), r.value2().floats()); });
+        return out;
+    }
+
+    /** The stored metadata of each of {@code chashes} that exists in the collection (RDR-223, nexus-z0o2p.13). */
+    private static Map<String, Map<String, Object>> selectStoredMetadata(DSLContext ctx,
+            DimTables.ChunkTable ch, String tenant, String collection, List<String> chashes) {
+        Map<String, Map<String, Object>> out = new HashMap<>();
+        ctx.select(ch.chash(), ch.metadata()).from(ch.table())
+           .where(ch.tenantId().eq(tenant)
+                  .and(ch.collection().eq(collection))
+                  .and(ch.chash().in(chashes)))
+           .fetch()
+           .forEach(r -> {
+               Map<String, Object> m = new LinkedHashMap<>();
+               if (r.value2() != null && r.value2().data() != null) {
+                   try {
+                       @SuppressWarnings("unchecked")
+                       Map<String, Object> parsed =
+                           CatalogRepository.MAPPER.readValue(r.value2().data(), Map.class);
+                       if (parsed != null) m.putAll(parsed);
+                   } catch (Exception e) {
+                       throw new IllegalStateException(
+                           "stored metadata of chash '" + r.value1() + "' is not a JSON object", e);
+                   }
+               }
+               out.put(r.value1(), m);
+           });
         return out;
     }
 
