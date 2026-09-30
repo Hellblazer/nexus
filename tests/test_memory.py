@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
+import hashlib
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -275,9 +276,35 @@ def _t2_cm(db: T2Database) -> MagicMock:
 
 
 def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False):
+    """Run ``nx memory promote`` with the note writer stood in.
+
+    RDR-223 P2.7 (nexus-z0o2p.17): promote writes through ``note_write.put_note``
+    (one request to the engine), no longer through ``t3.put``. These tests are
+    about promote's own translation of the T2 entry (collection, TTL, tags, the
+    ``--remove`` flag), so the writer is a recorder that reports a stored note;
+    the writer and every failure outcome are pinned against the real engine in
+    ``tests/test_z0o2p17_promote_note_write.py``. *mt3* only resolves the
+    collection name. Returns ``(result, calls)``: the kwargs of each
+    ``put_note`` call.
+    """
+    import hashlib
+
+    from nexus.catalog.note_write import STORED, PutNoteOutcome
+    from nexus.catalog.store_hook import note_manifest_metadata
+
     mt3 = _mock_t3()
     t2 = _t2_cm(db) if use_cm else db
     args = ["memory", "promote", str(row_id), "--collection", col, *(extra or [])]
+    calls: list[dict] = []
+
+    def fake_put_note(**kw):
+        calls.append(kw)
+        _first, metas = note_manifest_metadata([kw["content"]])
+        chash = hashlib.sha256(kw["content"].encode()).hexdigest()
+        return PutNoteOutcome(
+            status=STORED, collection=kw["collection"], pieces=[kw["content"]],
+            manifest_metadatas=metas, chunk_ids=[chash], catalog_doc_id="9.9.9", minted=True)
+
     try:
         with (
             patch("nexus.commands.memory.t2_handle", return_value=t2),
@@ -292,23 +319,7 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
             ),
             patch("nexus.config.is_local_mode", return_value=False),
             patch("nexus.db.make_t3", return_value=mt3),
-            # RDR-192 Step 3a (nexus-wbfpw.28): a blank/failed catalog
-            # registration is now a fail-loud rollback, not a tolerated
-            # degraded success — this helper's "fake-key" creds make a
-            # REAL registration attempt 400/401 against the test engine,
-            # which used to be silently swallowed. These tests are about
-            # promote's T3-put/remove/TTL behavior, not catalog wiring
-            # (that contract is pinned in test_b6enc_store_put_ghost_
-            # compensation.py's TestPromote* classes), so give it a
-            # working stand-in instead of a real registration attempt.
-            patch(
-                "nexus.catalog.store_hook.catalog_store_hook_tracked",
-                return_value=("9.9.9", True),
-            ),
-            patch(
-                "nexus.catalog.store_hook.store_put_manifest_direct",
-                return_value=None,
-            ),
+            patch("nexus.catalog.note_write.put_note", side_effect=fake_put_note),
             # The stand-in id above is not a real catalog document, and
             # these fake credentials point at no reachable catalog, so the
             # real manifest hook in the post-store chains would retry an
@@ -333,7 +344,7 @@ def _promote(runner, db, row_id, col="knowledge__proj", extra=None, use_cm=False
         # it here fixes it at the leaker.
         from nexus.mcp_infra import inject_t3
         inject_t3(None)
-    return result, mt3
+    return result, calls
 
 
 # ── Promote tests ────────────────────────────────────────────────────────────
@@ -362,29 +373,30 @@ def test_promote_calls_t3_put(
     which is genuinely mode-dependent (local mode would promote to the
     local embed model instead of voyage-context-3)."""
     row_id = db.put(project="proj", title="doc.md", content="the content", ttl=7, tags="ai")
-    result, mt3 = _promote(runner, db, row_id)
+    result, calls = _promote(runner, db, row_id)
     assert result.exit_code == 0, result.output
-    mt3.put.assert_called_once()
-    kw = mt3.put.call_args.kwargs
+    assert len(calls) == 1, "one promote is one note write"
+    kw = calls[0]
     # RDR-103 Phase 5: ``t3_collection_name`` auto-promotes
     # ``--collection knowledge__proj`` to a conformant 4-segment name.
-    assert (kw["collection"], kw["content"], kw["title"], kw["ttl_days"]) == (
-        "knowledge__proj__voyage-context-3__v1", "the content", "doc.md", 7
+    assert (kw["collection"], kw["content"], kw["title"], kw["ttl_days"], kw["tags"]) == (
+        "knowledge__proj__voyage-context-3__v1", "the content", "doc.md", 7, "ai"
     )
-    assert "abc123" in result.output
+    # The id echoed is the note's first chunk id, the content hash.
+    assert hashlib.sha256(b"the content").hexdigest() in result.output
 
 
 def test_promote_permanent_entry(runner: CliRunner, mem_home: Path, db: T2Database) -> None:
     row_id = db.put(project="proj", title="perm.md", content="forever", ttl=None)
-    _, mt3 = _promote(runner, db, row_id)
-    kw = mt3.put.call_args.kwargs
+    _, calls = _promote(runner, db, row_id)
+    kw = calls[0]
     # nexus-tk070.p6b fix-pass (nexus-24rof, RDR-194 D5): permanent now
-    # translates to ttl_days=None, not 0 (0 is rejected by the real
-    # T3Database.put/HttpVectorClient.put; this test uses a mock T3, so
-    # only the value passed through is asserted here).
+    # translates to ttl_days=None, not 0 (note_write rejects an explicit 0;
+    # this test stands the writer in, so only the value passed through is
+    # asserted here).
     assert kw["ttl_days"] is None
-    # nexus-v4paa fold: neither real T3 substrate accepts expires_at —
-    # promote must not pass it (it was a TypeError, mock-shielded here).
+    # nexus-v4paa fold: no substrate accepts expires_at — promote must not
+    # pass it (it was a TypeError, mock-shielded here).
     assert "expires_at" not in kw
 
 
@@ -423,9 +435,9 @@ def test_promote_honours_remaining_ttl(
             return datetime.fromisoformat(s)
 
     monkeypatch.setattr("nexus.commands.memory.datetime", _FiveDaysLater)
-    result, mt3 = _promote(runner, db, row_id)
+    result, calls = _promote(runner, db, row_id)
     assert result.exit_code == 0, result.output
-    kw = mt3.put.call_args.kwargs
+    kw = calls[0]
     assert "expires_at" not in kw
     assert kw["ttl_days"] == 5, (
         "5 of the 10 TTL days elapsed in T2 — the promoted entry gets "

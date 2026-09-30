@@ -160,22 +160,33 @@ class TestMemoryPromoteFence:
         assert result.exit_code == 0, result.output
         assert _index_state_for(title) == "complete"
 
-    def test_manifest_failure_rolls_back_the_freshly_minted_row(
+    def test_a_refused_write_rolls_back_the_freshly_minted_row(
         self, catalog_env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """RDR-192 Step 3a fix-round 1 (nexus-wbfpw.28, Important, both
-        reviewers): superseding this test's old 'stamped failed, row
-        survives' contract — see the CLI sibling test above for the
-        full rationale."""
+        reviewers): a failed write on a document THIS CALL minted rolls the
+        catalog row back entirely rather than leaving a chunk_count=0 ghost
+        stamped 'failed'. RDR-223 P2.7 (nexus-z0o2p.17): promote writes its note
+        in one request through ``put_note``, so the failure is injected where
+        it happens now, the engine refusing that request (a manifest row naming
+        a chunk the request does not carry; the per-document transaction rolls
+        back). The fence stamp fires first, then the minted row is removed."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        real = HttpCatalogClient.write_manifest_many
+
+        def refused(self, docs, *a, **k):
+            doc, rows = docs[0]
+            return real(self, [(doc, [*rows, {"chash": "f" * 64, "position": len(rows)}])], *a, **k)
+
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", refused)
         title = "cotmr-promote-failed"
-        monkeypatch.setattr(
-            "nexus.catalog.store_hook.store_put_manifest_direct",
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("manifest write refused")),
-        )
-        result = _invoke_promote(tmp_path, _local_t3(), title, "promote fence failure body")
+        with patch("nexus.doc_indexer._fence_fail") as fence_fail:
+            result = _invoke_promote(tmp_path, _real_t3(), title, "promote fence failure body")
         assert result.exit_code != 0
+        assert fence_fail.call_count == 1, "the failed write stamps the fence failed"
         assert documents_by_title(title) == [], (
-            "a manifest failure on a freshly-minted document must roll "
+            "a failed write on a freshly-minted document must roll "
             "back the catalog row, not leave a chunk_count=0 ghost "
             "stamped 'failed'"
         )

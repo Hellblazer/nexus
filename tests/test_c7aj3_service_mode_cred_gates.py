@@ -138,13 +138,22 @@ class TestVictimScenarioEndToEnd:
             "tags": "", "timestamp": "2026-07-18T00:00:00+00:00", "ttl": 30,
         }
         db = _fake_t3()
+        # RDR-223 P2.7 (nexus-z0o2p.17): promote writes through note_write.put_note
+        # (one request to the engine). This test is about the credential gate, so
+        # the writer is a stand-in that declines the note; the assertion that the
+        # command REACHES the writer is what "reaches T3" now means.
+        from nexus.catalog.note_write import NO_CATALOG, PutNoteOutcome
+
+        declined = PutNoteOutcome(status=NO_CATALOG, collection="knowledge__p__x__v1", reason="stand-in")
         try:
             with patch("nexus.commands.memory.t2_handle", return_value=fake_t2), \
                  patch("nexus.db.make_t3", return_value=db), \
+                 patch("nexus.catalog.note_write.put_note", return_value=declined) as put_note, \
                  patch("nexus.corpus.t3_collection_name", return_value="knowledge__p__x__v1"):
                 result = runner.invoke(
                     main, ["memory", "promote", "1", "--collection", "knowledge__p"],
                 )
+            assert put_note.call_count == 1, result.output
         finally:
             # nexus-jovc9: promote's store chains call get_t3(), which memoises
             # the patched make_t3's mock into the process-wide _t3_instance.

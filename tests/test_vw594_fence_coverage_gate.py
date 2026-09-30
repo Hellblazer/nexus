@@ -214,6 +214,20 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
         ),
         same_function=False,
     ),
+    ("commands/memory.py", "promote_cmd"): _Coverage(
+        reason=(
+            "producer 11 (nx memory promote): the fence begins in "
+            "nexus.catalog.note_write.put_note, which promote_cmd calls "
+            "before it fires the batch chain (RDR-223 P2.7, "
+            "nexus-z0o2p.17); the completion stamp rides the note's one "
+            "write_manifest_many request, and the batch chain skips "
+            "manifest_write_batch_hook. Cross-function, the same entry "
+            "shape as store_put: test_promote_cmd_begins_the_fence_in_put_note "
+            "below proves promote_cmd calls put_note and put_note calls "
+            "_fence_begin before write_note."
+        ),
+        same_function=False,
+    ),
 }
 
 
@@ -382,12 +396,14 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
     Pins the count so a future author cannot quietly reclassify a
     same-function site as cross-function to dodge the AST proof above.
 
-    ``mcp/core.py::store_put`` joined them at RDR-223 P2.2 (nexus-z0o2p.12) and
-    ``commands/store.py::put_cmd`` at P2.6 (nexus-z0o2p.16): their fence begins in
-    ``note_write.put_note``, the one function every note producer calls. That claim
-    is proven below, not asserted."""
+    ``mcp/core.py::store_put`` joined them at RDR-223 P2.2 (nexus-z0o2p.12),
+    ``commands/store.py::put_cmd`` at P2.6 (nexus-z0o2p.16) and
+    ``commands/memory.py::promote_cmd`` at P2.7 (nexus-z0o2p.17): their fence begins
+    in ``note_write.put_note``, the one function every note producer calls. That
+    claim is proven below, not asserted."""
     cross = sorted(k for k, cov in _ALLOWLIST.items() if not cov.same_function)
     assert cross == [
+        ("commands/memory.py", "promote_cmd"),
         ("commands/store.py", "put_cmd"),
         ("doc_indexer.py", "_index_document"),
         ("indexer.py", "_fire_deferred_hooks"),
@@ -433,6 +449,25 @@ def test_note_producers_begin_the_fence_in_put_note_before_the_write() -> None:
     assert "_fence_begin" in names and "write_note" in names, names
     assert names.index("_fence_begin") < names.index("write_note"), (
         f"put_note must begin the fence before it writes: {calls}")
+
+
+def test_promote_cmd_begins_the_fence_in_put_note() -> None:
+    """The proof behind ``promote_cmd``'s cross-function entry: it calls ``put_note``
+    (whose ``_fence_begin`` precedes ``write_note``, proven above), and no
+    ``fire_batch`` call precedes that ``put_note`` call (RDR-223 P2.7, nexus-z0o2p.17)."""
+    memory = ast.parse((SRC_ROOT / "commands" / "memory.py").read_text())
+    promote = next(
+        n for n in ast.walk(memory)
+        if isinstance(n, ast.FunctionDef) and n.name == "promote_cmd")
+    calls = sorted(
+        (c.lineno, c.func.id if isinstance(c.func, ast.Name) else c.func.attr)
+        for c in ast.walk(promote)
+        if isinstance(c, ast.Call) and isinstance(c.func, (ast.Name, ast.Attribute)))
+    names = [name for _line, name in calls]
+    assert "put_note" in names, "promote_cmd must write its note through note_write.put_note"
+    assert "fire_batch" in names
+    assert names.index("put_note") < names.index("fire_batch"), (
+        f"promote_cmd must write (and so fence) before it fires the batch chain: {calls}")
 
 
 # ── RDR-223 (nexus-z0o2p.10): the multi-batch writer's fence leg ──────────────

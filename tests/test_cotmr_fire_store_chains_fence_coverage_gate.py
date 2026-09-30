@@ -54,15 +54,11 @@ class _Coverage:
 
 # (relative-path-from-src-nexus, enclosing-function-name) -> coverage record.
 _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
-    ("commands/memory.py", "promote_cmd"): _Coverage(
-        reason=(
-            "nx memory promote: _fence_begin called in this same function "
-            "before t3.put; manifest_complete rides the fire_store_chains "
-            "call at the tail, mirroring MCP core.py::store_put's F2 "
-            "pattern verbatim (nexus-cotmr)."
-        ),
-        fenced=True,
-    ),
+    # Neither nx store put (put_cmd, RDR-223 P2.6, nexus-z0o2p.16) nor nx memory
+    # promote (promote_cmd, P2.7, nexus-z0o2p.17) is here any more: both write their
+    # note through note_write.put_note (the fence begins there) and fire the chains
+    # one by one, so neither has a fire_store_chains call left to fence. The fire_batch
+    # leg is test_vw594_fence_coverage_gate.py's.
     ("exporter.py", "_fire_store_chains_grouped_by_doc"): _Coverage(
         reason=(
             "nx store import: KNOWN, NAMED residual gap (nexus-tafjk "
