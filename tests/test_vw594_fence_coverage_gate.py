@@ -84,10 +84,13 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
             "_begin_fence), which this function calls before its "
             "fire_batch — cross-function by RDR-223 design, since the "
             "writer owns the begin, the chunk+owner writes and the "
-            "completion stamp as one protocol (nexus-z0o2p.13). Ordering "
-            "is pinned by tests/integration/"
-            "test_rdr223_index_document_journey.py (begin precedes the "
-            "first write request)."
+            "completion stamp as one protocol (nexus-z0o2p.13). Two "
+            "pins back it: the journey "
+            "(tests/integration/test_rdr223_index_document_journey.py) "
+            "shows the writer's begin precedes its first write request, and "
+            "this file's AST leg (test_cross_function_entries_call_the_owner_"
+            "write_before_fire_batch) checks the function reaches the owner "
+            "write before its first fire_batch."
         ),
         same_function=False,
     ),
@@ -97,9 +100,12 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
             "fence begin is the first request of the combined writer "
             "(_write_chunks_with_owner_rows -> MultiBatchDocumentWriter."
             "_begin_fence), called before this function's fire_batch — "
-            "cross-function by RDR-223 design (nexus-z0o2p.15). Ordering "
-            "is pinned by tests/integration/test_rdr223_pdf_journey.py "
-            "(begin precedes the first write request)."
+            "cross-function by RDR-223 design (nexus-z0o2p.15). Two pins "
+            "back it: tests/integration/test_rdr223_pdf_journey.py shows the "
+            "writer's begin precedes its first write request, and this "
+            "file's AST leg (test_cross_function_entries_call_the_owner_"
+            "write_before_fire_batch) checks the function reaches the owner "
+            "write before its first fire_batch."
         ),
         same_function=False,
     ),
@@ -108,8 +114,12 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
             "producer 3 (nx index pdf, <=128 chunks, small-doc inline "
             "path): the fence begin is the first request of the combined "
             "writer, called before this function's fire_batch — "
-            "cross-function by RDR-223 design (nexus-z0o2p.15). Ordering "
-            "is pinned by tests/integration/test_rdr223_pdf_journey.py."
+            "cross-function by RDR-223 design (nexus-z0o2p.15). Two pins "
+            "back it: tests/integration/test_rdr223_pdf_journey.py shows the "
+            "writer's begin precedes its first write request, and this "
+            "file's AST leg (test_cross_function_entries_call_the_owner_"
+            "write_before_fire_batch) checks the function reaches the owner "
+            "write before its first fire_batch."
         ),
         same_function=False,
     ),
@@ -121,8 +131,12 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
             "writer (UploadRun.open_writer -> MultiBatchDocumentWriter), "
             "which uploader_loop feeds and whose sent batches are the only "
             "ones fire_batch is called for — cross-function by the "
-            "writer's design (RDR-223, nexus-z0o2p.11). Ordering is pinned "
-            "by tests/integration/test_rdr223_pdf_journey.py."
+            "writer's design (RDR-223, nexus-z0o2p.11). Two pins back it: "
+            "tests/integration/test_rdr223_pdf_journey.py shows the writer's "
+            "begin precedes its first write request, and this file's AST leg "
+            "(test_cross_function_entries_call_the_owner_write_before_"
+            "fire_batch) checks that every call of _flag follows the writer's "
+            "open/finish or sits in the dry-run branch."
         ),
         same_function=False,
     ),
@@ -496,3 +510,133 @@ def test_writer_leg_kill_control_flags_the_omissions() -> None:
     )
     sites = {s.function: s.fenced for s in _find_writer_sites(ast.parse(src), "x.py")}
     assert sites == {"a": False, "b": False, "c": False, "d": True}
+
+
+# ── RDR-223: the cross-function entries reach the owner write before their fire_batch ─────
+#
+# The journeys pin that the WRITER's fence begin precedes its first data request. They do not pin
+# that these functions call the writer BEFORE they fire the post-store hooks, which is what makes
+# the hooks read stored chunks and what the cross-function justification above claims. Nothing
+# checked it: reordering ``fire_batch`` above the write would leave every test green until a
+# hook read a chunk that was not there. This leg checks it syntactically, per entry.
+
+#: The calls that hand chunks to the owner write: the combined write helper, and the streaming
+#: run's writer (opened, fed, finished).
+_OWNER_WRITE_CALLS = frozenset({"_write_chunks_with_owner_rows", "open_writer", "add_batch", "finish"})
+
+#: (file, function) -> how its fire_batch must be preceded. "direct": the fire_batch sits in the
+#: function's own body, after a call in _OWNER_WRITE_CALLS. "nested": the fire_batch is in a nested
+#: helper (``_flag``); every call of the helper must follow an owner-write call in its own
+#: function, or sit under ``if dry_run`` (a dry run has no owner write by design).
+_OWNER_WRITE_ENTRIES: dict[tuple[str, str], str] = {
+    ("doc_indexer.py", "_index_document"): "direct",
+    ("doc_indexer.py", "_index_pdf_incremental"): "direct",
+    ("doc_indexer.py", "index_pdf"): "direct",
+    ("pipeline_stages.py", "_flag"): "nested",
+}
+
+
+def _call_name(node: ast.Call) -> str | None:
+    f = node.func
+    return f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+
+
+def _owner_write_order_problems(tree: ast.Module, function: str, mode: str) -> list[str]:
+    """Why *function*'s fire_batch is not provably preceded by an owner write (empty: it is)."""
+    defs = [n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == function]
+    if not defs:
+        return [f"{function}() not found"]
+    problems: list[str] = []
+
+    def owner_lines(fn: ast.AST) -> list[int]:
+        return sorted(c.lineno for c in ast.walk(fn)
+                      if isinstance(c, ast.Call) and _call_name(c) in _OWNER_WRITE_CALLS)
+
+    if mode == "direct":
+        for fn in defs:
+            fires = sorted(c.lineno for c in ast.walk(fn)
+                           if isinstance(c, ast.Call) and _call_name(c) == "fire_batch")
+            owners = owner_lines(fn)
+            if not fires:
+                problems.append(f"{function}() has no fire_batch")
+            elif not owners:
+                problems.append(f"{function}() never calls the owner write")
+            elif owners[0] > fires[0]:
+                problems.append(
+                    f"{function}(): first fire_batch at line {fires[0]} precedes the first owner "
+                    f"write at line {owners[0]}")
+        return problems
+
+    # nested helper: every call of it, in the function that encloses its definition.
+    for helper in defs:
+        outer = next((n for n in ast.walk(tree)
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not helper
+                      and any(c is helper for c in ast.walk(n))), None)
+        if outer is None:
+            problems.append(f"{function}() is not nested")
+            continue
+        dry: set[int] = set()
+        for n in ast.walk(outer):
+            if isinstance(n, ast.If) and isinstance(n.test, ast.Name) and n.test.id == "dry_run":
+                dry.update(id(x) for x in ast.walk(n))
+        scopes = [outer] + [n for n in ast.walk(outer)
+                            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n is not outer]
+        calls = [c for c in ast.walk(outer)
+                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == function]
+        if not calls:
+            problems.append(f"{function}() is never called")
+        for c in calls:
+            if id(c) in dry:
+                continue
+            scope = min((sc for sc in scopes if any(x is c for x in ast.walk(sc))),
+                        key=lambda sc: sum(1 for _ in ast.walk(sc)))
+            if not any(line < c.lineno for line in owner_lines(scope)):
+                problems.append(
+                    f"{function}() called at line {c.lineno} with no owner-write call before it in "
+                    f"{scope.name}() and outside the dry_run branch")
+    return problems
+
+
+def test_cross_function_entries_call_the_owner_write_before_fire_batch() -> None:
+    problems: list[str] = []
+    for (rel, function), mode in _OWNER_WRITE_ENTRIES.items():
+        tree = ast.parse((SRC_ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+        problems += [f"{rel}: {p}" for p in _owner_write_order_problems(tree, function, mode)]
+    assert not problems, (
+        "nexus-z0o2p.11/.15 (S6): a cross-function fence entry no longer provably writes its chunks "
+        "with their owner rows before it fires the post-store hooks:\n  " + "\n  ".join(problems))
+
+
+def test_owner_write_entries_are_exactly_the_rdr223_cross_function_entries() -> None:
+    """The entries checked above are the cross-function entries that are owner-write callers (the
+    ChunkBatcher closures are cross-function by another mechanism), and every one is still an
+    allowlist entry, so neither list can drift from the other."""
+    cross = {k for k, cov in _ALLOWLIST.items() if not cov.same_function}
+    assert set(_OWNER_WRITE_ENTRIES) <= cross
+    assert cross - set(_OWNER_WRITE_ENTRIES) == {
+        ("indexer.py", "_fire_deferred_hooks"), ("indexer.py", "_fire_flush_grain_hooks")}
+
+
+def test_owner_write_leg_kill_control_flags_a_fire_batch_ahead_of_the_write() -> None:
+    """The scanner passes a write-then-hook body, and flags a hook-then-write body, a body with no
+    write, and an ungated nested-helper call ahead of the writer; it passes the dry-run-guarded
+    and finish-guarded helper calls."""
+    good = "def f():\n    _write_chunks_with_owner_rows(a)\n    hooks.fire_batch(b)\n"
+    bad = "def f():\n    hooks.fire_batch(b)\n    _write_chunks_with_owner_rows(a)\n"
+    none = "def f():\n    hooks.fire_batch(b)\n"
+    assert _owner_write_order_problems(ast.parse(good), "f", "direct") == []
+    assert _owner_write_order_problems(ast.parse(bad), "f", "direct")
+    assert _owner_write_order_problems(ast.parse(none), "f", "direct")
+    nested_ok = (
+        "def outer(dry_run):\n"
+        "    def _flag(x):\n        hooks.fire_batch(x)\n"
+        "    def _land():\n        w.finish()\n        _flag(1)\n"
+        "    if dry_run:\n        _flag(2)\n"
+        "    else:\n        run.open_writer()\n        _flag(3)\n")
+    nested_bad = (
+        "def outer(dry_run):\n"
+        "    def _flag(x):\n        hooks.fire_batch(x)\n"
+        "    _flag(1)\n    run.open_writer()\n")
+    assert _owner_write_order_problems(ast.parse(nested_ok), "_flag", "nested") == []
+    assert _owner_write_order_problems(ast.parse(nested_bad), "_flag", "nested")
