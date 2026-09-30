@@ -60,7 +60,7 @@ class StagingHandlerJourneyTest {
     /** 16 lowercase hex, exactly what InstallPingHandler stores as source_hash. */
     private static final String PING_SOURCE_HASH = "0123456789abcdef";
 
-    private static final String TEXT_REUSE ="journey chunk with reusable vector";
+    private static final String TEXT_REUSE = "journey chunk with reusable vector";
     private static final String TEXT_FILL  = "journey chunk needing embed fill";
 
     PostgreSQLContainer<?> pg;

@@ -5,6 +5,9 @@ package dev.nexus.service.db;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
+import org.jooq.Field;
+import org.jooq.Table;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -17,6 +20,8 @@ import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 
 import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
@@ -100,6 +105,31 @@ class ChashCensusInstallPingsTest {
             scope.withTenant(TENANT, ctx -> ctx.deleteFrom(RELEVANCE_LOG)
                 .where(RELEVANCE_LOG.TENANT_ID.eq(TENANT)).execute());
         }
+    }
+
+    @Test
+    void nonRlsTables_theCensusBlindSet_isPinned() {
+        Table<?> pc = DSL.table(DSL.name("pg_catalog", "pg_class")).as("pc");
+        Table<?> pn = DSL.table(DSL.name("pg_catalog", "pg_namespace")).as("pn");
+        Field<String> relname = DSL.field(DSL.name("pc", "relname"), String.class);
+        Field<Object> relns = DSL.field(DSL.name("pc", "relnamespace"), Object.class);
+        Field<String> relkind = DSL.field(DSL.name("pc", "relkind"), String.class);
+        Field<Boolean> rls = DSL.field(DSL.name("pc", "relrowsecurity"), Boolean.class);
+        Field<Object> nsOid = DSL.field(DSL.name("pn", "oid"), Object.class);
+        Field<String> nsName = DSL.field(DSL.name("pn", "nspname"), String.class);
+
+        Set<String> nonRls = scope.withTenant(TENANT, ctx -> new TreeSet<>(
+            ctx.select(relname).from(pc).join(pn).on(relns.eq(nsOid))
+               .where(nsName.eq("nexus")).and(relkind.in("r", "p")).and(rls.isFalse())
+               .fetch(relname)));
+
+        assertThat(nonRls)
+            .as("the census scans only RLS-enabled tables, so every non-RLS nexus table is "
+                + "invisible to it. A NEW non-RLS table lands here: decide deliberately "
+                + "whether it can hold chunk pointers before adding it to this set "
+                + "(nexus-6u63y)")
+            .containsExactlyInAnyOrder("embedding_models", "install_pings", "service_tokens",
+                "session_tokens", "tuple_tenants");
     }
 
     @Test

@@ -610,20 +610,20 @@ class StagingPromoteOpsIntegrationTest {
         // RLS-enabled tables, so a standalone CREATE TABLE canary would sit
         // outside it; a column on an existing RLS table is the faithful stand-in.
         Field<String> ccMysteryRef = DSL.field(DSL.name("mystery_ref"), String.class);
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
-            suCtx.alterTable(RELEVANCE_LOG).addColumn(ccMysteryRef, SQLDataType.CLOB).execute();
-            suCtx.insertInto(RELEVANCE_LOG)
-                 .set(RELEVANCE_LOG.TENANT_ID, T1)
-                 .set(RELEVANCE_LOG.QUERY, "census-canary")
-                 .set(RELEVANCE_LOG.CHUNK_ID, "b".repeat(64))
-                 .set(RELEVANCE_LOG.ACTION, "view")
-                 .set(RELEVANCE_LOG.TIMESTAMP, java.time.OffsetDateTime.parse("2026-09-29T12:00:00Z"))
-                 .set(ccMysteryRef, "0123456789abcdef0123456789abcdef")
-                 .execute();
-        }
         try {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
+                suCtx.alterTable(RELEVANCE_LOG).addColumn(ccMysteryRef, SQLDataType.CLOB).execute();
+                suCtx.insertInto(RELEVANCE_LOG)
+                     .set(RELEVANCE_LOG.TENANT_ID, T1)
+                     .set(RELEVANCE_LOG.QUERY, "census-canary")
+                     .set(RELEVANCE_LOG.CHUNK_ID, "b".repeat(64))
+                     .set(RELEVANCE_LOG.ACTION, "view")
+                     .set(RELEVANCE_LOG.TIMESTAMP, java.time.OffsetDateTime.parse("2026-09-29T12:00:00Z"))
+                     .set(ccMysteryRef, "0123456789abcdef0123456789abcdef")
+                     .execute();
+            }
             Map<String, Integer> residue = scope.withTenant(T1, ctx ->
                 dev.nexus.service.db.ChashCensus.scan(ctx));
             assertThat(residue)
@@ -635,7 +635,7 @@ class StagingPromoteOpsIntegrationTest {
                 su.setAutoCommit(true);
                 DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
                 suCtx.deleteFrom(RELEVANCE_LOG).where(RELEVANCE_LOG.QUERY.eq("census-canary")).execute();
-                suCtx.alterTable(RELEVANCE_LOG).dropColumn(ccMysteryRef).execute();
+                suCtx.alterTable(RELEVANCE_LOG).dropColumnIfExists(ccMysteryRef).execute();
             }
         }
         // Post-cleanup the migrated store scans clean.

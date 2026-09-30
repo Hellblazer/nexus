@@ -155,7 +155,11 @@ public final class ChashCensus {
     private static final Table<?> PG_CLASS     = DSL.table(DSL.name("pg_catalog", "pg_class"));
     private static final Table<?> PG_NAMESPACE = DSL.table(DSL.name("pg_catalog", "pg_namespace"));
 
-    /** Enumerate schema-nexus columns of one udt type: {@code table.column}. */
+    /**
+     * Enumerate columns of one udt type in RLS-ENABLED schema-nexus tables
+     * only (a global non-RLS table is out of scope, nexus-6u63y):
+     * {@code table.column}.
+     */
     private static List<String[]> columns(DSLContext ctx, String udt) {
         Table<?> c = INFO_COLUMNS.as("c");
         Table<?> t = INFO_TABLES.as("t");

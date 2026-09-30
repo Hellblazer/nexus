@@ -1243,7 +1243,9 @@ public final class StagingPromoteOps {
                     + "(manifest chash with no content row in any dim) — aborting");
             }
             // (8) THE COLUMN CENSUS (nexus-jxizy.10.5, Hal directive): every
-            // TEXT/BYTEA column in schema nexus, schema-derived, must scan
+            // TEXT/BYTEA column of an RLS-enabled table in schema nexus
+            // (global non-RLS tables are out of scope, nexus-6u63y),
+            // schema-derived, must scan
             // clean of legacy residue outside the justified allowlist — the
             // mechanical missed-leg killer. FATAL here: a finalize that
             // leaves residue in nexus has left the migration incomplete.
