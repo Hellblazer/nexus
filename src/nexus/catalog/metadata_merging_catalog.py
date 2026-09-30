@@ -20,9 +20,26 @@ Every other attribute is the wrapped writer's.
 """
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 __all__ = ["MetadataMergingCatalog"]
+
+
+def _may_have_written(exc: BaseException) -> bool:
+    """False only for a failure that positively means the request wrote nothing; an unknown failure
+    is treated as possibly written, since the cost of a wrong "written" is a leftover failed
+    registration a rerun heals, and the cost of a wrong "not written" is a rollback of chunks that
+    landed."""
+    import httpx  # noqa: PLC0415 — deferred: keeps the module import light
+
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
+        return False
+    if isinstance(exc, httpx.HTTPStatusError):
+        return not (400 <= exc.response.status_code < 500 and exc.response.status_code != 408)
+    if isinstance(exc, json.JSONDecodeError):  # a ValueError, but of the ANSWER: the write happened
+        return True
+    return not isinstance(exc, (ValueError, TypeError))
 
 
 class MetadataMergingCatalog:
@@ -37,23 +54,49 @@ class MetadataMergingCatalog:
         self._cat = cat
         self._collection = collection
         self._delete_keys = list(delete_keys)
-        #: Called just before each chunk-carrying request is sent (RDR-223, nexus-z0o2p.11/.15), so
-        #: a caller can tell the writer has begun writing.
+        #: Called when a chunk-carrying request has, or may have, written chunks (see :meth:`_send`).
         self._on_request = on_request
         #: Sweeps the engine reported as errored, with a reason, across this document's responses.
         self.errored_sweeps = 0
 
     def write_manifest_many(self, *args: Any, **kwargs: Any) -> Any:
-        if self._on_request is not None:
-            self._on_request()
-        return self._note(self._cat.write_manifest_many(
-            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
+        docs = args[0] if args else kwargs.get("docs")
+        return self._send(lambda: self._cat.write_manifest_many(
+            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs),
+            doc_ids=[d[0] for d in docs or ()])
 
     def append_manifest_chunks(self, *args: Any, **kwargs: Any) -> Any:
+        return self._send(lambda: self._cat.append_manifest_chunks(
+            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs),
+            doc_ids=[])
+
+    def _send(self, send: "Callable[[], Any]", *, doc_ids: list[str]) -> Any:
+        """Run one chunk-carrying request and tell the caller whether it may have written.
+
+        The hook reports what a caller that would undo a fresh registration needs to know: that
+        chunks are, or may be, in the store. It fires AFTER the request, and only when that is
+        true. A request that never reached the engine (a connect error, the client's own argument
+        checks) or that the engine refused (a 4xx other than 408) wrote nothing, and a freshly
+        minted document whose first request ended that way is a phantom registration the caller
+        must roll back, so reporting it would leave a failed document with zero chunks. A request
+        that answered with every document in ``failed_doc_ids`` was rolled back by the engine, for
+        the same reason. Everything else (a read timeout, a dropped connection, a 5xx or 408, an
+        answer the client could not parse or trust) leaves the outcome open and counts as written.
+        """
+        try:
+            resp = send()
+        except BaseException as exc:
+            if _may_have_written(exc):
+                self._report()
+            raise
+        failed = set(resp.get("failed_doc_ids") or ()) if isinstance(resp, dict) else set()
+        if not (doc_ids and set(doc_ids) <= failed):
+            self._report()
+        return self._note(resp)
+
+    def _report(self) -> None:
         if self._on_request is not None:
             self._on_request()
-        return self._note(self._cat.append_manifest_chunks(
-            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
 
     def _note(self, resp: Any) -> Any:
         if not isinstance(resp, dict):
