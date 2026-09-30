@@ -2541,6 +2541,8 @@ def index_repository(
                 _deferred_or_failed_files = (
                     stats.get("chunk_flush_failed_files", 0)
                     + stats.get("transient_upsert_deferred_files", 0)
+                    + stats.get("identity_less_dropped_files", 0)
+                    + stats.get("identity_less_deferred_files", 0)
                 )
                 if _deferred_or_failed_files:
                     _log.info(
@@ -2548,6 +2550,8 @@ def index_repository(
                         repo=str(repo),
                         chunk_flush_failed_files=stats.get("chunk_flush_failed_files", 0),
                         transient_upsert_deferred_files=stats.get("transient_upsert_deferred_files", 0),
+                        identity_less_dropped_files=stats.get("identity_less_dropped_files", 0),
+                        identity_less_deferred_files=stats.get("identity_less_deferred_files", 0),
                     )
                 else:
                     _set_owner_head_hash(repo, _current_head(repo))
@@ -4540,13 +4544,17 @@ def _build_combined_write_payload(
       cost paid) then silently discarded server-side — no log, no
       counter, no error, and a REGRESSION vs pre-commit behavior (that
       content used to land in T3 via the old direct upsert-chunks call,
-      orphaned-but-searchable). The caller (``_batch_flush``) sends these
-      through the OLD ``db.upsert_chunks_with_embeddings`` call, exactly
-      preserving the pre-commit orphaned-but-searchable behavior for
-      files this function cannot manifest.
+      orphaned-but-searchable). RDR-223 (nexus-z0o2p.20): the caller
+      (``_batch_flush``) no longer writes these anywhere. They are the
+      accounting of what the flush must NOT write for a file with no
+      catalog document; the paragraph below describes the retired route.
+
+      RETIRED (nexus-z0o2p.20): the shared-chash copy below fed the legacy
+      upsert, which is gone; the shared chash is now written only through the
+      identity document's combined write.
 
       A chash claimed by BOTH an identity file and an identity-less file
-      (duplicate content across files, routine boilerplate) rides BOTH
+      (duplicate content across files, routine boilerplate) rode BOTH
       paths (nexus-3mwuo, C1-residual from the wxjr6 delta re-review, T2
       review-wxjr6-client-2026-08-09 [22014]): it stays in
       ``chunks_payload`` (the cheap, common-case-correct path — safely
@@ -4677,6 +4685,74 @@ def _build_combined_write_payload(
         and _c["metadatas"][0].get("content_hash")
     }
     return chunks_payload, full_docs, complete_map, orphan_ids, orphan_docs, orphan_metas
+
+
+def _refuse_identity_less_files(
+    indexed_files: "list[tuple[Path, str, str]]",
+    file_to_doc_id: "dict[Path, str]",
+    causes: "dict[Path, str]",
+    *,
+    on_phase: "Callable[[str], None] | None" = None,
+) -> "tuple[set[Path], int, int]":
+    """Refuse, before any chunking, every file this run could not resolve to a
+    catalog document (nexus-z0o2p.20, RDR-223 P2.10, Technical Design 4).
+
+    A file with no document has no owner for its chunks, and a chunk is
+    written together with its owner row or not at all. Returns
+    ``(refused_paths, dropped, deferred)``; the caller removes ``refused_paths``
+    from what it dispatches. Three kinds, told apart by the hook's cause map:
+
+    * ``ephemeral:*``: registration was refused on purpose (worktree or temp
+      dir). Counted by the ephemeral-skip summary, not here, and not a failure.
+    * ``fairness_yielded``: a batch-priority writer yielded before the file was
+      reached; the next pass registers and indexes it. ``deferred``; not a
+      failure, but the since-head base must not advance past it.
+    * anything else (``register_failed``, ``catalog_hook_failed``,
+      ``unexplained``): a named identity drop with nothing written, which
+      fails the run's summary. ``dropped``.
+    """
+    from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred: avoid module-load cross-import
+
+    refused: set[Path] = set()
+    dropped = deferred = ephemeral = 0
+    cause_counts: dict[str, int] = {}
+    named: list[str] = []
+    for path, _content_type, collection in indexed_files:
+        if file_to_doc_id.get(path):
+            continue
+        refused.add(path)
+        cause = causes.get(path, "unexplained")
+        cause_counts[cause] = cause_counts.get(cause, 0) + 1
+        if cause.startswith("ephemeral:"):
+            ephemeral += 1
+            continue
+        if cause == "fairness_yielded":
+            deferred += 1
+            continue
+        dropped += 1
+        named.append(str(path))
+        _record_manifest_identity_drop(
+            collection, 0, written=False,
+            files=[{"file": str(path), "chunks": 0, "cause": cause}],
+        )
+    if refused:
+        _log.warning(
+            "identity_less_files_refused_before_chunking",
+            dropped=dropped, deferred=deferred, ephemeral_refused=ephemeral,
+            causes=cause_counts, files=named[:20],
+        )
+    if on_phase is not None:
+        if dropped:
+            on_phase(
+                f"WARNING: {dropped} file(s) have no catalog document and were "
+                f"not indexed (nexus-z0o2p.20; see the summary for names)"
+            )
+        if deferred:
+            on_phase(
+                f"NOTE: {deferred} file(s) deferred to the next pass "
+                f"(catalog write yielded to an interactive write)"
+            )
+    return refused, dropped, deferred
 
 
 def _run_index(
@@ -5497,6 +5573,27 @@ def _run_index(
     # orchestrator. Behaviour identical — missing files resolve to "".
     _doc_id_resolver = build_doc_id_resolver(file_to_doc_id)
 
+    # nexus-z0o2p.20 (RDR-223 P2.10): a file with no catalog document is
+    # refused before it is chunked. The batched (HttpVectorClient) path would
+    # otherwise write its chunks with no owner. Other T3 handles (test
+    # doubles) keep their per-file path. The full lists stay intact for the
+    # prune and attempted-total logic below; only what is DISPATCHED shrinks.
+    from nexus.db.http_vector_client import HttpVectorClient as _HttpVectorClient  # noqa: PLC0415 — deferred to avoid circular import
+    _refused_paths: set[Path] = set()
+    _identity_less_dropped = 0
+    _identity_less_deferred = 0
+    if isinstance(db, _HttpVectorClient):
+        _refused_paths, _identity_less_dropped, _identity_less_deferred = (
+            _refuse_identity_less_files(
+                indexed_for_catalog, file_to_doc_id, _unregistered_causes,
+                on_phase=on_phase,
+            )
+        )
+    _dispatch_code = [(sc, f) for sc, f in code_files if f not in _refused_paths]
+    _dispatch_prose = [(sc, f) for sc, f in prose_files if f not in _refused_paths]
+    _dispatch_pdf = [(sc, f) for sc, f in pdf_files if f not in _refused_paths]
+    _dispatch_rdr = [(sc, f) for sc, f in rdr_md_paths if f not in _refused_paths]
+
     # Pre-build the per-collection staleness cache (nexus-rr0u follow-up).
     # One paginated sweep per collection up front replaces N per-file
     # ``col.get(where={doc_id})`` round-trips inside the indexing loop.
@@ -5672,67 +5769,55 @@ def _run_index(
                 chunks_payload, full_docs, complete_map,
                 orphan_ids, orphan_docs, orphan_metas,
             ) = _build_combined_write_payload(_ids, _docs, _metas, _file_contexts)
+            from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred: avoid module-load cross-import
 
-            if orphan_ids:
-                # Code review Critical C1 (2026-08-09, review T2 [22014]):
-                # chunks whose file has NO catalog identity can never be
-                # referenced by any doc's manifest rows, so the engine
-                # would embed them (Voyage cost paid) and then silently
-                # discard them (upsertManifestChunkVectors only persists
-                # chashes a doc's OWN rows name). Route them through the
-                # OLD direct upsert-chunks call instead — preserves the
-                # pre-nexus-wxjr6 behavior EXACTLY (content lands in T3,
-                # orphaned but searchable, no manifest) rather than either
-                # silently losing it or changing what "orphaned" means.
-                # INFO, not WARNING: this is the SAME state the pre-commit
-                # code produced silently for identity-less chunks; logging
-                # it is strictly better observability, not a new failure.
-                _orphan_files = _identity_less_files(_file_contexts, _unregistered_causes)
-                _log.info(
-                    "combined_write_orphan_chunks_routed_to_legacy_upsert",
+            _orphan_files = _identity_less_files(_file_contexts, _unregistered_causes)
+            if _orphan_files:
+                # RDR-223 (nexus-z0o2p.20, Technical Design 4): a file with NO
+                # catalog document has no owner for its chunks, and a chunk is
+                # written together with its owner row or not at all. This used
+                # to send them through db.upsert_chunks_with_embeddings
+                # (Code review Critical C1, 2026-08-09): stored, ownerless,
+                # hidden from every read by live(c), and refused outright once
+                # the engine stops accepting ownerless writes. Now they are not
+                # written. The run has already refused such files before
+                # chunking (_refuse_identity_less_files), so reaching here means
+                # something staged one anyway; count it, name it, write nothing.
+                #
+                # nexus-3mwuo consequence: a chash shared by an identity file
+                # and an identity-less file used to be copied into that legacy
+                # upsert so it survived the identity document's failed write.
+                # That copy is gone. The shared chash is now written only by the
+                # identity document's combined write, with that document's
+                # failed_doc_ids and fence handling as the one recovery path.
+                # The identity-less file is still named as dropped.
+                for _f in _orphan_files:
+                    _record_manifest_identity_drop(
+                        collection, _f["chunks"], written=False, files=[_f],
+                    )
+                _log.warning(
+                    "combined_write_identity_less_files_dropped",
                     collection=collection,
-                    count=len(orphan_ids),
+                    chunks_not_written=len(orphan_ids),
                     **_identity_less_event_fields(_orphan_files),
-                )
-                # nexus-y8xjh: batch-indexer rows are complete dicts, so name
-                # the writer-owned keys they dropped as empty (see
-                # _index_pdf_file's upload for why).
-                from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
-                _orphan_delete_keys = rewrite_delete_keys(orphan_metas)
-                db.upsert_chunks_with_embeddings(
-                    collection_name=collection,
-                    ids=orphan_ids,
-                    documents=orphan_docs,
-                    embeddings=[[] for _ in orphan_ids],  # Seam B: server embeds
-                    metadatas=orphan_metas,
-                    force_re_embed=force_re_embed,
-                    **({"delete_keys": _orphan_delete_keys} if _orphan_delete_keys else {}),
                 )
 
             if not full_docs:
                 # Mirrors manifest_write_batch_hook's identical early-out
-                # (GH #1397 / nexus-94fxl): no file in this flush carries
-                # catalog identity — record it the same way, but do NOT
-                # attempt the old T3-write-without-manifest fallback: the
-                # combined write's whole point is that content and
-                # manifest land together or not at all (design memo §0).
-                # Structurally this should not happen for the
-                # ChunkBatcher path (catalog registration precedes
-                # indexing), so this is a defended invariant, not routine
-                # traffic. (A MIXED flush with SOME identity-having files
-                # already got its combined write above/below this branch
-                # — this is the ALL-orphan case, already fully handled by
-                # the orphan routing above.)
-                from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred (lazy import, rare path)
-                _record_manifest_identity_drop(collection, len(_ids))
-                _log.warning(
-                    "combined_write_batch_missing_doc_identity",
-                    collection=collection,
-                    batch_size=len(_ids),
-                    **_identity_less_event_fields(
-                        _identity_less_files(_file_contexts, _unregistered_causes),
-                    ),
-                )
+                # (GH #1397 / nexus-94fxl): nothing in this flush can be given
+                # a manifest, so nothing is written (the combined write's whole
+                # point is content and manifest landing together or not at all,
+                # design memo §0). The identity-less files, if any, were
+                # already named above; this branch only records the defended
+                # invariant of a flush with NO identity-less file that still has
+                # nothing manifestable (e.g. every chash empty).
+                if not _orphan_files:
+                    _record_manifest_identity_drop(collection, len(_ids), written=False)
+                    _log.warning(
+                        "combined_write_batch_missing_doc_identity",
+                        collection=collection,
+                        batch_size=len(_ids),
+                    )
                 return
 
             from nexus.mcp_infra import (  # noqa: PLC0415 — deferred: avoid module-load cross-import
@@ -6117,7 +6202,7 @@ def _run_index(
     # nexus-tevzq: kept per-kind so the caller can gate taxonomy discovery per
     # collection (code loop → code__, prose+pdf → docs__, rdr loop → rdr__).
     _code_written = run_file_loop(
-        code_files, _index_one_code, concurrency=_concurrency,
+        _dispatch_code, _index_one_code, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
         on_skip=_on_skip,
     )
@@ -6167,7 +6252,7 @@ def _run_index(
         ), file)
 
     _prose_written = run_file_loop(
-        prose_files, _index_one_prose, concurrency=_concurrency,
+        _dispatch_prose, _index_one_prose, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
         on_skip=_on_skip,
     )
@@ -6206,7 +6291,7 @@ def _run_index(
         ), file, _quality_gate_failed), file)
 
     _pdf_written = run_file_loop(
-        pdf_files, _index_one_pdf, concurrency=_concurrency,
+        _dispatch_pdf, _index_one_pdf, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
         on_skip=_on_skip,
     )
@@ -6259,7 +6344,7 @@ def _run_index(
     # ticker had already stopped. Announce the RDR pass's own total so the
     # renderer can count and estimate this phase on its own.
     if on_rdr_start:
-        on_rdr_start(len(rdr_md_paths))
+        on_rdr_start(len(_dispatch_rdr))
     if on_phase is not None:
         on_phase("Discovering and indexing RDR markdown files…")
     _rdr_t0 = time.monotonic()
@@ -6281,13 +6366,13 @@ def _run_index(
         ), file)
 
     _rdr_written = run_file_loop(
-        rdr_md_paths, _index_one_rdr, concurrency=_concurrency,
+        _dispatch_rdr, _index_one_rdr, concurrency=_concurrency,
         on_file=on_file, on_stage_timers=on_stage_timers,
         on_skip=_on_skip,
     )
     _files_written += _rdr_written
     rdr_indexed = _rdr_written
-    rdr_current = len(rdr_md_paths) - _rdr_written
+    rdr_current = len(_dispatch_rdr) - _rdr_written
     # nexus-3lswy: unlike the retired _discover_and_index_rdrs, there is no
     # distinct "failed" count here — like code/prose/pdf, a failed upload
     # is contained (batcher.failed_files / _contain_transient_upsert) and
@@ -6823,6 +6908,16 @@ def _run_index(
         # exit after the rest of the run completes, so a total-write-path
         # failure is never reported as a clean "Done." at rc=0.
         "chunk_flush_failed_files": len(_batch_failures),
+        # nexus-z0o2p.20 (RDR-223 P2.10): files this run refused BEFORE
+        # chunking because they have no catalog document. "dropped" =
+        # register_failed / catalog_hook_failed / unexplained: named in the
+        # identity-drop summary, which fails the run. "deferred" = a
+        # batch-priority writer yielded before the file was reached: retried
+        # by the next pass, not a failure. Both hold the --since-head base
+        # back (index_repository), or the next diff never re-offers the file.
+        # Neither is counted as indexed or fresh: no on_file callback fires.
+        "identity_less_dropped_files": _identity_less_dropped,
+        "identity_less_deferred_files": _identity_less_deferred,
         # nexus-6m9zy.6 (#12): count of files a per-file upsert deferred
         # this run on a transient 5xx/timeout (_contain_transient_upsert).
         # Zero chunks from these files landed either, same as

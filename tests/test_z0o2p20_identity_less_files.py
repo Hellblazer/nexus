@@ -305,11 +305,10 @@ class TestFlushEventNamesTheFiles:
             ]
 
         _db, _cw, logs, repo = _drive_flush(tmp_path, monkeypatch, contexts_for=contexts_for)
-        # A flush whose every file lacks a document logs this WARNING; the
-        # test logging config filters INFO, so this is the visible event.
-        events = [e for e in logs if e.get("event") == "combined_write_batch_missing_doc_identity"]
+        events = [e for e in logs if e.get("event") == "combined_write_identity_less_files_dropped"]
         assert len(events) == 1, [e.get("event") for e in logs]
         ev = events[0]
+        assert ev["chunks_not_written"] == 3
         assert ev["file_count"] == 2
         assert ev["file_chunks"] == 3
         assert ev["causes"] == {"catalog_hook_failed": 1, "unexplained": 1}

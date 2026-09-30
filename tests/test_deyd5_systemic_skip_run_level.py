@@ -52,6 +52,11 @@ def _reg(override=None):
     return m
 
 
+def _register_every_file(**kw):
+    """Stand-in for ``_catalog_hook``: a document id for every file offered."""
+    return {p: f"1.1.{i}" for i, (p, _t, _c) in enumerate(kw["indexed_files"], 1)}
+
+
 @contextmanager
 def _service_mode_patches(db, *, extra=None):
     # Mirrors tests/test_4s1ww_chunk_flush_failure_reporting.py's
@@ -72,6 +77,10 @@ def _service_mode_patches(db, *, extra=None):
         "nexus.indexer._migrate_legacy_collections": {"return_value": {}},
         "nexus.catalog.factory.make_catalog_reader": {"return_value": None},
         "nexus.catalog.factory.make_catalog_writer": {"return_value": None},
+        # nexus-z0o2p.20: the run refuses a file with no catalog document
+        # before chunking it, so a test that stubs the per-file indexers models
+        # a catalog that registered every file.
+        "nexus.indexer._catalog_hook": {"side_effect": _register_every_file},
         # nexus-bd44g fix check: _run_index's pre-staleness-sweep
         # registration loop now calls ensure_collection_registered before
         # any per-file write. That seam reads the engine's embedding

@@ -2116,7 +2116,8 @@ def get_manifest_identity_drops() -> list[dict]:
 
     Each entry: ``{"collection": str, "batch_size": int}``, plus ``"written": False``
     when the chunks were refused before any write (RDR-223,
-    :func:`_record_manifest_identity_drop`'s ``written``). Snapshot copy.
+    :func:`_record_manifest_identity_drop`'s ``written``) and ``"files"`` when the
+    drop names its files. Snapshot copy.
     """
     with _manifest_identity_drops_lock:
         return [dict(d) for d in _MANIFEST_IDENTITY_DROPS]
@@ -2135,6 +2136,7 @@ def reset_manifest_identity_drops() -> None:
 
 def _record_manifest_identity_drop(
     collection: str, batch_size: int, *, written: bool = True,
+    files: "list[dict] | None" = None,
 ) -> None:
     """No-op when no active CLI index run has reset the collector
     (nexus-wbfpw.29 round 2) — see the section comment above
@@ -2145,12 +2147,20 @@ def _record_manifest_identity_drop(
     BEFORE any write because it has no catalog document to own its chunks
     (``doc_indexer._index_document``); the entry then carries ``"written": False``
     so the summary can say nothing was stored instead of pointing at a reconcile
-    that has nothing to repair."""
+    that has nothing to repair.
+
+    *files* (nexus-z0o2p.20, RDR-223 P2.10): ``[{"file", "chunks", "cause"}, ...]``
+    naming the files behind the drop, so the run summary can say which ones and
+    why (``nx index repo`` refuses a file with no catalog document before
+    chunking it, and again at the flush). Absent for callers that have no file
+    to name."""
     if not _identity_drop_collectors_active:
         return
     entry: dict = {"collection": collection, "batch_size": batch_size}
     if not written:
         entry["written"] = False
+    if files:
+        entry["files"] = [dict(f) for f in files]
     with _manifest_identity_drops_lock:
         _MANIFEST_IDENTITY_DROPS.append(entry)
 

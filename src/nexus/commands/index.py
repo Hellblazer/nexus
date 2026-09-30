@@ -1594,6 +1594,17 @@ def index_repo_cmd(
                 f"  skipped: index fresh (use --force) — {skipped_files} of "
                 f"{n} file(s) unchanged"
             )
+        # nexus-z0o2p.20 (RDR-223 P2.10): files a batch-priority writer never
+        # reached were refused before chunking, so they are neither indexed nor
+        # fresh. Not a failure (the next pass registers them); said out loud so
+        # the counts above are not read as covering them.
+        _identity_less_deferred = (stats or {}).get("identity_less_deferred_files", 0)
+        if _identity_less_deferred:
+            click.echo(
+                f"  deferred: {_identity_less_deferred} file(s) NOT indexed this "
+                f"run — a catalog write yielded to an interactive write; "
+                f"re-run 'nx index repo' to pick them up"
+            )
         if not frecency_only and stats:
             rdr_indexed = stats.get("rdr_indexed", 0)
             rdr_current = stats.get("rdr_current", 0)

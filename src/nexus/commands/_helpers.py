@@ -462,6 +462,10 @@ def _emit_write_failed_warning(
     return True
 
 
+# nexus-z0o2p.20: how many not-indexed files the summary names before "and N more".
+_MAX_NAMED_DROPS = 10
+
+
 def _emit_identity_drops_warning() -> bool:
     """GH #1397 / nexus-94fxl: batches DROPPED for missing document
     identity never reach the write, so they are invisible to the
@@ -494,15 +498,24 @@ def _emit_identity_drops_warning() -> bool:
     if refused:
         n_chunks = sum(d["batch_size"] for d in refused)
         cols = sorted({d["collection"] for d in refused})
+        chunk_text = f"{n_chunks} chunks; " if n_chunks else ""
         click.echo(
-            f"  WARNING: {len(refused)} document(s) ({n_chunks} chunks; "
+            f"  WARNING: {len(refused)} document(s) ({chunk_text}"
             f"collection(s): {', '.join(cols)}) were NOT indexed: catalog "
             f"registration returned no document identity to own their "
             f"chunks, so nothing was written. Fix the registration failure "
-            f"(see the 'preflight_register_failed' log event) and re-run "
-            f"the index.",
+            f"(see the 'preflight_register_failed' or 'catalog_hook_failed' "
+            f"log event) and re-run the index.",
             err=True,
         )
+        # nexus-z0o2p.20: name the files and the reason each has no document.
+        named = [f for d in refused for f in d.get("files", ())]
+        for f in named[:_MAX_NAMED_DROPS]:
+            click.echo(f"    not indexed: {f['file']} ({f['cause']})", err=True)
+        if len(named) > _MAX_NAMED_DROPS:
+            click.echo(
+                f"    ... and {len(named) - _MAX_NAMED_DROPS} more", err=True,
+            )
     return True
 
 
@@ -828,10 +841,18 @@ def raise_identity_drop_exception(
     if write_failed and not identity_dropped:
         remedies.append("Run 'nx catalog reconcile' to repair the manifests")
     if identity_dropped:
-        remedies.append(
-            f"Run 'nx catalog reconcile' to repair the manifests; re-index "
-            f"with --force any {subject} still missing afterwards"
-        )
+        # nexus-z0o2p.20: a drop that wrote nothing (no document to own the
+        # chunks) has no manifest for reconcile to repair.
+        if all(not d.get("written", True) for d in get_manifest_identity_drops()):
+            remedies.append(
+                f"Fix the registration failure named above and re-run the "
+                f"index; no chunk of the affected {subject}s was written"
+            )
+        else:
+            remedies.append(
+                f"Run 'nx catalog reconcile' to repair the manifests; re-index "
+                f"with --force any {subject} still missing afterwards"
+            )
     if refused:
         remedies.append(
             f"Run 'nx catalog show <tumbler>' to inspect a specific "
