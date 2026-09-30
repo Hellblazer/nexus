@@ -71,6 +71,13 @@ def _chunk(chash: str, text: str = "t") -> dict:
 # ── write_manifest_many: dropped_chashes ──────────────────────────────────────
 
 
+def _says_the_engine_is_older_and_what_to_do(exc: BaseException) -> None:
+    """A refusal caused by an old engine names the cause and the two remedies, not only the field."""
+    text = str(exc)
+    assert "older than this client" in text, text
+    assert "Upgrade the local engine" in text and "cloud engine deploy" in text, text
+
+
 class TestWriteManyDroppedChashes:
     def test_dropped_chashes_returned_per_document(self, monkeypatch) -> None:
         c, _ = _client(monkeypatch, {
@@ -366,9 +373,10 @@ class TestAppendManifestMany:
 
     def test_an_answer_without_complete_refused_count_is_an_ack_mismatch(self, monkeypatch) -> None:
         c, _ = _client(monkeypatch, {"docs": 1, "results": [], "failed_doc_ids": []})
-        with pytest.raises(RuntimeError, match="complete_refused_count"):
+        with pytest.raises(RuntimeError, match="complete_refused_count") as exc:
             c.append_manifest_many(
                 [("1.1.1", [_row(_A, 0)])], complete={"1.1.1": ("h", 1)}, collection=_COLLECTION)
+        _says_the_engine_is_older_and_what_to_do(exc.value)
 
     @pytest.mark.parametrize("stamp", [("", 1), ("h", -1), ("h", True), ("h", "1")])
     def test_a_malformed_stamp_is_refused_before_any_post(self, monkeypatch, stamp) -> None:
@@ -431,9 +439,10 @@ class TestBeginIndexRunSnapshot:
 
     def test_begin_many_asked_for_snapshots_but_answered_without_is_an_ack_mismatch(self, monkeypatch) -> None:
         c, _ = _client(monkeypatch, {"docs": 1, "failed_doc_ids": []})
-        with pytest.raises(RuntimeError, match="snapshots"):
+        with pytest.raises(RuntimeError, match="snapshots") as exc:
             c.begin_index_run_many(
                 [{"doc_id": "1.1.1", "content_hash": "h", "run_id": "r"}], _COLLECTION, snapshot_manifest=True)
+        _says_the_engine_is_older_and_what_to_do(exc.value)
 
     def test_begin_many_404_stays_the_empty_sentinel(self, monkeypatch) -> None:
         req = httpx.Request("POST", "http://x/v1/catalog/index-run/begin-many")

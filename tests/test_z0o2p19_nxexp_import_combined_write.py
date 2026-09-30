@@ -37,6 +37,7 @@ import nexus.db.http_vector_client as hvc
 import nexus.exporter as exporter_mod
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.catalog.multi_document_write import MultiDocumentImportWriter
+from nexus.corpus import index_model_for_collection
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.limits import QUOTAS
@@ -62,10 +63,10 @@ def _vec(seed: int) -> np.ndarray:
     return np.random.default_rng(seed).standard_normal(_DIM).astype(np.float32)
 
 
-def _write_nxexp(path: Path, collection: str, records: list[dict]) -> None:
+def _write_nxexp(path: Path, collection: str, records: list[dict], *, model: str = _MODEL) -> None:
     header = {
         "format_version": 1, "collection_name": collection,
-        "database_type": collection.split("__")[0], "embedding_model": _MODEL,
+        "database_type": collection.split("__")[0], "embedding_model": model,
         "record_count": len(records), "embedding_dim": _DIM,
         "exported_at": "2026-01-01T00:00:00+00:00", "pipeline_version": "nexus-1",
     }
@@ -777,3 +778,181 @@ def test_gate_xr789_shaped_import_owns_chunks_already_stored_ownerless_across_se
         assert [c for _, c in _manifest(reader, str(entry.tumbler))] == by_doc[orig]
         assert entry.index_state == "complete"
     assert _stored_vectors(client, tmp_path, dst) == stored, "skip-existing sent no payload: vectors untouched"
+
+
+# ── Fix round 3 (nexus-z0o2p.19) ────────────────────────────────────────────
+
+
+def _a_dead_run_left(cat, dst: str, name: str, state: str, file_hash: str, n_owned: int = 2):
+    """A document of the file that already owns its first *n_owned* chunks, its fence in *state*."""
+    owner = cat.register_owner("knowledge", "curator")
+    uri = f"file:///z0o2p19/{dst}/{name}.py"
+    texts = [f"z0o2p19 {name} chunk {i}" for i in range(4)]
+    chashes = [_chash(t) for t in texts]
+    doc = str(cat.register(owner=owner, title=f"{name}.py", content_type="code",
+                           physical_collection=dst, source_uri=uri))
+    cat.write_manifest_many(
+        [(doc, [{"chash": chashes[i], "position": i} for i in range(n_owned)])], collection=dst,
+        chunks=[{"chash": chashes[i], "text": texts[i], "metadata": {}} for i in range(n_owned)])
+    cat.begin_index_run(doc, file_hash, "earlier-run", dst)
+    if state == "failed":
+        cat.fail_index_run(doc, "earlier failure")
+    elif state == "complete":
+        cat.complete_index_run(doc, file_hash, n_owned)
+    records = [{
+        "id": c, "document": t, "metadata": {"chunk_text_hash": c}, "embedding": _vec(400 + i).tobytes(),
+        "owner": {"source_uri": uri, "title": f"{name}.py", "content_type": "code", "position": i},
+    } for i, (c, t) in enumerate(zip(chashes, texts))]
+    return doc, records
+
+
+@pytest.mark.parametrize("state,unfinished", [("indexing", True), ("failed", True), ("complete", False)])
+def test_a_kept_document_is_described_by_what_it_is_not_always_as_a_different_chunk_list(
+    t2_service_env, tmp_path, monkeypatch, state, unfinished,
+):
+    """A document another run left ``indexing`` or ``failed`` (a different export, an index run) is kept
+    by the same rule as a finished one, but it is not "a document with a different chunk list": it is
+    unfinished. The message says so and what the user can do."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    cat = make_catalog_writer(priority="interactive")
+    dst = _coll(f"keptmsg-{state}")
+    f = tmp_path / "keptmsg.nxexp"
+    doc, records = _a_dead_run_left(cat, dst, "keptmsg", state, "another-exports-hash")
+    _write_nxexp(f, dst, records)
+    instances: list = []
+    real_finish = exporter_mod._OwnerImport.finish
+
+    def _spy(self):
+        instances.append(self)
+        return real_finish(self)
+
+    monkeypatch.setattr(exporter_mod._OwnerImport, "finish", _spy)
+    with patch("nexus.commands.store._t3", return_value=client):
+        cli = CliRunner().invoke(main, ["store", "import", str(f), "-c", dst])
+    assert cli.exit_code == 0, cli.output
+    out = " ".join(cli.output.split())
+    if unfinished:
+        assert "left unfinished by another run" in out, out
+        assert "already exist with a different chunk list" not in out, out
+    else:
+        assert "already exist with a different chunk list" in out, out
+        assert "left unfinished" not in out, out
+    assert f"nx store delete -c {dst} --title keptmsg.py" in out, out
+    (owner_import,) = instances
+    assert all(not k["file"] and not k["existing"] for k in owner_import._kept.values()), (
+        "a kept document's chash sets are released once all its records have been seen")
+
+
+def test_two_owner_groups_that_resolve_to_one_document_are_one_document_with_the_combined_count(
+    t2_service_env, tmp_path, monkeypatch,
+):
+    """A document in another collection is COPIED into the target under ``nxexp://<target>/<uri>``. A
+    file that also names that qualified identity literally has two owner groups resolving to ONE
+    document. Its total is the sum: stamping it complete at the first group's count and then failing
+    the second group's rows would flip a complete document to failed."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    cat = make_catalog_writer(priority="interactive")
+    owner = cat.register_owner("knowledge", "curator")
+    dst, src = _coll("twogroups"), _coll("twogroups-src")
+    uri_a = f"file:///z0o2p19/{src}/two.py"
+    cat.register(owner=owner, title="two.py", content_type="code", physical_collection=src, source_uri=uri_a)
+    qualified = f"nxexp://{dst}/{uri_a}"
+    texts = [f"z0o2p19 two groups chunk {i}" for i in range(6)]
+    records = []
+    for i, t in enumerate(texts):
+        records.append({
+            "id": _chash(t), "document": t, "metadata": {"chunk_text_hash": _chash(t)},
+            "embedding": _vec(500 + i).tobytes(),
+            "owner": {"source_uri": uri_a if i < 3 else qualified, "title": "two.py",
+                      "content_type": "code", "position": i}})
+    records.sort(key=lambda r: r["id"])
+    f = tmp_path / "twogroups.nxexp"
+    _write_nxexp(f, dst, records)
+    monkeypatch.setattr(
+        "nexus.exporter.QUOTAS", dataclasses.replace(QUOTAS, MAX_RECORDS_PER_WRITE=2))
+    failed: list[str] = []
+    real_fail = hcc.HttpCatalogClient.fail_index_run
+    monkeypatch.setattr(hcc.HttpCatalogClient, "fail_index_run",
+                        lambda self, d, e: (failed.append(d), real_fail(self, d, e))[1])
+
+    result = import_collection(db=client, input_path=f, target_collection=dst)
+
+    assert not failed
+    assert (result["owned_count"], result["unowned_count"]) == (6, 0), result
+    entry = reader.by_source_uri(qualified)
+    assert entry is not None and entry.index_state == "complete"
+    assert sorted(c for _, c in _manifest(reader, str(entry.tumbler))) == sorted(r["id"] for r in records)
+
+
+def test_the_summary_and_the_cli_report_documents_whose_replaced_chunks_were_not_swept(
+    t2_service_env, tmp_path, monkeypatch,
+):
+    """The engine's sweep fails open: the document reads complete and its superseded chunks stay. The
+    import says so instead of summing the count and dropping it."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    dst = _coll("sweepskip")
+    records, _ = _shaped_file(dst, docs=3)
+    f = tmp_path / "sweepskip.nxexp"
+    _write_nxexp(f, dst, records)
+    real = hcc.HttpCatalogClient.write_manifest_many
+
+    def _skipping(self, docs, *a, **kw):
+        out = dict(real(self, docs, *a, **kw))
+        out["sweep_skipped"] = int(out.get("sweep_skipped") or 0) + 1
+        return out
+
+    monkeypatch.setattr(hcc.HttpCatalogClient, "write_manifest_many", _skipping)
+    with patch("nexus.commands.store._t3", return_value=client):
+        cli = CliRunner().invoke(main, ["store", "import", str(f), "-c", dst])
+    assert cli.exit_code == 0, cli.output
+    out = " ".join(cli.output.split())
+    assert "could not be swept" in out and "nx t3 gc" in out, out
+
+
+def test_a_legacy_local_target_is_written_with_the_model_it_is_registered_with(t2_service_env, tmp_path):
+    """A two-segment name carries no model. Its export header holds the prefix-based guess (what
+    ``export_collection`` writes), which in a local install is not the model the collection is
+    registered with, and the engine compares the request's ``embedding_model`` with the registered
+    one. The import must send the registered model, or the first request is refused."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    dst = "knowledge__z0o2p19-legacy-model"
+    guess = index_model_for_collection(dst)
+    assert guess != _MODEL, "non-vacuity: the header's guess must differ from the local model"
+    uri = f"file:///z0o2p19/{dst}/legacy.md"
+    texts = ["z0o2p19 legacy one", "z0o2p19 legacy two"]
+    records = [{
+        "id": _chash(t), "document": t, "metadata": {"chunk_text_hash": _chash(t)},
+        "embedding": _vec(600 + i).tobytes(),
+        "owner": {"source_uri": uri, "title": "legacy.md", "content_type": "knowledge", "position": i},
+    } for i, t in enumerate(texts)]
+    f = tmp_path / "legacy.nxexp"
+    _write_nxexp(f, dst, records, model=guess)
+
+    result = import_collection(db=client, input_path=f, target_collection=dst)
+
+    assert (result["imported_count"], result["owned_count"]) == (2, 2), result
+    assert reader.by_source_uri(uri).index_state == "complete"
+    assert {r["id"]: r["embedding"] for r in records} == _stored_vectors(client, tmp_path, dst)
+
+
+def test_a_cce_collection_is_paged_at_the_write_cap_not_at_the_embed_cap(
+    t2_service_env, tmp_path, monkeypatch,
+):
+    """The 64-row cap on a CCE collection bounds the ENGINE'S EMBEDDING latency; an import embeds
+    nothing, so it pages at the record-write cap."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    dst = _coll("pagecap")
+    records, _ = _shaped_file(dst, docs=4)
+    f = tmp_path / "pagecap.nxexp"
+    _write_nxexp(f, dst, records)
+    monkeypatch.setattr(hvc, "per_collection_chunk_cap", lambda *a, **kw: 2)
+    pages: list[int] = []
+    real = exporter_mod._OwnerImport.flush
+    monkeypatch.setattr(exporter_mod._OwnerImport, "flush",
+                        lambda self, page: (pages.append(len(page)), real(self, page))[1])
+
+    import_collection(db=client, input_path=f, target_collection=dst)
+
+    assert pages and max(pages) == len(records), pages
