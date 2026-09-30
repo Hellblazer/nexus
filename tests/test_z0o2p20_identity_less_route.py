@@ -437,22 +437,32 @@ class TestRefusedFilesEnterTheDurableRecord:
         return stats, store
 
     def test_dropped_files_are_recorded_with_their_cause(self, tmp_path: Path) -> None:
+        """A real drop is recorded with its cause. A deliberate refusal
+        (``ephemeral:*``, a worktree or temp-dir path) is NOT: it is a
+        documented skip with its own summary line, and ``nx doctor`` fails on
+        any unacknowledged row, so recording it would turn the doctor red for a
+        run that did what it was told."""
         repo = _repo(tmp_path, "good.py", "bad.py", "worse.py")
         stats, store = self._run_with_store(
             repo, {"bad.py": "register_failed", "worse.py": "ephemeral:worktree_or_tempdir"},
         )
         store.record_index_failures_batch.assert_called_once()
         rows, = store.record_index_failures_batch.call_args.args
-        assert sorted(rows) == sorted([
-            (str(repo / "bad.py"), "IdentityLessFile", "register_failed", ""),
-            (str(repo / "worse.py"), "IdentityLessFile", "ephemeral:worktree_or_tempdir", ""),
-        ])
+        assert rows == [(str(repo / "bad.py"), "IdentityLessFile", "register_failed", "")]
         # Its own run id, separate from the extraction-skip record, and the
         # extraction-skip verdict input is untouched.
         assert store.record_index_failures_batch.call_args.kwargs["run_id"]
         store.list_index_failures.assert_not_called()
         assert stats["skipped_unextractable_files"] == 0
         assert stats["index_failures_write_failed"] is False
+        assert stats["identity_less_durable_write_failed"] is False
+
+    def test_an_ephemeral_only_run_writes_no_durable_row_at_all(self, tmp_path: Path) -> None:
+        repo = _repo(tmp_path, "worse.py")
+        _stats, store = self._run_with_store(
+            repo, {"worse.py": "ephemeral:worktree_or_tempdir"},
+        )
+        store.record_index_failures_batch.assert_not_called()
 
     def test_nothing_is_written_when_every_file_has_a_document(self, tmp_path: Path) -> None:
         repo = _repo(tmp_path, "good.py")
@@ -467,6 +477,9 @@ class TestRefusedFilesEnterTheDurableRecord:
             stats, _s = self._run_with_store(repo, {"bad.py": "register_failed"}, store=store)
         assert stats["identity_less_dropped_files"] == 1
         assert [e for e in logs if e.get("event") == "identity_less_durable_write_failed"]
+        # Surfaced in the stats the CLI summary reads, as nukn3's write is.
+        assert stats["identity_less_durable_write_failed"] is True
+        assert stats["index_failures_write_failed"] is False  # that one is nukn3's
 
 
 # ── The flush event counts only what the flush really drops ─────────────────
@@ -486,3 +499,267 @@ class TestFlushEventChunkCount:
         ev = [e for e in logs if e.get("event") == "combined_write_identity_less_files_dropped"]
         assert len(ev) == 1, [e.get("event") for e in logs]
         assert ev[0]["chunks_not_written"] == 1  # `only`; `shared` is written
+
+
+# ── nx doctor: a deliberate refusal is not a failure, a real drop is ─────────
+
+
+class _FakeFailureStore:
+    """``nexus.index_failures`` in memory: what a run writes, ``nx doctor`` reads.
+
+    One class attribute holds the rows so the run's store instance and the
+    doctor's are the same table, as they are in the engine.
+    """
+
+    rows: list[dict] = []
+
+    def __init__(self, client=None) -> None:
+        pass
+
+    def record_index_failures_batch(self, rows, *, run_id: str) -> int:
+        import datetime as _dt
+
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        for file_path, error_class, error, _occurred in rows:
+            type(self).rows.append({
+                "run_id": run_id, "file_path": file_path, "error_class": error_class,
+                "error": error, "occurred_at": now, "acknowledged": False,
+            })
+        return len(rows)
+
+    def list_index_failures(self, *, run_id: str = "", days: int = 0, limit: int = 100,
+                            unacknowledged_only: bool = False, file_path: str = "") -> dict:
+        matching = [
+            r for r in reversed(type(self).rows)
+            if (not run_id or r["run_id"] == run_id)
+            and not (unacknowledged_only and r["acknowledged"])
+        ]
+        return {"rows": matching[:limit], "total": len(matching), "oldest_occurred_at": ""}
+
+    def list_index_failure_acknowledgments(self, **_kw) -> dict:
+        return {"rows": [], "total": 0}
+
+
+def _doctor_verdict() -> tuple[int | None, str]:
+    """Run ``nx doctor --check-index-failures`` against the fake table."""
+    import click
+    from click.testing import CliRunner
+
+    from nexus.commands import doctor as doctor_mod
+
+    with CliRunner().isolation() as (out, err, _):
+        exit_code = None
+        try:
+            doctor_mod._run_check_index_failures()
+        except click.exceptions.Exit as exc:
+            exit_code = exc.exit_code
+        return exit_code, out.getvalue().decode() + err.getvalue().decode()
+
+
+class TestDoctorAfterARefusal:
+    @pytest.fixture(autouse=True)
+    def _table(self, monkeypatch: pytest.MonkeyPatch):
+        _FakeFailureStore.rows = []
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", _FakeFailureStore,
+        )
+        yield
+        _FakeFailureStore.rows = []
+
+    def _index(self, repo: Path, causes: dict[str, str]) -> dict:
+        stats, _m, _db = _run(
+            repo, extra={"nexus.indexer._catalog_hook": {"side_effect": _hook_naming(causes)}},
+        )
+        return stats
+
+    def test_a_worktree_refusal_leaves_doctor_green(self, tmp_path: Path) -> None:
+        """A hand-run ``nx index repo`` from a worktree refuses its files on
+        purpose. That is a documented skip with its own summary line, not a
+        failure: ``nx doctor`` must not go red for up to 30 days over it."""
+        repo = _repo(tmp_path, "good.py", "draft.py")
+        stats = self._index(repo, {"draft.py": "ephemeral:worktree_unique_no_main_mirror"})
+        assert stats["identity_less_dropped_files"] == 0
+        code, printed = _doctor_verdict()
+        assert code is None, printed
+        assert "FAIL" not in printed
+        assert "0 recorded failure" in printed
+
+    def test_a_real_drop_turns_doctor_red_and_names_its_cause_and_remedy(
+        self, tmp_path: Path,
+    ) -> None:
+        """Control: the file that genuinely never got indexed is what doctor
+        is for. The line names the file, why it has no document, and what to do."""
+        repo = _repo(tmp_path, "good.py", "lost.py")
+        self._index(repo, {"lost.py": "register_failed"})
+        code, printed = _doctor_verdict()
+        assert code == 1, printed
+        assert str(repo / "lost.py") in printed
+        assert "IdentityLessFile" in printed
+        assert "register_failed" in printed  # the cause, per file
+        assert "nx index repo" in printed    # the remedy: fix the registration, re-run
+        assert "nothing was written" in printed
+
+    def test_a_mixed_run_fails_doctor_on_the_real_drop_only(self, tmp_path: Path) -> None:
+        repo = _repo(tmp_path, "good.py", "lost.py", "draft.py")
+        self._index(
+            repo, {"lost.py": "register_failed", "draft.py": "ephemeral:worktree_or_tempdir"},
+        )
+        code, printed = _doctor_verdict()
+        assert code == 1, printed
+        assert str(repo / "lost.py") in printed
+        assert str(repo / "draft.py") not in printed
+        assert "1 unacknowledged failure(s) in the latest run" in printed
+
+
+# ── the extraction-skip verdict ignores refused files ───────────────────────
+
+
+class TestSkippedAndRefusedFilesMixed:
+    """nukn3's read-back count (``skipped_unextractable_files``) is
+    ``skip_floor_breached``'s input. It counts files that were ATTEMPTED and could
+    not be extracted. A refused file was never attempted, so it must neither join
+    that count nor the denominator. One skipped PDF, one good file and one refused
+    file is 1 of 2 skipped (below the floor); adding the refused file to the skip
+    count would read 2 of 2, which is a systemic failure."""
+
+    @pytest.fixture(autouse=True)
+    def _table(self, monkeypatch: pytest.MonkeyPatch):
+        _FakeFailureStore.rows = []
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", _FakeFailureStore,
+        )
+        yield
+        _FakeFailureStore.rows = []
+
+    def test_refused_files_do_not_move_the_systemic_skip_verdict(self, tmp_path: Path) -> None:
+        from nexus.errors import UnextractableContentError
+
+        repo = _repo(tmp_path, "good.py", "lost.py")
+        (repo / "scan.pdf").write_bytes(b"%PDF-1.4 fake content")
+
+        def _pdf(file, *_a, **_kw):
+            raise UnextractableContentError(f"{file.name}: no text extracted")
+
+        stats, _m, _db = _run(repo, extra={
+            "nexus.indexer._catalog_hook": {
+                "side_effect": _hook_naming({"lost.py": "register_failed"}),
+            },
+            "nexus.indexer._index_pdf_file": {"side_effect": _pdf},
+        })
+        assert stats["skipped_unextractable_files"] == 1
+        assert stats["files_attempted_total"] == 2  # good.py and scan.pdf; not lost.py
+        assert stats["systemic_extraction_failure"] is False
+        assert stats["identity_less_dropped_files"] == 1
+        # Both populations are in the durable record, each under its own class.
+        assert sorted(r["error_class"] for r in _FakeFailureStore.rows) == [
+            "IdentityLessFile", "UnextractableContentError",
+        ]
+
+
+# ── a file the oversize backstop refuses is one more real drop ──────────────
+
+
+class TestBackstopDropsAreCountedLikeTheRest:
+    """``oversize_write.refuse_identity_less_file`` is the net under the up-front
+    refusal: a file that reaches an oversize fallback with no document writes
+    nothing. The run must then count it, record it durably and hold the
+    --since-head base, exactly as it does for a file it refused up front."""
+
+    @pytest.fixture(autouse=True)
+    def _table(self, monkeypatch: pytest.MonkeyPatch):
+        _FakeFailureStore.rows = []
+        monkeypatch.setattr(
+            "nexus.db.t2.http_telemetry_store.HttpTelemetryStore", _FakeFailureStore,
+        )
+        yield
+        _FakeFailureStore.rows = []
+
+    def _run_with_a_backstop_drop(self, tmp_path: Path, **run_kw):
+        from nexus.oversize_write import refuse_identity_less_file
+
+        repo = _repo(tmp_path, "good.py", "big.py")
+        db = _http_db()
+
+        def _code(file, *_a, **_kw):
+            # The hook registered big.py, then its id went missing before the
+            # oversize fallback ran: the fallback refuses and returns 0, as the
+            # real one does.
+            if file.name == "big.py":
+                assert refuse_identity_less_file(db, "", file, "code__repo", 7)
+            return 0
+
+        stats, _m, _d = _run(
+            repo, extra={
+                "nexus.indexer._catalog_hook": {"side_effect": _hook_naming({})},
+                "nexus.indexer._index_code_file": {"side_effect": _code},
+            }, **run_kw,
+        )
+        return repo, stats
+
+    def test_the_drop_is_counted_so_the_since_head_base_holds(self, tmp_path: Path) -> None:
+        _repo_dir, stats = self._run_with_a_backstop_drop(tmp_path)
+        # index_repository holds the --since-head base on this key.
+        assert stats["identity_less_dropped_files"] == 1
+
+    def test_the_drop_is_recorded_durably_with_its_cause(self, tmp_path: Path) -> None:
+        repo, stats = self._run_with_a_backstop_drop(tmp_path)
+        assert [(r["file_path"], r["error_class"], r["error"]) for r in _FakeFailureStore.rows] == [
+            (str(repo / "big.py"), "IdentityLessFile", "oversize_no_catalog_document"),
+        ]
+        assert stats["identity_less_durable_write_failed"] is False
+
+    def test_a_file_dropped_up_front_is_not_counted_twice(self, tmp_path: Path) -> None:
+        """The up-front refusal also lands in the drop collector; the late sweep
+        must skip the paths it already holds."""
+        repo = _repo(tmp_path, "good.py", "lost.py")
+        stats, _m, _db = _run(
+            repo, extra={"nexus.indexer._catalog_hook": {
+                "side_effect": _hook_naming({"lost.py": "register_failed"}),
+            }},
+        )
+        assert stats["identity_less_dropped_files"] == 1
+        assert len(_FakeFailureStore.rows) == 1
+
+
+# ── a chash shared with an identity-less file keeps the identity file's metadata ──
+
+
+class TestSharedChashTakesTheIdentityFilesMetadata:
+    """Identical chunk text in two files collapses to one T3 row by design, and the
+    flush keeps ONE copy of it. When one of the two files has no catalog document
+    the kept copy must be the one the identity file staged: its metadata (path,
+    title, content hash) is what the written row should carry. Reachable only when
+    an identity-less file is staged despite the up-front refusal (a direct caller
+    of the flush), which is why this pins the pure builder."""
+
+    @staticmethod
+    def _staged(path: str, doc_id: str, source: str) -> tuple[str, dict]:
+        chash = "d" * 64
+        return path, {
+            "ids": [chash],
+            "documents": ["shared text"],
+            "metadatas": [{"chunk_text_hash": chash, "content_hash": "c" * 64, "source_path": source}],
+            "catalog_doc_id": doc_id,
+        }
+
+    @pytest.mark.parametrize("identity_first", [True, False])
+    def test_the_written_chunk_carries_the_identity_files_metadata(
+        self, identity_first: bool,
+    ) -> None:
+        from nexus.indexer import _build_combined_write_payload
+
+        has_id = self._staged("/r/has_id.py", "1.1.9", "has_id.py")
+        no_id = self._staged("/r/no_id.py", "", "no_id.py")
+        fctx = [has_id, no_id] if identity_first else [no_id, has_id]
+        ids = [i for _p, c in fctx for i in c["ids"]]
+        docs = [d for _p, c in fctx for d in c["documents"]]
+        metas = [m for _p, c in fctx for m in c["metadatas"]]
+
+        chunks_payload, full_docs, _complete, orphan_ids = _build_combined_write_payload(
+            ids, docs, metas, fctx,
+        )
+
+        assert [c["chash"] for c in chunks_payload] == ["d" * 64]
+        assert chunks_payload[0]["metadata"]["source_path"] == "has_id.py"
+        assert [d for d, _rows in full_docs] == ["1.1.9"]
+        assert orphan_ids == []  # the chash is written by the identity document

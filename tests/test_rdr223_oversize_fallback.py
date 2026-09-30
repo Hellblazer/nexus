@@ -493,6 +493,40 @@ def test_an_identity_less_oversize_file_writes_zero_chunks_and_is_counted(
     assert f["cause"] == "oversize_no_catalog_document" and f["chunks"] == drops[0]["batch_size"]
 
 
+class _CountingHooks(HookRegistry):
+    """A registry with one real hook on each chain, each counting its calls, so a fallback
+    that fires ANY chain (through ``fire_*`` or behind a ``has_*_hooks`` guard) is seen."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls: list[str] = []
+        self.register_single(lambda doc_id, collection, content: self.calls.append("single"))
+        self.register_batch(lambda *a, **kw: self.calls.append("batch"))
+        self.register_document(lambda *a, **kw: self.calls.append("document"))
+
+
+def test_the_spy_hooks_fire_when_a_file_is_written(cat, tmp_path, monkeypatch, run) -> None:
+    """Positive control for the test below: on the old upsert path the same counting registry
+    does see the hooks fire, so an empty ``calls`` there means none fired, not that the spy
+    cannot see them."""
+    _cap(monkeypatch, 16)
+    hooks = _CountingHooks()
+    run(tmp_path, monkeypatch, doc_id="", db=MagicMock(), hooks=hooks)  # not an HttpVectorClient
+    assert hooks.calls, "the spy saw no hook fire on a file that was written"
+
+
+def test_an_identity_less_oversize_file_fires_no_hook(cat, tmp_path, monkeypatch, run) -> None:
+    """RDR-223 (nexus-z0o2p.20): a refused file wrote nothing, so no post-store hook (taxonomy,
+    aspects, manifest) runs for it. Pinned with a spy on every chain, for code, prose and pdf:
+    a variant that refuses the write but still falls through to the hooks fails here."""
+    _cap(monkeypatch, 16)
+    hooks = _CountingHooks()
+    db = _http_db()
+    assert run(tmp_path, monkeypatch, doc_id="", db=db, hooks=hooks) == 0
+    assert hooks.calls == [], hooks.calls
+    assert db.mock_calls == [] and cat.calls == []
+
+
 def test_an_identity_less_file_on_a_non_service_t3_keeps_its_write(
     cat, tmp_path, monkeypatch, run,
 ) -> None:

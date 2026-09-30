@@ -463,6 +463,11 @@ def _emit_write_failed_warning(
 
 
 # nexus-z0o2p.20: how many not-indexed files the summary names before "and N more".
+# Kept at 10 on purpose: the summary is read on a terminal at the end of a run, where
+# a catalog outage can drop thousands of files, and ten names plus a count is what
+# fits. Nothing is lost to the cap: the complete list is the durable per-file record
+# (`nx index failures`, error class IdentityLessFile, uncapped), and the structured
+# log line carries the first 20 (indexer._refuse_identity_less_files).
 _MAX_NAMED_DROPS = 10
 
 

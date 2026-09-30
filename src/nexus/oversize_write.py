@@ -116,8 +116,12 @@ def refuse_identity_less_file(
 
     ``_run_index`` refuses such a file before it is ever dispatched, so this is the backstop for
     a file that reaches a fallback anyway (a direct caller, or a hook that lost the id mid-run).
-    The caller's return value (0) reads to the progress counter as a skipped file; the drop
-    collector, not that counter, is the record.
+    The caller's return value (0) looks to the progress counter like a file with nothing to
+    write; ``nx index repo`` tells the two apart by asking the drop collector
+    (``is_identity_dropped_file``), so the file is reported as not indexed and never as "index
+    fresh". ``_run_index`` reads the collector back at the end of the run: the file is counted in
+    ``identity_less_dropped_files`` (which holds the ``--since-head`` base) and recorded in
+    ``nx index failures`` like a file refused up front.
     """
     from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred: the vector client imports back into catalog code
 

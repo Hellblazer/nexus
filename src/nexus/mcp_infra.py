@@ -2109,6 +2109,11 @@ def _record_manifest_partial_doc_skip(doc_id: str) -> int:
 # rows stayed at chunk_count=0 and were invisible to catalog-aware search.
 _manifest_identity_drops_lock = threading.Lock()
 _MANIFEST_IDENTITY_DROPS: list[dict] = []
+# nexus-z0o2p.20: {file path: cause} for every drop that named its file, so a
+# caller can ask "was THIS file dropped?" in O(1) (the CLI progress counter)
+# and a run can find the files dropped AFTER its up-front refusal pass (the
+# oversize backstop, the flush) without re-walking the list per file.
+_IDENTITY_DROPPED_FILES: dict[str, str] = {}
 
 
 def get_manifest_identity_drops() -> list[dict]:
@@ -2123,6 +2128,19 @@ def get_manifest_identity_drops() -> list[dict]:
         return [dict(d) for d in _MANIFEST_IDENTITY_DROPS]
 
 
+def get_identity_dropped_files() -> dict[str, str]:
+    """``{file path: cause}`` for every drop this process/run that named its file
+    (nexus-z0o2p.20). Snapshot copy; empty when no CLI run armed the collector."""
+    with _manifest_identity_drops_lock:
+        return dict(_IDENTITY_DROPPED_FILES)
+
+
+def is_identity_dropped_file(path: object) -> bool:
+    """Was *path* named by an identity drop this run? O(1)."""
+    with _manifest_identity_drops_lock:
+        return str(path) in _IDENTITY_DROPPED_FILES
+
+
 def reset_manifest_identity_drops() -> None:
     """Clear the collector (CLI callers reset at the start of an indexing run,
     mirroring ``reset_manifest_write_failures``). Also arms
@@ -2132,6 +2150,7 @@ def reset_manifest_identity_drops() -> None:
     _identity_drop_collectors_active = True
     with _manifest_identity_drops_lock:
         _MANIFEST_IDENTITY_DROPS.clear()
+        _IDENTITY_DROPPED_FILES.clear()
 
 
 def _record_manifest_identity_drop(
@@ -2163,6 +2182,8 @@ def _record_manifest_identity_drop(
         entry["files"] = [dict(f) for f in files]
     with _manifest_identity_drops_lock:
         _MANIFEST_IDENTITY_DROPS.append(entry)
+        for f in files or ():
+            _IDENTITY_DROPPED_FILES[str(f["file"])] = str(f.get("cause", "unexplained"))
 
 
 # nexus-5xn3k.4 (RUNFENCE): docs whose manifest rows were written correctly but

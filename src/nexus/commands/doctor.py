@@ -1255,6 +1255,12 @@ def _index_failure_is_stale(occurred_at_iso: str, staleness_days: int) -> bool:
     return ts < cutoff
 
 
+#: ``nexus.indexer._run_index`` records a file it dropped for want of a catalog
+#: document under this error class (nexus-z0o2p.20). Deliberate worktree / temp-dir
+#: refusals are NOT recorded, so every row of this class is a file that was lost.
+_IDENTITY_LESS_ERROR_CLASS = "IdentityLessFile"
+
+
 def _report_index_failures_service() -> None:
     """Report the durable index-failures backlog (nexus-nukn3).
 
@@ -1385,14 +1391,27 @@ def _report_index_failures_service() -> None:
         return
 
     click.echo(f"\n{latest_total} unacknowledged failure(s) in the latest run ({latest_run_id}):")
+    identity_less_rows = 0
     for row in latest["rows"][:20]:
-        click.echo(
-            f"  {row.get('file_path', '?')} :: {row.get('error_class', '?')}"
-        )
+        line = f"  {row.get('file_path', '?')} :: {row.get('error_class', '?')}"
+        if row.get("error_class") == _IDENTITY_LESS_ERROR_CLASS:
+            # The cause (register_failed, catalog_hook_failed, ...) is the row's
+            # message; without it the operator cannot tell a registration failure
+            # from a catalog outage.
+            identity_less_rows += 1
+            line += f" ({row.get('error') or 'unexplained'})"
+        click.echo(line)
     if total_unacknowledged > latest_total:
         click.echo(
             f"\n({total_unacknowledged - latest_total} more unacknowledged "
             "from older run(s) -- see: nx index failures)"
+        )
+    if identity_less_rows:
+        click.echo(
+            f"\n{_IDENTITY_LESS_ERROR_CLASS}: the file had no catalog document to own "
+            "its chunks, so nothing was written and it is not searchable. Fix the "
+            "registration failure named after it (check the catalog service), re-run "
+            "`nx index repo`, then clear this run's rows with the command below."
         )
     click.echo(f"\nSee them all with: nx index failures --run-id {latest_run_id}")
     click.echo(

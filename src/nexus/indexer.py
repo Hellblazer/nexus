@@ -4538,7 +4538,11 @@ def _identity_less_files(
 def _identity_less_event_fields(files: list[dict]) -> dict:
     """Log fields for a flush's identity-less files: the first 20 names (a
     flush is capped at a few hundred chunks, so this is rarely truncated),
-    the true file and chunk totals, and a cause histogram."""
+    the true file and chunk totals, and a cause histogram.
+
+    The 20 is a log-line size bound, not a loss: every file is also in the drop
+    collector (the CLI summary names 10 and counts the rest) and, through
+    ``_run_index``, in the uncapped durable record (``nx index failures``)."""
     causes: dict[str, int] = {}
     for f in files:
         causes[f["cause"]] = causes.get(f["cause"], 0) + 1
@@ -4570,7 +4574,10 @@ def _build_combined_write_payload(
       catalog identity, deduped by chash (=id for T3, RDR-180), first
       occurrence wins — matches the engine's own dedup discipline (design
       memo §1.1: "chunk text is carried ONCE at the top level, keyed by
-      chash").
+      chash"). "First" means the first occurrence staged by a file WITH a
+      catalog document when one exists: a chash shared with an
+      identity-less file carries the identity file's metadata whichever was
+      staged first (nexus-z0o2p.20).
     * ``full_docs`` — ``[(doc_id, rows), ...]`` for every doc in this
       flush whose batch includes position 0 (ChunkBatcher's file-atomic
       contract guarantees this for every REAL doc — see the
@@ -4616,11 +4623,25 @@ def _build_combined_write_payload(
     # via chunks_payload alone).
     identity_ids: set[str] = set()
     orphan_candidate_ids: set[str] = set()
+    # The first occurrence staged by an IDENTITY-bearing file, per chash. A chash
+    # shared with an identity-less file is written once, through the identity
+    # document's combined write, and the row should carry THAT file's metadata
+    # (path, title, content hash), not the identity-less file's, even when the
+    # latter was staged first (RDR-223, nexus-z0o2p.20). The identity-less file
+    # is refused before chunking by _run_index, so this only matters to a
+    # caller that stages one anyway; it is cheap enough to make right.
+    identity_occurrence: dict[str, tuple[str, dict]] = {}
     for _path, _c in file_contexts:
         if not isinstance(_c, dict):
             continue
-        target = identity_ids if _c.get("catalog_doc_id") else orphan_candidate_ids
+        _has_identity = bool(_c.get("catalog_doc_id"))
+        target = identity_ids if _has_identity else orphan_candidate_ids
         target.update(_c.get("ids") or [])
+        if _has_identity:
+            for _i, _d, _m in zip(
+                _c.get("ids") or (), _c.get("documents") or (), _c.get("metadatas") or (),
+            ):
+                identity_occurrence.setdefault(_i, (_d, _m))
     orphan_only_ids = orphan_candidate_ids - identity_ids
 
     seen_chash: set[str] = set()
@@ -4633,6 +4654,10 @@ def _build_combined_write_payload(
         if _cid in seen_chash:
             continue
         seen_chash.add(_cid)
+        if _cid in orphan_candidate_ids:
+            # Shared with an identity-less file: take the identity file's copy.
+            # Only for that case, so every other chunk is written exactly as staged.
+            _cdoc, _cmeta = identity_occurrence.get(_cid, (_cdoc, _cmeta))
         chunks_payload.append({"chash": _cid, "text": _cdoc, "metadata": _cmeta})
 
     agg_metas = _aggregate_flush_metas(file_contexts)
@@ -4697,13 +4722,15 @@ def _refuse_identity_less_files(
     A file with no document has no owner for its chunks, and a chunk is
     written together with its owner row or not at all. Returns
     ``(refused_paths, refusals)``: the caller removes ``refused_paths`` from
-    what it dispatches and writes ``refusals`` (``(path, cause)``, every
-    refused file) to the durable per-file failure record. Two kinds, told
+    what it dispatches; ``refusals`` (``(path, cause)``, every refused file)
+    is what the run summarises, and what it writes to the durable per-file
+    failure record, less the ``ephemeral:*`` kind below. Two kinds, told
     apart by the hook's cause map:
 
     * ``ephemeral:*``: registration was refused on purpose (worktree or temp
-      dir). Counted by the ephemeral-skip summary, not a failure, and does
-      not hold the --since-head base.
+      dir). Counted by the ephemeral-skip summary, not a failure, not in the
+      durable record (``nx doctor`` would go red over it), and does not hold
+      the --since-head base.
     * anything else (``register_failed``, ``catalog_hook_failed``,
       ``unexplained``): a named identity drop with nothing written, which
       fails the run summary and holds the --since-head base.
@@ -6859,14 +6886,51 @@ def _run_index(
         _durable_skipped_count, _files_attempted_total,
     )
 
-    # nexus-z0o2p.20 (RDR-223 P2.10): the files refused for want of a catalog
+    # nexus-z0o2p.20 (RDR-223 P2.10): the files dropped for want of a catalog
     # document go into the same durable per-file record, under their own run
     # id and error class, so how often this happens is a query
     # (`nx index failures`) and not a count of rotating log lines. A SEPARATE
     # write from the nukn3 one above on purpose: its read-back count is
-    # skip_floor_breached's input, and a refused file was never attempted, so
-    # it must not move that verdict. Advisory like the rest of this record.
-    if _identity_less_refusals:
+    # skip_floor_breached's input, and a dropped file was never attempted, so
+    # it must not move that verdict.
+    #
+    # Two populations, and only the real drops are recorded:
+    #
+    # * refused up front (_refuse_identity_less_files), minus the deliberate
+    #   ``ephemeral:*`` skips. A worktree or temp-dir refusal is a documented
+    #   skip with its own summary line, not a failure, and `nx doctor` exits 1
+    #   on any unacknowledged row, so a row for it would turn the doctor red
+    #   for up to 30 days over a run that did what it was told.
+    # * dropped LATER, after the up-front pass: a file an oversize backstop
+    #   (oversize_write.refuse_identity_less_file) or the flush refused. They
+    #   are named in the drop collector; the run reads them back here so they
+    #   are counted in identity_less_dropped_files (which holds the
+    #   --since-head base), recorded, and summarised like the rest. Not
+    #   reachable through this function's own refusal pass today (the same
+    #   file_to_doc_id map feeds the resolver), so this is the net under it.
+    #
+    # Advisory like the rest of this record: a failed write never fails the
+    # run, but it is surfaced (``identity_less_durable_write_failed``) the way
+    # nukn3's is, because `nx index failures` and `nx doctor` cannot see what
+    # the write lost.
+    from nexus.mcp_infra import get_identity_dropped_files  # noqa: PLC0415 — deferred to avoid circular import
+
+    _refused_names = {str(_p) for _p, _c in _identity_less_refusals}
+    _late_identity_less_drops = {
+        _path: _cause for _path, _cause in get_identity_dropped_files().items()
+        if _path not in _refused_names
+    }
+    _identity_less_dropped += len(_late_identity_less_drops)
+    _identity_less_to_record = [
+        (str(_p), "IdentityLessFile", _cause, "")
+        for _p, _cause in [
+            *_identity_less_refusals,
+            *_late_identity_less_drops.items(),
+        ]
+        if not _cause.startswith("ephemeral:")
+    ]
+    _identity_less_durable_write_failed = False
+    if _identity_less_to_record:
         try:
             from nexus.db.t2.http_telemetry_store import HttpTelemetryStore  # noqa: PLC0415 — deferred to avoid import-time cost / circular deps
             from nexus.mcp_infra import current_index_run_t2_client  # noqa: PLC0415 — deferred to avoid circular import
@@ -6874,16 +6938,13 @@ def _run_index(
             HttpTelemetryStore(
                 client=current_index_run_t2_client(),
             ).record_index_failures_batch(
-                [
-                    (str(path), "IdentityLessFile", cause, "")
-                    for path, cause in _identity_less_refusals
-                ],
-                run_id=uuid.uuid4().hex,
+                _identity_less_to_record, run_id=uuid.uuid4().hex,
             )
         except Exception as exc:  # noqa: BLE001 — advisory write; never fail an otherwise-successful run over telemetry downtime
+            _identity_less_durable_write_failed = True
             _log.warning(
                 "identity_less_durable_write_failed",
-                error=str(exc), refused=len(_identity_less_refusals),
+                error=str(exc), dropped=len(_identity_less_to_record),
             )
 
     # nexus-hg2dw round 3 (T2 code-review-nexus-hg2dw-52d06c8c5 [24626]
@@ -6960,7 +7021,13 @@ def _run_index(
         # --since-head base back (index_repository), or the next diff never
         # re-offers the file. Not counted as indexed or fresh: no on_file
         # callback fires. Worktree/tempdir refusals are not in this count.
+        # It also counts a file dropped AFTER that up-front pass (an oversize
+        # backstop or the flush refusing it), read back from the drop collector.
         "identity_less_dropped_files": _identity_less_dropped,
+        # nexus-z0o2p.20: True iff the durable record of those drops could not
+        # be written; index_repo_cmd says so in the summary (the run does not
+        # fail over it).
+        "identity_less_durable_write_failed": _identity_less_durable_write_failed,
         # nexus-6m9zy.6 (#12): count of files a per-file upsert deferred
         # this run on a transient 5xx/timeout (_contain_transient_upsert).
         # Zero chunks from these files landed either, same as
