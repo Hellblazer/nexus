@@ -33,7 +33,7 @@ git diff --stat <green-service-ci-sha> HEAD -- service/    # empty = covered
 scripts/mvnw-leased.sh -q test
 ```
 
-The Java CI (`service-ci.yml`) is **advisory** — it does not block auto-merge — so verify it actually passed on this tree rather than assuming.
+The Java CI (`service-ci.yml`) is a required check on `main`, but nothing gates a push to `develop` on it, and a develop run can be cancelled or time out — so verify it actually passed on this tree rather than assuming.
 
 ### 3. PRE-TAG gate: `--shakeout` (the leg that builds the candidate)
 
