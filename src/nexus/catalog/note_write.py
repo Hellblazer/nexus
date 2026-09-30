@@ -30,13 +30,22 @@ Outcomes of :func:`write_note`, so a caller never treats every raise the same wa
    unchanged content are applied, and the completion stamp rides it) and the resend's answer is the
    outcome (``recovered=True``); a resend that fails is "unknown" (3), never a landed note the fence
    calls unfinished. Every attempt's error counts: if any was in flight the request is settled from
-   the manifest, never called "unsent".
+   the manifest, never called "unsent". The resend is a whole new request, so a concurrent writer of
+   the same document that landed between the manifest read and the resend is overwritten: the last
+   request wins, as with any two racing puts.
 2. **Not landed**: raises :class:`NoteWriteError`. The engine named the document in
    ``failed_doc_ids``, answered with a definitive 4xx refusal, or the connection was never made,
    and no attempt of the request was in flight. A 500 and an unexpected exception are NOT
-   definitive: a 500 can follow the commit. The transaction is per document, so nothing of the note was written and the old
-   manifest is intact. ``manifest_empty`` says whether the document has no manifest at all, which is
-   what lets a caller remove a row it minted without deleting a concurrent writer's note.
+   definitive: a 500 can follow the commit. The transaction is per document, so no piece of the
+   note was added and the old manifest is intact. The one thing a refusal can leave is a metadata
+   refresh: the engine refreshes the metadata of chunks whose text it already holds in a transaction
+   of its own before it embeds the new ones, and a 429 from the embedder (the only 429 a
+   ``write_manifest_many`` raises) arrives after that commit and before any manifest transaction
+   (``CombinedWriteService`` phase 2a commits, phase 2b embeds). The 429 is still definitive: the
+   manifest and the set of chunks are untouched, which is all a caller acts on, so it is not
+   settled from the manifest (that could only turn a first write's refusal into "unknown").
+   ``manifest_empty`` says whether the document has no manifest at all, which is what lets a caller
+   remove a row it minted without deleting a concurrent writer's note.
 3. **Unknown**: raises :class:`~nexus.catalog.store_hook.ManifestVerifyUncertainError`. The request
    died in flight (a timeout, a dropped connection, a gateway 5xx) and the manifest does not show it
    yet, so it may still commit (the engine cannot cancel an in-flight embed); or the manifest read
@@ -86,8 +95,9 @@ _log = structlog.get_logger(__name__)
 class NoteWriteError(RuntimeError):
     """The note is CONFIRMED not to have landed.
 
-    Nothing of it is in T3 and the document's previous manifest, if any, is intact, because the
-    request is one transaction. ``manifest_empty`` is True only when a read of the document's
+    No piece of it was added to T3 and the document's previous manifest, if any, is intact, because
+    the request is one transaction. What a refused request can leave behind is a metadata refresh on
+    chunks whose text the engine already held (see the module docstring, outcome 2). ``manifest_empty`` is True only when a read of the document's
     manifest succeeded and found it empty: a row this call minted may be removed then, and only
     then (another writer's version means the row is no longer this call's to delete).
 
@@ -105,12 +115,17 @@ class NoteWriteError(RuntimeError):
 
 
 class StampRefusedError(ManifestVerifyUncertainError):
-    """The note landed but the engine refused to stamp it complete.
+    """The engine accepted the note's write but refused to stamp the document complete.
 
     The writer's rule (``multi_batch_write``): a refusal is recorded (``_record_complete_refusal``, for
     the record-level summary) and the fence is LEFT ``indexing``, so nothing fails the index run and
     no failed-document heal runs. The caller reports it as uncertain and does not call ``_fence_fail``.
+    ``detail`` is the engine's refusal text alone, for a caller that words its own message.
     """
+
+    def __init__(self, message: str, *, detail: str = "") -> None:
+        super().__init__(message)
+        self.detail = detail or message
 
 
 class _AttemptRecorder:
@@ -367,20 +382,40 @@ def _classify(exc: BaseException) -> str:
 
     Only a 4xx (the engine answered and refused; 408 is a timeout, so not that) and a connection that
     was never made are definitive. Everything else, unknown exceptions included, is in flight.
+
+    The WHOLE exception chain is judged, not its first recognisable node. The httpx mixin
+    (``_refreshable_client._request``) retries once inside its own ``except`` block, so the
+    exception attempt 2 raises carries attempt 1's as ``__context__``, and the attempt recorder sees
+    only the final one. A dropped connection whose retry was refused (or the reverse) is one request
+    that may have reached the engine. Precedence over the chain: any in-flight node (an embed
+    timeout, a 5xx or 408, a transport error that is not a failed connect) makes it in flight; else
+    any 4xx makes it refused; else it is unsent, which needs at least one failed connect and no
+    other transport node. A chain of nothing recognisable is in flight.
     """
     seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
+    pending: list[BaseException] = [exc]
+    refused = unsent = False
+    while pending:
+        cur = pending.pop()
+        if id(cur) in seen:
+            continue
         seen.add(id(cur))
         if isinstance(cur, CombinedWriteEmbedTimeoutError):
             return _IN_FLIGHT
         if isinstance(cur, httpx.HTTPStatusError):
             status = cur.response.status_code
-            return _REFUSED if 400 <= status < 500 and status != 408 else _IN_FLIGHT
-        if isinstance(cur, (httpx.ConnectError, httpx.ConnectTimeout)):
-            return _UNSENT
-        cur = cur.__cause__ or cur.__context__
-    return _IN_FLIGHT
+            if 400 <= status < 500 and status != 408:
+                refused = True
+            else:
+                return _IN_FLIGHT
+        elif isinstance(cur, (httpx.ConnectError, httpx.ConnectTimeout)):
+            unsent = True
+        elif isinstance(cur, httpx.TransportError):
+            return _IN_FLIGHT
+        pending.extend(n for n in (cur.__cause__, cur.__context__) if n is not None)
+    if refused:
+        return _REFUSED
+    return _UNSENT if unsent else _IN_FLIGHT
 
 
 def _stamp_refused(doc: str, collection: str, exc: BaseException) -> StampRefusedError:
@@ -392,7 +427,8 @@ def _stamp_refused(doc: str, collection: str, exc: BaseException) -> StampRefuse
     except Exception as rec_exc:  # noqa: BLE001 — recording is advisory; the refusal itself propagates
         _log.warning("note_write_refusal_record_failed", doc_id=doc, error=str(rec_exc))
     return StampRefusedError(
-        f"note {doc} in {collection} landed but the engine refused to stamp it complete: {exc}")
+        f"note {doc} in {collection}: the write was accepted but the engine refused to stamp it "
+        f"complete: {exc}", detail=str(exc))
 
 
 def _settle_after_error(
@@ -408,7 +444,8 @@ def _settle_after_error(
     3. In flight and the manifest already equals the note's rows: the content is there but the request
        may never have committed, so changed tags, ttl or category on unchanged content are not
        applied yet. Resend the same idempotent request once; its answer is the note's outcome (a
-       resend that fails is unknown).
+       resend that fails is unknown). A concurrent writer of the document that landed between the
+       manifest read and the resend is overwritten: the last request wins.
     """
     doc = result.catalog_doc_id
     kinds = [_classify(e) for e in recorder.errors]
@@ -462,11 +499,14 @@ NO_CATALOG = "no-catalog"
 class PutNoteOutcome:
     """What :func:`put_note` did, for a producer to word its own message from.
 
-    ``status`` is one of :data:`STORED`, :data:`NOT_LANDED` (nothing was written; the catalog row this
-    call minted is removed or the identity stamp it changed is put back; retry is safe),
-    :data:`UNCERTAIN` (the note may have landed; nothing was rolled back) and :data:`NO_CATALOG`
-    (registration produced no document, so nothing was written at all). ``reason`` carries the
-    underlying message for the last three. ``write`` is the :class:`NoteWriteResult` when stored.
+    ``status`` is one of :data:`STORED`, :data:`NOT_LANDED` (no piece of the note was added and its
+    manifest is unchanged; the catalog row this call minted is removed or the identity stamp it
+    changed is put back; retry is safe), :data:`UNCERTAIN` (the note may have landed; nothing was
+    rolled back) and :data:`NO_CATALOG` (registration produced no document, so nothing was written
+    at all). ``reason`` carries the underlying message for the last three. ``stamp_refused`` is set
+    on an :data:`UNCERTAIN` outcome whose cause is known: the engine accepted the write and refused
+    the completion stamp (``stamp_detail`` is its refusal text); the document stays ``indexing``.
+    ``write`` is the :class:`NoteWriteResult` when stored.
     """
 
     status: str
@@ -478,6 +518,8 @@ class PutNoteOutcome:
     minted: bool = False
     reason: str = ""
     write: NoteWriteResult | None = None
+    stamp_refused: bool = False
+    stamp_detail: str = ""
 
     @property
     def doc_id(self) -> str:
@@ -509,8 +551,13 @@ def put_note(
     4. On :class:`NoteWriteError`: ``_fence_fail``; remove the row this call minted, but only when
        its manifest is empty (a concurrent writer's version means the row is no longer ours), or,
        for a row this call reconciled onto, put back the identity stamp it changed.
-       On :class:`~nexus.catalog.store_hook.ManifestVerifyUncertainError`, or a landed note the fence
-       could not be told about: ``_fence_fail`` and nothing else, since the note may exist.
+       On :class:`StampRefusedError` (the engine accepted the write and refused the completion
+       stamp): UNCERTAIN with ``stamp_refused`` set, and NO ``_fence_fail``: the writer's rule
+       leaves the fence ``indexing`` so no failed-document heal runs; the refusal was recorded by
+       :func:`write_note`, and nothing is rolled back.
+       On any other :class:`~nexus.catalog.store_hook.ManifestVerifyUncertainError`, or a landed
+       note the fence could not be told about: ``_fence_fail`` and nothing else, since the note may
+       exist.
        On any other exception: ``_fence_fail``, remove a minted row, re-raise.
 
     *collection* is the full T3 collection name. Raises ``PutOversizedError`` for an over-quota
@@ -556,6 +603,7 @@ def put_note(
         # The writer's rule: a refused stamp leaves the fence `indexing` (no _fence_fail, so no
         # failed-document heal); it is recorded and reported as unknown.
         out.status, out.reason = UNCERTAIN, str(exc)
+        out.stamp_refused, out.stamp_detail = True, exc.detail
         _log.warning(
             "store_put_stamp_refused", doc_id=out.doc_id, catalog_doc_id=doc, collection=collection,
             error=out.reason[:300])

@@ -985,6 +985,135 @@ class TestSettlingFromEveryAttempt:
             write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="x",
                        cat=_Recording(real_cat, before=dropped))
 
+    def test_a_document_failed_after_an_in_flight_attempt_is_unknown_not_failed(self, vec, real_cat):
+        """The first attempt died in flight (the wrapper retried it); the retry got a definitive
+        failed_doc_ids. The first attempt may have committed, so 'nothing was written' is not known:
+        the write is settled from the manifest. Deleting the ``recorder.any_in_flight()`` branch in
+        write_note turns this into a NoteWriteError."""
+        pieces = _pieces("failed-after-flight", 2)
+        doc = _register("z0o2p12-failed-after-flight", pieces)
+        cat = _Recording(
+            real_cat, mutate=_bad_row, before=_once(lambda: httpx.RemoteProtocolError("dropped")))
+        with pytest.raises(ManifestVerifyUncertainError):
+            write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, cat=cat)
+        assert cat.calls.count("write_manifest_many") == 2, "the wrapper retried the dropped connection"
+
+    def test_a_refused_stamp_on_the_resend_is_stamp_refused_and_recorded(self, vec, real_cat):
+        """The manifest already matches, so the request is resent; the engine refuses the stamp on the
+        resend. That is the writer's rule (recorded, fence left indexing), not a generic failed resend.
+        Deleting the ``except IndexRunVerifyRefused`` arm of the resend turns this into a plain
+        ManifestVerifyUncertainError."""
+        from unittest.mock import patch
+
+        from nexus.catalog.note_write import StampRefusedError
+
+        pieces = _pieces("resend-stamp", 1)
+        doc = _register("z0o2p12-resend-stamp", pieces)
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, cat=real_cat)
+
+        class TimeoutThenRefusedStamp:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def write_manifest_many(self, docs, **kw):
+                self.calls += 1
+                if self.calls == 1:
+                    raise _embed_timeout()
+                return {"failed_doc_ids": [], "chunks_written": 0,
+                        "dropped_chashes": {doc: []}, "dropped_count": {doc: 0},
+                        "complete_refused": [{"doc_id": doc, "referenced": 1, "missing": 1, "chunk_count": 1}]}
+
+        cat = TimeoutThenRefusedStamp()
+        with patch("nexus.mcp_infra._record_complete_refusal") as record:
+            with pytest.raises(StampRefusedError):
+                write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
+                           content_hash=_hash(pieces), cat=cat)
+        assert cat.calls == 2, "the request was resent once"
+        record.assert_called_once_with(doc)
+
+    def test_a_408_is_a_timeout_not_a_refusal(self, vec, real_cat):
+        """A 408 is 4xx but the server gave up waiting: the request may have been processed. Removing
+        the ``status != 408`` exclusion from _classify makes it a NoteWriteError ('nothing written')."""
+        pieces = _pieces("408", 2)
+        doc = _register("z0o2p12-408", pieces)
+
+        def timed_out():
+            raise _status_error(408)
+
+        with pytest.raises(ManifestVerifyUncertainError):
+            write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
+                       cat=_Recording(real_cat, before=timed_out))
+
+
+# ── the exception CHAIN is judged whole (I1) ─────────────────────────────────
+
+
+def _chained(first: Exception, second: Exception) -> Exception:
+    """*second* the way the httpx mixin raises it: inside the ``except`` handler for *first*, so
+    *first* is its ``__context__``. The mixin retries once inside its own handler
+    (``_refreshable_client._request``), and the attempt recorder sees only the final exception."""
+    try:
+        try:
+            raise first
+        except Exception:
+            raise second
+    except Exception as caught:
+        return caught
+
+
+def _connect() -> Exception:
+    return httpx.ConnectError("connection refused")
+
+
+#: (outer attempt-1 error, attempt-2 error): the exception attempt 2 raises carries attempt 1's as context.
+_IN_FLIGHT_CHAINS = {
+    "connect-then-protocol-error": (_connect, lambda: httpx.RemoteProtocolError("dropped mid-response")),
+    "protocol-error-then-connect": (lambda: httpx.RemoteProtocolError("dropped mid-response"), _connect),
+    "connect-then-read-error": (_connect, lambda: httpx.ReadError("reset while reading")),
+    "write-error-then-connect": (lambda: httpx.WriteError("reset while writing"), _connect),
+    "connect-then-500": (_connect, lambda: _status_error(500)),
+    "500-then-connect": (lambda: _status_error(500), _connect),
+    "connect-then-408": (_connect, lambda: _status_error(408)),
+    "408-then-connect": (lambda: _status_error(408), _connect),
+    "connect-then-embed-timeout": (_connect, _embed_timeout),
+    "embed-timeout-then-connect": (_embed_timeout, _connect),
+}
+
+
+class TestChainIsJudgedWhole:
+    @pytest.mark.parametrize("name", sorted(_IN_FLIGHT_CHAINS))
+    def test_any_in_flight_node_of_the_chain_makes_the_attempt_in_flight(self, name):
+        from nexus.catalog.note_write import _classify
+
+        first, second = _IN_FLIGHT_CHAINS[name]
+        assert _classify(_chained(first(), second())) == "in-flight"
+
+    @pytest.mark.parametrize("first,second,expected", [
+        pytest.param(_connect, _connect, "unsent", id="connect-then-connect"),
+        pytest.param(_connect, lambda: httpx.ConnectTimeout("slow"), "unsent", id="connect-then-connect-timeout"),
+        pytest.param(_connect, lambda: _status_error(409), "refused", id="connect-then-409"),
+        pytest.param(lambda: _status_error(409), _connect, "refused", id="409-then-connect"),
+    ])
+    def test_definitive_chains_stay_definitive(self, first, second, expected):
+        from nexus.catalog.note_write import _classify
+
+        assert _classify(_chained(first(), second())) == expected
+
+    @pytest.mark.parametrize("name", sorted(_IN_FLIGHT_CHAINS))
+    def test_a_chained_in_flight_error_is_unknown_never_nothing_written(self, vec, real_cat, name):
+        """The consequence: a request that reached the engine must not read as 'nothing was written'
+        (NoteWriteError -> fence failed, minted row removed)."""
+        first, second = _IN_FLIGHT_CHAINS[name]
+        pieces = _pieces(f"chain-{name}", 2)
+        doc = _register(f"z0o2p12-chain-{name}", pieces)
+
+        def chained():
+            raise _chained(first(), second())
+
+        with pytest.raises(ManifestVerifyUncertainError):
+            write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
+                       cat=_Recording(real_cat, before=chained))
+
 
 # ── a refused stamp follows the writer's rule ────────────────────────────────
 
@@ -1026,6 +1155,11 @@ class TestRefusedStamp:
 
 
 class TestContentTypeMap:
+    """The map lives in ``metadata_schema``. The real-engine test
+    ``TestChunkMetadata.test_content_type_follows_the_collection_prefix_as_put_did`` is the pin that a
+    note written through ``write_note`` reads back with the prefix's content type; the tests here
+    catch the two ways that could silently stop being true."""
+
     @pytest.mark.parametrize("collection,expected", [
         ("code__x__bge-base-en-v15-768__v1", "code"),
         ("docs__x__bge-base-en-v15-768__v1", "prose"),
@@ -1033,24 +1167,80 @@ class TestContentTypeMap:
         ("knowledge__x__bge-base-en-v15-768__v1", "prose"),
         ("taxonomy__x__bge-base-en-v15-768__v1", "prose"),
     ])
-    def test_the_note_writer_and_the_helper_agree(self, collection, expected):
-        from nexus.catalog.note_write import _chunk_payload
+    def test_the_helper_maps_each_prefix(self, collection, expected):
         from nexus.metadata_schema import chunk_content_type_for_collection
 
         assert chunk_content_type_for_collection(collection) == expected
-        payload = _chunk_payload(
-            collection, ["p"], [{"chash": _chash("p")}], title="", tags="", category="", session_id="",
-            source_agent="", ttl_days=None, catalog_doc_id="1.1.1",
-            content_type=chunk_content_type_for_collection(collection))
-        assert payload[0]["metadata"]["content_type"] == expected
 
+    @staticmethod
+    def _sent_chunks(monkeypatch, **kw):
+        import nexus.metadata_schema as ms
+
+        monkeypatch.setattr(ms, "chunk_content_type_for_collection", lambda collection: "pdf")
+        sent: list[list[dict]] = []
+
+        class Capturing:
+            def write_manifest_many(self, docs, **kwargs):
+                sent.append(kwargs["chunks"])
+                return {"failed_doc_ids": [], "chunks_written": 1, **_OK_DROPS}
+
+        write_note(catalog_doc_id=_DOC, pieces=["content type"], cat=Capturing(), **kw)
+        return [c["metadata"]["content_type"] for c in sent[0]]
+
+    def test_write_note_takes_the_content_type_from_the_helper(self, monkeypatch):
+        """Drives write_note itself with a helper that answers 'pdf', a valid type no prefix in the
+        map yields: a write_note that stopped calling the helper (and used a table of its own)
+        would send the prefix's real type instead."""
+        got = self._sent_chunks(monkeypatch, collection="rdr__x__bge-base-en-v15-768__v1")
+        assert got == ["pdf"]
+
+    def test_an_explicit_content_type_wins_over_the_helper(self, monkeypatch):
+        got = self._sent_chunks(monkeypatch, collection=_COLLECTION, content_type="code")
+        assert got == ["code"]
+
+    @pytest.mark.lint
     def test_there_is_one_copy_of_the_map(self):
-        """put, T3Database.put and the note writer share metadata_schema's map; a second copy in
-        source would drift."""
+        """put, T3Database.put and the note writer share metadata_schema's map; a second copy would
+        drift. AST-based, so another spelling (a dict, a list, a prefix test that returns the type) is
+        found too. The detector is proven against each spelling first, so a clean scan means it looked."""
+        import ast
         import pathlib
+
+        def is_rdr(n):
+            return isinstance(n, ast.Constant) and isinstance(n.value, str) and n.value in {"rdr", "rdr__"}
+
+        def is_md(n):
+            return isinstance(n, ast.Constant) and n.value == "markdown"
+
+        def second_copies(source: str) -> list[int]:
+            """Lines of a literal or branch that pairs an ``rdr`` prefix with 'markdown'."""
+            hits = []
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.Dict):
+                    if any(is_rdr(k) and is_md(v) for k, v in zip(node.keys, node.values)):
+                        hits.append(node.lineno)
+                elif isinstance(node, (ast.Tuple, ast.List)):
+                    if any(is_rdr(e) for e in node.elts) and any(is_md(e) for e in node.elts):
+                        hits.append(node.lineno)
+                elif isinstance(node, ast.If):
+                    tests_rdr = any(is_rdr(n) for n in ast.walk(node.test))
+                    returns_md = any(is_md(n) for b in node.body for n in ast.walk(b))
+                    if tests_rdr and returns_md:
+                        hits.append(node.lineno)
+            return hits
+
+        spellings = {
+            "tuple": 'M = (("rdr__", "markdown"),)',
+            "dict": 'M = {"rdr__": "markdown"}',
+            "bare-dict": 'M = {"rdr": "markdown"}',
+            "list": 'M = [["rdr", "markdown"]]',
+            "branch": 'def f(c):\n    if c.startswith("rdr__"):\n        return "markdown"\n',
+        }
+        for name, source in sorted(spellings.items()):
+            assert second_copies(source), f"the detector is blind to the {name} spelling"
+        assert not second_copies('M = {"docs__": "prose"}\nx = "markdown"\n'), "control: no false positive"
 
         src = pathlib.Path(__file__).parent.parent / "src" / "nexus"
         holders = sorted(
-            str(p.relative_to(src)) for p in src.rglob("*.py")
-            if '("rdr__", "markdown")' in p.read_text() or '"rdr__": "markdown"' in p.read_text())
+            str(p.relative_to(src)) for p in src.rglob("*.py") if second_copies(p.read_text()))
         assert holders == ["metadata_schema.py"], holders

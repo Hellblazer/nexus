@@ -5484,6 +5484,18 @@ def store_put(
                 f"{outcome.reason}. Nothing was written: a note is "
                 f"written together with its catalog entry, never without one."
             )
+        if outcome.status == UNCERTAIN and outcome.stamp_refused:
+            # The cause is KNOWN here, unlike the timeout below: the engine
+            # accepted the write and refused the completion stamp, so say that
+            # once. Still an Error (the note is not confirmed complete), never
+            # a Stored: the document stays `indexing` until a retry stamps it.
+            return (
+                f"Error: store_put wrote {doc_id} to {col_name} and the "
+                f"engine accepted the write, but it refused to stamp the "
+                f"document complete ({outcome.stamp_detail}). The document "
+                f"stays 'indexing'. Nothing was rolled back; store_get reads "
+                f"the note, and a retry is an idempotent re-write."
+            )
         if outcome.status == UNCERTAIN:
             # RDR-192 Step 3a fix-round 1 (critic Critical 1): an atomic
             # request can still time out with an unknown result. Nothing was
@@ -5498,14 +5510,18 @@ def store_put(
             )
         if outcome.status == NOT_LANDED:
             # Confirmed not landed. The request is one transaction, so no
-            # chunk of this note was written and a previous version of the
-            # note (a re-put) is exactly as it was.
+            # chunk of this note was added and a previous version of the
+            # note (a re-put) is exactly as it was. Said precisely: a request
+            # refused by a 429 from the embedder comes after the engine's
+            # metadata refresh of chunks whose text it already held, so
+            # "nothing was written" would overstate it (note_write outcome 2).
             return (
                 f"Error: store_put could not catalog content in {col_name}: "
-                f"{outcome.reason}. Nothing was written: the note's chunks and "
+                f"{outcome.reason}. The note was not stored: its chunks and "
                 f"its catalog entry go in one request, so no chunk was left "
-                f"behind and any earlier version of the note is unchanged; "
-                f"retry is safe."
+                f"behind and any earlier version of the note is unchanged "
+                f"(chunks whose text was already stored may have had their "
+                f"metadata refreshed); retry is safe."
             )
 
         # A committed write makes any cached page burst stale — drop it so a

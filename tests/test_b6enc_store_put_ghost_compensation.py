@@ -2239,6 +2239,43 @@ class TestZ0o2p12McpFailedReput:
 # chunk out from under the legacy note.
 
 
+class TestZ0o2p12McpWording:
+    """What the MCP reply says for the two outcomes whose wording was imprecise (verify2 M4, M5)."""
+
+    def test_a_refused_stamp_says_what_is_known_once_and_stays_an_error(
+        self, catalog_env: Path, local_t3: T3Database,
+    ) -> None:
+        from nexus.catalog.note_write import StampRefusedError
+
+        refused = StampRefusedError(
+            "note 1.1.1 in c: the write was accepted but the engine refused to stamp it complete: "
+            "referenced 2 != chunk_count 1", detail="referenced 2 != chunk_count 1")
+        result = _mcp_store_put_with(local_t3, "z0o2p12 stamp refused", "z0o2p12-stamp-wording",
+                                     write_error=refused)
+        assert result.startswith("Error:") and "Stored:" not in result, result
+        assert "accepted the write" in result and "'indexing'" in result
+        assert "referenced 2 != chunk_count 1" in result
+        assert "could not confirm" not in result and "landed" not in result, (
+            "the cause is known, so the reply must not also say it could not be confirmed")
+        assert result.count("refused to stamp") == 1, result
+
+    def test_a_refused_request_does_not_claim_nothing_was_written(
+        self, catalog_env: Path, local_t3: T3Database,
+    ) -> None:
+        """A 429 from the embedder follows the engine's metadata refresh of already-stored chunks
+        (CombinedWriteService phase 2a commits, 2b embeds), so the reply names what is unchanged."""
+        from nexus.catalog.note_write import NoteWriteError
+
+        refused = NoteWriteError(
+            catalog_doc_id="1.1.1", collection="c", reason="HTTP 429", manifest_empty=False)
+        result = _mcp_store_put_with(local_t3, "z0o2p12 refused wording", "z0o2p12-refused-wording",
+                                     write_error=refused)
+        assert result.startswith("Error:"), result
+        assert "Nothing was written" not in result
+        assert "metadata refreshed" in result
+        assert "retry is safe" in result and "earlier version of the note is unchanged" in result
+
+
 class TestK54nkRollbackLiveNoteGuard:
     """Seeding mirrors nexus-wbfpw.2's R8 row exactly (``cat.register(...,
     meta={"doc_id": chash})`` with no manifest write at all) -- the
