@@ -483,8 +483,15 @@ Phase 1, against the real engine substrate.
   unmigrated paths keep working until Phase 3.
 - **Build tool compatibility**, **Licensing**, **IDE compatibility**,
   **Secret/credential lifecycle**: N/A.
-- **Memory management**: an append request is bounded by the existing
-  per-request chunk caps.
+- **Memory management**: the client caps every combined-write request at 300
+  chunks (`QUOTAS.MAX_RECORDS_PER_WRITE`; the ChunkBatcher flush cap is 64 for
+  CCE collections, 300 for code, 16 on onnx-local). The engine does not
+  enforce that cap on `write_many` or `append`: the released client's
+  onnx-local cap can be raised without limit through
+  `NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`, so a server cap of 300 there could refuse a
+  request an existing client legitimately sends. Only the new `append_many`
+  route enforces 300 chunks, and `sweep_chashes` is capped at 300 per append
+  (P1.0). The asymmetry is recorded in the wire ledger.
 
 ### Proportionality
 
