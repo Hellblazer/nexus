@@ -6996,12 +6996,22 @@ public final class CatalogRepository {
                 log.warn("event=index_run_begin_unknown_doc tenant={} doc_id={}", tenant, docId);
             }
             if (!snapshotManifest) return null;
+            // ONE fetch of every manifest row's chash in position order: the count is its size and
+            // the distinct list its first-seen order, so the two fields cannot disagree.
+            var rowChashes = ctx.select(CHK_CHASH_HEX).from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                       .and(liveParentDoc(ctx, tenant)))
+                .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
+                .fetch();
+            Set<String> distinct = new LinkedHashSet<>();
+            for (var r : rowChashes) {
+                String c = r.value1();
+                if (c != null && !c.isBlank()) distinct.add(c);
+            }
             Map<String, Object> snapshot = new LinkedHashMap<>();
-            snapshot.put("prior_chashes", new ArrayList<>(currentManifestChashes(ctx, tenant, docId)));
-            snapshot.put("prior_count", ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
-                CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                    .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
-                    .and(liveParentDoc(ctx, tenant))));
+            snapshot.put("prior_chashes", new ArrayList<>(distinct));
+            snapshot.put("prior_count", rowChashes.size());
             return snapshot;
         });
     }

@@ -109,7 +109,56 @@ class IndexRunBeginSnapshotTest extends AtomicWriteTestBase {
         Map<String, Object> first = begin(f, true);
         Map<String, Object> resent = begin(f, true);
 
+        // Non-vacuity: the snapshot both times is the real manifest, not two empty ones.
+        assertThat(first.get("prior_chashes")).isEqualTo(List.of(ch("resend/r1"), ch("resend/r2")));
+        assertThat(first.get("prior_count")).isEqualTo(2);
         assertThat(resent).isEqualTo(first);
+    }
+
+    @Test
+    void aSnapshotBeginStillStampsTheDocumentIndexing() throws Exception {
+        Fx f = fixture("stamp");
+        writeManifest(f, List.of("stamp/s1"));
+
+        begin(f, true);
+
+        assertThat(repo.getDocument(TENANT, f.docId()).get("index_state")).isEqualTo("indexing");
+    }
+
+    @Test
+    void aSnapshotBeginOnATombstonedDocumentIsRefusedAndReturnsNoManifest() throws Exception {
+        Fx f = fixture("tomb");
+        writeManifest(f, List.of("tomb/t1"));
+        repo.deleteDocument(TENANT, f.docId());
+
+        CapturingExchange ex = new CapturingExchange("POST",
+            URI.create("/v1/catalog/index-run/begin"),
+            JSON.writeValueAsString(Map.of("doc_id", f.docId(), "content_hash", "h", "run_id", "r",
+                "collection", f.collection(), "snapshot_manifest", true)));
+        RequestContext.set(new RequestContext.Principal(TENANT, null, false, false, "tenant", "test-credential-hash"));
+        try {
+            handler.handle(ex);
+        } finally {
+            RequestContext.clear();
+        }
+
+        assertThat(ex.status).as(ex.bodyString()).isNotEqualTo(200);
+        assertThat(ex.bodyString()).doesNotContain("prior_chashes");
+    }
+
+    @Test
+    void aSnapshotNeverShowsAnotherTenantsManifest() throws Exception {
+        Fx f = fixture("tenant");
+        writeManifest(f, List.of("tenant/x1", "tenant/x2"));
+
+        // The same doc_id asked for under a different tenant: RLS hides the document and its rows.
+        Map<String, Object> other = repo.beginIndexRun("other-tenant-z0o2p10", f.docId(), "h", "r",
+            f.collection(), true);
+
+        assertThat(other.get("prior_chashes")).isEqualTo(List.of());
+        assertThat(other.get("prior_count")).isEqualTo(0);
+        // ...and the owning tenant still sees its own.
+        assertThat(begin(f, true).get("prior_count")).isEqualTo(2);
     }
 
     @Test

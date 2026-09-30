@@ -204,7 +204,8 @@ def test_one_batch_is_one_write_many_with_sweep_on_and_complete_riding_it() -> N
     assert wm["complete"] == {_DOC: "hash1"}
     assert len(wm["chunks"]) == 3 and wm["collection"] == _COLLECTION
     begin = cat.of("begin_index_run")[0]
-    assert begin["run_id"] == "run1" and begin["snapshot_manifest"] is False
+    # A fenced single request also snapshots, so a resent write_many still reports correctly.
+    assert begin["run_id"] == "run1" and begin["snapshot_manifest"] is True
     assert res.completed and res.requests == 1 and res.batches == 1
 
 
@@ -225,6 +226,27 @@ def test_one_batch_result_reports_the_drop_list_of_the_write() -> None:
     res = w.finish()
     assert res.dropped == [_h(50), _h(51)] and res.dropped_count == 2
     assert res.dropped_unknown is False
+
+
+def test_a_fenced_one_batch_write_reports_its_drop_list_from_the_snapshot_after_a_resend() -> None:
+    """The resend's own dropped_chashes is empty; the fenced single request reports from the
+    snapshot taken before any write."""
+    cat = FakeCat(prior=[_h(0), _h(50), _h(51)], resend_first_write_many=True)
+    w = _writer(cat, content_hash="hash1")
+    w.add_batch(*_batch(0, 2))
+    res = w.finish()
+    assert res.dropped == [_h(50), _h(51)] and res.dropped_count == 2
+
+
+def test_an_unfenced_one_batch_write_can_under_report_after_a_resend() -> None:
+    """Documented limit: with no fence there is no snapshot, so the write_many response is all
+    there is, and a resend makes it empty. (The sweep itself ran server-side on the first
+    attempt.)"""
+    cat = FakeCat(prior=[_h(0), _h(50), _h(51)], resend_first_write_many=True)
+    w = _writer(cat)
+    w.add_batch(*_batch(0, 2))
+    res = w.finish()
+    assert res.dropped == [] and res.dropped_count == 0
 
 
 def test_one_batch_dropped_unknown_is_flagged_and_has_no_list() -> None:
@@ -258,6 +280,11 @@ def test_write_many_failure_of_the_document_raises() -> None:
     with pytest.raises(BatchWriteFailedError) as ei:
         w.finish()
     assert ei.value.doc_id == _DOC
+
+
+def test_an_empty_content_hash_is_refused() -> None:
+    with pytest.raises(ValueError, match="content_hash"):
+        _writer(FakeCat(), content_hash="")
 
 
 def test_a_repeated_chash_at_two_positions_stamps_with_the_row_count() -> None:
@@ -368,6 +395,17 @@ def test_the_sweep_ignores_a_lying_first_batch_response() -> None:
     assert cat.of("append_manifest_chunks")[-1]["sweep_chashes"] == [_h(900)]
 
 
+def test_a_concurrent_writers_drop_is_hedged_in_from_batch_ones_response() -> None:
+    """The snapshot is the source, but a chash a concurrent writer put in the manifest AFTER the
+    snapshot shows up in batch 1's own dropped_chashes; the sweep is the union, minus the run's."""
+    cat = FakeCat(prior=[_h(900), _h(901)], snapshot={"prior_chashes": [_h(900)], "prior_count": 1})
+    w = _writer(cat, content_hash="hash1")
+    for b in (_batch(0, 1), _batch(1, 1)):
+        w.add_batch(*b)
+    w.finish()
+    assert cat.of("append_manifest_chunks")[-1]["sweep_chashes"] == [_h(900), _h(901)]
+
+
 def test_long_dropped_list_is_split_into_300s_with_trailing_sweep_only_appends() -> None:
     dropped = [_h(10_000 + i) for i in range(650)]
     cat = FakeCat(prior=dropped)
@@ -439,6 +477,9 @@ def test_an_unusable_snapshot_is_an_error_before_any_write(snapshot) -> None:
     with pytest.raises(BatchWriteFailedError, match="pre-run manifest"):
         w.add_batch(*_batch(1, 1))
     assert "write_manifest_many" not in cat.names()
+    # The stamp is committed when begin answers, so the run must still be abort()-able.
+    w.abort("unusable snapshot")
+    assert cat.of("fail_index_run") == [{"doc_id": _DOC, "error": "unusable snapshot"}]
 
 
 def test_chunks_the_engine_reports_unreferenced_are_a_hard_error() -> None:
@@ -600,12 +641,20 @@ def test_finish_with_no_batch_writes_an_empty_manifest_and_stamps_zero() -> None
     """A re-index that yields no chunks must still clear the old manifest."""
     cat = FakeCat(prior=[_h(1), _h(2)])
     w = _writer(cat, content_hash="hash1")
-    res = w.finish()
+    res = w.finish(allow_empty=True)
     wm = cat.of("write_manifest_many")[0]
     assert wm["docs"] == [(_DOC, [])] and wm["sweep"] is True and wm["chunks"] is None
     assert wm["complete"] == {_DOC: "hash1"}
     assert cat.manifest == {} and res.completed
     assert res.dropped == [_h(1), _h(2)]
+
+
+def test_a_bare_finish_with_no_batch_raises_and_sends_nothing() -> None:
+    cat = FakeCat(prior=[_h(1)])
+    w = _writer(cat, content_hash="hash1")
+    with pytest.raises(ValueError, match="allow_empty"):
+        w.finish()
+    assert cat.calls == []
 
 
 def test_a_writer_that_failed_refuses_more_work() -> None:
@@ -659,6 +708,28 @@ def test_the_context_manager_aborts_on_an_exception_and_lets_it_propagate() -> N
             raise RuntimeError("caller bug")
     assert len(cat.of("fail_index_run")) == 1
     assert "RuntimeError: caller bug" in cat.of("fail_index_run")[0]["error"]
+
+
+def test_abort_after_finish_does_nothing() -> None:
+    """A completed document must never be marked failed by a late exception."""
+    cat = FakeCat()
+    w = _writer(cat, content_hash="hash1")
+    w.add_batch(*_batch(0, 1))
+    w.add_batch(*_batch(1, 1))
+    w.finish()
+    w.abort("too late")
+    assert cat.of("fail_index_run") == []
+
+
+def test_an_exception_after_finish_inside_the_with_leaves_the_document_complete() -> None:
+    cat = FakeCat()
+    with pytest.raises(RuntimeError, match="after finish"):
+        with _writer(cat, content_hash="hash1") as w:
+            w.add_batch(*_batch(0, 1))
+            w.add_batch(*_batch(1, 1))
+            w.finish()
+            raise RuntimeError("after finish")
+    assert cat.of("fail_index_run") == []
 
 
 def test_the_context_manager_does_not_abort_on_success() -> None:
