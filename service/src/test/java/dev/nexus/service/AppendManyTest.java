@@ -33,6 +33,17 @@ class AppendManyTest extends AtomicWriteTestBase {
         return mdoc(docId, rows, List.of());
     }
 
+    private static Map<String, Object> mdoc(String docId, List<Map<String, Object>> rows, List<String> sweep,
+                                            String contentHash, int chunkCount) {
+        Map<String, Object> d = mdoc(docId, rows, sweep);
+        d.put("complete", Map.of("content_hash", contentHash, "chunk_count", chunkCount));
+        return d;
+    }
+
+    private String indexState(String docId) {
+        return (String) repo.getDocument(TENANT, docId).get("index_state");
+    }
+
     @SuppressWarnings("unchecked")
     private static List<Map<String, Object>> results(Map<String, Object> response) {
         return (List<Map<String, Object>>) response.get("results");
@@ -270,5 +281,117 @@ class AppendManyTest extends AtomicWriteTestBase {
         assertThat(response).containsEntry("docs", 25).containsEntry("rows", 25)
             .containsEntry("chunks_written", 25);
         assertThat(chunkCount(f.collection())).isEqualTo(25);
+    }
+
+    // ── optional per-document `complete` (RDR-223 fix round, nexus-z0o2p.19): the completion stamp
+    //    rides a document's LAST append, with write_many's semantics (content hash + manifest ROW
+    //    count, the same fail-closed verify, refusals reported rather than failing the append). ──
+
+    @Test
+    void completeOnALastAppend_stampsTheDocumentAfterItsRowsLand_andReportsNoRefusal() throws Exception {
+        Fx f = fixture("cmp");
+        String a = ch("cmp-a"), b = ch("cmp-b"), c = ch("cmp-c");
+
+        var first = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(0, a), row(2, c)))), List.of(chunk(a, "a"), chunk(c, "c")),
+            false).response();
+        assertThat(indexState(f.docId())).as("no complete on the first append: not stamped").isNotEqualTo("complete");
+        assertThat(first).containsEntry("complete_refused_count", 0);
+
+        var last = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(1, b)), List.of(), "cmp-hash", 3)), List.of(chunk(b, "b")),
+            false).response();
+
+        assertThat(last).containsEntry("failed_doc_ids", List.of()).containsEntry("complete_refused_count", 0);
+        assertThat((List<?>) last.get("complete_refused")).isEmpty();
+        assertThat(indexState(f.docId())).isEqualTo("complete");
+        assertThat(repo.getDocument(TENANT, f.docId())).containsEntry("index_content_hash", "cmp-hash");
+    }
+
+    @Test
+    void completeWithAWrongRowCount_isRefusedInTheResponse_theRowsStillLand_andTheStateIsNotComplete() throws Exception {
+        Fx f = fixture("cmpbad");
+        String a = ch("cmpbad-a"), b = ch("cmpbad-b");
+
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(0, a), row(1, b)), List.of(), "cmpbad-hash", 5)),
+            List.of(chunk(a, "a"), chunk(b, "b")), false).response();
+
+        assertThat(response).containsEntry("docs", 1).containsEntry("failed_doc_ids", List.of())
+            .containsEntry("complete_refused_count", 1);
+        @SuppressWarnings("unchecked")
+        var refused = (List<Map<String, Object>>) response.get("complete_refused");
+        assertThat(refused).hasSize(1);
+        assertThat(refused.get(0)).containsEntry("doc_id", f.docId()).containsEntry("referenced", 2L)
+            .containsEntry("chunk_count", 5).containsEntry("missing", 0L);
+        assertThat(manifestChashes(f.docId())).as("over-work, never under-work: the rows are correct").containsExactly(a, b);
+        assertThat(indexState(f.docId())).isNotEqualTo("complete");
+    }
+
+    @Test
+    void theStampCountsManifestRows_notDistinctChashes() throws Exception {
+        Fx f = fixture("cmprow");
+        String a = ch("cmprow-a");
+
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(0, a), row(1, a)), List.of(), "cmprow-hash", 2)),
+            List.of(chunk(a, "a")), false).response();
+
+        assertThat(response).containsEntry("complete_refused_count", 0);
+        assertThat(indexState(f.docId())).as("one chash at two positions is two manifest rows").isEqualTo("complete");
+    }
+
+    @Test
+    void completeRidesTheSameRequestAsTheDeferredSweep_andASweepOnlyAppendCanStamp() throws Exception {
+        Fx f = fixture("cmpswp");
+        String holder = freshDoc("cmpswp-holder", f.collection());
+        String dropped = ch("cmpswp-dropped"), kept = ch("cmpswp-kept");
+        svc.writeManyCombined(TENANT, f.collection(), List.of(chunk(dropped, "dropped")),
+            List.of(doc(holder, List.of(row(0, dropped)))), null, false, false);
+        repo.writeManifestMany(TENANT, List.of(doc(holder, List.of())), f.collection(), null, false);
+
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(0, kept)), List.of(dropped), "cmpswp-hash", 1)),
+            List.of(chunk(kept, "kept")), false).response();
+        assertThat(response).containsEntry("swept", 1).containsEntry("complete_refused_count", 0);
+        assertThat(chunkExists(f.collection(), dropped)).isFalse();
+        assertThat(indexState(f.docId())).isEqualTo("complete");
+
+        // A sweep-only append (no rows) stamps too: the verify reads the manifest, not the request.
+        Fx g = fixture("cmpso");
+        String x = ch("cmpso-x");
+        svc.appendManyCombined(TENANT, g.collection(), List.of(mdoc(g.docId(), List.of(row(0, x)))),
+            List.of(chunk(x, "x")), false);
+        var stamp = svc.appendManyCombined(TENANT, g.collection(),
+            List.of(mdoc(g.docId(), List.of(), List.of(), "cmpso-hash", 1)), List.of(), false).response();
+        assertThat(stamp).containsEntry("complete_refused_count", 0);
+        assertThat(indexState(g.docId())).isEqualTo("complete");
+    }
+
+    @Test
+    void aDocumentThatFails_isNotStamped_andItsSiblingIs() throws Exception {
+        Fx f = fixture("cmpfail");
+        String a = ch("cmpfail-a");
+
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc("aw.cmpfail-missing", List.of(row(0, a)), List.of(), "h-missing", 1),
+                    mdoc(f.docId(), List.of(row(0, a)), List.of(), "h-ok", 1)),
+            List.of(chunk(a, "a")), false).response();
+
+        assertThat(response).containsEntry("failed_doc_ids", List.of("aw.cmpfail-missing"))
+            .containsEntry("complete_refused_count", 0);
+        assertThat(indexState(f.docId())).isEqualTo("complete");
+    }
+
+    @Test
+    void withoutComplete_theStateIsUntouched_andTheRefusalFieldsAreEmpty() throws Exception {
+        Fx f = fixture("cmpabs");
+        String a = ch("cmpabs-a");
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(0, a)))), List.of(chunk(a, "a")), false).response();
+        assertThat(response).containsEntry("complete_refused_count", 0);
+        assertThat((List<?>) response.get("complete_refused")).isEmpty();
+        assertThat(indexState(f.docId())).isNull();
+        assertThat(results(response).get(0)).doesNotContainKey("complete");
     }
 }

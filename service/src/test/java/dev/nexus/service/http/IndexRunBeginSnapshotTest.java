@@ -173,4 +173,59 @@ class IndexRunBeginSnapshotTest extends AtomicWriteTestBase {
         assertThat(resp.get("prior_chashes")).isEqualTo(List.of(ch("replace/old1"), ch("replace/old2")));
         assertThat(manifestChashes(f.docId())).containsExactly(ch("replace/new1"));
     }
+
+    // ── begin-many (RDR-223 fix round, nexus-z0o2p.19): the same snapshot for N documents ──
+
+    private Map<String, Object> beginMany(Fx collectionOf, List<String> docIds, boolean snapshot) throws Exception {
+        List<Map<String, Object>> docs = new ArrayList<>();
+        for (String id : docIds) docs.add(Map.of("doc_id", id, "content_hash", "h", "run_id", "r"));
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("docs", docs);
+        body.put("collection", collectionOf.collection());
+        if (snapshot) body.put("snapshot_manifest", true);
+        return send("/v1/catalog/index-run/begin-many", body);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void beginManyWithTheFlag_returnsEachDocumentsPreRunManifest_andStampsIndexing() throws Exception {
+        Fx f = fixture("many1");
+        String other = freshDoc("many2", f.collection());
+        writeManifest(f, List.of("many/m1", "many/m2", "many/m1"));
+
+        Map<String, Object> resp = beginMany(f, List.of(f.docId(), other, "aw.no-such-doc"), true);
+
+        assertThat(resp.get("docs")).isEqualTo(3);
+        Map<String, Map<String, Object>> snaps = (Map<String, Map<String, Object>>) resp.get("snapshots");
+        assertThat(snaps.get(f.docId()).get("prior_chashes")).isEqualTo(List.of(ch("many/m1"), ch("many/m2")));
+        assertThat(snaps.get(f.docId()).get("prior_count")).isEqualTo(3);
+        assertThat(snaps.get(other).get("prior_chashes")).isEqualTo(List.of());
+        assertThat(snaps.get(other).get("prior_count")).isEqualTo(0);
+        assertThat(repo.getDocument(TENANT, f.docId()).get("index_state")).isEqualTo("indexing");
+    }
+
+    @Test
+    void beginManyWithoutTheFlag_isTheOldResponseWithNoSnapshots() throws Exception {
+        Fx f = fixture("many3");
+        writeManifest(f, List.of("many3/x"));
+
+        Map<String, Object> resp = beginMany(f, List.of(f.docId()), false);
+
+        assertThat(resp).isEqualTo(Map.of("docs", 1, "failed_doc_ids", List.of()));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void beginManyWithTheFlag_aTombstonedDocumentFailsInPlace_andHasNoSnapshot() throws Exception {
+        Fx f = fixture("many4");
+        String dead = freshDoc("many4-dead", f.collection());
+        writeManifest(f, List.of("many4/x"));
+        repo.deleteDocument(TENANT, dead);
+
+        Map<String, Object> resp = beginMany(f, List.of(dead, f.docId()), true);
+
+        assertThat(resp.get("failed_doc_ids")).isEqualTo(List.of(dead));
+        Map<String, Object> snaps = (Map<String, Object>) resp.get("snapshots");
+        assertThat(snaps).containsKey(f.docId()).doesNotContainKey(dead);
+    }
 }

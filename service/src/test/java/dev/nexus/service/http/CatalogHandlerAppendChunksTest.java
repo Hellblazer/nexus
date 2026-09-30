@@ -454,6 +454,64 @@ class CatalogHandlerAppendChunksTest {
         assertThat(overCap.bodyString()).contains("docs[0]").contains("300");
     }
 
+    // ── append_many `complete` (RDR-223 fix round, nexus-z0o2p.19) ──
+
+    @Test
+    void appendMany_complete_stampsOverHttp_andRefusalIsReportedNotFailed() throws Exception {
+        registerDoc("aph.c1");
+        registerDoc("aph.c2");
+        String a = ch("aphc-a"), b = ch("aphc-b");
+        CapturingExchange ex = post("/v1/catalog/manifest/append_many", manyBody(
+            "[{\"doc_id\":\"aph.c1\",\"rows\":[{\"position\":0,\"chash\":\"" + a + "\"}],"
+            + "\"complete\":{\"content_hash\":\"http-c1\",\"chunk_count\":1}},"
+            + "{\"doc_id\":\"aph.c2\",\"rows\":[{\"position\":0,\"chash\":\"" + b + "\"}],"
+            + "\"complete\":{\"content_hash\":\"http-c2\",\"chunk_count\":9}}]",
+            ",\"chunks\":[{\"chash\":\"" + a + "\",\"text\":\"aphc a\"},{\"chash\":\"" + b + "\",\"text\":\"aphc b\"}]"));
+        handle(handler, ex);
+
+        assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
+        assertThat(ex.bodyString()).contains("\"complete_refused_count\":1")
+            .contains("\"doc_id\":\"aph.c2\"").contains("\"failed_doc_ids\":[]");
+        assertThat(repo.getDocument(TENANT, "aph.c1")).containsEntry("index_state", "complete")
+            .containsEntry("index_content_hash", "http-c1");
+        assertThat(repo.getDocument(TENANT, "aph.c2").get("index_state")).isNotEqualTo("complete");
+    }
+
+    @Test
+    void appendMany_complete_withoutChunks_stampsToo() throws Exception {
+        registerDoc("aph.c3");
+        String c = ch("aphc3-c");
+        handle(handler, post("/v1/catalog/manifest/append", "{\"doc_id\":\"aph.c3\",\"collection\":\"" + COLLECTION + "\","
+            + "\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"aphc3 c\"}]}"));
+        CapturingExchange ex = post("/v1/catalog/manifest/append_many", manyBody(
+            "[{\"doc_id\":\"aph.c3\",\"rows\":[],\"complete\":{\"content_hash\":\"http-c3\",\"chunk_count\":1}}]", ""));
+        handle(handlerWithoutService, ex);
+        assertThat(ex.status).as(ex.bodyString()).isEqualTo(200);
+        assertThat(repo.getDocument(TENANT, "aph.c3")).containsEntry("index_state", "complete");
+    }
+
+    @Test
+    void appendMany_malformedComplete_400s_beforeAnyTransaction() throws Exception {
+        registerDoc("aph.c4");
+        String c = ch("aphc4-c");
+        String rows = "\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}]";
+        for (String bad : new String[] {
+                "\"complete\":\"a-string\"",
+                "\"complete\":{\"chunk_count\":1}",
+                "\"complete\":{\"content_hash\":\"\",\"chunk_count\":1}",
+                "\"complete\":{\"content_hash\":\"h\"}",
+                "\"complete\":{\"content_hash\":\"h\",\"chunk_count\":-1}",
+                "\"complete\":{\"content_hash\":\"h\",\"chunk_count\":\"1\"}"}) {
+            CapturingExchange ex = post("/v1/catalog/manifest/append_many", manyBody(
+                "[{\"doc_id\":\"aph.c4\"," + rows + "," + bad + "}]", ""));
+            handle(handlerWithoutService, ex);
+            assertThat(ex.status).as(bad + " -> " + ex.bodyString()).isEqualTo(400);
+            assertThat(ex.bodyString()).contains("complete");
+        }
+        assertThat(repo.getManifest(TENANT, "aph.c4")).isEmpty();
+    }
+
     @Test
     void appendMany_caps_docsAndChunks() throws Exception {
         StringBuilder docs = new StringBuilder("[");
