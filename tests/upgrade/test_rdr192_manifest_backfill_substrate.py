@@ -26,14 +26,17 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
 import nexus.db.http_vector_client as hvc
+from nexus.commands.t3 import t3
 from nexus.commands.upgrade import _run_ladder
 from nexus.upgrade_ladder.http_store import HttpLadderStore
 from nexus.upgrade_ladder.registry import LadderRegistry
 from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (
     MEMO_PROJECT,
     MEMO_TITLE,
+    RETRY_ENV,
     RUNG_NAME,
     BackfillIncompleteError,
     CensusUnavailable,
@@ -296,6 +299,7 @@ def test_an_unhealable_residual_defers_loudly_records_nothing_and_is_not_retried
     out = capsys.readouterr().out
     assert f"rung '{RUNG_NAME}' deferred" in out
     assert coll in out and "nx store put" in out and "cannot heal" in out
+    assert "hidden from `nx store get`" in out and "your own copy" in out
 
     assert _census_totals(tenant, coll)["legacy-unmanifested"] == 1
     assert chash in _stored(tenant, coll), "a residual is reported, never deleted"
@@ -309,18 +313,24 @@ def test_an_unhealable_residual_defers_loudly_records_nothing_and_is_not_retried
 
     _run_ladder(dry_run=False, auto_mode=False)
     assert f"rung '{RUNG_NAME}' deferred" in capsys.readouterr().out
-    assert len(backfill_calls) == calls_after_first, "an unchanged residual is not retried"
+    assert len(backfill_calls) == calls_after_first, "a residual inside the gate is not retried"
     assert rdr192_backfill_complete() is False
 
     cat.write_manifest(tumbler, [{"chash": chash, "position": 0}], collection=coll)
 
+    # Inside the 24h gate the fix is not even looked for ...
+    _run_ladder(dry_run=False, auto_mode=False)
+    assert "not re-examined" in capsys.readouterr().out
+    assert rdr192_backfill_complete() is False
+    # ... until the operator forces a retry (or the gate opens).
+    monkeypatch.setenv(RETRY_ENV, "1")
     _run_ladder(dry_run=False, auto_mode=False)
     assert _census_totals(tenant, coll)["legacy-unmanifested"] == 0
     assert rdr192_backfill_complete() is True
     assert _memo_note() is None, "a recorded completion clears the residual memo"
 
 
-def test_the_remedy_works_a_re_put_heals_a_stranded_legacy_note(t2_service_env, catalog) -> None:
+def test_the_remedy_works_a_re_put_heals_a_stranded_legacy_note(t2_service_env, catalog, monkeypatch) -> None:
     """The remedy the deferred walk prints for a skipped legacy note is
     `nx store put` under the same title. Prove it: strand a legacy note the
     collection-scoped backfill cannot reach (its owner is registered under a
@@ -365,6 +375,7 @@ def test_the_remedy_works_a_re_put_heals_a_stranded_legacy_note(t2_service_env, 
     assert old in _stored(tenant, coll), "the old chunk is not deleted; it is the reaper's now"
     assert totals["superseded"] == 1, totals
 
+    monkeypatch.setenv(RETRY_ENV, "1")  # inside the 24h gate; the operator re-put, so retry now
     _run_ladder(dry_run=False, auto_mode=True)
     assert rdr192_backfill_complete() is True
 
@@ -454,6 +465,107 @@ def test_backfill_re_checks_the_manifest_immediately_before_writing(
     assert seen == [tumbler], "the re-check ran, once, for the one gapped document"
     assert result.docs_skipped_has_manifest == 1 and result.chunks_written == 0
     assert cat.get_manifest(tumbler) == [], "the real manifest was never written"
+
+
+def test_a_skipped_document_reaches_the_deferred_detail(t2_service_env, catalog, capsys) -> None:
+    """The BackfillResult skip counters travel through the production
+    `_default_backfill` into the walk's deferred detail (verify round item 6)."""
+    tenant = t2_service_env
+    cat, owner = catalog
+    coll = _coll("skiplist")
+    tumbler = str(cat.register(
+        owner, "two-chunk note", content_type="knowledge", physical_collection=coll, chunk_count=1,
+    ))
+    meta = {"catalog_doc_id": tumbler, "chunk_index": 0}
+    _seed_chunk(tenant, coll, "skiplist old", {**meta, "title": "old"})
+    _seed_chunk(tenant, coll, "skiplist current", {**meta, "title": "current"})
+
+    _run_ladder(dry_run=False, auto_mode=False)
+
+    out = capsys.readouterr().out
+    assert f"The backfill skipped documents: {coll}: chunk_count_mismatch=1." in out
+    assert cat.get_manifest(tumbler) == []
+
+
+def test_a_repeated_piece_note_is_still_manifested(t2_service_env, catalog) -> None:
+    """Verify round N2: identical chunk text collapses to ONE T3 row by
+    design, so a note registered with 3 pieces whose 2nd repeats the 1st has
+    2 stored chunks, at positions 0 and 2. That is not the old-and-current
+    shape (more matched than registered); the verb always healed it, with a
+    position gap, and must keep doing so."""
+    from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.manifest_backfill import backfill_manifest_for_collection
+
+    tenant = t2_service_env
+    cat, owner = catalog
+    coll = _coll("repeat")
+    tumbler = str(cat.register(
+        owner, "repeated piece note", content_type="knowledge",
+        physical_collection=coll, chunk_count=3,
+    ))
+    first = _seed_chunk(tenant, coll, "piece one", {"catalog_doc_id": tumbler, "chunk_index": 0})
+    third = _seed_chunk(tenant, coll, "piece three", {"catalog_doc_id": tumbler, "chunk_index": 2})
+    assert _census_totals(tenant, coll)["legacy-unmanifested"] == 2  # control
+
+    result = backfill_manifest_for_collection(
+        make_catalog_reader(), hvc.HttpVectorClient(tenant=tenant), coll,
+        dry_run=False, only_gapped=True,
+    )
+    assert result.docs_skipped_chunk_count_mismatch == 0
+    assert result.docs_processed == 1 and result.chunks_written == 2
+    assert [(r.position, r.chash) for r in cat.get_manifest(tumbler)] == [(0, first), (2, third)]
+
+
+def test_the_census_prints_the_owner_title_for_legacy_rows(t2_service_env, catalog) -> None:
+    """A stranded note's text is hidden from get and search, so the owner
+    document's title is the only handle an operator has to re-put it under."""
+    tenant = t2_service_env
+    cat, owner = catalog
+    coll = _coll("titles")
+    tumbler, chash = _legacy_note(cat, owner, coll, "The stranded note title", tenant)
+
+    result = CliRunner().invoke(t3, ["census-manifest-less", "--collection", coll])
+    assert result.exit_code == 0, result.output
+    assert f'{chash}  owner={tumbler} (forward)  title="The stranded note title"' in result.output
+
+    # Only legacy rows carry a title: a superseded row for the same document does not.
+    live_doc = str(cat.register(owner, "Titled live doc", content_type="knowledge", physical_collection=coll))
+    current = _seed_chunk(tenant, coll, "current live body", {"catalog_doc_id": live_doc})
+    stale = _seed_chunk(tenant, coll, "stale live body", {"catalog_doc_id": live_doc})
+    cat.write_manifest(live_doc, [{"chash": current, "position": 0}], collection=coll)
+    again = CliRunner().invoke(t3, ["census-manifest-less", "--collection", coll])
+    stale_line = next(line for line in again.output.splitlines() if stale in line)
+    assert "title=" not in stale_line, stale_line
+
+
+def test_backfill_manifest_verb_reports_the_chunk_count_mismatch_class(
+    t2_service_env, catalog, tmp_path, monkeypatch,
+) -> None:
+    """Verify round N5: the verb's per-collection line, the `--resume` state
+    field and the summary all name the skip class. Deleting any of the three
+    from t3.py turns this red."""
+    tenant = t2_service_env
+    cat, owner = catalog
+    coll = _coll("verb")
+    tumbler = str(cat.register(
+        owner, "verb note", content_type="knowledge", physical_collection=coll, chunk_count=1,
+    ))
+    meta = {"catalog_doc_id": tumbler, "chunk_index": 0}
+    _seed_chunk(tenant, coll, "verb old", {**meta, "title": "old"})
+    _seed_chunk(tenant, coll, "verb current", {**meta, "title": "current"})
+    state_file = tmp_path / "backfill_state.json"
+    monkeypatch.setenv("NEXUS_BACKFILL_STATE_FILE", str(state_file))
+
+    result = CliRunner().invoke(
+        t3, ["backfill-manifest", "-c", coll, "--no-dry-run", "--only-gapped"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "1 skipped: more matched chunks than the document's chunk count" in result.output
+    assert "NOT marked done" in result.output and "chunk_count_mismatch=1" in result.output
+    assert "1 doc(s) skipped (chunk count mismatch)" in result.output
+    state = json.loads(state_file.read_text())
+    assert state[coll][0] == "__partial__" and "chunk_count_mismatch=1" in state[coll]
+    assert cat.get_manifest(tumbler) == []
 
 
 def test_a_quarantine_collection_is_skipped_and_counted_in_the_record(t2_service_env, catalog) -> None:

@@ -66,6 +66,23 @@ def installed_package_version() -> str:
 _installed_package_version = installed_package_version
 
 
+def _optional_text(rung: object, method: str) -> str:
+    """Call an OPTIONAL structural ``() -> str`` method a rung may expose
+    (``verify_detail``, ``record_detail``). Absent, not callable, or returning
+    a non-string yields ``""``, so the ledger's ``str`` parameters stay honest."""
+    fn = getattr(rung, method, None)
+    if not callable(fn):
+        return ""
+    value = fn()
+    return value if isinstance(value, str) else ""
+
+
+def _optional_flag(rung: object, method: str) -> bool:
+    """Call an OPTIONAL structural ``() -> bool`` method (``verify_deferred``)."""
+    fn = getattr(rung, method, None)
+    return bool(fn()) if callable(fn) else False
+
+
 class StructlogReporter:
     """Default :class:`ProgressReporter`: batch events go to structlog."""
 
@@ -247,8 +264,14 @@ class LadderRunner:
             # failed" — RDR-182 requires the unavailable note itself to reach
             # the operator. OPTIONAL structural surface: rungs without it
             # keep the generic detail.
-            detail_fn = getattr(rung, "verify_detail", None)
-            detail = detail_fn() if callable(detail_fn) else ""
+            detail = _optional_text(rung, "verify_detail")
+            # OPTIONAL structural surface: a rung whose verify() refused only
+            # because its evidence could not be read (an outage) says so, and
+            # the walk reports a deferral instead of a hard failure. A real
+            # refusal (evidence read, and it was bad) stays VERIFY_FAILED.
+            if _optional_flag(rung, "verify_deferred"):
+                _log.warning("ladder_rung_verify_deferred", rung=rung.name, detail=detail)
+                return RungRun(rung.name, RungOutcome.DEFERRED, detail=detail)
             _log.warning("ladder_rung_verify_failed", rung=rung.name, detail=detail)
             return RungRun(
                 rung.name,
@@ -258,8 +281,7 @@ class LadderRunner:
         # OPTIONAL structural surface (like ``verify_detail``): a rung may
         # carry the evidence its verify() just read, so the durable record
         # says what was examined and not only that something passed.
-        record_detail_fn = getattr(rung, "record_detail", None)
-        record_detail = record_detail_fn() if callable(record_detail_fn) else ""
+        record_detail = _optional_text(rung, "record_detail")
         if record_detail:
             self._store.record_verified(
                 rung.name,

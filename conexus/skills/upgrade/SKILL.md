@@ -65,13 +65,19 @@ Everything else is automatic.
 have a catalog document but no manifest row (the engine hides them from search
 since RDR-192) and backfills them. It records completion, per tenant, only after
 a fresh census reads zero; the engine's reaper refuses to run on a tenant
-without that record. When some note cannot be backfilled the rung DEFERS instead
-of failing: `nx upgrade` finishes its other steps, exits 0, prints which
+without that record; that refusal is complete only for a tenant with no earlier
+record (an older record still stands, and the reaper's own in-engine census is
+what covers that case). When some note cannot be backfilled the rung DEFERS
+instead of failing: `nx upgrade` finishes its other steps, exits 0, prints which
 collection and what to do, and `nx doctor` keeps showing the rung as pending.
-No verb heals a skipped note: the remedy is to re-put it with `nx store put`
-under the same title. It is not retried until the residual or the package
-version changes. Do not "fix" a deferred rung by recording the completion by
-hand; the record is what tells the reaper the census read zero.
+No verb heals a skipped note, and its text is hidden from `nx store get`, so the
+remedy needs the user's own copy: re-put it with `nx store put` under the same
+title into the collection named in the message (`nx t3 census-manifest-less
+--collection <c>` lists the owner titles). A residual is not re-examined for 24
+hours or until the package version changes (`NX_RDR192_BACKFILL_RETRY=1` retries
+now); a backfill that errors is retried at the next session start. Do not "fix"
+a deferred rung by recording the completion by hand; the record is what tells
+the reaper the census read zero.
 
 ## When a user is blocked on legacy chunk ids
 

@@ -31,18 +31,23 @@ WHAT IT DOES.
             Converged only when a completion is on file whose
             ``package_version`` equals the installed version. Otherwise
             pending, and the census belongs to ``converge()``.
-  converge: under a cross-process lock, one census of every non-quarantine
-            collection. A clean census completes. An UNCHANGED residual
-            (same per-collection counts and package version as the last failed
-            attempt, kept in a T2 note) is not retried. Otherwise
+  converge: under a cross-process lock, a residual recorded within 24 hours
+            at the same package version is not even re-censused. Otherwise
+            one census of every non-quarantine collection. A clean census
+            completes. An UNCHANGED residual (same per-collection counts and
+            package version as the last failed attempt, kept in a T2 note) is
+            not retried. Otherwise
             ``backfill_manifest_for_collection(only_gapped=True)`` on each
             collection holding a legacy chunk, re-censusing between passes
             until the count reads zero or a pass makes no progress. The
-            backfill never deletes a chunk.
-  verify  : a FRESH census that read every collection and found zero legacy
-            and zero unclassified chunks. A census that cannot run, or whose
-            answer lacks the bucket keys, is unknown, and unknown is not
-            reached (nexus-hdumg).
+            backfill never deletes a chunk. A backfill that RAISED is never
+            remembered (it is not a residual): the next session start retries.
+  verify  : a census that read every collection and found zero legacy and
+            zero unclassified chunks; the one converge just took counts if it
+            is under a minute old, so a clean tenant pays for one census, not
+            two. A census that cannot run, or whose answer lacks the bucket
+            keys, is unknown, and unknown is not reached (nexus-hdumg); a
+            transient outage there defers instead of failing the upgrade.
 
 The completion record carries a census summary in its ``detail``.
 
@@ -58,10 +63,14 @@ RESIDUAL. A legacy chunk the backfill cannot heal leaves the census above
 zero. The rung DEFERS (it never raises): ``nx upgrade`` keeps running its
 remaining steps (plugin lockstep, git hooks, install-mode record, ...), the
 walk reports the collections and the remedy, ``nx doctor`` shows the row, NO
-completion is recorded, and so the reaper stays refused on that tenant until
-an operator resolves it. It is retried when the residual or the package version
-changes. See :func:`_remedy` for what actually heals each class (for most
-skipped classes no verb does).
+completion is recorded, and so, on a tenant with no earlier record, the reaper
+stays refused until an operator resolves it. (On a tenant that already holds a
+record from an older package version the old record still stands and the gate
+is open; the reaper's own in-engine census is what covers that tenant.) It is
+retried when the residual or the package version changes, after 24 hours, or on
+demand with NX_RDR192_BACKFILL_RETRY=1. See :func:`_remedy` for what actually
+heals each class (for most skipped classes no verb does, and the note's text is
+hidden, so the user's own copy is needed).
 
 THE REAPER GATE. :func:`rdr192_backfill_complete` and
 :func:`require_rdr192_backfill_complete` are the client-side reads of the
@@ -91,7 +100,7 @@ import json
 import os
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 import structlog
@@ -132,6 +141,22 @@ _MEMO_TTL_DAYS = 30
 
 #: Cap on the record ``detail`` (a TEXT column; a summary, not a dump).
 _DETAIL_MAX = 600
+
+#: A failed attempt's residual is not even re-censused for this long at the
+#: same package version: a stuck tenant would otherwise pay one census request
+#: per collection at every session start (nx upgrade --auto).
+RESIDUAL_RETRY_AFTER = timedelta(hours=24)
+
+#: ``NX_RDR192_BACKFILL_RETRY=1`` forces an immediate full retry (skips the
+#: time gate and the unchanged-residual skip). For an operator who has just
+#: re-put a stranded note and does not want to wait for the gate.
+RETRY_ENV = "NX_RDR192_BACKFILL_RETRY"
+
+#: verify() reuses the census converge just took, if it is at most this old.
+#: That census IS independent evidence (a census read, not the backfill's own
+#: return value); reading it a second time only doubled the cost of every
+#: clean tenant at every package version.
+_VERIFY_REUSE = timedelta(seconds=60)
 
 
 class CensusUnavailable(RuntimeError):
@@ -231,10 +256,52 @@ class CensusReading:
 
 
 CensusFn = Callable[[], CensusReading]
-#: Backfill one collection for real, ``only_gapped``; returns chunks written.
-BackfillFn = Callable[[str], int]
+#: Backfill one collection for real, ``only_gapped``. Returns a
+#: :class:`BackfillOutcome`, or a bare chunk count (no skip detail).
+BackfillFn = Callable[[str], "BackfillOutcome | int"]
 #: The completion record on file for this tenant, or None.
 RecordFn = Callable[[], CompletionRecord | None]
+
+
+#: BackfillResult skip counters worth surfacing, as (field, label). The
+#: has_manifest counter is benign (the document is healthy) and omitted.
+_SKIP_FIELDS = (
+    ("docs_skipped_zero_chunks", "zero_chunks"),
+    ("docs_skipped_no_t3", "no_t3_collection"),
+    ("docs_skipped_phase3_no_index", "phase3_no_chunk_index"),
+    ("docs_skipped_chash_divergent", "chash_divergent"),
+    ("docs_skipped_fk_409", "fk_409"),
+    ("docs_cross_collection_forward_owner_skipped", "cross_collection_forward_owner"),
+    ("docs_reverse_multi_piece_skipped", "reverse_multi_piece"),
+    ("docs_skipped_chunk_count_mismatch", "chunk_count_mismatch"),
+)
+
+
+@dataclass(frozen=True)
+class BackfillOutcome:
+    """What one collection's backfill did: rows written and, per skip class,
+    how many documents it left alone (counts, because the backfill reports
+    counts; the document ids are in its structlog warnings)."""
+
+    chunks_written: int = 0
+    skipped: dict[str, int] = field(default_factory=dict)
+
+    @classmethod
+    def from_result(cls, result: Any) -> "BackfillOutcome":
+        skipped = {
+            label: int(getattr(result, attr, 0) or 0)
+            for attr, label in _SKIP_FIELDS
+            if getattr(result, attr, 0)
+        }
+        return cls(chunks_written=int(result.chunks_written), skipped=skipped)
+
+
+def _describe_skipped(skipped: dict[str, dict[str, int]]) -> str:
+    parts = [
+        f"{collection}: " + ", ".join(f"{label}={n}" for label, n in sorted(counts.items()))
+        for collection, counts in sorted(skipped.items()) if counts
+    ]
+    return "The backfill skipped documents: " + "; ".join(parts) + "." if parts else ""
 
 
 def _remedy(reading: CensusReading) -> str:
@@ -242,21 +309,30 @@ def _remedy(reading: CensusReading) -> str:
 
     Measured, not hoped for: ``nx t3 backfill-manifest`` is what this rung
     already ran, so repeating it cannot heal what it skipped (owner registered
-    under another collection, no matching chunk, chash divergence, a
-    chunk-count mismatch, several chunks at one position). ``nx catalog
-    reconcile`` rebuilds file-indexed documents from a recorded content hash
-    and does not apply to notes. The path RDR-192 Phase 1 used for the
-    operator tenant's leftover live notes was a re-put (nexus-wbfpw.7)."""
+    under another collection, no matching chunk, chash divergence, a matched
+    chunk count above the registered one, several chunks at one position).
+    ``nx catalog reconcile`` rebuilds file-indexed documents from a recorded
+    content hash and does not apply to notes. The path RDR-192 Phase 1 used
+    for the operator tenant's leftover live notes was a re-put (nexus-wbfpw.7),
+    and ``tests/upgrade/test_rdr192_manifest_backfill_substrate.py`` proves it
+    heals a stranded note end to end.
+
+    The catch, stated in the text: a stranded note's text is hidden from
+    ``nx store get`` and search (``live(c)``), and no ``nx`` verb reads it, so
+    a re-put needs the user's own copy of the note."""
     lines: list[str] = []
     if reading.legacy_total:
+        example = reading.legacy_collections[0].collection
         lines.append(
             "legacy-unmanifested: the backfill already ran and skipped these documents; "
-            "running it again cannot heal them. No verb does. List each chunk and its "
-            "owner with `nx t3 census-manifest-less --collection <collection>`, then "
-            "re-put the note with `nx store put` under the same title, which gives it a "
-            "fresh manifested chunk and leaves the old one to the reaper. Notes you do "
-            "not want can be left as they are: they stay hidden and the reaper stays "
-            "refused on this tenant."
+            "running it again cannot heal them, and no verb does. Their text is hidden "
+            "from `nx store get` and search and no `nx` verb reads it, so a fix needs "
+            "your own copy of each note. `nx t3 census-manifest-less --collection "
+            f"{example}` lists each chunk with its owner document's title. To heal one, "
+            "re-put your copy under the same title into the collection named there, "
+            f"for example `nx store put - --collection {example} --title '<title>'`: "
+            "the new chunk is manifested under the same document and the old chunk is "
+            "left to the reaper. A note you cannot re-put stays hidden."
         )
     if reading.unclassified_total:
         lines.append(
@@ -265,8 +341,9 @@ def _remedy(reading: CensusReading) -> str:
             "to the maintainers."
         )
     lines.append(
-        "The reaper stays refused on this tenant until the census reads zero. "
-        "`nx upgrade` retries when the residual or the package version changes."
+        "`nx upgrade` retries when the residual or the package version changes, or "
+        f"after 24 hours; set {RETRY_ENV}=1 to retry now. On a tenant with no prior "
+        "completion record the reaper stays refused until the census reads zero."
     )
     return " ".join(lines)
 
@@ -284,6 +361,7 @@ def _default_census() -> CensusReading:
     ``totals`` are read, which the route reports identically on every page."""
     from nexus.db import make_t3  # noqa: PLC0415 — deferred; keeps cold CLI start cheap and breaks an import cycle
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred; same reason
+    from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415 — deferred; same reason
 
     def reach(call: Callable[[], Any]) -> Any:
         """Run one engine-reaching call. Everything that stops the call from
@@ -305,6 +383,13 @@ def _default_census() -> CensusReading:
                 # a quarantine sibling the listing carried no catalog row for.
                 raise _QuarantineRefusal(str(exc)) from exc
             raise CensusUnavailable(f"the census request failed: {exc}") from exc
+        except ServiceEndpointUnresolvableError as exc:
+            # Say it cleanly: the exception's own text also explains a retired
+            # Chroma path, which is noise to anyone reading `nx upgrade`.
+            raise CensusUnavailable(
+                "the engine could not be reached: no nexus-service endpoint is resolvable; "
+                "start it with `nx daemon service start`"
+            ) from exc
         except Exception as exc:  # noqa: BLE001 — see the docstring: any failure to reach the engine is "census unavailable"
             raise CensusUnavailable(
                 f"the engine could not be reached: {type(exc).__name__}: {exc}"
@@ -391,9 +476,9 @@ def _cross_check_empty_listing() -> None:
         )
 
 
-def _default_backfill(collection: str) -> int:
+def _default_backfill(collection: str) -> BackfillOutcome:
     """The same call ``nx t3 backfill-manifest -c <collection> --no-dry-run
-    --only-gapped`` makes. Returns the chunk manifest rows written."""
+    --only-gapped`` makes. Returns rows written and the per-class skip counts."""
     from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred; keeps cold CLI start cheap
     from nexus.catalog.manifest_backfill import backfill_manifest_for_collection  # noqa: PLC0415 — deferred; same reason
     from nexus.db import make_t3  # noqa: PLC0415 — deferred; same reason
@@ -402,11 +487,11 @@ def _default_backfill(collection: str) -> int:
     if catalog is None:
         # No catalog means no document to own a chunk: nothing is
         # backfillable, and the census still reads what it reads.
-        return 0
+        return BackfillOutcome()
     result = backfill_manifest_for_collection(
         catalog, make_t3(), collection, dry_run=False, only_gapped=True,
     )
-    return result.chunks_written
+    return BackfillOutcome.from_result(result)
 
 
 def _default_record() -> CompletionRecord | None:
@@ -432,14 +517,20 @@ class T2ResidualMemo:
     of this kind (``taxonomy_discover_health``). Every failure degrades to
     'no memo', which only costs a retry."""
 
-    def _store(self):
+    @contextlib.contextmanager
+    def _store(self) -> Iterator[Any]:
         from nexus.db.t2.http_memory_store import HttpMemoryStore  # noqa: PLC0415 — deferred; keeps cold CLI start cheap
 
-        return HttpMemoryStore()
+        store = HttpMemoryStore()
+        try:
+            yield store
+        finally:
+            store.close()
 
     def load(self) -> dict[str, Any] | None:
         try:
-            row = self._store().get(project=MEMO_PROJECT, title=MEMO_TITLE)
+            with self._store() as store:
+                row = store.get(project=MEMO_PROJECT, title=MEMO_TITLE)
             return json.loads(row["content"]) if row else None
         except Exception as exc:  # noqa: BLE001 — a memo that cannot be read is no memo
             _log.debug("rdr192_residual_memo_load_failed", error=str(exc))
@@ -447,16 +538,18 @@ class T2ResidualMemo:
 
     def save(self, note: dict[str, Any]) -> None:
         try:
-            self._store().put(
-                MEMO_PROJECT, MEMO_TITLE, json.dumps(note, sort_keys=True),
-                tags="upgrade-ladder,rdr192", ttl=_MEMO_TTL_DAYS, agent="nx-upgrade",
-            )
+            with self._store() as store:
+                store.put(
+                    MEMO_PROJECT, MEMO_TITLE, json.dumps(note, sort_keys=True),
+                    tags="upgrade-ladder,rdr192", ttl=_MEMO_TTL_DAYS, agent="nx-upgrade",
+                )
         except Exception as exc:  # noqa: BLE001 — losing the memo costs one retry, never correctness
             _log.warning("rdr192_residual_memo_save_failed", error=str(exc))
 
     def clear(self) -> None:
         try:
-            self._store().delete(project=MEMO_PROJECT, title=MEMO_TITLE)
+            with self._store() as store:
+                store.delete(project=MEMO_PROJECT, title=MEMO_TITLE)
         except Exception as exc:  # noqa: BLE001 — a stale memo is harmless: it is keyed on the residual fingerprint
             _log.debug("rdr192_residual_memo_clear_failed", error=str(exc))
 
@@ -502,11 +595,15 @@ class Rdr192ManifestBackfillRung:
     installed_version_fn: Callable[[], str] = installed_package_version
     memo: ResidualMemo = field(default_factory=T2ResidualMemo)
     lock_factory: Callable[[], contextlib.AbstractContextManager[bool]] = _cross_process_lock
+    now_fn: Callable[[], datetime] = lambda: datetime.now(UTC)  # noqa: E731 — a dataclass default seam, not a def
     max_passes: int = DEFAULT_MAX_PASSES
     name: str = RUNG_NAME
     _errors: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _skipped: dict[str, dict[str, int]] = field(default_factory=dict, init=False, repr=False)
     _verify_detail: str = field(default="", init=False, repr=False)
+    _verify_deferred: bool = field(default=False, init=False, repr=False)
     _record_detail: str = field(default="", init=False, repr=False)
+    _last_clean: tuple[CensusReading, datetime] | None = field(default=None, init=False, repr=False)
 
     # ── detect ───────────────────────────────────────────────────────────────
 
@@ -518,11 +615,14 @@ class Rdr192ManifestBackfillRung:
         Cheap on purpose: this runs at every session start (``nx upgrade
         --auto``), from ``--dry-run`` and ``nx doctor``, and from the root
         CLI's version-transition callout. A completion is only ever written
-        after a fresh census read zero (``verify()``). Re-deriving when the
-        package version changes bounds how stale the record can get; an
-        operator can re-derive on demand with ``nx t3 census-manifest-less
-        --all --require-zero legacy-unmanifested``. An unreadable ledger is
-        not a record."""
+        after a census read zero (``verify()``). Re-deriving when the package
+        version changes decides WHEN this client looks again; it does not
+        bound the record's authority (the engine gate ignores
+        ``package_version`` and there is no revoke route), which is why the
+        reaper must run its own census in the engine. An operator can
+        re-derive on demand with ``nx t3 census-manifest-less --all
+        --require-zero legacy-unmanifested``. An unreadable ledger is not a
+        record."""
         version = self.installed_version_fn()
         record: CompletionRecord | None = None
         ledger_error = ""
@@ -549,26 +649,61 @@ class Rdr192ManifestBackfillRung:
 
     def converge(self, report: ProgressReporter) -> ConvergeResult:
         self._errors.clear()
-        with self.lock_factory() as acquired:
-            if not acquired:
-                return ConvergeResult(
-                    ConvergeOutcome.DEFERRED,
-                    detail="another nx process is running the RDR-192 backfill; retried on the next `nx upgrade`",
-                )
-            try:
-                return self._converge_locked(report)
-            except CensusUnavailable as exc:
-                return ConvergeResult(ConvergeOutcome.DEFERRED, detail=str(exc))
+        self._skipped.clear()
+        self._last_clean = None
+        try:
+            with self.lock_factory() as acquired:
+                if not acquired:
+                    return ConvergeResult(
+                        ConvergeOutcome.DEFERRED,
+                        detail="another nx process is running the RDR-192 backfill; retried on the next `nx upgrade`",
+                    )
+                try:
+                    return self._converge_locked(report)
+                except CensusUnavailable as exc:
+                    return ConvergeResult(ConvergeOutcome.DEFERRED, detail=str(exc))
+        except OSError as exc:
+            # An unwritable config dir cannot take the lock. A rung that cannot
+            # run defers; it must not fail `nx upgrade` and skip its later steps.
+            _log.warning("rdr192_backfill_lock_unavailable", error=str(exc))
+            return ConvergeResult(
+                ConvergeOutcome.DEFERRED,
+                detail=f"the RDR-192 backfill could not take its lock ({type(exc).__name__}: {exc}); "
+                "retried on the next `nx upgrade`",
+            )
+
+    def _residual_age(self, note: dict[str, Any]) -> timedelta | None:
+        try:
+            return self.now_fn() - datetime.fromisoformat(str(note["at"]))
+        except (KeyError, ValueError, TypeError):
+            return None
 
     def _converge_locked(self, report: ProgressReporter) -> ConvergeResult:
         version = self.installed_version_fn()
+        force = os.environ.get(RETRY_ENV) == "1"
+        note = self.memo.load()
+
+        # A stuck tenant must not pay a census per collection at every session
+        # start: within the gate, at the same package version, do not even look.
+        if note and not force and note.get("version") == version:
+            age = self._residual_age(note)
+            if age is not None and age < RESIDUAL_RETRY_AFTER:
+                detail = (
+                    f"residual recorded {note.get('at')}; not re-examined before "
+                    f"{RESIDUAL_RETRY_AFTER} have passed or the package version changes "
+                    f"({RETRY_ENV}=1 retries now): {note.get('detail', '')}"
+                )
+                _log.warning("rdr192_backfill_residual_gated", detail=detail)
+                return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
+
         reading = self.census_fn()
         if reading.clean:
-            self.memo.clear()
-            return ConvergeResult(ConvergeOutcome.COMPLETED)
+            return self._completed(reading)
 
-        note = self.memo.load()
-        if note and note.get("fingerprint") == reading.fingerprint(version):
+        if note and not force and note.get("fingerprint") == reading.fingerprint(version):
+            # Same residual after the gate: renew the timestamp so the next
+            # census is another gate away, and do not repeat the backfill.
+            self.memo.save({**note, "at": self.now_fn().isoformat(timespec="seconds"), "version": version})
             detail = (
                 f"unchanged since the last attempt ({note.get('at', '?')}), not retried: "
                 f"{note.get('detail', reading.describe_residual())}"
@@ -582,7 +717,7 @@ class Rdr192ManifestBackfillRung:
                 break
             for target in targets:
                 try:
-                    written = self.backfill_fn(target.collection)
+                    outcome = self.backfill_fn(target.collection)
                 except Exception as exc:  # noqa: BLE001 — one collection's failure must not stop the rest; the next census names what remains
                     self._errors[target.collection] = f"{type(exc).__name__}: {exc}"
                     _log.warning(
@@ -590,11 +725,15 @@ class Rdr192ManifestBackfillRung:
                         collection=target.collection, error=str(exc),
                     )
                     continue
+                if not isinstance(outcome, BackfillOutcome):
+                    outcome = BackfillOutcome(chunks_written=int(outcome or 0))
+                self._skipped[target.collection] = dict(outcome.skipped)
                 report.emit(
                     "rdr192_backfill_collection_done",
                     collection=target.collection, pass_number=pass_number,
                     legacy_before=target.legacy_unmanifested,
-                    manifest_rows_written=written,
+                    manifest_rows_written=outcome.chunks_written,
+                    skipped=outcome.skipped,
                 )
             after = self.census_fn()
             progressed = after.legacy_total < reading.legacy_total
@@ -603,39 +742,76 @@ class Rdr192ManifestBackfillRung:
                 break  # the residual is not this rung's to heal
 
         if reading.clean:
-            self.memo.clear()
-            return ConvergeResult(ConvergeOutcome.COMPLETED)
+            return self._completed(reading)
 
-        errors = "".join(
-            f" Backfill error in {name}: {err}." for name, err in sorted(self._errors.items())
-        )
-        detail = (
+        skipped = _describe_skipped(self._skipped)
+        residual = (
             f"{reading.legacy_total} legacy-unmanifested and {reading.unclassified_total} "
-            f"unclassified chunk(s) remain ({reading.describe_residual()}).{errors} "
-            f"{_remedy(reading)}"
+            f"unclassified chunk(s) remain ({reading.describe_residual()})."
         )
+        if self._errors:
+            # A backfill that RAISED is not an unhealable residual: a transient
+            # 503 or timeout must not be remembered, or the healable chunk stays
+            # hidden until the next package version. Nothing is saved; the next
+            # session start retries.
+            errors = "".join(
+                f" Backfill error in {name}: {err}." for name, err in sorted(self._errors.items())
+            )
+            detail = (
+                f"{residual}{errors} A backfill error is usually transient; nothing is "
+                f"remembered, so the next `nx upgrade` retries. {skipped}"
+            ).strip()
+            _log.warning("rdr192_backfill_errored", detail=detail)
+            return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
+
+        detail = f"{residual} {skipped} {_remedy(reading)}".replace("  ", " ")
         self.memo.save({
             "fingerprint": reading.fingerprint(version),
-            "at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "detail": detail[:_DETAIL_MAX * 2],
+            "version": version,
+            "at": self.now_fn().isoformat(timespec="seconds"),
+            "detail": detail[:_DETAIL_MAX * 3],
         })
         _log.warning("rdr192_backfill_residual", detail=detail)
         return ConvergeResult(ConvergeOutcome.DEFERRED, detail=detail)
 
+    def _completed(self, reading: CensusReading) -> ConvergeResult:
+        self.memo.clear()
+        self._last_clean = (reading, self.now_fn())
+        return ConvergeResult(ConvergeOutcome.COMPLETED)
+
     # ── verify ───────────────────────────────────────────────────────────────
 
     def verify(self) -> bool:
-        """A fresh census that read every collection and found nothing to
-        backfill. Unknown is not reached: a census that cannot run returns
-        False with the reason, it never falls back to converge's self-report."""
-        try:
-            reading = self.census_fn()
-        except CensusUnavailable as exc:
-            self._verify_detail = (
-                f"the RDR-192 census could not run, so completion is not "
-                f"recorded: {exc}"
-            )
-            return False
+        """A census that read every collection and found nothing to backfill.
+
+        Reuses the clean census ``converge`` took moments ago instead of
+        taking the same census again (it is a census read, independent of the
+        backfill's own return values, and a clean tenant otherwise paid it
+        twice per package version). Anything older than
+        :data:`_VERIFY_REUSE`, and any second call, reads afresh.
+
+        Unknown is not reached, and it is not a failure either: a census that
+        cannot run returns False with the reason and marks the verdict as a
+        deferral (:meth:`verify_deferred`), so a transient outage does not
+        abort the rest of `nx upgrade`. Only a real non-zero residual is a
+        plain refusal."""
+        self._verify_deferred = False
+        reading: CensusReading | None = None
+        if self._last_clean is not None:
+            cached, taken = self._last_clean
+            self._last_clean = None
+            if self.now_fn() - taken <= _VERIFY_REUSE:
+                reading = cached
+        if reading is None:
+            try:
+                reading = self.census_fn()
+            except CensusUnavailable as exc:
+                self._verify_deferred = True
+                self._verify_detail = (
+                    f"the RDR-192 census could not run, so completion is not "
+                    f"recorded; retried on the next `nx upgrade`: {exc}"
+                )
+                return False
         if reading.clean:
             self._verify_detail = ""
             self._record_detail = reading.summary()
@@ -646,6 +822,11 @@ class Rdr192ManifestBackfillRung:
             f"({reading.describe_residual()}). {_remedy(reading)}"
         )
         return False
+
+    def verify_deferred(self) -> bool:
+        """True when the last ``verify()`` refused only because the census
+        could not run (the runner reports DEFERRED, not VERIFY_FAILED)."""
+        return self._verify_deferred
 
     def verify_detail(self) -> str:
         return self._verify_detail

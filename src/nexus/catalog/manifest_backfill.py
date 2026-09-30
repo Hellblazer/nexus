@@ -1039,7 +1039,12 @@ def backfill_manifest_for_collection(
             positions = [c["position"] for c in chunks]
             registered = int(getattr(doc, "chunk_count", 0) or 0)
             duplicate_positions = len(set(positions)) != len(positions)
-            count_mismatch = only_gapped and registered > 0 and registered != len(chunks)
+            # matched > registered only. Fewer matched than registered is the
+            # repeated-piece note: identical chunk text collapses to ONE T3 row
+            # by design (RDR-108), so a note of N pieces with a repeated one
+            # matches N-1 unique chunks at unique positions, and the manifest
+            # keeps the position gap the verb always wrote for it.
+            count_mismatch = only_gapped and registered > 0 and len(chunks) > registered
             if duplicate_positions or count_mismatch:
                 # nexus-wbfpw.41 (review S2). write_manifest is an atomic
                 # REPLACE onto PRIMARY KEY (tenant, doc_id, position): two

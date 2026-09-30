@@ -17,6 +17,7 @@ reaper (nexus-2x9xa) refuses to run on a tenant without that record.
 from __future__ import annotations
 
 import contextlib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -29,7 +30,9 @@ from nexus.upgrade_ladder.protocol import ConvergeOutcome, Rung
 from nexus.upgrade_ladder.registry import LadderRegistry, default_registry
 from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (
     RUNG_NAME,
+    RETRY_ENV,
     BackfillIncompleteError,
+    BackfillOutcome,
     CensusReading,
     CensusUnavailable,
     CollectionReading,
@@ -99,6 +102,8 @@ class FakeTenant:
         self.record: CompletionRecord | None = None
         self.memo = InMemoryMemo()
         self.lock = FakeLock()
+        self.now = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+        self.skipped: dict[str, dict[str, int]] = {}
 
     def census(self) -> CensusReading:
         self.censuses += 1
@@ -115,20 +120,26 @@ class FakeTenant:
             for n in names
         ), quarantine_skipped=1)
 
-    def backfill(self, collection: str) -> int:
+    def backfill(self, collection: str):
         self.backfilled.append(collection)
         if collection in self.backfill_errors:
             raise self.backfill_errors[collection]
         before = self.legacy.get(collection, 0)
         healed = before if self.heal_per_pass is None else min(before, self.heal_per_pass)
         self.legacy[collection] = before - healed
+        if collection in self.skipped:
+            return BackfillOutcome(chunks_written=healed, skipped=self.skipped[collection])
         return healed
+
+    def later(self, **delta) -> None:
+        self.now += timedelta(**delta)
 
     def rung(self, **kw) -> Rdr192ManifestBackfillRung:
         kw.setdefault("record_fn", lambda: self.record)
         kw.setdefault("installed_version_fn", lambda: _VERSION)
         kw.setdefault("memo", self.memo)
         kw.setdefault("lock_factory", self.lock)
+        kw.setdefault("now_fn", lambda: self.now)
         return Rdr192ManifestBackfillRung(census_fn=self.census, backfill_fn=self.backfill, **kw)
 
 
@@ -294,14 +305,15 @@ def test_a_deferred_residual_leaves_a_memo_for_the_next_run() -> None:
 
 
 def test_an_unchanged_residual_is_not_retried() -> None:
-    """The heavy work (backfill scans, re-censuses) must not repeat at every
-    session start for a residual that has not changed."""
+    """The heavy work (backfill scans, re-censuses) must not repeat for a
+    residual that has not changed, even after the time gate opens."""
     tenant = FakeTenant({"knowledge__a": 1}, heal_per_pass=0)
     rung = tenant.rung()
     rung.converge(_Reporter())
     backfills_after_first = len(tenant.backfilled)
     censuses_after_first = tenant.censuses
 
+    tenant.later(hours=25)
     second = rung.converge(_Reporter())
     assert second.outcome is ConvergeOutcome.DEFERRED
     assert "unchanged since the last attempt" in second.detail
@@ -309,17 +321,58 @@ def test_an_unchanged_residual_is_not_retried() -> None:
     assert tenant.censuses == censuses_after_first + 1  # one fresh census to compare, nothing more
 
 
-def test_a_changed_residual_is_retried() -> None:
+def test_within_the_gate_an_unchanged_residual_is_not_even_censused() -> None:
+    """A stuck tenant must not pay a census per collection at every session
+    start."""
+    tenant = FakeTenant({"knowledge__a": 1}, heal_per_pass=0)
+    rung = tenant.rung()
+    rung.converge(_Reporter())
+    censuses_after_first = tenant.censuses
+    tenant.legacy["knowledge__b"] = 1  # a change inside the window is not looked at
+
+    tenant.later(hours=23)
+    result = rung.converge(_Reporter())
+    assert result.outcome is ConvergeOutcome.DEFERRED
+    assert "not re-examined" in result.detail and RETRY_ENV in result.detail
+    assert tenant.censuses == censuses_after_first
+    assert tenant.backfilled.count("knowledge__b") == 0
+
+
+def test_after_the_gate_a_still_unchanged_residual_renews_it() -> None:
+    tenant = FakeTenant({"knowledge__a": 1}, heal_per_pass=0)
+    rung = tenant.rung()
+    rung.converge(_Reporter())
+    tenant.later(hours=25)
+    rung.converge(_Reporter())  # census, unchanged, renews the timestamp
+    censuses = tenant.censuses
+    tenant.later(hours=1)
+    rung.converge(_Reporter())
+    assert tenant.censuses == censuses, "the renewed note gates the next hour too"
+
+
+def test_the_retry_env_forces_a_full_retry_inside_the_gate(monkeypatch) -> None:
+    tenant = FakeTenant({"knowledge__a": 1}, heal_per_pass=0)
+    rung = tenant.rung()
+    rung.converge(_Reporter())
+    backfills = len(tenant.backfilled)
+    tenant.heal_per_pass = None  # the operator re-put the note
+    monkeypatch.setenv(RETRY_ENV, "1")
+    assert rung.converge(_Reporter()).outcome is ConvergeOutcome.COMPLETED
+    assert len(tenant.backfilled) > backfills
+
+
+def test_a_changed_residual_is_retried_once_the_gate_opens() -> None:
     tenant = FakeTenant({"knowledge__a": 1}, heal_per_pass=0)
     rung = tenant.rung()
     rung.converge(_Reporter())
     backfills_after_first = len(tenant.backfilled)
     tenant.legacy["knowledge__b"] = 1  # a new legacy chunk elsewhere
+    tenant.later(hours=25)
     rung.converge(_Reporter())
     assert len(tenant.backfilled) > backfills_after_first
 
 
-def test_a_new_package_version_retries_an_unchanged_residual() -> None:
+def test_a_new_package_version_retries_inside_the_gate() -> None:
     tenant = FakeTenant({"knowledge__a": 1}, heal_per_pass=0)
     tenant.rung(installed_version_fn=lambda: "1.0.0").converge(_Reporter())
     backfills_after_first = len(tenant.backfilled)
@@ -334,8 +387,53 @@ def test_a_healed_residual_clears_the_memo() -> None:
     assert tenant.memo.note is not None
     tenant.heal_per_pass = None  # the cause was fixed
     tenant.legacy["knowledge__a"] = 0
+    tenant.later(hours=25)
     assert rung.converge(_Reporter()).outcome is ConvergeOutcome.COMPLETED
     assert tenant.memo.note is None
+
+
+def test_a_backfill_error_is_never_remembered_and_is_retried_next_session() -> None:
+    """A transient 503 must not be memoized as an unhealable residual (verify
+    round N1): the healable chunk would stay hidden until the next package
+    version."""
+    tenant = FakeTenant({"knowledge__a": 1})
+    tenant.backfill_errors["knowledge__a"] = RuntimeError("503 from the engine")
+    rung = tenant.rung()
+    first = rung.converge(_Reporter())
+    assert first.outcome is ConvergeOutcome.DEFERRED
+    assert tenant.memo.note is None, "an errored attempt leaves no memo"
+    assert "usually transient" in first.detail and "nx store put" not in first.detail
+
+    del tenant.backfill_errors["knowledge__a"]  # the outage is over
+    second = rung.converge(_Reporter())  # no clock advance: nothing gates it
+    assert second.outcome is ConvergeOutcome.COMPLETED
+    assert tenant.legacy["knowledge__a"] == 0
+    assert tenant.backfilled == ["knowledge__a", "knowledge__a"]
+
+
+def test_a_skipped_document_is_named_in_the_deferred_detail() -> None:
+    """The BackfillResult skip counters must reach the operator, not only a
+    structlog line."""
+    tenant = FakeTenant({"knowledge__a": 1}, heal_per_pass=0)
+    tenant.skipped["knowledge__a"] = {"zero_chunks": 1, "chunk_count_mismatch": 2}
+    result = tenant.rung().converge(_Reporter())
+    assert "The backfill skipped documents: knowledge__a: chunk_count_mismatch=2, zero_chunks=1." in result.detail
+    assert "chunk_count_mismatch=2" in tenant.memo.note["detail"]
+
+
+def test_a_lock_that_cannot_be_taken_defers_and_does_not_raise() -> None:
+    """An unwritable config dir must not fail `nx upgrade` (verify round N3)."""
+
+    @contextlib.contextmanager
+    def unwritable():
+        raise PermissionError(13, "Permission denied", "/root/.config/nexus")
+        yield True  # pragma: no cover
+
+    tenant = FakeTenant({"knowledge__a": 1})
+    result = tenant.rung(lock_factory=unwritable).converge(_Reporter())
+    assert result.outcome is ConvergeOutcome.DEFERRED
+    assert "could not take its lock" in result.detail
+    assert tenant.censuses == 0
 
 
 def test_a_held_lock_defers_without_touching_the_engine() -> None:
@@ -355,13 +453,18 @@ def test_the_lock_is_released_after_converge_even_when_the_census_raises() -> No
 
 
 def test_remedy_names_a_path_for_each_class_and_admits_when_no_verb_heals() -> None:
-    legacy = _remedy(CensusReading((CollectionReading("c", 2, 0),)))
+    legacy = _remedy(CensusReading((CollectionReading("knowledge__c", 2, 0),)))
     unclassified = _remedy(CensusReading((CollectionReading("c", 0, 3),)))
-    assert "nx store put" in legacy and "cannot heal" in legacy and "No verb does" in legacy
-    assert "nx t3 census-manifest-less" in legacy
-    assert "unclassified" not in legacy
+    assert "cannot heal them, and no verb does" in legacy
+    assert "nx store put - --collection knowledge__c --title" in legacy, "names the collection to put into"
+    assert "nx t3 census-manifest-less --collection knowledge__c" in legacy
+    assert "owner document's title" in legacy
+    assert "hidden from `nx store get`" in legacy and "your own copy" in legacy
+    assert "unclassified:" not in legacy
     assert "no verb heals" in unclassified and "maintainers" in unclassified
     assert "nx store put" not in unclassified
+    for text in (legacy, unclassified):
+        assert RETRY_ENV in text and "no prior completion record" in text
 
 
 # ── verify: presence of the positive signal, from a fresh read ───────────────
@@ -375,12 +478,34 @@ def test_verify_true_only_on_a_fresh_zero_census() -> None:
     assert rung.verify() is True
 
 
-def test_verify_re_reads_the_census_and_does_not_trust_converge() -> None:
+def test_verify_re_reads_a_census_that_is_no_longer_fresh() -> None:
     tenant = FakeTenant({"knowledge__a": 1})
     rung = tenant.rung()
     rung.converge(_Reporter())
     tenant.legacy["knowledge__a"] = 1  # a legacy row reappears after converge
+    tenant.later(minutes=5)
     assert rung.verify() is False
+
+
+def test_verify_reuses_the_clean_census_converge_just_took() -> None:
+    """A clean tenant pays for one census, not two (verify round N4)."""
+    tenant = FakeTenant({"knowledge__a": 0})
+    rung = tenant.rung()
+    rung.converge(_Reporter())
+    assert tenant.censuses == 1
+    assert rung.verify() is True
+    assert tenant.censuses == 1
+    assert rung.verify() is True, "a second verify is a fresh read"
+    assert tenant.censuses == 2
+
+
+def test_verify_never_reuses_a_dirty_census() -> None:
+    tenant = FakeTenant({"knowledge__a": 1}, heal_per_pass=0)
+    rung = tenant.rung()
+    rung.converge(_Reporter())
+    censuses = tenant.censuses
+    assert rung.verify() is False
+    assert tenant.censuses == censuses + 1
 
 
 def test_verify_unknown_is_not_reached() -> None:
@@ -449,6 +574,53 @@ def test_walk_with_an_unhealable_residual_defers_and_does_not_record() -> None:
     assert "knowledge__a" in report.runs[0].detail
 
 
+def test_walk_on_a_clean_tenant_takes_exactly_one_census() -> None:
+    tenant = FakeTenant({"knowledge__a": 0})
+    ledger = InMemoryCompletionLedger()
+    report = _walk(tenant, ledger)
+    assert [r.outcome for r in report.runs] == [RungOutcome.RECORDED]
+    assert tenant.censuses == 1
+
+
+def test_a_census_outage_inside_verify_defers_instead_of_failing_the_walk() -> None:
+    """converge's census was clean; verify's own (fresh) census hits an outage.
+    That is unknown, not a refusal: DEFERRED, nothing recorded, and the walk is
+    not hard-failed (so nx upgrade runs its later steps)."""
+    tenant = FakeTenant({"knowledge__a": 0})
+    calls = {"n": 0}
+
+    def flaky_census():
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise CensusUnavailable("engine dropped")
+        return tenant.census()
+
+    clock = {"t": tenant.now}
+
+    def advancing_now():
+        clock["t"] += timedelta(minutes=2)  # every look at the clock ages the census past the reuse window
+        return clock["t"]
+
+    ledger = InMemoryCompletionLedger()
+    rung = Rdr192ManifestBackfillRung(
+        census_fn=flaky_census, backfill_fn=tenant.backfill, record_fn=lambda: None,
+        installed_version_fn=lambda: _VERSION, memo=tenant.memo, lock_factory=tenant.lock,
+        now_fn=advancing_now,
+    )
+    report = LadderRunner(LadderRegistry((rung,)), ledger).run()
+    assert [r.outcome for r in report.runs] == [RungOutcome.DEFERRED]
+    assert not report.hard_failed
+    assert RUNG_NAME not in ledger.verified_rungs()
+    assert "engine dropped" in report.runs[0].detail
+
+
+def test_a_real_residual_in_verify_is_still_a_plain_refusal() -> None:
+    tenant = FakeTenant({"knowledge__a": 1}, heal_per_pass=0)
+    rung = tenant.rung()
+    assert rung.verify() is False
+    assert rung.verify_deferred() is False
+
+
 def test_walk_defers_and_does_not_record_when_the_engine_is_unreachable() -> None:
     tenant = FakeTenant({"knowledge__a": 1})
     tenant.unavailable = True
@@ -479,6 +651,7 @@ def test_walk_after_a_residual_resumes_and_records_when_it_is_fixed() -> None:
     ledger = InMemoryCompletionLedger()
     assert [r.outcome for r in _walk(tenant, ledger).runs] == [RungOutcome.DEFERRED]
     tenant.legacy["knowledge__a"] = 0  # the operator re-put the note
+    tenant.later(hours=25)
     report = _walk(tenant, ledger)
     assert [r.outcome for r in report.runs] == [RungOutcome.RECORDED]
 
@@ -743,3 +916,49 @@ def test_the_real_lock_excludes_a_second_holder_and_frees_on_release() -> None:
             assert second is False, "a concurrent session start must not stack a backfill"
     with _cross_process_lock() as again:
         assert again is True, "the lock is released when the holder leaves"
+
+
+def test_default_census_maps_an_unresolvable_endpoint_to_a_clean_message(monkeypatch) -> None:
+    """The endpoint error's own text explains a retired Chroma path; that is
+    noise in `nx upgrade` output (verify round N7)."""
+    from nexus.db.service_endpoint import ServiceEndpointUnresolvableError
+
+    def unresolvable(**kw):
+        raise ServiceEndpointUnresolvableError(
+            "nexus-service endpoint is not resolvable: ... the direct Chroma serving paths are retired ..."
+        )
+
+    monkeypatch.setattr(nexus_db, "make_t3", unresolvable)
+    with pytest.raises(CensusUnavailable) as excinfo:
+        _default_census()
+    message = str(excinfo.value)
+    assert "nx daemon service start" in message
+    assert "chroma" not in message.lower()
+
+
+def test_the_memo_closes_the_store_it_opens(monkeypatch) -> None:
+    import nexus.db.t2.http_memory_store as memory_module
+    from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import T2ResidualMemo
+
+    events: list[str] = []
+
+    class FakeStore:
+        def get(self, **kw):
+            events.append("get")
+            return {"content": '{"detail": "x"}'}
+
+        def put(self, *a, **kw):
+            events.append("put")
+
+        def delete(self, **kw):
+            events.append("delete")
+
+        def close(self):
+            events.append("close")
+
+    monkeypatch.setattr(memory_module, "HttpMemoryStore", FakeStore)
+    memo = T2ResidualMemo()
+    assert memo.load() == {"detail": "x"}
+    memo.save({"a": 1})
+    memo.clear()
+    assert events == ["get", "close", "put", "close", "delete", "close"]

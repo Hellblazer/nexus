@@ -55,17 +55,26 @@ reaper.
   missing its bucket totals defers: nothing is recorded and the next
   `nx upgrade` retries. An answer without the totals is never read as clean.
 - A legacy chunk the backfill cannot heal (its owner is registered under a
-  different collection, no matching chunk, a chash divergence, a chunk-count
-  mismatch, several chunks at one position) DEFERS the rung; it does not fail
-  `nx upgrade`. The rest of the upgrade runs and exits 0, the walk prints the
-  collections and the remedy, `nx doctor` keeps the rung pending, and nothing is
-  recorded. No verb heals a skipped note. List each chunk and its owner with
-  `nx t3 census-manifest-less --collection <c>`, then re-put the note with
-  `nx store put` under the same title: the new chunk is manifested and the old
-  one becomes the reaper's. An unchanged residual is not retried at each session
-  start (a T2 note, `upgrade_ladder_state/rdr192-manifest-backfill.residual`,
-  holds its fingerprint); it is retried when the residual or the package version
-  changes. A file lock keeps concurrent session starts from stacking backfills.
+  different collection, no matching chunk, a chash divergence, more matched
+  chunks than the registered count, several chunks at one position) DEFERS the
+  rung; it does not fail `nx upgrade`. The rest of the upgrade runs and exits 0,
+  the walk prints the collections, the per-class count of skipped documents and
+  the remedy, `nx doctor` keeps the rung pending, and nothing is recorded. No
+  verb heals a skipped note, and its text is hidden from `nx store get` and
+  search, so the fix needs your own copy of the note. List each chunk with its
+  owner document's title using `nx t3 census-manifest-less --collection <c>`,
+  then re-put your copy with `nx store put - --collection <c> --title '<title>'`
+  under the same title: the new chunk is manifested under the same document and
+  the old one becomes the reaper's.
+- Retries: a residual is not re-examined at all for 24 hours at the same
+  package version (a T2 note, `upgrade_ladder_state/rdr192-manifest-backfill.residual`,
+  holds its fingerprint and time), so a stuck tenant pays no census per session
+  start. After 24 hours one census runs, and the backfill repeats only if the
+  residual changed. A new package version retries at once, and
+  `NX_RDR192_BACKFILL_RETRY=1` forces a retry now (use it right after a re-put).
+  A backfill that raised is a different thing: it is never remembered, so the
+  next session start retries it. A file lock keeps concurrent session starts
+  from stacking backfills, and an unwritable config directory defers too.
 - `detect()` never takes a census. A completion recorded at the installed
   package version is converged; otherwise the rung is pending and `converge`
   does the census. So a new package version re-derives the record once, and
@@ -76,9 +85,12 @@ reaper.
 - The record is per tenant and written by whichever client runs `nx upgrade`
   against it. The reaper refuses to run on a tenant without it
   (`Rdr192BackfillGate` in the engine), so a cloud tenant no client has
-  upgraded since this rung shipped stays unreaped until one does. The record is
-  an attestation, not proof: the reaper must also re-check the census in the
-  engine (nexus-2x9xa).
+  upgraded since this rung shipped stays unreaped until one does. That refusal
+  is complete only for a tenant with NO earlier record: the gate ignores
+  `package_version` and nothing revokes a record, so a tenant that recorded at an
+  older version stays open even if a later census finds a residual. The record
+  is an attestation, not proof; the reaper's own in-engine census (nexus-2x9xa)
+  is what covers that case.
 
 ## Verifying
 

@@ -1139,7 +1139,7 @@ def backfill_manifest_cmd(
             )
             + (
                 f" ({result.docs_skipped_chunk_count_mismatch} skipped: "
-                f"matched chunks disagree with the document's chunk count)"
+                f"more matched chunks than the document's chunk count, or two at one position)"
                 if result.docs_skipped_chunk_count_mismatch
                 else ""
             )
@@ -1627,11 +1627,39 @@ def _census_one_collection(client, collection: str) -> dict:
     }
 
 
-def _render_census_text(result: dict) -> None:
+def _legacy_owner_titles(results: list[dict]) -> dict[str, str]:
+    """Titles of the owner documents of every legacy-unmanifested chunk,
+    keyed by tumbler, in ONE batched catalog read (nexus-wbfpw.41). Those
+    chunks are hidden from ``nx store get`` and search, so the owner's title
+    is the only thing an operator has to recognise the note by and to re-put
+    it under. Best-effort: a catalog that cannot answer just prints no titles."""
+    tumblers = sorted({
+        owner_tumbler
+        for result in results
+        for chash in result["chashes"].get("legacy-unmanifested", [])
+        if (owner_tumbler := (result["owners"].get(chash) or {}).get("owner_tumbler"))
+    })
+    if not tumblers:
+        return {}
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.factory)
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return {}
+        return {t: entry.title for t, entry in reader.resolve_many(tumblers).items() if entry.title}
+    except Exception as exc:  # noqa: BLE001 — titles are a convenience; the census itself must still print
+        _log.debug("census_owner_titles_unavailable", error=str(exc))
+        return {}
+
+
+def _render_census_text(result: dict, titles: dict[str, str] | None = None) -> None:
     """Print one collection's census in text form, naming each item's
     owner tumbler and path (forward, reverse, or none) so an operator can
     see which document keeps a chunk live and whether the reverse
-    tie-break chose it (nexus-wbfpw.5 acceptance criteria)."""
+    tie-break chose it (nexus-wbfpw.5 acceptance criteria). A
+    legacy-unmanifested row also carries its owner document's title when
+    ``titles`` has it (nexus-wbfpw.41)."""
     click.echo(f"{result['collection']}:")
     owners = result["owners"]
     for bucket in _CENSUS_BUCKETS:
@@ -1641,7 +1669,9 @@ def _render_census_text(result: dict) -> None:
             owner = owners.get(chash) or {}
             tumbler = owner.get("owner_tumbler") or "-"
             path = owner.get("owner_path") or "none"
-            click.echo(f"    {chash}  owner={tumbler} ({path})")
+            title = (titles or {}).get(tumbler) if bucket == "legacy-unmanifested" else None
+            title_part = f'  title="{title}"' if title else ""
+            click.echo(f"    {chash}  owner={tumbler} ({path}){title_part}")
     click.echo(f"  total: {result['scope_chunk_total']}")
 
 
@@ -1713,8 +1743,9 @@ def _finish_census(
             "exit_code": exit_code,
         }, indent=2))
     else:
+        titles = _legacy_owner_titles(results)
         for result in results:
-            _render_census_text(result)
+            _render_census_text(result, titles)
 
     if zero_violations:
         # Always stderr (review round 1 CRITICAL finding): this line used
