@@ -1127,6 +1127,10 @@ public final class CatalogHandler implements HttpHandler {
         if (collection == null) return;
         List<Map<String, Object>> rows = strictRows(body.get("rows"));
         requireCanonicalChashes(rows);
+        // Validated up front, before any transaction: a refusal on the LAST append of a
+        // multi-batch write, after its rows would already have committed, must never
+        // read as a lost batch (nexus-z0o2p.1 finding 4).
+        List<String> sweepChashes = parseSweepChashes(body.get("sweep_chashes"));
         Object rawChunks = body.get("chunks");
         if (rawChunks != null) {
             if (combinedWriteService == null) {
@@ -1137,7 +1141,7 @@ public final class CatalogHandler implements HttpHandler {
             List<Map<String, Object>> chunks = parseChunks(rawChunks);
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
             var combined = combinedWriteService.appendCombined(
-                tenant, collection, docId, rows, chunks, forceReEmbed);
+                tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes);
             if (combined.tokens() > 0) {
                 exchange.getResponseHeaders().set(
                     VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
@@ -1145,8 +1149,42 @@ public final class CatalogHandler implements HttpHandler {
             HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
             return;
         }
+        if (!sweepChashes.isEmpty()) {
+            // sweep_chashes without chunks: an append (possibly sweep-only, empty rows) that
+            // sweeps after its commit. No embed, so no CombinedWriteService is needed.
+            var outcome = repo.appendManifestChunks(
+                tenant, docId, collection, rows, null, null, sweepChashes);
+            Map<String, Object> response = new LinkedHashMap<>();
+            response.put("ok", true);
+            response.put("count", rows.size());
+            outcome.addSweepFieldsTo(response);
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(response));
+            return;
+        }
         repo.appendManifestChunks(tenant, docId, collection, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
+    }
+
+    /**
+     * Validates {@code sweep_chashes} (RDR-223 P1.3): absent or null is no sweep; otherwise a
+     * list of canonical 64-hex chashes, at most {@link
+     * CatalogRepository#MAX_SWEEP_CHASHES_PER_APPEND}. Throws {@link IllegalArgumentException}
+     * (mapped to 400) naming the offending element or the cap.
+     */
+    private static List<String> parseSweepChashes(Object raw) {
+        if (raw == null) return List.of();
+        if (!(raw instanceof List<?> l)) {
+            throw new IllegalArgumentException("'sweep_chashes' must be a list");
+        }
+        List<String> out = new ArrayList<>(l.size());
+        for (int i = 0; i < l.size(); i++) {
+            if (!(l.get(i) instanceof String s)) {
+                throw new IllegalArgumentException("sweep_chashes[" + i + "]: every element must be a string");
+            }
+            out.add(dev.nexus.service.db.Chash.requireCanonical(s, "sweep_chashes[" + i + "]"));
+        }
+        // Size last: an element that is not a chash is the more specific complaint.
+        return CatalogRepository.normalizeSweepChashes(out);
     }
 
     /**

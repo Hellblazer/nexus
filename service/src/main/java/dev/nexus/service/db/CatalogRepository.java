@@ -6286,7 +6286,73 @@ public final class CatalogRepository {
                                     List<Map<String, Object>> rows,
                                     Map<String, ResolvedChunk> resolvedChunks,
                                     List<String>[] writtenChashesOut) {
+        return appendManifestChunks(tenant, docId, collection, rows, resolvedChunks,
+                writtenChashesOut, null).chunksWritten();
+    }
+
+    /**
+     * RDR-223 P1.3 (bead nexus-z0o2p.4): the most per-append {@code sweep_chashes} an append
+     * accepts (Sam, 2026-09-29, nexus-z0o2p.1, option A). A longer list is refused before any
+     * transaction; a sweep-only append (empty {@code rows}) carries the overflow. The bound is
+     * the write cap ({@code QUOTAS.MAX_RECORDS_PER_WRITE}), not a new number: one sweep DELETE
+     * binds one parameter per chash, and the sweep runs under a 5 s statement timeout.
+     */
+    public static final int MAX_SWEEP_CHASHES_PER_APPEND = 300;
+
+    /**
+     * Validates the size of a {@code sweep_chashes} list and returns it de-duplicated in order
+     * (a duplicate would inflate the sweep's {@code dropped}/{@code kept} counts). Public so the
+     * callers that embed BEFORE calling the repository ({@code CombinedWriteService}) refuse an
+     * over-cap list before paying for the embed.
+     *
+     * @throws IllegalArgumentException naming the cap when the list is longer than {@link
+     *         #MAX_SWEEP_CHASHES_PER_APPEND}
+     */
+    public static List<String> normalizeSweepChashes(List<String> sweepChashes) {
+        if (sweepChashes == null || sweepChashes.isEmpty()) return List.of();
+        if (sweepChashes.size() > MAX_SWEEP_CHASHES_PER_APPEND) {
+            throw new IllegalArgumentException("'sweep_chashes' holds " + sweepChashes.size()
+                + " chashes, over the per-append cap of " + MAX_SWEEP_CHASHES_PER_APPEND
+                + "; send the rest in further sweep-only appends (empty 'rows')");
+        }
+        return new ArrayList<>(new LinkedHashSet<>(sweepChashes));
+    }
+
+    /**
+     * What an append did: how many chunk rows it wrote, and, when it carried {@code
+     * sweep_chashes}, the outcome of the post-commit sweep ({@code {doc_id, dropped, swept,
+     * kept, errored[, reason]}}, the element {@code write_many} puts in {@code sweep_detail}).
+     */
+    public record AppendOutcome(int chunksWritten, Map<String, Object> sweep) {
+        /** Adds {@code swept}, {@code sweep_skipped} and {@code sweep_detail}, as {@code write_many} returns them. */
+        public void addSweepFieldsTo(Map<String, Object> response) {
+            if (sweep == null) return;
+            response.put("swept", sweep.get("swept"));
+            response.put("sweep_skipped", Boolean.TRUE.equals(sweep.get("errored")) ? 1 : 0);
+            response.put("sweep_detail", List.of(sweep));
+        }
+    }
+
+    /**
+     * RDR-223 P1.3 (bead nexus-z0o2p.4): {@link #appendManifestChunks(String, String, String,
+     * List, Map, List[])} plus the DEFERRED SWEEP of a multi-batch write. After the append's
+     * transaction COMMITS, {@code sweepChashes} are swept in their own transaction by {@link
+     * #runSweepTransaction} -- the sweep gate EXCLUSIVE, the shared-chash union guard and the
+     * notes guard, fail-open -- exactly as {@code write_many}'s sweep does. A chash a later
+     * batch of the same document re-added, or another document owns, survives. A failed append
+     * throws before the sweep is reached, so it sweeps nothing. An append with empty {@code rows}
+     * and a non-empty {@code sweepChashes} is a sweep-only append.
+     *
+     * @param sweepChashes chashes to sweep after the commit, at most {@link
+     *        #MAX_SWEEP_CHASHES_PER_APPEND}; {@code null} or empty means no sweep
+     */
+    public AppendOutcome appendManifestChunks(String tenant, String docId, String collection,
+                                              List<Map<String, Object>> rows,
+                                              Map<String, ResolvedChunk> resolvedChunks,
+                                              List<String>[] writtenChashesOut,
+                                              List<String> sweepChashes) {
         requireNonBlank(collection, "collection");
+        List<String> toSweep = normalizeSweepChashes(sweepChashes);
         int[] chunksWritten = new int[1];
         tenantScope.withTenant(tenant, ctx -> {
             // Case-1 duty only (RDR-191): does docId exist at all? A ghost
@@ -6352,7 +6418,12 @@ public final class CatalogRepository {
             }
             return null;
         });
-        return chunksWritten[0];
+        // The append has COMMITTED (withTenant returned). Only now does the deferred sweep run,
+        // in its own transaction: it cannot share the append's, which holds the sweep gate
+        // SHARED (see runSweepTransaction), and a rolled-back append must sweep nothing.
+        Map<String, Object> sweepOutcome = toSweep.isEmpty()
+            ? null : runSweepTransaction(tenant, docId, collection, toSweep);
+        return new AppendOutcome(chunksWritten[0], sweepOutcome);
     }
 
     /**

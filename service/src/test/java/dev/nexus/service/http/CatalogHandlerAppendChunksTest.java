@@ -224,6 +224,130 @@ class CatalogHandlerAppendChunksTest {
         assertThat(embeds.get() - before).as("no embed for a document that does not exist").isZero();
     }
 
+    // ── sweep_chashes (RDR-223 P1.3, bead nexus-z0o2p.4) ────────────────────────
+
+    /** Writes a document owning {@code chash}, then empties it (sweep off): {@code chash} is left ownerless. */
+    private void leaveOwnerless(String docId, String chash) throws Exception {
+        registerDoc(docId);
+        CapturingExchange seed = post("/v1/catalog/manifest/write_many",
+            "{\"collection\":\"" + COLLECTION + "\",\"docs\":[{\"doc_id\":\"" + docId + "\",\"rows\":[{\"position\":0,\"chash\":\"" + chash + "\"}]}],"
+            + "\"chunks\":[{\"chash\":\"" + chash + "\",\"text\":\"ownerless " + docId + "\"}]}");
+        handle(handler, seed);
+        assertThat(seed.status).isEqualTo(200);
+        CapturingExchange empty = post("/v1/catalog/manifest/write_many",
+            "{\"collection\":\"" + COLLECTION + "\",\"docs\":[{\"doc_id\":\"" + docId + "\",\"rows\":[]}]}");
+        handle(handler, empty);
+        assertThat(empty.status).isEqualTo(200);
+        assertThat(empty.bodyString()).contains("\"dropped_chashes\":{\"" + docId + "\":[\"" + chash + "\"]}");
+    }
+
+    @Test
+    void append_sweepOnly_withoutChunks_sweepsAfterCommit_andReportsIt() throws Exception {
+        String x = ch("aph8-x");
+        leaveOwnerless("aph.8.holder", x);
+        registerDoc("aph.8");
+
+        CapturingExchange ex = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.8\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],"
+            + "\"sweep_chashes\":[\"" + x + "\"]}");
+        handle(handlerWithoutService, ex);   // no chunks: no CombinedWriteService needed
+
+        assertThat(ex.status).isEqualTo(200);
+        assertThat(ex.bodyString()).contains("\"ok\":true").contains("\"count\":0")
+            .contains("\"swept\":1").contains("\"sweep_skipped\":0")
+            .contains("\"sweep_detail\":[{\"doc_id\":\"aph.8\",\"dropped\":1,\"swept\":1,\"kept\":0,\"errored\":false}]");
+    }
+
+    @Test
+    void append_withChunksAndSweepChashes_landsThenSweeps() throws Exception {
+        String x = ch("aph9-x"), fresh = ch("aph9-fresh");
+        leaveOwnerless("aph.9.holder", x);
+        registerDoc("aph.9");
+
+        CapturingExchange ex = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.9\",\"collection\":\"" + COLLECTION + "\","
+            + "\"rows\":[{\"position\":0,\"chash\":\"" + fresh + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + fresh + "\",\"text\":\"aph9 fresh\"}],"
+            + "\"sweep_chashes\":[\"" + x + "\"]}");
+        handle(handler, ex);
+
+        assertThat(ex.status).isEqualTo(200);
+        assertThat(ex.bodyString()).contains("\"chunks_written\":1").contains("\"swept\":1");
+        assertThat(repo.getManifest(TENANT, "aph.9")).hasSize(1);
+    }
+
+    @Test
+    void append_sweepChashesOverTheCap_400NamingTheCap_andNothingIsWritten() throws Exception {
+        registerDoc("aph.10");
+        String c = ch("aph10-c");
+        StringBuilder sweep = new StringBuilder();
+        for (int i = 0; i < 301; i++) {
+            if (i > 0) sweep.append(',');
+            sweep.append('"').append(ch("aph10-sweep-" + i)).append('"');
+        }
+        CapturingExchange ex = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.10\",\"collection\":\"" + COLLECTION + "\","
+            + "\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"aph10 c\"}],"
+            + "\"sweep_chashes\":[" + sweep + "]}");
+        int before = embeds.get();
+        handle(handler, ex);
+
+        assertThat(ex.status).isEqualTo(400);
+        assertThat(ex.bodyString()).contains("300").contains("sweep_chashes");
+        assertThat(repo.getManifest(TENANT, "aph.10"))
+            .as("the refusal comes before any transaction: the rows did not commit").isEmpty();
+        assertThat(embeds.get() - before).as("and before the embed").isZero();
+    }
+
+    @Test
+    void append_sweepChashesAtExactlyTheCap_isAccepted() throws Exception {
+        registerDoc("aph.11");
+        StringBuilder sweep = new StringBuilder();
+        for (int i = 0; i < 300; i++) {
+            if (i > 0) sweep.append(',');
+            sweep.append('"').append(ch("aph11-sweep-" + i)).append('"');
+        }
+        CapturingExchange ex = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.11\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],"
+            + "\"sweep_chashes\":[" + sweep + "]}");
+        handle(handler, ex);
+        assertThat(ex.status).isEqualTo(200);
+        assertThat(ex.bodyString()).contains("\"dropped\":300").contains("\"swept\":0");
+    }
+
+    @Test
+    void append_malformedSweepChashes_400() throws Exception {
+        registerDoc("aph.12");
+        CapturingExchange notList = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.12\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],\"sweep_chashes\":\"x\"}");
+        handle(handler, notList);
+        assertThat(notList.status).isEqualTo(400);
+        assertThat(notList.bodyString()).contains("'sweep_chashes' must be a list");
+
+        CapturingExchange notChash = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.12\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],"
+            + "\"sweep_chashes\":[\"" + "a".repeat(32) + "\"]}");
+        handle(handler, notChash);
+        assertThat(notChash.status).isEqualTo(400);
+        assertThat(notChash.bodyString()).contains("sweep_chashes[0]").contains("legacy 32-hex");
+
+        CapturingExchange notString = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.12\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],\"sweep_chashes\":[7]}");
+        handle(handler, notString);
+        assertThat(notString.status).isEqualTo(400);
+        assertThat(notString.bodyString()).contains("sweep_chashes[0]").contains("must be a string");
+    }
+
+    @Test
+    void append_sweepChashesForMissingDocument_409() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.no-such-2\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],"
+            + "\"sweep_chashes\":[\"" + ch("aph13-x") + "\"]}");
+        handle(handlerWithoutService, ex);
+        assertThat(ex.status).isEqualTo(409);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     private void handle(CatalogHandler h, CapturingExchange ex) throws Exception {

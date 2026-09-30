@@ -229,9 +229,23 @@ public final class CombinedWriteService {
      */
     public CombinedWriteResult appendCombined(String tenant, String collection, String docId,
             List<Map<String, Object>> rows, List<Map<String, Object>> chunks, boolean forceReEmbed) {
+        return appendCombined(tenant, collection, docId, rows, chunks, forceReEmbed, null);
+    }
+
+    /**
+     * {@link #appendCombined(String, String, String, List, List, boolean)} plus the deferred
+     * sweep of a multi-batch write (RDR-223 P1.3, bead nexus-z0o2p.4): after the append commits,
+     * {@code sweepChashes} (at most {@link CatalogRepository#MAX_SWEEP_CHASHES_PER_APPEND}) are
+     * swept in their own transaction, and the response gains {@code swept}, {@code sweep_skipped}
+     * and {@code sweep_detail}. An over-cap list is refused BEFORE the embed.
+     */
+    public CombinedWriteResult appendCombined(String tenant, String collection, String docId,
+            List<Map<String, Object>> rows, List<Map<String, Object>> chunks, boolean forceReEmbed,
+            List<String> sweepChashes) {
         if (docId == null || docId.isBlank()) {
             throw new IllegalArgumentException("'doc_id' required");
         }
+        CatalogRepository.normalizeSweepChashes(sweepChashes);   // size check first: cheapest refusal
         catalogRepo.requireDocumentRegistered(tenant, docId);
 
         java.util.Set<String> referenced = new HashSet<>();
@@ -246,16 +260,17 @@ public final class CombinedWriteService {
         }
 
         ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed);
-        int written = catalogRepo.appendManifestChunks(
-            tenant, docId, collection, rows, batch.resolved(), null);
+        CatalogRepository.AppendOutcome outcome = catalogRepo.appendManifestChunks(
+            tenant, docId, collection, rows, batch.resolved(), null, sweepChashes);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("ok", true);
         response.put("count", rows.size());
-        response.put("chunks_written", written);
+        response.put("chunks_written", outcome.chunksWritten());
         response.put("chunks_deduped", batch.deduped());
         response.put("embed_skipped", batch.skipped());
         response.put("embed_embedded", batch.embedded());
+        outcome.addSweepFieldsTo(response);
         return new CombinedWriteResult(response, batch.tokens());
     }
 
