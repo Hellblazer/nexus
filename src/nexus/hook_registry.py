@@ -248,8 +248,8 @@ class HookRegistry:
         ``batch_grain`` attribute (``"file"`` default, ``"flush"`` for
         file-agnostic consumers like taxonomy/chash whose per-call cost
         is round-trip-dominated). ``grain="all"`` (default) fires every
-        hook regardless — every pre-existing caller (MCP store_put,
-        legacy per-file indexing) is behaviorally unchanged.
+        hook regardless — every pre-existing caller (legacy per-file
+        indexing, ``nx store import``) is behaviorally unchanged.
 
         *manifest_complete* (nexus-5xn3k.4, RUNFENCE) — ``{doc_id:
         content_hash}`` for documents the PRODUCER asserts are WHOLLY

@@ -41,6 +41,7 @@ __all__ = [
     "register_real_doc_id",
     "restore_fk_after_dangling_seeds",
     "seed_manifest_chunks",
+    "seed_note_manifest",
     "unroutable_write_target",
 ]
 
@@ -275,6 +276,26 @@ def seed_manifest_chunks(collection: str, chashes: Iterable[str], *, dim: int | 
         collection, ids, [f"fk-stub chunk for {c}" for c in ids],
         embeddings=None if dim is None else [[0.0] * dim for _ in ids],
     )
+
+
+def seed_note_manifest(catalog_doc_id: str, manifest_metadatas: list[dict], *, collection: str) -> None:
+    """Write the manifest rows for a note whose chunks a fixture already seeded.
+
+    For a fixture that needs chunk metadata :func:`nexus.catalog.note_write.write_note` cannot
+    carry (a backdated ``indexed_at``, a TTL, a hand-shaped ``doc_id``): seed the chunk rows with
+    ``tests._chunk_seed.seed_chunks_direct``, then call this. It replaces the direct manifest
+    write of the retired split note path (RDR-223, nexus-z0o2p.32) for that purpose: one
+    ``atomic_manifest_replace`` with the rows :func:`nexus.catalog.note_write.note_manifest_rows`
+    builds, then ``resync_chunk_count_cache``. No verify, no reap, no retry, because no fixture's
+    subject is any of them. A fixture whose chunks carry nothing special goes through ``write_note``
+    instead, which writes chunks and owner in one request as production does.
+    """
+    from nexus.catalog.note_write import note_manifest_rows
+
+    rows = note_manifest_rows(manifest_metadatas)
+    cat = ActiveCatalog()
+    cat.atomic_manifest_replace(catalog_doc_id, rows, collection=collection)
+    cat.resync_chunk_count_cache(catalog_doc_id)
 
 
 def _run_psql(sql: str) -> None:

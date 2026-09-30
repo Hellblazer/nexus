@@ -54,8 +54,8 @@ def _seed_ttl_lapsed_note(client, cat, content: str, title: str) -> str:
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
         single_chunk_manifest_metadata,
-        store_put_manifest_direct,
     )
+    from tests._catalog_fixture_ops import seed_note_manifest
 
     chash, manifest_metadatas = single_chunk_manifest_metadata(content)
     assert chash == hashlib.sha256(content.encode()).hexdigest()
@@ -89,8 +89,8 @@ def _seed_ttl_lapsed_note(client, cat, content: str, title: str) -> str:
         }],
     )
 
-    # Real production manifest write (put_cmd's exact call).
-    store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)
+    # The manifest write, after the backdated chunk.
+    seed_note_manifest(tumbler, manifest_metadatas, collection=_COLLECTION)
     return chash
 
 

@@ -3,7 +3,7 @@
 MVV (c), against the real engine substrate.
 
 MVV (b): a superseded chunk left physically in T3 with no live owner (once by a
-failed same-call client reap, ``_reap_superseded_note_chunks``; since RDR-223 P2.2
+failed same-call client reap, since retired with the split write; since RDR-223 P2.2
 store_put's engine sweep leaves none, so the test strands one with a write that has
 no sweep). Before S5 (nexus-wbfpw.10) raw ``search()`` still returned that stranded
 chunk. Under live(c) it must return only the current note, while the old chunk stays

@@ -292,10 +292,9 @@ def seeded_client(java_service, pg_instance):
     # purpose is a REAL retrieval corpus for search/topic-boost gates
     # downstream, so the judged docs need real ownership, not a
     # maintenance include_non_live escape hatch -- registering each one
-    # through the same catalog_store_hook_tracked + store_put_manifest_
-    # direct path the real indexing path uses (mirrors
-    # tests/test_wbfpw2_client_liveness_matrix.py's pattern).
-    from nexus.catalog.store_hook import catalog_store_hook_tracked, store_put_manifest_direct
+    # through catalog_store_hook_tracked + seed_note_manifest.
+    from nexus.catalog.store_hook import catalog_store_hook_tracked
+    from tests._catalog_fixture_ops import seed_note_manifest
 
     for chash, d in zip(ids, corpus, strict=True):
         owner_tumbler, _created = catalog_store_hook_tracked(
@@ -305,7 +304,7 @@ def seeded_client(java_service, pg_instance):
             f"catalog document registration must succeed for judged doc "
             f"{d['id']!r} against the real engine substrate"
         )
-        store_put_manifest_direct(
+        seed_note_manifest(
             owner_tumbler, [{"chunk_text_hash": chash}], collection=_COLLECTION,
         )
 

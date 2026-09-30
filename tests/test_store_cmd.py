@@ -19,7 +19,7 @@ def _seed_for_store_put(content: str, collection: str = "fixture-subject") -> No
 
     ``mock_store`` / the inline ``MagicMock(spec=HttpVectorClient)`` fully
     mock the T3 write here, but the catalog manifest write
-    (``store_put_manifest_direct``) always goes through the REAL engine
+    (``note_write.write_note``) always goes through the REAL engine
     catalog (autouse ``_pin_t2_substrate``). ``fk_catalog_chunks_chunk``
     now requires the manifest's chash to have a matching REAL
     ``nexus.chunks`` row. Computes the exact ``(collection, chash)``

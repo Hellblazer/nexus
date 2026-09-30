@@ -353,10 +353,10 @@ class TestStorePutManifestReplace:
     """nexus-sdp0u fix-round (round-1 critique SIGNIFICANT #2): the
     "manifest is replaced, not duplicated" claim was previously asserted
     only by doc-count / meta.doc_id — no test ever inspected
-    ``store_put_manifest_direct``'s actual output (the mechanism that
+    the manifest write's actual output (the mechanism that
     realizes the replace). This exercises the FULL production wiring
-    (``put_cmd`` -> ``catalog_store_hook_tracked`` ->
-    ``store_put_manifest_direct``'s ``atomic_manifest_replace``) and
+    (``put_cmd`` -> ``put_note`` -> ``catalog_store_hook_tracked`` ->
+    ``write_note``'s one request) and
     asserts the manifest itself: after a reconciled re-put with different
     content, the document's manifest contains EXACTLY the new chash — the
     old chash row is gone, not merely uncounted."""

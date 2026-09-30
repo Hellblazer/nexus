@@ -536,17 +536,13 @@ class TestARealEngineRefusalLeavesTheOldManifest:
         assert [d for d in make_catalog_reader().all_documents() if d.title == title] == []
 
 
-# ── the command no longer makes the split write ──────────────────────────────
+# ── the command writes through put_note and registers nothing itself ─────────
 
 _SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nexus" / "commands" / "store.py"
-_SPLIT_WRITE_NAMES = frozenset({
-    "_put_note_pieces", "put_note_pieces", "_store_put_manifest_direct_with_recovery",
-    "store_put_manifest_direct_with_recovery", "_rollback_uncataloged_chunk_write",
-    "rollback_uncataloged_chunk_write", "_catalog_store_hook_tracked", "catalog_store_hook_tracked",
-})
+_SPLIT_WRITE_NAMES = frozenset({"_catalog_store_hook_tracked", "catalog_store_hook_tracked"})
 
 
-def test_put_cmd_calls_put_note_and_none_of_the_split_write() -> None:
+def test_put_cmd_calls_put_note_and_does_not_register_the_catalog_row_itself() -> None:
     tree = ast.parse(_SRC.read_text(encoding="utf-8"))
     put_cmd = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "put_cmd")
     names = {n.id for n in ast.walk(put_cmd) if isinstance(n, ast.Name)}

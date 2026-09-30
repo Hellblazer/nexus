@@ -2,17 +2,13 @@
 """RDR-223 P2.2 (nexus-z0o2p.12): the note writer against the REAL engine.
 
 A note's pieces and its manifest go to the engine in ONE ``write_manifest_many`` request. Each test
-here is the evidence that the one request covers a failure the split-write machinery (``put_note_pieces``,
-``store_put_manifest_direct_with_recovery``, ``rollback_uncataloged_chunk_write``, the bb6n2 client reap)
-was built for:
+here is the evidence that the one request covers a failure the split write (a chunk put, a manifest
+write, a compensating delete, a client reap; deleted at nexus-z0o2p.32) was built for:
 
-* a failed request leaves no piece of the note in T3 and the previous manifest intact
-  (``put_note_pieces``' compensating delete; "a failed re-put leaves the old manifest intact");
-* concurrent puts of the same note converge to one complete manifest with every piece present
-  (``store_put_manifest_direct_with_recovery``'s FK-race re-put);
-* a failed first write leaves no chunk without a manifest row (``rollback_uncataloged_chunk_write``);
-* a supersede that drops pieces has them swept, and a piece another document owns survives
-  (the bb6n2 client reap);
+* a failed request leaves no piece of the note in T3 and the previous manifest intact;
+* concurrent puts of the same note converge to one complete manifest with every piece present;
+* a failed first write leaves no chunk without a manifest row;
+* a supersede that drops pieces has them swept, and a piece another document owns survives;
 * Test Plan 8: the client dies after the one request, so no chunk it wrote is without an owner;
 * an unknown outcome is reported, never rolled back (``ManifestVerifyUncertainError``).
 """
@@ -270,13 +266,13 @@ class TestOneRequest:
         assert rec.calls == []
 
 
-# ── replaces put_note_pieces' compensation: a failed request leaves nothing ──
+# ── a failed request leaves nothing ──────────────────────────────────────────
 
 
 class TestFailedRequestLeavesNothing:
     def test_first_write_failure_leaves_no_chunk_and_no_manifest(self, vec, real_cat):
-        """put_note_pieces deleted the pieces it had written when a later piece failed; here there is
-        nothing to delete because the engine rolled the whole document back."""
+        """The split write had to delete the pieces it had written when a later piece failed; here there
+        is nothing to delete because the engine rolled the whole document back."""
         pieces = _pieces("first-fail", 3)
         doc = _register("z0o2p12-first-fail", pieces)
         with pytest.raises(NoteWriteError):
@@ -586,13 +582,13 @@ class TestSupersedeSweep:
         assert res.dropped_chashes == [] and res.swept == 0 and res.embed_embedded == 0
 
 
-# ── replaces store_put_manifest_direct_with_recovery: no gap left to recover ─
+# ── concurrent puts: no gap between the chunk write and the owner write ──────
 
 
 class TestConcurrentPuts:
     def test_concurrent_puts_of_the_same_note_converge_to_one_complete_manifest(self, vec):
-        """The FK-race recovery re-put pieces a concurrent rollback deleted between the chunk write
-        and the manifest write. There is no such gap: N writers of one note end with the whole note."""
+        """A concurrent rollback could delete pieces between the split write's chunk write and its
+        manifest write. There is no such gap now: N writers of one note end with the whole note."""
         from nexus.catalog.factory import make_catalog_writer
 
         pieces = _pieces("concurrent", 4)
@@ -661,7 +657,7 @@ class TestConcurrentPuts:
         assert _present(vec, xs + ys) == set(final), "the loser's pieces must not linger without an owner"
 
 
-# ── the split-write machinery that stays ─────────────────────────────────────
+# ── the default writer ───────────────────────────────────────────────────────
 
 
 def test_the_default_writer_is_made_and_closed_by_the_call(vec):

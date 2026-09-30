@@ -458,8 +458,9 @@ class TestPromoteMakesNoOwnerlessChunkWrite:
         assert result.exit_code == 0, result.output
         assert not [p for p in paths if "store-put" in p or "upsert-chunks" in p], paths
 
-    def test_promote_cmd_calls_none_of_the_split_write_machinery(self):
-        """A source-level pin: the function writes through ``put_note`` and names no split-write helper."""
+    def test_promote_cmd_writes_through_put_note_and_fires_no_chains_itself(self):
+        """A source-level pin: the function writes through ``put_note`` and makes no ``t3.put`` or
+        ``fire_store_chains`` call of its own."""
         tree = ast.parse((_SRC / "commands" / "memory.py").read_text())
         promote = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "promote_cmd")
         called = {
@@ -469,8 +470,5 @@ class TestPromoteMakesNoOwnerlessChunkWrite:
         }
         imported = {a.name for n in ast.walk(promote) if isinstance(n, ast.ImportFrom) for a in n.names}
         assert "put_note" in called, "promote must write its note through note_write.put_note"
-        banned = {
-            "put", "put_note_pieces", "store_put_manifest_direct_with_recovery",
-            "rollback_uncataloged_chunk_write", "describe_rollback_outcome", "fire_store_chains",
-        }
+        banned = {"put", "fire_store_chains"}
         assert not (banned & (called | imported)), sorted(banned & (called | imported))

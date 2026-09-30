@@ -175,7 +175,7 @@ class _AttemptRecorder:
 class NoteWriteResult:
     """What one :func:`write_note` did.
 
-    ``chunk_ids`` are the piece chashes in piece order (what ``put_note_pieces`` returned).
+    ``chunk_ids`` are the piece chashes in piece order (one per manifest row).
     ``dropped_chashes`` are the chashes the write dropped from the document's previous manifest,
     which the engine swept after the commit when nothing else owns them; ``None`` when unknown (the
     engine could not read the previous manifest, or ``recovered`` is True and the response was lost).
@@ -200,7 +200,7 @@ class NoteWriteResult:
 def note_manifest_rows(manifest_metadatas: Sequence[dict]) -> list[dict]:
     """Manifest rows for a note, from :func:`~nexus.catalog.store_hook.note_manifest_metadata`.
 
-    Same fields ``store_put_manifest_direct`` wrote: ``chash``, ``position`` (the piece's
+    The fields a note's manifest row carries: ``chash``, ``position`` (the piece's
     ``chunk_index``, else its index), ``chunk_index``, the note-relative character span.
     """
     rows = [

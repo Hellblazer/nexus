@@ -256,50 +256,6 @@ def test_a_windowless_single_chunk_note_still_reads_back_plain(
 
 # ── failure, hook shape, resolver (review round 1) ───────────────────────────
 
-class _FailingT3:
-    """put() fails on the call numbered *fail_at*; records deletes."""
-
-    def __init__(self, fail_at: int, existing: set[str]) -> None:
-        self.fail_at = fail_at
-        self.existing = existing
-        self.calls = 0
-        self.deleted: list[str] = []
-
-    def existing_ids(self, collection: str, ids: list[str]) -> set[str]:
-        return {i for i in ids if i in self.existing}
-
-    def put(self, *, collection: str, content: str, **kwargs) -> str:
-        self.calls += 1
-        if self.calls == self.fail_at:
-            raise RuntimeError("engine said no")
-        return _sha(content)
-
-    def batch_delete(self, collection: str, ids: list[str]) -> int:
-        self.deleted.extend(ids)
-        return len(ids)
-
-
-def test_a_failed_piece_write_removes_only_the_pieces_this_call_wrote() -> None:
-    """Pieces written before the failure would otherwise stay searchable with
-    no manifest. A piece that already existed is identical text another note
-    also holds, so it must survive."""
-    t3 = _FailingT3(fail_at=3, existing={_sha("b")})
-    with pytest.raises(RuntimeError, match="engine said no"):
-        store_hook.put_note_pieces(t3, "c", ["a", "b", "c", "d"], title="t")
-    assert t3.deleted == [_sha("a")]
-
-
-def test_one_piece_is_a_single_put_with_no_existence_probe() -> None:
-    class _T3:
-        def existing_ids(self, *a, **k):
-            raise AssertionError("a one-piece note must not pay an existence probe")
-
-        def put(self, *, collection: str, content: str, **kwargs) -> str:
-            return _sha(content)
-
-    assert store_hook.put_note_pieces(_T3(), "c", ["x"], title="t") == [_sha("x")]
-
-
 def test_the_split_uses_the_calibrated_model_resolver(monkeypatch) -> None:
     """embedding_model_for_collection reads a legacy two-segment local
     collection as Voyage (nexus-mc1l1), which would leave it unsplit."""

@@ -329,16 +329,15 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
     # step 6 below, both of which this test depends on to prove the
     # frecency update actually landed. Register a real catalog document for
     # this chunk and write its manifest row the way the real indexing path
-    # does (mirrors tests/test_wbfpw2_client_liveness_matrix.py's
-    # catalog_store_hook_tracked + store_put_manifest_direct pattern),
+    # does (catalog_store_hook_tracked + seed_note_manifest),
     # rather than reading back via a maintenance include_non_live escape
     # hatch -- steps 5 and 6 exercise genuine retrieval, not just
     # write-acceptance, so the fixture must be a realistically-owned chunk.
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
         single_chunk_manifest_metadata,
-        store_put_manifest_direct,
     )
+    from tests._catalog_fixture_ops import seed_note_manifest
     manifest_doc_id, manifest_metadatas = single_chunk_manifest_metadata(chunk_text)
     assert manifest_doc_id == chunk_id
     owner_tumbler, _created = catalog_store_hook_tracked(
@@ -348,7 +347,7 @@ def test_frecency_service_mode_update_lands_in_service_chroma(
         "catalog document registration must succeed against the real "
         "engine substrate before the manifest write below"
     )
-    store_put_manifest_direct(owner_tumbler, manifest_metadatas, collection=collection)
+    seed_note_manifest(owner_tumbler, manifest_metadatas, collection=collection)
 
     # Step 2: Build a fake registry pointing to this collection
     fake_registry = MagicMock()

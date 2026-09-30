@@ -438,10 +438,6 @@ class TestNexusHmxiRoundTripGrandfathering:
         monkeypatch.setattr(
             "tests._catalog_fixture_ops.seed_manifest_chunks", lambda *a, **kw: None,
         )
-        monkeypatch.setattr(
-            "nexus.catalog.store_hook.store_put_manifest_direct",
-            lambda *a, **kw: None,
-        )
         # RDR-192 Step 3a (nexus-wbfpw.28): this test is about client-side
         # collection-NAME promotion (register_collection, asserted below),
         # not document registration — ``fake_writer.register(...)``'s

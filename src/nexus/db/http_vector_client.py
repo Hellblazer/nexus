@@ -4158,7 +4158,7 @@ class HttpVectorClient:
         Presence, not visibility: ``include_non_live`` makes the engine answer
         for a stored chunk whether or not it has a live owner (RDR-192 Step 5
         amendment), because every caller asks "is this already stored" (verify,
-        the migration ETL, skip-existing, the ``put_note_pieces`` delete guard).
+        the migration ETL, skip-existing).
         An engine older than that ignores the field and answers from its own
         read filter, which before Step 5 already returned unowned chunks.
 
