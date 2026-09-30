@@ -42,7 +42,9 @@ import java.util.Map;
  *   POST /v1/pipeline/chunks             {REF, chunks: [...]} → {inserted} (INSERT-OR-IGNORE)
  *   GET  /v1/pipeline/chunks             ?REF&uploadable=0|1&limit= → {chunks: [...]}
  *   POST /v1/pipeline/mark_uploaded      {REF, chunk_indices: [...]} → {updated}
- *   GET  /v1/pipeline/counts             ?REF → {embedded_chunks, pipelines}
+ *   POST /v1/pipeline/reset_uploaded     {REF} → {reset}  (flags back to "not uploaded"; pages,
+ *                                         chunks and embeddings kept; run_epoch-checked)
+ *   GET  /v1/pipeline/counts             ?REF → {embedded_chunks, uploaded_chunks, pipelines}
  *   POST /v1/pipeline/clear_wal          {REF}   (pages+chunks only; audit row survives)
  *   POST /v1/pipeline/delete             {REF} → {deleted: bool}
  *   POST /v1/pipeline/delete_collection  {collection} → {deleted}
@@ -112,6 +114,7 @@ public final class PipelineHandler implements HttpHandler {
                 case "/pages"             -> handlePages(exchange, tenant, method);
                 case "/chunks"            -> handleChunks(exchange, tenant, method);
                 case "/mark_uploaded"     -> handleMarkUploaded(exchange, tenant, method);
+                case "/reset_uploaded"    -> handleResetUploaded(exchange, tenant, method);
                 case "/counts"            -> handleCounts(exchange, tenant, method);
                 case "/clear_wal"         -> handleClearWal(exchange, tenant, method);
                 case "/delete"            -> handleDelete(exchange, tenant, method);
@@ -304,9 +307,18 @@ public final class PipelineHandler implements HttpHandler {
         // per-pipeline-only by contract (.16 critic Significant #3).
         PipelineRef ref = optionalRefFromQuery(exchange);
         int embedded = ref == null ? 0 : repo.countEmbeddedChunks(tenant, ref);
+        int uploaded = ref == null ? 0 : repo.countUploadedChunks(tenant, ref);
         HttpUtil.send(exchange, 200,
                 "{\"embedded_chunks\":" + embedded
+                + ",\"uploaded_chunks\":" + uploaded
                 + ",\"pipelines\":" + repo.countPipelines(tenant) + "}");
+    }
+
+    private void handleResetUploaded(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (wrongMethod(exchange, method, "POST")) return;
+        Map<String, Object> body = readBody(exchange);
+        int reset = repo.resetUploaded(tenant, refFromBody(body));
+        HttpUtil.send(exchange, 200, "{\"reset\":" + reset + "}");
     }
 
     // ── cleanup ──────────────────────────────────────────────────────────────

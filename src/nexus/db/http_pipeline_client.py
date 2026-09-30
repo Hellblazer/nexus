@@ -198,6 +198,10 @@ class PipelineRunFenced(RuntimeError):
 class HttpPipelineDB(RefreshableHttpStoreMixin):
     """Thin, write-buffering HTTP client for ``/v1/pipeline``."""
 
+    #: True only on a client wired to an in-memory twin of the engine
+    #: (``nexus.db.inmemory_pipeline.make_in_memory_pipeline_db``). A PDF dry run accepts no other.
+    in_memory: bool = False
+
     def __init__(self, *args: object, **kwargs: object) -> None:
         super().__init__(*args, **kwargs)  # type: ignore[arg-type]
         # Overridable for deterministic staleness tests (fixed-clock house
@@ -521,6 +525,31 @@ class HttpPipelineDB(RefreshableHttpStoreMixin):
         return int(self._get(
             "/v1/pipeline/counts", self._ref(content_hash)
         )["embedded_chunks"])
+
+    def chunk_counts(self, content_hash: str) -> tuple[int, int]:
+        """``(embedded, uploaded)`` chunk counts of the run, in one round trip and without reading a
+        row: the chunks with an embedding, and those of them flagged uploaded. The difference is
+        what is left to send."""
+        self.flush(content_hash)
+        counts = self._get("/v1/pipeline/counts", self._ref(content_hash))
+        if "uploaded_chunks" not in counts:
+            raise RuntimeError(
+                "GET /v1/pipeline/counts answered without 'uploaded_chunks': the engine predates "
+                "the reset_uploaded route (RDR-223); this client requires the engine it was released with")
+        return int(counts["embedded_chunks"]), int(counts["uploaded_chunks"])
+
+    def reset_uploaded(self, content_hash: str) -> int:
+        """Put every chunk of the run back to "not yet uploaded", keeping the extracted pages and
+        the chunks (RDR-223). The rerun of a killed upload re-sends the document from position 0
+        with a fresh writer and does not extract again. Epoch-checked like every write; returns the
+        number of flags that were set."""
+        self.flush(content_hash)
+        result = self._post_fenced("/v1/pipeline/reset_uploaded", self._ref(content_hash))
+        if "reset" not in result:
+            raise RuntimeError(
+                "POST /v1/pipeline/reset_uploaded answered without 'reset': the engine predates the "
+                "route (RDR-223); this client requires the engine it was released with")
+        return int(result["reset"])
 
     def count_pipelines(self) -> int:
         self.flush_all()

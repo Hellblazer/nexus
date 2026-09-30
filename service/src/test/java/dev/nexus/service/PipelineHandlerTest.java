@@ -609,6 +609,7 @@ class PipelineHandlerTest {
         assertStaleRun(writeFenced("progress", id, 0, ",\"fields\":{\"pages_extracted\":9}"), id, 0, 1);
         assertStaleRun(writeFenced("extraction_meta", id, 0, ",\"metadata_json\":\"{}\""), id, 0, 1);
         assertStaleRun(writeFenced("mark_uploaded", id, 0, ",\"chunk_indices\":[0]"), id, 0, 1);
+        assertStaleRun(writeFenced("reset_uploaded", id, 0, ""), id, 0, 1);
         assertStaleRun(writeFenced("complete", id, 0, ""), id, 0, 1);
         assertStaleRun(writeFenced("fail", id, 0, ",\"error\":\"stale\""), id, 0, 1);
         assertStaleRun(writeFenced("clear_wal", id, 0, ""), id, 0, 1);
@@ -689,6 +690,111 @@ class PipelineHandlerTest {
         var r = post("/v1/pipeline/create", TOKEN, TENANT,
             "{\"content_hash\":\"e9\",\"pdf_path\":\"/tmp/e9.pdf\",\"collection\":\"knowledge__t\",\"identity\":\"tumbler\"}");
         assertThat(r.statusCode()).isEqualTo(400);
+    }
+
+
+    // ── reset_uploaded (RDR-223, nexus-z0o2p.11): a hard-killed upload is re-sent from position 0
+    // without re-extracting: the flags go back, the pages and chunks stay. ─────────────────────
+
+    private int uploadedCountById(long pipelineId) throws Exception {
+        var r = get("/v1/pipeline/counts?pipeline_id=" + pipelineId, TOKEN, TENANT);
+        return ((Number) mapper.readValue(r.body(), MAP_T).get("uploaded_chunks")).intValue();
+    }
+
+    private long runWithThreeChunksTwoFlagged(String hash, String path) throws Exception {
+        long id = pipelineId(create(docCreate(hash, path, "knowledge__t")));
+        post("/v1/pipeline/pages", TOKEN, TENANT, """
+            {"pipeline_id":%d,"pages":[{"page_index":0,"page_text":"p0","metadata_json":"{}"},
+                                      {"page_index":1,"page_text":"p1","metadata_json":"{}"}]}""".formatted(id));
+        post("/v1/pipeline/chunks", TOKEN, TENANT, """
+            {"pipeline_id":%d,"chunks":[
+              {"chunk_index":0,"chunk_text":"c0","chunk_id":"rid0","metadata_json":"{}","embedding":""},
+              {"chunk_index":1,"chunk_text":"c1","chunk_id":"rid1","metadata_json":"{}","embedding":""},
+              {"chunk_index":2,"chunk_text":"c2","chunk_id":"rid2","metadata_json":"{}","embedding":""}]}""".formatted(id));
+        post("/v1/pipeline/progress", TOKEN, TENANT,
+            "{\"pipeline_id\":" + id + ",\"fields\":{\"total_pages\":2,\"pages_extracted\":2,"
+            + "\"chunks_created\":3,\"chunks_embedded\":3,\"chunks_uploaded\":2}}");
+        post("/v1/pipeline/mark_uploaded", TOKEN, TENANT,
+            "{\"pipeline_id\":" + id + ",\"chunk_indices\":[0,1]}");
+        return id;
+    }
+
+    @Test
+    void resetUploaded_flipsTheFlagsBack_keepsPagesChunksAndProgress() throws Exception {
+        String hash = "r1-" + "0".repeat(28);
+        long id = runWithThreeChunksTwoFlagged(hash, "/tmp/r1.pdf");
+        assertThat(uploadableById(id)).as("before: only chunk 2 is left to send").hasSize(1);
+        assertThat(uploadedCountById(id)).isEqualTo(2);
+
+        var r = post("/v1/pipeline/reset_uploaded", TOKEN, TENANT, "{\"pipeline_id\":" + id + "}");
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        assertThat(mapper.readValue(r.body(), MAP_T).get("reset")).as("rows whose flag was set").isEqualTo(2);
+
+        assertThat(uploadableById(id)).as("every chunk is to be sent again").hasSize(3);
+        assertThat(uploadedCountById(id)).isEqualTo(0);
+        assertThat(embeddedCountById(id)).as("the chunks and their embeddings are kept").isEqualTo(3);
+        assertThat(pagesById(id)).as("the extracted pages are kept").hasSize(2);
+        var state = stateById(id);
+        assertThat(state.get("chunks_uploaded")).as("the counter is zeroed in the same transaction").isEqualTo(0);
+        assertThat(state.get("total_pages")).isEqualTo(2);
+        assertThat(state.get("pages_extracted")).isEqualTo(2);
+        assertThat(state.get("chunks_created")).isEqualTo(3);
+        assertThat(state.get("chunks_embedded")).isEqualTo(3);
+
+        var again = post("/v1/pipeline/reset_uploaded", TOKEN, TENANT, "{\"pipeline_id\":" + id + "}");
+        assertThat(mapper.readValue(again.body(), MAP_T).get("reset")).as("idempotent").isEqualTo(0);
+    }
+
+    @Test
+    void resetUploaded_staleEpoch_isRefused_andFlipsNothing() throws Exception {
+        String hash = "r2-" + "0".repeat(28);
+        long id = runWithThreeChunksTwoFlagged(hash, "/tmp/r2.pdf");
+        // A takeover bumps the epoch 0 -> 1; the old holder still carries 0.
+        post("/v1/pipeline/fail", TOKEN, TENANT, "{\"pipeline_id\":" + id + ",\"run_epoch\":0,\"error\":\"x\"}");
+        assertThat(runEpoch(create(docCreate(hash, "/tmp/r2.pdf", "knowledge__t")))).isEqualTo(1);
+
+        assertStaleRun(writeFenced("reset_uploaded", id, 0, ""), id, 0, 1);
+        assertThat(uploadedCountById(id)).as("the stale reset flipped nothing").isEqualTo(2);
+        assertThat(stateById(id).get("chunks_uploaded")).isEqualTo(2);
+
+        var owner = writeFenced("reset_uploaded", id, 1, "");
+        assertThat(owner.statusCode()).as(owner.body()).isEqualTo(200);
+        assertThat(uploadedCountById(id)).isEqualTo(0);
+    }
+
+    @Test
+    void resetUploaded_unknownRun_resetsNothing_neverCreatesOne() throws Exception {
+        var r = post("/v1/pipeline/reset_uploaded", TOKEN, TENANT,
+            "{\"content_hash\":\"r3-" + "0".repeat(28) + "\"}");
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(r.body(), MAP_T).get("reset")).isEqualTo(0);
+    }
+
+    @Test
+    void resetUploaded_otherTenantsRun_isInvisible() throws Exception {
+        String hash = "r4-" + "0".repeat(28);
+        long id = runWithThreeChunksTwoFlagged(hash, "/tmp/r4.pdf");
+        var r = post("/v1/pipeline/reset_uploaded", OTHER_TOKEN, OTHER_TENANT, "{\"pipeline_id\":" + id + "}");
+        assertThat(r.statusCode()).isEqualTo(200);
+        assertThat(mapper.readValue(r.body(), MAP_T).get("reset")).as("RLS hides the row").isEqualTo(0);
+        assertThat(uploadedCountById(id)).as("the owner's flags are untouched").isEqualTo(2);
+    }
+
+    @Test
+    void counts_reportUploadedChunks_onlyFlaggedEmbeddedRows() throws Exception {
+        String hash = "r5-" + "0".repeat(28);
+        long id = pipelineId(create(docCreate(hash, "/tmp/r5.pdf", "knowledge__t")));
+        post("/v1/pipeline/chunks", TOKEN, TENANT, """
+            {"pipeline_id":%d,"chunks":[
+              {"chunk_index":0,"chunk_text":"c0","chunk_id":"u0","metadata_json":"{}","embedding":""},
+              {"chunk_index":1,"chunk_text":"c1","chunk_id":"u1","metadata_json":"{}","embedding":null}]}""".formatted(id));
+        assertThat(uploadedCountById(id)).isEqualTo(0);
+        post("/v1/pipeline/mark_uploaded", TOKEN, TENANT, "{\"pipeline_id\":" + id + ",\"chunk_indices\":[0]}");
+        assertThat(uploadedCountById(id)).isEqualTo(1);
+        assertThat(embeddedCountById(id)).as("embedded_chunks is unchanged by the flag").isEqualTo(1);
+        var none = get("/v1/pipeline/counts", TOKEN, TENANT);
+        assertThat(mapper.readValue(none.body(), MAP_T).get("uploaded_chunks"))
+            .as("a call naming no row is zero, never a global sum").isEqualTo(0);
     }
 
     // ── Test 9: RLS isolation through HTTP ───────────────────────────────────
