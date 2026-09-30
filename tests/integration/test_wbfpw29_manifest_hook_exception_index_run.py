@@ -923,8 +923,14 @@ def test_index_markdown_no_longer_depends_on_the_manifest_hook(
     document is stamped complete. This pins that the hook is off the path; the
     fence's refusal contract keeps its own coverage on the paths that still use
     the hook.
+
+    It FAILS if the hook stays on the path: the faulting ``get_catalog`` makes the hook
+    record a manifest write failure for the document (the collector the CLI exit code
+    reads), so an empty collector is the proof the hook never ran. It also asserts the
+    write itself was the only manifest write.
     """
     from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.doc_indexer import _register_or_lookup_doc_id, index_markdown
 
@@ -944,6 +950,19 @@ def test_index_markdown_no_longer_depends_on_the_manifest_hook(
         raise RuntimeError("nexus-wbfpw.29 fault injection (markdown channel)")
 
     monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
+    # Arm the collectors the hook records into (they are no-ops until a run resets them).
+    mcp_infra.reset_manifest_write_failures()
+    mcp_infra.reset_manifest_identity_drops()
+
+    manifest_writes: list[str] = []
+    real_post = HttpCatalogClient._post
+
+    def counting_post(self, path, body=None, **kw):
+        if path in ("/manifest/write_many", "/manifest/append", "/manifest/replace"):
+            manifest_writes.append(path)
+        return real_post(self, path, body, **kw)
+
+    monkeypatch.setattr(HttpCatalogClient, "_post", counting_post)
 
     t3 = HttpVectorClient()
     n = index_markdown(
@@ -951,6 +970,10 @@ def test_index_markdown_no_longer_depends_on_the_manifest_hook(
     )
 
     assert n == 1
+    # The hook did not run: had it, its faulting catalog gate would have recorded this document.
+    assert mcp_infra.get_manifest_write_failures() == []
+    assert mcp_infra.get_manifest_identity_drops() == []
+    assert manifest_writes == ["/manifest/write_many"], "the combined write is the only manifest write"
     reader = make_catalog_reader()
     assert reader is not None
     assert len(reader.get_manifest(doc_id)) == 1

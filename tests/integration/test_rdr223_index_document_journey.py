@@ -370,3 +370,95 @@ def test_a_document_with_no_catalog_identity_fails_the_run_and_writes_nothing(tm
 
     assert t.writes == 0
     assert _present(_COLLECTION, [_sha(x) for x in lines]) == set()
+
+
+# ── metadata: the write merges, like the old upsert did ───────────────────────
+
+
+def _stored_metadata(collection: str, chashes: list[str], *, non_live: bool = False) -> dict[str, dict]:
+    kw = {"include_non_live": True} if non_live else {}
+    got = hvc.HttpVectorClient().get_collection(collection).get(ids=chashes, include=["metadatas"], **kw)
+    assert len(got["ids"]) == len(chashes), "every chunk is stored"
+    return dict(zip(got["ids"], got["metadatas"]))
+
+
+@pytest.mark.parametrize("re_embed", [False, True], ids=["force", "force-re-embed"])
+def test_forced_reindex_keeps_enrichment_and_clears_the_owned_keys_the_document_dropped(
+    tmp_path, re_embed,
+) -> None:
+    """The combined routes REPLACE stored chunk metadata; the old upsert MERGED and preserved the
+    ``bib_*`` enrichment (``nx enrich`` sets it), clearing only the keys the writer owns and
+    dropped (``rewrite_delete_keys``). ``_index_document`` sends the merge mode, so a forced
+    re-index keeps ``bib_year`` and clears a stale owned key. With ``--re-embed`` the same holds
+    through the engine's insert branch, and every chunk is really re-embedded through the real
+    writer (``force_re_embed`` reaches the engine)."""
+    from nexus.db.http_vector_client import per_collection_chunk_cap
+
+    cap = per_collection_chunk_cap(_COLLECTION)
+    marker = f"enrich-{int(re_embed)}"
+    lines = _lines(marker, cap + 3)
+    path = _write_file(tmp_path, marker, lines)
+    every = [_sha(x) for x in lines]
+    _index(path, marker)
+
+    # Another writer's enrichment, plus a stale value of a key the indexer owns and no longer sends.
+    hvc.HttpVectorClient().update_chunks(
+        _COLLECTION, every, [{"bib_year": 2020, "quality_gate_overridden": True} for _ in every])
+    before = _stored_metadata(_COLLECTION, every)
+    assert all(m["bib_year"] == 2020 and m["quality_gate_overridden"] is True for m in before.values())
+
+    with _traffic() as t:
+        _index(path, marker, force=True, force_re_embed=re_embed)
+
+    after = _stored_metadata(_COLLECTION, every)
+    assert all(m.get("bib_year") == 2020 for m in after.values()), "enrichment survived"
+    assert all("quality_gate_overridden" not in m for m in after.values()), \
+        "an owned key the write dropped is cleared"
+    assert all(m["content_hash"] == before[c]["content_hash"] for c, m in after.items())
+    sent = [b for p, b, _ in t.data() if "chunks" in b]
+    assert sent, "non-vacuity: chunk-carrying requests were made"
+    assert all(b["metadata_merge"] is True for b in sent)
+    assert all("quality_gate_overridden" in b["metadata_delete_keys"] for b in sent)
+    assert all("bib_year" not in b["metadata_delete_keys"] for b in sent)
+    if re_embed:
+        assert t.total("embed_embedded") == len(every), "--force --re-embed re-embeds every chunk"
+        assert all(b["force_re_embed"] is True for b in sent)
+    else:
+        assert t.total("embed_embedded") == 0
+        assert not any(b.get("force_re_embed") for b in sent)
+
+
+def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
+    """Read each chunk's stored metadata back and compare it to what the previous path
+    (``_upsert_skip_reembed`` into a control collection) stored for the same chunk; only the
+    write time differs."""
+    from datetime import UTC, datetime
+
+    from nexus.corpus import index_model_for_collection
+    from nexus.doc_indexer import _upsert_skip_reembed
+    from nexus.metadata_schema import rewrite_delete_keys
+
+    lines = _lines("meta", 6)
+    path = _write_file(tmp_path, "meta", lines)
+    every = [_sha(x) for x in lines]
+    _index(path, "meta")
+
+    prepared = _line_chunks(
+        path, "control-hash", index_model_for_collection(_CONTROL_COLLECTION),
+        datetime.now(UTC).isoformat(), "z0o2p13-meta")
+    # The same chunks, through the old path, into a control collection.
+    metas = [dict(m) for _, _, m in prepared]
+    _upsert_skip_reembed(
+        hvc.HttpVectorClient(), _CONTROL_COLLECTION, [p[0] for p in prepared],
+        [p[1] for p in prepared], [[] for _ in prepared], metas)
+    assert rewrite_delete_keys(metas)   # non-vacuity: the old path did name owned keys
+
+    new = _stored_metadata(_COLLECTION, every)
+    # The old path stored the chunks with no owner row, which live(c) hides.
+    old = _stored_metadata(_CONTROL_COLLECTION, every, non_live=True)
+    volatile = {"indexed_at", "content_hash"}
+    for chash in every:
+        assert {k: v for k, v in new[chash].items() if k not in volatile} == \
+            {k: v for k, v in old[chash].items() if k not in volatile}, chash
+        assert new[chash]["indexed_at"], "the write time is stored"
+        assert new[chash]["chunk_text_hash"] == chash

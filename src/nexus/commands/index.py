@@ -3746,11 +3746,13 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
     # raise) used to run AFTER arm(), so a raise there left the heartbeat
     # armed with no disarm ever reached (a leaked background thread).
     file_heartbeat.arm(f"0/{len(rdr_files)} RDR document(s)")
+    rdr_errors: dict[str, str] = {}
     try:
         results = batch_index_markdowns(rdr_files, corpus=basename, collection_name=collection,
                                         content_type="rdr", force=force, force_re_embed=re_embed,
                                         on_file=on_file,
-                                        base_path=repo_root, embed_fn=_embed_fn)
+                                        base_path=repo_root, embed_fn=_embed_fn,
+                                        on_error=lambda p, e: rdr_errors.__setitem__(str(p), str(e)))
     finally:
         file_heartbeat.disarm()
     bar.close()
@@ -3768,3 +3770,12 @@ def index_rdr_cmd(path: Path, force: bool, re_embed: bool, monitor: bool) -> Non
         click.echo(f"  skipped: index fresh (use --force) — {unchanged} document(s)")
     if rdr_failed:
         click.echo(f"  {rdr_failed} document(s) failed — see structured logs")
+        # nexus-z0o2p.13: say why, per document. A registration that returned no
+        # identity (CatalogIdentityMissingError) names its own remedy in the message.
+        for failed_path in sorted(p for p, s in results.items() if s == "failed"):
+            reason = rdr_errors.get(failed_path)
+            if reason:
+                click.echo(f"    {Path(failed_path).name}: {reason}")
+        # A batch with failed documents must not exit 0: the run did not index what
+        # it was asked to.
+        raise click.ClickException(f"{rdr_failed} RDR document(s) failed to index")

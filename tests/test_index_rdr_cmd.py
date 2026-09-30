@@ -350,3 +350,33 @@ def test_index_rdr_heartbeat_never_armed_if_embed_fn_setup_raises(
     assert result.exit_code != 0
     time.sleep(0.05)
     assert not any(t.name == "nx-phase-heartbeat" for t in threading.enumerate())
+
+
+def test_index_rdr_reports_why_a_document_failed_and_exits_nonzero(
+    runner: CliRunner, repo_with_rdrs: Path
+) -> None:
+    """nexus-z0o2p.13: a document whose catalog registration returned no identity has no owner for
+    its chunks, so nothing is written for it. The command names the document and the remedy the
+    error carries, and does not exit 0 (it used to print 'see structured logs' and succeed)."""
+    from nexus.errors import CatalogIdentityMissingError
+
+    def fake_batch(paths, corpus, *, on_error=None, **kw):
+        results = {}
+        for p in paths:
+            if p.name.startswith("001"):
+                results[str(p)] = "failed"
+                on_error(p, CatalogIdentityMissingError(
+                    f"{p}: catalog registration failed, so there is no catalog document to own "
+                    "3 chunk(s) in 'rdr__x'; nothing was written. Check 'nx doctor', then re-run."))
+            else:
+                results[str(p)] = "indexed"
+        return results
+
+    with patch("nexus.doc_indexer.batch_index_markdowns", side_effect=fake_batch):
+        result = runner.invoke(main, ["index", "rdr", str(repo_with_rdrs)])
+
+    assert result.exit_code != 0, result.output
+    assert "Indexed 1 of 2 RDR document(s)." in result.output
+    assert "1 document(s) failed" in result.output
+    assert "001-use-sqlite.md" in result.output
+    assert "nothing was written" in result.output and "nx doctor" in result.output

@@ -261,6 +261,37 @@ MANIFEST_APPEND_MANY_MAX_DOCS = 1000
 MANIFEST_APPEND_MANY_MAX_CHUNKS = 300
 
 
+#: The most keys one request may name in ``metadata_delete_keys`` (the engine refuses more).
+METADATA_DELETE_KEYS_CAP = 64
+
+
+def _metadata_mode_fields(
+    what: str, metadata_merge: bool, metadata_delete_keys: "list[str] | None",
+) -> dict:
+    """The request fields for the combined routes' metadata write mode (RDR-223, nexus-z0o2p.13).
+
+    Empty (the engine's replace behaviour, and what every older client sends) unless
+    *metadata_merge*. With it the engine stores ``(stored - metadata_delete_keys) || incoming``
+    for a chunk whose chash it already holds, instead of replacing the stored metadata. Checked
+    here, before any round trip: keys without merge, more than
+    :data:`METADATA_DELETE_KEYS_CAP` keys, or a blank / non-string key.
+    """
+    keys = list(metadata_delete_keys or ())
+    if keys and not metadata_merge:
+        raise ValueError(f"{what}: metadata_delete_keys requires metadata_merge=True")
+    if len(keys) > METADATA_DELETE_KEYS_CAP:
+        raise ValueError(
+            f"{what}: {len(keys)} metadata_delete_keys exceeds the {METADATA_DELETE_KEYS_CAP}-key cap")
+    if any(not isinstance(k, str) or not k.strip() for k in keys):
+        raise ValueError(f"{what}: metadata_delete_keys must be non-blank strings")
+    if not metadata_merge:
+        return {}
+    out: dict = {"metadata_merge": True}
+    if keys:
+        out["metadata_delete_keys"] = keys
+    return out
+
+
 def _check_sweep_chashes(what: str, sweep_chashes: "list[str] | None") -> None:
     """Refuse an over-cap ``sweep_chashes`` list locally (the engine 400s it, but only after the
     request was built and, on a chunk-carrying append, an embed budget was set aside)."""
@@ -3502,6 +3533,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         sweep_chashes: "list[str] | None" = None,
         force_re_embed: bool = False,
         embedding_model: str | None = None,
+        metadata_merge: bool = False,
+        metadata_delete_keys: "list[str] | None" = None,
     ) -> dict:
         """Append manifest rows for doc_id (rows upsert BY POSITION).
 
@@ -3529,7 +3562,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         *force_re_embed* mirrors :meth:`write_manifest_many`'s. *embedding_model* is required as
         soon as any *chunk_payload* element carries an ``embedding`` (a client-supplied vector);
-        checked locally before any round trip.
+        checked locally before any round trip. *metadata_merge* / *metadata_delete_keys* are
+        :meth:`write_manifest_many`'s, and apply to *chunk_payload* only.
 
         Returns the engine's response (``{ok, count[, chunks_written, chunks_deduped,
         embed_skipped, embed_embedded, swept, sweep_skipped, sweep_detail]}``).
@@ -3541,6 +3575,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             )
         _check_sweep_chashes("append_manifest_chunks", sweep_chashes)
         _check_supplied_vectors("append_manifest_chunks", chunk_payload, embedding_model)
+        merge_fields = _metadata_mode_fields(
+            "append_manifest_chunks", metadata_merge, metadata_delete_keys)
         if chunk_payload is not None and len(chunk_payload) > MANIFEST_APPEND_MANY_MAX_CHUNKS:
             raise ValueError(
                 f"append_manifest_chunks: {len(chunk_payload)} chunks exceeds the "
@@ -3563,6 +3599,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 body["force_re_embed"] = True
             if embedding_model:
                 body["embedding_model"] = embedding_model
+            body.update(merge_fields)
             result = self._post_embedding_write(
                 "/manifest/append", body, collection=collection, chunk_count=len(chunk_payload))
         out: dict = dict(result) if isinstance(result, dict) else {}
@@ -3588,6 +3625,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         sweep_chashes: "dict[str, list[str]] | None" = None,
         force_re_embed: bool = False,
         embedding_model: str | None = None,
+        metadata_merge: bool = False,
+        metadata_delete_keys: "list[str] | None" = None,
     ) -> dict:
         """Append rows for several documents in ONE request (RDR-223 P1.4, ``append_many``).
 
@@ -3636,6 +3675,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             _check_sweep_chashes(f"append_manifest_many sweep_chashes[{d!r}]", lst)
         sweep_requested = any(sweeps.values())
         _check_supplied_vectors("append_manifest_many", chunks, embedding_model)
+        merge_fields = _metadata_mode_fields(
+            "append_manifest_many", metadata_merge, metadata_delete_keys)
         body_docs: list[dict] = []
         for d, rows in docs:
             entry: dict = {"doc_id": d, "rows": self._manifest_rows(rows)}
@@ -3654,6 +3695,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     body["force_re_embed"] = True
                 if embedding_model:
                     body["embedding_model"] = embedding_model
+                body.update(merge_fields)
                 result = self._post_embedding_write(
                     "/manifest/append_many", body, collection=collection,
                     chunk_count=len(chunks))
@@ -4134,6 +4176,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         collection: str,
         force_re_embed: bool = False,
         embedding_model: str | None = None,
+        metadata_merge: bool = False,
+        metadata_delete_keys: "list[str] | None" = None,
     ) -> dict:
         """Atomic per-doc manifest REPLACE for many docs in one POST.
 
@@ -4231,6 +4275,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         *embedding_model* (RDR-223 P1.5) names the model that produced any ``embedding`` a
         chunk carries — REQUIRED as soon as one does (checked here, before any round trip) and
         ignored by the engine otherwise. Sent on the chunk-carrying page only.
+
+        *metadata_merge* / *metadata_delete_keys* (RDR-223, nexus-z0o2p.13; additive) choose how
+        the engine writes the metadata of a chunk whose chash it already holds. Default (both
+        unset) is the replace behaviour: stored metadata becomes the incoming metadata, so a
+        writer that omits a key clears it. With ``metadata_merge=True`` stored metadata becomes
+        ``(stored - metadata_delete_keys) || incoming``, the ``upsert-chunks`` semantics, so an
+        indexer that owns only some keys (the ones ``nexus.metadata_schema.rewrite_delete_keys``
+        names) leaves the ``bib_*`` enrichment another writer set. Sent on the chunk-carrying
+        page only; a chunk not stored yet takes the incoming metadata under either mode.
         """
         if not collection:
             raise ValueError(
@@ -4256,6 +4309,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # the collection where it is about to write it.
         ensure_collection_registered(collection, registrar=self._catalog_registrar)
         _check_supplied_vectors("write_manifest_many", chunks, embedding_model)
+        merge_fields = _metadata_mode_fields(
+            "write_manifest_many", metadata_merge, metadata_delete_keys)
         failed: list[str] = []
         refused: list[dict] = []
         refused_count = 0
@@ -4295,6 +4350,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     body["force_re_embed"] = True
                 if embedding_model:
                     body["embedding_model"] = embedding_model
+                body.update(merge_fields)
             if page_carries_chunks:
                 # nexus-y9t08: this page's POST triggers a synchronous
                 # server-side embed — give it the embed-appropriate

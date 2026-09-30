@@ -1706,6 +1706,45 @@ def _register_before_read(db: Any, collection_name: str) -> None:
     ensure_collection_registered(collection_name, registrar=registrar)
 
 
+class _MetadataMergingCatalog:
+    """A catalog writer that sends the combined routes' metadata merge mode (RDR-223,
+    nexus-z0o2p.13) on every chunk-carrying request, and keeps the engine's per-document
+    sweep outcomes.
+
+    The multi-batch writer owns the request sequence and knows nothing of metadata modes, so this
+    wrapper adds ``metadata_merge=True`` and the caller's ``metadata_delete_keys`` to its
+    ``write_manifest_many`` / ``append_manifest_chunks`` calls, and records each response's
+    ``sweep_detail`` entries that errored (the writer's result carries only their count). Every
+    other attribute is the wrapped writer's.
+    """
+
+    def __init__(self, cat: Any, delete_keys: list[str]) -> None:
+        self._cat = cat
+        self._delete_keys = list(delete_keys)
+        #: ``[{doc_id, reason}, ...]``: sweeps the engine reported as errored, with its reason.
+        self.sweep_errors: list[dict] = []
+
+    def _note(self, resp: Any) -> Any:
+        if isinstance(resp, dict):
+            for d in resp.get("sweep_detail") or ():
+                if isinstance(d, dict) and d.get("errored"):
+                    self.sweep_errors.append(
+                        {"doc_id": str(d.get("doc_id", "")),
+                         "reason": str(d.get("reason") or "sweep_failed")})
+        return resp
+
+    def write_manifest_many(self, *args: Any, **kwargs: Any) -> Any:
+        return self._note(self._cat.write_manifest_many(
+            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
+
+    def append_manifest_chunks(self, *args: Any, **kwargs: Any) -> Any:
+        return self._note(self._cat.append_manifest_chunks(
+            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cat, name)
+
+
 def _write_chunks_with_owner_rows(
     collection_name: str,
     doc_id: str,
@@ -1731,7 +1770,13 @@ def _write_chunks_with_owner_rows(
     run fails, and the caller's fence bracket marks it), and
     :class:`~nexus.errors.IndexRunVerifyRefused` for a refused stamp. Side effects
     the manifest hook used to carry are ported here: the sweep counters the run
-    summary reads (nexus-39upx: a skipped sweep is never silent).
+    summary reads (nexus-39upx: a skipped sweep is never silent, and it keeps the
+    engine's own reason, ``gate_timeout`` / ``statement_timeout`` / ...).
+
+    Metadata is MERGED into what the engine already stores for a chash (the old
+    upsert's semantics), not replaced: the keys this writer owns and dropped from a
+    row (:func:`nexus.metadata_schema.rewrite_delete_keys`) are cleared, and the
+    ``bib_*`` enrichment another writer set survives a forced re-index.
     """
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
     from nexus.catalog.multi_batch_write import write_document  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
@@ -1740,6 +1785,7 @@ def _write_chunks_with_owner_rows(
         _record_superseded_swept,
         _record_superseded_sweep_skip,
     )
+    from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     rows = _manifest_chunk_rows(list(enumerate(metadatas)))
     for row, chash in zip(rows, ids):
@@ -1748,18 +1794,22 @@ def _write_chunks_with_owner_rows(
         {"chash": chash, "text": text, "metadata": meta}
         for chash, text, meta in zip(ids, documents, metadatas)
     ]
-    cat = make_catalog_writer()
+    raw_cat = make_catalog_writer()
+    cat = _MetadataMergingCatalog(raw_cat, rewrite_delete_keys(metadatas))
     try:
         result = write_document(
             cat, [(rows, chunks)], doc_id=doc_id, collection=collection_name,
             content_hash=content_hash, force_re_embed=force_re_embed,
         )
     finally:
-        close = getattr(cat, "close", None)
+        close = getattr(raw_cat, "close", None)
         if close is not None:
             close()
     _record_superseded_swept(result.swept)
-    if result.sweep_skipped:
+    for err in cat.sweep_errors:
+        _record_superseded_sweep_skip(err["doc_id"] or doc_id, collection_name, err["reason"])
+    if result.sweep_skipped > len(cat.sweep_errors):
+        # The engine counted skips it gave no reason for (or an older shape without detail).
         _record_superseded_sweep_skip(doc_id, collection_name, "sweep_failed")
     if result.dropped_unknown:
         _record_superseded_sweep_skip(doc_id, collection_name, "before_read_failed")
@@ -2022,9 +2072,10 @@ def _index_document(
 
         _record_manifest_identity_drop(collection_name, len(ids), written=False)
         raise CatalogIdentityMissingError(
-            f"{file_path}: no catalog document to own {len(ids)} chunk(s) in "
-            f"{collection_name!r} (registration returned no doc_id; see the "
-            f"preflight_register_failed log event); nothing was written"
+            f"{file_path}: catalog registration failed, so there is no catalog "
+            f"document to own {len(ids)} chunk(s) in {collection_name!r}; nothing "
+            f"was written. See the 'preflight_register_failed' log event, check "
+            f"'nx doctor' and the service health, then re-run the index."
         )
 
     # nexus-5xn3k.4 review follow-up (code-review-expert MEDIUM): the fail
@@ -2100,10 +2151,12 @@ def _index_document(
         )
     except IndexRunVerifyRefused:
         # The engine refused the completion stamp: the manifest is NOT verified
-        # complete. The fence stays 'indexing' (a re-index redoes the document);
-        # marking it 'failed' as well would say nothing more. Record the refusal
-        # for the run summary (nexus-5xn3k.6) and drop any deferred sweep, then
-        # let the refusal propagate: it is the signal the fence exists to raise.
+        # complete. The write_document context manager has already marked the
+        # fence 'failed' (its abort), so this handler does not call _fence_fail a
+        # second time; either state makes the next run redo the document. Record
+        # the refusal for the run summary (nexus-5xn3k.6) and drop any deferred
+        # sweep, then let the refusal propagate: it is the signal the fence
+        # exists to raise.
         from nexus.mcp_infra import (  # noqa: PLC0415 — deferred import: avoids import cycle at module load
             _record_complete_refusal,
             discard_deferred_superseded_vectors,
@@ -3760,9 +3813,11 @@ def index_markdown(
     Pass *force=True* to bypass the staleness check and always re-index.
 
     *force_re_embed* (nexus-8143o): DECOUPLED from *force* -- forwarded
-    verbatim to :func:`_index_document`/:func:`_upsert_skip_reembed`. See
-    :func:`_upsert_skip_reembed`'s docstring for the full rationale; the
-    same split ``nx index repo --force --re-embed`` already has.
+    verbatim to :func:`_index_document`, which hands it to the combined
+    chunk+owner write (:func:`_write_chunks_with_owner_rows`): ``force`` only
+    bypasses the staleness gate, and the engine re-embeds a chunk whose text it
+    already holds only when *force_re_embed* is also set -- the same split
+    ``nx index repo --force --re-embed`` already has.
 
     When *return_metadata* is True, returns a dict instead of an int::
 
@@ -3847,8 +3902,9 @@ def index_markdown(
     # RDR-102 Phase A: pre-flight catalog registration. Resolve doc_id BEFORE
     # _index_document's staleness check so a fresh index lands chunks with
     # doc_id populated at write time. Idempotent on re-index via
-    # Catalog.register's by_file_path early-return. Returns "" when the
-    # catalog is absent (no-catalog ingest contract preserved).
+    # Catalog.register's by_file_path early-return. Returns "" only when the
+    # registration itself failed; _index_document then refuses to write the
+    # chunks (CatalogIdentityMissingError) rather than store them ownerless.
     # nexus-ivzw8: thread the frontmatter title/year into the PRE-FLIGHT
     # registration so a fresh Document row never carries the stem default.
     _fm_title, _fm_year = _parse_md_title_year(md_path)
@@ -3962,6 +4018,7 @@ def batch_index_markdowns(
     base_path: Path | None = None,
     embed_fn: EmbedFn | None = None,
     hooks: "HookRegistry | None" = None,
+    on_error: "Callable[[Path, BaseException], None] | None" = None,
 ) -> dict[str, str]:
     """Index multiple Markdown files sequentially, returning per-file status.
 
@@ -3977,8 +4034,12 @@ def batch_index_markdowns(
     Pass *force=True* to bypass the staleness check on every file.
 
     *force_re_embed* (nexus-8143o): DECOUPLED from *force* -- forwarded
-    verbatim to :func:`index_markdown` for every file. See
-    :func:`_upsert_skip_reembed`'s docstring for the full rationale.
+    verbatim to :func:`index_markdown` for every file, and from there to the
+    combined chunk+owner write (see :func:`_index_document`).
+
+    *on_error*, if provided, is called as ``on_error(path, exc)`` for each file
+    that failed, so a caller can report why (a failed file is otherwise only a
+    ``"failed"`` status and a log line).
 
     *on_file*, if provided, is called after each file as
     ``on_file(path, chunks, elapsed_s)`` where *chunks* is the number of
@@ -4001,6 +4062,8 @@ def batch_index_markdowns(
         except Exception as e:  # noqa: BLE001 — best-effort path; failure surfaced via log.warning, must not crash caller
             _log.warning("batch_index_markdowns: failed", path=str(path), error=str(e))
             results[str(path)] = "failed"
+            if on_error is not None:
+                on_error(path, e)
         if on_file:
             on_file(path, count, time.monotonic() - t0)
     return results

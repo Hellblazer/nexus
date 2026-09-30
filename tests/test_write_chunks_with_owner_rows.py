@@ -35,8 +35,10 @@ class _Cat:
         return {"prior_chashes": [], "prior_count": 0}
 
     def write_manifest_many(self, docs, complete=None, *, sweep=False, chunks=None, collection,
-                            force_re_embed=False, embedding_model=None):
+                            force_re_embed=False, embedding_model=None, metadata_merge=False,
+                            metadata_delete_keys=None):
         self.calls.append("write")
+        self.merge = (metadata_merge, metadata_delete_keys)
         doc = docs[0][0]
         out = {"chunks_written": len(chunks or []), "failed_doc_ids": [], "complete_refused": [],
                "complete_refused_count": 0, "dropped_chashes": {doc: []}, "dropped_count": {doc: 0}}
@@ -83,6 +85,39 @@ def test_the_engines_sweep_counts_reach_the_run_summary() -> None:
         {"doc_id": DOC_ID, "collection": COLLECTION, "reason": "sweep_failed"}]
 
 
+def test_the_engines_sweep_skip_reasons_are_kept() -> None:
+    """A skipped sweep keeps the engine's own reason (gate_timeout, statement_timeout, ...), not a
+    generic one, so the run summary can tell an operator what to do about it."""
+    from nexus.mcp_infra import get_superseded_sweep_stats
+
+    _write(_Cat(sweep_skipped=1, sweep_detail=[
+        {"doc_id": DOC_ID, "errored": True, "reason": "gate_timeout"},
+        {"doc_id": DOC_ID, "errored": False}]))
+
+    assert get_superseded_sweep_stats()["skipped"] == [
+        {"doc_id": DOC_ID, "collection": COLLECTION, "reason": "gate_timeout"}]
+
+
+def test_chunk_metadata_is_merged_naming_the_keys_the_document_dropped() -> None:
+    """The combined write merges (stored - delete_keys) || incoming, like the old upsert did."""
+    from nexus.doc_indexer import _write_chunks_with_owner_rows
+    from nexus.metadata_schema import REWRITE_OWNED_KEYS
+
+    text = "wcor chunk"
+    chash = hashlib.sha256(text.encode()).hexdigest()
+    cat = _Cat()
+    with patch("nexus.catalog.factory.make_catalog_writer", return_value=cat):
+        _write_chunks_with_owner_rows(
+            COLLECTION, DOC_ID, "h" * 64, [chash], [text],
+            [{"chunk_text_hash": chash, "content_hash": "h" * 64}])
+
+    merge, keys = cat.merge
+    assert merge is True
+    # Every owned key the row dropped is named, and the keys it carries are not.
+    assert set(keys) == REWRITE_OWNED_KEYS - {"chunk_text_hash", "content_hash"}
+    assert not any(k.startswith("bib_") for k in keys)
+
+
 def test_an_unreadable_previous_manifest_is_a_recorded_sweep_skip() -> None:
     from nexus.mcp_infra import get_superseded_sweep_stats
 
@@ -105,8 +140,8 @@ def test_a_refused_stamp_is_recorded_and_propagates_without_marking_the_run_fail
     tmp_path: Path,
 ) -> None:
     """The engine refuses the completion stamp: the document is NOT fully indexed. The refusal
-    must reach the run summary (nexus-5xn3k.6) and propagate; the fence stays 'indexing' rather
-    than being stamped 'failed' as well (as ``_fence_complete``'s refusal always was)."""
+    must reach the run summary (nexus-5xn3k.6) and propagate. ``_index_document`` does not call
+    ``_fence_fail`` for it (the writer's own abort has already marked the fence)."""
     from nexus.doc_indexer import _index_document
     from nexus.mcp_infra import get_complete_refusals
 
@@ -141,3 +176,8 @@ def test_a_refused_stamp_is_recorded_and_propagates_without_marking_the_run_fail
     assert get_complete_refusals() == [DOC_ID]
     fence_fail.assert_not_called()
     assert cat.calls == ["begin", "write"]
+    # write_document's context manager marks the fence failed (its abort) when the refusal
+    # propagates, so the document is 'failed', not left 'indexing'; either makes the next run
+    # redo it. TODO(nexus-z0o2p.10 writer round): the writer's abort semantics are being revised;
+    # re-assert whatever they become here.
+    assert cat.failed == [DOC_ID]

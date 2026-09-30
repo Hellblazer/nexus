@@ -73,11 +73,13 @@ class _RecordingFenceWriter:
         self._seq.append(("fail", doc_id))
 
     def write_manifest_many(self, docs, complete=None, *, sweep=False, chunks=None,
-                            collection, force_re_embed=False, embedding_model=None):
+                            collection, force_re_embed=False, embedding_model=None,
+                            metadata_merge=False, metadata_delete_keys=None):
         """The RDR-223 combined write: chunks and manifest rows in one request."""
         self.write_calls.append({
             "docs": docs, "complete": complete, "sweep": sweep, "chunks": chunks,
             "collection": collection, "force_re_embed": force_re_embed,
+            "metadata_merge": metadata_merge, "metadata_delete_keys": metadata_delete_keys,
         })
         self._seq.append(("write", docs[0][0]))
         doc = docs[0][0]
@@ -238,6 +240,10 @@ def test_index_document_completion_rides_the_one_request_write(tmp_path) -> None
     assert w["sweep"] is True
     assert w["complete"] == {DOC_ID: fence.begin_calls[0]["content_hash"]}
     assert len(w["chunks"]) == 1 and w["chunks"][0]["text"] == "chunk text"
+    # The write MERGES chunk metadata (the old upsert's semantics), naming the owned keys this
+    # document's rows dropped, so bib_* enrichment survives a re-index.
+    assert w["metadata_merge"] is True
+    assert isinstance(w["metadata_delete_keys"], list)
     assert fence.complete_calls == [], "the stamp rides the write; no second call"
     assert hooks.batch_calls, "fire_batch never fired"
     assert hooks.batch_calls[0]["manifest_complete"] is None

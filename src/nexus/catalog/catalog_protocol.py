@@ -272,16 +272,16 @@ class CatalogWriter(Protocol):
     def write_manifest(self, doc_id, chunks, *, collection) -> object:  # canonical (RDR-191: collection now REQUIRED, 2026-08-12)
         ...
 
-    def append_manifest_chunks(self, doc_id, chunks, *, collection, chunk_payload=..., sweep_chashes=..., force_re_embed=..., embedding_model=...) -> object:  # canonical (RDR-191: collection now REQUIRED, 2026-08-12; RDR-223 P2.0 nexus-z0o2p.10: inline chunk_payload, deferred sweep_chashes, supplied-vector embedding_model)
+    def append_manifest_chunks(self, doc_id, chunks, *, collection, chunk_payload=..., sweep_chashes=..., force_re_embed=..., embedding_model=..., metadata_merge=..., metadata_delete_keys=...) -> object:  # canonical (RDR-191: collection now REQUIRED, 2026-08-12; RDR-223 P2.0 nexus-z0o2p.10: inline chunk_payload, deferred sweep_chashes, supplied-vector embedding_model)
         ...
 
-    def append_manifest_many(self, docs, *, collection, chunks=..., sweep_chashes=..., force_re_embed=..., embedding_model=...) -> object:  # canonical (RDR-223 P2.0 nexus-z0o2p.10: the multi-document append, POST /manifest/append_many)
+    def append_manifest_many(self, docs, *, collection, chunks=..., sweep_chashes=..., force_re_embed=..., embedding_model=..., metadata_merge=..., metadata_delete_keys=...) -> object:  # canonical (RDR-223 P2.0 nexus-z0o2p.10: the multi-document append, POST /manifest/append_many)
         ...
 
     def atomic_manifest_replace(self, doc_id, chunks, *, collection, new_collection=..., new_chunk_count=...) -> object:  # canonical (RDR-191: collection now REQUIRED, 2026-08-12)
         ...
 
-    def write_manifest_many(self, docs, complete=..., *, sweep=..., chunks=..., collection, force_re_embed=..., embedding_model=...) -> object:  # canonical (nexus-u2kwq batch write; nexus-67qsd/jk88j whitelisted 2026-08-08; nexus-wxjr6 combined-write kwargs 2026-08-09; RDR-191: collection now REQUIRED, 2026-08-12; RDR-223 P2.0 nexus-z0o2p.10: embedding_model for supplied vectors, dropped_chashes in the result)
+    def write_manifest_many(self, docs, complete=..., *, sweep=..., chunks=..., collection, force_re_embed=..., embedding_model=..., metadata_merge=..., metadata_delete_keys=...) -> object:  # canonical (nexus-u2kwq batch write; nexus-67qsd/jk88j whitelisted 2026-08-08; nexus-wxjr6 combined-write kwargs 2026-08-09; RDR-191: collection now REQUIRED, 2026-08-12; RDR-223 P2.0 nexus-z0o2p.10: embedding_model for supplied vectors, dropped_chashes in the result)
         ...
 
     def resync_chunk_count_cache(self, doc_id) -> object:  # canonical
