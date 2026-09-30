@@ -784,6 +784,29 @@ def _prepass_groups(
     return groups
 
 
+def _wire_embedding_model(db: Any, collection_name: str, effective_model: str) -> str:
+    """The ``embedding_model`` an import request names: the model the engine will compare it with.
+
+    The engine refuses a request whose ``embedding_model`` is not the model the collection is
+    REGISTERED with. A conformant four-segment name carries its model, and the gate in
+    :func:`import_collection` already proved *effective_model* equals it, so that is what is sent. A
+    legacy two-segment name carries none: the export header holds the prefix-based guess (a Voyage
+    model), which in a local install is not what the collection is registered with (the local
+    embedder), so sending it would be refused on the first request. For such a name send the model
+    the collection has, or, when it has no row yet, the one its registration will derive (the write
+    path's own derivation, :func:`nexus.corpus.collection_registration_kwargs`). The engine still
+    checks every vector's dimension against the collection's."""
+    if embedding_model_for_collection_name(collection_name) is not None:
+        return effective_model
+    resolver = getattr(db, "_resolve_collection_row", None)
+    row = resolver(collection_name) if callable(resolver) else None
+    model = (row or {}).get("embedding_model")
+    if model:
+        return str(model)
+    from nexus.corpus import collection_registration_kwargs  # noqa: PLC0415 — deferred to avoid import cycle
+    return collection_registration_kwargs(collection_name)["embedding_model"]
+
+
 class _OwnerImport:
     """The service-backed leg of :func:`import_collection` (RDR-223, nexus-z0o2p.19): every chunk is
     written together with its owner row, through the catalog manifest routes, carrying the
@@ -836,12 +859,17 @@ class _OwnerImport:
         self.imported_count = 0
         self.skipped_count = 0
         self.vector_mismatches = 0
+        self.unowned_count = 0                    # kept documents' records left out of the import
+        self._kept_owned = 0                      # kept documents' records the document already owns
+        self._left_out: dict[str, tuple[int, str | None]] = {}   # kept tumbler -> (records left out, index_state)
         #: ``(label, reason)``: a group that failed to resolve carries its source URI, a document
         #: that failed to write or stamp carries its tumbler; the label says which.
         self.failures: list[tuple[str, str]] = []
         self._state: dict[str, str] = {}          # document tumbler -> "write" | "resume" | "kept" | "failed"
-        self._kept: dict[str, dict[str, set[str]]] = {}   # tumbler -> {"existing": ..., "file": ...}
-        self._family: dict[str, tuple[int, int]] = {}     # group key -> (records, highest position)
+        self._kept: dict[str, dict[str, Any]] = {}        # tumbler -> chash sets, counts, index_state
+        self._doc_of: dict[str, str] = {}                 # group key -> the document it resolved to
+        self._doc_figures: dict[str, tuple[int, int]] = {}   # tumbler -> (records, highest position)
+        self._group_failed: set[str] = set()              # group keys that did not resolve (reported)
         self._live_legacy: dict[str, Any] = {}
         self._reader: Any = None
         self._writer: Any = None
@@ -878,10 +906,13 @@ class _OwnerImport:
     # ── prepass ───────────────────────────────────────────────────────────────
 
     def plan(self, pre: dict[str, dict]) -> None:
-        """Fix each group's record count and highest position from the prepass. Two groups that
-        will resolve to ONE document (a live document in this collection holding both owner-tagged
-        records and legacy ``doc_id`` records) are merged into a family whose figures are the sums,
-        so the document is finished once, when all of its records have arrived."""
+        """Resolve every owner group of the prepass to its catalog document (found or registered) and
+        fix each DOCUMENT's record count and highest position. Several groups can resolve to one
+        document (a live document holding both owner-tagged and legacy ``doc_id`` records; two legacy
+        ids aliased to one document; a literal ``nxexp://<target>/<uri>`` identity beside the original
+        that was copied to it): the document's figures are the sums, so it is finished once, when ALL
+        of its records have arrived. Resolving here, before anything is written or stamped, is what
+        lets the totals be complete; the writing pass reads the answers back by group key."""
         self._ensure()
         legacy_ids = [g["legacy_doc_id"] for g in pre.values() if g.get("legacy_doc_id")]
         if legacy_ids:
@@ -889,18 +920,28 @@ class _OwnerImport:
                 doc_id: entry for doc_id, entry in self._reader.resolve_many(legacy_ids).items()
                 if entry.physical_collection == self.collection_name
             }
-        family: dict[str, list[int]] = {k: [g["seen"], g.get("maxpos", -1)] for k, g in pre.items()}
-        owner_of: dict[str, str] = {}
-        for k, g in pre.items():
-            entry = self._live_legacy.get(g.get("legacy_doc_id") or "")
-            if entry is not None and entry.source_uri in pre and not pre[entry.source_uri].get("legacy_doc_id"):
-                owner_of[k] = entry.source_uri
-        for k, root in owner_of.items():
-            family[root][0] += pre[k]["seen"]
-            family[root][1] = max(family[root][1], pre[k].get("maxpos", -1))
-        for k in pre:
-            root = owner_of.get(k, k)
-            self._family[k] = (family[root][0], family[root][1])
+        if pre and self._owner_tumbler is None:
+            self._owner_tumbler = _resolve_import_owner_tumbler(
+                self.collection_name, self._reader, self._writer)
+        for key, g in pre.items():
+            # One group's failure must not strand every later group: record it, carry on, report all
+            # at the end.
+            try:
+                doc = _resolve_owner_document(
+                    g, self.collection_name, self._owner_tumbler, self._reader, self._writer,
+                    self._live_legacy,
+                )
+            except Exception as exc:  # noqa: BLE001 — collected and re-raised at the end as one NexusError
+                _log.warning(
+                    "import_owner_group_failed",
+                    collection=self.collection_name, source_uri=g["source_uri"], error=str(exc),
+                )
+                self._group_failed.add(key)
+                self.failures.append((f"source {g['source_uri']}", str(exc)))
+                continue
+            self._doc_of[key] = doc
+            total, top = self._doc_figures.get(doc, (0, -1))
+            self._doc_figures[doc] = (total + g["seen"], max(top, g.get("maxpos", -1)))
 
     # ── one page ──────────────────────────────────────────────────────────────
 
@@ -926,8 +967,12 @@ class _OwnerImport:
                 continue                      # its group failed to resolve; already reported
             state = self._state.get(doc)
             if state == "kept":
-                self._kept[doc]["file"].add(r.rec_id)
+                k = self._kept[doc]
+                k["file"].add(r.rec_id)
+                k["seen"] += 1
                 self.skipped_count += 1
+                if k["seen"] >= k["total"]:
+                    self._settle_kept(doc)
                 continue
             if state not in ("write", "resume") or writer.failure(doc) is not None:
                 continue
@@ -988,34 +1033,23 @@ class _OwnerImport:
             return set()
 
     def _resolve_groups(self, page: list[_PageRec]) -> None:
-        new: list[dict] = []
-        seen: set[int] = set()
+        """Attach each record's group to the document :meth:`plan` resolved it to."""
         for r in page:
             g = r.group
-            if g.get("doc_id") or g.get("failed") or id(g) in seen:
+            if g.get("doc_id") or g.get("failed"):
                 continue
-            seen.add(id(g))
-            new.append(g)
-        if not new:
-            return
-        if self._owner_tumbler is None:
-            self._owner_tumbler = _resolve_import_owner_tumbler(
-                self.collection_name, self._reader, self._writer)
-        # One group's failure must not strand every later group: record it, carry on, report all
-        # at the end.
-        for g in new:
-            try:
-                g["doc_id"] = _resolve_owner_document(
-                    g, self.collection_name, self._owner_tumbler, self._reader, self._writer,
-                    self._live_legacy,
-                )
-            except Exception as exc:  # noqa: BLE001 — collected and re-raised at the end as one NexusError
-                _log.warning(
-                    "import_owner_group_failed",
-                    collection=self.collection_name, source_uri=g["source_uri"], error=str(exc),
-                )
-                g["failed"] = True
-                self.failures.append((f"source {g['source_uri']}", str(exc)))
+            key = g["key"]
+            if key in self._group_failed:
+                g["failed"] = True                # reported by plan()
+            elif key in self._doc_of:
+                g["doc_id"] = self._doc_of[key]
+            else:
+                # The prepass and the writing pass read the same file with the same grouping, so this
+                # is unreachable; refusing beats writing a document whose total nobody counted.
+                raise NexusError(
+                    f"Import of {self.collection_name!r}: owner group {g.get('source_uri')!r} appeared "
+                    "in the file after the counting pass did not see it; the file changed while it "
+                    "was being imported. Nothing further was written; run the import again.")
 
     def _decide(self, first_group: dict[str, dict]) -> None:
         """Keep, resume or write each document met for the first time (one batched manifest read)."""
@@ -1064,6 +1098,7 @@ class _OwnerImport:
         for d in new_docs:
             if d in self._state:
                 continue
+            total, max_position = self._doc_figures[d]
             if existing[d] and d not in resumable:
                 # nexus-wbfpw.40 (Sam, 2026-09-29: keep existing): a live document that already
                 # owns chunks is current truth. A replace would delete every row it has (an older
@@ -1071,55 +1106,77 @@ class _OwnerImport:
                 # resurrect a superseded version. Leave its manifest alone AND leave the file's
                 # chunks for it out: since RDR-223 a chunk is only ever written with an owner row.
                 self._state[d] = "kept"
-                self._kept[d] = {"existing": existing[d], "file": set()}
+                entry = entries.get(d)
+                self._kept[d] = {
+                    "existing": existing[d], "file": set(), "seen": 0, "total": total,
+                    "index_state": getattr(entry, "index_state", None),
+                }
                 continue
-            total, max_position = self._family[first_group[d]["key"]]
             self._import_writer.register_document(
                 d, total_rows=total, max_position=max_position, resume=d in resumable)
             self._state[d] = "resume" if d in resumable else "write"
 
     # ── end of stream ─────────────────────────────────────────────────────────
 
+    def _settle_kept(self, doc: str) -> None:
+        """A kept document's records have all been seen: count what it already owns and what the
+        file's chunks for it leave out, then drop the two chash sets (they are needed for that count
+        and for nothing else)."""
+        k = self._kept[doc]
+        if k.get("settled"):
+            return
+        file_chashes = k["file"]
+        kept = len(file_chashes & k["existing"])
+        left_out = len(file_chashes) - kept
+        self._kept_owned += kept
+        self.unowned_count += left_out
+        if left_out:
+            self._left_out[doc] = (left_out, k["index_state"])
+            _log.warning(
+                "import_owner_kept_existing_manifest",
+                collection=self.collection_name, doc=doc, index_state=k["index_state"],
+                file_chunks=len(file_chashes), left_out=left_out,
+            )
+        file_chashes.clear()
+        k["existing"].clear()
+        k["settled"] = True
+
     def finish(self) -> dict[str, Any]:
-        """Collect the run's verdict and summarise. Returns ``owned_count``, ``unowned_count`` and
-        ``unowned_documents``; failures are in :attr:`failures`. Every document was swept and stamped
-        on its own last page, so nothing is sent here."""
+        """Collect the run's verdict and summarise. Returns ``owned_count``, ``unowned_count``,
+        ``unowned_documents`` (each ``{tumbler, title, index_state, left_out}``) and
+        ``sweep_skipped``; failures are in :attr:`failures`. Every document was swept and stamped on
+        its own last page, so nothing is sent here."""
+        sweep_skipped = 0
         owned_count = 0
-        unowned_count = 0
-        unowned_tumblers: list[str] = []
         if self._import_writer is not None:
             done = self._import_writer.finish()
             for d, reason in done.failed.items():
                 self.failures.append((f"document {d}", reason))
             owned_count += self._import_writer.rows_landed
-        for doc, k in self._kept.items():
-            file_chashes = k["file"]
-            kept = len(file_chashes & k["existing"])
-            owned_count += kept
-            unowned_count += len(file_chashes) - kept
-            if kept < len(file_chashes):
-                unowned_tumblers.append(doc)
-                _log.warning(
-                    "import_owner_kept_existing_manifest",
-                    collection=self.collection_name, doc=doc,
-                    file_chunks=len(file_chashes), left_out=len(file_chashes) - kept,
-                )
+            sweep_skipped = self._import_writer.sweep_skipped
+        for doc in self._kept:
+            self._settle_kept(doc)            # a document whose records did not all arrive
+        owned_count += self._kept_owned
+        unowned_tumblers = list(self._left_out)
         unowned_documents: list[dict[str, Any]] = []
         if unowned_tumblers:
             # The remedy nx store import prints is `nx store delete --title`, so name each
             # document by its CURRENT title. title None: the lookup failed; "": the document has none.
             try:
                 found = self._reader.resolve_many(unowned_tumblers)
-                unowned_documents = [
-                    {"tumbler": t, "title": getattr(found.get(t), "title", "") or ""}
-                    for t in unowned_tumblers
-                ]
+                titles = {t: getattr(found.get(t), "title", "") or "" for t in unowned_tumblers}
             except Exception:  # noqa: BLE001 — naming is best-effort; the counts above stand
-                unowned_documents = [{"tumbler": t, "title": None} for t in unowned_tumblers]
+                titles = {t: None for t in unowned_tumblers}
+            unowned_documents = [
+                {"tumbler": t, "title": titles[t], "index_state": self._left_out[t][1],
+                 "left_out": self._left_out[t][0]}
+                for t in unowned_tumblers
+            ]
         return {
             "owned_count": owned_count,
-            "unowned_count": unowned_count,
+            "unowned_count": self.unowned_count,
             "unowned_documents": unowned_documents,
+            "sweep_skipped": sweep_skipped,
         }
 
 
@@ -1342,16 +1399,15 @@ def import_collection(
     # catalog documents) keep the plain upsert -- production never takes either.
     owner_import: _OwnerImport | None = None
     if _owners_apply(db):
-        from nexus.db.http_vector_client import per_collection_chunk_cap  # noqa: PLC0415 — deferred to avoid import cycle
-        page_size = min(
-            page_size,
-            per_collection_chunk_cap(
-                collection_name, row_resolver=getattr(db, "_resolve_collection_row", None)),
-        )
+        # No per-collection embed cap here: that cap (64 for a CCE collection) bounds the engine's
+        # EMBEDDING latency inside one request, and an import carries every vector, so it embeds
+        # nothing. The bound is the combined-write request's own (300 chunks).
+        from nexus.catalog.http_catalog_client import MANIFEST_APPEND_MANY_MAX_CHUNKS  # noqa: PLC0415 — deferred to avoid import cycle
+        page_size = min(page_size, MANIFEST_APPEND_MANY_MAX_CHUNKS)
         owner_import = _OwnerImport(
             db=db, collection_name=collection_name, hooks=hooks,
-            embedding_model=effective_model, file_hash=_file_sha256(input_path),
-            skip_existing=skip_existing,
+            embedding_model=_wire_embedding_model(db, collection_name, effective_model),
+            file_hash=_file_sha256(input_path), skip_existing=skip_existing,
         )
     else:
         # A non-service handle (the InMemoryVectorClient unit-test substrate).
@@ -1420,6 +1476,7 @@ def import_collection(
     owned_count = 0
     unowned_count = 0
     vector_mismatches = 0
+    sweep_skipped = 0
     failures: list[tuple[str, str]] = []
     unowned_documents: list[dict[str, Any]] = []
     try:
@@ -1545,6 +1602,7 @@ def import_collection(
             owned_count = summary["owned_count"]
             unowned_count = summary["unowned_count"]
             unowned_documents = summary["unowned_documents"]
+            sweep_skipped = summary["sweep_skipped"]
             vector_mismatches = owner_import.vector_mismatches
             failures = owner_import.failures
             _log.info(
@@ -1554,6 +1612,7 @@ def import_collection(
                 owned_count=owned_count,
                 unowned_count=unowned_count,
                 vector_mismatches=vector_mismatches,
+                sweep_skipped=sweep_skipped,
                 failures=len(failures),
             )
         elif ids:
@@ -1615,5 +1674,6 @@ def import_collection(
         "unowned_count": unowned_count,
         "unowned_documents": unowned_documents,
         "vector_mismatches": vector_mismatches,
+        "sweep_skipped": sweep_skipped,
         "elapsed_seconds": round(elapsed, 2),
     }

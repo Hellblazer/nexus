@@ -809,6 +809,47 @@ def expire_cmd() -> None:
     click.echo(f"Expired {count} {'entry' if count == 1 else 'entries'}.")
 
 
+def _echo_left_out(result: dict) -> None:
+    """Say which documents the import left chunks out of, and why. A document another run left
+    ``indexing`` or ``failed`` is kept by the same rule as a finished one, but it is not one "with a
+    different chunk list": it is unfinished, and the message says that."""
+    docs = result.get("unowned_documents") or []
+    if not result.get("unowned_count") or not docs:
+        return
+    target = result.get("collection_name", "")
+    unfinished = [d for d in docs if d.get("index_state") in ("indexing", "failed")]
+    current = [d for d in docs if d.get("index_state") not in ("indexing", "failed")]
+    restore = (
+        "To restore one from this file instead, delete it (this discards its current version, and "
+        "--title removes every document with that title in the collection), then import again:"
+    )
+    for group, lead in (
+        (current, "their {n} document(s) already exist with a different chunk list, which an import "
+                  "never replaces, and a chunk is never stored without its owner."),
+        (unfinished, "their {n} document(s) were left unfinished by another run (another export, "
+                     "or an index run, left them indexing or failed), and an import finishes "
+                     "only the runs of its own file; a chunk is never stored without its owner."),
+    ):
+        if not group:
+            continue
+        left = sum(int(d.get("left_out") or 0) for d in group)
+        click.echo(f"  {left} records were left out of the import: " + lead.format(n=len(group)) + " " + restore)
+        for d in group[:5]:
+            title = d.get("title")
+            tumbler = d.get("tumbler")
+            if title is None:
+                click.echo(f"    (could not look up document {tumbler}'s title; see nx catalog show {tumbler})")
+            elif not title:
+                click.echo(f"    (document {tumbler} has no title; see nx catalog show {tumbler})")
+            else:
+                # Catalog titles are user and file data: quote them so a
+                # pasted command cannot run anything else.
+                safe = "".join(ch for ch in title if ch.isprintable())
+                click.echo(f"    nx store delete -c {shlex.quote(target)} --title {shlex.quote(safe)}")
+        if len(group) > 5:
+            click.echo(f"    ... and {len(group) - 5} more")
+
+
 def _resolve_bare_subject(collection: str, *, t3: object | None = None, for_write: bool = False) -> str:
     """Resolve a ``--collection`` argument for export and import the way
     every other store verb does (:func:`t3_collection_name` with *t3*).
@@ -1058,31 +1099,14 @@ def import_cmd(
             f"  {n} stored vector{'s' if n != 1 else ''} differed from the file's and "
             f"{'were' if n != 1 else 'was'} replaced by it."
         )
-    if result.get("unowned_count"):
-        docs = result.get("unowned_documents") or []
+    if result.get("sweep_skipped"):
+        n = result["sweep_skipped"]
         click.echo(
-            f"  {result['unowned_count']} records were left out of the import: their "
-            f"{len(docs)} document(s) already exist with a different chunk list, which an import "
-            "never replaces, and a chunk is never stored without its owner. To restore one from "
-            "this file instead, delete it (this discards its "
-            "current version, and --title removes every document with that title in the "
-            "collection), then import again:"
+            f"  {n} document{'s' if n != 1 else ''} replaced an earlier chunk list whose old chunks "
+            "could not be swept. The documents are complete; those chunks stay stored, owned by "
+            "no document, until `nx t3 gc` removes them."
         )
-        target = result.get("collection_name", "")
-        for d in docs[:5]:
-            title = d.get("title")
-            tumbler = d.get("tumbler")
-            if title is None:
-                click.echo(f"    (could not look up document {tumbler}'s title; see nx catalog show {tumbler})")
-            elif not title:
-                click.echo(f"    (document {tumbler} has no title; see nx catalog show {tumbler})")
-            else:
-                # Catalog titles are user and file data: quote them so a
-                # pasted command cannot run anything else.
-                safe = "".join(ch for ch in title if ch.isprintable())
-                click.echo(f"    nx store delete -c {shlex.quote(target)} --title {shlex.quote(safe)}")
-        if len(docs) > 5:
-            click.echo(f"    ... and {len(docs) - 5} more")
+    _echo_left_out(result)
     if result.get("rehashed_count"):
         click.echo(
             f"  Re-hashed {result['rehashed_count']} non-conformant legacy "

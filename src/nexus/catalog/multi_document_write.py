@@ -18,7 +18,15 @@ Per page, for the documents it holds rows of:
   (``index_state`` becomes ``indexing``; the answer carries each document's PRE-RUN manifest, read in
   the same transaction as its stamp). The snapshot, not a ``write_many`` response, is the source of
   the deferred sweep: a first response that is lost and resent reads the manifest its first attempt
-  already replaced and would report nothing dropped.
+  already replaced and would report nothing dropped. A RESUMED document is begun in a second
+  ``begin_index_run_many`` call without the flag: it ignores its snapshot, and the engine's
+  ``prior_chashes`` is uncapped.
+
+  The fence is not a lock. ``begin`` re-stamps a document another writer has open (its run id and
+  hash are replaced), so two writers on ONE document are not supported. What stands between that and
+  a wrong ``complete``: the stamp is verified by the engine in the document's own transaction against
+  the manifest's row count, so a manifest another writer added to or replaced no longer has the count
+  this run landed, the stamp is refused, and the document is reported and stays ``indexing``.
 * **First request of a fresh document.** One ``write_manifest_many`` (a replace) carrying its rows and
   chunks. A document whose only request this is (its first page is also its last) is written with
   ``sweep`` on and ``complete`` in the same request; the engine sweeps what the replace dropped and
@@ -46,10 +54,13 @@ A refused stamp (``complete_refused``) leaves ``index_state`` as ``begin`` left 
 is recorded for the record-level summary as the single-document writer does; it is not turned into
 ``failed``. A document the engine fails in place is marked failed, gets no further rows, and is
 reported; the other documents of the request are unaffected. A request that raises propagates;
-:meth:`abort` marks the fences of the documents still open ``failed`` for a caller that survives it
-(a killed process needs nothing: the fence stays ``indexing`` and the next run resumes the document).
+:meth:`abort` marks the fences of the documents still open ``failed`` for a caller that survives it,
+at most :attr:`ABORT_FENCE_CAP` of them (there is no batch route, so each is one request; the rest, and
+every document of a killed process, stay ``indexing``, and the next run resumes ``indexing`` and
+``failed`` documents alike).
 
-No old-engine fallbacks: a response missing a field this protocol needs is an error, never a degrade.
+No old-engine fallbacks: a response missing a field this protocol needs is an error, never a degrade,
+and the message says the engine is older than the client and what to do about it.
 
 Only write ops are used, so ``cat`` may be the ``make_catalog_writer()`` proxy (the closed
 ``CATALOG_WRITE_OPS`` whitelist).
@@ -66,7 +77,7 @@ from nexus.catalog.http_catalog_client import (
     MANIFEST_APPEND_MANY_MAX_DOCS,
     MANIFEST_APPEND_SWEEP_CHASHES_CAP,
 )
-from nexus.errors import BatchWriteFailedError
+from nexus.errors import ENGINE_OLDER_THAN_CLIENT_REMEDY, BatchWriteFailedError, EngineOlderThanClientError
 
 __all__ = ["FinishResult", "MultiDocumentImportWriter", "PageWriteResult"]
 
@@ -104,10 +115,11 @@ class FinishResult:
 
 
 class _Doc:
-    __slots__ = ("positions", "tail", "total", "resume", "received", "begun", "written", "failed",
+    __slots__ = ("positions", "max_position", "tail", "total", "resume", "received", "begun", "written", "failed",
                  "prior", "wrote", "sweep_rest", "done", "stamped", "refusal", "collisions")
 
     def __init__(self, total: int, max_position: int, resume: bool) -> None:
+        self.max_position = max_position
         self.positions: set[int] = set()     # every position claimed
         self.tail = max_position + 1         # where a colliding row goes: past every legitimate one
         self.total = total                   # rows the caller will send over the run
@@ -124,6 +136,15 @@ class _Doc:
         self.refusal: str | None = None
         self.collisions = 0
 
+    def release(self) -> None:
+        """Drop what only an OPEN document needs (its claimed positions, its pre-run manifest and the
+        chashes written against it), once the document is stamped, refused or failed: a run over many
+        documents would otherwise hold them all to the end."""
+        self.positions = set()
+        self.prior = []
+        self.wrote = None
+        self.sweep_rest = []
+
 
 class MultiDocumentImportWriter:
     """Write several documents page by page. See the module docstring.
@@ -136,6 +157,10 @@ class MultiDocumentImportWriter:
     stored chash's metadata as ``stored || incoming`` instead of replacing it, so keys another
     document's enrichment set on a shared chunk survive.
     """
+
+    #: The most fence-fail requests :meth:`abort` sends. A document left ``indexing`` and one marked
+    #: ``failed`` are resumed alike, so the mark is a courtesy and a bound is all it needs.
+    ABORT_FENCE_CAP = 50
 
     def __init__(
         self,
@@ -163,6 +188,7 @@ class MultiDocumentImportWriter:
         self._run_id = run_id or uuid.uuid4().hex
         self._docs: dict[str, _Doc] = {}
         self._rows_landed = 0
+        self._sweep_skipped = 0
         self._finished = False
 
     # ── public ────────────────────────────────────────────────────────────────
@@ -173,17 +199,31 @@ class MultiDocumentImportWriter:
         pages included: those rows are owned."""
         return self._rows_landed
 
+    @property
+    def sweep_skipped(self) -> int:
+        """Documents whose deferred sweep the engine could not run (it fails open: the document is
+        complete and the chunks it replaced stay stored, owned by nothing), over the run."""
+        return self._sweep_skipped
+
     def register_document(
         self, doc_id: str, *, total_rows: int, max_position: int, resume: bool = False,
     ) -> None:
         """Declare a document the run will write: *total_rows* rows over the whole run (its last page
         is the one that brings it there), *max_position* the highest position the caller will claim
         for it, and whether it is a *resume* (written with the append form throughout). Registering
-        again is a no-op: a document reached through two owner groups is declared by both with its
-        combined figures."""
+        again with the same figures is a no-op; with other figures it is refused, because the first
+        total would silently win and the document would be stamped complete at the smaller count (two
+        owner groups that resolve to one document are declared ONCE, with their combined figures)."""
         if total_rows < 1:
             raise ValueError(f"register_document({doc_id!r}): total_rows must be positive, got {total_rows}")
-        self._docs.setdefault(doc_id, _Doc(total_rows, max_position, resume))
+        known = self._docs.get(doc_id)
+        if known is None:
+            self._docs[doc_id] = _Doc(total_rows, max_position, resume)
+        elif (known.total, known.max_position, known.resume) != (total_rows, max_position, resume):
+            raise ValueError(
+                f"register_document({doc_id!r}): already registered with total_rows={known.total}, "
+                f"max_position={known.max_position}, resume={known.resume}; got total_rows={total_rows}, "
+                f"max_position={max_position}, resume={resume}")
 
     def failure(self, doc_id: str) -> str | None:
         """Why *doc_id* failed, or None."""
@@ -292,22 +332,33 @@ class MultiDocumentImportWriter:
         return out
 
     def abort(self, error: str) -> None:
-        """Mark the fence of every document begun and neither stamped, refused nor failed ``failed``.
-        Best effort, for a caller that survives a failed run; it stops at the first fence call that
-        fails (the engine is the likely cause, and one more call per document would only repeat it:
-        the documents stay ``indexing``, which the next run of the same file resumes). A no-op once
-        :meth:`finish` returned."""
+        """Mark the fence of the documents begun and neither stamped, refused nor failed ``failed``.
+        Best effort, for a caller that survives a failed run, and bounded: it sends at most
+        :attr:`ABORT_FENCE_CAP` fence calls (each is one request, and a multi-chunk document is open
+        for most of a run) and stops at the first one that fails (the engine is the likely cause). A
+        document not marked stays ``indexing``, which the next run of the same file resumes exactly as
+        it resumes a ``failed`` one. A no-op once :meth:`finish` returned."""
         if self._finished:
             return
+        sent = 0
+        unmarked = 0
+        stop = False
         for doc_id, st in self._docs.items():
             if not st.begun or st.stamped or st.refusal is not None or st.failed is not None:
                 continue
             st.failed = error
+            st.release()
+            if stop or sent >= self.ABORT_FENCE_CAP:
+                unmarked += 1
+                continue
+            sent += 1
             try:
                 self._cat.fail_index_run(doc_id, error)
             except Exception as exc:  # noqa: BLE001 — best-effort fence marking must never mask the original failure
                 _log.warning("nxexp_import_abort_fail_index_run_failed", doc_id=doc_id, error=str(exc))
-                break
+                stop = True                          # the engine is the likely cause: stop asking
+        if unmarked:
+            _log.warning("nxexp_import_abort_fences_left_indexing", documents=unmarked, marked=sent)
 
     # ── requests ──────────────────────────────────────────────────────────────
 
@@ -324,6 +375,7 @@ class MultiDocumentImportWriter:
     def _fail_doc(self, doc_id: str, reason: str, result: PageWriteResult | None = None) -> None:
         st = self._docs[doc_id]
         st.failed = reason
+        st.release()
         if result is not None:
             result.failed[doc_id] = reason
         if not st.begun:
@@ -335,29 +387,53 @@ class MultiDocumentImportWriter:
 
     def _begin(self, doc_ids: list[str], result: PageWriteResult) -> None:
         todo = [d for d in doc_ids if not self._docs[d].begun]
-        if not todo:
-            return
-        resp = self._retrying(
-            self._cat.begin_index_run_many,
-            [{"doc_id": d, "content_hash": self._content_hash, "run_id": self._run_id} for d in todo],
-            self._collection, snapshot_manifest=True)
-        # begin_index_run_many answers {} on a 404: an engine without the fence route. A write
-        # without the fence is not safe (a stale 'complete' stamp could outlive a half-written
-        # document), so that is an error here, not a degrade.
-        if not isinstance(resp, dict) or "failed_doc_ids" not in resp or not isinstance(resp.get("snapshots"), dict):
+        fresh = [d for d in todo if not self._docs[d].resume]
+        resumed = [d for d in todo if self._docs[d].resume]
+        if fresh:
+            self._begin_group(fresh, True, result)
+        if resumed:
+            self._begin_group(resumed, False, result)
+
+    def _begin_group(self, todo: list[str], snapshot: bool, result: PageWriteResult) -> None:
+        """One ``begin_index_run_many`` for *todo*: with the manifest snapshot for fresh documents,
+        without it for resumed ones (which ignore it)."""
+        try:
+            resp = self._retrying(
+                self._cat.begin_index_run_many,
+                [{"doc_id": d, "content_hash": self._content_hash, "run_id": self._run_id} for d in todo],
+                self._collection, snapshot_manifest=snapshot)
+        except EngineOlderThanClientError:
+            # The engine answered without the snapshot AFTER stamping every document of the call
+            # `indexing`: they are fenced, so abort() must be able to mark them.
+            for d in todo:
+                self._docs[d].begun = True
+            raise
+        # begin_index_run_many answers {} on a 404: an engine without the fence route (nothing was
+        # stamped). A write without the fence is not safe (a stale 'complete' stamp could outlive a
+        # half-written document), so that is an error here, not a degrade.
+        if (not isinstance(resp, dict) or "failed_doc_ids" not in resp
+                or (snapshot and not isinstance(resp.get("snapshots"), dict))):
+            if resp:                        # an answer, so the engine did stamp the documents
+                for d in todo:
+                    self._docs[d].begun = True
             raise BatchWriteFailedError(
                 doc_id=todo[0], batch=0,
-                reason="begin_index_run_many returned no 'failed_doc_ids' and 'snapshots'; the engine "
-                       "has no index-run fence route or no manifest snapshot, and a write without "
-                       "them is not safe")
+                reason="begin_index_run_many returned no 'failed_doc_ids'"
+                       + (" and 'snapshots'" if snapshot else "")
+                       + "; the engine has no index-run fence route or no manifest snapshot, and a "
+                         f"write without them is not safe. {ENGINE_OLDER_THAN_CLIENT_REMEDY}")
         failed = {str(d) for d in (resp.get("failed_doc_ids") or ())}
-        snapshots = resp["snapshots"]
+        snapshots = resp.get("snapshots") or {}
         for d in todo:
             st = self._docs[d]
             if d in failed:
                 # Its begin did not land, so it was never fenced; nothing to mark.
                 st.failed = "the engine could not begin its index run"
+                st.release()
                 result.failed[d] = st.failed
+                continue
+            if not snapshot:
+                st.begun = True
                 continue
             snap = snapshots.get(d)
             prior = snap.get("prior_chashes") if isinstance(snap, dict) else None
@@ -370,7 +446,7 @@ class MultiDocumentImportWriter:
                     reason=f"begin_index_run_many returned no usable pre-run manifest "
                            f"(prior_chashes={type(prior).__name__}, prior_count={count!r})")
             st.begun = True
-            if prior and not st.resume:
+            if prior:
                 st.prior = [str(c) for c in prior]
                 st.wrote = set()
 
@@ -407,7 +483,9 @@ class MultiDocumentImportWriter:
         result.embed_embedded += int(resp.get("embed_embedded") or 0)
         result.vectors_supplied += int(resp.get("vectors_supplied") or 0)
         result.vector_mismatches += int(resp.get("vector_mismatches") or 0)
-        result.sweep_skipped += int(resp.get("sweep_skipped") or 0)
+        skipped = int(resp.get("sweep_skipped") or 0)
+        result.sweep_skipped += skipped
+        self._sweep_skipped += skipped
 
     def _check_no_embeds(self, resp: dict, doc_ids: Sequence[str]) -> None:
         """The import supplies a vector with every chunk, so the engine embeds nothing. A count
@@ -424,6 +502,7 @@ class MultiDocumentImportWriter:
         """Record the outcome of a stamp that rode a request this document landed in."""
         st = self._docs[doc_id]
         st.done = True
+        st.release()
         r = refused.get(doc_id)
         if r is None:
             st.stamped = True
@@ -564,7 +643,9 @@ class MultiDocumentImportWriter:
             resp = resp if isinstance(resp, dict) else {}
             failed = {str(d) for d in (resp.get("failed_doc_ids") or ())}
             refused = self._refused_map(resp)
-            result.sweep_skipped += int(resp.get("sweep_skipped") or 0)
+            skipped = int(resp.get("sweep_skipped") or 0)
+            result.sweep_skipped += skipped
+            self._sweep_skipped += skipped
             for d, _ in batch:
                 if d in failed:
                     self._docs[d].sweep_rest = []

@@ -1064,7 +1064,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 return {}
             raise
         if snapshot_manifest and result and not isinstance(result.get("snapshots"), dict):
-            raise RuntimeError(
+            from nexus.errors import EngineOlderThanClientError  # noqa: PLC0415 — deferred: only the refusal needs it
+            raise EngineOlderThanClientError(
                 f"begin_index_run_many: asked for snapshot_manifest for {len(docs)} document(s) in "
                 f"{collection!r} but the response carried no 'snapshots' object; the engine "
                 "predates the manifest snapshot and a sweep computed without it is not safe"
@@ -3775,7 +3776,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 "response carried no 'swept' key; the engine did not run the deferred sweeps"
             )
         if stamps and "complete_refused_count" not in out:
-            raise RuntimeError(
+            from nexus.errors import EngineOlderThanClientError  # noqa: PLC0415 — deferred: only the refusal needs it
+            raise EngineOlderThanClientError(
                 f"append_many ack mismatch for {collection!r}: sent complete for {len(stamps)} "
                 "document(s) but the response carried no 'complete_refused_count' key; the engine "
                 "does not stamp on append_many and the documents are NOT complete"
