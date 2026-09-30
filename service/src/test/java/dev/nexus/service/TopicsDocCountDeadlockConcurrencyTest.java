@@ -67,7 +67,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * superuser {@code CREATE OR REPLACE}, then runs the concurrent repro via a RAW
  * multi-row {@code INSERT INTO topic_assignments} (bypassing {@code
  * assignFromChashes}/{@code DeadlockRetry} entirely — see {@link #rawInsertTask}) for
- * {@value #ROUNDS} rounds, asserting AT LEAST ONE round surfaced SQLSTATE 40P01 —
+ * rounds until the first one surfaces SQLSTATE 40P01, up to {@value #RED_MAX_ROUNDS}
+ * (see {@link #RED_MAX_ROUNDS}), asserting that one did —
  * proving source (1) is real, isolated from source (2) and from the retry belt.
  * Restores the fixed body afterward (in a {@code finally}).
  *
@@ -132,7 +133,40 @@ class TopicsDocCountDeadlockConcurrencyTest {
     private static final int TOPICS_B_OFFSET = 2;
     private static final int TOPICS_B = 5;
 
+    /** Fixed round count for GREEN and ORDERED, which assert on the count across every
+     *  round. */
     private static final int ROUNDS = 20;
+
+    /**
+     * RED's round budget (nexus-yr9b4). RED stops at its first deadlock, so this is only
+     * spent in full when the repro is broken.
+     *
+     * <p>Sizing. Measured against real PG with the pre-fix body and stop-at-first
+     * disabled, 100 rounds per run, three runs before and three after moving the
+     * connection setup in front of the barrier: 38/38/38 and 38/36/37 deadlocked rounds,
+     * a per-round rate near 0.37, and every run saw its first deadlock at round 3. The
+     * rate is structural, not timing: ten consecutive runs each saw the first deadlock at
+     * round 3, and moving the {@code topics} id sequence before the first round moved it
+     * (first deadlock at round 2 to 5 across starting offsets 0, 1, 2, 3, 5, 8, 13, 100
+     * and 1000). So which topic ids a round draws decides whether it deadlocks, most
+     * likely because the trigger's {@code SELECT DISTINCT} visits the shared topics in an
+     * id-dependent order and two writers deadlock only when their orders invert. A CI
+     * container whose sequence starts elsewhere therefore runs a different sequence of
+     * rounds, which is how a fixed 20 could come up empty there. On the pre-refactor
+     * shape, ten runs of 20 rounds gave 99 deadlocked rounds of 200; a fixed 20 at 0.37
+     * misses with probability 0.63^20, about 1e-4 per run if rounds were independent.
+     *
+     * <p>The budget assumes a floor of p = 0.01 per round, 37 times below the measured
+     * rate. The chance that 1400 rounds all miss at p = 0.01 is
+     * 0.99^1400 = exp(1400 * ln 0.99) = exp(-14.07), about 8e-7. At the measured 0.37 it
+     * is 0.63^1400, about 1e-280. A round that does not deadlock costs about 0.04 s
+     * (measured: 700 rounds against the fixed trigger body took 27 s), and one that does
+     * waits out PG's 1 s deadlock_timeout, so the full budget is about a minute and is
+     * reached only when RED is going to fail. Verified to fail for the right reason: with
+     * the downgrade skipped so the fixed body stays live, 700 of 700 rounds saw no
+     * deadlock and the assertion failed.
+     */
+    private static final int RED_MAX_ROUNDS = 1400;
     private static final long BARRIER_AWAIT_S = 30;
 
     PostgreSQLContainer<?> pg;
@@ -187,12 +221,21 @@ class TopicsDocCountDeadlockConcurrencyTest {
             // DeadlockRetry wrap entirely (see class javadoc "TWO INDEPENDENT
             // DEADLOCK SOURCES") — this isolates the TRIGGER's own statement, which
             // is the bead's NAMED root cause and this changeset's actual target.
-            int deadlocks = runRounds("red", ROUNDS, null, this::rawInsertTask);
-            assertThat(deadlocks)
+            //
+            // Runs rounds until the FIRST deadlock, up to RED_MAX_ROUNDS (see that
+            // constant for the sizing). Whether a given round deadlocks is decided by
+            // the plan-dependent traversal order of the trigger's DISTINCT over that
+            // round's topic ids, so it is a per-round chance and a fixed 20 rounds could
+            // miss by luck (nexus-yr9b4: 0 of 20 on a CI runner, once). A miss across the
+            // whole budget is therefore not chance, it means the old trigger shape no
+            // longer reproduces the hazard.
+            RunResult red = runRounds("red", RED_MAX_ROUNDS, null, this::rawInsertTask, true);
+            assertThat(red.deadlocks())
                 .as("pre-fix topics_doc_count_recount_ins/_del body (unordered per-row"
                     + " correlated-subquery UPDATE) must deadlock at least once across "
-                    + ROUNDS + " rounds of concurrent overlapping-topic-set writers"
-                    + " — if this ever reads 0, the repro shape below no longer"
+                    + RED_MAX_ROUNDS + " rounds of concurrent overlapping-topic-set writers"
+                    + " (ran " + red.roundsRun() + ") — a miss over this budget is not"
+                    + " chance (see RED_MAX_ROUNDS): the repro shape below no longer"
                     + " reproduces the production hazard and needs revisiting, not the"
                     + " assertion loosened")
                 .isGreaterThan(0);
@@ -233,7 +276,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
         // deadlock); it is not currently a regression gate for the trigger fix in
         // isolation.
         List<Long> allTopicIds = new ArrayList<>();
-        int escaped = runRounds("green", ROUNDS, allTopicIds, this::assignFromChashesTask);
+        int escaped = runRounds("green", ROUNDS, allTopicIds, this::assignFromChashesTask, false).deadlocks();
         assertThat(escaped)
             .as("no deadlock may escape to the caller across " + ROUNDS + " rounds of the"
                 + " identical concurrent-writer shape that reliably deadlocked pre-fix,"
@@ -306,7 +349,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
     @Order(3)
     void orderedInsertPhase_beltNeverEngages_becauseNoDeadlockOccursAtAll() throws Exception {
         long retriesBefore = DeadlockRetry.retryAttemptCount();
-        int escaped = runRounds("ordered", ROUNDS, null, this::assignFromChashesTask);
+        int escaped = runRounds("ordered", ROUNDS, null, this::assignFromChashesTask, false).deadlocks();
         long retriesDelta = DeadlockRetry.retryAttemptCount() - retriesBefore;
 
         assertThat(escaped)
@@ -330,36 +373,59 @@ class TopicsDocCountDeadlockConcurrencyTest {
         Callable<SQLException> build(String collection, List<ChashTopic> pairs, CyclicBarrier barrier);
     }
 
+    /** @param deadlocks  40P01 errors seen across the rounds run (a round contributes at
+     *                    most one in practice: Postgres aborts a single victim).
+     *  @param roundsRun  rounds actually executed (less than the budget when
+     *                    {@code stopAtFirstDeadlock} ended the run early). */
+    private record RunResult(int deadlocks, int roundsRun) {}
+
     /** @param collectTopicIds when non-null, every round's topic ids are appended, for
      *                         the GREEN phase's post-hoc doc_count correctness check.
      * @param taskFactory      builds each thread's unit of work for the round — the
      *                         raw-INSERT bypass (RED) or the real assignFromChashes
-     *                         call path (GREEN); see the two {@code @Test} methods. */
-    private int runRounds(String label, int rounds, List<Long> collectTopicIds, TaskFactory taskFactory)
+     *                         call path (GREEN); see the two {@code @Test} methods.
+     * @param stopAtFirstDeadlock when true, returns as soon as a round surfaced a 40P01
+     *                         (RED only: it needs one witness, not a count, so the common
+     *                         case ends after a round or two instead of running the whole
+     *                         budget). GREEN and ORDERED must keep this false: they assert
+     *                         on the count across every round. */
+    private RunResult runRounds(String label, int rounds, List<Long> collectTopicIds,
+                                TaskFactory taskFactory, boolean stopAtFirstDeadlock)
             throws Exception {
         int deadlocks = 0;
+        int roundsRun = 0;
         for (int round = 0; round < rounds; round++) {
             String collection = "code__dcdl_" + label + round + "__voyage-code-3__v1";
             List<Long> topicIds = new ArrayList<>(TOPICS_A);
-            for (int i = 0; i < TOPICS_A; i++) {
-                long topicId = seedTopic(collection, "dcdl-" + label + "-" + round + "-topic-" + i);
-                topicIds.add(topicId);
-                seedCentroid(collection, topicId, oneHot(i));
+            List<ChashTopic> pairsA = new ArrayList<>(TOPICS_A);
+            List<ChashTopic> pairsB = new ArrayList<>(TOPICS_B);
+            // One superuser connection seeds the whole round. This used to open a fresh
+            // connection per fixture row (about 30 per round), which made a round cost
+            // about a second and is what kept the RED budget at 20 rounds.
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                // RDR-204 Phase 1 (bead nexus-ft04v.7): topics_collection_fk is a REAL,
+                // always-enforced FK now -- register the collection before insertTopic.
+                PgContainerHelper.insertCollection(
+                    org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT, collection);
+                for (int i = 0; i < TOPICS_A; i++) {
+                    long topicId = repo.insertTopic(TENANT, "dcdl-" + label + "-" + round + "-topic-" + i,
+                        null, collection, 0, "2026-01-01T00:00:00Z", null);
+                    topicIds.add(topicId);
+                    seedCentroid(su, collection, topicId, oneHot(i));
+                }
+                for (int i = 0; i < TOPICS_A; i++) {
+                    String c = hexChash("dcdl-" + label + "-" + round + "-A-" + i);
+                    seedChunk(su, collection, c, oneHot(i));
+                    pairsA.add(new ChashTopic(c, topicIds.get(i)));
+                }
+                for (int i = TOPICS_B_OFFSET; i < TOPICS_B_OFFSET + TOPICS_B; i++) {
+                    String c = hexChash("dcdl-" + label + "-" + round + "-B-" + i);
+                    seedChunk(su, collection, c, oneHot(i));
+                    pairsB.add(new ChashTopic(c, topicIds.get(i)));
+                }
             }
             if (collectTopicIds != null) collectTopicIds.addAll(topicIds);
-
-            List<ChashTopic> pairsA = new ArrayList<>(TOPICS_A);
-            for (int i = 0; i < TOPICS_A; i++) {
-                String c = hexChash("dcdl-" + label + "-" + round + "-A-" + i);
-                seedChunk(collection, c, oneHot(i));
-                pairsA.add(new ChashTopic(c, topicIds.get(i)));
-            }
-            List<ChashTopic> pairsB = new ArrayList<>(TOPICS_B);
-            for (int i = TOPICS_B_OFFSET; i < TOPICS_B_OFFSET + TOPICS_B; i++) {
-                String c = hexChash("dcdl-" + label + "-" + round + "-B-" + i);
-                seedChunk(collection, c, oneHot(i));
-                pairsB.add(new ChashTopic(c, topicIds.get(i)));
-            }
 
             CyclicBarrier barrier = new CyclicBarrier(2);
             Callable<SQLException> taskA = taskFactory.build(collection, pairsA, barrier);
@@ -368,6 +434,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
             Future<SQLException> futB = pool.submit(taskB);
             SQLException exA = futA.get(BARRIER_AWAIT_S, TimeUnit.SECONDS);
             SQLException exB = futB.get(BARRIER_AWAIT_S, TimeUnit.SECONDS);
+            roundsRun++;
 
             if (exA != null) {
                 if ("40P01".equals(exA.getSQLState())) deadlocks++;
@@ -377,8 +444,11 @@ class TopicsDocCountDeadlockConcurrencyTest {
                 if ("40P01".equals(exB.getSQLState())) deadlocks++;
                 else throw exB;
             }
+            if (stopAtFirstDeadlock && deadlocks > 0) break;
         }
-        return deadlocks;
+        System.err.println("DCDL repro label=" + label + " rounds_run=" + roundsRun + " of_budget=" + rounds
+            + " deadlocks=" + deadlocks);
+        return new RunResult(deadlocks, roundsRun);
     }
 
     /** A chash paired with the topic it is meant to be assigned to. */
@@ -404,7 +474,11 @@ class TopicsDocCountDeadlockConcurrencyTest {
         List<ChashTopic> sorted = new ArrayList<>(pairs);
         sorted.sort(java.util.Comparator.comparing(ChashTopic::chashHex));
         return () -> {
-            barrier.await(BARRIER_AWAIT_S, TimeUnit.SECONDS);
+            // Connection checkout, tenant GUC, statement text and parameter binding all
+            // happen BEFORE the barrier, so the two threads are released into
+            // ps.execute() itself. Waiting first and setting up after (as this once did)
+            // let per-thread setup skew decide how far apart the two INSERTs started, and
+            // the trigger's lock-holding window is only a few milliseconds wide.
             try (Connection conn = svcDs.getConnection()) {
                 conn.setAutoCommit(false);
                 PgContainerHelper.setTenant(conn, TenantScope.DEFAULT_TENANT_GUC, TENANT, true);
@@ -423,6 +497,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
                         ps.setLong(p++, ct.topicId());
                         ps.setString(p++, collection);
                     }
+                    barrier.await(BARRIER_AWAIT_S, TimeUnit.SECONDS);
                     ps.execute();
                 }
                 conn.commit();
@@ -573,49 +648,33 @@ class TopicsDocCountDeadlockConcurrencyTest {
 
     // ── fixtures ────────────────────────────────────────────────────────────────
 
-    private long seedTopic(String collection, String label) throws Exception {
-        // RDR-204 Phase 1 (bead nexus-ft04v.7): topics_collection_fk is a REAL,
-        // always-enforced FK now -- register the collection before insertTopic.
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(
-                org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES), TENANT, collection);
-        }
-        return repo.insertTopic(TENANT, label, null, collection, 0, "2026-01-01T00:00:00Z", null);
-    }
-
-    private void seedCentroid(String collection, long topicId, float[] emb) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.taxonomy_centroids"
-                    // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
-                    // nexus-tk070.p6a follow-on) -- no assertion in this class
-                    // reads the label value.
-                    + " (tenant_id, collection, topic_id, label, embedding_" + DIM + ") VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, collection);
-                ps.setLong(3, topicId);
-                ps.setString(4, "seed-centroid-label");
-                ps.setString(5, vectorLiteral(emb));
-                ps.executeUpdate();
-            }
+    private void seedCentroid(Connection su, String collection, long topicId, float[] emb) throws Exception {
+        try (PreparedStatement ps = su.prepareStatement(
+                "INSERT INTO nexus.taxonomy_centroids"
+                // label: taxonomy_centroids.label is NOT NULL (hygiene-001-9b,
+                // nexus-tk070.p6a follow-on) -- no assertion in this class
+                // reads the label value.
+                + " (tenant_id, collection, topic_id, label, embedding_" + DIM + ") VALUES (?, ?, ?, ?, ?::nexus.vector)")) {
+            ps.setString(1, TENANT);
+            ps.setString(2, collection);
+            ps.setLong(3, topicId);
+            ps.setString(4, "seed-centroid-label");
+            ps.setString(5, vectorLiteral(emb));
+            ps.executeUpdate();
         }
     }
 
-    private void seedChunk(String collection, String hexChashValue, float[] emb) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            try (PreparedStatement ps = su.prepareStatement(
-                    "INSERT INTO nexus.chunks"
-                    + " (tenant_id, collection, chash, chunk_text, embedding_" + DIM + ")"
-                    + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
-                ps.setString(1, TENANT);
-                ps.setString(2, collection);
-                ps.setString(3, hexChashValue);
-                ps.setString(4, "seed text " + hexChashValue);
-                ps.setString(5, vectorLiteral(emb));
-                ps.executeUpdate();
-            }
+    private void seedChunk(Connection su, String collection, String hexChashValue, float[] emb) throws Exception {
+        try (PreparedStatement ps = su.prepareStatement(
+                "INSERT INTO nexus.chunks"
+                + " (tenant_id, collection, chash, chunk_text, embedding_" + DIM + ")"
+                + " VALUES (?, ?, decode(?, 'hex'), ?, ?::nexus.vector)")) {
+            ps.setString(1, TENANT);
+            ps.setString(2, collection);
+            ps.setString(3, hexChashValue);
+            ps.setString(4, "seed text " + hexChashValue);
+            ps.setString(5, vectorLiteral(emb));
+            ps.executeUpdate();
         }
     }
 
