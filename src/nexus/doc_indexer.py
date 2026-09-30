@@ -620,8 +620,16 @@ def _heal_failed_document(doc_id: str) -> None:
                 write_failed=result.write_failed,
                 short_of_chunk_count=bool(result.dup_collapsed),
             )
-    except Exception:  # noqa: BLE001 — boundary catch: the heal is advisory; must never mask the original failure
-        _log.warning("index_run_fail_heal_failed", doc_id=doc_id, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 — boundary catch: the heal is advisory; must never mask the original failure
+        # No exc_info: the CLI prints WARNING logs to the terminal, and this
+        # runs inside a failure path whose own error is what the user acts on.
+        # A heal that fails for the same reason the write did (a profile
+        # mismatch, a stopped service) would otherwise print a traceback
+        # beside a clean "Error:" line (nexus-z0o2p.16).
+        _log.warning(
+            "index_run_fail_heal_failed",
+            doc_id=doc_id, error_class=type(exc).__name__, error=str(exc)[:500],
+        )
     finally:
         close = getattr(reader, "close", None)
         if close is not None:
