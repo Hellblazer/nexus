@@ -484,7 +484,16 @@ jobs:
     # which measured 17:05 locally versus 13:33 for the since-deleted SQLite
     # arm and 25-30m on the runners — 3.12 was cancelled at 30m18s under the
     # old cap.
-    timeout-minutes: 25
+    #
+    # nexus-qzxzh: 25m -> 35m. The suite outgrew the n0ful estimate: on
+    # 2026-09-30 passing shards took 18-22m of job time and two of three
+    # develop runs lost one shard to the 25m cap with no failing test
+    # (b6af1878c shard 4 was cancelled at 93% after 24m of tests). The
+    # durations file had been refreshed the day before (3130s recorded,
+    # ~13m per shard), so this is runner speed (~1.6-1.9x the recorded
+    # times), not stale balance. Revisit with a fifth shard if job times
+    # pass 30m.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
