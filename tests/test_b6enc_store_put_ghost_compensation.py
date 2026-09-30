@@ -2148,6 +2148,62 @@ class TestZ0o2p12McpFailedReput:
         assert fail.call_count == 1
         assert rollback.call_count == 1
 
+    def test_killed_at_the_transport_after_the_post_leaves_no_ownerless_chunk(
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Test Plan 8 at the tool: the process dies at the HTTP layer right after the note's one
+        request went out. Whatever reached T3 has an owner row."""
+        import nexus.catalog.http_catalog_client as hcc
+        import nexus.db.http_vector_client as hvc
+
+        class ClientDied(BaseException):
+            pass
+
+        real = hcc.HttpCatalogClient._post_embedding_write
+
+        def kill_after_post(self, path, *a, **k):
+            real(self, path, *a, **k)
+            raise ClientDied()
+
+        monkeypatch.setattr(hcc.HttpCatalogClient, "_post_embedding_write", kill_after_post)
+        content = "z0o2p12 killed at the transport"
+        with pytest.raises(ClientDied):
+            _mcp_store_put_with(local_t3, content, "z0o2p12-killed")
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        (tumbler, _count), = _catalog_rows(catalog_env, "z0o2p12-killed")
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert _present_in(client, self._COLLECTION, [chash]) == {chash}, "control: the request committed"
+        assert _manifest_rows(catalog_env, tumbler) == [(chash,)], "and the chunk has its owner"
+
+    def test_a_timeout_the_manifest_does_not_show_is_unknown_and_keeps_the_row(
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The engine cannot cancel an in-flight embed, so a timeout with no note in the manifest may
+        still commit: 'could not confirm', not 'Nothing was written'; the minted row stays; a late
+        commit lands a whole note and the retry the message recommends is an idempotent replace."""
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+        from nexus.errors import CombinedWriteEmbedTimeoutError
+
+        real = HttpCatalogClient.write_manifest_many
+
+        def timeout(self, docs, *a, **k):
+            raise CombinedWriteEmbedTimeoutError(collection="c", chunk_count=1, original="ReadTimeout")
+
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", timeout)
+        content = "z0o2p12 timeout in flight"
+        result = _mcp_store_put_with(local_t3, content, "z0o2p12-timeout")
+        assert result.startswith("Error") and "could not confirm" in result, result
+        assert "Nothing was written" not in result and "retry is safe" not in result
+        assert len(_catalog_rows(catalog_env, "z0o2p12-timeout")) == 1, "the row must survive"
+
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", real)
+        assert _mcp_store_put_with(local_t3, content, "z0o2p12-timeout").startswith("Stored:")
+        (tumbler, count), = _catalog_rows(catalog_env, "z0o2p12-timeout")
+        assert count == 1
+        assert _manifest_rows(catalog_env, tumbler) == [(hashlib.sha256(content.encode()).hexdigest(),)]
+
     def test_store_put_makes_no_store_put_call(
         self, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

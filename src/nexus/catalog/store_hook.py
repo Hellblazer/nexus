@@ -133,14 +133,13 @@ def _manifest_verify_retry_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-def _read_manifest_chashes_with_retry(catalog_doc_id: str, *, context: str) -> set[str]:
-    """Read *catalog_doc_id*'s current manifest chashes, retrying up to
-    :data:`_MANIFEST_VERIFY_RETRY_ATTEMPTS` times with
-    :data:`_MANIFEST_VERIFY_RETRY_BACKOFF_S` backoff between attempts
-    before giving up (RDR-192 Step 3a fix-round 2, critic (a) / Decision
-    2). Raises :class:`ManifestVerifyUncertainError` — never returns a
-    partial or best-guess result — when EVERY attempt fails: no catalog
-    reader available, or the read itself raises.
+def _read_manifest_rows_with_retry(catalog_doc_id: str, *, context: str) -> list[tuple[int, str]]:
+    """Read *catalog_doc_id*'s current manifest as ``[(position, chash), ...]`` in position
+    order, retrying up to :data:`_MANIFEST_VERIFY_RETRY_ATTEMPTS` times with
+    :data:`_MANIFEST_VERIFY_RETRY_BACKOFF_S` backoff between attempts before giving up
+    (RDR-192 Step 3a fix-round 2, critic (a) / Decision 2). Raises
+    :class:`ManifestVerifyUncertainError` -- never returns a partial or best-guess result --
+    when EVERY attempt fails: no catalog reader available, or the read itself raises.
 
     *context* names the calling situation (e.g. "post-write verify" or
     "write-exception arbitration") so the eventual uncertain-outcome
@@ -158,7 +157,7 @@ def _read_manifest_chashes_with_retry(catalog_doc_id: str, *, context: str) -> s
             reader = make_catalog_reader()
             if reader is None:
                 raise RuntimeError("catalog reader unavailable")  # noqa: TRY301 — converted to ManifestVerifyUncertainError below if every attempt fails
-            return {row.chash for row in reader.get_manifest(catalog_doc_id)}
+            return sorted((int(getattr(row, "position", 0)), row.chash) for row in reader.get_manifest(catalog_doc_id))
         except Exception as exc:  # noqa: BLE001 — retried; converted below if every attempt fails
             last_exc = exc
         finally:
@@ -171,6 +170,11 @@ def _read_manifest_chashes_with_retry(catalog_doc_id: str, *, context: str) -> s
         f"manifest write for {catalog_doc_id}: {context} — verify failed "
         f"after {_MANIFEST_VERIFY_RETRY_ATTEMPTS} attempts: {last_exc}"
     ) from last_exc
+
+
+def _read_manifest_chashes_with_retry(catalog_doc_id: str, *, context: str) -> set[str]:
+    """The chashes of :func:`_read_manifest_rows_with_retry`, as a set (see there)."""
+    return {chash for _position, chash in _read_manifest_rows_with_retry(catalog_doc_id, context=context)}
 
 
 def single_chunk_manifest_metadata(content: str) -> tuple[str, list[dict]]:

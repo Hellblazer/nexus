@@ -39,7 +39,7 @@ def route_note_writes_to(monkeypatch: pytest.MonkeyPatch, t3: Any) -> None:
         store_hook.store_put_manifest_direct(catalog_doc_id, metadatas, collection=collection)
         return note_write.NoteWriteResult(
             catalog_doc_id=catalog_doc_id, collection=collection, chunk_ids=list(ids),
-            chunks_written=len(ids), completed=False,
+            chunks_written=len(ids), completed=bool(content_hash),
         )
 
     monkeypatch.setattr(note_write, "write_note", _write_note)
