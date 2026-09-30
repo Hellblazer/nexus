@@ -397,9 +397,23 @@ things to avoid carefully; they are impossible.
    superseded commit reads the `conclusion` column, not the verdict. A
    `cancelled` job inside a run GitHub did not cancel was not superseded
    (a job past its time limit, for one) and reads `failed`, so rerun it.
-   A `cancelled` job whose run has no post at all reads `cancelled` and
-   exits 4, because the fold cannot tell which it was: the run post is a
-   separate delivery and can be missing, so read the rows.
+   But GitHub also cancels the RUN when the timed-out job was its only real
+   job (Service CI's Java job, twice on 2026-09-30, nexus-rjk2a), so the
+   run post cannot tell a timeout from a supersede; the board history can.
+   A job with an `in_progress` post before its `cancelled` post ran, and
+   reads `failed` (exit 1, its whole run with it) unless a run of the same
+   workflow for a different commit posted its first post between 180 s
+   before and 15 s after the cancellation (`SUPERSEDE_WINDOW_S`,
+   `CLOCK_SKEW_S`; a newer push cancelling an in-progress CI run was
+   measured 60 to 92 s ahead). A `cancelled` job that never started was
+   cancelled while pending and keeps reading `cancelled`. Two known
+   misreadings: a timeout within the window of an unrelated newer push
+   reads `cancelled` (the old reading), and a run cancelled by hand while
+   it ran reads `failed`. The rule needs the job's `in_progress` post to
+   still be on the board. A `cancelled` job whose run has no post at all,
+   and which never started, reads `cancelled` and exits 4, because the
+   fold cannot tell which it was: the run post is a separate delivery and
+   can be missing, so read the rows.
    Subscribe once per session with
    `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
    delivery starts at the subscribe time, and the posts of one wait

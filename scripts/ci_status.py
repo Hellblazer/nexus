@@ -31,6 +31,22 @@ audit of a superseded commit reads conclusions, not verdicts). A
 job with no run post reads ``cancelled``, since the fold cannot tell which
 it was; the run post is a separate delivery and can be missing.
 
+GitHub also gives a job that hit its time limit the conclusion ``cancelled``,
+and cancels the run with it when that job was the run's only real one
+(nexus-rjk2a: Service CI's Java job, measured 2026-09-30, twice), so the
+run-post rule above cannot separate a timeout from a supersede. The board
+history can. A job that has an ``in_progress`` post before its ``cancelled``
+post ran; it reads ``failed`` unless a run of the same workflow for a
+different commit posted its first post within ``SUPERSEDE_WINDOW_S`` before
+the cancellation (a newer push cancelling an in-progress run, measured 60 to
+92 s ahead) or up to ``CLOCK_SKEW_S`` after it. A cancelled job that never
+started is a pending run cancelled, and keeps reading ``cancelled``. This
+reading can be wrong in two ways, both stated: a timeout that lands within
+the window of an unrelated newer push reads ``cancelled`` (as it did before),
+and a run someone cancelled by hand while it ran reads ``failed``. It needs
+the ``in_progress`` post to still be on the board; without it (posts expire)
+the older reading stands.
+
 Exit status: 0 when every job completed green, 1 when any job failed,
 2 when nothing failed but something is still pending, 3 when the topic has
 no post for the commit, 4 when nothing failed or is pending but something
@@ -53,6 +69,13 @@ DEFAULT_TOPIC: str = "nexus-develop"
 GREEN: frozenset[str] = frozenset({"success", "skipped", "neutral"})
 _STATE_RANK: dict[str, int] = {"queued": 0, "in_progress": 1, "completed": 2}
 _PAGE: int = 200
+#: How long before a job's ``cancelled`` post a newer run of its workflow may have
+#: appeared for the cancellation to count as that run superseding it. Measured
+#: 2026-09-30 on run 36733252313: 60 to 92 s (the runner takes a while to stop).
+SUPERSEDE_WINDOW_S: int = 180
+#: Board deliveries can reorder by seconds; a newer run's first post this far AFTER
+#: the cancel post still counts as its cause.
+CLOCK_SKEW_S: int = 15
 #: Exit codes, by precedence: a genuine red outranks a wait, which outranks a supersede.
 EXIT_GREEN: int = 0
 EXIT_FAILED: int = 1
@@ -117,6 +140,39 @@ def _newer(cand: tuple[str, str, str, str], prev: tuple[str, str, str, str] | No
     return prev is None or (_STATE_RANK[cand[0]], cand[3]) >= (_STATE_RANK[prev[0]], prev[3])
 
 
+def _when(ts: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _superseded_by_newer_run(
+    cancelled_at: str, workflow: str, sha: str, own_first: str | None,
+    run_first: dict[tuple[str, int], tuple[str, str]],
+) -> bool:
+    """True when a run of *workflow* for another commit began just before *cancelled_at*.
+
+    *run_first* maps (workflow, run) to that run's earliest post and its sha.
+    A run that began before this run's own first post is not newer. An
+    unparseable cancel time answers True: the caller then keeps the older
+    ``cancelled`` reading rather than call a run failed on a time it cannot read.
+    """
+    cancelled = _when(cancelled_at)
+    own = _when(own_first) if own_first else None
+    if cancelled is None:
+        return True
+    for (wf, _run), (first_at, first_sha) in run_first.items():
+        if wf != workflow or first_sha == sha:
+            continue
+        first = _when(first_at)
+        if first is None or (own is not None and first < own):
+            continue
+        if -CLOCK_SKEW_S <= (cancelled - first).total_seconds() <= SUPERSEDE_WINDOW_S:
+            return True
+    return False
+
+
 def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) -> list[Status]:
     """Latest state per (workflow, job, attempt) of each workflow's chosen run for *sha*.
 
@@ -141,14 +197,24 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
     # (state, conclusion, url, created_at) per key; a Status is built only
     # once its verdict is known, so no Status ever exists without one.
     latest: dict[tuple[str, int | None, str, int], tuple[str, str, str, str]] = {}
+    started: set[tuple[str, int | None, str, int]] = set()
+    run_first: dict[tuple[str, int], tuple[str, str]] = {}
     for created_at, body, dims in posts:
-        if dims.get("from") != "github" or body.get("sha") != sha:
+        if dims.get("from") != "github":
             continue
         state = str(body.get("state", ""))
         if state not in _STATE_RANK:
             continue
+        if (rid := _run_id(body)) is not None:
+            rk = (str(body.get("workflow", "")), rid)
+            if rk not in run_first or created_at < run_first[rk][0]:
+                run_first[rk] = (created_at, str(body.get("sha", "")))
+        if body.get("sha") != sha:
+            continue
         key = (str(body.get("workflow", "")), _run_id(body), str(body.get("job", "")),
                int(body.get("attempt", 1) or 1))
+        if state == "in_progress":
+            started.add(key)
         cand = (state, str(body.get("conclusion") or ""), str(body.get("url", "")), created_at)
         if _newer(cand, latest.get(key)):
             latest[key] = cand
@@ -163,6 +229,18 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
         newest_attempt[(wf, job)] = max(attempt, newest_attempt.get((wf, job), 0))
     current = {k: v for k, v in in_run.items() if k[2] == newest_attempt[(k[0], k[1])]}
     run_conclusion = {wf: v[1] for (wf, job, _a), v in current.items() if job == "" and v[0] == "completed"}
+    # A job that ran and was then cancelled with no newer run of its workflow to
+    # blame hit its time limit (or was cancelled by hand): the run was not superseded.
+    for (wf, run, job, attempt), (state, conclusion, _url, cancelled_at) in latest.items():
+        if not (job and state == "completed" and conclusion == "cancelled"):
+            continue
+        if attempt != newest_attempt.get((wf, job)) or not (run is None or run == chosen.get(wf)):
+            continue
+        if (wf, run, job, attempt) not in started:
+            continue  # cancelled while pending: a supersede or a manual cancel, not a limit
+        own_first = run_first[(wf, run)][0] if run is not None else None
+        if not _superseded_by_newer_run(cancelled_at, wf, sha, own_first, run_first):
+            run_conclusion[wf] = "timed_out"
     return sorted(
         (Status(wf, job, attempt, state, conclusion, url, created_at,
                 _verdict(state, conclusion, run_conclusion.get(wf)))

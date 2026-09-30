@@ -260,6 +260,116 @@ def test_run_rows_sort_before_their_jobs() -> None:
     assert [s.job for s in cs.fold(posts, SHA)] == ["", "zeta"]
 
 
+# ── a job that hit its time limit versus a superseded run (nexus-rjk2a) ──────
+#
+# GitHub gives BOTH a timed-out job and a job cancelled by a newer push the
+# conclusion ``cancelled``, and cancels the run too when the timed-out job was
+# the only real one. What differs on the board is the history: a timed-out job
+# reached ``in_progress`` and no newer run of its workflow began just before
+# its cancel post; a superseded one either never started or was cancelled
+# within seconds to about a minute and a half of a newer run's first post.
+
+RUN = {"from": "github", "kind": "run"}
+NEWER = "e" * 40
+
+
+def _timed_out_service_ci(run: int = 36728708487, sha: str = SHA) -> list:
+    """The posts of Service CI run 36728708487 (2026-09-30), timestamps as posted:
+    the Java job started at 14:23:33, was cancelled at 14:53:54 by its 30-minute
+    limit, and GitHub cancelled the run a second later. No newer Service CI run
+    existed until 14:59."""
+    wf = "Service CI"
+    java = "Java tests + jOOQ codegen drift guard"
+    return [
+        _p("2026-09-30T14:23:15.551795Z", state="queued", job="", dims=RUN, workflow=wf, run=run, sha=sha),
+        _p("2026-09-30T14:23:31.172155Z", state="completed", conclusion="success",
+           job="service change detection", workflow=wf, run=run, sha=sha),
+        _p("2026-09-30T14:23:30.224016Z", state="queued", job=java, workflow=wf, run=run, sha=sha),
+        _p("2026-09-30T14:23:33.981646Z", state="in_progress", job=java, workflow=wf, run=run, sha=sha),
+        _p("2026-09-30T14:53:54.040293Z", state="completed", conclusion="cancelled", job=java,
+           workflow=wf, run=run, sha=sha),
+        _p("2026-09-30T14:53:55.099871Z", state="completed", conclusion="cancelled", job="",
+           dims=RUN, workflow=wf, run=run, sha=sha),
+    ]
+
+
+def test_a_job_that_started_and_hit_its_time_limit_reads_failed() -> None:
+    statuses = cs.fold(_timed_out_service_ci(), SHA)
+    by_job = {s.job: s for s in statuses}
+    assert by_job["Java tests + jOOQ codegen drift guard"].verdict == "failed"
+    assert by_job[""].verdict == "failed"
+    assert by_job["service change detection"].verdict == "green"
+    assert by_job["Java tests + jOOQ codegen drift guard"].conclusion == "cancelled"  # the row still says what GitHub said
+    assert cs.exit_code(statuses) == 1
+
+
+def test_a_timeout_reads_failed_even_with_a_later_run_queued_behind_it() -> None:
+    # Service CI push runs queue behind the run in flight; a newer commit whose
+    # run appeared minutes BEFORE the timeout did not cancel it (cancel-in-
+    # progress is pull_request only), so it must not excuse the timeout.
+    posts = _timed_out_service_ci() + [
+        _p("2026-09-30T14:40:00Z", state="queued", job="", dims=RUN, workflow="Service CI",
+           run=36733834664, sha=NEWER)]
+    statuses = cs.fold(posts, SHA)
+    assert cs.exit_code(statuses) == 1
+
+
+def _superseded_in_progress_python_run(newer_first_post: str) -> list:
+    """A CI run cancelled while its shards were running, the shape of run
+    36733252313 (2026-09-30): the shards started 15:00, were cancelled
+    15:04:59..15:05:03 and the aggregator posted failure."""
+    return [
+        _p("2026-09-30T14:59:10Z", state="queued", job="", dims=RUN, run=36733252313),
+        _p("2026-09-30T14:59:40Z", state="in_progress", job="shard-1", run=36733252313),
+        _p("2026-09-30T14:59:41Z", state="in_progress", job="shard-2", run=36733252313),
+        _p("2026-09-30T15:05:00Z", state="completed", conclusion="cancelled", job="shard-1", run=36733252313),
+        _p("2026-09-30T15:05:03Z", state="completed", conclusion="cancelled", job="shard-2", run=36733252313),
+        _p("2026-09-30T15:05:04Z", state="completed", conclusion="failure", job="pytest-gate", run=36733252313),
+        _p("2026-09-30T15:05:12Z", state="completed", conclusion="cancelled", job="", dims=RUN, run=36733252313),
+        # the newer commit's run, first seen shortly before the cancellations
+        _p(newer_first_post, state="queued", job="", dims=RUN, run=36733834663, sha=NEWER),
+    ]
+
+
+def test_an_in_progress_run_cancelled_by_a_newer_push_still_reads_cancelled() -> None:
+    # Measured: the newer run's first post preceded the cancellations by 60 to 92 s.
+    statuses = cs.fold(_superseded_in_progress_python_run("2026-09-30T15:03:40Z"), SHA)
+    assert {s.job: s.verdict for s in statuses} == {
+        "": "cancelled", "shard-1": "cancelled", "shard-2": "cancelled", "pytest-gate": "cancelled"}
+    assert cs.exit_code(statuses) == 4
+
+
+def test_a_newer_run_of_another_workflow_does_not_excuse_a_timeout() -> None:
+    posts = _timed_out_service_ci() + [
+        _p("2026-09-30T14:53:00Z", state="queued", job="", dims=RUN, workflow="CI", run=7, sha=NEWER)]
+    assert cs.exit_code(cs.fold(posts, SHA)) == 1
+
+
+def test_a_second_run_for_the_same_commit_does_not_excuse_a_timeout() -> None:
+    # GitHub can start two runs for one push (nexus-wqvv9); same sha is not "newer".
+    posts = _timed_out_service_ci() + [
+        _p("2026-09-30T14:53:00Z", state="queued", job="", dims=RUN, workflow="Service CI",
+           run=36728708480, sha=SHA),
+        _p("2026-09-30T14:53:01Z", state="completed", conclusion="cancelled", job="", dims=RUN,
+           workflow="Service CI", run=36728708480, sha=SHA)]
+    assert cs.exit_code(cs.fold(posts, SHA)) == 1
+
+
+def test_a_cancelled_job_that_never_started_still_reads_cancelled() -> None:
+    # No in_progress post: it was cancelled while pending, which is a supersede
+    # or a manual cancel, never a time limit.
+    posts = [p for p in _timed_out_service_ci() if p[1]["state"] != "in_progress"]
+    assert cs.exit_code(cs.fold(posts, SHA)) == 4
+
+
+def test_unparseable_timestamps_keep_the_old_reading() -> None:
+    posts = [_p("t3" if p[1]["state"] == "completed" else "t1", state=p[1]["state"],
+                conclusion=p[1]["conclusion"], job=p[1].get("job", ""), dims=p[2],
+                workflow="Service CI", run=p[1]["run"])
+             for p in _timed_out_service_ci()]
+    assert cs.exit_code(cs.fold(posts, SHA)) == 4
+
+
 # ── against the real engine ─────────────────────────────────────────────────
 
 
