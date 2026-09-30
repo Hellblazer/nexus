@@ -1142,7 +1142,8 @@ public final class CatalogHandler implements HttpHandler {
             List<Map<String, Object>> chunks = parseChunks(rawChunks);
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
             var combined = combinedWriteService.appendCombined(
-                tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes);
+                tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes,
+                parseEmbeddingModel(body.get("embedding_model")));
             if (combined.tokens() > 0) {
                 exchange.getResponseHeaders().set(
                     VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
@@ -1243,12 +1244,27 @@ public final class CatalogHandler implements HttpHandler {
             return;
         }
         boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
-        var combined = combinedWriteService.appendManyCombined(tenant, collection, docs, chunks, forceReEmbed);
+        var combined = combinedWriteService.appendManyCombined(tenant, collection, docs, chunks, forceReEmbed,
+            parseEmbeddingModel(body.get("embedding_model")));
         if (combined.tokens() > 0) {
             exchange.getResponseHeaders().set(
                 VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
         }
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
+    }
+
+    /**
+     * The request's top-level {@code embedding_model} (RDR-223 P1.5): the model that produced
+     * any {@code embedding} a chunk carries. Absent or null is {@code null}; the service refuses
+     * a request whose chunks carry vectors and this is absent, or names another model than the
+     * collection's.
+     */
+    private static String parseEmbeddingModel(Object raw) {
+        if (raw == null) return null;
+        if (!(raw instanceof String model)) {
+            throw new IllegalArgumentException("'embedding_model' must be a string");
+        }
+        return model;
     }
 
     /**
@@ -1297,6 +1313,20 @@ public final class CatalogHandler implements HttpHandler {
             chunk.put("chash", dev.nexus.service.db.Chash.requireCanonical(chashStr, "chunks[" + i + "]"));
             if (!(chunk.get("text") instanceof String)) {
                 throw new IllegalArgumentException("chunks[" + i + "]: 'text' required (string)");
+            }
+            // RDR-223 P1.5: an optional client-supplied vector. Shape only here; its length and
+            // the request's embedding_model are checked against the collection by the service.
+            Object embedding = chunk.get("embedding");
+            if (embedding != null) {
+                if (!(embedding instanceof List<?> nums)) {
+                    throw new IllegalArgumentException("chunks[" + i + "]: 'embedding' must be an array of numbers");
+                }
+                for (Object n : nums) {
+                    if (!(n instanceof Number)) {
+                        throw new IllegalArgumentException(
+                            "chunks[" + i + "]: 'embedding' contains a non-numeric component");
+                    }
+                }
             }
             chunks.add(chunk);
         }
@@ -1423,7 +1453,8 @@ public final class CatalogHandler implements HttpHandler {
             List<Map<String, Object>> chunks = parseChunks(rawChunks);
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
             var combined = combinedWriteService.writeManyCombined(
-                tenant, collection, chunks, docs, complete, sweep, forceReEmbed);
+                tenant, collection, chunks, docs, complete, sweep, forceReEmbed,
+                parseEmbeddingModel(body.get("embedding_model")));
             if (combined.tokens() > 0) {
                 exchange.getResponseHeaders().set(
                     VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));

@@ -5,6 +5,7 @@ package dev.nexus.service.db;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.SuppliedVectorMismatchActivity;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.jooq.DSLContext;
 import org.slf4j.Logger;
@@ -178,6 +179,20 @@ public final class CombinedWriteService {
     public CombinedWriteResult writeManyCombined(String tenant, String collection,
             List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
             Map<String, String> complete, boolean sweep, boolean forceReEmbed) {
+        return writeManyCombined(tenant, collection, chunks, docs, complete, sweep, forceReEmbed, null);
+    }
+
+    /**
+     * {@link #writeManyCombined(String, String, List, List, Map, boolean, boolean)} with
+     * client-supplied vectors (RDR-223 P1.5, bead nexus-z0o2p.6): a chunk may carry {@code
+     * embedding}, and {@code embeddingModel} (the request's {@code embedding_model}) then names
+     * the model that produced it. See {@link #checkSuppliedVectors} for the refusal rules and
+     * {@link #resolveChunks} for how the four cells of Technical Design 2 are applied.
+     */
+    public CombinedWriteResult writeManyCombined(String tenant, String collection,
+            List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
+            Map<String, String> complete, boolean sweep, boolean forceReEmbed, String embeddingModel) {
+        checkSuppliedVectors(tenant, collection, chunks, embeddingModel);
         ResolvedBatch batch = resolveChunks(tenant, collection, chunks, forceReEmbed);
 
         // Phase 3: dispatch — every actual WRITE happens inside this call,
@@ -203,6 +218,8 @@ public final class CombinedWriteService {
         response.put("chunks_deduped", batch.deduped());
         response.put("embed_skipped", batch.skipped());
         response.put("embed_embedded", batch.embedded());
+        response.put("vectors_supplied", batch.supplied());
+        response.put("vector_mismatches", batch.mismatches());
         return new CombinedWriteResult(response, batch.tokens());
     }
 
@@ -242,10 +259,22 @@ public final class CombinedWriteService {
     public CombinedWriteResult appendCombined(String tenant, String collection, String docId,
             List<Map<String, Object>> rows, List<Map<String, Object>> chunks, boolean forceReEmbed,
             List<String> sweepChashes) {
+        return appendCombined(tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes, null);
+    }
+
+    /**
+     * {@link #appendCombined(String, String, String, List, List, boolean, List)} with
+     * client-supplied vectors (RDR-223 P1.5, bead nexus-z0o2p.6); see {@link
+     * #writeManyCombined(String, String, List, List, Map, boolean, boolean, String)}.
+     */
+    public CombinedWriteResult appendCombined(String tenant, String collection, String docId,
+            List<Map<String, Object>> rows, List<Map<String, Object>> chunks, boolean forceReEmbed,
+            List<String> sweepChashes, String embeddingModel) {
         if (docId == null || docId.isBlank()) {
             throw new IllegalArgumentException("'doc_id' required");
         }
         CatalogRepository.normalizeSweepChashes(sweepChashes);   // size check first: cheapest refusal
+        checkSuppliedVectors(tenant, collection, chunks, embeddingModel);
         catalogRepo.requireDocumentRegistered(tenant, docId);
 
         java.util.Set<String> referenced = new HashSet<>();
@@ -270,6 +299,8 @@ public final class CombinedWriteService {
         response.put("chunks_deduped", batch.deduped());
         response.put("embed_skipped", batch.skipped());
         response.put("embed_embedded", batch.embedded());
+        response.put("vectors_supplied", batch.supplied());
+        response.put("vector_mismatches", batch.mismatches());
         outcome.addSweepFieldsTo(response);
         return new CombinedWriteResult(response, batch.tokens());
     }
@@ -289,6 +320,18 @@ public final class CombinedWriteService {
      */
     public CombinedWriteResult appendManyCombined(String tenant, String collection,
             List<Map<String, Object>> docs, List<Map<String, Object>> chunks, boolean forceReEmbed) {
+        return appendManyCombined(tenant, collection, docs, chunks, forceReEmbed, null);
+    }
+
+    /**
+     * {@link #appendManyCombined(String, String, List, List, boolean)} with client-supplied
+     * vectors (RDR-223 P1.5, bead nexus-z0o2p.6); see {@link
+     * #writeManyCombined(String, String, List, List, Map, boolean, boolean, String)}.
+     */
+    public CombinedWriteResult appendManyCombined(String tenant, String collection,
+            List<Map<String, Object>> docs, List<Map<String, Object>> chunks, boolean forceReEmbed,
+            String embeddingModel) {
+        checkSuppliedVectors(tenant, collection, chunks, embeddingModel);
         // Size-check every document's sweep list BEFORE the embed: the cheapest refusal.
         for (Map<String, Object> d : docs) {
             if (d.get("sweep_chashes") instanceof List<?> l) {
@@ -319,12 +362,89 @@ public final class CombinedWriteService {
         response.put("chunks_deduped", batch.deduped());
         response.put("embed_skipped", batch.skipped());
         response.put("embed_embedded", batch.embedded());
+        response.put("vectors_supplied", batch.supplied());
+        response.put("vector_mismatches", batch.mismatches());
         return new CombinedWriteResult(response, batch.tokens());
     }
 
     /** Output of the dedupe / existence-partition / embed phases. */
     private record ResolvedBatch(Map<String, CatalogRepository.ResolvedChunk> resolved,
-                                 int deduped, int skipped, int embedded, long tokens) {}
+                                 int deduped, int skipped, int embedded, int supplied,
+                                 int mismatches, long tokens) {}
+
+    /**
+     * RDR-223 P1.5 (bead nexus-z0o2p.6) -- validate every client-supplied vector BEFORE any
+     * transaction or embed, and refuse the WHOLE request on the first problem: a chunk's {@code
+     * embedding} must be an array of finite numbers whose length is the collection's dimension,
+     * and the request's {@code embedding_model} (required as soon as any chunk carries a vector)
+     * must equal the collection's registered {@code embedding_model} (F-8). Indexes in the
+     * messages are into {@code chunks} as the client sent it. A request with no vectors is not
+     * checked at all, so an {@code embedding_model} riding without vectors is ignored.
+     *
+     * @param embeddingModel the request's top-level {@code embedding_model}, or {@code null}
+     * @throws IllegalArgumentException naming both values on a mismatch (mapped to 400)
+     */
+    private void checkSuppliedVectors(String tenant, String collection,
+                                      List<Map<String, Object>> chunks, String embeddingModel) {
+        if (chunks == null) return;
+        int first = -1;
+        for (int i = 0; i < chunks.size(); i++) {
+            if (chunks.get(i).get("embedding") != null) { first = i; break; }
+        }
+        if (first < 0) return;
+        if (collection == null || collection.isBlank()) {
+            throw new IllegalArgumentException("'collection' is required and must be non-blank");
+        }
+        CollectionRow row = CollectionRegistry.lookup(tenantScope, tenant, collection);
+        if (embeddingModel == null || embeddingModel.isBlank()) {
+            throw new IllegalArgumentException("'embedding_model' is required when a chunk carries an"
+                + " 'embedding' (chunks[" + first + "] does); collection '" + collection
+                + "' is registered with embedding_model '" + row.embeddingModel() + "'");
+        }
+        if (!embeddingModel.equals(row.embeddingModel())) {
+            throw new IllegalArgumentException("embedding_model '" + embeddingModel
+                + "' does not match collection '" + collection + "' embedding_model '"
+                + row.embeddingModel() + "'; nothing was stored");
+        }
+        for (int i = first; i < chunks.size(); i++) {
+            float[] v = toFloatArray(chunks.get(i).get("embedding"), "chunks[" + i + "].embedding");
+            if (v != null && v.length != row.dimension()) {
+                throw new IllegalArgumentException("chunks[" + i + "].embedding has " + v.length
+                    + " dimensions; collection '" + collection + "' (embedding_model '"
+                    + row.embeddingModel() + "') has " + row.dimension() + "; nothing was stored");
+            }
+        }
+    }
+
+    /**
+     * A chunk's {@code embedding} as a {@code float[]}: a {@code float[]} as is, or a list of
+     * numbers (what Jackson hands the engine). {@code null} in, {@code null} out.
+     *
+     * @throws IllegalArgumentException for anything else, or a non-finite component
+     */
+    static float[] toFloatArray(Object raw, String what) {
+        if (raw == null) return null;
+        if (raw instanceof float[] f) {
+            for (float x : f) {
+                if (!Float.isFinite(x)) throw new IllegalArgumentException(what + " contains a non-finite component");
+            }
+            return f;
+        }
+        if (!(raw instanceof List<?> nums)) {
+            throw new IllegalArgumentException(what + " must be an array of numbers");
+        }
+        float[] out = new float[nums.size()];
+        for (int i = 0; i < out.length; i++) {
+            if (!(nums.get(i) instanceof Number n)) {
+                throw new IllegalArgumentException(what + " contains a non-numeric component");
+            }
+            out[i] = n.floatValue();
+            if (!Float.isFinite(out[i])) {
+                throw new IllegalArgumentException(what + " contains a non-finite component");
+            }
+        }
+        return out;
+    }
 
     /**
      * Phases 1-2b, shared by {@link #writeManyCombined} and {@link #appendCombined}:
@@ -363,8 +483,12 @@ public final class CombinedWriteService {
         List<String> dedupChashes = new ArrayList<>(dedup.keySet());
         List<String> dedupTexts   = new ArrayList<>(dedupChashes.size());
         List<Map<String, Object>> dedupMetas = new ArrayList<>(dedupChashes.size());
+        // RDR-223 P1.5: the client-supplied vector of each deduped chunk, or null. First
+        // occurrence wins, like the text. Already validated by checkSuppliedVectors.
+        List<float[]> dedupVectors = new ArrayList<>(dedupChashes.size());
         for (String chash : dedupChashes) {
             Map<String, Object> c = dedup.get(chash);
+            dedupVectors.add(toFloatArray(c.get("embedding"), "chunks[].embedding"));
             Object rawText = c.get("text");
             String text = stripNul(rawText instanceof String s ? s : "");
             dedupTexts.add(text);
@@ -434,6 +558,8 @@ public final class CombinedWriteService {
         // PgVectorRepository.NeedEmbedResolution's javadoc for the identical
         // distinction on the direct upsert-chunks path.
         Set<Integer> originalAbsentIdx = new HashSet<>();
+        // RDR-223 P1.5: chashes whose stored vector (identical text) differs from the supplied one.
+        List<String> mismatchedChashes = new ArrayList<>();
         List<Integer> needEmbedIdx = dedupChashes.isEmpty() ? new ArrayList<>()
             : DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: SHARED sweep gate first, like every manifest
@@ -451,6 +577,7 @@ public final class CombinedWriteService {
                 // PgVectorRepository.upsertChunksInternal's identical racedThisWrite
                 // reset for the full rationale).
                 originalAbsentIdx.clear();
+                mismatchedChashes.clear();
                 List<Integer> need = new ArrayList<>();
                 List<Integer> metadataOnly = new ArrayList<>();
                 for (int i = 0; i < dedupChashes.size(); i++) {
@@ -472,6 +599,26 @@ public final class CombinedWriteService {
                 Runnable existencePartitionHook = afterExistencePartitionHookForTests;
                 if (existencePartitionHook != null) {
                     existencePartitionHook.run();
+                }
+                // RDR-223 P1.5, Technical Design 2 (R-14): an existing chash (identical text)
+                // that also carries a supplied vector KEEPS its stored vector. Compare the
+                // two so a disagreement is counted and logged, never written.
+                List<Integer> withSupplied = new ArrayList<>();
+                for (int i : metadataOnly) {
+                    if (dedupVectors.get(i) != null) withSupplied.add(i);
+                }
+                if (!withSupplied.isEmpty()) {
+                    List<String> hexes = new ArrayList<>(withSupplied.size());
+                    for (int i : withSupplied) hexes.add(dedupChashes.get(i));
+                    Map<String, float[]> storedVectors = selectStoredVectors(ctx, ch, tenant, collection, hexes);
+                    for (int i : withSupplied) {
+                        float[] stored = storedVectors.get(dedupChashes.get(i));
+                        // A chash whose vector cannot be read back (concurrently deleted) is
+                        // not a mismatch: the zero-row reroute below re-stores it.
+                        if (stored != null && !java.util.Arrays.equals(stored, dedupVectors.get(i))) {
+                            mismatchedChashes.add(dedupChashes.get(i));
+                        }
+                    }
                 }
                 if (!metadataOnly.isEmpty()) {
                     // A chash present at the existence SELECT above but
@@ -502,9 +649,25 @@ public final class CombinedWriteService {
             needEmbedResolvedHook.run();
         }
 
+        if (!mismatchedChashes.isEmpty()) {
+            SuppliedVectorMismatchActivity.record(mismatchedChashes.size());
+            log.info("event=supplied_vector_mismatch collection={} mismatched={} chashes={}",
+                     collection, mismatchedChashes.size(),
+                     String.join(",", mismatchedChashes.subList(0, Math.min(8, mismatchedChashes.size()))));
+        }
+
+        // RDR-223 P1.5: a chunk that needs writing AND carries a supplied vector stores that
+        // vector as-is (no embedder call); only the rest go to the embedder. A supplied vector
+        // also wins under force_re_embed and for a content-divergent existing chash: both mean
+        // "write this chunk", and the client already computed the vector to write.
         List<String> textsToEmbed = new ArrayList<>(needEmbedIdx.size());
+        int suppliedCount = 0;
         for (int idx : needEmbedIdx) {
-            textsToEmbed.add(dedupTexts.get(idx));
+            if (dedupVectors.get(idx) != null) {
+                suppliedCount++;
+            } else {
+                textsToEmbed.add(dedupTexts.get(idx));
+            }
         }
 
         // nexus-acvi7: the existence-partition above is otherwise completely
@@ -516,10 +679,10 @@ public final class CombinedWriteService {
         // partition and BEFORE the embed call below (2.5(a) of T2
         // [22162]) — this is deliberately the FIRST log line
         // CombinedWriteService ever emits.
-        int embeddedCount = needEmbedIdx.size();
-        int skippedCount  = dedupChashes.size() - embeddedCount;
-        log.info("event=combined_write_embed_partition collection={} deduped={} skipped={} embedded={} force_re_embed={}",
-                  collection, dedupChashes.size(), skippedCount, embeddedCount, forceReEmbed);
+        int embeddedCount = textsToEmbed.size();
+        int skippedCount  = dedupChashes.size() - needEmbedIdx.size();
+        log.info("event=combined_write_embed_partition collection={} deduped={} skipped={} embedded={} supplied={} force_re_embed={}",
+                  collection, dedupChashes.size(), skippedCount, embeddedCount, suppliedCount, forceReEmbed);
 
         // Phase 2b: embed OUTSIDE any transaction — the existence-check
         // transaction above has already committed, and no per-doc manifest
@@ -543,9 +706,11 @@ public final class CombinedWriteService {
         }
 
         Map<String, CatalogRepository.ResolvedChunk> resolved = new HashMap<>();
+        int nextEmbedding = 0;
         for (int k = 0; k < needEmbedIdx.size(); k++) {
             int idx = needEmbedIdx.get(k);
             String chash = dedupChashes.get(idx);
+            float[] supplied = dedupVectors.get(idx);
             String metadataJson;
             try {
                 metadataJson = CatalogRepository.MAPPER.writeValueAsString(dedupMetas.get(idx));
@@ -553,13 +718,16 @@ public final class CombinedWriteService {
                 throw new IllegalArgumentException(
                     "chunks[].metadata for chash '" + chash + "' is not JSON-serializable", e);
             }
+            // A supplied vector cost no embed, so a race on it is not a duplicate embed:
+            // originalAbsent (which feeds the raced-embed counter) stays false for it.
             resolved.put(chash,
-                new CatalogRepository.ResolvedChunk(dedupTexts.get(idx), embeddings.get(k), metadataJson,
-                    originalAbsentIdx.contains(idx)));
+                new CatalogRepository.ResolvedChunk(dedupTexts.get(idx),
+                    supplied != null ? supplied : embeddings.get(nextEmbedding++), metadataJson,
+                    supplied == null && originalAbsentIdx.contains(idx)));
         }
 
         return new ResolvedBatch(resolved, dedupChashes.size(), skippedCount, embeddedCount,
-            embedResult.tokens());
+            suppliedCount, mismatchedChashes.size(), embedResult.tokens());
     }
 
     /**
@@ -579,6 +747,19 @@ public final class CombinedWriteService {
             CollectionRegistry.requireRegistered(ctx, tenant, collection);
             return null;
         });
+    }
+
+    /** The stored vector of each of {@code chashes} that exists in the collection (RDR-223 P1.5). */
+    private static Map<String, float[]> selectStoredVectors(DSLContext ctx, DimTables.ChunkTable ch,
+            String tenant, String collection, List<String> chashes) {
+        Map<String, float[]> out = new HashMap<>();
+        ctx.select(ch.chash(), ch.embedding()).from(ch.table())
+           .where(ch.tenantId().eq(tenant)
+                  .and(ch.collection().eq(collection))
+                  .and(ch.chash().in(chashes)))
+           .fetch()
+           .forEach(r -> { if (r.value2() != null) out.put(r.value1(), r.value2().floats()); });
+        return out;
     }
 
     private static Map<String, String> selectExistingText(DSLContext ctx, DimTables.ChunkTable ch,

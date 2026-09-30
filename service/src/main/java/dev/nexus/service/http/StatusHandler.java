@@ -7,6 +7,7 @@ import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedActivitySnapshot;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.RacedEmbedActivity;
+import dev.nexus.service.vectors.SuppliedVectorMismatchActivity;
 
 import java.io.IOException;
 import java.util.Map;
@@ -32,7 +33,14 @@ import java.util.function.Supplier;
  *    "deadline_aborts_total":0,"admission_refusals_total":0},
  *  "embedder_activity":{"bge-base-en-v15-768":{...same shape...}},
  *  "raced_embeds_total":0,
+ *  "supplied_vector_mismatches_total":0,
  *  "process_start_time":"2026-09-12T09:00:00Z"}</pre>
+ *
+ * <p>{@code supplied_vector_mismatches_total} (RDR-223 P1.5, bead nexus-z0o2p.6, ADDITIVE) is
+ * a process-wide, lifetime counter (see {@link SuppliedVectorMismatchActivity}) of client-supplied
+ * vectors the combined write routes did not store because the chash already had a stored vector
+ * for the same text and the two differed. Top-level for the same reason as {@code
+ * raced_embeds_total}: it has no embedder dimension.
  *
  * <p>{@code raced_embeds_total} (RDR-222 Phase 0, bead nexus-ulrjq, ADDITIVE) is a
  * process-wide, lifetime counter (see {@link RacedEmbedActivity}) of chashes a
@@ -177,6 +185,10 @@ public final class StatusHandler implements HttpHandler {
         // RDR-222 Phase 0 (bead nexus-ulrjq), [additive]: process-wide lifetime
         // counter, not per-embedder — see this class's own javadoc.
         body.append(",\"raced_embeds_total\":").append(RacedEmbedActivity.total());
+
+        // RDR-223 P1.5 (bead nexus-z0o2p.6), [additive]: same shape and lifetime as the
+        // raced-embed counter above.
+        body.append(",\"supplied_vector_mismatches_total\":").append(SuppliedVectorMismatchActivity.total());
 
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2), [additive]:
         // VersionHandler.startTimeIso is the SAME rendering /version's field of

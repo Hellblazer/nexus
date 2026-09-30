@@ -484,6 +484,112 @@ class CatalogHandlerAppendChunksTest {
         assertThat(ex.status).isEqualTo(503);
     }
 
+    // ── client-supplied vectors (RDR-223 P1.5, bead nexus-z0o2p.6) ──────────────
+
+    private static String vectorJson(int dim, double base) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < dim; i++) {
+            if (i > 0) sb.append(',');
+            sb.append(base + i * 0.001);
+        }
+        return sb.append(']').toString();
+    }
+
+    @Test
+    void vectors_onAppend_areStoredWithoutAnEmbed_andRefusedOnAWrongModelOrDimension() throws Exception {
+        registerDoc("aph.v1");
+        String c = ch("aphv1-c");
+        int before = embeds.get();
+
+        CapturingExchange ok = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.v1\",\"collection\":\"" + COLLECTION + "\",\"embedding_model\":\"minilm-l6-v2-384\","
+            + "\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"aphv1 c\",\"embedding\":" + vectorJson(384, 0.5) + "}]}");
+        handle(handler, ok);
+        assertThat(ok.status).isEqualTo(200);
+        assertThat(ok.bodyString()).contains("\"vectors_supplied\":1").contains("\"embed_embedded\":0")
+            .contains("\"chunks_written\":1");
+        assertThat(embeds.get() - before).as("no embedder call for a supplied vector").isZero();
+        assertThat(ok.responseHeaders.containsKey(VectorHandler.USAGE_TOKENS_HEADER)).isFalse();
+
+        String d = ch("aphv1-d");
+        CapturingExchange wrongModel = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.v1\",\"collection\":\"" + COLLECTION + "\",\"embedding_model\":\"voyage-code-3\","
+            + "\"rows\":[{\"position\":1,\"chash\":\"" + d + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + d + "\",\"text\":\"d\",\"embedding\":" + vectorJson(384, 0.1) + "}]}");
+        handle(handler, wrongModel);
+        assertThat(wrongModel.status).isEqualTo(400);
+        assertThat(wrongModel.bodyString()).contains("voyage-code-3").contains("minilm-l6-v2-384");
+
+        CapturingExchange wrongDim = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.v1\",\"collection\":\"" + COLLECTION + "\",\"embedding_model\":\"minilm-l6-v2-384\","
+            + "\"rows\":[{\"position\":1,\"chash\":\"" + d + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + d + "\",\"text\":\"d\",\"embedding\":" + vectorJson(383, 0.1) + "}]}");
+        handle(handler, wrongDim);
+        assertThat(wrongDim.status).isEqualTo(400);
+        assertThat(wrongDim.bodyString()).contains("chunks[0]").contains("383").contains("384");
+
+        CapturingExchange noModel = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.v1\",\"collection\":\"" + COLLECTION + "\","
+            + "\"rows\":[{\"position\":1,\"chash\":\"" + d + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + d + "\",\"text\":\"d\",\"embedding\":" + vectorJson(384, 0.1) + "}]}");
+        handle(handler, noModel);
+        assertThat(noModel.status).isEqualTo(400);
+        assertThat(noModel.bodyString()).contains("embedding_model");
+        assertThat(repo.getManifest(TENANT, "aph.v1")).as("only the accepted append committed").hasSize(1);
+    }
+
+    @Test
+    void vectors_onWriteManyAndAppendMany_areAccepted() throws Exception {
+        registerDoc("aph.v2");
+        registerDoc("aph.v3");
+        String a = ch("aphv2-a"), b = ch("aphv3-b");
+        int before = embeds.get();
+
+        CapturingExchange wm = post("/v1/catalog/manifest/write_many",
+            "{\"collection\":\"" + COLLECTION + "\",\"embedding_model\":\"minilm-l6-v2-384\","
+            + "\"docs\":[{\"doc_id\":\"aph.v2\",\"rows\":[{\"position\":0,\"chash\":\"" + a + "\"}]}],"
+            + "\"chunks\":[{\"chash\":\"" + a + "\",\"text\":\"a\",\"embedding\":" + vectorJson(384, 0.2) + "}]}");
+        handle(handler, wm);
+        assertThat(wm.status).isEqualTo(200);
+        assertThat(wm.bodyString()).contains("\"vectors_supplied\":1").contains("\"chunks_written\":1");
+
+        CapturingExchange am = post("/v1/catalog/manifest/append_many",
+            "{\"collection\":\"" + COLLECTION + "\",\"embedding_model\":\"minilm-l6-v2-384\","
+            + "\"docs\":[{\"doc_id\":\"aph.v3\",\"rows\":[{\"position\":0,\"chash\":\"" + b + "\"}]}],"
+            + "\"chunks\":[{\"chash\":\"" + b + "\",\"text\":\"b\",\"embedding\":" + vectorJson(384, 0.3) + "}]}");
+        handle(handler, am);
+        assertThat(am.status).isEqualTo(200);
+        assertThat(am.bodyString()).contains("\"vectors_supplied\":1").contains("\"docs\":1");
+        assertThat(embeds.get() - before).isZero();
+    }
+
+    @Test
+    void vectors_malformedShapes_400() throws Exception {
+        registerDoc("aph.v4");
+        String c = ch("aphv4-c");
+        CapturingExchange notArray = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.v4\",\"collection\":\"" + COLLECTION + "\",\"embedding_model\":\"minilm-l6-v2-384\","
+            + "\"rows\":[],\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"c\",\"embedding\":\"nope\"}]}");
+        handle(handler, notArray);
+        assertThat(notArray.status).isEqualTo(400);
+        assertThat(notArray.bodyString()).contains("chunks[0]").contains("'embedding' must be an array of numbers");
+
+        CapturingExchange nonNumeric = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.v4\",\"collection\":\"" + COLLECTION + "\",\"embedding_model\":\"minilm-l6-v2-384\","
+            + "\"rows\":[],\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"c\",\"embedding\":[0.1,\"x\"]}]}");
+        handle(handler, nonNumeric);
+        assertThat(nonNumeric.status).isEqualTo(400);
+        assertThat(nonNumeric.bodyString()).contains("non-numeric");
+
+        CapturingExchange badModelType = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.v4\",\"collection\":\"" + COLLECTION + "\",\"embedding_model\":7,"
+            + "\"rows\":[],\"chunks\":[]}");
+        handle(handler, badModelType);
+        assertThat(badModelType.status).isEqualTo(400);
+        assertThat(badModelType.bodyString()).contains("'embedding_model' must be a string");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     private void handle(CatalogHandler h, CapturingExchange ex) throws Exception {

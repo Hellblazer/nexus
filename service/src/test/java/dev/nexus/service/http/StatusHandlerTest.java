@@ -188,6 +188,19 @@ class StatusHandlerTest {
     }
 
     @Test
+    void suppliedVectorMismatchesTotal_topLevelFieldReflectsTheGlobalCounterDelta() throws Exception {
+        // RDR-223 P1.5 (bead nexus-z0o2p.6), [additive]: same delta discipline as
+        // raced_embeds_total above.
+        start(new StatusHandler(null));
+        long before = get().get("supplied_vector_mismatches_total").asLong();
+
+        dev.nexus.service.vectors.SuppliedVectorMismatchActivity.record(2);
+
+        long after = get().get("supplied_vector_mismatches_total").asLong();
+        assertThat(after - before).isEqualTo(2L);
+    }
+
+    @Test
     void processStartTime_reflectsTheExplicitlyProvidedInstant() throws Exception {
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2): production
         // wiring (NexusService) passes VersionHandler's OWN processStartMillis()
