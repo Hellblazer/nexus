@@ -176,7 +176,10 @@ def _is_transient_write_error(exc: BaseException) -> bool:
     ``__context__`` too, and is right to for its manifest-retry and eviction uses; this site is the
     one that turns a classification into "skip the file".) A genuine connect failure that the
     client's retry could not outlast is itself a transport error at the top level, so it still
-    defers.
+    defers. The same rule aborts the run when the client's re-resolve gives up: it raises
+    ``ServiceEndpointUnresolvableError`` (a ``RuntimeError``, no ``from``) inside the handler of
+    the ``ConnectError`` that triggered it, after its bounded lease wait. That is deliberate:
+    an endpoint that cannot be resolved would make every remaining file wait out the same bound.
     """
     import httpx  # noqa: PLC0415 — deferred: only the failure arm needs the type
 

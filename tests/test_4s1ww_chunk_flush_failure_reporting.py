@@ -377,6 +377,9 @@ def test_index_repo_deferral_warning_prints_with_a_taxonomy_failure(runner, repo
     assert re.search(_DEFERRED_LINE, result.stdout), result.stdout
     assert "2/5 taxonomy-assign batch(es) failed" in result.stdout, result.stdout
     assert result.output.count("Error:") == 1, result.output        # one non-zero exit, one message
+    error_line = next(line for line in result.output.splitlines() if line.startswith("Error:"))
+    assert "deferred on a transient write error" in error_line, error_line   # deferral outranks taxonomy
+    assert "(nexus-7lw6a)" not in error_line, error_line
 
 
 def test_index_repo_deferral_warning_prints_before_an_earlier_failure_raises(runner, repo_dir, mock_reg):

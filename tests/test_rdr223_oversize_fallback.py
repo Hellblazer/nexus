@@ -575,6 +575,17 @@ def test_an_application_error_raised_in_a_transport_handler_without_from_is_not_
     assert _transient(exc) is False
 
 
+def test_an_endpoint_the_client_could_not_re_resolve_aborts_the_run() -> None:
+    """The client's re-resolve gives up with ``ServiceEndpointUnresolvableError`` raised inside
+    the ConnectError handler that triggered it; the file is not deferred."""
+    from nexus.db.service_endpoint import ServiceEndpointUnresolvableError  # noqa: PLC0415
+
+    exc = _raised_inside_a_handler(
+        httpx.ConnectError("first", request=_REQ),
+        ServiceEndpointUnresolvableError("lease not republished"))
+    assert _transient(exc) is False
+
+
 def test_a_permanent_400_after_a_transport_error_propagates_from_the_writer(
     tmp_path, monkeypatch,
 ) -> None:
