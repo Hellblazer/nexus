@@ -432,6 +432,23 @@ class UnchunkableContentError(NexusError):
         super().__init__(message)
 
 
+class CatalogIdentityMissingError(NexusError):
+    """A document reached the chunk write with no catalog document to own its chunks.
+
+    RDR-223 (nexus-z0o2p.13): ``doc_indexer._index_document`` writes a document's
+    chunks and their owner rows as one request, and there is no owner row without a
+    catalog document. Before, a document whose pre-flight registration returned no
+    identity had its chunks written ownerless (hidden from every read by ``live(c)``
+    until the reaper removed them) and the run reported success unless a summary
+    collector happened to be active. Now the write is refused before anything lands,
+    the run fails, and ``_record_manifest_identity_drop`` still feeds the batch
+    summaries. A per-record-raisable member of :data:`PER_RECORD_SURVIVABLE_
+    EXCEPTIONS`: one record without identity must fail THAT record, never abort the
+    rest of a batch. A plain ``NexusError`` subclass taking a positional message,
+    like the SourceUri pair above.
+    """
+
+
 class PutOversizedError(NexusError):
     """A ``put``-path write was refused because the document exceeds the
     T3 per-document byte quota (``QUOTAS.MAX_DOCUMENT_BYTES``, the
@@ -772,6 +789,10 @@ class ManifestAppendManyUnsupportedError(NexusError):
 #: dispatches the second. One record naming a collection that disagrees with its
 #: document's home must fail THAT record — aborting the rest is precisely the
 #: regression class this tuple exists to prevent (nexus-2fyb/qo84l/9800y/hb10j).
+#: CatalogIdentityMissingError (nexus-z0o2p.13, RDR-223) fires from
+#: ``_index_document`` when a document's registration returned no identity and so
+#: its chunks have no owner to be written with; one such record must fail THAT
+#: record only.
 PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
     ChunkLandingUnverifiedError,
     IndexRunVerifyRefused,
@@ -780,4 +801,5 @@ PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
     UnextractableContentError,
     SourceUriNotFoundError,
     SourceUriCollectionMismatchError,
+    CatalogIdentityMissingError,
 )

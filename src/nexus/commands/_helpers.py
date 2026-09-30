@@ -471,20 +471,38 @@ def _emit_identity_drops_warning() -> bool:
 
     from nexus.mcp_infra import get_manifest_identity_drops  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached when checked
 
-    drops = get_manifest_identity_drops()
-    if not drops:
+    all_drops = get_manifest_identity_drops()
+    if not all_drops:
         return False
-    n_chunks = sum(d["batch_size"] for d in drops)
-    cols = sorted({d["collection"] for d in drops})
-    click.echo(
-        f"  WARNING: {len(drops)} chunk batch(es) ({n_chunks} chunks; "
-        f"collection(s): {', '.join(cols)}) were indexed WITHOUT a "
-        f"catalog document identity — their manifests were not "
-        f"written and the documents will not appear in "
-        f"catalog-aware queries. Run 'nx catalog reconcile' to "
-        f"repair.",
-        err=True,
-    )
+    # RDR-223 (nexus-z0o2p.13): a drop with written=False was refused before any
+    # write (no catalog document to own its chunks), so there is nothing stored to
+    # reconcile; the two kinds get different wording.
+    drops = [d for d in all_drops if d.get("written", True)]
+    refused = [d for d in all_drops if not d.get("written", True)]
+    if drops:
+        n_chunks = sum(d["batch_size"] for d in drops)
+        cols = sorted({d["collection"] for d in drops})
+        click.echo(
+            f"  WARNING: {len(drops)} chunk batch(es) ({n_chunks} chunks; "
+            f"collection(s): {', '.join(cols)}) were indexed WITHOUT a "
+            f"catalog document identity — their manifests were not "
+            f"written and the documents will not appear in "
+            f"catalog-aware queries. Run 'nx catalog reconcile' to "
+            f"repair.",
+            err=True,
+        )
+    if refused:
+        n_chunks = sum(d["batch_size"] for d in refused)
+        cols = sorted({d["collection"] for d in refused})
+        click.echo(
+            f"  WARNING: {len(refused)} document(s) ({n_chunks} chunks; "
+            f"collection(s): {', '.join(cols)}) were NOT indexed: catalog "
+            f"registration returned no document identity to own their "
+            f"chunks, so nothing was written. Fix the registration failure "
+            f"(see the 'preflight_register_failed' log event) and re-run "
+            f"the index.",
+            err=True,
+        )
     return True
 
 

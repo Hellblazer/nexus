@@ -3469,6 +3469,7 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
         UnchunkableContentError,
+        CatalogIdentityMissingError,
     )
 
     if re_embed and not force:
@@ -3544,6 +3545,10 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # nexus-rqsh1 round 2: a zero-byte or binary-content file named
         # explicitly on this command must fail loud, before any catalog
         # write -- see index_markdown's guard for the full rationale.
+        raise click.ClickException(str(exc)) from exc
+    except CatalogIdentityMissingError as exc:
+        # nexus-z0o2p.13 (RDR-223): registration returned no identity, so the
+        # chunks have no owner to be written with and nothing was written.
         raise click.ClickException(str(exc)) from exc
     except IndexRunVerifyRefused as exc:
         # nexus-tp8yk substantive-critic SIGNIFICANT (2026-08-04): this

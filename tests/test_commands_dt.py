@@ -985,6 +985,7 @@ from nexus.errors import (  # noqa: E402 — grouped with this section's test-on
     ExtractionQualityError,
     IndexRunVerifyRefused,
     NexusError as _NexusError,
+    CatalogIdentityMissingError,
     SourceUriCollectionMismatchError,
     SourceUriNotFoundError,
     UnchunkableContentError,
@@ -1024,6 +1025,10 @@ _MEMBER_KWARGS: dict[type, dict] = {
     # SURVIVES the type, not what the message says.
     SourceUriNotFoundError: {},
     SourceUriCollectionMismatchError: {},
+    # nexus-z0o2p.13 (RDR-223): a record whose registration returned no identity
+    # has no owner for its chunks; it fails that record only. Plain positional
+    # message like the SourceUri pair above.
+    CatalogIdentityMissingError: {},
     UnchunkableContentError: {
         "message": (
             "refusing to index empty.md: file is zero bytes — nothing "
@@ -1410,13 +1415,18 @@ class TestIdentityDropSummary:
             result = runner.invoke(main, ["dt", "index", "--selection"])
 
         # Collect-and-continue (nexus-9800y convention): the register
-        # exception on record A must not abort record B — both land.
-        assert "Indexed 2 record(s)" in result.output, result.output
-        # Distinct, non-clean outcome — never the plain success summary.
-        assert (
-            "WITHOUT a catalog document identity" in result.output
-        ), result.output
-        assert "nx catalog reconcile" in result.output
+        # exception on record A must not abort record B — both are attempted.
+        # RDR-223 (nexus-z0o2p.13): a record with no catalog identity has no
+        # owner for its chunks, so neither lands (they used to land ownerless).
+        assert "Indexed 0 record(s)" in result.output, result.output
+        assert "2 failed" in result.output, result.output
+        assert "recA.md" in result.output and "recB.md" in result.output, result.output
+        assert "no catalog document to own" in result.output, result.output
+        # Distinct, non-clean outcome — the refused records feed the identity-drop
+        # summary, worded for a write that never happened (nothing to reconcile).
+        assert "were NOT indexed" in result.output, result.output
+        assert "nothing was written" in result.output, result.output
+        assert "WITHOUT a catalog document identity" not in result.output, result.output
         # pbawi acceptance item 3, verbatim requirement: must NOT exit 0.
         assert result.exit_code != 0, result.output
 
@@ -1438,9 +1448,11 @@ class TestIdentityDropSummary:
 
         reader, writer = self._broken_catalog(register_raises=False)
 
+        # RDR-223 (nexus-z0o2p.13): the chunks and owner rows are one write to the
+        # real engine, which this test's doubles do not model; this test pins the
+        # registration-ok SUMMARY, so the write is replaced.
         with patch("nexus.doc_indexer.make_t3", return_value=self._empty_t3()), \
-             patch("nexus.doc_indexer._fence_begin"), \
-             patch("nexus.doc_indexer._fence_complete"), \
+             patch("nexus.doc_indexer._write_chunks_with_owner_rows"), \
              patch("nexus.catalog.factory.make_catalog_reader", return_value=reader), \
              patch("nexus.catalog.factory.make_catalog_writer", return_value=writer):
             result = runner.invoke(main, ["dt", "index", "--selection"])

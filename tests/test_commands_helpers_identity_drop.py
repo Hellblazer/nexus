@@ -183,6 +183,32 @@ def test_emit_identity_drop_summary_surfaces_identity_drops(capsys):
     assert "nx catalog reconcile" in err
 
 
+def test_emit_identity_drop_summary_words_a_refused_document_as_not_written(capsys):
+    """RDR-223 (nexus-z0o2p.13): a document refused before any write (no catalog
+    document to own its chunks) is not 'indexed WITHOUT an identity' and has
+    nothing for 'nx catalog reconcile' to repair; it gets its own line, and the
+    original wording is unchanged for a drop that did store its chunks."""
+    from nexus.mcp_infra import _record_manifest_identity_drop
+
+    _record_manifest_identity_drop("docs__x", 6, written=False)
+    _record_manifest_identity_drop("docs__x", 2, written=False)
+
+    assert emit_identity_drop_summary(indexed_count=0) is True
+    err = capsys.readouterr().err
+    assert (
+        "WARNING: 2 document(s) (8 chunks; collection(s): docs__x) were NOT indexed" in err
+    )
+    assert "nothing was written" in err
+    assert "WITHOUT a catalog document identity" not in err
+    assert "nx catalog reconcile" not in err
+
+    _record_manifest_identity_drop("docs__y", 3)
+    emit_identity_drop_summary(indexed_count=0)
+    err = capsys.readouterr().err
+    assert "WARNING: 1 chunk batch(es) (3 chunks; collection(s): docs__y) were indexed WITHOUT" in err
+    assert "WARNING: 2 document(s) (8 chunks; collection(s): docs__x) were NOT indexed" in err
+
+
 def test_emit_identity_drop_summary_surfaces_complete_refusals(capsys):
     from nexus.mcp_infra import _record_complete_refusal
 

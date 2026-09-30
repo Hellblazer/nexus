@@ -2114,7 +2114,9 @@ _MANIFEST_IDENTITY_DROPS: list[dict] = []
 def get_manifest_identity_drops() -> list[dict]:
     """Batches dropped for missing doc identity this process/run.
 
-    Each entry: ``{"collection": str, "batch_size": int}``. Snapshot copy.
+    Each entry: ``{"collection": str, "batch_size": int}``, plus ``"written": False``
+    when the chunks were refused before any write (RDR-223,
+    :func:`_record_manifest_identity_drop`'s ``written``). Snapshot copy.
     """
     with _manifest_identity_drops_lock:
         return [dict(d) for d in _MANIFEST_IDENTITY_DROPS]
@@ -2131,16 +2133,26 @@ def reset_manifest_identity_drops() -> None:
         _MANIFEST_IDENTITY_DROPS.clear()
 
 
-def _record_manifest_identity_drop(collection: str, batch_size: int) -> None:
+def _record_manifest_identity_drop(
+    collection: str, batch_size: int, *, written: bool = True,
+) -> None:
     """No-op when no active CLI index run has reset the collector
     (nexus-wbfpw.29 round 2) — see the section comment above
-    ``_manifest_write_failures_lock``."""
+    ``_manifest_write_failures_lock``.
+
+    *written* (RDR-223, nexus-z0o2p.13): ``True`` (the default) is the original
+    meaning, chunks stored with no manifest rows. ``False`` is a document refused
+    BEFORE any write because it has no catalog document to own its chunks
+    (``doc_indexer._index_document``); the entry then carries ``"written": False``
+    so the summary can say nothing was stored instead of pointing at a reconcile
+    that has nothing to repair."""
     if not _identity_drop_collectors_active:
         return
+    entry: dict = {"collection": collection, "batch_size": batch_size}
+    if not written:
+        entry["written"] = False
     with _manifest_identity_drops_lock:
-        _MANIFEST_IDENTITY_DROPS.append(
-            {"collection": collection, "batch_size": batch_size}
-        )
+        _MANIFEST_IDENTITY_DROPS.append(entry)
 
 
 # nexus-5xn3k.4 (RUNFENCE): docs whose manifest rows were written correctly but

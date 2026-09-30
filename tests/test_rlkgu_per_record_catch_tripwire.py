@@ -377,6 +377,12 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
     # gained them.
     "SourceUriNotFoundError",
     "SourceUriCollectionMismatchError",
+    # nexus-z0o2p.13 (RDR-223): fires from doc_indexer._index_document when a
+    # document's registration returned no identity, so its chunks have no owner
+    # to be written with. Reachable from batch_index_markdowns and dt.py's
+    # per-record loops; one record without identity must fail that record only.
+    # Single-file `nx index md` converts it to a ClickException.
+    "CatalogIdentityMissingError",
 })
 
 #: Command-level: every OTHER NexusError subclass, with a specific,

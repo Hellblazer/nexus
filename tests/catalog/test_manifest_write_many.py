@@ -963,22 +963,23 @@ class TestManifestNeverOutrunsConfirmedChunks:
     """nexus-tp8yk D1 consequence, pinned at this file's own layer (memo
     §5 TDD plan): ``_manifest_write_loop`` — and therefore the whole
     ``manifest_write_batch_hook`` chain this file otherwise drives
-    directly — must be STRUCTURALLY UNREACHABLE for a batch
-    ``doc_indexer._upsert_skip_reembed`` could not confirm landed. The
-    gate itself lives one layer up (``_upsert_skip_reembed`` raises
-    ``ChunkLandingUnverifiedError`` BEFORE ``hooks.fire_batch`` runs);
-    this test proves the consequence at THIS file's call site by driving
-    the real production entry point (``nexus.doc_indexer._index_document``)
-    with a fake T3 that reproduces the "stale-positive probe, cannot-tell
-    update response" fault, and asserting `_manifest_write_loop` sees
-    zero calls.
+    directly — must be STRUCTURALLY UNREACHABLE for a batch whose chunks
+    were not confirmed landed.
+
+    RDR-223 (nexus-z0o2p.13): for ``doc_indexer._index_document`` the gate is
+    no longer ``_upsert_skip_reembed``'s ``ChunkLandingUnverifiedError``. The
+    chunks and their owner rows are ONE request, so a manifest row cannot
+    exist for a chunk that did not land, and the batch manifest hook is dropped
+    from the path. This test drives the real production entry point
+    (``nexus.doc_indexer._index_document``) with a combined write that fails and
+    a fake T3 that must never see a chunk upsert, and asserts
+    `_manifest_write_loop` sees zero calls.
     """
 
     def test_unconfirmed_batch_never_reaches_manifest_write_loop(
         self, tmp_path, monkeypatch,
     ) -> None:
         from nexus.doc_indexer import _index_document
-        from nexus.errors import ChunkLandingUnverifiedError
 
         calls: list = []
         monkeypatch.setattr(
@@ -994,18 +995,10 @@ class TestManifestNeverOutrunsConfirmedChunks:
             def get_or_create_collection(self, name):
                 return _FakeCol()
 
-            def existing_ids(self, collection, ids):
-                # Stale-positive probe: reports EVERY id present.
-                return list(ids)
-
-            def update_chunks(self, collection, ids, metadatas, **_kw):
-                # "Cannot tell" — the exact D1 trigger.
-                return None
-
             def upsert_chunks_with_embeddings(self, *a, **k):
                 raise AssertionError(
-                    "must not be called — every id took the stale-positive "
-                    "(existing_ids) branch, never the fresh-upsert branch"
+                    "must not be called — the chunks go with their owner rows in "
+                    "the combined write, never as a separate upsert"
                 )
 
         def _chunks(file_path, content_hash, target_model, now_iso, corpus):
@@ -1018,13 +1011,16 @@ class TestManifestNeverOutrunsConfirmedChunks:
         def _embed(texts, model):
             return [[0.1, 0.2]] * len(texts), model
 
+        def _write_fails(*a, **k):
+            raise RuntimeError("injected: the combined write did not land")
+
         f = tmp_path / "doc.md"
         f.write_text("hello tp8yk")
 
         with patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value="1.9.99"), \
-                patch("nexus.doc_indexer._fence_begin"), \
+                patch("nexus.doc_indexer._write_chunks_with_owner_rows", _write_fails), \
                 patch("nexus.doc_indexer._fence_fail"):
-            with pytest.raises(ChunkLandingUnverifiedError):
+            with pytest.raises(RuntimeError, match="did not land"):
                 _index_document(
                     f, "testowner", _chunks, _FakeT3(),
                     collection_name="docs__testowner__bge-base-en-v15-768__v1",
@@ -1032,9 +1028,8 @@ class TestManifestNeverOutrunsConfirmedChunks:
                 )
 
         assert calls == [], (
-            "_manifest_write_loop must be UNREACHABLE for a batch "
-            f"_upsert_skip_reembed could not confirm landed — got "
-            f"{len(calls)} call(s)"
+            "_manifest_write_loop must be UNREACHABLE for a batch whose "
+            f"combined write did not land — got {len(calls)} call(s)"
         )
 
 

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Callable, Final
 import structlog
 
 if TYPE_CHECKING:
+    from nexus.catalog.multi_batch_write import DocumentWriteResult
     from nexus.hook_registry import HookRegistry
 
 _log = structlog.get_logger(__name__)
@@ -1705,6 +1706,66 @@ def _register_before_read(db: Any, collection_name: str) -> None:
     ensure_collection_registered(collection_name, registrar=registrar)
 
 
+def _write_chunks_with_owner_rows(
+    collection_name: str,
+    doc_id: str,
+    content_hash: str,
+    ids: list[str],
+    documents: list[str],
+    metadatas: list[dict],
+    *,
+    force_re_embed: bool = False,
+) -> "DocumentWriteResult":
+    """Write one document's chunks together with their owner rows (RDR-223, nexus-z0o2p.13).
+
+    *ids* are the chunks' chashes (``chunk_id == sha256(text)``, RDR-180), so the
+    manifest row of position ``i`` names ``ids[i]``. Everything goes through
+    :class:`~nexus.catalog.multi_batch_write.MultiBatchDocumentWriter`: a document
+    that fits one request is one ``write_manifest_many`` with the sweep on and the
+    completion stamp riding it; a larger one begins the index-run fence, writes its
+    first request with the sweep off, appends the rest with their chunks, sweeps
+    after the last, and stamps. A client that dies between two requests leaves every
+    chunk it wrote owned. *content_hash* turns on the fence and the stamp.
+
+    The writer raises for a request that fails or an answer it cannot trust (the
+    run fails, and the caller's fence bracket marks it), and
+    :class:`~nexus.errors.IndexRunVerifyRefused` for a refused stamp. Side effects
+    the manifest hook used to carry are ported here: the sweep counters the run
+    summary reads (nexus-39upx: a skipped sweep is never silent).
+    """
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    from nexus.catalog.multi_batch_write import write_document  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+        _manifest_chunk_rows,
+        _record_superseded_swept,
+        _record_superseded_sweep_skip,
+    )
+
+    rows = _manifest_chunk_rows(list(enumerate(metadatas)))
+    for row, chash in zip(rows, ids):
+        row["chash"] = chash
+    chunks = [
+        {"chash": chash, "text": text, "metadata": meta}
+        for chash, text, meta in zip(ids, documents, metadatas)
+    ]
+    cat = make_catalog_writer()
+    try:
+        result = write_document(
+            cat, [(rows, chunks)], doc_id=doc_id, collection=collection_name,
+            content_hash=content_hash, force_re_embed=force_re_embed,
+        )
+    finally:
+        close = getattr(cat, "close", None)
+        if close is not None:
+            close()
+    _record_superseded_swept(result.swept)
+    if result.sweep_skipped:
+        _record_superseded_sweep_skip(doc_id, collection_name, "sweep_failed")
+    if result.dropped_unknown:
+        _record_superseded_sweep_skip(doc_id, collection_name, "before_read_failed")
+    return result
+
+
 def _index_document(
     file_path: Path,
     corpus: str,
@@ -1723,7 +1784,7 @@ def _index_document(
     source_uri: str = "",
     doc_just_created: bool = False,
 ) -> int | list[dict]:
-    """Shared indexing pipeline: credential check, staleness, embed, upsert, prune.
+    """Shared indexing pipeline: credential check, staleness, then one write of the chunks with their owner rows.
 
     *chunk_fn(file_path, content_hash, target_model, now_iso)* produces the
     per-format (chunk_id, document_text, metadata_dict) tuples.  Returns the
@@ -1747,9 +1808,10 @@ def _index_document(
     Callers pass a relative path here so that T3 metadata lookups match the
     relative ``source_path`` stored in chunk metadata (RDR-060).
 
-    *force_re_embed* (nexus-8143o) is forwarded verbatim to
-    :func:`_upsert_skip_reembed` -- see that function's docstring for the
-    full ``force``/``force_re_embed`` decoupling.
+    *force_re_embed* (nexus-8143o) is forwarded verbatim to the combined
+    write (:func:`_write_chunks_with_owner_rows`): ``force`` only bypasses the
+    staleness gate, and the engine re-embeds a chunk whose text it already
+    holds only when *force_re_embed* is also set.
 
     When *doc_id* is provided (the caller — ``index_markdown`` — already
     resolved catalog identity, possibly via *source_uri*), it is used
@@ -1762,6 +1824,8 @@ def _index_document(
     *source_uri* is forwarded only when this function must register
     fresh (``doc_id`` empty).
     """
+    from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+
     # GH #336: when ``nx index md/pdf`` runs in local mode we want
     # the local ONNX/fastembed embedder rather than a hard fail. The
     # local model name overrides ``target_model`` so the staleness
@@ -1946,14 +2010,29 @@ def _index_document(
             physical_collection=collection_name,
             source_uri=source_uri,
         )
-    if _catalog_doc_id_for_batch:
-        _fence_begin(_catalog_doc_id_for_batch, content_hash, collection_name)
+    if not _catalog_doc_id_for_batch:
+        # RDR-223: a chunk is written together with its owner row, and there is
+        # no owner without a catalog document. Writing the chunks anyway is the
+        # ownerless write this path used to make (hidden from every read by
+        # live(c) until the reaper removes it), so the run fails instead. The
+        # drop is recorded for the batch summaries (nexus-pbawi: a registration
+        # failure must not leave a batch run at rc 0) as one that wrote nothing.
+        from nexus.errors import CatalogIdentityMissingError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+        from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
 
-    # nexus-5xn3k.4 review follow-up (code-review-expert MEDIUM): begin was
-    # already bracketed above; this try/except adds the missing fail
-    # bracket around the embed/upsert/hook region. The skip paths (early
-    # `return 0` above) precede `begin` and stay fence-untouched by
-    # construction — they are outside this try block entirely.
+        _record_manifest_identity_drop(collection_name, len(ids), written=False)
+        raise CatalogIdentityMissingError(
+            f"{file_path}: no catalog document to own {len(ids)} chunk(s) in "
+            f"{collection_name!r} (registration returned no doc_id; see the "
+            f"preflight_register_failed log event); nothing was written"
+        )
+
+    # nexus-5xn3k.4 review follow-up (code-review-expert MEDIUM): the fail
+    # bracket around the embed/write/hook region. RDR-223: the index-run
+    # fence BEGINS inside the combined writer, as its first request, and the
+    # completion stamp rides its last one (see _write_chunks_with_owner_rows).
+    # The skip paths (early `return 0` above) precede the writer and stay
+    # fence-untouched by construction — they are outside this try block.
     try:
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(documents, target_model)
@@ -1976,7 +2055,16 @@ def _index_document(
         if actual_model != target_model:
             for m in metadatas:
                 m["embedding_model"] = actual_model
-        _upsert_skip_reembed(db, collection_name, ids, documents, embeddings, metadatas, force=force, force_re_embed=force_re_embed)
+        # RDR-223 (nexus-z0o2p.13): the chunks and their owner rows are ONE
+        # write. The engine's combined route embeds only the chunks it does not
+        # already hold (RDR-181), so an unchanged document re-embeds nothing.
+        # A document that fits one request is one write_manifest_many with the
+        # sweep on; a larger one goes as N requests, each carrying the chunks
+        # its own rows reference, with the sweep after the last.
+        _write_chunks_with_owner_rows(
+            collection_name, _catalog_doc_id_for_batch, content_hash,
+            ids, documents, metadatas, force_re_embed=force_re_embed,
+        )
 
         # Post-store hook chains (RDR-095). Both single-doc and batch chains
         # fire from every storage event; the per-doc loop covers single-shape
@@ -1985,22 +2073,16 @@ def _index_document(
             from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             hooks = HookRegistry()
             install_default_hooks(hooks)
-        # doc_id resolution (and the fence `begin`) HOISTED above the
-        # embed/upsert (nexus-5xn3k.4) — see `_catalog_doc_id_for_batch` up
-        # near `metadatas = [p[2] for p in prepared]`.
-        #
-        # nexus-tp8yk D2a: this whole function is single-flush (one upsert,
-        # one fire_batch — no streaming). It USED TO ride write_manifest_
-        # many's optional `complete` map for the completion stamp — but the
-        # production writer never exposes write_manifest_many (dcv2k: the
-        # op is absent from both CATALOG_WRITE_OPS and
-        # _SERVICE_ONLY_WRITE_OPS), so that ride never fired on any real
-        # run; completion fell through to mcp_infra's per-doc
-        # `_stamp_index_run_complete`, whose refusal is recorded but never
-        # propagates to the CLI (design memo §1 P1). manifest_complete is
-        # now always None here; the explicit, PROPAGATING `_fence_complete`
-        # call below (mirroring `_index_pdf_incremental`'s tail) is the
-        # completion stamp for this path.
+        # The manifest is already written (with the chunks, above). The batch
+        # manifest hook would replace it a second time and stash a deferred
+        # sweep for a completion stamp nobody is waiting for.
+        from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+        hooks = hooks.without_batch(manifest_write_batch_hook)
+        # doc_id resolution HOISTED above the write (nexus-5xn3k.4) — see
+        # `_catalog_doc_id_for_batch` up near `metadatas = [p[2] for p in
+        # prepared]`. The completion stamp rode the write (RDR-223), so
+        # manifest_complete is not passed.
         hooks.fire_batch(
             ids, collection_name, documents, embeddings, metadatas,
             catalog_doc_id=_catalog_doc_id_for_batch,
@@ -2016,11 +2098,24 @@ def _index_document(
             sp, collection_name, "",
             doc_id=_catalog_doc_id_for_batch,
         )
+    except IndexRunVerifyRefused:
+        # The engine refused the completion stamp: the manifest is NOT verified
+        # complete. The fence stays 'indexing' (a re-index redoes the document);
+        # marking it 'failed' as well would say nothing more. Record the refusal
+        # for the run summary (nexus-5xn3k.6) and drop any deferred sweep, then
+        # let the refusal propagate: it is the signal the fence exists to raise.
+        from nexus.mcp_infra import (  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+            _record_complete_refusal,
+            discard_deferred_superseded_vectors,
+        )
+
+        _record_complete_refusal(_catalog_doc_id_for_batch)
+        discard_deferred_superseded_vectors(_catalog_doc_id_for_batch)
+        raise
     except Exception as exc:
         # _fence_fail never raises, so the original exception always
         # propagates unmasked.
-        if _catalog_doc_id_for_batch:
-            _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
 
     # nexus-tbkk1: stale-chunk prune via _identity_where's source_path
@@ -2033,23 +2128,14 @@ def _index_document(
     # This closes only the doc_indexer.py/pipeline_stages.py HALF of
     # RDR-102 D2's "Phase 5b" 4-site class — indexer.py/indexer_utils.py
     # sibling sites were audited and deleted by nexus-afudo (2026-08-05)
-    # — Phase 5b is now fully closed. Automatic
-    # replacement protection is mcp_infra._sweep_superseded_vectors
-    # (manifest-diff based, fires on every hooks.fire_batch/fire_document
-    # call above), proven end-to-end at tests/integration/test_tp8yk_
-    # manifest_never_outruns_chunks.py::test_union_guard_keeps_shared_
-    # chunk_at_the_production_wiring — NOT comprehensive for legacy rows
-    # a manifest never referenced; nx t3 gc (chash-vs-manifest, src/
-    # nexus/commands/t3.py:219) is the comprehensive but manual/operator-
+    # — Phase 5b is now fully closed. Replacement protection (RDR-223) is the
+    # engine's own sweep inside the combined write: a one-request document
+    # sweeps the chunks its previous manifest owned and the new one does not,
+    # a larger one sweeps them after its last request. NOT comprehensive for
+    # legacy rows a manifest never referenced; nx t3 gc (chash-vs-manifest,
+    # src/nexus/commands/t3.py:219) is the comprehensive but manual/operator-
     # triggered backstop. Full evidence + defense-in-depth discussion:
     # _identity_where's docstring above.
-
-    # nexus-tp8yk D2a: explicit completion stamp, replacing the dead
-    # manifest_complete ride (see the comment above `hooks.fire_batch`).
-    # Zero-extraction never reaches here — `if not prepared: return 0`
-    # above already short-circuits, so `len(prepared)` is always > 0.
-    if _catalog_doc_id_for_batch:
-        _fence_complete(_catalog_doc_id_for_batch, content_hash, len(prepared))
 
     if return_metadata:
         return metadatas

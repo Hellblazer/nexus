@@ -908,29 +908,25 @@ def test_manifest_hook_exception_via_doc_indexer_pdf_channel_runfence_already_re
     assert excinfo.value.chunk_count == 1
 
 
-def test_index_markdown_manifest_hook_exception_runfence_already_refuses(
+def test_index_markdown_no_longer_depends_on_the_manifest_hook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """critic Significant: ``index_markdown`` (doc_indexer.py ~3498-3681
-    -- backing ``nx dt index``'s markdown records, ``nx collection
-    reindex``, and standalone RDR indexing) was never traced by either
-    prior round. Grepping its OWN function body for
-    ``fire_batch``/``manifest_write_batch_hook`` finds nothing because
-    ``index_markdown`` does not fire hooks itself at all -- it delegates
-    its entire body to ``_index_document`` (doc_indexer.py:1591), the
-    SAME shared pipeline function ``index_pdf``'s OTHER (non-small-doc)
-    paths use. ``_index_document`` fires ``hooks.fire_batch(...)`` with
-    NO ``grain=`` override (real hook fires unconditionally, same as the
-    channel-4 PDF test above) and then calls
-    ``_fence_complete(_catalog_doc_id_for_batch, content_hash,
-    len(prepared))`` -- byte-for-byte the same RUNFENCE backstop. A
-    manifest-hook failure during markdown/RDR/dt-markdown indexing is
-    therefore ALREADY loud via the identical pre-existing mechanism, not
-    an unresolved or silent gap.
+    """``index_markdown`` (backing ``nx index md``, ``nx index rdr``,
+    ``nx dt index``'s markdown records and ``nx collection reindex``) delegates
+    to ``_index_document``. Until RDR-223 (nexus-z0o2p.13) that function wrote
+    its chunks first and left the manifest to ``manifest_write_batch_hook``, so
+    a fault in the hook's catalog gate was only caught, loudly, by the RUNFENCE
+    completion refusal (``IndexRunVerifyRefused``, referenced=0). The chunks and
+    their owner rows are now one request and the hook is dropped from this
+    path, so the same fault (``get_catalog`` raising, which is the hook's own
+    gate) cannot reach the write: the run succeeds, the manifest is whole and the
+    document is stamped complete. This pins that the hook is off the path; the
+    fence's refusal contract keeps its own coverage on the paths that still use
+    the hook.
     """
+    from nexus.catalog.factory import make_catalog_reader
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.doc_indexer import _register_or_lookup_doc_id, index_markdown
-    from nexus.errors import IndexRunVerifyRefused
 
     import nexus.mcp_infra as mcp_infra
 
@@ -950,14 +946,16 @@ def test_index_markdown_manifest_hook_exception_runfence_already_refuses(
     monkeypatch.setattr(mcp_infra, "get_catalog", faulting_get_catalog)
 
     t3 = HttpVectorClient()
-    with pytest.raises(IndexRunVerifyRefused) as excinfo:
-        index_markdown(
-            md_path, "wbfpw29-channel-md-gate", t3=t3, collection_name=collection,
-        )
+    n = index_markdown(
+        md_path, "wbfpw29-channel-md-gate", t3=t3, collection_name=collection,
+    )
 
-    assert excinfo.value.doc_id == doc_id
-    assert excinfo.value.referenced == 0
-    assert excinfo.value.chunk_count == 1
+    assert n == 1
+    reader = make_catalog_reader()
+    assert reader is not None
+    assert len(reader.get_manifest(doc_id)) == 1
+    entry = reader.resolve(doc_id)
+    assert entry is not None and entry.index_state == "complete"
 
 
 def test_non_manifest_hook_exception_does_not_change_exit_code(
