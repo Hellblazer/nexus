@@ -483,6 +483,34 @@ print(json.dumps({
   fi
   if [ "$rdoc" = "200" ] && [ "$rman" = "200" ] \
      && python3 -c "import json,os,sys; sys.exit(0 if json.load(open(os.environ['SMOKE_TMP'] + '/ns-rerank-man.out')).get('chunks_written')==2 else 1)" 2>/dev/null; then
+    # Raw-route coverage on the native binary: re-post the SAME, now owned,
+    # chashes through /v1/vectors/upsert-chunks and /v1/vectors/store-put (the
+    # only native-image probe of the two chunk-write routes). Owned writes are
+    # valid before and after the RDR-223 P3.2 refusal of ownerless writes. Same
+    # texts as the write_many above, so the ranking conditions below do not move.
+    RCOL="$RCOL" CHASH1="$CHASH1" CHASH2="$CHASH2" RTEXT1="$RTEXT1" RTEXT2="$RTEXT2" python3 -c "
+import json, os
+e = os.environ
+json.dump({'collection': e['RCOL'], 'ids': [e['CHASH1'], e['CHASH2']],
+           'documents': [e['RTEXT1'], e['RTEXT2']], 'metadatas': [{}, {}]}, open(e['SMOKE_TMP'] + '/ns-rerank-up.in', 'w'))"
+    rup=$(curl -s -o "$SMOKE_TMP/ns-rerank-up.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      --data-binary "@$SMOKE_TMP/ns-rerank-up.in" "$U/v1/vectors/upsert-chunks")
+    if [ "$rup" = "200" ] && python3 -c "import json,os,sys; sys.exit(0 if json.load(open(os.environ['SMOKE_TMP'] + '/ns-rerank-up.out')).get('upserted')==2 else 1)" 2>/dev/null; then
+      echo "  ok   upsert-chunks (owned chashes) -> 200, upserted=2"
+    else
+      echo "  FAIL upsert-chunks (owned chashes) -> $rup: $(head -c200 "$SMOKE_TMP/ns-rerank-up.out")"; fail=1
+    fi
+    RCOL="$RCOL" CHASH1="$CHASH1" RTEXT1="$RTEXT1" python3 -c "
+import json, os
+e = os.environ
+json.dump({'collection': e['RCOL'], 'doc_id': e['CHASH1'], 'content': e['RTEXT1']}, open(e['SMOKE_TMP'] + '/ns-rerank-sp.in', 'w'))"
+    rsp=$(curl -s -o "$SMOKE_TMP/ns-rerank-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      --data-binary "@$SMOKE_TMP/ns-rerank-sp.in" "$U/v1/vectors/store-put")
+    if [ "$rsp" = "200" ]; then
+      echo "  ok   store-put (owned chash) -> 200"
+    else
+      echo "  FAIL store-put (owned chash) -> $rsp: $(head -c200 "$SMOKE_TMP/ns-rerank-sp.out")"; fail=1
+    fi
     rcode=$(curl -s -o "$SMOKE_TMP/ns-rerank.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"query\":\"how do I bake bread\",\"collections\":[\"$RCOL\"],\"n_results\":2,\"rerank\":true}" \
       "$U/v1/vectors/search")

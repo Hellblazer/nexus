@@ -511,11 +511,65 @@ def test_post_upsert_sends_the_documented_body_and_deadline_header() -> None:
 
 
 def test_load_chashes_are_exactly_the_ids_the_ramp_posts() -> None:
-    chashes = admission_load.load_chashes("nonce1", (2, 3))
-    assert len(chashes) == 5 and len(set(chashes)) == 5
-    assert chashes[0] == admission_load.load_document_id("nonce1", "0-0")
-    assert chashes[2] == admission_load.load_document_id("nonce1", "1-0")
-    assert chashes[4] == admission_load.load_document_id("nonce1", "1-2")
+    # Derive the expected ids from fire_step's OWN requests, not from a copy of its
+    # tagging: run each step against a recording transport and compare.
+    posted: dict[int, list[str]] = {}
+    step = {"i": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        posted.setdefault(step["i"], []).extend(_json.loads(request.content)["ids"])
+        return httpx.Response(200, json={"upserted": 1})
+
+    ramp = (2, 3)
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://fake.example") as client:
+        for step_index, concurrency in enumerate(ramp):
+            step["i"] = step_index
+            admission_load.fire_step(client, "coll", "nonce1", step_index, concurrency)
+
+    all_chashes = admission_load.load_chashes("nonce1", ramp)
+    assert len(all_chashes) == sum(ramp) == len(set(all_chashes))
+    for step_index, concurrency in enumerate(ramp):
+        assert sorted(posted[step_index]) == sorted(admission_load.load_step_chashes("nonce1", step_index, concurrency))
+    assert sorted(all_chashes) == sorted(c for ids in posted.values() for c in ids)
+
+
+def test_seed_owned_chunks_groups_at_most_300_chunks_per_write_many() -> None:
+    sizes: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content)
+        if request.url.path == "/v1/catalog/doc/register":
+            return httpx.Response(200, json={"tumbler": f"9.7.{len(sizes) + 1}"})
+        if request.url.path == "/v1/catalog/manifest/write_many":
+            if len(body["chunks"]) > 300:  # the cap a future engine may impose
+                return httpx.Response(400, text="too many chunks (max 300)")
+            sizes.append(len(body["chunks"]))
+            return httpx.Response(200, json={"ok": True, "chunks_written": len(body["chunks"])})
+        return httpx.Response(200, json={"ok": True})
+
+    chashes = admission_load.load_chashes("nonce1", (650,))
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://fake.example") as client:
+        admission_load.seed_owned_chunks(client, "coll", "nonce1", chashes)
+    assert sizes == [300, 300, 50]
+
+
+def test_deactivate_load_owner_posts_the_run_owner_and_never_raises() -> None:
+    seen: list[dict[str, Any]] = []
+
+    def ok(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/catalog/owners/deactivate"
+        seen.append(_json.loads(request.content))
+        return httpx.Response(200, json={"ok": True})
+
+    with httpx.Client(transport=httpx.MockTransport(ok), base_url="https://fake.example") as client:
+        assert admission_load.deactivate_load_owner(client, "nonce1") is True
+    assert seen == [{"tumbler_prefix": admission_load.load_owner_prefix("nonce1")}]
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    with httpx.Client(transport=httpx.MockTransport(boom), base_url="https://fake.example") as client:
+        assert admission_load.deactivate_load_owner(client, "nonce1") is False
 
 
 def test_seed_owned_chunks_writes_owner_doc_rows_and_chunks_in_one_write_many() -> None:
@@ -732,9 +786,10 @@ STATUS_FAIL_500 = object()
 STATUS_FAIL_TRANSPORT = object()
 
 
-def _client_factory_for(status_sequence: list, upsert_responder):
+def _client_factory_for(status_sequence: list, upsert_responder, *, fail_paths: tuple[str, ...] = ()):
     calls = {"status": 0}
     owned: set[str] = set()
+    log: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/status":
@@ -750,11 +805,18 @@ def _client_factory_for(status_sequence: list, upsert_responder):
         # records which chashes it owns and REFUSES an upsert-chunks for any other,
         # as the real engine does once the refusal lands, so a driver that stops
         # seeding turns every ramp response into a 422 instead of passing quietly.
+        log.append(request.url.path)
+        if request.url.path in fail_paths:
+            return httpx.Response(422, text="seed refused")
+        if request.url.path == "/v1/catalog/owners/deactivate":
+            return httpx.Response(200, json={"ok": True})
         if request.url.path in ("/v1/catalog/owners/upsert", "/v1/catalog/doc/register", "/v1/catalog/manifest/write_many"):
             payload = _json.loads(request.content)
             if request.url.path == "/v1/catalog/doc/register":
                 return httpx.Response(200, json={"tumbler": "9.1.1"})
             if request.url.path == "/v1/catalog/manifest/write_many":
+                if len(payload["chunks"]) > 300:
+                    return httpx.Response(400, text="too many chunks (max 300)")
                 owned.update(r["chash"] for d in payload["docs"] for r in d["rows"])
                 return httpx.Response(200, json={"ok": True, "chunks_written": len(payload["chunks"])})
             return httpx.Response(200, json={"ok": True})
@@ -767,6 +829,7 @@ def _client_factory_for(status_sequence: list, upsert_responder):
     def factory(base_url: str, headers: dict[str, str]) -> httpx.Client:
         return httpx.Client(transport=httpx.MockTransport(handler), base_url=base_url, headers=headers)
 
+    factory.log = log  # type: ignore[attr-defined]
     return factory
 
 
@@ -822,6 +885,37 @@ def test_run_gate_passes_on_edge_only_refusals(monkeypatch: pytest.MonkeyPatch) 
     result = admission_load.run_gate(dry_run=False, ramp_steps=(2,), client_factory=factory, idle_sleep=lambda s: None)
     assert result["passed"] is True, result["reason"]
     assert "0 engine, 2 edge" in result["reason"]
+
+
+def test_run_gate_deactivates_the_throwaway_owner_after_the_collection_delete(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_lifecycle(monkeypatch)
+    factory = _client_factory_for(
+        [IDLE_STATUS, IDLE_STATUS, _status(admission=1), _status(admission=1)],
+        lambda request: httpx.Response(503, headers={"Retry-After": "2", "X-Nexus-Deadline-Outcome": "refused"}),
+    )
+    log = factory.log  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        admission_load, "delete_load_collection",
+        lambda name: log.append("delete_collection") or {"t3_absent": False, "failures": []},
+    )
+    result = admission_load.run_gate(dry_run=False, ramp_steps=(2,), client_factory=factory, idle_sleep=lambda s: None)
+    assert result["passed"] is True, result["reason"]
+    assert result["cleanup"]["owner_deactivated"] is True
+    assert log[-2:] == ["delete_collection", "/v1/catalog/owners/deactivate"]
+
+
+def test_run_gate_reports_a_seed_failure_as_a_seed_failure_naming_the_step(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_lifecycle(monkeypatch)
+    factory = _client_factory_for(
+        [IDLE_STATUS, IDLE_STATUS], lambda request: httpx.Response(200, json={"upserted": 1}),
+        fail_paths=("/v1/catalog/doc/register",),
+    )
+    result = admission_load.run_gate(dry_run=False, ramp_steps=(2,), client_factory=factory, idle_sleep=lambda s: None)
+    assert result["passed"] is False
+    assert "seed step 'doc/register'" in result["reason"]
+    assert "error during load" not in result["reason"]
+    assert result["steps"] == []  # no load was sent
+    assert result["cleanup"]["owner_deactivated"] is True  # cleanup still ran
 
 
 def test_run_gate_fails_when_a_mostly_cut_step_is_invalid(monkeypatch: pytest.MonkeyPatch) -> None:

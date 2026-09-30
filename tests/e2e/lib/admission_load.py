@@ -117,17 +117,19 @@ Two design choices worth reading before changing the network layer:
 3. **The route under load is a refusal target since RDR-223 P3.2.**
    ``/v1/vectors/upsert-chunks`` refuses a chunk no catalog manifest row owns,
    so this gate no longer posts ownerless chunks. Before the ramp it seeds
-   every chash the ramp will send through ONE ``write_many`` (owner, document,
-   manifest rows and placeholder chunks in a single request, the combined
-   write a real client uses; :func:`seed_owned_chunks`), then the measured
+   every chash the coming step will send through ``write_many`` (owner, then
+   per group of at most 300 chunks one document, manifest rows and placeholder
+   chunks in a single request, the combined write a real client uses;
+   :func:`seed_owned_chunks`), then the measured
    request is the same raw ``upsert-chunks`` POST as before, now carrying
    ``force_re_embed`` so the owned, already-stored chash still goes through the
    embedder (without it the engine's existence partition would skip the embed
    and the gate would measure nothing). SQL seeding is not an option here:
    this gate runs against the cloud engine through the public edge. The seed
-   leaves one throwaway owner row (``9.<n>``, same synthetic namespace the
-   local-service-gate uses); the document and chunks go with the collection
-   delete.
+   uses one throwaway owner (``9.<n>``, same synthetic namespace the
+   local-service-gate uses): the document and chunks go with the collection
+   delete and the owner is deactivated best-effort after it. A seed failure is
+   reported as a preflight failure naming the step, never as a load failure.
 
 4. **Collection lifecycle reuses the real write path's own functions**
    (``nexus.corpus.t3_collection_name`` / ``ensure_collection_registered``,
@@ -280,7 +282,8 @@ class AdmissionLoadUnattributableError(RuntimeError):
 
 class AdmissionLoadPreflightError(RuntimeError):
     """The upfront status-readability or idle pre-check failed before any
-    write was attempted."""
+    load was sent, or a step's seed write (owner, document, ``write_many``)
+    was refused: setup failures, reported apart from load failures."""
 
 
 # ── Pure: counters + idle pre-check ─────────────────────────────────────
@@ -776,14 +779,28 @@ def find_orphan_collections(exclude: str | None = None) -> list[str]:
     return sorted(n for n in names if isinstance(n, str) and n.startswith(ORPHAN_PREFIX) and n != exclude)
 
 
+#: Most chunks one seed ``write_many`` carries: the repo's 300-record write
+#: ceiling (``QUOTAS.MAX_RECORDS_PER_WRITE``, the engine's own append cap), so a
+#: cap on ``write_many`` cannot turn this production gate red at its seed.
+SEED_GROUP_MAX = 300
+
+
+def load_tag(step_index: int, i: int) -> str:
+    """The per-request tag :func:`fire_step` hands :func:`post_upsert` (and so
+    the chash it posts); one definition so the seed and the ramp cannot drift."""
+    return f"{step_index}-{i}"
+
+
+def load_step_chashes(nonce: str, step_index: int, concurrency: int, target_bytes: int = DEFAULT_TARGET_BYTES) -> list[str]:
+    """Every chunk id step *step_index* posts, in send order."""
+    return [load_document_id(nonce, load_tag(step_index, i), target_bytes) for i in range(concurrency)]
+
+
 def load_chashes(nonce: str, ramp_steps: Sequence[int], target_bytes: int = DEFAULT_TARGET_BYTES) -> list[str]:
-    """Every chunk id the ramp can send, in send order: the ``(step_index,
-    i)`` tags :func:`fire_step` hands :func:`post_upsert`, so a seeded chash
-    is exactly a chash a later request will post."""
+    """Every chunk id the whole ramp can send, in send order."""
     return [
-        load_document_id(nonce, f"{step_index}-{i}", target_bytes)
-        for step_index, concurrency in enumerate(ramp_steps)
-        for i in range(concurrency)
+        c for step_index, concurrency in enumerate(ramp_steps)
+        for c in load_step_chashes(nonce, step_index, concurrency, target_bytes)
     ]
 
 
@@ -798,38 +815,59 @@ def load_owner_prefix(nonce: str) -> str:
 def _seed_post(client: httpx.Client, path: str, body: dict[str, Any], what: str) -> dict[str, Any]:
     resp = client.post(path, content=json.dumps(body).encode("utf-8"))
     if resp.status_code != 200:
-        raise RuntimeError(f"seed step {what!r} -> {resp.status_code}: {resp.text[:200]}")
+        raise AdmissionLoadPreflightError(f"seed step {what!r} -> {resp.status_code}: {resp.text[:200]}")
     out = resp.json()
     return out if isinstance(out, dict) else {}
 
 
-def seed_owned_chunks(client: httpx.Client, collection: str, nonce: str, chashes: Sequence[str]) -> None:
-    """Give every chash in *chashes* a live owner in *collection* before the
-    ramp, so ``/v1/vectors/upsert-chunks`` (which refuses ownerless chunks
-    from RDR-223 P3.2) accepts the measured writes. Owner, document, and
-    ONE ``write_many`` carrying the manifest rows plus a short placeholder
-    chunk per chash: the combined write, so no chunk is ever ownerless.
-    Raises ``RuntimeError`` naming the failing step; :func:`run_gate` folds it
-    into the run's ``error``. The placeholder text is short so the seed is
-    cheap; the measured request re-embeds the real ~12KB text under
-    ``force_re_embed``."""
+def seed_owned_chunks(
+    client: httpx.Client, collection: str, nonce: str, chashes: Sequence[str], *, label: str = "0",
+) -> None:
+    """Give every chash in *chashes* a live owner in *collection* before it is
+    posted, so ``/v1/vectors/upsert-chunks`` (which refuses ownerless chunks
+    from RDR-223 P3.2) accepts the measured writes. Owner, then per group of at
+    most :data:`SEED_GROUP_MAX` chashes one document and ONE ``write_many``
+    carrying the manifest rows plus a short placeholder chunk per chash: the
+    combined write, so no chunk is ever ownerless. *label* keeps the document
+    titles of different calls (ramp steps) distinct.
+
+    Raises :class:`AdmissionLoadPreflightError` naming the failing step;
+    :func:`run_gate` reports it as a seed failure, not a load failure. The
+    placeholder text is short so the seed is cheap; the measured request
+    re-embeds the real ~12KB text under ``force_re_embed``."""
     prefix = load_owner_prefix(nonce)
     _seed_post(client, "/v1/catalog/owners/upsert",
                {"tumbler_prefix": prefix, "name": f"u2mlh-load-{nonce}", "owner_type": "admission_load"}, "owners/upsert")
-    doc = _seed_post(client, "/v1/catalog/doc/register", {
-        "owner_prefix": prefix, "title": f"u2mlh-load-seed-{nonce}",
-        "content_type": "knowledge", "physical_collection": collection,
-    }, "doc/register")
-    doc_id = doc.get("tumbler")
-    if not isinstance(doc_id, str):
-        raise RuntimeError(f"seed step 'doc/register' returned no tumbler: {doc!r}")
-    ack = _seed_post(client, "/v1/catalog/manifest/write_many", {
-        "collection": collection,
-        "docs": [{"doc_id": doc_id, "rows": [{"position": i, "chash": c} for i, c in enumerate(chashes)]}],
-        "chunks": [{"chash": c, "text": f"u2mlh load seed {nonce} {i}", "metadata": {}} for i, c in enumerate(chashes)],
-    }, "manifest/write_many")
-    if ack.get("chunks_written") != len(chashes):
-        raise RuntimeError(f"seed write_many wrote {ack.get('chunks_written')!r} chunks, wanted {len(chashes)}: {ack!r}")
+    for g, start in enumerate(range(0, len(chashes), SEED_GROUP_MAX)):
+        group = list(chashes[start:start + SEED_GROUP_MAX])
+        doc = _seed_post(client, "/v1/catalog/doc/register", {
+            "owner_prefix": prefix, "title": f"u2mlh-load-seed-{nonce}-{label}-{g}",
+            "content_type": "knowledge", "physical_collection": collection,
+        }, "doc/register")
+        doc_id = doc.get("tumbler")
+        if not isinstance(doc_id, str):
+            raise AdmissionLoadPreflightError(f"seed step 'doc/register' returned no tumbler: {doc!r}")
+        ack = _seed_post(client, "/v1/catalog/manifest/write_many", {
+            "collection": collection,
+            "docs": [{"doc_id": doc_id, "rows": [{"position": i, "chash": c} for i, c in enumerate(group)]}],
+            "chunks": [{"chash": c, "text": f"u2mlh load seed {nonce} {label} {start + i}", "metadata": {}} for i, c in enumerate(group)],
+        }, "manifest/write_many")
+        if ack.get("chunks_written") != len(group):
+            raise AdmissionLoadPreflightError(
+                f"seed step 'manifest/write_many' wrote {ack.get('chunks_written')!r} chunks, wanted {len(group)}: {ack!r}")
+
+
+def deactivate_load_owner(client: httpx.Client, nonce: str) -> bool:
+    """Best-effort ``POST /v1/catalog/owners/deactivate`` for this run's
+    throwaway ``9.<n>`` owner, after the collection delete has removed its
+    documents. Never raises: a leftover empty owner is a disclosed, harmless
+    residue, not a reason to lose the run's verdict."""
+    try:
+        resp = client.post("/v1/catalog/owners/deactivate",
+                           content=json.dumps({"tumbler_prefix": load_owner_prefix(nonce)}).encode("utf-8"))
+        return resp.status_code == 200
+    except Exception:  # noqa: BLE001 — best-effort cleanup, see docstring
+        return False
 
 
 def post_upsert(
@@ -906,7 +944,7 @@ def fire_step(
     """
     pool = ThreadPoolExecutor(max_workers=concurrency)
     futures = [
-        pool.submit(post_upsert, client, collection, nonce, f"{step_index}-{i}", target_bytes=target_bytes)
+        pool.submit(post_upsert, client, collection, nonce, load_tag(step_index, i), target_bytes=target_bytes)
         for i in range(concurrency)
     ]
     hit_deadline = False
@@ -1001,6 +1039,9 @@ def run_gate(
     is_preflight_failure = False
     orphan_collections: list[str] = []
     cleanup: dict[str, Any] = {"attempted": False}
+    owner_seeded = False
+    endpoint: tuple[str, dict[str, str]] | None = None
+    factory: Callable[[str, dict[str, str]], httpx.Client] | None = None
     start = time.monotonic()
 
     try:
@@ -1013,6 +1054,7 @@ def run_gate(
             "Content-Type": "application/json",
         }
         factory = client_factory if client_factory is not None else (lambda url, hdrs: build_client(url, hdrs, ramp_steps))
+        endpoint = (base_url, headers)
 
         with factory(base_url, headers) as client:
             orphan_collections = find_orphan_collections()
@@ -1030,7 +1072,7 @@ def run_gate(
             print(f"[admission-load] plan: {json.dumps(plan)}")
 
             register_load_collection(name)
-            seed_owned_chunks(client, name, nonce, load_chashes(nonce, ramp_steps, target_bytes))
+            owner_seeded = True
 
             for step_index, concurrency in enumerate(ramp_steps):
                 remaining = wall_clock_cap_s - (time.monotonic() - start)
@@ -1041,6 +1083,15 @@ def run_gate(
                         f"concurrency={concurrency} could start"
                     )
                     break
+
+                try:
+                    seed_owned_chunks(
+                        client, name, nonce,
+                        load_step_chashes(nonce, step_index, concurrency, target_bytes), label=str(step_index),
+                    )
+                except AdmissionLoadPreflightError:
+                    is_preflight_failure = True
+                    raise
 
                 before_status = fetch_status(client)
                 status_read_failed = before_status is None
@@ -1120,6 +1171,15 @@ def run_gate(
             except BaseException as exc:  # noqa: BLE001 — a second interrupt during cleanup must not crash silently; best-effort record and move on (see this module's Interrupts note)
                 cleanup["ok"] = False
                 cleanup["error"] = str(exc)
+            if owner_seeded and factory is not None and endpoint is not None:
+                # After the collection delete (which removes the seed documents):
+                # retire the throwaway owner. Best-effort; never changes "ok".
+                try:
+                    with factory(*endpoint) as owner_client:
+                        cleanup["owner_deactivated"] = deactivate_load_owner(owner_client, nonce)
+                except BaseException as exc:  # noqa: BLE001 — best-effort, see deactivate_load_owner
+                    cleanup["owner_deactivated"] = False
+                    cleanup["owner_error"] = str(exc)
         else:
             cleanup["ok"] = True
             cleanup["skipped_reason"] = "no collection name was ever resolved; nothing to clean up"

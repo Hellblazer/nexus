@@ -614,7 +614,7 @@ echo "[gate] throwaway service on 127.0.0.1:$SERVICE_PORT"
 # LIVED_IN_EXPECTED / CLOUD_MODE_EXPECTED below: every assertion increments
 # SMOKE_PASSED, and a mismatch against SMOKE_EXPECTED FAILS the gate — an
 # unreachable service or a malformed response fails loud, never skips.
-SMOKE_EXPECTED=12  # 13->12 (nexus-z0o2p.31): the vector leg writes chunk + owner in one write_many, one check where upsert-chunks and manifest/write took two; 12->13 (nexus-wbfpw.10 live(c)): the vector leg writes a manifest row so its chunk has a live owner; 11->12 (nexus-ft04v.7): the vector leg registers its collection first; 12->11 at 3b2901141: the manifest/verify leg was retired
+SMOKE_EXPECTED=13  # 9 pre-vector checks + 4 vector-leg checks (collections/upsert, write_many, owned upsert-chunks re-post, search); NEXUS_GATE_NO_VECTOR_SMOKE drops the 4
                    # with the catalog-030 subtraction but the count was not
                    # lowered, making the gate structurally unpassable (caught
                    # by its own vacuity guard in the 7.8.0 battery).
@@ -789,7 +789,16 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   smoke_request POST /v1/catalog/manifest/write_many \
     "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','docs':[{'doc_id':'$SMOKE_DOC_TUMBLER','rows':[{'position':0,'chash':'$SMOKE_CHASH'}]}],'chunks':[{'chash':'$SMOKE_CHASH','text':'$SMOKE_CHUNK_TEXT','metadata':{'source':'gate-smoke'}}]}))")"
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/manifest/write_many"
-  smoke_check "POST /v1/catalog/manifest/write_many -> chunks_written=1 (chunk written with its live owner)" "d.get('chunks_written')==1"
+  smoke_check "POST /v1/catalog/manifest/write_many -> chunks_written==1 (the combined write stored one chunk; the search below proves its owner is live)" "d.get('chunks_written')==1"
+
+  # Raw-route coverage: re-post the SAME, now owned, chash through
+  # /v1/vectors/upsert-chunks. An owned write is valid before and after the
+  # RDR-223 P3.2 refusal of ownerless writes, so this keeps the route under
+  # the gate without seeding an orphan.
+  smoke_request POST /v1/vectors/upsert-chunks \
+    "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_CHASH'],'documents':['$SMOKE_CHUNK_TEXT'],'metadatas':[{'source':'gate-smoke'}]}))")"
+  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (owned chash)"
+  smoke_check "POST /v1/vectors/upsert-chunks (owned chash) -> upserted=1" "d.get('upserted')==1"
 
   smoke_request POST /v1/vectors/search \
     "$(python3 -c "import json;print(json.dumps({'query':'$SMOKE_CHUNK_TEXT','collections':['$SMOKE_VEC_COLLECTION'],'n_results':5}))")"
