@@ -1323,7 +1323,8 @@ def import_collection(
             "The file may be corrupt or was produced by an incompatible version."
         )
     collection_name: str = target_collection or source_collection
-    if _owners_apply(db) and collection_name.startswith(_BYPASS_SCHEMA_PREFIXES):
+    bypass_schema = collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
+    if _owners_apply(db) and bypass_schema:
         # Their ids are not chunk hashes and they have no catalog documents, so no chunk of theirs
         # can be written with an owner row, and the engine refuses an ownerless write. Say so now,
         # before anything is read or written, rather than fail halfway (or embed the text and drop
@@ -1437,7 +1438,7 @@ def import_collection(
     # import. Bypass-schema collections (``taxonomy__*``) use their own
     # programmatic id scheme (not content-derived) and must NOT be
     # rehashed -- that would break their intentional stable identifiers.
-    rehash_ids = not collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
+    rehash_ids = not bypass_schema
 
     # CLI review: infer the expected embedding byte-size from the first
     # record and reject any subsequent record whose embedding doesn't
