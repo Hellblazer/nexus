@@ -1153,9 +1153,10 @@ def import_collection(
         D2). Pre-migration exports can carry a wrong header label; this
         lets the caller supply the true model instead of trusting it.
     skip_existing:
-        If True, records whose id already exists in the target collection
-        are skipped rather than overwritten (GH #1370 D3). Useful for
-        resuming a partially-completed import.
+        If True, no text or vector is sent for a record whose chunk the
+        target collection already holds (GH #1370 D3): the stored chunk and
+        vector stay, and the record still gets its owner row. Without it every
+        record is written with the file's vector, which replaces a stored one.
 
     Returns
     -------
@@ -1173,33 +1174,45 @@ def import_collection(
     document's manifest is never replaced or extended by an import, and a
     chunk is never written without an owner row, so these are not stored.
     ``unowned_documents`` lists those documents as ``{"tumbler", "title"}``.
+    ``vector_mismatches`` is the number of stored vectors that differed from
+    the file's and were replaced by it (0 when the target held none).
 
-    Against the engine (RDR-223, nexus-z0o2p.19) the file is read once, page
-    by page. Each page's records are grouped by owner identity -- a legacy
+    Against the engine (RDR-223, nexus-z0o2p.19) the file is read twice. A
+    first pass counts the records and the highest position of each owner
+    group and keeps nothing else (:func:`_prepass_groups`); the second writes,
+    page by page. Each page's records are grouped by owner identity -- a legacy
     record carrying ``meta.doc_id`` by that doc_id (:func:`_locate_legacy_group`),
     every other record by its export-time ``owner`` or the file fallback
     (:func:`_locate_owner_group`) -- and each group is resolved to a catalog
     document, found or registered (:func:`_resolve_owner_document`;
     :func:`_resolve_import_owner_tumbler` picks the owner). A document met for
-    the first time is kept (it already owns chunks in the collection) or
-    written; the written documents' rows and chunks then go out as one
-    ``write_manifest_many`` (documents on their first page) and one
-    ``append_manifest_many`` (documents already open), both carrying the
-    exported vectors and the export's explicit positions, so the embedder is
-    not called. This is deliberately NOT routed through
+    the first time is KEPT (it already owns chunks in the collection: never
+    replaced or extended), RESUMED (this same file left it ``indexing`` or
+    ``failed``: finished with the append form) or WRITTEN: a first page that
+    replaces its manifest and later pages that append. Every request carries
+    the page's chunks with their exported vectors, written with
+    ``force_re_embed`` so the file's vector replaces a stored one
+    (``vector_mismatches`` counts the ones that differed) and with metadata
+    merged, plus the export's explicit positions, so the embedder is not called.
+    A document's last page, known from the prepass, also carries its deferred
+    sweep and its completion stamp, so each document reads ``complete`` as
+    soon as it is whole. This is deliberately NOT routed through
     ``manifest_write_batch_hook`` (the per-batch hook every OTHER T3 write
     path uses): its position numbering is local to one ``fire_store_chains``
     call and restarts at 0 per batch. The import fires its store chains
-    without that hook at all (nexus-wbfpw.40). After the last page the writer
-    sends each document's deferred sweep and stamps it ``complete``
-    (:class:`_OwnerImport`, ``nexus.catalog.multi_document_write``).
-    ``force_re_embed`` is not an option of the import (it never was) and is
-    not sent: a chash the collection already holds keeps its stored vector.
-    A non-service handle and the ``taxonomy__*`` collections keep the plain
-    upsert.
+    without that hook at all (nexus-wbfpw.40). See :class:`_OwnerImport` and
+    ``nexus.catalog.multi_document_write``. A non-service handle keeps the
+    plain upsert; ``taxonomy__*`` and ``quarantine-*`` targets on the service
+    path are refused with :class:`NexusError` before anything is written.
 
     Raises
     ------
+    NexusError:
+        For a ``taxonomy__*`` or ``quarantine-*`` target (service path), and at the
+        end if any document could not be finished (every chunk stored has its
+        owner row; the failure names ``source <URI>`` for a group that could not
+        be registered and ``document <tumbler>`` for one that failed writing or
+        stamping).
     FormatVersionError:
         If the export file's format_version exceeds MAX_SUPPORTED_FORMAT_VERSION.
     EmbeddingModelMismatch:
