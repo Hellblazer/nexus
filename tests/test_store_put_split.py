@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 from tokenizers import Tokenizer, models, pre_tokenizers
 
-from nexus.catalog import recovery_bundle, store_hook
+from nexus.catalog import store_hook
 from nexus.corpus import t3_collection_name
 from nexus.embed_window import TokenWindow
 from nexus.mcp.core import store_get, store_put
@@ -298,53 +298,6 @@ def test_one_piece_is_a_single_put_with_no_existence_probe() -> None:
             return _sha(content)
 
     assert store_hook.put_note_pieces(_T3(), "c", ["x"], title="t") == [_sha("x")]
-
-
-def test_recovery_import_of_a_split_note_extracts_aspects_once_from_the_whole_note(monkeypatch) -> None:
-    """MCP store_put's shape: every piece reaches the single and batch
-    chains, and the document chain (aspect extraction) sees the note once,
-    whole. fire_store_chains would fire it once per fragment."""
-
-    events: list[tuple] = []
-
-    class _Hooks:
-        def fire_single(self, doc_id, collection, content, **kw):
-            events.append(("single", doc_id, content))
-
-        def fire_batch(self, doc_ids, collection, contents, embeddings=None, metadatas=None, **kw):
-            events.append(("batch", tuple(doc_ids), tuple(contents), kw.get("catalog_doc_id")))
-
-        def fire_document(self, source_path, collection, content, **kw):
-            events.append(("document", source_path, content, kw.get("doc_id")))
-
-        def fire_store_chains(self, *a, **kw):
-            raise AssertionError("a split note must not ride fire_store_chains")
-
-    monkeypatch.setattr(
-        "nexus.corpus.t3_collection_name",
-        lambda name, t3=None, for_write=False, allow_placeholder=False: "knowledge__x",
-    )
-    monkeypatch.setattr(store_hook, "note_pieces", lambda content, collection: ["ab", "cd"])
-    monkeypatch.setattr(
-        store_hook, "catalog_store_hook_tracked",
-        lambda title, doc_id, collection_name, **_kw: ("1.2.3", True),
-    )
-    monkeypatch.setattr(store_hook, "store_put_manifest_direct", lambda doc_id, metadatas, collection: None)
-    monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)
-    monkeypatch.setattr("nexus.hook_registry.HookRegistry", lambda: _Hooks())
-    monkeypatch.setattr("nexus.hook_registry.install_default_hooks", lambda h: None)
-
-    recovery_bundle._default_import_doc(_FailingT3(fail_at=0, existing=set()), {
-        "record": "knowledge_doc", "source_uri": "", "collection": "x",
-        "title": "t", "tags": "", "category": "", "content": "abcd",
-    })
-
-    assert events == [
-        ("single", _sha("ab"), "ab"),
-        ("single", _sha("cd"), "cd"),
-        ("batch", (_sha("ab"), _sha("cd")), ("ab", "cd"), "1.2.3"),
-        ("document", _sha("ab"), "abcd", "1.2.3"),
-    ]
 
 
 def test_the_split_uses_the_calibrated_model_resolver(monkeypatch) -> None:

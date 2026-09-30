@@ -906,9 +906,10 @@ One paired recovery verb (GH #1419.9): a human-inspectable JSONL bundle
 carrying the catalog **link graph** and **store_put-origin knowledge
 content** — the two things a reinstall cannot regenerate. Identity is
 `source_uri` (tumblers are not stable across reindex); no embeddings are
-carried (import re-embeds through the real store_put chain, so the
+carried (import re-embeds through the note writer `store_put` uses, so the
 bundle survives an embedding-mode change); import is idempotent and
-reports every unresolvable link or failed doc without aborting the rest.
+reports every unresolvable link or failed note without aborting the rest,
+and exits non-zero when any note did not verify.
 See `docs/catalog.md` § Recovery bundle for the format contract. For an
 embedding-preserving per-collection backup use `nx store export COLLECTION`
 (`.nxexp`) instead.

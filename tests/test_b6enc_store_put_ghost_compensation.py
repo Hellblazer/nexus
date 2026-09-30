@@ -1083,10 +1083,11 @@ class TestWbfpw28ConcurrentIdenticalContentRace:
 
 
 class TestWbfpw28RecoveryBundleRollback:
-    """``catalog/recovery_bundle.py::_default_import_doc`` shares the same
-    register -> t3.put -> manifest shape; it already re-raised a manifest
-    failure (unlike the three callers above, pre-fix) but never rolled
-    back the chunk, and never detected a blank ``catalog_doc_id`` at all."""
+    """``catalog/recovery_bundle.py::_default_import_doc`` writes a note through
+    ``note_write.put_note`` (RDR-223 P2.8, nexus-z0o2p.18), the same writer MCP ``store_put``
+    uses: a registration that yields no document writes nothing, and a write that is confirmed not
+    to have landed removes the catalog row this call minted. There is no chunk to roll back any
+    more: the pieces and the owner rows are one request (``tests/test_z0o2p18_recovery_import.py``)."""
 
     def _rec(self, content: str, title: str) -> dict:
         return {
@@ -1097,7 +1098,7 @@ class TestWbfpw28RecoveryBundleRollback:
             "category": "",
         }
 
-    def test_registration_failure_rolls_back_and_raises(
+    def test_registration_failure_writes_nothing_and_raises(
         self, catalog_env: Path, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1107,41 +1108,34 @@ class TestWbfpw28RecoveryBundleRollback:
             "nexus.catalog.store_hook.catalog_store_hook_tracked",
             lambda *a, **k: ("", False),
         )
+
+        def _no_write(**kw):
+            raise AssertionError("a note with no catalog document must not be written")
+
+        monkeypatch.setattr("nexus.catalog.note_write.write_note", _no_write)
         content = "wbfpw28 recovery bundle registration fail"
         with pytest.raises(RuntimeError, match="catalog registration failed"):
             _default_import_doc(local_t3, self._rec(content, "wbfpw28-rb-reg"))
         assert _catalog_rows(catalog_env, "wbfpw28-rb-reg") == []
-        chash = hashlib.sha256(content.encode()).hexdigest()
-        cols = [c["name"] for c in local_t3.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local_t3.get_by_id(cols[0], chash) is None
 
-    def test_manifest_failure_rolls_back_and_raises(
+    def test_a_write_that_did_not_land_removes_the_row_it_minted_and_raises(
         self, catalog_env: Path, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from nexus.catalog.note_write import NoteWriteError
         from nexus.catalog.recovery_bundle import _default_import_doc
 
-        monkeypatch.setattr(
-            "nexus.catalog.store_hook.store_put_manifest_direct",
-            lambda *a, **k: (_ for _ in ()).throw(
-                RuntimeError("manifest write refused")
-            ),
-        )
+        def _refused(**kw):
+            raise NoteWriteError(
+                catalog_doc_id=kw["catalog_doc_id"], collection=kw["collection"],
+                reason="manifest write refused", manifest_empty=True)
+
+        monkeypatch.setattr("nexus.catalog.note_write.write_note", _refused)
         content = "wbfpw28 recovery bundle manifest fail"
         with pytest.raises(RuntimeError, match="manifest write refused"):
             _default_import_doc(local_t3, self._rec(content, "wbfpw28-rb-manifest"))
-        chash = hashlib.sha256(content.encode()).hexdigest()
-        cols = [c["name"] for c in local_t3.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local_t3.get_by_id(cols[0], chash) is None, (
-            "a failed manifest write must roll back the chunk it just "
-            "wrote, not leave a manifest-less orphan in T3"
-        )
         assert _catalog_rows(catalog_env, "wbfpw28-rb-manifest") == [], (
-            "a failed manifest write must roll back the catalog row this "
+            "a write confirmed not to have landed must remove the catalog row this "
             "call minted, not leave a chunk_count=0 ghost behind"
         )
 
@@ -1151,7 +1145,6 @@ class TestWbfpw28RecoveryBundleRollback:
         from nexus.catalog.recovery_bundle import _default_import_doc
 
         content = "wbfpw28 recovery bundle healthy import"
-        _seed_for_store_put(local_t3, content)
         _default_import_doc(local_t3, self._rec(content, "wbfpw28-rb-ok"))
         rows = _catalog_rows(catalog_env, "wbfpw28-rb-ok")
         assert len(rows) == 1

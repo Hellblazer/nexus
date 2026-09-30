@@ -134,13 +134,22 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
         ),
         same_function=False,
     ),
-    ("catalog/recovery_bundle.py", "_default_import_doc"): _Coverage(
+    ("catalog/recovery_bundle.py", "_fire_post_store_hooks"): _Coverage(
         reason=(
-            "recovery-bundle import, split-note path (nexus-spujb): same "
-            "shape as nx store put; _fence_begin is called in this same "
-            "function before the first piece is written."
+            "recovery-bundle import (RDR-223 P2.8, nexus-z0o2p.18): the "
+            "fence begins in nexus.catalog.note_write.put_note, which "
+            "_default_import_doc calls before it calls this function "
+            "(_fire_post_store_hooks, the batch-chain firing); "
+            "the completion stamp rides the note's one write_manifest_many "
+            "request and the batch chain skips manifest_write_batch_hook. "
+            "Cross-function like store_put: "
+            "test_recovery_import_writes_its_notes_through_put_note below "
+            "proves _default_import_doc calls put_note and only then "
+            "_fire_post_store_hooks, and "
+            "test_store_put_fence_begins_in_put_note_before_the_write "
+            "proves put_note calls _fence_begin before write_note."
         ),
-        same_function=True,
+        same_function=False,
     ),
     ("code_indexer.py", "index_code_file"): _Coverage(
         reason=(
@@ -397,12 +406,14 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
     same-function site as cross-function to dodge the AST proof above.
 
     ``mcp/core.py::store_put`` joined them at RDR-223 P2.2 (nexus-z0o2p.12),
-    ``commands/store.py::put_cmd`` at P2.6 (nexus-z0o2p.16) and
-    ``commands/memory.py::promote_cmd`` at P2.7 (nexus-z0o2p.17): their fence begins
-    in ``note_write.put_note``, the one function every note producer calls. That
-    claim is proven below, not asserted."""
+    ``commands/store.py::put_cmd`` at P2.6 (nexus-z0o2p.16),
+    ``commands/memory.py::promote_cmd`` at P2.7 (nexus-z0o2p.17) and the recovery-bundle
+    import (``catalog/recovery_bundle.py::_fire_post_store_hooks``) at P2.8
+    (nexus-z0o2p.18): their fence begins in ``note_write.put_note``, the one function
+    every note producer calls. That claim is proven below, not asserted."""
     cross = sorted(k for k, cov in _ALLOWLIST.items() if not cov.same_function)
     assert cross == [
+        ("catalog/recovery_bundle.py", "_fire_post_store_hooks"),
         ("commands/memory.py", "promote_cmd"),
         ("commands/store.py", "put_cmd"),
         ("doc_indexer.py", "_index_document"),
@@ -468,6 +479,24 @@ def test_promote_cmd_begins_the_fence_in_put_note() -> None:
     assert "fire_batch" in names
     assert names.index("put_note") < names.index("fire_batch"), (
         f"promote_cmd must write (and so fence) before it fires the batch chain: {calls}")
+
+
+def test_recovery_import_writes_its_notes_through_put_note() -> None:
+    """The other half of the recovery import's cross-function entry (RDR-223 P2.8,
+    nexus-z0o2p.18): ``_default_import_doc`` hands each note to ``put_note``, the function that
+    begins the fence before it writes (proven by the test above), and only afterwards calls
+    ``_fire_post_store_hooks``, the function that fires the batch chain."""
+    tree = ast.parse((SRC_ROOT / "catalog" / "recovery_bundle.py").read_text())
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_default_import_doc")
+    calls = sorted(
+        (c.lineno, c.func.id) for c in ast.walk(fn)
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        and c.func.id in {"put_note", "_fire_post_store_hooks"})
+    names = [name for _line, name in calls]
+    assert names == ["put_note", "_fire_post_store_hooks"], (
+        f"_default_import_doc must write through note_write.put_note, then fire the chains: {calls}")
 
 
 # ── RDR-223 (nexus-z0o2p.10): the multi-batch writer's fence leg ──────────────

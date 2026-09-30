@@ -63,8 +63,11 @@ def import_cmd(bundle: Path) -> None:
     Knowledge docs re-run the real store_put chain (re-embedding,
     reconciling onto existing rows per the sdp0u identity contract);
     links resolve endpoints by source_uri. Idempotent: a second import of
-    the same bundle merges rather than duplicates. Partial failures are
-    REPORTED, never silently dropped — and never abort the rest.
+    the same bundle merges rather than duplicates. Each note is written in
+    one request with its catalog owner rows. Partial failures are REPORTED
+    per note, never silently dropped — and never abort the rest. Exits
+    non-zero when any note did not verify (failed, uncertain, or written
+    but not stamped complete).
     """
     from nexus.catalog.recovery_bundle import import_bundle  # noqa: PLC0415 — command-local import
     from nexus.commands import catalog as _cat_cmd  # noqa: PLC0415 — module-routed helper access keeps import acyclic + monkeypatch-visible
@@ -87,6 +90,14 @@ def import_cmd(bundle: Path) -> None:
         click.echo(f"  DOC FAILURES: {summary.docs_failed}")
         for f in summary.doc_failures:
             click.echo(f"    {f['title']!r}: {f['error']}")
+    if summary.docs_uncertain:
+        click.echo(f"  DOCS NOT CONFIRMED (may have landed): {summary.docs_uncertain}")
+    if summary.docs_stamp_refused:
+        click.echo(
+            f"  DOCS WRITTEN BUT NOT STAMPED COMPLETE (left 'indexing'): {summary.docs_stamp_refused}"
+        )
+    for u in summary.doc_unverified:
+        click.echo(f"    {u['title']!r}: {u['error']}")
     if summary.unresolvable_links:
         click.echo(f"  UNRESOLVABLE LINKS: {len(summary.unresolvable_links)}")
         for link in summary.unresolvable_links:
@@ -94,6 +105,13 @@ def import_cmd(bundle: Path) -> None:
                 f"    {link['from_source_uri']} -[{link['link_type']}]-> "
                 f"{link['to_source_uri']} (missing: {link['missing']})"
             )
+    if summary.docs_unverified:
+        click.echo(
+            f"  {summary.docs_unverified} note(s) did not verify; "
+            f"{summary.docs_imported} verified",
+            err=True,
+        )
+        raise click.exceptions.Exit(1)
 
 
 def register(group: click.Group) -> None:
