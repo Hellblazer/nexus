@@ -394,8 +394,19 @@ listed in Technical Design 3.
 
 #### Step 2: Import
 
-Move `.nxexp` import onto append with chunks and client-supplied vectors,
-keeping the nexus-wbfpw.31 legacy `doc_id` handling. Owner: nexus-76.
+Move `.nxexp` import onto the combined routes with chunks and client-supplied
+vectors, keeping the nexus-wbfpw.31 legacy `doc_id` handling. Owner: nexus-76.
+
+Corrected 2026-09-30 (Sam; rulings in T2
+`nexus/rdr-223-nxexp-import-rulings-2026-09-30`). This step first said "onto
+append". The keep-existing rule of nexus-wbfpw.40 (Sam, 2026-09-29) governs:
+an import never replaces or extends the manifest of a document that already
+owns chunks, and that document's chunks in the file are skipped and counted.
+A first-seen document gets `write_many` and its later pages `append_many`. A
+document left `indexing` or `failed` by the same file's earlier dead run is
+finished with append. Each document is stamped at its own last page. The
+import sends the exported vectors with `force_re_embed`, so they replace
+stored ones.
 
 #### Step 3: Stop the ownerless route
 
@@ -452,7 +463,10 @@ None.
   **Verify**: no chunk that request wrote is without an owner.
 - **Scenario**: a gate-xr789-shaped fixture imported through append with
   chunks and supplied vectors — **Verify**: vectors byte-identical, zero
-  embedder calls, scattered positions in manifest order, a re-import replaces.
+  embedder calls, scattered positions in manifest order, a re-import writes
+  nothing. (Corrected 2026-09-30 from "a re-import replaces": under the
+  nexus-wbfpw.40 keep-existing rule a second import keeps every document that
+  already owns chunks. See Phase 2 Step 2.)
 - **Scenario**: supplied vector with the wrong dimension or model —
   **Verify**: refused, nothing stored.
 - **Scenario**: Phase 3 refusal — **Verify**: an `upsert-chunks`,

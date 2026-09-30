@@ -138,17 +138,23 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
     ),
     ("code_indexer.py", "index_code_file"): _Coverage(
         reason=(
-            "producer 5 (nx index repo, code, legacy per-file fallback "
-            "when the ChunkBatcher rejects the file or is absent): "
-            "_fence_begin called in this same function (nexus-vw594 F1)."
+            "producer 5 (nx index repo, code, per-file path for a file the "
+            "ChunkBatcher rejected as oversize, a file with no catalog "
+            "identity, or a non-service T3): _fence_begin called in this same "
+            "function (nexus-vw594 F1); the oversize leg writes through "
+            "MultiBatchDocumentWriter, whose own fence begin re-affirms it "
+            "(nexus-z0o2p.14)."
         ),
         same_function=True,
     ),
     ("prose_indexer.py", "index_prose_file"): _Coverage(
         reason=(
-            "producer 6 (nx index repo, prose/rdr, legacy per-file "
-            "fallback): _fence_begin called in this same function "
-            "(nexus-vw594 F1)."
+            "producer 6 (nx index repo, prose/rdr, per-file path for a file "
+            "the ChunkBatcher rejected as oversize, a file with no catalog "
+            "identity, or a non-service T3): _fence_begin called in this same "
+            "function (nexus-vw594 F1); the oversize leg writes through "
+            "MultiBatchDocumentWriter, whose own fence begin re-affirms it "
+            "(nexus-z0o2p.14)."
         ),
         same_function=True,
     ),
@@ -177,9 +183,12 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
     ),
     ("indexer.py", "_index_pdf_file"): _Coverage(
         reason=(
-            "producer 9 (nx index repo, PDF path, legacy per-file "
-            "fallback): _fence_begin called in this same function "
-            "(nexus-vw594 F1)."
+            "producer 9 (nx index repo, PDF path, per-file path for a file "
+            "the ChunkBatcher rejected as oversize, a file with no catalog "
+            "identity, or a non-service T3): _fence_begin called in this same "
+            "function (nexus-vw594 F1); the oversize leg writes through "
+            "MultiBatchDocumentWriter, whose own fence begin re-affirms it "
+            "(nexus-z0o2p.14)."
         ),
         same_function=True,
     ),
