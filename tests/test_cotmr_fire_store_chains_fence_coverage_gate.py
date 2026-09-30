@@ -54,15 +54,6 @@ class _Coverage:
 
 # (relative-path-from-src-nexus, enclosing-function-name) -> coverage record.
 _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
-    ("commands/store.py", "put_cmd"): _Coverage(
-        reason=(
-            "nx store put: _fence_begin called in this same function "
-            "before db.put; manifest_complete rides the fire_store_chains "
-            "call at the tail, mirroring MCP core.py::store_put's F2 "
-            "pattern verbatim (nexus-cotmr)."
-        ),
-        fenced=True,
-    ),
     ("commands/memory.py", "promote_cmd"): _Coverage(
         reason=(
             "nx memory promote: _fence_begin called in this same function "
@@ -222,10 +213,13 @@ def test_fenced_allowlist_entries_are_proven() -> None:
     _fence_begin — the registry's prose is not trusted blindly.
 
     KILL CONTROL: commenting out the ``_fence_begin(...)`` call in
-    ``commands/store.py``'s ``put_cmd`` (or ``commands/memory.py``'s
-    ``promote_cmd``) turns this test RED for that specific entry while
-    leaving every other test in this file green — verified manually
-    during implementation, 2026-08-06."""
+    ``commands/memory.py``'s ``promote_cmd`` turns this test RED for that
+    specific entry while leaving every other test in this file green —
+    verified manually during implementation, 2026-08-06. (``commands/store.py``'s
+    ``put_cmd`` was the other such entry until RDR-223 P2.6, nexus-z0o2p.16: it now
+    writes through ``note_write.put_note`` and fires the chains one by one, so it has
+    no ``fire_store_chains`` call left to fence; the ``fire_batch`` leg is the vw594
+    gate's.)"""
     trees: dict[str, ast.Module] = {}
 
     def _tree_for(rel_path: str) -> ast.Module:

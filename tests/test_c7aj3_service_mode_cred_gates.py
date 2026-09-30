@@ -106,14 +106,16 @@ class TestVictimScenarioEndToEnd:
         # pre-flight message, not about catalog wiring, so give the
         # registration/manifest legs a working stand-in instead of forcing
         # the old "no catalog" shortcut.
+        # RDR-223 P2.6 (nexus-z0o2p.16): the command writes through
+        # note_write.put_note; a stored outcome is the working stand-in.
+        from nexus.catalog.note_write import STORED, PutNoteOutcome
+
+        stored = PutNoteOutcome(
+            status=STORED, collection="knowledge__t__x__v1", pieces=["content"],
+            manifest_metadatas=[{}], chunk_ids=["cid"], catalog_doc_id="9.9.9", minted=True)
         with patch("nexus.commands.store.make_t3", return_value=db), \
              patch("nexus.corpus.t3_collection_name", return_value="knowledge__t__x__v1"), \
-             patch("nexus.commands.store._catalog_store_hook_tracked",
-                   return_value=("9.9.9", True)), \
-             patch("nexus.commands.store._single_chunk_manifest_metadata",
-                   return_value=("cid", [{}])), \
-             patch("nexus.commands.store._store_put_manifest_direct_with_recovery",
-                   return_value=None), \
+             patch("nexus.catalog.note_write.put_note", return_value=stored), \
              patch("nexus.hook_registry.HookRegistry"), \
              patch("nexus.hook_registry.install_default_hooks"):
             result = runner.invoke(main, ["store", "put", "--collection", "fixture-subject", str(src), "--title", "t"])

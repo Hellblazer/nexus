@@ -24,6 +24,7 @@ from unittest.mock import patch
 import pytest
 
 from tests._catalog_fixture_ops import documents_by_title
+from tests._note_write_double import route_note_writes_to
 from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
 
 from nexus.db.t3 import T3Database
@@ -104,6 +105,10 @@ def test_store_put_cli_writes_catalog_doc_id_into_t3_chunk_metadata(
     _finding_content = "# Finding: nexus-doc-id-pin\n\nT3 chunks must carry catalog tumbler."
     (catalog_env.parent / "finding.md").write_text(_finding_content, encoding="utf-8")
     _seed_for_store_put(_finding_content)
+    # RDR-223 P2.6 (nexus-z0o2p.16): the command writes the note through the note
+    # writer (one request to the engine); this test's subject is the chunk
+    # metadata in its fake T3, so the note is routed there.
+    route_note_writes_to(monkeypatch, local_t3)
 
     # Patch HookRegistry's fire methods so no real hooks run for these
     # doc_id-stamping contract tests. The CLI constructs its own
@@ -179,6 +184,10 @@ def test_store_put_doc_id_absent_when_catalog_uninitialized(
     _finding_content = "# Finding without catalog backing\n\nstore put no-catalog path."
     (tmp_path / "finding-nocat.md").write_text(_finding_content, encoding="utf-8")
     _seed_for_store_put(_finding_content)
+    # RDR-223 P2.6 (nexus-z0o2p.16): the command writes the note through the note
+    # writer (one request to the engine); this test's subject is the chunk
+    # metadata in its fake T3, so the note is routed there.
+    route_note_writes_to(monkeypatch, local_t3)
 
     # Patch HookRegistry's fire methods so no real hooks run for these
     # doc_id-stamping contract tests. The CLI constructs its own

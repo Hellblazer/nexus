@@ -377,6 +377,17 @@ _REFUSED = "refused"
 _IN_FLIGHT = "in-flight"
 
 
+def _client_side_refusals() -> tuple[type[BaseException], ...]:
+    """Refusals the client raises BEFORE it sends: ``write_manifest_many`` registers the collection
+    first, and registration refuses a profile that disagrees with the engine's, a voyage intent with
+    no key, and a retired collection name. Nothing reached the engine, so the note is not in flight.
+    (Imported at call time: ``nexus.corpus`` imports back into the catalog package.)"""
+    from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415 — deferred: circular-dep avoidance
+    from nexus.corpus import EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError  # noqa: PLC0415 — deferred: circular-dep avoidance
+
+    return (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError, SupersededCollectionWriteError)
+
+
 def _classify(exc: BaseException) -> str:
     """Which of the three shapes one failed ``write_manifest_many`` attempt is.
 
@@ -390,7 +401,8 @@ def _classify(exc: BaseException) -> str:
     that may have reached the engine. Precedence over the chain: any in-flight node (an embed
     timeout, a 5xx or 408, a transport error that is not a failed connect) makes it in flight; else
     any 4xx makes it refused; else it is unsent, which needs at least one failed connect and no
-    other transport node. A chain of nothing recognisable is in flight.
+    other transport node. A chain of nothing recognisable is in flight. A refusal the client raises
+    before it sends (:func:`_client_side_refusals`) counts as a connection never made.
     """
     seen: set[int] = set()
     pending: list[BaseException] = [exc]
@@ -408,7 +420,8 @@ def _classify(exc: BaseException) -> str:
                 refused = True
             else:
                 return _IN_FLIGHT
-        elif isinstance(cur, (httpx.ConnectError, httpx.ConnectTimeout)):
+        elif isinstance(cur, (httpx.ConnectError, httpx.ConnectTimeout)) or isinstance(
+                cur, _client_side_refusals()):
             unsent = True
         elif isinstance(cur, httpx.TransportError):
             return _IN_FLIGHT
@@ -618,10 +631,11 @@ def put_note(
     except NoteWriteError as exc:
         out.status, out.reason = NOT_LANDED, exc.reason
         _fence_fail(doc, out.reason)
+        # No exc_info: a definitive refusal is a normal outcome the caller words itself (the CLI
+        # prints this line to the operator's terminal), and the reason names what the engine said.
         _log.warning(
             "store_put_note_write_failed", doc_id=out.doc_id, catalog_doc_id=doc,
-            collection=collection, manifest_empty=exc.manifest_empty, error=out.reason[:300],
-            exc_info=True)
+            collection=collection, manifest_empty=exc.manifest_empty, error=out.reason[:300])
         if out.minted:
             if exc.manifest_empty:
                 sh.rollback_minted_catalog_entry(doc, original_error=out.reason)
