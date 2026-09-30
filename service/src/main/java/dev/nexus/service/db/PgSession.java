@@ -77,26 +77,72 @@ public final class PgSession {
     static final int DEFAULT_EF_SEARCH_FLOOR = 200;
 
     /**
-     * Serving value for {@code hnsw.max_scan_tuples} (nexus-wbfpw.47; pgvector
-     * default 20000). An iterative scan stops at this many visited tuples OR at
+     * Default serving value for {@code hnsw.max_scan_tuples} (nexus-wbfpw.47;
+     * pgvector default 20000), overridable by {@code NX_HNSW_MAX_SCAN_TUPLES}.
+     * An iterative scan stops at this many visited tuples OR at
      * {@code work_mem x hnsw.scan_mem_multiplier} bytes, whichever comes first.
      * Measured 2026-09-30 (T2 nexus/rdr-192-livec-recall-extended-2026-09-30,
      * nexus-wbfpw.44/.45): at 98% correlated-dead chunks on a shared 768/1024-d
-     * index recall@10 fell to 0.85-0.89 under the old caps; this value together
-     * with {@link #HNSW_SCAN_MEM_MULTIPLIER} restored 1.000 in every cell
-     * measured, and neither alone changed anything. Cost at 98% dead: p50
-     * ~42 to ~80 ms, worst ~60 to ~300 ms; none at 90% dead or below (the caps
-     * never bind). Decided by Sam 2026-09-30.
+     * index recall@10 fell to 0.85-0.89 under the old caps; this cap together
+     * with the memory budget ({@link #DEFAULT_SCAN_MEM_BUDGET_MB}) restored
+     * 1.000 in every cell measured, and neither alone changed anything.
+     * Decided by Sam 2026-09-30.
+     *
+     * <p>COST, both directions. Measured at 98% dead: p50 ~42 to ~80 ms, worst
+     * ~60 to ~300 ms, none at 90% dead or below. That measurement only covers
+     * queries that had at least LIMIT qualifying rows. The raised budget also
+     * applies to any filtered search that CANNOT fill its LIMIT (a small
+     * collection on the shared index, a narrow {@code where}, tenant
+     * crowd-out): the scan then runs to the cap, up from 20000 to 200000
+     * tuples and from ~4 to ~16 MB per call, and that is paid BEFORE the
+     * empty-result exact re-run ({@code PgVectorRepository#exactOnUnderReturn}).
+     * That case is unmeasured. A scan that exhausts the budget on a large
+     * shared index now ends at the search statement timeout (57014) rather
+     * than returning low recall quickly.
      */
-    static final int HNSW_MAX_SCAN_TUPLES = 200_000;
+    static final int DEFAULT_MAX_SCAN_TUPLES = 200_000;
+
+    /** Bounds on the {@code NX_HNSW_MAX_SCAN_TUPLES} override. Below 1,000 the search
+     *  regresses recall well under pgvector's own 20000 default; above 100M a
+     *  single search could hold a backend for the whole statement timeout. */
+    static final int MAX_SCAN_TUPLES_MIN = 1_000;
+    static final int MAX_SCAN_TUPLES_MAX = 100_000_000;
 
     /**
-     * Serving value for {@code hnsw.scan_mem_multiplier} (nexus-wbfpw.47;
-     * pgvector default 1): the scan may use up to this many times
-     * {@code work_mem} (about 16 MB at the 4 MB default) per concurrent search,
-     * allocated as the scan uses it. Pair of {@link #HNSW_MAX_SCAN_TUPLES}.
+     * Fixed per-search memory budget for the iterative scan, in MB
+     * (nexus-wbfpw.47), overridable by {@code NX_HNSW_SCAN_MEM_BUDGET_MB}.
+     * pgvector bounds the scan at {@code work_mem x hnsw.scan_mem_multiplier}
+     * and does not spill: an exhausted scan simply stops. The budget is held
+     * FIXED and the multiplier is DERIVED from the engine role's effective
+     * {@code work_mem} at boot ({@link #startupScanBudget}), because work_mem
+     * differs by an order of magnitude between installs (stock 4 MB locally,
+     * 384 MB measured on the managed cloud): a fixed multiplier would mean
+     * ~16 MB in one place and ~1.5 GB per search in the other. Sized so
+     * multiplier 4 at the local 4 MB work_mem restores recall (multiplier 2
+     * measured 0.994, 4 measured 1.000).
      */
-    static final int HNSW_SCAN_MEM_MULTIPLIER = 4;
+    static final int DEFAULT_SCAN_MEM_BUDGET_MB = 16;
+    static final int SCAN_MEM_BUDGET_MB_MAX = 4096;
+
+    /** pgvector's own upper bound for {@code hnsw.scan_mem_multiplier}. */
+    static final int SCAN_MEM_MULTIPLIER_MAX = 1000;
+
+    /** The resolved serving scan budget: what {@link #setHnswScanBudget} sets. */
+    public record ScanBudget(int maxScanTuples, long workMemBytes, long budgetBytes, int memMultiplier) {
+        /** The effective per-search memory ceiling the scan may use. */
+        public long effectiveMemBytes() {
+            return workMemBytes * memMultiplier;
+        }
+    }
+
+    private static final int MAX_SCAN_TUPLES =
+        maxScanTuples(System.getenv("NX_HNSW_MAX_SCAN_TUPLES"));
+
+    private static final long SCAN_MEM_BUDGET_BYTES =
+        scanMemBudgetBytes(System.getenv("NX_HNSW_SCAN_MEM_BUDGET_MB"));
+
+    /** Null until {@link #startupScanBudget} (or the first search) resolves it. */
+    private static volatile ScanBudget scanBudget;
 
     /**
      * Env-resolved floor ({@code NX_HNSW_EF_SEARCH}) so the managed cloud can
@@ -437,17 +483,142 @@ public final class PgSession {
     }
 
     /**
+     * Parse the {@code NX_HNSW_MAX_SCAN_TUPLES} override. Null/blank means
+     * {@link #DEFAULT_MAX_SCAN_TUPLES}; anything else must be an integer in
+     * [{@link #MAX_SCAN_TUPLES_MIN}, {@link #MAX_SCAN_TUPLES_MAX}], loud at boot.
+     */
+    static int maxScanTuples(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return DEFAULT_MAX_SCAN_TUPLES;
+        }
+        int v;
+        try {
+            v = Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                "NX_HNSW_MAX_SCAN_TUPLES must be an integer, got: " + raw, e);
+        }
+        if (v < MAX_SCAN_TUPLES_MIN || v > MAX_SCAN_TUPLES_MAX) {
+            throw new IllegalArgumentException("NX_HNSW_MAX_SCAN_TUPLES must be in "
+                + MAX_SCAN_TUPLES_MIN + ".." + MAX_SCAN_TUPLES_MAX + ", got: " + v);
+        }
+        return v;
+    }
+
+    /**
+     * Parse the {@code NX_HNSW_SCAN_MEM_BUDGET_MB} override into bytes. Null/blank
+     * means {@link #DEFAULT_SCAN_MEM_BUDGET_MB}; anything else must be an integer
+     * in [1, {@link #SCAN_MEM_BUDGET_MB_MAX}], loud at boot.
+     */
+    static long scanMemBudgetBytes(String raw) {
+        int mb = DEFAULT_SCAN_MEM_BUDGET_MB;
+        if (raw != null && !raw.isBlank()) {
+            try {
+                mb = Integer.parseInt(raw.trim());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException(
+                    "NX_HNSW_SCAN_MEM_BUDGET_MB must be an integer, got: " + raw, e);
+            }
+            if (mb < 1 || mb > SCAN_MEM_BUDGET_MB_MAX) {
+                throw new IllegalArgumentException("NX_HNSW_SCAN_MEM_BUDGET_MB must be in 1.."
+                    + SCAN_MEM_BUDGET_MB_MAX + ", got: " + mb);
+            }
+        }
+        return mb * 1024L * 1024L;
+    }
+
+    private static final java.util.regex.Pattern WORK_MEM =
+        java.util.regex.Pattern.compile("(\\d+)\\s*(B|kB|MB|GB|TB)");
+
+    /** Parse a {@code current_setting('work_mem')} value ("4MB", "384MB", "64kB") to bytes. */
+    static long parseWorkMemBytes(String setting) {
+        java.util.regex.Matcher m = WORK_MEM.matcher(setting == null ? "" : setting.trim());
+        if (!m.matches()) {
+            throw new IllegalStateException("cannot parse work_mem setting: '" + setting + "'");
+        }
+        long n = Long.parseLong(m.group(1));
+        return switch (m.group(2)) {
+            case "B" -> n;
+            case "kB" -> n * 1024L;
+            case "MB" -> n * 1024L * 1024L;
+            case "GB" -> n * 1024L * 1024L * 1024L;
+            default -> n * 1024L * 1024L * 1024L * 1024L;
+        };
+    }
+
+    /** {@code clamp(budgetBytes / workMemBytes, 1, SCAN_MEM_MULTIPLIER_MAX)} - pure, for tests. */
+    static int scanMemMultiplier(long workMemBytes, long budgetBytes) {
+        if (workMemBytes <= 0) {
+            throw new IllegalArgumentException("work_mem must be positive, got " + workMemBytes);
+        }
+        return (int) Math.max(1L, Math.min(SCAN_MEM_MULTIPLIER_MAX, budgetBytes / workMemBytes));
+    }
+
+    /**
+     * Resolve and publish the serving scan budget (nexus-wbfpw.47): read the
+     * engine role's effective {@code work_mem} from the database and derive
+     * {@code hnsw.scan_mem_multiplier = max(1, budget / work_mem)}. Called from
+     * {@code Main} at boot so a bad environment override or an unreadable
+     * work_mem fails loud before serving, and the result is logged there. Also
+     * called lazily by the first {@link #setHnswScanBudget} in a process that
+     * never ran the boot path (tests).
+     *
+     * @return the resolved budget, for the boot log line
+     */
+    public static ScanBudget startupScanBudget(DSLContext ctx) {
+        String raw = ctx.select(DSL.function("current_setting", String.class, DSL.val("work_mem")))
+            .fetchSingle().value1();
+        long workMem = parseWorkMemBytes(raw);
+        ScanBudget b = new ScanBudget(MAX_SCAN_TUPLES, workMem, SCAN_MEM_BUDGET_BYTES,
+            scanMemMultiplier(workMem, SCAN_MEM_BUDGET_BYTES));
+        scanBudget = b;
+        return b;
+    }
+
+    /** The resolved budget, or null before it has been resolved. */
+    public static ScanBudget currentScanBudget() {
+        return scanBudget;
+    }
+
+    /**
+     * TEST SEAM (nexus-wbfpw.47): pin the budget the search paths set, e.g. a tiny
+     * tuple cap so a fixture of a few thousand rows reaches the scan cap the way a
+     * large index does in production. Replaces a connection-level
+     * {@code -c hnsw.max_scan_tuples=...}, which the per-search SET LOCAL now
+     * overrides. Pair with {@link #resetScanBudgetForTests()} in a finally.
+     */
+    public static void overrideScanBudgetForTests(int maxScanTuples, int memMultiplier) {
+        scanBudget = new ScanBudget(maxScanTuples, 0L, 0L, memMultiplier);
+    }
+
+    /** Drop any pinned or resolved budget; the next search (or boot) resolves afresh. */
+    public static void resetScanBudgetForTests() {
+        scanBudget = null;
+    }
+
+    /**
      * Set the serving iterative-scan budget for this transaction:
      * {@code hnsw.max_scan_tuples} and {@code hnsw.scan_mem_multiplier}
      * (nexus-wbfpw.47). Called at every vector-ranked site next to
-     * {@link #setHnswEfSearch}; the pairing is pinned by
-     * {@code HnswServingGucParityTest}. Both must be raised together: the scan
-     * stops at whichever cap it reaches first, so raising one alone changes
-     * nothing (see {@link #HNSW_MAX_SCAN_TUPLES}).
+     * {@link #setHnswEfSearch}, BEFORE the fetch; the pairing and the order are
+     * pinned by {@code HnswServingGucParityTest}. Both must be raised together:
+     * the scan stops at whichever cap it reaches first, so raising one alone
+     * changes nothing (see {@link #DEFAULT_MAX_SCAN_TUPLES}).
+     *
+     * <p>At the centroid ANN site ({@code TaxonomyCentroidRepository#annQuery})
+     * this is crowd-out headroom, not dead-row recall: centroids have no
+     * liveness predicate, but the same-collection query is a selective filter on
+     * a unified table (RLS after the scan) and a collection with fewer centroids
+     * than {@code n} would exhaust the default cap. The table is small, so it is
+     * a no-op below 20000 centroid rows.
      */
     public static void setHnswScanBudget(DSLContext ctx) {
-        setLocal(ctx, "hnsw.max_scan_tuples", Integer.toString(HNSW_MAX_SCAN_TUPLES));
-        setLocal(ctx, "hnsw.scan_mem_multiplier", Integer.toString(HNSW_SCAN_MEM_MULTIPLIER));
+        ScanBudget b = scanBudget;
+        if (b == null) {
+            b = startupScanBudget(ctx);
+        }
+        setLocal(ctx, "hnsw.max_scan_tuples", Integer.toString(b.maxScanTuples()));
+        setLocal(ctx, "hnsw.scan_mem_multiplier", Integer.toString(b.memMultiplier()));
     }
 
     /**

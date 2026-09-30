@@ -190,7 +190,10 @@ public final class TaxonomyCentroidRepository {
             // PgSession.DEFAULT_EF_SEARCH_FLOOR) — centroid tables share the
             // same one-index-all-tenants + RLS-after-scan shape as chunks.
             PgSession.setHnswEfSearch(ctx, nResults);
-            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            // nexus-wbfpw.47: the shared serving scan budget. For centroids this is crowd-out
+            // headroom (no liveness predicate here): a same-collection query is a selective
+            // filter on the unified table and a collection with fewer centroids than nResults
+            // would otherwise exhaust the default cap. A no-op below 20000 centroid rows.
             PgSession.setHnswScanBudget(ctx);
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.

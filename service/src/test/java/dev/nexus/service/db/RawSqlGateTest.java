@@ -939,7 +939,7 @@ class RawSqlGateTest {
         // call sites (one per function family, each looped over the three
         // dims) -- no jOOQ codegen for GRANT EXECUTE.
         Map.entry("dev/nexus/service/CrossPreviewRepositoryTest.java", 4),
-        Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 7),
+        Map.entry("dev/nexus/service/DenseGateScanBudgetIntegrationTest.java", 5),
         // nexus-brxnp: new file at 3 -- metadataField's raw executeQuery
         // (metadata->>key read, no jOOQ codegen shortcut used here) and
         // insertManifestRowBypassingFk's two ALTER TABLE DROP/ADD CONSTRAINT
@@ -1648,7 +1648,7 @@ class RawSqlGateTest {
     // nexus-wbfpw.44/.45/.46: 979 -> 981 (+2: new test file
     // vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java at 2 -- see that entry's own
     // comment).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 981;
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 979;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

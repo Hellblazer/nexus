@@ -3,6 +3,7 @@ package dev.nexus.service;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.PgVectorRepository;
@@ -57,8 +58,18 @@ class DenseGateScanBudgetIntegrationTest {
     private static final String COL_NOISE  = "docs__noise__minilm-l6-v2-384__v1";
 
     private static final String QUERY = "gpu batch scheduling";
-    private static final int MATCHING = 350;   // > SELECTIVE_GATE_MAX (128): dense branch
+    /** The gate cutoff this test pins. Production's PgVectorRepository.SELECTIVE_GATE_MAX is
+     *  5000 now (it was 128 when this test was written), which would send a 350-row gate down
+     *  the SELECTIVE text-first branch and leave the dense HNSW-first branch unexercised; the
+     *  6-arg hybridSearch overload pins the dispatch at the original 128 instead. */
+    private static final int DENSE_GATE_MAX = 128;
+    private static final int MATCHING = 350;   // > DENSE_GATE_MAX: dense branch
     private static final int NOISE = 50_000;
+
+    /** The scan cap the calibration below pins (see the calibration comment). */
+    private static final int CALIBRATED_SCAN_CAP = 512;
+
+    private final ScanBudgetProbe probe = new ScanBudgetProbe();
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
@@ -82,7 +93,11 @@ class DenseGateScanBudgetIntegrationTest {
         config.setMaximumPoolSize(3);
         config.setAutoCommit(true);
         svcDs = new HikariDataSource(config);
-        scope = new TenantScope(svcDs);
+        scope = new TenantScope(probe.wrap(svcDs));
+        // nexus-wbfpw.47: every search now SET LOCALs its own scan budget, which overrides
+        // a DB-level ALTER DATABASE ... SET hnsw.max_scan_tuples, so the calibrated cap goes
+        // through PgSession's test seam and is asserted INSIDE the search below.
+        PgSession.overrideScanBudgetForTests(CALIBRATED_SCAN_CAP, 1);
         embedder = new PgVectorRepositoryContractTest.FakeEmbedder(384);
         embedder.register(QUERY, 1.0f, 0.0f);
         repo = new PgVectorRepository(scope, embedder, embedder);
@@ -92,6 +107,7 @@ class DenseGateScanBudgetIntegrationTest {
 
     @AfterAll
     void stopAll() {
+        PgSession.resetScanBudgetForTests();
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
     }
@@ -155,17 +171,14 @@ class DenseGateScanBudgetIntegrationTest {
             }
             PgContainerHelper.ownChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, COL_TARGET,
                 matchingChashes);
-            // Calibrate the scan budget to the CLOUD's ratio at test scale:
-            // their failing queries sit at ~329 gate matches in a table where
-            // the default 20k-tuple budget yields ~9 expected hits (the exact
-            // 10 -> 0/1/4 cliff regime). 512 tuples over 50k rows with 350
-            // matches reproduces that ratio honestly (~3.5 expected hits)
-            // without a 20-minute 700k seed. DB-level so the repo's own
-            // session inherits it — hybridSearch pins iterative_scan but
-            // deliberately NOT the budget.
-            su.createStatement().execute(
-                "ALTER DATABASE \"" + pg.getDatabaseName()
-                + "\" SET hnsw.max_scan_tuples = 512");
+            // The scan budget is calibrated to the CLOUD's ratio at test scale, through
+            // PgSession's test seam (CALIBRATED_SCAN_CAP, set in startAll): their failing
+            // queries sit at ~329 gate matches in a table where the default 20k-tuple
+            // budget yields ~9 expected hits (the exact 10 -> 0/1/4 cliff regime). 512
+            // tuples over 50k rows with 350 matches reproduces that ratio honestly (~3.5
+            // expected hits) without a 20-minute 700k seed. It is NOT a DB-level setting:
+            // hybridSearch's HNSW-first branch SET LOCALs the serving budget, which would
+            // override one (nexus-wbfpw.47).
             // The cloud's post-conversion state: a freshly REBUILT graph.
             su.createStatement().execute(
                 "CREATE INDEX idx_chunks_embedding_384 ON " + DimTables.CHUNKS_TABLE_NAME + " "
@@ -176,15 +189,6 @@ class DenseGateScanBudgetIntegrationTest {
 
     @Test
     void denseGate_sparseInLargeIndex_mustStillFillNResults() {
-        // The pool predates the ALTER DATABASE — session GUCs snapshot at
-        // connect, so evict and let fresh connections inherit the budget.
-        svcDs.getHikariPoolMXBean().softEvictConnections();
-        String budget = scope.withTenant(TENANT, ctx ->
-            ctx.fetchOne("SHOW hnsw.max_scan_tuples").get(0, String.class));
-        assertThat(budget)
-            .as("the calibrated scan budget must actually govern the repo's session")
-            .isEqualTo("512");
-
         // Sanity: the gate really is dense-branch territory (> 128 matches).
         Integer gateMatches = scope.withTenant(TENANT, ctx -> ctx.fetchOne(
             "SELECT count(*) FROM " + DimTables.CHUNKS_TABLE_NAME + " "
@@ -193,8 +197,23 @@ class DenseGateScanBudgetIntegrationTest {
             + "     OR '" + QUERY + "' OPERATOR(nexus.<%) chunk_text)").get(0, Integer.class));
         assertThat(gateMatches).isGreaterThanOrEqualTo(MATCHING);
 
-        List<Map<String, Object>> rows =
-            repo.hybridSearch(TENANT, QUERY, List.of(COL_TARGET), 10, null);
+        probe.arm("dense");
+        List<Map<String, Object>> rows;
+        try {
+            rows = repo.hybridSearch(TENANT, QUERY, List.of(COL_TARGET), 10, null, DENSE_GATE_MAX);
+        } finally {
+            probe.disarm();
+        }
+
+        // The calibrated premise must hold INSIDE the search: the HNSW-first statement ran
+        // under the pinned cap. Without this a raised serving budget would silently turn
+        // the cliff-ratio pin into a test of a different (200k-cap) regime.
+        var hnsw = probe.hnswStatements("dense");
+        assertThat(hnsw).as("the dense gate must take the HNSW-first branch; saw %s", probe.seen())
+            .isNotEmpty();
+        assertThat(hnsw).allSatisfy(seen -> assertThat(seen.maxScanTuples())
+            .as("the calibrated scan budget must govern the search statement itself")
+            .isEqualTo(Integer.toString(CALIBRATED_SCAN_CAP)));
 
         // THE CONTRACT: >= n_results gate-passing rows exist, so the hybrid
         // MUST return n_results. This held through every BUG-0148 run —

@@ -176,6 +176,66 @@ class HnswServingGucParityTest {
             .isGreaterThanOrEqualTo(4);
     }
 
+    /**
+     * nexus-wbfpw.47 ORDER: the scan budget must be set BEFORE the fetch that runs the HNSW
+     * scan, or the statement runs on pgvector's 20000-tuple / 1x defaults while the count
+     * test above still passes. The anchor is the fetch that FOLLOWS each
+     * {@code "hnsw.iterative_scan"} in its {@code withTenant} block, not the first fetch in
+     * the block: {@code hybridSearch} runs a text_gate_probe fetch and a text-first
+     * by-chash fetch earlier in the same method, neither of which scans HNSW.
+     */
+    @Test
+    void everyIterativeScanSiteRaisesTheScanBudgetBeforeItsFetch() {
+        Path root = Path.of("src", "main", "java");
+        List<String> misordered = new ArrayList<>();
+        int checked = 0;
+        try (Stream<Path> files = Files.walk(root)) {
+            for (Path p : files.filter(f -> f.toString().endsWith(".java")).toList()) {
+                if (p.getFileName().toString().equals("PgSession.java")) {
+                    continue;
+                }
+                String body;
+                try {
+                    body = Files.readString(p);
+                } catch (IOException e) {
+                    throw new UncheckedIOException(e);
+                }
+                for (int at = body.indexOf("tenantScope.withTenant("); at >= 0;
+                     at = body.indexOf("tenantScope.withTenant(", at + 1)) {
+                    int end = body.indexOf("\n    }\n", at);
+                    String block = body.substring(at, end < 0 ? body.length() : end);
+                    for (int it = block.indexOf("\"hnsw.iterative_scan\""); it >= 0;
+                         it = block.indexOf("\"hnsw.iterative_scan\"", it + 1)) {
+                        checked++;
+                        int budget = block.indexOf("setHnswScanBudget(", it);
+                        int fetch = firstIndexOfAnyFrom(block, it, "exactSelectFrom(",
+                            ".selectFrom(fn)", ".selectFrom(probeFn)");
+                        if (budget < 0 || fetch < 0 || budget > fetch) {
+                            misordered.add(p.getFileName() + " @" + lineOf(body, at + it));
+                        }
+                    }
+                }
+            }
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        assertThat(misordered)
+            .as("iterative_scan sites where setHnswScanBudget is missing or comes AFTER the fetch "
+                + "that follows the iterative_scan (nexus-wbfpw.47)")
+            .isEmpty();
+        assertThat(checked).as("iterative_scan sites visible to the ordering sweep")
+            .isGreaterThanOrEqualTo(5);
+    }
+
+    private static int firstIndexOfAnyFrom(String haystack, int from, String... needles) {
+        int best = -1;
+        for (String n : needles) {
+            int idx = haystack.indexOf(n, from);
+            if (idx >= 0 && (best < 0 || idx < best)) best = idx;
+        }
+        return best;
+    }
+
     private static int firstIndexOfAny(String haystack, String... needles) {
         int best = -1;
         for (String n : needles) {
