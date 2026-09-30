@@ -62,13 +62,19 @@ from typing import Any, Sequence
 import httpx
 import structlog
 
+from nexus.catalog.multi_batch_write import (
+    DocumentFailedError,
+    OneRequestResult,
+    complete_document,
+    write_one_request,
+)
 from nexus.catalog.store_hook import (
     ManifestVerifyUncertainError,
     _read_manifest_rows_with_retry,
     note_manifest_metadata,
 )
 from nexus.db.limits import QUOTAS
-from nexus.errors import CombinedWriteEmbedTimeoutError
+from nexus.errors import BatchWriteFailedError, CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
 
 _log = structlog.get_logger(__name__)
 
@@ -220,9 +226,12 @@ def write_note(
     metadata's content type, by default the one the collection prefix implies. *cat* is a catalog
     writer; by default one is made for the call and closed after it.
 
-    The request goes through ``nexus.retry._manifest_write_with_retry`` (429, 503 with Retry-After
-    and connectivity errors, tripping the shared rate brake); a ``CombinedWriteEmbedTimeoutError``
-    is never retried, since a retry would start a second uncancelled embed.
+    The request is :func:`~nexus.catalog.multi_batch_write.write_one_request`, the primitive the
+    multi-batch writer's single-request path uses too, so the checks on the engine's answer are one
+    body of code: 429, 503 with Retry-After and connectivity errors are retried (tripping the shared
+    rate brake), a ``CombinedWriteEmbedTimeoutError`` never is (a retry would start a second
+    uncancelled embed), and a document the engine names in ``failed_doc_ids``, chunks it dropped as
+    unreferenced and a refused stamp are judged there.
 
     Raises ``ValueError`` before any request for a missing document or collection, no pieces, more
     pieces than one request may carry, or ``ttl_days`` that is not a positive integer. See the
@@ -255,8 +264,6 @@ def write_note(
         catalog_doc_id=catalog_doc_id, collection=collection, chunk_ids=[r["chash"] for r in rows])
     expected = [(r["position"], r["chash"]) for r in rows]
 
-    from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
-
     owns_cat = cat is None
     if owns_cat:
         from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
@@ -264,16 +271,27 @@ def write_note(
         cat = make_catalog_writer(priority="interactive")
     try:
         try:
-            resp = _manifest_write_with_retry(
-                cat.write_manifest_many,
-                [(catalog_doc_id, rows)],
-                complete={catalog_doc_id: content_hash} if content_hash else None,
-                sweep=True, chunks=chunks, collection=collection,
-            )
+            out = write_one_request(
+                cat, doc_id=catalog_doc_id, collection=collection, rows=rows, chunks=chunks,
+                content_hash=content_hash or None, sweep=True, dropped="optional")
+        except DocumentFailedError as exc:
+            raise NoteWriteError(
+                catalog_doc_id=catalog_doc_id, collection=collection,
+                reason=f"{exc.reason} (see manifest_write_many_doc_failed in the log for its reason)",
+                manifest_empty=_manifest_is_empty(catalog_doc_id)) from exc
+        except IndexRunVerifyRefused as exc:
+            # The rows and chunks committed; only the stamp was refused. Rolling the document back
+            # now would delete a manifest the engine holds, so this is "unknown", not "failed".
+            raise ManifestVerifyUncertainError(
+                f"note {catalog_doc_id} in {collection} landed but the engine refused to stamp it "
+                f"complete: {exc}") from exc
+        except BatchWriteFailedError as exc:
+            raise ManifestVerifyUncertainError(
+                f"note {catalog_doc_id} in {collection}: the engine's answer cannot be trusted "
+                f"({exc.reason}); the note may have landed") from exc
         except Exception as exc:  # noqa: BLE001 — judged below from the exception and the manifest
             return _settle_after_error(result, expected, exc, cat=cat, content_hash=content_hash)
-        resp = resp if isinstance(resp, dict) else {}
-        _absorb_response(result, resp, stamped=bool(content_hash))
+        _absorb(result, out)
         return result
     finally:
         if owns_cat:
@@ -283,30 +301,15 @@ def write_note(
                 pass
 
 
-def _absorb_response(result: NoteWriteResult, resp: dict, *, stamped: bool) -> None:
-    doc = result.catalog_doc_id
-    if doc in (resp.get("failed_doc_ids") or ()):
-        raise NoteWriteError(
-            catalog_doc_id=doc, collection=result.collection,
-            reason="the engine reported the document in failed_doc_ids "
-                   "(see manifest_write_many_doc_failed in the log for its reason)",
-            manifest_empty=_manifest_is_empty(doc))
-    result.chunks_written = int(resp.get("chunks_written") or 0)
-    result.embed_embedded = int(resp.get("embed_embedded") or 0)
-    result.embed_skipped = int(resp.get("embed_skipped") or 0)
-    result.chunks_deduped = int(resp.get("chunks_deduped") or 0)
-    result.swept = int(resp.get("swept") or 0)
-    result.sweep_skipped = int(resp.get("sweep_skipped") or 0)
-    dropped = resp.get("dropped_chashes")
-    if isinstance(dropped, dict) and doc in dropped and doc not in (resp.get("dropped_unknown") or ()):
-        result.dropped_chashes = list(dropped[doc] or ())
-    for refused in resp.get("complete_refused") or ():
-        if refused.get("doc_id") == doc:
-            # The rows and chunks committed; only the stamp was refused. Rolling the document back
-            # now would delete a manifest the engine holds, so this is "unknown", not "failed".
-            raise ManifestVerifyUncertainError(
-                f"note {doc} in {result.collection} landed but the engine refused to stamp it complete: {refused}")
-    result.completed = stamped
+def _absorb(result: NoteWriteResult, out: OneRequestResult) -> None:
+    result.chunks_written = out.chunks_written
+    result.embed_embedded = out.embed_embedded
+    result.embed_skipped = out.embed_skipped
+    result.chunks_deduped = out.chunks_deduped
+    result.swept = out.swept
+    result.sweep_skipped = out.sweep_skipped
+    result.dropped_chashes = out.dropped
+    result.completed = out.completed
 
 
 def _manifest_is_empty(doc: str) -> bool:
@@ -384,10 +387,8 @@ def _settle_after_error(
         error=str(exc)[:300])
     result.recovered = True
     if content_hash:
-        from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
-
         try:
-            _manifest_write_with_retry(cat.complete_index_run, doc, content_hash, len(expected))
+            complete_document(cat, doc_id=doc, content_hash=content_hash, manifest_rows=len(expected))
         except Exception as stamp_exc:  # noqa: BLE001 — reported as unknown below, never as a finished note
             _log.warning(
                 "note_write_recovered_complete_stamp_failed", doc_id=doc,

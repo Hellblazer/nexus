@@ -784,3 +784,106 @@ class TestPutNote:
             with pytest.raises(PutOversizedError):
                 put_note(content="x" * 20000, collection=_COLLECTION, title="z0o2p12-huge")
         register.assert_not_called()
+
+
+# ── the shared one-request primitive ─────────────────────────────────────────
+
+
+class _CannedCat:
+    """A catalog writer whose write_manifest_many answers with a canned response."""
+
+    def __init__(self, response: dict) -> None:
+        self._response = response
+        self.stamps: list[tuple] = []
+
+    def write_manifest_many(self, docs, **kwargs):
+        return dict(self._response)
+
+    def begin_index_run(self, doc_id, content_hash, run_id, collection, **kw):
+        return {"prior_chashes": [], "prior_count": 0}
+
+    def complete_index_run(self, doc_id, content_hash, count):
+        self.stamps.append((doc_id, content_hash, count))
+        return {}
+
+    def fail_index_run(self, doc_id, error):
+        return {}
+
+
+_DOC = "1.9.9"
+_OK_DROPS = {"dropped_chashes": {_DOC: []}, "dropped_count": {_DOC: 0}}
+
+
+class TestOneRequestPrimitive:
+    """write_note and the multi-batch writer's single-request path judge the engine's answer with
+    ONE body of code (multi_batch_write.write_one_request), so a bad answer is a bad answer to both."""
+
+    def _writer_single_request(self, cat, content_hash="h"):
+        from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter
+
+        rows = [{"chash": _chash("x"), "position": 0}]
+        chunks = [{"chash": _chash("x"), "text": "x", "metadata": {}}]
+        with MultiBatchDocumentWriter(cat, doc_id=_DOC, collection=_COLLECTION, content_hash=content_hash) as w:
+            w.add_batch(rows, chunks)
+            return w.finish()
+
+    def _note(self, cat, content_hash="h"):
+        return write_note(catalog_doc_id=_DOC, collection=_COLLECTION, pieces=["x"],
+                          content_hash=content_hash, cat=cat)
+
+    def test_a_failed_document_is_rejected_by_both(self):
+        from nexus.errors import BatchWriteFailedError
+
+        cat = _CannedCat({"failed_doc_ids": [_DOC], **_OK_DROPS})
+        with pytest.raises(BatchWriteFailedError, match="failed_doc_ids"):
+            self._writer_single_request(cat)
+        with pytest.raises(NoteWriteError, match="failed_doc_ids"):
+            self._note(cat)
+
+    def test_chunks_the_engine_dropped_as_unreferenced_are_rejected_by_both(self):
+        from nexus.errors import BatchWriteFailedError
+
+        cat = _CannedCat({"failed_doc_ids": [], "chunks_written": 1, "chunks_unreferenced": 2, **_OK_DROPS})
+        with pytest.raises(BatchWriteFailedError, match="referenced by no row"):
+            self._writer_single_request(cat)
+        with pytest.raises(ManifestVerifyUncertainError, match="cannot be trusted"):
+            self._note(cat)
+
+    def test_a_refused_stamp_is_rejected_by_both(self):
+        from nexus.errors import IndexRunVerifyRefused
+
+        cat = _CannedCat({
+            "failed_doc_ids": [], "chunks_written": 1, **_OK_DROPS,
+            "complete_refused": [{"doc_id": _DOC, "referenced": 2, "missing": 1, "chunk_count": 2}]})
+        with pytest.raises(IndexRunVerifyRefused):
+            self._writer_single_request(cat)
+        with pytest.raises(ManifestVerifyUncertainError, match="refused to stamp"):
+            self._note(cat)
+
+    def test_a_good_answer_is_taken_the_same_way_by_both(self):
+        cat = _CannedCat({"failed_doc_ids": [], "chunks_written": 1, "swept": 2, "sweep_skipped": 1,
+                          "dropped_chashes": {_DOC: ["a" * 64, "b" * 64]}, "dropped_count": {_DOC: 2}})
+        written = self._writer_single_request(cat)
+        noted = self._note(cat)
+        assert (written.chunks_written, written.swept, written.sweep_skipped) == (1, 2, 1)
+        assert (noted.chunks_written, noted.swept, noted.sweep_skipped) == (1, 2, 1)
+        assert written.completed and noted.completed
+        assert noted.dropped_chashes == ["a" * 64, "b" * 64]
+
+    def test_the_stamp_is_the_primitives_stamp_and_retries_a_blip(self):
+        """complete_document is what the writer's multi-request path uses; write_note's lost-ack
+        recovery uses the same one, so it retries connectivity errors."""
+        from nexus.catalog.multi_batch_write import complete_document
+
+        cat = _CannedCat({})
+        flaky = [httpx.ConnectError("blip")]
+        real = cat.complete_index_run
+
+        def complete(doc_id, content_hash, count):
+            if flaky:
+                raise flaky.pop()
+            return real(doc_id, content_hash, count)
+
+        cat.complete_index_run = complete
+        complete_document(cat, doc_id=_DOC, content_hash="h", manifest_rows=3)
+        assert cat.stamps == [(_DOC, "h", 3)]
