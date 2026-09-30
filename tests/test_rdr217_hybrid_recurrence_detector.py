@@ -75,6 +75,7 @@ import pytest
 
 import nexus.db.http_vector_client as hvc
 from tests._catalog_fixture_ops import give_chunks_a_live_owner
+from tests._chunk_seed import seed_chunks_direct
 
 _COLLECTION = "code__rdr217-detector__bge-base-en-v15-768__v1"
 
@@ -159,8 +160,8 @@ def _seed(db: hvc.HttpVectorClient, n: int = 6) -> tuple[list[str], list[str], s
             f"    return session.id  # probe {i}\n"
         )
         metas.append({"chunk_text_hash": chash, "title": f"detector_{i}.py:1-3"})
-    db.upsert_chunks_with_embeddings(
-        _COLLECTION, ids=ids, documents=docs, embeddings=[], metadatas=metas,
+    seed_chunks_direct(
+        _COLLECTION, ids=ids, documents=docs, embed=True, metadatas=metas,
     )
     tumbler = give_chunks_a_live_owner(_COLLECTION, ids, content_type="code")
     return ids, docs, tumbler

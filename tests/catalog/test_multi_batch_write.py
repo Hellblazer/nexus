@@ -204,7 +204,8 @@ def test_one_batch_is_one_write_many_with_sweep_on_and_complete_riding_it() -> N
     assert wm["complete"] == {_DOC: "hash1"}
     assert len(wm["chunks"]) == 3 and wm["collection"] == _COLLECTION
     begin = cat.of("begin_index_run")[0]
-    assert begin["run_id"] == "run1" and begin["snapshot_manifest"] is False
+    # A fenced single request also snapshots, so a resent write_many still reports correctly.
+    assert begin["run_id"] == "run1" and begin["snapshot_manifest"] is True
     assert res.completed and res.requests == 1 and res.batches == 1
 
 
@@ -225,6 +226,27 @@ def test_one_batch_result_reports_the_drop_list_of_the_write() -> None:
     res = w.finish()
     assert res.dropped == [_h(50), _h(51)] and res.dropped_count == 2
     assert res.dropped_unknown is False
+
+
+def test_a_fenced_one_batch_write_reports_its_drop_list_from_the_snapshot_after_a_resend() -> None:
+    """The resend's own dropped_chashes is empty; the fenced single request reports from the
+    snapshot taken before any write."""
+    cat = FakeCat(prior=[_h(0), _h(50), _h(51)], resend_first_write_many=True)
+    w = _writer(cat, content_hash="hash1")
+    w.add_batch(*_batch(0, 2))
+    res = w.finish()
+    assert res.dropped == [_h(50), _h(51)] and res.dropped_count == 2
+
+
+def test_an_unfenced_one_batch_write_can_under_report_after_a_resend() -> None:
+    """Documented limit: with no fence there is no snapshot, so the write_many response is all
+    there is, and a resend makes it empty. (The sweep itself ran server-side on the first
+    attempt.)"""
+    cat = FakeCat(prior=[_h(0), _h(50), _h(51)], resend_first_write_many=True)
+    w = _writer(cat)
+    w.add_batch(*_batch(0, 2))
+    res = w.finish()
+    assert res.dropped == [] and res.dropped_count == 0
 
 
 def test_one_batch_dropped_unknown_is_flagged_and_has_no_list() -> None:
@@ -258,6 +280,11 @@ def test_write_many_failure_of_the_document_raises() -> None:
     with pytest.raises(BatchWriteFailedError) as ei:
         w.finish()
     assert ei.value.doc_id == _DOC
+
+
+def test_an_empty_content_hash_is_refused() -> None:
+    with pytest.raises(ValueError, match="content_hash"):
+        _writer(FakeCat(), content_hash="")
 
 
 def test_a_repeated_chash_at_two_positions_stamps_with_the_row_count() -> None:
@@ -368,6 +395,17 @@ def test_the_sweep_ignores_a_lying_first_batch_response() -> None:
     assert cat.of("append_manifest_chunks")[-1]["sweep_chashes"] == [_h(900)]
 
 
+def test_a_concurrent_writers_drop_is_hedged_in_from_batch_ones_response() -> None:
+    """The snapshot is the source, but a chash a concurrent writer put in the manifest AFTER the
+    snapshot shows up in batch 1's own dropped_chashes; the sweep is the union, minus the run's."""
+    cat = FakeCat(prior=[_h(900), _h(901)], snapshot={"prior_chashes": [_h(900)], "prior_count": 1})
+    w = _writer(cat, content_hash="hash1")
+    for b in (_batch(0, 1), _batch(1, 1)):
+        w.add_batch(*b)
+    w.finish()
+    assert cat.of("append_manifest_chunks")[-1]["sweep_chashes"] == [_h(900), _h(901)]
+
+
 def test_long_dropped_list_is_split_into_300s_with_trailing_sweep_only_appends() -> None:
     dropped = [_h(10_000 + i) for i in range(650)]
     cat = FakeCat(prior=dropped)
@@ -439,6 +477,9 @@ def test_an_unusable_snapshot_is_an_error_before_any_write(snapshot) -> None:
     with pytest.raises(BatchWriteFailedError, match="pre-run manifest"):
         w.add_batch(*_batch(1, 1))
     assert "write_manifest_many" not in cat.names()
+    # The stamp is committed when begin answers, so the run must still be abort()-able.
+    w.abort("unusable snapshot")
+    assert cat.of("fail_index_run") == [{"doc_id": _DOC, "error": "unusable snapshot"}]
 
 
 def test_chunks_the_engine_reports_unreferenced_are_a_hard_error() -> None:
@@ -600,12 +641,20 @@ def test_finish_with_no_batch_writes_an_empty_manifest_and_stamps_zero() -> None
     """A re-index that yields no chunks must still clear the old manifest."""
     cat = FakeCat(prior=[_h(1), _h(2)])
     w = _writer(cat, content_hash="hash1")
-    res = w.finish()
+    res = w.finish(allow_empty=True)
     wm = cat.of("write_manifest_many")[0]
     assert wm["docs"] == [(_DOC, [])] and wm["sweep"] is True and wm["chunks"] is None
     assert wm["complete"] == {_DOC: "hash1"}
     assert cat.manifest == {} and res.completed
     assert res.dropped == [_h(1), _h(2)]
+
+
+def test_a_bare_finish_with_no_batch_raises_and_sends_nothing() -> None:
+    cat = FakeCat(prior=[_h(1)])
+    w = _writer(cat, content_hash="hash1")
+    with pytest.raises(ValueError, match="allow_empty"):
+        w.finish()
+    assert cat.calls == []
 
 
 def test_a_writer_that_failed_refuses_more_work() -> None:
@@ -659,6 +708,118 @@ def test_the_context_manager_aborts_on_an_exception_and_lets_it_propagate() -> N
             raise RuntimeError("caller bug")
     assert len(cat.of("fail_index_run")) == 1
     assert "RuntimeError: caller bug" in cat.of("fail_index_run")[0]["error"]
+
+
+def test_abort_after_finish_does_nothing() -> None:
+    """A completed document must never be marked failed by a late exception."""
+    cat = FakeCat()
+    w = _writer(cat, content_hash="hash1")
+    w.add_batch(*_batch(0, 1))
+    w.add_batch(*_batch(1, 1))
+    w.finish()
+    w.abort("too late")
+    assert cat.of("fail_index_run") == []
+
+
+def test_an_exception_after_finish_inside_the_with_leaves_the_document_complete() -> None:
+    cat = FakeCat()
+    with pytest.raises(RuntimeError, match="after finish"):
+        with _writer(cat, content_hash="hash1") as w:
+            w.add_batch(*_batch(0, 1))
+            w.add_batch(*_batch(1, 1))
+            w.finish()
+            raise RuntimeError("after finish")
+    assert cat.of("fail_index_run") == []
+
+
+class _Refusing:
+    """complete_index_run refuses, as the engine does when the manifest does not verify."""
+
+    def __init__(self, cat: FakeCat) -> None:
+        def refuse(doc_id, content_hash, chunk_count):
+            cat._rec("complete_index_run", doc_id=doc_id, content_hash=content_hash,
+                     chunk_count=chunk_count)
+            raise IndexRunVerifyRefused(doc_id=doc_id, referenced=9, present=8, missing=1,
+                                        chunk_count=chunk_count)
+
+        cat.complete_index_run = refuse  # type: ignore[method-assign]
+
+
+def _refusals() -> list[str]:
+    from nexus import mcp_infra
+
+    return list(mcp_infra._COMPLETE_REFUSALS)
+
+
+@pytest.fixture
+def _clean_refusals():
+    from nexus import mcp_infra
+
+    mcp_infra._COMPLETE_REFUSALS.clear()
+    yield
+    mcp_infra._COMPLETE_REFUSALS.clear()
+
+
+def test_a_refused_completion_stamp_is_recorded_and_the_fence_is_left_indexing(
+    _clean_refusals,
+) -> None:
+    """The engine contract (IndexRunFenceTest): a refused /complete leaves index_state exactly as
+    /begin left it. abort() must not flip that to 'failed'; the refusal goes to the collector the
+    record-level summary reads."""
+    cat = FakeCat()
+    _Refusing(cat)
+    with pytest.raises(IndexRunVerifyRefused):
+        with _writer(cat, content_hash="hash1") as w:
+            w.add_batch(*_batch(0, 1))
+            w.add_batch(*_batch(1, 1))
+            w.finish()
+    assert cat.of("fail_index_run") == []
+    assert _refusals() == [_DOC]
+
+
+def test_a_refused_single_request_stamp_is_recorded_and_left_indexing(_clean_refusals) -> None:
+    cat = FakeCat(complete_refused=True)
+    with pytest.raises(IndexRunVerifyRefused):
+        write_document(cat, [_batch(0, 2)], doc_id=_DOC, collection=_COLLECTION,
+                       content_hash="hash1")
+    assert cat.of("fail_index_run") == []
+    assert _refusals() == [_DOC]
+
+
+def test_a_refusal_raised_by_the_caller_inside_the_block_is_treated_the_same(_clean_refusals) -> None:
+    cat = FakeCat()
+    with pytest.raises(IndexRunVerifyRefused):
+        with _writer(cat, content_hash="hash1") as w:
+            w.add_batch(*_batch(0, 1))
+            w.add_batch(*_batch(1, 1))
+            raise IndexRunVerifyRefused(doc_id=_DOC, referenced=2, present=1, missing=1,
+                                        chunk_count=2)
+    assert cat.of("fail_index_run") == []
+    assert _refusals() == [_DOC]
+
+
+def test_a_failed_request_still_fails_the_fence_once_even_if_abort_is_called_again() -> None:
+    cat = FakeCat()
+    _Flaky(cat, "append_manifest_chunks", RuntimeError("engine said no"), times=5)
+    with pytest.raises(RuntimeError):
+        with _writer(cat, content_hash="hash1") as w:
+            w.add_batch(*_batch(0, 1))
+            w.add_batch(*_batch(1, 1))
+            w.finish()
+    w.abort("again")                       # the caller's except clause, after the with block
+    assert len(cat.of("fail_index_run")) == 1
+
+
+def test_a_caller_that_failed_the_fence_itself_can_stop_the_with_block_doing_it_again() -> None:
+    cat = FakeCat()
+    with pytest.raises(RuntimeError):
+        with _writer(cat, content_hash="hash1") as w:
+            w.add_batch(*_batch(0, 1))
+            w.add_batch(*_batch(1, 1))       # sends batch 1: the fence is begun
+            cat.fail_index_run(_DOC, "caller's own _fence_fail")
+            w.mark_fence_handled()
+            raise RuntimeError("caller failure")
+    assert len(cat.of("fail_index_run")) == 1
 
 
 def test_the_context_manager_does_not_abort_on_success() -> None:
@@ -732,12 +893,79 @@ def test_an_embed_timeout_is_never_retried() -> None:
     assert flaky.attempts == 1
 
 
-def test_write_many_is_not_retried_by_the_writer() -> None:
+def test_the_first_or_only_write_many_is_retried_on_a_connectivity_error() -> None:
     cat = FakeCat()
-    flaky = _Flaky(cat, "write_manifest_many", httpx.ConnectError("reset"), times=5)
+    flaky = _Flaky(cat, "write_manifest_many", httpx.ConnectError("reset"), times=1)
     w = _writer(cat, content_hash="hash1")
     w.add_batch(*_batch(0, 1))
-    with pytest.raises(httpx.ConnectError):
+    assert w.finish().completed
+    assert flaky.attempts == 2
+
+
+def test_the_first_write_many_of_several_is_retried_and_the_sweep_survives_the_resend() -> None:
+    cat = FakeCat(prior=[_h(900)])
+    flaky = _Flaky(cat, "write_manifest_many", httpx.ReadError("dropped"), times=1)
+    w = _writer(cat, content_hash="hash1")
+    for b in (_batch(0, 1), _batch(1, 1)):
+        w.add_batch(*b)
+    w.finish()
+    assert flaky.attempts == 2
+    assert cat.of("append_manifest_chunks")[-1]["sweep_chashes"] == [_h(900)]
+
+
+def test_a_write_many_embed_timeout_is_never_retried() -> None:
+    cat = FakeCat()
+    exc = CombinedWriteEmbedTimeoutError(collection=_COLLECTION, chunk_count=1, original="slow")
+    flaky = _Flaky(cat, "write_manifest_many", exc, times=5)
+    w = _writer(cat, content_hash="hash1")
+    w.add_batch(*_batch(0, 1))
+    with pytest.raises(CombinedWriteEmbedTimeoutError):
+        w.finish()
+    assert flaky.attempts == 1
+
+
+def _status_error(code: int, headers: dict | None = None) -> httpx.HTTPStatusError:
+    req = httpx.Request("POST", "http://x/v1/catalog/manifest/write_many")
+    return httpx.HTTPStatusError(
+        str(code), request=req, response=httpx.Response(code, headers=headers or {}, request=req))
+
+
+@pytest.mark.parametrize("multi", [False, True], ids=["single-request", "first-of-several"])
+def test_a_429_on_the_first_request_paces_the_shared_brake_and_the_document_completes(
+    monkeypatch, multi,
+) -> None:
+    """Cloud mode answers 429 under load. The first write_many used to bypass the retry wrapper,
+    so a 429 failed the document and never told the shared RateLimitBrake to back every other
+    writer off."""
+    from nexus.rate_brake import get_brake
+
+    brake = get_brake()
+    trips: list[float | None] = []
+    real_trip = brake.trip
+
+    def spy(retry_after=None, *a, **kw):
+        trips.append(retry_after)
+        return real_trip(retry_after, *a, **kw)
+
+    monkeypatch.setattr(brake, "trip", spy)
+    cat = FakeCat()
+    flaky = _Flaky(cat, "write_manifest_many", _status_error(429, {"Retry-After": "1"}), times=1)
+    w = _writer(cat, content_hash="hash1")
+    w.add_batch(*_batch(0, 1))
+    if multi:
+        w.add_batch(*_batch(1, 1))
+    res = w.finish()
+    assert res.completed
+    assert flaky.attempts == 2
+    assert trips == [1.0]                     # the brake was engaged with the server's Retry-After
+
+
+def test_a_non_rate_limit_status_error_on_the_first_request_is_not_retried() -> None:
+    cat = FakeCat()
+    flaky = _Flaky(cat, "write_manifest_many", _status_error(422), times=5)
+    w = _writer(cat, content_hash="hash1")
+    w.add_batch(*_batch(0, 1))
+    with pytest.raises(httpx.HTTPStatusError):
         w.finish()
     assert flaky.attempts == 1
 

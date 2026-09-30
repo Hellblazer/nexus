@@ -368,3 +368,120 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
         "cross-function allowlist entries changed — this is the escape "
         f"hatch from AST proof, keep it to the documented minimum: {cross}"
     )
+
+
+# ── RDR-223 (nexus-z0o2p.10): the multi-batch writer's fence leg ──────────────
+#
+# The gate above only sees fire_batch producers. Every path migrated onto the combined write
+# writes through ``write_document(...)`` / ``MultiBatchDocumentWriter(...)`` instead, and the
+# writer's fence (begin -> snapshot -> stamp) is only on when the caller passes ``content_hash``.
+# Without it a multi-request document leaves a stale ``complete`` stamp on a half-replaced
+# manifest, so the writer refuses a second request when ``content_hash`` is None. A caller that
+# forgets the argument would then fail at RUNTIME, on the first large document. This leg makes it
+# fail here instead, naming the call site.
+#
+# The rule is syntactic and deliberately blunt: every call under src/nexus must pass a
+# ``content_hash=`` keyword that is not the literal ``None``. A ``**kwargs`` spread does not count
+# (it proves nothing). A caller that genuinely writes ONE request per document and has no content
+# hash (a note) is listed below, by (file, enclosing function), with the reason.
+
+_WRITER_CALLABLES = frozenset({"write_document", "MultiBatchDocumentWriter"})
+
+#: (relative-path-from-src-nexus, enclosing-function-name) -> why this caller may go unfenced.
+#: Empty until a caller needs it; each entry needs a specific reason.
+_UNFENCED_WRITER_CALLERS: dict[tuple[str, str], str] = {}
+
+
+@dataclass(frozen=True)
+class _WriterSite:
+    rel_path: str
+    function: str
+    lineno: int
+    callee: str
+    fenced: bool
+
+
+def _find_writer_sites(tree: ast.Module, rel_path: str) -> list[_WriterSite]:
+    sites: list[_WriterSite] = []
+    stack: list[ast.AST] = []
+
+    class _Visitor(ast.NodeVisitor):
+        def generic_visit(self, node: ast.AST) -> None:
+            stack.append(node)
+            super().generic_visit(node)
+            stack.pop()
+
+        def visit_Call(self, node: ast.Call) -> None:
+            func = node.func
+            name = func.id if isinstance(func, ast.Name) else (
+                func.attr if isinstance(func, ast.Attribute) else None)
+            if name in _WRITER_CALLABLES:
+                fenced = any(
+                    kw.arg == "content_hash"
+                    and not (isinstance(kw.value, ast.Constant) and kw.value.value is None)
+                    for kw in node.keywords
+                )
+                sites.append(_WriterSite(
+                    rel_path=rel_path, function=_enclosing_function_name(stack),
+                    lineno=node.lineno, callee=name, fenced=fenced))
+            self.generic_visit(node)
+
+    _Visitor().visit(tree)
+    return sites
+
+
+def _all_writer_sites() -> list[_WriterSite]:
+    sites: list[_WriterSite] = []
+    for path in _py_files():
+        rel = str(path.relative_to(SRC_ROOT))
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        sites.extend(_find_writer_sites(tree, rel))
+    return sites
+
+
+def test_every_multi_batch_writer_caller_passes_a_content_hash() -> None:
+    unfenced = [
+        s for s in _all_writer_sites()
+        if not s.fenced and (s.rel_path, s.function) not in _UNFENCED_WRITER_CALLERS
+    ]
+    assert not unfenced, (
+        "nexus-z0o2p.10: write_document / MultiBatchDocumentWriter called without a "
+        "content_hash= keyword (or with the literal None), so the index-run fence is off and a "
+        "multi-request document would leave a stale 'complete' stamp on a half-replaced "
+        "manifest. Pass content_hash=, or, for a caller that provably writes one request per "
+        "document with no content hash, add (file, function) to _UNFENCED_WRITER_CALLERS with "
+        "the reason: "
+        + ", ".join(f"{s.rel_path}:{s.function}():{s.lineno} ({s.callee})" for s in unfenced)
+    )
+
+
+def test_writer_leg_is_non_vacuous() -> None:
+    """The scan must actually see the writer's own construction site (``write_document`` builds a
+    ``MultiBatchDocumentWriter``), or a renamed callable would make the leg pass on nothing."""
+    sites = _all_writer_sites()
+    assert any(
+        s.rel_path == "catalog/multi_batch_write.py" and s.function == "write_document"
+        and s.callee == "MultiBatchDocumentWriter" and s.fenced
+        for s in sites
+    ), f"writer construction site not found by the scan: {sites}"
+
+
+def test_unfenced_writer_allowlist_entries_are_real_and_reasoned() -> None:
+    sites = {(s.rel_path, s.function) for s in _all_writer_sites()}
+    stale = sorted(k for k in _UNFENCED_WRITER_CALLERS if k not in sites)
+    assert not stale, f"_UNFENCED_WRITER_CALLERS entries with no call site: {stale}"
+    weak = sorted(k for k, why in _UNFENCED_WRITER_CALLERS.items() if len(why.strip()) < 30)
+    assert not weak, f"_UNFENCED_WRITER_CALLERS entries need a specific reason: {weak}"
+
+
+def test_writer_leg_kill_control_flags_the_omissions() -> None:
+    """The scanner flags a missing content_hash, a literal None and a **kwargs spread, and passes
+    a real value."""
+    src = (
+        "def a():\n    write_document(cat, batches, doc_id=d, collection=c)\n"
+        "def b():\n    write_document(cat, batches, doc_id=d, collection=c, content_hash=None)\n"
+        "def c():\n    MultiBatchDocumentWriter(cat, **opts)\n"
+        "def d():\n    mod.write_document(cat, batches, content_hash=h)\n"
+    )
+    sites = {s.function: s.fenced for s in _find_writer_sites(ast.parse(src), "x.py")}
+    assert sites == {"a": False, "b": False, "c": False, "d": True}

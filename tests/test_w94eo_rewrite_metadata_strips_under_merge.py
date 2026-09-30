@@ -16,6 +16,7 @@ from nexus.db import make_t3
 from nexus.db.t3 import _rewrite_collection_metadata
 from nexus.metadata_schema import make_chunk_metadata
 from tests._catalog_fixture_ops import give_chunks_a_live_owner
+from tests._chunk_seed import seed_chunks_direct
 
 _COLLECTION = "docs__w94eo-rewrite__bge-base-en-v15-768__v1"
 _TEXT = "a chunk indexed before the canonical metadata schema existed"
@@ -31,7 +32,9 @@ def _seed(t3) -> str:
         title="Doc", source_author="", section_title="", section_type="",
         tags="", category="",
     )
-    t3.upsert_chunks(_COLLECTION, [chash], [_TEXT], [meta])
+    # Substrate SQL with the engine's real embedding: the engine refuses an
+    # ownerless upsert-chunks write from RDR-223 Phase 3 on.
+    seed_chunks_direct(_COLLECTION, [chash], [_TEXT], [meta], embed=True)
     # A pre-canonical key, written the way an old client wrote it.
     t3.update_chunks(_COLLECTION, [chash], [{_LEGACY: "markdown"}])
     # RDR-192 Step 5 (nexus-wbfpw.10): get()/getWhere is a live-visibility

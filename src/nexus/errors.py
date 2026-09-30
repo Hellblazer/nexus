@@ -704,6 +704,25 @@ class ManifestAppendManyUnsupportedError(NexusError):
         )
 
 
+class BatchWriteFailedError(NexusError):
+    """A request of a multi-batch combined write did not land, or the engine's answer cannot be
+    trusted (RDR-223, ``nexus.catalog.multi_batch_write``).
+
+    Defined here, and re-exported by ``multi_batch_write``, so it can join
+    :data:`PER_RECORD_SURVIVABLE_EXCEPTIONS`: a writer failure on one document of a batch
+    (``nx dt index``) must fail THAT record, not abort the rest.
+
+    Attributes: ``doc_id``, ``batch`` (1-based index of the request or step that failed),
+    ``reason``.
+    """
+
+    def __init__(self, *, doc_id: str, batch: int, reason: str) -> None:
+        self.doc_id = doc_id
+        self.batch = batch
+        self.reason = reason
+        super().__init__(f"multi-batch write of {doc_id!r} failed at batch {batch}: {reason}")
+
+
 # SystemicExtractionFailureError DELETED (nexus-deyd5 round 3, coordinator
 # directive, 2026-08-21). Round 2 added this type for run_file_loop to
 # raise on a systemic-skip breach; a code-review HIGH finding traced that
@@ -802,4 +821,7 @@ PER_RECORD_SURVIVABLE_EXCEPTIONS: tuple[type[NexusError], ...] = (
     SourceUriNotFoundError,
     SourceUriCollectionMismatchError,
     CatalogIdentityMissingError,
+    # RDR-223 (nexus-z0o2p.10): one document's multi-batch write failing (a request that did
+    # not land, or an engine answer the writer cannot trust) fails that record only.
+    BatchWriteFailedError,
 )

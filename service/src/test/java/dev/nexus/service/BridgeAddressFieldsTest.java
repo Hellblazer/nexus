@@ -82,6 +82,7 @@ class BridgeAddressFieldsTest {
     PgVectorRepository     pgRepo;
     NexusService           service;
     HttpClient             http;
+    FakeEmbedder           embedder;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -107,7 +108,7 @@ class BridgeAddressFieldsTest {
         svcDs = new HikariDataSource(cfg);
 
         TenantScope tenantScope = new TenantScope(svcDs);
-        var embedder = new FakeEmbedder(1024);
+        embedder = new FakeEmbedder(1024);
         embedder.register(QUERY,                             1.0f, 0.0f);
         embedder.register("chunk with source_uri in catalog", 1.0f, 0.0f);
         embedder.register("chunk without catalog entry",      0.8f, 0.6f);
@@ -141,14 +142,14 @@ class BridgeAddressFieldsTest {
             PgContainerHelper.insertCollection(DSL.using(su0, SQLDialect.POSTGRES), TENANT, COL);
         }
         // Upsert chunks (metadata carries chunk_text_hash = full sha256 hex)
-        post("/v1/vectors/upsert-chunks", Map.of(
-            "collection", COL,
-            "ids",        List.of(CHASH_WITH_URI, CHASH_WITHOUT_URI),
-            "documents",  List.of("chunk with source_uri in catalog",
-                                  "chunk without catalog entry"),
-            "metadatas",  List.of(
+        // RDR-223 P3.1 (nexus-z0o2p.23): substrate SQL, not the upsert-chunks POST --
+        // the engine refuses that route's ownerless writes from Phase 3 on.
+        seed(TENANT, COL,
+            List.of(CHASH_WITH_URI, CHASH_WITHOUT_URI),
+            List.of("chunk with source_uri in catalog", "chunk without catalog entry"),
+            List.of(
                 Map.of("chunk_text_hash", FULL_HASH_1, "line_start", 10, "line_end", 20),
-                Map.of("chunk_text_hash", FULL_HASH_2, "line_start",  5, "line_end", 15))));
+                Map.of("chunk_text_hash", FULL_HASH_2, "line_start",  5, "line_end", 15)));
 
         // Register a catalog owner+document for CHASH_WITH_URI only.
         // Schema: catalog_owners PK is (tenant_id, tumbler_prefix); catalog_documents PK is (tenant_id, tumbler).
@@ -220,8 +221,11 @@ class BridgeAddressFieldsTest {
         // TENANT2's own chunk row (a separate PK entry, tenant_id is part of the
         // key) to exist BEFORE the manifest insert below -- moved ahead of it
         // (previously ran after, order-independent pre-FK).
-        // RDR-204 Phase 1 (bead nexus-ft04v.3): the upsert-chunks POST below is
-        // TENANT2's first-ever request against `service` -- AuthFilter's
+        // RDR-223 P3.1: that chunk is now inserted with substrate SQL (seed below), so
+        // no write POST is TENANT2's first request any more; the warmup is kept because
+        // it is harmless and the ordering it protects was the point of the fix.
+        // RDR-204 Phase 1 (bead nexus-ft04v.3): the upsert-chunks POST that used to be
+        // here was TENANT2's first-ever request against `service` -- AuthFilter's
         // per-tenant, once-per-process ghost sweep fires on it, and would
         // delete COL out from under the write if COL were registered for
         // TENANT2 before this warmup ran (see the identical TENANT-side fix
@@ -239,11 +243,10 @@ class BridgeAddressFieldsTest {
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT2, COL);
         }
         // Upsert CHASH_WITH_URI also for TENANT2 (needs the chunk to search against)
-        postAs(TOKEN2, "/v1/vectors/upsert-chunks", Map.of(
-            "collection", COL,
-            "ids",        List.of(CHASH_WITH_URI),
-            "documents",  List.of("chunk with source_uri in catalog"),
-            "metadatas",  List.of(Map.of("chunk_text_hash", FULL_HASH_1))));
+        seed(TENANT2, COL,
+            List.of(CHASH_WITH_URI),
+            List.of("chunk with source_uri in catalog"),
+            List.of(Map.of("chunk_text_hash", FULL_HASH_1)));
 
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
@@ -479,11 +482,10 @@ class BridgeAddressFieldsTest {
         String c2 = dev.nexus.service.db.Chash.ofText("g5count-2").toHex();
         String c3 = dev.nexus.service.db.Chash.ofText("g5count-3").toHex();
 
-        post("/v1/vectors/upsert-chunks", Map.of(
-            "collection", col,
-            "ids",        List.of(c1, c2, c3),
-            "documents",  List.of("count fixture one", "count fixture two", "count fixture three"),
-            "metadatas",  List.of(Map.of(), Map.of(), Map.of())));
+        seed(TENANT, col,
+            List.of(c1, c2, c3),
+            List.of("count fixture one", "count fixture two", "count fixture three"),
+            List.of(Map.of(), Map.of(), Map.of()));
         own(col, List.of(c1, c2, c3));
 
         // No explicit limit → defaultLimit resolves to ids.size() (3, nexus-hdx2u
@@ -542,8 +544,7 @@ class BridgeAddressFieldsTest {
             docs.add("e1 fixture " + i);
             metas.add(Map.of());
         }
-        post("/v1/vectors/upsert-chunks", Map.of(
-            "collection", col, "ids", ids, "documents", docs, "metadatas", metas));
+        seed(TENANT, col, ids, docs, metas);
         own(col, ids);
 
         // No "limit" key at all in the request body.
@@ -618,8 +619,7 @@ class BridgeAddressFieldsTest {
             docs.add("e3 fixture " + i);
             metas.add(Map.of());
         }
-        post("/v1/vectors/upsert-chunks", Map.of(
-            "collection", col, "ids", ids, "documents", docs, "metadatas", metas));
+        seed(TENANT, col, ids, docs, metas);
         own(col, ids);
 
         var resp = post("/v1/vectors/store-get", Map.of(
@@ -657,8 +657,7 @@ class BridgeAddressFieldsTest {
             docs.add("e3b fixture " + i);
             metas.add(Map.of());
         }
-        post("/v1/vectors/upsert-chunks", Map.of(
-            "collection", col, "ids", ids, "documents", docs, "metadatas", metas));
+        seed(TENANT, col, ids, docs, metas);
         own(col, ids);
 
         var resp = post("/v1/vectors/store-get", Map.of(
@@ -791,6 +790,20 @@ class BridgeAddressFieldsTest {
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
+
+    /**
+     * Insert chunks for {@code tenant} with substrate SQL (RDR-223 P3.1, nexus-z0o2p.23),
+     * with the vectors this test's {@link FakeEmbedder} would have produced server-side.
+     * They have no manifest row until {@link #own} or a test-specific insert gives them one.
+     */
+    private void seed(String tenant, String col, List<String> ids, List<String> docs,
+                      List<Map<String, Object>> metas) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), tenant, col,
+                ids, docs, metas, embedder);
+        }
+    }
 
     /**
      * Give {@code ids} a live owner in {@code col} for {@code TENANT} (RDR-192 Step 5,

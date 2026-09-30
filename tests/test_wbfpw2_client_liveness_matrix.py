@@ -35,6 +35,7 @@ from datetime import UTC, datetime
 from click.testing import CliRunner
 
 from nexus.cli import main
+from tests._chunk_seed import seed_chunks_direct
 
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
 # and CI's default selection must run this RDR-192 pin.
@@ -51,22 +52,23 @@ def _chash(text: str) -> str:
 
 
 def _write_chunk(client, collection: str, chash: str, text: str) -> None:
-    """Bare T3 write, no catalog call -- same upsert shape store_hook's
-    own note-write uses (mirrors ``test_bb6n2_supersede_reap.py::
-    _put_note``'s per-piece upsert), used for every row that needs a
-    physical chunk row with no (or a separately-built) manifest entry.
+    """Bare T3 write, no catalog call -- substrate SQL with the engine's real
+    embedding (the engine refuses an ownerless upsert-chunks write from RDR-223
+    Phase 3 on; mirrors ``test_bb6n2_supersede_reap.py::_put_note``'s
+    per-piece seed), used for every row that needs a physical chunk row with
+    no (or a separately-built) manifest entry.
 
     ``indexed_at`` is stamped explicitly: the real ``store_put`` path
     (``HttpVectorClient.put``, ``http_vector_client.py`` ~2885) stamps it
     via ``make_chunk_metadata`` before every upsert, but the lower-level
-    ``upsert_chunks_with_embeddings`` this helper (and ``_put_note``
+    ``seed_chunks_direct`` this helper (and ``_put_note``
     below) calls directly does NOT add it on its own -- omitting it here
     would leave every row's ``nx t3 gc`` candidacy answered by "no
     indexed_at" (predicate 8's own skip path) rather than by the
     liveness relationship this test exists to pin.
     """
-    client.upsert_chunks_with_embeddings(
-        collection, ids=[chash], documents=[text], embeddings=[],
+    seed_chunks_direct(
+        collection, ids=[chash], documents=[text], embed=True,
         metadatas=[{
             "chunk_text_hash": chash, "title": collection,
             "indexed_at": datetime.now(UTC).isoformat(),
@@ -98,7 +100,7 @@ def _put_note(client, *, collection: str, title: str, content: str) -> tuple[str
     """R7's write path: the store_put shape (a registered note whose
     manifest names its chunks), mirroring ``test_bb6n2_supersede_reap.py::
     _put_note``. Not the MCP tool's exact sequence: it writes chunks with
-    ``upsert_chunks_with_embeddings`` and the bare
+    ``seed_chunks_direct`` and the bare
     ``store_put_manifest_direct`` rather than ``put_note_pieces`` and the
     recovery wrapper; none of the five predicates read the difference.
     Returns ``(tumbler, chashes)``."""
@@ -116,8 +118,8 @@ def _put_note(client, *, collection: str, title: str, content: str) -> tuple[str
     )
     chashes = [m["chunk_text_hash"] for m in manifest_metadatas]
     for piece, chash, meta in zip(pieces, chashes, manifest_metadatas):
-        client.upsert_chunks_with_embeddings(
-            collection, ids=[chash], documents=[piece], embeddings=[],
+        seed_chunks_direct(
+            collection, ids=[chash], documents=[piece], embed=True,
             metadatas=[{
                 "title": title, "chunk_text_hash": chash, "doc_id": tumbler,
                 "indexed_at": datetime.now(UTC).isoformat(),

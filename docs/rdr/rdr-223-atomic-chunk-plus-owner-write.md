@@ -202,15 +202,23 @@ chunk owned.
    document's previous manifest, in its own transaction right after the
    commit (R-10); on a first batch that would delete the previous run's
    chunks for the later batches before those batches land. So the first batch
-   is written with `sweep` off and its response returns the dropped list
-   `write_many` already computes (`dropped_chashes`); the client passes that
-   list on the last append as `sweep_chashes`, and the engine sweeps it after
+   is written with `sweep` off. The list to sweep comes from the document's
+   manifest as it stood BEFORE the run (the index-run fence's `begin` returns
+   it, read with the stamp), not from the first batch's `dropped_chashes`,
+   which is empty when a lost first-batch response is resent; the client passes
+   that list, minus every chash the run wrote, on the last append as
+   `sweep_chashes`, and the engine sweeps it after
    that commit under the existing NOT EXISTS guard, so a dropped chash a later
    batch re-added, or another document owns, survives. A crash mid-document
    leaves a document with some of its batches and no chunk this run wrote
    without an owner; the deferred sweep never runs, so the previous run's
-   dropped chunks stay ownerless and hidden until the RDR-192 reaper removes
-   them. A multi-document form, `append_many`, carries several
+   dropped chunks stay ownerless and hidden from search. The RDR-192 reaper
+   (nexus-2x9xa, not yet built) is scoped to `knowledge__` collections, so for
+   `docs__`, `code__` and `rdr__` they stay until `nx t3 gc`; nexus-2x9xa
+   carries the decision on widening its coverage. A rerun sweeps what its own
+   snapshot shows, which is the crashed run's chunks in the manifest, not the
+   tail of the run before the crash (the crashed run's first batch already
+   dropped that tail from the manifest). A multi-document form, `append_many`, carries several
    documents in one request, one transaction per document, as `write_many`
    does. The raced-embed counter (RDR-222, nexus-ulrjq) counts on this path
    too.
@@ -221,9 +229,13 @@ chunk owned.
    - new chash, no vector: embedded, as today;
    - new chash, vector: the supplied vector is stored as-is;
    - existing chash, no vector: not re-embedded, metadata refreshed (RDR-181);
-   - existing chash, vector: the stored vector is kept (same text, same
-     collection model) and a mismatch with the supplied one is counted and
-     logged, not written (inferred, not read: a design choice).
+   - existing chash, vector: the stored text and vector are kept, whatever text
+     the request carries, and a mismatch with the supplied vector is counted
+     and logged, not written (inferred, not read: a design choice). The same
+     holds if another writer commits the chash between the existence check and
+     the insert (ON CONFLICT keeps the stored row). With `force_re_embed` the
+     supplied vector is written instead, and a differing stored vector is
+     counted.
 3. **Client migration (closes Gaps 1 and 2).** Each split path moves onto the
    combined write, or append plus chunks for later batches. The note paths
    move with no engine change (F-5); a note is one document of a few pieces,
@@ -316,7 +328,8 @@ append reuses code that exists.
 
 - Positive: once Phase 3 lands, no write inserts a chunk without an owner.
   Chunks a supersede drops still lose their owner; they are swept at the
-  document's last batch, or after a crash by the RDR-192 reaper.
+  document's last batch. After a crash they stay ownerless until `nx t3 gc`
+  (the RDR-192 reaper, nexus-2x9xa, covers `knowledge__` only).
 - Positive: the note paths get atomic chunk-plus-owner writes with no engine
   change.
 - Negative: a crash mid-document still leaves a partial document (some
@@ -483,15 +496,14 @@ Phase 1, against the real engine substrate.
   unmigrated paths keep working until Phase 3.
 - **Build tool compatibility**, **Licensing**, **IDE compatibility**,
   **Secret/credential lifecycle**: N/A.
-- **Memory management**: the client caps every combined-write request at 300
-  chunks (`QUOTAS.MAX_RECORDS_PER_WRITE`; the ChunkBatcher flush cap is 64 for
-  CCE collections, 300 for code, 16 on onnx-local). The engine does not
-  enforce that cap on `write_many` or `append`: the released client's
-  onnx-local cap can be raised without limit through
-  `NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`, so a server cap of 300 there could refuse a
-  request an existing client legitimately sends. Only the new `append_many`
-  route enforces 300 chunks, and `sweep_chashes` is capped at 300 per append
-  (P1.0). The asymmetry is recorded in the wire ledger.
+- **Memory management**: the engine caps `append` and `append_many` at 300
+  chunks per request (400 before any transaction or embed) and `sweep_chashes`
+  at 300 per append (P1.0). It does not cap `write_many`: released clients send
+  it with up to `NX_ONNX_LOCAL_UPSERT_CHUNK_CAP` chunks, a setting with no upper
+  bound, so a server cap there could refuse a request an existing client
+  legitimately sends. The new client clamps every combined-write request to 300
+  (`QUOTAS.MAX_RECORDS_PER_WRITE`) itself. The asymmetry is recorded in the wire
+  ledger.
 
 ### Proportionality
 

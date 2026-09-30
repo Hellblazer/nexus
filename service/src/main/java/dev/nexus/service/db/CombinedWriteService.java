@@ -234,7 +234,7 @@ public final class CombinedWriteService {
         // one per-doc transaction at a time.
         Map<String, Object> response =
             catalogRepo.writeManifestMany(tenant, docs, collection, complete, sweep, batch.resolved());
-        recordMismatches(collection, batch);
+        int mismatchesCounted = recordMismatches(collection, batch, docs, response.get("failed_doc_ids"));
         // nexus-acvi7: merge the embed-partition counts into the SAME
         // response envelope `chunks_written` already rides — this is the
         // right seam (CatalogRepository.writeManifestMany's map, built at
@@ -255,7 +255,7 @@ public final class CombinedWriteService {
         response.put("embed_skipped", batch.skipped());
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
-        response.put("vector_mismatches", batch.mismatches());
+        response.put("vector_mismatches", mismatchesCounted);
         return new CombinedWriteResult(response, batch.tokens());
     }
 
@@ -340,7 +340,8 @@ public final class CombinedWriteService {
         ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed, metadataMode);
         CatalogRepository.AppendOutcome outcome = catalogRepo.appendManifestChunks(
             tenant, docId, collection, rows, batch.resolved(), null, sweepChashes);
-        recordMismatches(collection, batch);
+        // The append returned, so its transaction committed: every mismatch counts.
+        int mismatchesCounted = recordMismatches(collection, batch, null, null);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("ok", true);
@@ -350,7 +351,7 @@ public final class CombinedWriteService {
         response.put("embed_skipped", batch.skipped());
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
-        response.put("vector_mismatches", batch.mismatches());
+        response.put("vector_mismatches", mismatchesCounted);
         // Distinct chashes of the request's chunks that no row referenced: neither embedded nor
         // inserted. Non-zero is a client bug made visible.
         response.put("chunks_unreferenced", unreferenced.size());
@@ -434,12 +435,12 @@ public final class CombinedWriteService {
         ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed, metadataMode);
         Map<String, Object> response =
             catalogRepo.appendManifestMany(tenant, collection, docs, batch.resolved());
-        recordMismatches(collection, batch);
+        int mismatchesCounted = recordMismatches(collection, batch, docs, response.get("failed_doc_ids"));
         response.put("chunks_deduped", batch.deduped());
         response.put("embed_skipped", batch.skipped());
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
-        response.put("vector_mismatches", batch.mismatches());
+        response.put("vector_mismatches", mismatchesCounted);
         response.put("chunks_unreferenced", unreferenced.size());
         return new CombinedWriteResult(response, batch.tokens());
     }
@@ -455,12 +456,33 @@ public final class CombinedWriteService {
      * Counts and logs the supplied-vector mismatches of a batch, once the write that used it has
      * COMMITTED (a request that fails and is retried by the client must not count twice).
      */
-    private static void recordMismatches(String collection, ResolvedBatch batch) {
-        List<String> m = batch.mismatchedChashes();
-        if (m.isEmpty()) return;
+    private static int recordMismatches(String collection, ResolvedBatch batch,
+                                        List<Map<String, Object>> docs, Object failedDocIds) {
+        List<String> m = new ArrayList<>(batch.mismatchedChashes());
+        if (m.isEmpty()) return 0;
+        if (docs != null) {
+            // Multi-document write: a document that failed in place rolled back, so a mismatch
+            // only counts if a document that COMMITTED references the chash.
+            Set<String> failed = new HashSet<>();
+            if (failedDocIds instanceof java.util.Collection<?> f) {
+                for (Object o : f) failed.add(String.valueOf(o));
+            }
+            Set<String> committedChashes = new HashSet<>();
+            for (Map<String, Object> d : docs) {
+                if (d.get("doc_id") instanceof String id && failed.contains(id)) continue;
+                if (d.get("rows") instanceof List<?> rows) {
+                    for (Object r : rows) {
+                        if (r instanceof Map<?, ?> row && row.get("chash") instanceof String c) committedChashes.add(c);
+                    }
+                }
+            }
+            m.retainAll(committedChashes);
+            if (m.isEmpty()) return 0;
+        }
         SuppliedVectorMismatchActivity.record(m.size());
         log.info("event=supplied_vector_mismatch collection={} mismatched={} chashes={}",
                  collection, m.size(), String.join(",", m.subList(0, Math.min(8, m.size()))));
+        return m.size();
     }
 
     /**
@@ -656,6 +678,9 @@ public final class CombinedWriteService {
         // under a colliding chash); the metadata-only branch merges in SQL instead. Reset per
         // attempt with the rest of this transaction's outputs.
         Map<Integer, Map<String, Object>> mergedForInsert = new HashMap<>();
+        // RDR-223: chashes kept as stored although the request's text differs (a supplied vector
+        // without force never rewrites an existing chash). Logged at debug, not counted.
+        List<String> keptDivergent = new ArrayList<>();
         List<Integer> needEmbedIdx = dedupChashes.isEmpty() ? new ArrayList<>()
             : DeadlockRetry.run(collection + " combined-write metadata refresh", () -> tenantScope.withTenant(tenant, ctx -> {
                 // nexus-hxrcm residual: SHARED sweep gate first, like every manifest
@@ -675,6 +700,7 @@ public final class CombinedWriteService {
                 originalAbsentIdx.clear();
                 mismatchedChashes.clear();
                 mergedForInsert.clear();
+                keptDivergent.clear();
                 List<Integer> need = new ArrayList<>();
                 List<Integer> metadataOnly = new ArrayList<>();
                 List<Integer> existingWithSupplied = new ArrayList<>();
@@ -690,6 +716,7 @@ public final class CombinedWriteService {
                     if (supplied && !forceReEmbed && stored != null) {
                         // R-14 cell 4: an existing chash keeps its stored vector (and text)
                         // whatever the supplied one says; only the metadata is refreshed.
+                        if (!stored.equals(dedupTexts.get(i))) keptDivergent.add(dedupChashes.get(i));
                         metadataOnly.add(i);
                     } else if (forceReEmbed || stored == null || !stored.equals(dedupTexts.get(i))) {
                         need.add(i);
@@ -765,6 +792,12 @@ public final class CombinedWriteService {
                 }
                 return need;
             }));
+
+        if (!keptDivergent.isEmpty() && log.isDebugEnabled()) {
+            log.debug("event=supplied_vector_kept_divergent_text collection={} kept={} chashes={}",
+                      collection, keptDivergent.size(),
+                      String.join(",", keptDivergent.subList(0, Math.min(8, keptDivergent.size()))));
+        }
 
         // Test-only interleaving seam (RDR-222 Phase 0) — see
         // afterNeedEmbedResolvedHookForTests javadoc. Fires AFTER Phase 2a's

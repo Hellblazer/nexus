@@ -19,6 +19,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -144,14 +145,22 @@ class AppendWithChunksTest extends AtomicWriteTestBase {
         // upsert and the manifest row insert have already run in the same transaction.
         assertThat(repo.deleteDocument(TENANT, f.docId())).isEqualTo(1);
         long chunksBefore = chunkCount(f.collection());
-        int embedsBefore = embedder.calls.get();
+        // Non-vacuity: read the chunk row INSIDE the append's transaction, right after the upsert.
+        java.util.concurrent.atomic.AtomicInteger seenMidTransaction = new java.util.concurrent.atomic.AtomicInteger(-1);
+        repo.setAfterChunkUpsertHookForTests(ctx -> seenMidTransaction.set(ctx.selectCount().from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(TENANT)).and(CHUNKS.COLLECTION.eq(f.collection()))
+            .and(CHUNKS.CHASH.eq(java.util.HexFormat.of().parseHex(c)))
+            .fetchOne(0, int.class)));
+        try {
+            assertThatThrownBy(() -> svc.appendCombined(TENANT, f.collection(), f.docId(),
+                    List.of(row(0, c)), List.of(chunk(c, "tomb text")), false))
+                .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
+        } finally {
+            repo.setAfterChunkUpsertHookForTests(null);
+        }
 
-        assertThatThrownBy(() -> svc.appendCombined(TENANT, f.collection(), f.docId(),
-                List.of(row(0, c)), List.of(chunk(c, "tomb text")), false))
-            .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
-
-        assertThat(embedder.calls.get() - embedsBefore)
-            .as("non-vacuity: the chunk WAS embedded and reached the insert before the failure").isEqualTo(1);
+        assertThat(seenMidTransaction.get())
+            .as("the chunk row existed inside the transaction before the fold failed").isEqualTo(1);
         assertThat(chunkCount(f.collection())).as("the rolled-back transaction took the chunk with it")
             .isEqualTo(chunksBefore);
         assertThat(chunkExists(f.collection(), c)).isFalse();

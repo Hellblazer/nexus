@@ -17,6 +17,7 @@ from unittest.mock import patch
 import pytest
 
 import nexus.db.http_vector_client as hvc
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = pytest.mark.integration
 
@@ -32,8 +33,8 @@ def _seed(client) -> list[str]:
     for i, name in enumerate(names):
         text = f"z0us sibling collection {i} " + "x" * 200
         chash = hashlib.sha256(text.encode()).hexdigest()
-        client.upsert_chunks_with_embeddings(
-            name, ids=[chash], documents=[text], embeddings=[],
+        seed_chunks_direct(
+            name, ids=[chash], documents=[text], embed=True,
             metadatas=[{"title": text[:40], "indexed_at": datetime.now(UTC).isoformat()}],
         )
         doc = str(writer.register(
@@ -78,8 +79,8 @@ def test_orphan_classifier_lists_the_tenant_once(t2_service_env):
     client = hvc.HttpVectorClient(tenant=t2_service_env)
     orphan = "knowledge__z0us-sib-orphan__bge-base-en-v15-768__v1"
     _seed(client)
-    client.upsert_chunks_with_embeddings(
-        orphan, ids=["b" * 64], documents=["z0us unowned chunk"], embeddings=[],
+    seed_chunks_direct(
+        orphan, ids=["b" * 64], documents=["z0us unowned chunk"], embed=True,
         metadatas=[{"title": "unowned", "indexed_at": datetime.now(UTC).isoformat()}],
     )
     reader = make_catalog_reader()

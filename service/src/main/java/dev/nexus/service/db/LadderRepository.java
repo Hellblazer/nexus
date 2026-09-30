@@ -84,6 +84,20 @@ public final class LadderRepository {
                        "detail", r.value4())));
     }
 
+    /**
+     * True when the tenant has a completion fact for {@code rungName}. Facts
+     * only, like {@link #completions}: the caller (for one, {@code
+     * Rdr192BackfillGate}) decides what a fact means. Throws on a database
+     * failure; it never answers false for "could not read".
+     */
+    public boolean isRungVerified(String tenant, String rungName) {
+        requireNonBlank(rungName, "rung_name");
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.fetchExists(LADDER_COMPLETIONS,
+                LADDER_COMPLETIONS.TENANT_ID.eq(tenant)
+                    .and(LADDER_COMPLETIONS.RUNG_NAME.eq(rungName))));
+    }
+
     private static void requireNonBlank(String value, String field) {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException("'" + field + "' is required");
