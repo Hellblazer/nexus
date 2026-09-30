@@ -581,7 +581,7 @@ from __future__ import annotations
 #: only by lacking that pin and was never published: its mac leg linked minos
 #: 27.0 on hellmini and the ABI gate refused it. No changeset; all three wire
 #: entries are additive, so the engine deploys BEFORE this client tag.
-REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 140)
+REQUIRED_ENGINE_VERSION: tuple[int, int, int] = (0, 1, 142)
 
 #: nexus-5uoxu: the first engine version whose telemetry trim honors the
 #: ``dry_run`` field (the 3-arg ``trimSearchTelemetry`` overload, re-landed

@@ -1,5 +1,32 @@
 # Changelog
 
+## [7.67.0] - 2026-09-29
+
+Plugin version aligned with conexus 7.67.0. The plugin-side changes held since
+7.66.0 go live as `source.ref` advances to `v7.67.0`.
+
+- The sn plugin's `hooks/scripts/auto_approve_sn_mcp.py` auto-approves only
+  Serena's read tools and Context7 (nexus-2lf1v). Serena's writers,
+  `jet_brains_debug` (arbitrary Groovy/Java in the IDE's JVM),
+  `query_project`, `onboarding` and `restart_language_server` now get no
+  decision, so Claude Code prompts or asks its auto-mode classifier, as for
+  Edit and Write. Add the writers you use by name to `permissions.allow` to
+  keep editing without prompts. `hooks/scripts/serena-section.md` tells
+  subagents that Serena writes now prompt and to fall back to Edit or Write
+  rather than retry a denied one.
+- `hooks/hooks.json` drops the `UserPromptSubmit` entry for
+  `nx-hook mcp-connect-check`, the "nx-mcp is not connected" warning, which
+  fired on live servers and cost 270 to 300 ms per prompt (nexus-qxyqz). The
+  verb stays in the CLI as a silent no-op for older plugins.
+- `hooks/scripts/routing/subagent_git_write_requires_orchestrator.py` arms
+  only on `git` as the command, not on a path or word that contains it
+  (`~/git/nexus`, `.git/hooks`, `git-workflow.md`), so those no longer deny a
+  subagent's Bash command (nexus-0r5l8). Every catalogued bypass still denies.
+- `hooks/scripts/routing/_lib.py` gains `ask_envelope`/`ask`, the PreToolUse
+  decision that forces a permission prompt where an advisory would let the
+  auto-mode classifier approve (nexus-nmzsg). The bead-close gate that uses it
+  runs from the CLI and takes effect when the CLI is updated.
+
 ## [7.66.0] - 2026-09-29
 
 Plugin version aligned with conexus 7.66.0. No plugin-side changes: nothing
