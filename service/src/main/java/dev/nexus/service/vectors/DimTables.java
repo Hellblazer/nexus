@@ -79,9 +79,16 @@ public final class DimTables {
         // at runtime, exactly like every other field in this record.
         Field<String> retention,
         // nexus-wbfpw.43 (vectors-020-chunks-last-written-at.xml): TIMESTAMPTZ NOT NULL
-        // DEFAULT now(), the reapable(c) grace anchor. Set to now() ONLY by client writes
-        // that re-write an existing chunk (see lastWrittenNow()); maintenance and
-        // stamping UPDATEs must never touch it. Same runtime field lookup as retention.
+        // DEFAULT now(), the reapable(c) grace anchor. An UPDATE sets it to now() ONLY for
+        // a client write that re-writes an existing chunk (see lastWrittenNow());
+        // maintenance and stamping UPDATEs (metadata stamps, collection re-home, rename,
+        // move) must never touch it. Every INSERT that omits the column takes DEFAULT
+        // now(), including the quarantine and return-from-quarantine SQL functions'
+        // INSERTs (catalog-037-1, catalog-043): a move into or out of quarantine DOES
+        // reset it. That over-refreshes, which is the safe direction (a reap is delayed,
+        // never caused), and ChunkLastWrittenAtIntegrationTest pins it. Same runtime
+        // field lookup as retention. ChunksWriterLastWrittenAtScanTest lists every
+        // chunks writer and why it refreshes or not.
         Field<OffsetDateTime> lastWrittenAt
     ) {
         @SuppressWarnings("unchecked")

@@ -3,6 +3,7 @@
 package dev.nexus.service;
 
 import dev.nexus.service.db.CatalogRepository;
+import dev.nexus.service.db.ChashRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CombinedWriteService;
 import dev.nexus.service.db.TenantScope;
@@ -24,6 +25,8 @@ import java.time.OffsetDateTime;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -55,6 +58,12 @@ class ChunkLastWrittenAtIntegrationTest {
     private static final String COL_CW_DIVERGENT = "code__lwa-cwdiverge__minilm-l6-v2-384__v1";
     private static final String COL_MAINTENANCE = "code__lwa-maint__minilm-l6-v2-384__v1";
     private static final String COL_FRESH = "code__lwa-fresh__minilm-l6-v2-384__v1";
+    private static final String COL_REHOME_OLD = "code__lwa-rehome-old__minilm-l6-v2-384__v1";
+    private static final String COL_REHOME_NEW = "code__lwa-rehome-new__minilm-l6-v2-384__v1";
+    private static final String COL_RENAME_OLD = "code__lwa-rename-old__minilm-l6-v2-384__v1";
+    private static final String COL_RENAME_NEW = "code__lwa-rename-new__minilm-l6-v2-384__v1";
+    private static final String COL_QUARANTINE_ORIGIN = "code__lwa-quar__minilm-l6-v2-384__v1";
+    private static final String COL_QUARANTINE = "quarantine-" + COL_QUARANTINE_ORIGIN;
 
     private PostgreSQLContainer<?> pg;
     private com.zaxxer.hikari.HikariDataSource svcDs;
@@ -94,7 +103,8 @@ class ChunkLastWrittenAtIntegrationTest {
         vectors = new PgVectorRepository(tenantScope, embedder, embedder);
 
         for (String col : List.of(COL_UPSERT_FORCE, COL_UPSERT_DIVERGENT, COL_UPSERT_HAVE_VECTOR,
-                COL_REF_ONLY, COL_CW_IDENTICAL, COL_CW_DIVERGENT, COL_MAINTENANCE, COL_FRESH)) {
+                COL_REF_ONLY, COL_CW_IDENTICAL, COL_CW_DIVERGENT, COL_MAINTENANCE, COL_FRESH,
+                COL_REHOME_OLD, COL_REHOME_NEW, COL_RENAME_OLD, COL_QUARANTINE_ORIGIN)) {
             tenantScope.withTenant(TENANT, ctx -> {
                 PgContainerHelper.insertCollection(ctx, TENANT, col);
                 return null;
@@ -253,6 +263,86 @@ class ChunkLastWrittenAtIntegrationTest {
         assertThat(after.createdAt()).isEqualTo(aged.createdAt());
     }
 
+    @Test
+    void chashRepositoryReHome_doesNotMoveLastWrittenAt() throws Exception {
+        String chash = ch("rehome");
+        vectors.upsertChunks(TENANT, COL_REHOME_OLD, List.of(chash), List.of("rehomed text"),
+            List.of(Map.of()));
+        Stamps aged = age(COL_REHOME_OLD, chash);
+
+        int moved = new ChashRepository(tenantScope).renameCollection(TENANT, COL_REHOME_OLD, COL_REHOME_NEW);
+        assertThat(moved).as("precondition: the row really moved").isEqualTo(1);
+
+        Stamps after = stamps(COL_REHOME_NEW, chash);
+        assertThat(after.lastWrittenAt())
+            .as("a re-home is maintenance: it must not extend an unowned chunk's grace")
+            .isEqualTo(aged.lastWrittenAt());
+        assertThat(after.createdAt()).isEqualTo(aged.createdAt());
+    }
+
+    @Test
+    void catalogCollectionRename_doesNotMoveLastWrittenAt() throws Exception {
+        String chash = ch("rename");
+        vectors.upsertChunks(TENANT, COL_RENAME_OLD, List.of(chash), List.of("renamed text"),
+            List.of(Map.of()));
+        Stamps aged = age(COL_RENAME_OLD, chash);
+
+        var counts = catalog.renameCollection(TENANT, COL_RENAME_OLD, COL_RENAME_NEW);
+        assertThat(counts.get("chunks")).as("precondition: the rename moved the chunk row").isEqualTo(1);
+
+        Stamps after = stamps(COL_RENAME_NEW, chash);
+        assertThat(after.lastWrittenAt())
+            .as("a collection rename is maintenance: it must not extend a chunk's grace")
+            .isEqualTo(aged.lastWrittenAt());
+        assertThat(after.createdAt()).isEqualTo(aged.createdAt());
+    }
+
+    // -- pinned as-is: quarantine and the return trip take the column DEFAULT ----
+    //
+    // The quarantine and un-quarantine SQL functions (catalog-037-1, catalog-043) INSERT
+    // the moved row with an explicit column list that names created_at but not
+    // last_written_at, so the new row takes DEFAULT now(). A quarantine or a
+    // return from quarantine therefore RESETS last_written_at. That over-refreshes,
+    // which is the safe direction (it can only delay a reap, never cause one), and
+    // those changesets shipped, so this test pins the behaviour rather than changing it.
+
+    @Test
+    void quarantineThenReturn_resetLastWrittenAtToNow_whileCarryingCreatedAt() throws Exception {
+        String chash = ch("quar");
+        String docId = "lwa.quar";
+        vectors.upsertChunks(TENANT, COL_QUARANTINE_ORIGIN, List.of(chash), List.of("orphan text"),
+            List.of(Map.of()));
+        registerDoc(docId, COL_QUARANTINE_ORIGIN);
+        catalog.writeManifest(TENANT, docId, COL_QUARANTINE_ORIGIN,
+            List.of(Map.of("position", 0, "chash", chash, "chunk_index", 0)));
+        // Orphan it so the quarantine sweep picks it up.
+        catalog.writeManifest(TENANT, docId, COL_QUARANTINE_ORIGIN, List.of());
+        Stamps aged = age(COL_QUARANTINE_ORIGIN, chash);
+
+        var quarantined = vectors.quarantineOrphansBounded(TENANT, COL_QUARANTINE_ORIGIN,
+            COL_QUARANTINE, "2026-08-01T00:00:00Z", 20, 10);
+        assertThat(quarantined.moved()).as("precondition: the orphan moved to quarantine").isEqualTo(1L);
+
+        Stamps inQuarantine = stamps(COL_QUARANTINE, chash);
+        assertThat(inQuarantine.createdAt()).as("created_at is carried through the move")
+            .isEqualTo(aged.createdAt());
+        assertThat(inQuarantine.recent())
+            .as("the quarantine INSERT takes DEFAULT now(): last_written_at is reset")
+            .isTrue();
+
+        // Age the quarantined copy again, re-reference it, and bring it back.
+        Stamps agedInQuarantine = age(COL_QUARANTINE, chash);
+        insertManifestRowBypassingFk(docId, chash, COL_QUARANTINE_ORIGIN);
+        var back = vectors.restoreRereferencedBounded(TENANT, COL_QUARANTINE, COL_QUARANTINE_ORIGIN, 10);
+        assertThat(back.restored()).as("precondition: the row came back").isEqualTo(1L);
+
+        Stamps afterReturn = stamps(COL_QUARANTINE_ORIGIN, chash);
+        assertThat(afterReturn.createdAt()).isEqualTo(agedInQuarantine.createdAt());
+        assertThat(afterReturn.recent())
+            .as("the return INSERT takes DEFAULT now(): last_written_at is reset again")
+            .isTrue();
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private static void assertRefreshed(Stamps aged, Stamps after) {
@@ -300,6 +390,29 @@ class ChunkLastWrittenAtIntegrationTest {
                 .fetchOne();
             assertThat(r).as("row %s/%s must exist", collection, chash).isNotNull();
             return new Stamps(r.value1(), r.value2(), r.value3());
+        }
+    }
+
+    /**
+     * Inserts a manifest row naming {@code collection} for a chash whose chunk currently
+     * sits only in quarantine. The FK is dropped and re-added NOT VALID around the insert
+     * (the shared PgContainerHelper idiom): a real write cannot do this.
+     */
+    private void insertManifestRowBypassingFk(String docId, String chashHex, String collection)
+            throws SQLException {
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            PgContainerHelper.dropConstraint(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk");
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CATALOG_DOCUMENT_CHUNKS,
+                    CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(TENANT, docId, 0, Chash.fromHex(chashHex).toBytes(), collection)
+               .execute();
+            PgContainerHelper.addFkNotValidComposite3(su, CATALOG_DOCUMENT_CHUNKS, "fk_catalog_chunks_chunk",
+                "collection", "chash", CHUNKS, "collection", "chash",
+                "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
         }
     }
 

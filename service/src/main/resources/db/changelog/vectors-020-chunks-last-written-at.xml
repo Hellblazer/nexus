@@ -16,10 +16,35 @@
     batchUpdateMetadata (the have-vector branch of upsert-chunks and the
     identical-text branch of the combined write), and the combined write's
     chunk upsert (CatalogRepository#upsertManifestChunkVectors). It is NEVER
-    refreshed by maintenance or stamping updates (frecency and enrichment
-    metadata stamps, collection re-homing, the quarantine and restore
-    functions' ON CONFLICT branches): a refresh from those would keep dead
-    chunks alive forever. created_at stays write-once.
+    refreshed by maintenance or stamping UPDATEs (frecency and enrichment
+    metadata stamps, collection re-homing, collection rename and move): a
+    refresh from those would keep dead chunks alive forever. created_at stays
+    write-once. ChunksWriterLastWrittenAtScanTest lists every chunks writer in
+    service/src/main and fails on one that is neither refreshing nor named
+    there with a reason.
+
+    QUARANTINE AND RETURN FROM QUARANTINE DO RESET IT. The INSERTs in
+    nexus.gc_quarantine_orphans_bounded (catalog-037-1) and
+    nexus.gc_restore_rereferenced_bounded (catalog-043) name created_at in an
+    explicit column list and omit last_written_at, so the moved row takes
+    DEFAULT now(). A chunk that enters or leaves quarantine therefore gets a
+    fresh grace window. That over-refreshes, which is the safe direction: it
+    can delay a reap, never cause one. Those changesets have shipped and are
+    not edited; ChunkLastWrittenAtIntegrationTest pins the behaviour. (An
+    earlier draft of this header said the quarantine and restore functions do
+    not refresh. Their ON CONFLICT DO NOTHING branch does not, their INSERT
+    does.)
+
+    KNOWN RESIDUAL, client-initiated, does NOT refresh: StagingPromoteOps'
+    content INSERT (promoteCollection) and its synthetic-stub INSERT
+    (finalizeTenant) are ON CONFLICT DO NOTHING. A promote that lands a chash
+    already present in the collection leaves that row's last_written_at
+    alone, though a client initiated it. Its manifest rows are written later
+    by finalizeTenant, so the client-write-then-manifest-write gap this
+    column exists for is open here too; StagingPromoteOps names the gap in
+    the "RESIDUAL, honestly named" comment above the content INSERT. This
+    change does not close it. reapable(c) (nexus-wbfpw.15) has to account
+    for it.
 
     EXISTING ROWS take the value at migration time, i.e. every chunk starts
     with a full grace window at deploy. now() is STABLE, not VOLATILE, so
