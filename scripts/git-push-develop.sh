@@ -43,7 +43,26 @@
 #                    Set to a REASON string to push without taking the
 #                    lock/ci-develop-push tuple-space lock. Logged in the
 #                    output; there is no silent skip. Same shape as
-#                    NX_PUSH_SKIP_SCOPE_AUDIT above.
+#                    NX_PUSH_SKIP_SCOPE_AUDIT above. It is also the ONE escape
+#                    for an unreadable freeze board (see "Develop freeze").
+#   NX_PUSH_FREEZE_OVERRIDE
+#                    Set to a NON-EMPTY REASON string to push while develop is
+#                    frozen: for a push the release owner sanctioned. Echoed on
+#                    stderr (PUSH_FREEZE_OVERRIDDEN) with the freeze it crossed.
+#                    Blank or whitespace-only is not an override.
+#
+# Develop freeze (nexus-eusu6). A release freeze announced by direct message
+# reaches only the sessions someone remembered to message; on 2026-09-29 a
+# session not on the list pushed mid-freeze. The freeze is instead a post on the
+# board/develop-freeze topic (the existing board/<topic> template, no engine
+# change), set and cleared with scripts/develop-freeze.sh. Before the push, next
+# to the lock, this script reads the NEWEST post: state=frozen refuses
+# (PUSH_REFUSED_FROZEN, naming holder, reason and age); state=open or no post at
+# all proceeds. Board rows expire in 7 days, which bounds a crashed owner. An
+# unreadable board, or a malformed newest post, refuses (PUSH_REFUSED_FREEZE_
+# UNKNOWN) unless NX_PUSH_SKIP_LOCK is set: one escape for "the tuple space is
+# unreachable", not two. NX_PUSH_SKIP_LOCK never lifts a freeze the board
+# actually reported; only NX_PUSH_FREEZE_OVERRIDE does.
 #
 # Push lock (nexus-agctp). Rule 7 (check `gh run list` before pushing) is a
 # poll: the gap between looking and pushing is where two sessions collide,
@@ -149,8 +168,24 @@
 #                               but its claim id could not be parsed from
 #                               the response -- the claim is left for its
 #                               900s lease to self-expire, on the record
+#  12 PUSH_REFUSED_FROZEN       board/develop-freeze's newest post says frozen;
+#                               the refusal names holder, reason and age, and
+#                               NX_PUSH_FREEZE_OVERRIDE is the sanctioned way
+#                               through
+#  13 PUSH_REFUSED_FREEZE_UNKNOWN
+#                               board/develop-freeze could not be read, or its
+#                               newest post is malformed, and NX_PUSH_SKIP_LOCK
+#                               is unset
 
 set -euo pipefail
+
+_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# `installed_nx_resolve` / `installed_nx_describe_scope` (the installed-nx walk
+# and the endpoint label, shared with develop-freeze.sh) and `freeze_read`.
+# shellcheck source=./lib/installed-nx.sh
+source "$_script_dir/lib/installed-nx.sh"
+# shellcheck source=./lib/develop-freeze.sh
+source "$_script_dir/lib/develop-freeze.sh"
 
 # Claimant identity for the push lock (nexus-agctp): the active Claude
 # session id, plus this host and this process's own pid, so a refusal
@@ -218,51 +253,11 @@ _nx_bin=""
 # points at.
 _lock_scope_desc=""
 
-# Endpoint + tenant this invocation resolved (review finding 1). Reads
-# ONLY through `nx` itself (never a bash-side re-parse of config.yml or a
-# lease file), in the same priority nexus.db.service_endpoint.
-# resolve_service_endpoint documents: an explicit NX_SERVICE_URL/HOST/PORT
-# override this process already has in its own environment (no call
-# needed), else the persisted config.yml `service_url` credential, else a
-# local supervisor's live lease. Every read is individually guarded so a
-# resolution failure degrades to "(unresolvable)"/"(unknown)" and NEVER
-# aborts the script under `set -e` -- this is a diagnostic label, not a
-# gate, and must never be able to orphan a lock or block a push by itself.
+# Endpoint + tenant this invocation resolved (review finding 1): see
+# installed_nx_describe_scope in scripts/lib/installed-nx.sh. A diagnostic
+# label, never a gate.
 _lock_describe_scope() {
-  local nxbin="$1" endpoint="" tenant="" cfg status host port
-  if [[ -n "${NX_SERVICE_URL:-}" ]]; then
-    endpoint="$NX_SERVICE_URL"
-  else
-    cfg="$("$nxbin" config get service_url --show 2>/dev/null || true)"
-    if [[ -n "$cfg" && "$cfg" != "service_url: not set" ]]; then
-      endpoint="$cfg"
-    elif [[ -n "${NX_SERVICE_HOST:-}" && -n "${NX_SERVICE_PORT:-}" ]]; then
-      endpoint="${NX_SERVICE_HOST}:${NX_SERVICE_PORT}"
-    else
-      status="$("$nxbin" daemon service status --json 2>/dev/null || true)"
-      host=""
-      port=""
-      if [[ -n "$status" ]]; then
-        host="$(printf '%s' "$status" | python3 -c 'import json,sys
-d = json.load(sys.stdin)
-print(d.get("host") or "")' 2>/dev/null || true)"
-        port="$(printf '%s' "$status" | python3 -c 'import json,sys
-d = json.load(sys.stdin)
-print(d.get("port") or "")' 2>/dev/null || true)"
-      fi
-      if [[ -n "$host" && -n "$port" ]]; then
-        endpoint="${host}:${port}"
-      fi
-    fi
-  fi
-  [[ -z "$endpoint" ]] && endpoint="(unresolvable)"
-
-  tenant="$("$nxbin" config get mint_tenant --show 2>/dev/null || true)"
-  if [[ -z "$tenant" || "$tenant" == "mint_tenant: not set" ]]; then
-    tenant="(unknown)"
-  fi
-
-  printf 'endpoint=%s tenant=%s' "$endpoint" "$tenant"
+  installed_nx_describe_scope "$@"
 }
 
 # Released on every exit path (success, any refusal, or a signal) so a
@@ -421,7 +416,6 @@ _outbound_files() {
 # toplevel: the audit is this repo's sibling tool, and keying it on the
 # working tree would look correct in the primary checkout (where they
 # coincide) and break anywhere else.
-_script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 audit="$_script_dir/../tests/e2e/lib/commit_scope_audit.sh"
 if [[ -n "${NX_PUSH_SKIP_SCOPE_AUDIT:-}" ]]; then
   # stderr, not stdout: stdout is the machine-readable contract. Still
@@ -486,40 +480,75 @@ elif read -r -a _allowed_paths <<< "$(printf '%s' "${NX_PUSH_ALLOWED_PATHS}" | t
   exit 7
 fi
 
+# ── Develop freeze (nexus-eusu6) ─────────────────────────────────────────
+# The newest board/develop-freeze post decides: frozen refuses, open (or no
+# post at all) proceeds. Runs next to the push lock and after every gate about
+# the commits themselves, so a refusal above costs nothing extra by happening
+# first. NX_PUSH_SKIP_LOCK is the ONE escape for "the tuple space is
+# unreachable": it lets a push through when the board cannot be read, but it
+# never lifts a freeze the board actually reported. Only
+# NX_PUSH_FREEZE_OVERRIDE does that, and only with a non-empty reason, echoed
+# on stderr like the other skips (a release-owner-sanctioned push).
+#
+# $1 = "strict" (unreadable board refuses) or "lenient" (NX_PUSH_SKIP_LOCK is
+# set: unreadable board, or no installed nx to read it with, proceeds).
+_check_develop_freeze() {
+  local mode="$1" rc=0 override="${NX_PUSH_FREEZE_OVERRIDE:-}"
+  override="${override//[[:space:]]/}"
+  if [[ -z "$_nx_bin" ]]; then
+    # Lenient only: strict callers already refused a missing nx (exit 10).
+    echo "PUSH_FREEZE_UNCHECKED the installed CLI was not found, so $FREEZE_SUBSPACE was not read; proceeding under NX_PUSH_SKIP_LOCK" >&2
+    return 0
+  fi
+  # Lenient (NX_PUSH_SKIP_LOCK) skips the scope lookup: it makes its own
+  # unbounded nx calls, and the escape exists for a tuple space that hangs.
+  if [[ "$mode" == "lenient" ]]; then
+    [[ -n "$_lock_scope_desc" ]] || _lock_scope_desc="scope not resolved under NX_PUSH_SKIP_LOCK"
+  else
+    [[ -n "$_lock_scope_desc" ]] || _lock_scope_desc="$(_lock_describe_scope "$_nx_bin")"
+  fi
+  freeze_read "$_nx_bin" || rc=$?
+  if [[ $rc -ne 0 ]]; then
+    if [[ "$mode" == "lenient" ]]; then
+      echo "PUSH_FREEZE_UNCHECKED could not read $FREEZE_SUBSPACE ($_lock_scope_desc); proceeding under NX_PUSH_SKIP_LOCK: $FREEZE_ERR" >&2
+      return 0
+    fi
+    echo "PUSH_REFUSED_FREEZE_UNKNOWN could not read $FREEZE_SUBSPACE ($_lock_scope_desc) to learn whether develop is frozen:"
+    echo "$FREEZE_ERR"
+    echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the freeze check (the same escape as the lock), on the record."
+    exit 13
+  fi
+  if [[ "$FREEZE_STATE" != "frozen" ]]; then
+    echo "PUSH_FREEZE_OPEN $FREEZE_SUBSPACE ($_lock_scope_desc)" >&2
+    return 0
+  fi
+  if [[ -n "$override" ]]; then
+    echo "PUSH_FREEZE_OVERRIDDEN reason=${NX_PUSH_FREEZE_OVERRIDE} (develop frozen by $FREEZE_HOLDER $FREEZE_AGE ago: $FREEZE_REASON)" >&2
+    return 0
+  fi
+  echo "PUSH_REFUSED_FROZEN develop is frozen holder=$FREEZE_HOLDER age=$FREEZE_AGE reason=$FREEZE_REASON ($_lock_scope_desc)"
+  echo "Wait for the thaw (the holder runs scripts/develop-freeze.sh clear; check with scripts/develop-freeze.sh status),"
+  echo "or, for a push the release owner sanctioned, set NX_PUSH_FREEZE_OVERRIDE='<non-empty reason>' to push on the record."
+  if [[ -n "${NX_PUSH_FREEZE_OVERRIDE+x}" ]]; then
+    echo "NX_PUSH_FREEZE_OVERRIDE is set but blank: the reason must be non-empty text."
+  fi
+  exit 12
+}
+
 # ── Push lock (nexus-agctp) ──────────────────────────────────────────────
 # Runs after every other gate, right before the push itself: a refusal
 # above this point is about the commits, not about who else is pushing,
 # and costs nothing extra by happening first.
+#
+# Resolve the INSTALLED nx generation deliberately (review finding 2; see
+# "Installed nx only" in the header and scripts/lib/installed-nx.sh). Done
+# before the skip test because the freeze check below needs it on both paths.
+_nx_bin="$(installed_nx_resolve || true)"
+
 if [[ -n "${NX_PUSH_SKIP_LOCK:-}" ]]; then
   echo "PUSH_LOCK_SKIPPED reason=${NX_PUSH_SKIP_LOCK}" >&2
+  _check_develop_freeze lenient
 else
-  # Resolve the INSTALLED nx generation deliberately (review finding 2;
-  # see "Installed nx only" in the header): the first `nx` on PATH that is
-  # neither under a `.venv/` directory nor under this checkout's own
-  # toplevel. Walks $PATH by hand rather than `command -v -a` -- bash's
-  # `command` builtin has NO `-a` flag (that is a zsh-ism; under bash it
-  # is a hard "invalid option" error, confirmed directly), so that call
-  # would have found nothing on every real bash and refused every push.
-  _repo_toplevel="$(git rev-parse --show-toplevel 2>/dev/null || true)"
-  _nx_path_ifs="$IFS"
-  IFS=':' read -r -a _nx_path_dirs <<< "$PATH"
-  IFS="$_nx_path_ifs"
-  for _nx_dir in "${_nx_path_dirs[@]+"${_nx_path_dirs[@]}"}"; do
-    [[ -z "$_nx_dir" ]] && continue
-    _nx_candidate="$_nx_dir/nx"
-    [[ -x "$_nx_candidate" ]] || continue
-    _nx_cand_dir="$(cd -- "$_nx_dir" 2>/dev/null && pwd -P)" || continue
-    _nx_resolved="$_nx_cand_dir/nx"
-    case "$_nx_resolved" in
-      */.venv/*) continue ;;
-    esac
-    if [[ -n "$_repo_toplevel" && "$_nx_resolved" == "$_repo_toplevel"/* ]]; then
-      continue
-    fi
-    _nx_bin="$_nx_candidate"
-    break
-  done
-
   if [[ -z "$_nx_bin" ]]; then
     echo "PUSH_REFUSED_LOCK_DEV_CHECKOUT_NX only a dev-checkout/venv nx is on PATH; the installed generation was not found."
     echo "The nexus-a2qhz production-write guard refuses every real tuple-space write from a dev-checkout CLI, which otherwise"
@@ -542,6 +571,10 @@ else
     echo "Set NX_PUSH_SKIP_LOCK='<reason>' to push without the lock, on the record."
     exit 9
   fi
+
+  # Just after the reachability probe and BEFORE the claim: a frozen refusal
+  # must not take (and then have to release) the lock.
+  _check_develop_freeze strict
 
   if _lock_in_json="$("$_nx_bin" tuple in "$_lock_subspace" --pattern "resource=$_lock_resource" \
        --claimant "$_lock_claimant" --lease-s 900 --timeout-s 0 --json 2>/dev/null)"; then

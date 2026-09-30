@@ -30,6 +30,30 @@ artifact-identity guard (nexus-mbeke) refuse every remaining leg. Cut the
 worktree before Step 1's expensive legs, so the artifacts are built once and in
 the tree that actually ships.
 
+### Freeze develop (nexus-eusu6)
+
+At release start, before the battery, post the freeze:
+
+```bash
+scripts/develop-freeze.sh set --reason "release vX.Y.Z" [--holder <your session name>]
+```
+
+`scripts/git-push-develop.sh` reads that post and refuses every non-override push
+(`PUSH_REFUSED_FROZEN`, naming you, the reason and the age), so the freeze reaches
+sessions nobody messaged. Message the peers you know about too, but the post is the
+authority (a session not on a hand-picked list pushed mid-freeze on 2026-09-29).
+`scripts/develop-freeze.sh status` reads it back (exit 10 while frozen). A push you
+yourself sanction during the freeze, such as the Step 11b back-merge, goes through
+`NX_PUSH_FREEZE_OVERRIDE='<reason>'`. Clear the freeze at thaw, in Step 11b, after
+the tag and the main-to-develop back-merge have landed. Posts expire after 7 days,
+so a freeze you forget to clear lapses on its own, but do not rely on that.
+
+**If the release is abandoned at any step, clear the freeze before you stop:**
+`scripts/develop-freeze.sh clear --reason "vX.Y.Z abandoned: <why>"`. An
+abandoned release otherwise holds develop frozen for every session until the
+board's 7-day expiry. The override and `clear` are honour-system: any session
+can post either, so they are for the release owner's own freeze only.
+
 ### 0. Engine-freshness gate (PREREQUISITE — the two-lifecycle check)
 
 The Java **engine-service** is a SEPARATE release artifact from this PyPI release: its own `engine-service-vX.Y.Z` tag fires `engine-service-release.yml`, version is tag-stamped (no manifest bump), and it is **decoupled from the luxe6 / RDR-155-P4a develop release boundary**. This PyPI release pins ONE engine IDENTITY, `REQUIRED_ENGINE_VERSION` (`src/nexus/engine_version.py`) — the engine the release was built and gated with, installed on EVERY path (fresh init AND upgrade). It is NOT a compatibility minimum and NOT a range (Hal directive 2026-07-15). `PINNED_SERVICE_TAG` (`src/nexus/daemon/binary_install.py`, the exact tag a fresh local `nx init --service` install downloads) is DERIVED from it, not an independently hand-typed literal — there is no floor/exact split to reason about, bumping the one constant moves both together, by construction.
@@ -606,7 +630,10 @@ Both must report `vX.Y.Z` / `X.Y.Z`. **Do not declare done before this check pas
 git checkout develop && git pull
 git merge origin/main --no-edit    # trivially clean right after a release:
                                    # the release branch just CONTAINED develop
-scripts/git-push-develop.sh HEAD   # the merge commit vouches for what it merged in (nexus-9wxu6)
+NX_PUSH_FREEZE_OVERRIDE='release vX.Y.Z back-merge' \
+  scripts/git-push-develop.sh HEAD \
+  && scripts/develop-freeze.sh clear --reason "vX.Y.Z tagged and back-merged"   # THAW only once the back-merge is on develop (nexus-eusu6)
+# the merge commit vouches for what it merged in (nexus-9wxu6); the override crosses YOUR OWN freeze
 ```
 
 Why mandatory (2026-07-23 incident): from 6.12.0 through 6.17.0 no release

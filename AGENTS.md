@@ -433,6 +433,24 @@ things to avoid carefully; they are impossible.
    expiry; `NX_PUSH_SKIP_LOCK='<reason>'` is the named escape when the
    tuple space is unreachable.
 
+   **A develop freeze is a post, not a message** (nexus-eusu6). The release
+   owner runs `scripts/develop-freeze.sh set --reason "<text>"`, which posts
+   `state=frozen` to the `board/develop-freeze` topic, and `clear` at thaw
+   (`status` reads it; exit 10 while frozen). `git-push-develop.sh` reads the
+   newest post and refuses with `PUSH_REFUSED_FROZEN` (exit 12) naming holder,
+   reason and age; a board it cannot read refuses `PUSH_REFUSED_FREEZE_UNKNOWN`
+   (exit 13) unless the existing `NX_PUSH_SKIP_LOCK` is set, and a
+   release-owner-sanctioned push uses `NX_PUSH_FREEZE_OVERRIDE='<reason>'`.
+   Subscribe once per session with
+   `mcp__plugin_conexus_nexus__tuple_subscribe("board/develop-freeze")`.
+   Announce a freeze by message too, but the post is the authority: on
+   2026-09-29 a session missing from a hand-picked message list pushed
+   mid-freeze. The override and `clear` are honour-system (any session can
+   post either, and the newest post wins, so one `clear` thaws overlapping
+   freezes); an abandoned release must clear its freeze, since the board only
+   expires it after 7 days. The gate covers pushes made through the script; a
+   bare `git push` is not checked (nexus-wvokz).
+
 9. **Whoever pushes to `develop` fast-forwards the primary in the same
    breath.** `cd` to the primary and `git merge --ff-only origin/develop`.
    Rule 2 makes the primary the reference checkout — the one place to read
