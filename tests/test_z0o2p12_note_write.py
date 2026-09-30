@@ -55,6 +55,18 @@ def _status_error(code: int, headers: dict | None = None) -> httpx.HTTPStatusErr
         f"HTTP {code}", request=request, response=httpx.Response(code, request=request, headers=headers or {}))
 
 
+def _once(make_exc):
+    """A ``before`` / ``after`` hook that raises ``make_exc()`` the first time it is called only."""
+    fired: list[bool] = []
+
+    def hook(*_a):
+        if not fired:
+            fired.append(True)
+            raise make_exc()
+
+    return hook
+
+
 @pytest.fixture(autouse=True)
 def _no_retry_sleeps(monkeypatch):
     """The manifest-write retry backs off 0.5 + 1 + 2 s and the shared rate brake remembers a trip
@@ -343,21 +355,20 @@ class TestClientDeath:
 
     @pytest.mark.parametrize("make_exc", [
         _embed_timeout,
-        lambda: httpx.RemoteProtocolError("connection dropped before the answer"),
         lambda: _status_error(504),
-    ], ids=["embed-timeout", "connection-dropped", "gateway-504"])
+        lambda: _status_error(500),
+    ], ids=["embed-timeout", "gateway-504", "server-500"])
     def test_a_lost_acknowledgement_is_recovered_from_the_manifest(self, vec, real_cat, make_exc):
         """The request committed and only the answer was lost: the manifest read proves it, and the
         note is reported landed, not rolled back."""
         pieces = _pieces("ack-lost", 3)
         doc = _register("z0o2p12-ack-lost", pieces)
 
-        def lose(_out):
-            raise make_exc()
-
+        cat = _Recording(real_cat, after=_once(make_exc))
         res = write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
-                         content_hash=_hash(pieces), cat=_Recording(real_cat, after=lose))
+                         content_hash=_hash(pieces), cat=cat)
         assert res.recovered is True
+        assert cat.calls.count("write_manifest_many") == 2, "the note is resent once, not re-asked"
         assert _present(vec, res.chunk_ids) == set(res.chunk_ids)
         assert _manifest(doc) == [(i, _chash(p)) for i, p in enumerate(pieces)]
         assert res.completed is True and _index_state(doc) == "complete"
@@ -373,11 +384,8 @@ class TestClientDeath:
         doc = _register("z0o2p12-ack-lost-repeat", pieces)
         _fence_begin(doc, _hash(pieces), _COLLECTION)
 
-        def lose(_out):
-            raise _embed_timeout()
-
         res = write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
-                         content_hash=_hash(pieces), cat=_Recording(real_cat, after=lose))
+                         content_hash=_hash(pieces), cat=_Recording(real_cat, after=_once(_embed_timeout)))
         assert res.recovered is True and res.completed is True
         assert _index_state(doc) == "complete"
 
@@ -415,7 +423,7 @@ class TestClientDeath:
             write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=[b, a],
                        cat=_Recording(real_cat, before=dropped))
 
-    @pytest.mark.parametrize("code", [400, 409, 422, 500])
+    @pytest.mark.parametrize("code", [400, 409, 422])
     def test_a_definitive_refusal_is_a_failure_even_when_the_manifest_matches(self, vec, real_cat, code):
         """An unchanged re-put refused with new tags must not report 'recovered': the engine
         answered, the metadata was not applied, and the manifest happening to match proves nothing."""
@@ -887,3 +895,162 @@ class TestOneRequestPrimitive:
         cat.complete_index_run = complete
         complete_document(cat, doc_id=_DOC, content_hash="h", manifest_rows=3)
         assert cat.stamps == [(_DOC, "h", 3)]
+
+
+# ── every attempt counts; only 4xx, unsent and failed_doc_ids are definitive ─
+
+
+class TestSettlingFromEveryAttempt:
+    def test_a_dropped_connection_followed_by_refused_reconnects_is_not_unsent(self, vec, real_cat):
+        """The retry wrapper re-raises only the LAST error. The first attempt died in flight, so the
+        request may have reached the engine: settled from the manifest (unknown), never 'nothing written'."""
+        pieces = _pieces("attempts", 2)
+        doc = _register("z0o2p12-attempts", pieces)
+        errors = [httpx.RemoteProtocolError("dropped mid-flight")]
+
+        def flaky():
+            raise errors.pop(0) if errors else httpx.ConnectError("refused")
+
+        with pytest.raises(ManifestVerifyUncertainError):
+            write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
+                       cat=_Recording(real_cat, before=flaky))
+
+    def test_only_connections_never_made_are_unsent(self, vec, real_cat):
+        pieces = _pieces("unsent", 2)
+        doc = _register("z0o2p12-unsent", pieces)
+
+        def refuse():
+            raise httpx.ConnectError("refused")
+
+        with pytest.raises(NoteWriteError):
+            write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
+                       cat=_Recording(real_cat, before=refuse))
+
+    def test_a_500_that_did_not_commit_is_unknown_not_failed(self, vec, real_cat):
+        pieces = _pieces("500-none", 2)
+        doc = _register("z0o2p12-500-none", pieces)
+
+        def boom():
+            raise _status_error(500)
+
+        with pytest.raises(ManifestVerifyUncertainError):
+            write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
+                       cat=_Recording(real_cat, before=boom))
+
+    def test_a_500_after_the_commit_is_recovered_by_resending(self, vec, real_cat):
+        """CombinedWriteService records mismatches after the commit, so a 500 can follow it."""
+        pieces = _pieces("500-after", 2)
+        doc = _register("z0o2p12-500-after", pieces)
+        cat = _Recording(real_cat, after=_once(lambda: _status_error(500)))
+        res = write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
+                         content_hash=_hash(pieces), cat=cat)
+        assert res.recovered and res.completed
+        assert _manifest(doc) == [(i, _chash(p)) for i, p in enumerate(pieces)]
+
+    def test_an_unexpected_exception_is_settled_from_the_manifest(self, vec, real_cat):
+        pieces = _pieces("odd", 1)
+        doc = _register("z0o2p12-odd", pieces)
+
+        def odd():
+            raise ValueError("malformed body")
+
+        with pytest.raises(ManifestVerifyUncertainError):
+            write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces,
+                       cat=_Recording(real_cat, before=odd))
+
+    def test_a_manifest_that_already_matches_is_resent_so_new_metadata_is_applied(self, vec, real_cat):
+        """The request died in flight before it committed; the manifest equals the note only because
+        the content is unchanged. Changed tags, ttl and category must still be applied."""
+        pieces = _pieces("resend", 1)
+        doc = _register("z0o2p12-resend", pieces)
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="old", ttl_days=5,
+                   cat=real_cat)
+        cat = _Recording(real_cat, before=_once(_embed_timeout))
+        res = write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="new",
+                         ttl_days=30, category="c2", cat=cat)
+        assert res.recovered is True and cat.calls.count("write_manifest_many") == 2
+        got = vec.get_collection(_COLLECTION).get(ids=[_chash(pieces[0])], include=["metadatas"])
+        meta = got["metadatas"][0]
+        assert (meta["tags"], meta["ttl_days"], meta["category"]) == ("new", 30, "c2")
+
+    def test_a_resend_that_fails_is_unknown(self, vec, real_cat):
+        pieces = _pieces("resend-fails", 1)
+        doc = _register("z0o2p12-resend-fails", pieces)
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, cat=real_cat)
+
+        def dropped():
+            raise httpx.RemoteProtocolError("dropped")
+
+        with pytest.raises(ManifestVerifyUncertainError, match="resending"):
+            write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="x",
+                       cat=_Recording(real_cat, before=dropped))
+
+
+# ── a refused stamp follows the writer's rule ────────────────────────────────
+
+
+class TestRefusedStamp:
+    def _refusing_cat(self):
+        return _CannedCat({
+            "failed_doc_ids": [], "chunks_written": 1, **_OK_DROPS,
+            "complete_refused": [{"doc_id": _DOC, "referenced": 2, "missing": 1, "chunk_count": 2}]})
+
+    def test_write_note_records_the_refusal_and_raises_stamp_refused(self):
+        from unittest.mock import patch
+
+        from nexus.catalog.note_write import StampRefusedError
+
+        with patch("nexus.mcp_infra._record_complete_refusal") as record:
+            with pytest.raises(StampRefusedError):
+                write_note(catalog_doc_id=_DOC, collection=_COLLECTION, pieces=["x"],
+                           content_hash="h", cat=self._refusing_cat())
+        record.assert_called_once_with(_DOC)
+
+    def test_put_note_leaves_the_fence_indexing_and_reports_unknown(self, vec):
+        """No _fence_fail (so no failed-document heal), nothing rolled back, status unknown."""
+        import nexus.catalog.note_write as nw
+        from unittest.mock import patch
+
+        with patch("nexus.catalog.note_write.write_note", side_effect=nw.StampRefusedError("refused")), \
+             patch("nexus.doc_indexer._fence_fail") as fail, \
+             patch("nexus.catalog.store_hook.rollback_minted_catalog_entry") as rollback:
+            out = put_note(content="z0o2p12 refused stamp", collection=_COLLECTION,
+                           title="z0o2p12-refused-stamp")
+        assert out.status == nw.UNCERTAIN
+        fail.assert_not_called()
+        rollback.assert_not_called()
+        assert _index_state(out.catalog_doc_id) == "indexing"
+
+
+# ── one prefix -> content_type map ───────────────────────────────────────────
+
+
+class TestContentTypeMap:
+    @pytest.mark.parametrize("collection,expected", [
+        ("code__x__bge-base-en-v15-768__v1", "code"),
+        ("docs__x__bge-base-en-v15-768__v1", "prose"),
+        ("rdr__x__bge-base-en-v15-768__v1", "markdown"),
+        ("knowledge__x__bge-base-en-v15-768__v1", "prose"),
+        ("taxonomy__x__bge-base-en-v15-768__v1", "prose"),
+    ])
+    def test_the_note_writer_and_the_helper_agree(self, collection, expected):
+        from nexus.catalog.note_write import _chunk_payload
+        from nexus.metadata_schema import chunk_content_type_for_collection
+
+        assert chunk_content_type_for_collection(collection) == expected
+        payload = _chunk_payload(
+            collection, ["p"], [{"chash": _chash("p")}], title="", tags="", category="", session_id="",
+            source_agent="", ttl_days=None, catalog_doc_id="1.1.1",
+            content_type=chunk_content_type_for_collection(collection))
+        assert payload[0]["metadata"]["content_type"] == expected
+
+    def test_there_is_one_copy_of_the_map(self):
+        """put, T3Database.put and the note writer share metadata_schema's map; a second copy in
+        source would drift."""
+        import pathlib
+
+        src = pathlib.Path(__file__).parent.parent / "src" / "nexus"
+        holders = sorted(
+            str(p.relative_to(src)) for p in src.rglob("*.py")
+            if '("rdr__", "markdown")' in p.read_text() or '"rdr__": "markdown"' in p.read_text())
+        assert holders == ["metadata_schema.py"], holders

@@ -25,18 +25,23 @@ Outcomes of :func:`write_note`, so a caller never treats every raise the same wa
 
 1. **Landed**: returns a :class:`NoteWriteResult`. Also when the request raised on the transport (a
    lost acknowledgement, a timeout, a gateway 5xx) but a retried read of the document's manifest
-   shows exactly the ``(position, chash)`` rows this call wrote (``recovered=True``): the request
-   committed and only the answer was lost. The completion stamp is asked for again then; if that
-   cannot be confirmed the outcome is "unknown" (3), never a landed note the fence calls unfinished.
+   shows exactly the ``(position, chash)`` rows this call wrote. The content is there but the request
+   may never have committed, so it is resent once (it is idempotent: changed tags, ttl or category on
+   unchanged content are applied, and the completion stamp rides it) and the resend's answer is the
+   outcome (``recovered=True``); a resend that fails is "unknown" (3), never a landed note the fence
+   calls unfinished. Every attempt's error counts: if any was in flight the request is settled from
+   the manifest, never called "unsent".
 2. **Not landed**: raises :class:`NoteWriteError`. The engine named the document in
-   ``failed_doc_ids``, answered with a definitive refusal (a 4xx, a 500), or the connection was
-   never made. The transaction is per document, so nothing of the note was written and the old
+   ``failed_doc_ids``, answered with a definitive 4xx refusal, or the connection was never made,
+   and no attempt of the request was in flight. A 500 and an unexpected exception are NOT
+   definitive: a 500 can follow the commit. The transaction is per document, so nothing of the note was written and the old
    manifest is intact. ``manifest_empty`` says whether the document has no manifest at all, which is
    what lets a caller remove a row it minted without deleting a concurrent writer's note.
 3. **Unknown**: raises :class:`~nexus.catalog.store_hook.ManifestVerifyUncertainError`. The request
    died in flight (a timeout, a dropped connection, a gateway 5xx) and the manifest does not show it
    yet, so it may still commit (the engine cannot cancel an in-flight embed); or the manifest read
-   itself failed on every attempt; or the engine refused to stamp a landed note complete.
+   itself failed on every attempt; or the engine refused to stamp a landed note complete
+   (:class:`StampRefusedError`: recorded, the fence left ``indexing``, never ``_fence_fail``).
 
 One request means one request: a note is bounded by the 16 KiB document quota, so its pieces are
 few, and a bulk-indexer chunk cap (``per_collection_chunk_cap``, which protects the local embedder's
@@ -65,7 +70,6 @@ import structlog
 from nexus.catalog.multi_batch_write import (
     DocumentFailedError,
     OneRequestResult,
-    complete_document,
     write_one_request,
 )
 from nexus.catalog.store_hook import (
@@ -98,6 +102,38 @@ class NoteWriteError(RuntimeError):
         self.reason = reason
         self.manifest_empty = manifest_empty
         super().__init__(f"note write of {catalog_doc_id!r} into {collection!r} did not land: {reason}")
+
+
+class StampRefusedError(ManifestVerifyUncertainError):
+    """The note landed but the engine refused to stamp it complete.
+
+    The writer's rule (``multi_batch_write``): a refusal is recorded (``_record_complete_refusal``, for
+    the record-level summary) and the fence is LEFT ``indexing``, so nothing fails the index run and
+    no failed-document heal runs. The caller reports it as uncertain and does not call ``_fence_fail``.
+    """
+
+
+class _AttemptRecorder:
+    """Wraps a catalog writer and remembers every error ``write_manifest_many`` raised, so a request
+    is judged from ALL its attempts: the retry wrapper re-raises only the last, and a dropped
+    connection followed by refused reconnects is still a request that may have reached the engine."""
+
+    def __init__(self, cat: Any) -> None:
+        self._cat = cat
+        self.errors: list[BaseException] = []
+
+    def write_manifest_many(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return self._cat.write_manifest_many(*args, **kwargs)
+        except Exception as exc:
+            self.errors.append(exc)
+            raise
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cat, name)
+
+    def any_in_flight(self) -> bool:
+        return any(_classify(e) == _IN_FLIGHT for e in self.errors)
 
 
 @dataclass
@@ -145,16 +181,6 @@ def note_manifest_rows(manifest_metadatas: Sequence[dict]) -> list[dict]:
         for i, m in enumerate(manifest_metadatas or [])
     ]
     return [r for r in rows if r["chash"]]
-
-
-def _content_type_for(collection: str) -> str:
-    """The chunk metadata content type ``HttpVectorClient.put`` derived from the collection prefix."""
-    for prefix, content_type in (
-        ("code__", "code"), ("docs__", "prose"), ("rdr__", "markdown"), ("knowledge__", "prose"),
-    ):
-        if collection.startswith(prefix):
-            return content_type
-    return "prose"
 
 
 def _chunk_payload(
@@ -253,12 +279,14 @@ def write_note(
             f"ttl_days={ttl_days} is invalid: omit the argument or pass None for a permanent entry "
             "— ttl_days must be a positive integer number of days (0 does NOT mean permanent; None does)")
 
+    from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — deferred: circular-dep avoidance
+
     _first, manifest_metadatas = note_manifest_metadata(pieces)
     rows = note_manifest_rows(manifest_metadatas)
     chunks = _chunk_payload(
         collection, pieces, rows, title=title, tags=tags, category=category,
         session_id=session_id, source_agent=source_agent, ttl_days=ttl_days,
-        catalog_doc_id=catalog_doc_id, content_type=content_type or _content_type_for(collection),
+        catalog_doc_id=catalog_doc_id, content_type=content_type or chunk_content_type_for_collection(collection),
     )
     result = NoteWriteResult(
         catalog_doc_id=catalog_doc_id, collection=collection, chunk_ids=[r["chash"] for r in rows])
@@ -269,28 +297,32 @@ def write_note(
         from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
 
         cat = make_catalog_writer(priority="interactive")
+    recorder = _AttemptRecorder(cat)
     try:
         try:
             out = write_one_request(
-                cat, doc_id=catalog_doc_id, collection=collection, rows=rows, chunks=chunks,
+                recorder, doc_id=catalog_doc_id, collection=collection, rows=rows, chunks=chunks,
                 content_hash=content_hash or None, sweep=True, dropped="optional")
         except DocumentFailedError as exc:
+            if recorder.any_in_flight():
+                # An earlier attempt of this request may have committed before this one was refused.
+                return _settle_after_error(
+                    result, expected, exc, recorder=recorder, cat=cat, rows=rows, chunks=chunks,
+                    content_hash=content_hash)
             raise NoteWriteError(
                 catalog_doc_id=catalog_doc_id, collection=collection,
                 reason=f"{exc.reason} (see manifest_write_many_doc_failed in the log for its reason)",
                 manifest_empty=_manifest_is_empty(catalog_doc_id)) from exc
         except IndexRunVerifyRefused as exc:
-            # The rows and chunks committed; only the stamp was refused. Rolling the document back
-            # now would delete a manifest the engine holds, so this is "unknown", not "failed".
-            raise ManifestVerifyUncertainError(
-                f"note {catalog_doc_id} in {collection} landed but the engine refused to stamp it "
-                f"complete: {exc}") from exc
+            raise _stamp_refused(catalog_doc_id, collection, exc) from exc
         except BatchWriteFailedError as exc:
             raise ManifestVerifyUncertainError(
                 f"note {catalog_doc_id} in {collection}: the engine's answer cannot be trusted "
                 f"({exc.reason}); the note may have landed") from exc
-        except Exception as exc:  # noqa: BLE001 — judged below from the exception and the manifest
-            return _settle_after_error(result, expected, exc, cat=cat, content_hash=content_hash)
+        except Exception as exc:  # noqa: BLE001 — judged below from every attempt's error and the manifest
+            return _settle_after_error(
+                result, expected, exc, recorder=recorder, cat=cat, rows=rows, chunks=chunks,
+                content_hash=content_hash)
         _absorb(result, out)
         return result
     finally:
@@ -322,18 +354,20 @@ def _manifest_is_empty(doc: str) -> bool:
 
 #: The request never reached the engine, so nothing of it can commit.
 _UNSENT = "unsent"
-#: The engine answered with a definitive refusal, so the transaction did not commit.
+#: The engine answered with a definitive 4xx refusal, so the transaction did not commit.
 _REFUSED = "refused"
-#: The request may have reached the engine and may still commit: settle it from the manifest.
+#: Anything else: the request may have reached the engine and may have committed or still commit
+#: (a dropped connection, a timeout, a gateway 5xx, a 500 that can follow the commit, an exception
+#: nobody anticipated). Settle it from the manifest.
 _IN_FLIGHT = "in-flight"
-
-#: A gateway answer says nothing about what the engine did with the request; any other status is the
-#: engine's own, definitive answer.
-_GATEWAY_STATUSES = frozenset({502, 503, 504})
 
 
 def _classify(exc: BaseException) -> str:
-    """Which of the three shapes a failed ``write_manifest_many`` is (see the constants above)."""
+    """Which of the three shapes one failed ``write_manifest_many`` attempt is.
+
+    Only a 4xx (the engine answered and refused; 408 is a timeout, so not that) and a connection that
+    was never made are definitive. Everything else, unknown exceptions included, is in flight.
+    """
     seen: set[int] = set()
     cur: BaseException | None = exc
     while cur is not None and id(cur) not in seen:
@@ -341,29 +375,44 @@ def _classify(exc: BaseException) -> str:
         if isinstance(cur, CombinedWriteEmbedTimeoutError):
             return _IN_FLIGHT
         if isinstance(cur, httpx.HTTPStatusError):
-            return _IN_FLIGHT if cur.response.status_code in _GATEWAY_STATUSES else _REFUSED
+            status = cur.response.status_code
+            return _REFUSED if 400 <= status < 500 and status != 408 else _IN_FLIGHT
         if isinstance(cur, (httpx.ConnectError, httpx.ConnectTimeout)):
             return _UNSENT
-        if isinstance(cur, (httpx.TransportError, ConnectionError, TimeoutError)):
-            return _IN_FLIGHT
         cur = cur.__cause__ or cur.__context__
-    return _REFUSED
+    return _IN_FLIGHT
+
+
+def _stamp_refused(doc: str, collection: str, exc: BaseException) -> StampRefusedError:
+    """The writer's rule for a refused stamp: record it, leave the fence as it is, report unknown."""
+    try:
+        from nexus.mcp_infra import _record_complete_refusal  # noqa: PLC0415 — deferred: mcp_infra imports back into catalog code
+
+        _record_complete_refusal(doc)
+    except Exception as rec_exc:  # noqa: BLE001 — recording is advisory; the refusal itself propagates
+        _log.warning("note_write_refusal_record_failed", doc_id=doc, error=str(rec_exc))
+    return StampRefusedError(
+        f"note {doc} in {collection} landed but the engine refused to stamp it complete: {exc}")
 
 
 def _settle_after_error(
     result: NoteWriteResult, expected: list[tuple[int, str]], exc: Exception, *,
-    cat: Any, content_hash: str | None,
+    recorder: _AttemptRecorder, cat: Any, rows: list[dict], chunks: list[dict],
+    content_hash: str | None,
 ) -> NoteWriteResult:
-    """The request raised: decide what happened, from the exception and, if in flight, the manifest.
+    """The request failed: decide what happened, from EVERY attempt's error and, if any was in
+    flight, the manifest.
 
-    A note that landed on the strength of the manifest read alone may not have been stamped complete
-    (an unchanged re-put whose request never committed reads the same as one that did), so the stamp
-    is asked for again, with the manifest ROW count the engine verifies against (a repeated piece is
-    one chunk but two rows).
+    1. No attempt was in flight (only 4xx refusals and connections never made): confirmed not landed.
+    2. In flight and the manifest does not show the note: unknown (it may still commit).
+    3. In flight and the manifest already equals the note's rows: the content is there but the request
+       may never have committed, so changed tags, ttl or category on unchanged content are not
+       applied yet. Resend the same idempotent request once; its answer is the note's outcome (a
+       resend that fails is unknown).
     """
     doc = result.catalog_doc_id
-    kind = _classify(exc)
-    if kind != _IN_FLIGHT:
+    kinds = [_classify(e) for e in recorder.errors]
+    if _IN_FLIGHT not in kinds and _classify(exc) != _IN_FLIGHT:
         raise NoteWriteError(
             catalog_doc_id=doc, collection=result.collection, reason=str(exc),
             manifest_empty=_manifest_is_empty(doc)) from exc
@@ -383,20 +432,21 @@ def _settle_after_error(
             f"note {doc} in {result.collection}: the write request failed in flight ({exc}) and the "
             "manifest does not show it, but it may still commit") from exc
     _log.warning(
-        "note_write_exception_but_landed", doc_id=doc, collection=result.collection,
+        "note_write_in_flight_manifest_matches", doc_id=doc, collection=result.collection,
         error=str(exc)[:300])
+    try:
+        out = write_one_request(
+            cat, doc_id=doc, collection=result.collection, rows=rows, chunks=chunks,
+            content_hash=content_hash or None, sweep=True, dropped="optional")
+    except IndexRunVerifyRefused as refused:
+        raise _stamp_refused(doc, result.collection, refused) from refused
+    except Exception as resend_exc:  # noqa: BLE001 — the note's content is there; whether its metadata and stamp were applied is not known
+        raise ManifestVerifyUncertainError(
+            f"note {doc} in {result.collection} is in the manifest, but resending the request to apply "
+            f"its metadata failed: {resend_exc}") from resend_exc
+    _absorb(result, out)
     result.recovered = True
-    if content_hash:
-        try:
-            complete_document(cat, doc_id=doc, content_hash=content_hash, manifest_rows=len(expected))
-        except Exception as stamp_exc:  # noqa: BLE001 — reported as unknown below, never as a finished note
-            _log.warning(
-                "note_write_recovered_complete_stamp_failed", doc_id=doc,
-                collection=result.collection, exc_info=True)
-            raise ManifestVerifyUncertainError(
-                f"note {doc} in {result.collection} landed (the write's answer was lost) but could not "
-                f"be stamped complete: {stamp_exc}") from stamp_exc
-        result.completed = True
+    result.dropped_chashes = None      # the first attempt's drop list is lost; a resend reads an empty diff
     return result
 
 
@@ -502,6 +552,14 @@ def put_note(
         if not write.completed:
             raise ManifestVerifyUncertainError(
                 f"note {doc} in {collection} landed but was not stamped complete")
+    except StampRefusedError as exc:
+        # The writer's rule: a refused stamp leaves the fence `indexing` (no _fence_fail, so no
+        # failed-document heal); it is recorded and reported as unknown.
+        out.status, out.reason = UNCERTAIN, str(exc)
+        _log.warning(
+            "store_put_stamp_refused", doc_id=out.doc_id, catalog_doc_id=doc, collection=collection,
+            error=out.reason[:300])
+        return out
     except ManifestVerifyUncertainError as exc:
         out.status, out.reason = UNCERTAIN, str(exc)
         _fence_fail(doc, out.reason)

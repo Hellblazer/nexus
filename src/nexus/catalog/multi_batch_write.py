@@ -121,6 +121,7 @@ __all__ = [
     "OneRequestResult",
     "RepeatedPositionError",
     "complete_document",
+    "first_chunk_per_chash",
     "retrying",
     "write_document",
     "write_one_request",
@@ -150,6 +151,16 @@ def retrying(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
     its chain, so it is not retried (a retry would start an uncancelled duplicate embed)."""
     from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
     return _manifest_write_with_retry(fn, *args, **kwargs)
+
+
+def first_chunk_per_chash(chunks: Sequence[dict]) -> dict[str, dict]:
+    """``{chash: chunk}``, FIRST occurrence wins. A document that repeats a chunk's text under
+    different metadata writes one chunk, and the old ``upsert`` and the ChunkBatcher both keep the
+    first; a last-wins dict here would silently change which metadata a repeated chunk carries."""
+    out: dict[str, dict] = {}
+    for c in chunks:
+        out.setdefault(c["chash"], c)
+    return out
 
 
 def check_unreferenced(resp: dict, *, doc_id: str, batch: int, required: bool) -> None:
@@ -220,6 +231,7 @@ def write_one_request(
     response must carry a ``dropped_chashes`` and ``dropped_count`` entry for the document that agree,
     or a ``dropped_unknown`` marker) or ``"optional"`` (take the list if the response has one).
     """
+    chunks = list(first_chunk_per_chash(chunks).values())
     resp = retrying(
         cat.write_manifest_many,
         [(doc_id, rows)], complete={doc_id: content_hash} if content_hash is not None else None,
@@ -515,7 +527,7 @@ class MultiBatchDocumentWriter:
                     f"MultiBatchDocumentWriter.add_batch: chunks[{i}] (chash "
                     f"{str(c.get('chash'))[:12]}...) is referenced by no row of this batch; "
                     "it would be written without an owner")
-        return rows_l, {c["chash"]: c for c in chunks_l}
+        return rows_l, first_chunk_per_chash(chunks_l)
 
     # ── requests ──────────────────────────────────────────────────────────────
 
