@@ -137,9 +137,15 @@ jobs:
     # OWN RUNNER, OWN USER. `hellmini-ci` runs as the macOS user `ghci`, with its
     # own Maven repo, tool cache and per-job colima. Release jobs (the
     # engine-service release legs, the PG-bundle cache seed) stay on the
-    # `hellmini` runner under user `ghrunner`, so this job's test code, Maven
-    # plugins and caches are isolated at the OS level from the dependencies and
-    # toolchain that feed the signed release binaries.
+    # `hellmini` runner under user `ghrunner`. The intent is that this job's test
+    # code, Maven plugins and caches cannot reach the dependencies and toolchain
+    # that feed the signed release binaries. A separate macOS user is not a
+    # sandbox, and whether the separation holds is host state that nothing in
+    # this file can assert. The evidence is a run of the negative-control probe,
+    # .github/workflows/hellmini-ci-isolation-probe.yml (owner-only
+    # workflow_dispatch, runs on hellmini-ci): ghrunner's paths unreadable,
+    # `sudo -n` refused, no Developer ID signing identity visible. Until a run of
+    # that probe is green, read "isolated" here as "intended".
     #
     # WHAT THE EXPRESSION DOES. THIS workflow's routing never selects a
     # self-hosted runner for a pull_request or for a push by anyone but the repo
@@ -171,13 +177,27 @@ jobs:
     # What it removes is the hosted-runner timeout exposure and the queueing
     # behind a slow hosted job.
     #
-    # OFFLINE FALLBACK. A job queued for a runner that is down waits forever
-    # (hellmini needs a KVM unlock after a FileVault reboot). Set the repository
-    # variable SERVICE_CI_PUSH_RUNNER to `ubuntu-latest` (Settings > Secrets and
-    # variables > Actions > Variables) and the next push runs on GitHub's
-    # runners with no code change; delete the variable to return to hellmini-ci.
-    # The variable is read at job start, so a run already queued for a dead
-    # runner must be cancelled and re-run to pick it up.
+    # REVIEW PLAN (Sam, 2026-09-30): Service CI stays on hellmini-ci for now.
+    # After about 10 develop runs on it, note the host load during each and
+    # compare job minutes with the hosted runs, then set SERVICE_CI_PUSH_RUNNER
+    # to `ubuntu-latest` (below) unless hellmini-ci is clearly faster. The
+    # measurements behind this decision overlap: hosted 21.8 to 31.2 min (median
+    # about 31, n=4), hellmini 24.4 to 30.8 (median about 27, steady state about
+    # 22, n=4). The hosted minutes cost nothing on a public repo, so speed is
+    # the only thing the move buys.
+    #
+    # OFFLINE FALLBACK AND THE ALLOWLIST. A job queued for a runner that is down
+    # waits until GitHub gives up (hellmini needs a KVM unlock after a FileVault
+    # reboot). Set the repository variable SERVICE_CI_PUSH_RUNNER to exactly
+    # `ubuntu-latest` (Settings > Secrets and variables > Actions > Variables)
+    # and the next push runs on GitHub's runners with no code change; delete the
+    # variable to return to hellmini-ci. The expression treats that one value as
+    # the only override: unset, any other value, `hellmini` included, a typo,
+    # all mean hellmini-ci. So the variable can never send a push to the
+    # release-signing runner, and a typo cannot queue the job for a label that
+    # no runner has. The variable is read at job start, so a run already queued
+    # for a dead runner must be cancelled and re-run to pick it up (not verified
+    # that a re-run re-reads it).
     #
     # RUNNER SHARING. `hellmini-ci` is a separate runner from the release
     # runner, so this job no longer queues behind a release build, and a release
@@ -200,16 +220,19 @@ jobs:
     # The job's Docker daemon is separate from the always-on one that
     # scripts/mvnw-leased.sh suites use (user hhildebrand), so the two do not
     # collide on containers. They do compete for the host's 24 GB of RAM: a full
-    # host `pytest -n auto` uses about 23 GB, so a push job's colima VM running
-    # at the same time can thrash. mvnw-leased.sh serializes builders through a
+    # host `pytest -n auto` uses about 23 GB, and a release mac-arm64 native
+    # build on `hellmini` brings its own colima VM and a 5632m heap, so a push
+    # job's colima VM running at the same time can thrash. Nothing serializes
+    # the two runners. mvnw-leased.sh serializes builders through a
     # lock in the git common dir of the clone it runs from, and this job runs
     # from the runner's own checkout, so the two never see each other's lock.
     #
     # COST DISCIPLINE. AGENTS.md § CI Cost Discipline reads "BILLED
     # macOS/premium runners only where the artifact requires the platform" and
-    # names the self-hosted hellmini exception. hellmini is owned hardware billed
-    # at nothing per minute, and the job moves OFF a billed runner.
-    runs-on: ${{ github.event_name == 'push' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner && (vars.SERVICE_CI_PUSH_RUNNER || 'hellmini-ci') || 'ubuntu-latest' }}
+    # names the self-hosted hellmini exception: owned hardware, no per-minute
+    # charge. (Hosted minutes are also free on a public repo, so this move saves
+    # no money; see the review plan above.)
+    runs-on: ${{ github.event_name == 'push' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner && (vars.SERVICE_CI_PUSH_RUNNER == 'ubuntu-latest' && 'ubuntu-latest' || 'hellmini-ci') || 'ubuntu-latest' }}
     permissions:
       contents: read
     # nexus-rjk2a, measured 2026-09-29/30 (14 runs in 30 hours): the job took
@@ -373,11 +396,12 @@ jobs:
       # verbatim because the PR status-check name is referenced by branch
       # protection; renaming would strand required checks.
       # nexus-13eb0: forkCount default (4) is the LOCAL-loop parallelism
-      # lever. GH-hosted ubuntu-latest runners are 4-core/16GB, sized for
-      # the existing serial job shape, not evaluated for N concurrent
-      # Testcontainers PG forks; pin CI to the pre-existing serial behavior
-      # explicitly rather than silently inheriting the new local default.
-      # Revisit deliberately if CI itself is ever parallelized.
+      # lever. forks=1 is pinned for CI because RAM, not core count, is the
+      # limit: each fork boots its own Testcontainers Postgres, and neither CI
+      # target was sized for N of them. GH-hosted ubuntu-latest is 4-core/16GB;
+      # the hellmini-ci push job runs in a colima VM of 8 CPUs and 8 GiB. The
+      # serial shape is still right on both. Revisit deliberately if CI itself
+      # is ever parallelized.
       - name: Run Java test suite
         working-directory: service
         run: ./mvnw -q test -Dnexus.test.forks=1

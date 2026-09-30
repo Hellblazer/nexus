@@ -459,17 +459,19 @@ jobs:
     # nexus-n0ful: 45m -> 25m. The 45m ceiling was sized for one process
     # running the WHOLE unit suite (17:05 measured locally, 25-30m on
     # runners, cache-save overhead on top — see the history below, kept for
-    # provenance). A 4-way duration-balanced shard puts each leg at roughly
-    # a quarter of that wall time; 25m is a ceiling with real headroom over
-    # the balanced-shard estimate, not a tight bound — a timeout is a
+    # provenance). A duration-balanced shard (4-way when this was written, 6-way
+    # since nexus-qzxzh below) puts each leg at roughly 1/N of that wall time;
+    # 25m was a ceiling with real headroom over the balanced-shard estimate,
+    # not a tight bound — a timeout is a
     # CEILING, not a reservation, GitHub bills actual runtime either way.
     #
-    # Review-earned arithmetic (why not 20m): the shard divides only
+    # Review-earned arithmetic (why not 20m; figures are the 4-way ones from
+    # n0ful): the shard divides only
     # RECORDED TEST time (~206s/leg, balanced via .test_durations.json). The
     # fixed per-leg setup pipeline — JDK/GraalVM, PG bundle, uv sync, HF +
     # docling cache restore (or a COLD FETCH on a cache miss), ci_warm_docling.py,
     # service-jar download — is paid by EVERY shard independently, not
-    # divided by 4, and is exactly what drove both prior emergency bumps
+    # divided by the shard count, and is exactly what drove both prior emergency bumps
     # (nexus-cxsbs: cold model fetch; nexus-aqbrk: the engine arm). On top of
     # that, ~200s of session-fixture/engine-boot overhead is visible in the
     # 1025s local wall vs the 825s recorded-test sum. 25m covers a cold-cache
@@ -490,9 +492,10 @@ jobs:
     # develop runs lost one shard to the 25m cap with no failing test
     # (b6af1878c shard 4 was cancelled at 93% after 24m of tests). The
     # durations file had been refreshed the day before (3130s recorded,
-    # ~13m per shard), so this is runner speed (~1.6-1.9x the recorded
-    # times), not stale balance. Revisit with a fifth shard if job times
-    # pass 30m.
+    # ~13m per shard), so this is runner speed, not stale balance (1.6-1.9x
+    # the recorded times when measured then; 1.1-1.4x on the test step alone
+    # once re-measured on the 6-shard runs below). The "fifth shard if job
+    # times pass 30m" plan became the six-way split below.
     #
     # nexus-qzxzh (Sam, 2026-09-30): 4 -> 6 shards. The 35m ceiling kept the
     # tail shard alive but did not fix it: the split balances RECORDED
@@ -502,6 +505,14 @@ jobs:
     # shard 1 ran 14-16m. Six legs cut every leg's test time by a third at the
     # cost of ~2m fixed setup per extra leg (billed on actual runtime). The
     # 35m ceiling stays as headroom, not a budget.
+    #
+    # Measured on the three 6-shard runs of 2026-09-30 (36782096550,
+    # 36784801648, 36785966097): job 10.9 to 13.5 min, test step 8:32 to 11:53,
+    # and the same shard ran 8:32 on one run and 11:53 on another, so run-to-run
+    # noise on one shard (about 40%) exceeds the residual imbalance between
+    # shards. 35m is therefore about 2.6x the worst job, and a wedged shard
+    # delays its red by about 22 min. Revisit toward 25m after about 10 runs
+    # (nexus-vyg07); the earlier "revisit at 30m" note no longer applies.
     timeout-minutes: 35
     strategy:
       fail-fast: false
@@ -707,7 +718,9 @@ jobs:
       - name: Run tests (shard ${{ matrix.shard }}/6)
         # nexus-n0ful: pytest-split partitions the SAME collection every leg
         # sees (addopts' `-m 'not integration and not slow'` applies
-        # uniformly) into 4 duration-balanced groups, keyed off the committed
+        # uniformly) into 6 duration-balanced groups (the count is the `shard`
+        # matrix length; tests/scripts/test_ci_shard_count_lint.py fails when the
+        # matrix, this `--splits` and the job and step names disagree), keyed off the committed
         # .test_durations.json. Refresh cadence (JSON has no comment syntax,
         # so it lives here + pyproject.toml's pytest-split dev-dep comment):
         # regenerate on demand with
@@ -733,11 +746,14 @@ jobs:
       # at the shard matrix pytest-gate trusts blindly via needs.test. The
       # marker-scoped conftest guards (scenario / mandatory-pin) cannot see
       # a mass-skip of the GENERAL corpus; pytest exits 0 on all-skipped.
-      # Floor 1500/shard against ~3290/shard actual (13150 default-selected
-      # / 4, measured 2026-08-18): generous headroom for corpus shrinkage
-      # and split imbalance, structurally impossible for a near-zero shard
-      # to pass. Re-measured for the 6-way split (nexus-qzxzh, 2026-09-30):
-      # 3471-5298 collected per shard, so 1500 still holds with headroom.
+      # The floor reads the EXECUTED count (passed + failed + errored, skipped
+      # excluded; check_lint_leg_non_vacuity.py), not the collected count.
+      # Measured on the 6-shard runs of 2026-09-30 (nexus-qzxzh, runs 36782096550,
+      # 36784801648, 36785966097): 3406 to 5946 executed per shard, about 27.7k
+      # default-selected tests in all. 1500 is 44% of the smallest shard: it
+      # catches a shard that skipped its corpus down to near zero, not half a
+      # shard vanishing, and not a dropped group (a shard that never ran has no
+      # count to read; tests/scripts/test_ci_shard_count_lint.py covers that).
       - name: Executed-count floor (nexus-lemv5 — a shard that skipped its corpus must not report green)
         run: uv run python scripts/check_lint_leg_non_vacuity.py shard-output.txt --floor 1500 --label "test shard ${{ matrix.shard }}"
 
@@ -854,7 +870,7 @@ jobs:
 
   test-mode-census:
     # nexus-vdti6 (candidate 1, chosen over: candidate 2 — an out-of-band
-    # merge across the 4 shard processes, more plumbing for no benefit over
+    # merge across the shard processes, more plumbing for no benefit over
     # this precedent; candidate 3 — reverting to a filesystem/AST-only
     # census, explicitly scoped OUT by this census's own design because it
     # needs pytest's fixture-resolution machinery (item.fixturenames) to
@@ -872,8 +888,9 @@ jobs:
     # its own pytest_collection_modifyitems — the IDENTICAL session.items-
     # mutation mechanism `-m`/`-k` deselection uses (the same mechanism
     # nexus-8x4le's `-m lint` blind spot exploited). Under that real
-    # invocation the census only ever saw its own shard (~20-25% of the
-    # corpus): enforcement was shard-placement luck, not real coverage.
+    # invocation the census only ever saw its own shard (1/N of the corpus,
+    # about 17% at 6 shards): enforcement was shard-placement luck, not real
+    # coverage.
     # tests/conftest.py's partial_session_view_reason guard now makes the
     # census SKIP (never silently scan a partial view) whenever
     # --splits/--group is active — which is unconditionally true in the
@@ -882,8 +899,9 @@ jobs:
     # trustworthy view.
     #
     # HOW IT STAYS CHEAP WITHOUT THE ENGINE SUBSTRATE: this job still needs
-    # request.session.items to be the REAL full corpus (~13.1k raw / ~11.7k
-    # default-loop items, measured live 2026-08-06), which means COLLECTING
+    # request.session.items to be the REAL full corpus (about 27.7k
+    # default-selected items, summed from the shard outputs 2026-09-30; it was
+    # ~13.1k raw / ~11.7k default-loop on 2026-08-06), which means COLLECTING
     # the whole tests/ tree — but collecting is not the same as EXECUTING.
     # NX_CENSUS_ONLY_JOB=1 (tests/conftest.py's pytest_collection_
     # modifyitems) SKIP-MARKS every item outside
@@ -893,9 +911,10 @@ jobs:
     # `pytest_runtest_setup` (`@hookimpl(tryfirst=True)`), which raises
     # BEFORE `_pytest/runner.py`'s own `pytest_runtest_setup` — the one that
     # calls `item.setup()` and instantiates fixtures — ever runs, so the
-    # ~11.7k skip-marked tests never touch the engine substrate, PG, or the
-    # service jar. Measured locally: collection alone is ~8s (11733/13101
-    # items); this job pays that plus per-item skip overhead for the
+    # skip-marked tests (all but the census modules) never touch the engine
+    # substrate, PG, or the service jar. Measured locally 2026-08-06:
+    # collection alone was ~8s (11733/13101 items, a corpus less than half
+    # today's); this job pays that plus per-item skip overhead for the
     # rest, not fixture/engine cost — no service-jar / PG-bundle / docling
     # provisioning steps below, unlike the `test` matrix.
     name: pytest (mode-declarations census)
