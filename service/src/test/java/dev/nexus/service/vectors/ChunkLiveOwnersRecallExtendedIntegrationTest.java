@@ -464,11 +464,38 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
             + passagesPerDoc[seedDoc] + " passages");
     }
 
-    /** Embeds {@code passages} with the provisioned bge-base ONNX model, cached by content. */
-    private float[][] embedCached(List<String> passages) throws Exception {
+    /**
+     * Cache key for {@link #embedCached}: the passages AND the identity of the model that
+     * embeds them (SHA-256 of the ONNX file and the tokenizer file). Keyed on the passages
+     * alone, a cache file that outlives a model bump (it persists on a self-hosted runner,
+     * unlike a hosted VM) would serve embeddings from the old model and the recall test
+     * would pass against it.
+     */
+    static String cacheKey(List<String> passages, Path model, Path tokenizer) throws Exception {
         java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
         for (String t : passages) md.update(t.getBytes(StandardCharsets.UTF_8));
-        String key = HexFormat.of().formatHex(md.digest()).substring(0, 16);
+        md.update((byte) 0);
+        md.update(fileDigest(model));
+        md.update((byte) 0);
+        md.update(fileDigest(tokenizer));
+        return HexFormat.of().formatHex(md.digest()).substring(0, 16);
+    }
+
+    private static byte[] fileDigest(Path file) throws Exception {
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        try (var in = Files.newInputStream(file)) {
+            byte[] buf = new byte[1 << 16];
+            for (int n; (n = in.read(buf)) > 0; ) md.update(buf, 0, n);
+        }
+        return md.digest();
+    }
+
+    /** Embeds {@code passages} with the provisioned bge-base ONNX model, cached by content and model. */
+    private float[][] embedCached(List<String> passages) throws Exception {
+        // The key needs the model on disk, so the provisioning gate runs BEFORE the cache read.
+        OrtTestModel.requireBgeOrSkip();
+        String key = cacheKey(passages, Path.of(Bge768Embedder.DEFAULT_MODEL_PATH),
+            Path.of(Bge768Embedder.DEFAULT_TOKENIZER_PATH));
         Path cache = Path.of(System.getProperty("nx.recallExt.cacheDir", System.getProperty("java.io.tmpdir")),
             "recallExt-bge768-" + key + ".bin");
         float[][] out = new float[passages.size()][];
@@ -482,7 +509,6 @@ class ChunkLiveOwnersRecallExtendedIntegrationTest {
             log("embeddings read from cache " + cache);
             return out;
         }
-        OrtTestModel.requireBgeOrSkip();
         Bge768Embedder embedder = new Bge768Embedder();
         try {
             long t0 = System.nanoTime();
