@@ -20,6 +20,17 @@ cd "$(dirname "$0")"
 BIN="${BIN:-target/nexus-service}"
 [ -x "$BIN" ] || { echo "FAIL: native binary not found/executable at $BIN"; exit 2; }
 
+# nexus-eex5m: every scratch file (service logs, curl bodies, SIGTERM-probe exit
+# codes) lives in ONE per-run private dir. Fixed /tmp names broke a shared box:
+# /tmp is sticky, so whichever user ran last (ghrunner release job vs a human's
+# validation run) owned the files and the next user's redirects failed with
+# "Permission denied", surfacing as bogus service-startup / ort_run_cancelled
+# FAILs against a healthy binary. mktemp -d is mode 0700 and unique per run.
+# Template form (no -t) works on both GNU and BSD mktemp.
+SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/native-smoke.XXXXXX") \
+  || { echo "FAIL: cannot create scratch dir under ${TMPDIR:-/tmp}"; exit 2; }
+export SMOKE_TMP
+
 OWN_PG=0
 if [ -z "${NX_DB_URL:-}" ]; then
   OWN_PG=1
@@ -58,6 +69,7 @@ NATIVE_SMOKE_CLEANUP_ROWS=0
 [ "$OWN_PG" != "1" ] && NATIVE_SMOKE_CLEANUP_ROWS=1
 
 cleanup() {
+  local rc=$?
   [ -n "${SVCPID:-}" ] && kill "$SVCPID" 2>/dev/null
   [ "$OWN_PG" = "1" ] && docker rm -f lp2qo-smoke-pg >/dev/null 2>&1
   # nexus-rxqqd review follow-up (code-review-expert): the real-Python-client
@@ -69,22 +81,30 @@ cleanup() {
   [ -n "${T1_PY_TMPDIR:-}" ] && rm -rf "$T1_PY_TMPDIR"
   [ -n "${T2_PY_TMPDIR:-}" ] && rm -rf "$T2_PY_TMPDIR"
   [ -n "${TUPLES_PY_TMPDIR:-}" ] && rm -rf "$TUPLES_PY_TMPDIR"
+  # nexus-eex5m: drop the scratch dir on success; on failure keep it (logs are
+  # the only post-mortem for a native crash) and say where it is.
+  if [ "$rc" = "0" ]; then
+    rm -rf "$SMOKE_TMP"
+  else
+    echo "native-smoke: FAILED (exit $rc); logs kept in $SMOKE_TMP" >&2
+  fi
+  return "$rc"
 }
 trap cleanup EXIT
 
 # nexus-9gaj7: -Duser.timezone=UTC defense-in-depth alongside Main.main's
 # in-process TimeZone.setDefault(UTC) pin (asserted at boot, fails loud).
-"$BIN" -Duser.timezone=UTC > /tmp/native-smoke-svc.log 2>&1 &
+"$BIN" -Duser.timezone=UTC > "$SMOKE_TMP/svc.log" 2>&1 &
 SVCPID=$!
 U="http://localhost:${SVCPORT}"
 
 UP=0
 for i in $(seq 1 60); do
-  kill -0 $SVCPID 2>/dev/null || { echo "FAIL: service exited during startup"; tail -40 /tmp/native-smoke-svc.log; exit 1; }
+  kill -0 $SVCPID 2>/dev/null || { echo "FAIL: service exited during startup"; tail -40 "$SMOKE_TMP/svc.log"; exit 1; }
   curl -fsS "$U/health" >/dev/null 2>&1 && { UP=1; break; }
   sleep 1
 done
-[ "$UP" = "1" ] || { echo "FAIL: service never became healthy"; tail -40 /tmp/native-smoke-svc.log; exit 1; }
+[ "$UP" = "1" ] || { echo "FAIL: service never became healthy"; tail -40 "$SMOKE_TMP/svc.log"; exit 1; }
 
 # RDR-218 Gap 2 (nexus-ijue9.7): the SOCKET FAMILY of the listener.
 #
@@ -134,7 +154,7 @@ if [ -r /proc/net/tcp ] && [ -r /proc/net/tcp6 ]; then
     echo "FAIL: listener is ALSO in the IPv6 table; the socket is dual-stack."
     fail_family=1
   fi
-  [ "${fail_family:-0}" = "1" ] && { tail -40 /tmp/native-smoke-svc.log; exit 1; }
+  [ "${fail_family:-0}" = "1" ] && { tail -40 "$SMOKE_TMP/svc.log"; exit 1; }
   echo "socket family: OK (IPv4-only, forwardable by the WSL2 relay)"
 else
   echo "socket family: SKIPPED (no /proc/net/tcp*; not Linux). The family is"
@@ -144,13 +164,13 @@ fi
 # Migration must have applied (changeset_count > 0).
 VER=$(curl -fsS -H "Authorization: Bearer smoketoken" "$U/version")
 echo "version: $VER"
-echo "$VER" | grep -qE '"schema_changeset_count":[1-9]' || { echo "FAIL: migration did not apply"; tail -40 /tmp/native-smoke-svc.log; exit 1; }
+echo "$VER" | grep -qE '"schema_changeset_count":[1-9]' || { echo "FAIL: migration did not apply"; tail -40 "$SMOKE_TMP/svc.log"; exit 1; }
 
 fail=0
 assert() { # name expected_code curl-args...
   local name="$1" exp="$2"; shift 2
-  local code; code=$(curl -s -o /tmp/ns.out -w "%{http_code}" "$@")
-  if [ "$code" = "$exp" ]; then echo "  ok   $name -> $code"; else echo "  FAIL $name -> $code (want $exp): $(head -c160 /tmp/ns.out)"; fail=1; fi
+  local code; code=$(curl -s -o "$SMOKE_TMP/ns.out" -w "%{http_code}" "$@")
+  if [ "$code" = "$exp" ]; then echo "  ok   $name -> $code"; else echo "  FAIL $name -> $code (want $exp): $(head -c160 "$SMOKE_TMP/ns.out")"; fail=1; fi
 }
 A=(-H "Authorization: Bearer smoketoken"); J=(-H "Content-Type: application/json")
 echo "jOOQ runtime path:"
@@ -390,13 +410,13 @@ fi
 BGE_MODEL="${NX_BGE_MODEL_PATH:-$HOME/.cache/nexus/onnx_models/bge-base-en-v1.5/onnx/model.onnx}"
 if [ -f "$BGE_MODEL" ]; then
   echo "local bge-768 embed path:"
-  ecode=$(curl -s -o /tmp/ns-embed.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+  ecode=$(curl -s -o "$SMOKE_TMP/ns-embed.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
     -d '{"model":"bge-base-en-v15-768","texts":["native embed smoke"]}' "$U/v1/vectors/embed")
-  if [ "$ecode" = "200" ] && grep -q '"embeddings"' /tmp/ns-embed.out \
-     && [ "$(python3 -c "import json,sys;print(len(json.load(open('/tmp/ns-embed.out'))['embeddings'][0]))" 2>/dev/null)" = "768" ]; then
+  if [ "$ecode" = "200" ] && grep -q '"embeddings"' "$SMOKE_TMP/ns-embed.out" \
+     && [ "$(python3 -c "import json,os;print(len(json.load(open(os.environ['SMOKE_TMP'] + '/ns-embed.out'))['embeddings'][0]))" 2>/dev/null)" = "768" ]; then
     echo "  ok   embed (DJL tokenizer JNI + onnx run) -> 200, 768-dim"
   else
-    echo "  FAIL embed -> $ecode (want 200 + 768-dim): $(head -c200 /tmp/ns-embed.out)"; fail=1
+    echo "  FAIL embed -> $ecode (want 200 + 768-dim): $(head -c200 "$SMOKE_TMP/ns-embed.out")"; fail=1
   fi
 else
   echo "  WARN embed path NOT covered — bge model absent at $BGE_MODEL"
@@ -419,14 +439,14 @@ if [ -f "$BGE_MODEL" ]; then
   # the model must match the tenant's bge profile). Found by --shakeout Phase
   # F on the v0.1.109 candidate, before the tag; this script also runs in
   # engine-service-release.yml, where the same 422 would have burned the tag.
-  rreg=$(curl -s -o /tmp/ns-rerank-reg.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+  rreg=$(curl -s -o "$SMOKE_TMP/ns-rerank-reg.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
     -d "{\"name\":\"$RCOL\",\"content_type\":\"knowledge\",\"owner_id\":\"nativesmoke\",\"embedding_model\":\"bge-base-en-v15-768\"}" \
     "$U/v1/catalog/collections/upsert")
   if [ "$rreg" != "200" ]; then
-    echo "  FAIL rerank fixture collection register -> $rreg: $(head -c200 /tmp/ns-rerank-reg.out)"; fail=1
+    echo "  FAIL rerank fixture collection register -> $rreg: $(head -c200 "$SMOKE_TMP/ns-rerank-reg.out")"; fail=1
   fi
   put_rerank_chunk() {
-    curl -s -o /tmp/ns-rerank-put.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+    curl -s -o "$SMOKE_TMP/ns-rerank-put.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"collection\":\"$RCOL\",\"doc_id\":\"$1\",\"content\":$2}" "$U/v1/vectors/store-put"
   }
   CHASH1="$(printf 'e%.0s' {1..64})"
@@ -445,28 +465,28 @@ if [ -f "$BGE_MODEL" ]; then
     # are dead(c) the instant they land. A real client always follows a
     # store-put with a manifest write; do the same here so the search below
     # can see them.
-    rdoc=$(curl -s -o /tmp/ns-rerank-doc.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+    rdoc=$(curl -s -o "$SMOKE_TMP/ns-rerank-doc.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"owner_prefix\":\"nativesmoke.rerank\",\"title\":\"native-smoke rerank fixture\",\"content_type\":\"knowledge\",\"physical_collection\":\"$RCOL\"}" \
       "$U/v1/catalog/doc/register")
     if [ "$rdoc" != "200" ]; then
-      echo "  FAIL rerank fixture doc register -> $rdoc: $(head -c200 /tmp/ns-rerank-doc.out)"; fail=1
+      echo "  FAIL rerank fixture doc register -> $rdoc: $(head -c200 "$SMOKE_TMP/ns-rerank-doc.out")"; fail=1
     else
-      RDOC_ID=$(python3 -c "import json,sys; print(json.load(open('/tmp/ns-rerank-doc.out'))['tumbler'])" 2>/dev/null)
-      rman=$(curl -s -o /tmp/ns-rerank-man.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      RDOC_ID=$(python3 -c "import json,os; print(json.load(open(os.environ['SMOKE_TMP'] + '/ns-rerank-doc.out'))['tumbler'])" 2>/dev/null)
+      rman=$(curl -s -o "$SMOKE_TMP/ns-rerank-man.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
         -d "{\"doc_id\":\"$RDOC_ID\",\"collection\":\"$RCOL\",\"rows\":[{\"position\":0,\"chash\":\"$CHASH1\"},{\"position\":1,\"chash\":\"$CHASH2\"}]}" \
         "$U/v1/catalog/manifest/write")
       if [ "$rman" != "200" ]; then
-        echo "  FAIL rerank fixture manifest write -> $rman: $(head -c200 /tmp/ns-rerank-man.out)"; fail=1
+        echo "  FAIL rerank fixture manifest write -> $rman: $(head -c200 "$SMOKE_TMP/ns-rerank-man.out")"; fail=1
       fi
     fi
-    rcode=$(curl -s -o /tmp/ns-rerank.out -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+    rcode=$(curl -s -o "$SMOKE_TMP/ns-rerank.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"query\":\"how do I bake bread\",\"collections\":[\"$RCOL\"],\"n_results\":2,\"rerank\":true}" \
       "$U/v1/vectors/search")
     CE_MODEL="${NX_CROSSENCODER_MODEL_PATH:-$HOME/.cache/nexus/onnx_models/ms-marco-minilm-l6-v2/onnx/model.onnx}"
     if [ -f "$CE_MODEL" ]; then
       if [ "$rcode" = "200" ] && python3 - <<'PYEOF' 2>/dev/null
-import json
-r = json.load(open("/tmp/ns-rerank.out"))
+import json, os
+r = json.load(open(os.environ["SMOKE_TMP"] + "/ns-rerank.out"))
 assert r["rerank_degraded"] is False, r.get("rerank_error")
 assert r["rerank_model"] == "ms-marco-minilm-l6-v2"
 rows = r["results"]
@@ -476,12 +496,12 @@ PYEOF
       then
         echo "  ok   rerank=true -> cross-encoder scores in native image (correct top doc)"
       else
-        echo "  FAIL rerank strong path -> $rcode: $(head -c300 /tmp/ns-rerank.out)"; fail=1
+        echo "  FAIL rerank strong path -> $rcode: $(head -c300 "$SMOKE_TMP/ns-rerank.out")"; fail=1
       fi
     else
       if [ "$rcode" = "200" ] && python3 - <<'PYEOF' 2>/dev/null
-import json
-r = json.load(open("/tmp/ns-rerank.out"))
+import json, os
+r = json.load(open(os.environ["SMOKE_TMP"] + "/ns-rerank.out"))
 assert r["rerank_degraded"] is True and "not found" in r["rerank_error"]
 assert len(r["results"]) == 2
 PYEOF
@@ -489,18 +509,18 @@ PYEOF
         echo "  ok   rerank=true -> LOUD structured degrade (model absent at $CE_MODEL)"
         echo "       (prime the ms-marco ONNX to exercise the strong scoring path)"
       else
-        echo "  FAIL rerank degrade path -> $rcode: $(head -c300 /tmp/ns-rerank.out)"; fail=1
+        echo "  FAIL rerank degrade path -> $rcode: $(head -c300 "$SMOKE_TMP/ns-rerank.out")"; fail=1
       fi
     fi
   else
-    echo "  FAIL rerank fixture store-put -> $p1/$p2: $(head -c200 /tmp/ns-rerank-put.out)"; fail=1
+    echo "  FAIL rerank fixture store-put -> $p1/$p2: $(head -c200 "$SMOKE_TMP/ns-rerank-put.out")"; fail=1
   fi
 else
   echo "  WARN rerank stage NOT covered — bge model absent (store-put needs the embedder)"
 fi
 
-if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log; then
-  echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-svc.log | head; fail=1
+if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/svc.log"; then
+  echo "FAIL: native runtime error in service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/svc.log" | head; fail=1
 fi
 
 # ── SIGTERM during in-flight local inference (nexus-o5xyx.3) ─────────────────
@@ -515,11 +535,11 @@ fi
 if [ -f "$BGE_MODEL" ]; then
   echo "SIGTERM during in-flight inference:"
   BIG=$(python3 -c "import json;print(json.dumps({'model':'bge-base-en-v15-768','texts':[str(i)+' '+'the engine embeds this sentence under load. '*40 for i in range(64)]}))")
-  rm -f /tmp/ns-term-*.code
+  rm -f "$SMOKE_TMP"/ns-term-*.code
   TPIDS=()
   for k in $(seq 1 8); do
     ( curl -s -o /dev/null -w "%{http_code}\n" --max-time 60 "${A[@]}" "${J[@]}" -X POST \
-        -d "$BIG" "$U/v1/vectors/embed" > "/tmp/ns-term-$k.code" ) &
+        -d "$BIG" "$U/v1/vectors/embed" > "$SMOKE_TMP/ns-term-$k.code" ) &
     TPIDS+=($!)
   done
   sleep 1.5
@@ -529,14 +549,14 @@ if [ -f "$BGE_MODEL" ]; then
   wait "$SVCPID"; trc=$?
   kill "$TWATCH" 2>/dev/null; wait "$TWATCH" 2>/dev/null
   for p in "${TPIDS[@]}"; do wait "$p" 2>/dev/null; done
-  codes=$(cat /tmp/ns-term-*.code 2>/dev/null | tr '\n' ' ')
+  codes=$(cat "$SMOKE_TMP"/ns-term-*.code 2>/dev/null | tr '\n' ' ')
   if [ "$trc" = "143" ]; then
     echo "  ok   exit 143 after SIGTERM under embed load"
   else
-    echo "  FAIL exit $trc after SIGTERM under embed load (want 143; 134/139 = native crash)"; tail -20 /tmp/native-smoke-svc.log; fail=1
+    echo "  FAIL exit $trc after SIGTERM under embed load (want 143; 134/139 = native crash)"; tail -20 "$SMOKE_TMP/svc.log"; fail=1
   fi
-  if grep -q 'event=ort_run_cancelled' /tmp/native-smoke-svc.log; then
-    echo "  ok   in-flight runs cancelled ($(grep -o 'event=ort_run_cancelled count=[0-9]*' /tmp/native-smoke-svc.log | tail -1))"
+  if grep -q 'event=ort_run_cancelled' "$SMOKE_TMP/svc.log"; then
+    echo "  ok   in-flight runs cancelled ($(grep -o 'event=ort_run_cancelled count=[0-9]*' "$SMOKE_TMP/svc.log" | tail -1))"
   else
     echo "  FAIL no event=ort_run_cancelled: the signal met no live run, or the gate did not cancel"; fail=1
   fi
@@ -574,29 +594,29 @@ else
   DEADPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
   NX_DB_URL="jdbc:postgresql://localhost:${PGPORT}/voyagesmoke" \
     NX_VOYAGE_API_KEY=dummy-smoke-key HTTPS_PROXY="http://127.0.0.1:${DEADPORT}" \
-    "$BIN" > /tmp/native-smoke-voyage.log 2>&1 &
+    "$BIN" > "$SMOKE_TMP/voyage.log" 2>&1 &
 SVCPID=$!
 VUP=0
 for i in $(seq 1 60); do
-  kill -0 $SVCPID 2>/dev/null || { echo "FAIL: voyage-mode service exited during startup (segfault?)"; tail -40 /tmp/native-smoke-voyage.log; exit 1; }
+  kill -0 $SVCPID 2>/dev/null || { echo "FAIL: voyage-mode service exited during startup (segfault?)"; tail -40 "$SMOKE_TMP/voyage.log"; exit 1; }
   curl -fsS "$U/health" >/dev/null 2>&1 && { VUP=1; break; }
   sleep 1
 done
-[ "$VUP" = "1" ] || { echo "FAIL: voyage-mode service never became healthy"; tail -40 /tmp/native-smoke-voyage.log; exit 1; }
+[ "$VUP" = "1" ] || { echo "FAIL: voyage-mode service never became healthy"; tail -40 "$SMOKE_TMP/voyage.log"; exit 1; }
 # (2) took the cloud (voyage) embedding branch, not local bge/onnx
-if grep -qE 'event=embedding_mode_banner mode=voyage' /tmp/native-smoke-voyage.log; then
+if grep -qE 'event=embedding_mode_banner mode=voyage' "$SMOKE_TMP/voyage.log"; then
   echo "  ok   voyage-mode boot (no segfault)"
 else
-  echo "  FAIL voyage mode not selected:"; grep embedding_mode_banner /tmp/native-smoke-voyage.log | head; fail=1
+  echo "  FAIL voyage mode not selected:"; grep embedding_mode_banner "$SMOKE_TMP/voyage.log" | head; fail=1
 fi
 # (3) EgressProxy parsed HTTPS_PROXY and set the proxy on the Voyage client
-if grep -qE "event=egress_proxy_configured.*port=${DEADPORT}" /tmp/native-smoke-voyage.log; then
+if grep -qE "event=egress_proxy_configured.*port=${DEADPORT}" "$SMOKE_TMP/voyage.log"; then
   echo "  ok   egress proxy wired from HTTPS_PROXY -> 127.0.0.1:${DEADPORT}"
 else
-  echo "  FAIL egress proxy not configured from HTTPS_PROXY:"; grep egress_proxy /tmp/native-smoke-voyage.log | head; fail=1
+  echo "  FAIL egress proxy not configured from HTTPS_PROXY:"; grep egress_proxy "$SMOKE_TMP/voyage.log" | head; fail=1
 fi
-if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-voyage.log; then
-  echo "FAIL: native runtime error in voyage-mode service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" /tmp/native-smoke-voyage.log | head; fail=1
+if grep -qiE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/voyage.log"; then
+  echo "FAIL: native runtime error in voyage-mode service log:"; grep -iE "MissingReflection|NoClassDefFound|UnsatisfiedLink|NullPointerException" "$SMOKE_TMP/voyage.log" | head; fail=1
 fi
 fi  # end voyage-mode phase (OWN_PG)
 
