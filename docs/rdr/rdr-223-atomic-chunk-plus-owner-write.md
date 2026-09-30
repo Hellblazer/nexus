@@ -221,9 +221,13 @@ chunk owned.
    - new chash, no vector: embedded, as today;
    - new chash, vector: the supplied vector is stored as-is;
    - existing chash, no vector: not re-embedded, metadata refreshed (RDR-181);
-   - existing chash, vector: the stored vector is kept (same text, same
-     collection model) and a mismatch with the supplied one is counted and
-     logged, not written (inferred, not read: a design choice).
+   - existing chash, vector: the stored text and vector are kept, whatever text
+     the request carries, and a mismatch with the supplied vector is counted
+     and logged, not written (inferred, not read: a design choice). The same
+     holds if another writer commits the chash between the existence check and
+     the insert (ON CONFLICT keeps the stored row). With `force_re_embed` the
+     supplied vector is written instead, and a differing stored vector is
+     counted.
 3. **Client migration (closes Gaps 1 and 2).** Each split path moves onto the
    combined write, or append plus chunks for later batches. The note paths
    move with no engine change (F-5); a note is one document of a few pieces,
@@ -483,15 +487,14 @@ Phase 1, against the real engine substrate.
   unmigrated paths keep working until Phase 3.
 - **Build tool compatibility**, **Licensing**, **IDE compatibility**,
   **Secret/credential lifecycle**: N/A.
-- **Memory management**: the client caps every combined-write request at 300
-  chunks (`QUOTAS.MAX_RECORDS_PER_WRITE`; the ChunkBatcher flush cap is 64 for
-  CCE collections, 300 for code, 16 on onnx-local). The engine does not
-  enforce that cap on `write_many` or `append`: the released client's
-  onnx-local cap can be raised without limit through
-  `NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`, so a server cap of 300 there could refuse a
-  request an existing client legitimately sends. Only the new `append_many`
-  route enforces 300 chunks, and `sweep_chashes` is capped at 300 per append
-  (P1.0). The asymmetry is recorded in the wire ledger.
+- **Memory management**: the engine caps `append` and `append_many` at 300
+  chunks per request (400 before any transaction or embed) and `sweep_chashes`
+  at 300 per append (P1.0). It does not cap `write_many`: released clients send
+  it with up to `NX_ONNX_LOCAL_UPSERT_CHUNK_CAP` chunks, a setting with no upper
+  bound, so a server cap there could refuse a request an existing client
+  legitimately sends. The new client clamps every combined-write request to 300
+  (`QUOTAS.MAX_RECORDS_PER_WRITE`) itself. The asymmetry is recorded in the wire
+  ledger.
 
 ### Proportionality
 
