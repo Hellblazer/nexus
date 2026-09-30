@@ -104,17 +104,21 @@ def _install_recording_registry(monkeypatch):
 
         def fire_batch(self, doc_ids, collection, contents, embeddings=None,
                        metadatas=None, *, catalog_doc_id="",
-                       manifest_complete=None, invoke=None):  # type: ignore[override]
+                       manifest_complete=None, invoke=None,
+                       skip_hooks=None):  # type: ignore[override]
             # nexus-cotmr: keep in sync with HookRegistry.fire_batch's real
             # signature (manifest_complete, nexus-5xn3k.4 RUNFENCE) — CLI
             # `nx store put` / `nx memory promote` now fence and pass this
             # through fire_store_chains -> fire_batch; an override missing
             # the parameter raises TypeError on every such call, not just
             # the RUNFENCE-specific ones.
+            # RDR-223 P2.6 (nexus-z0o2p.16): ``nx store put`` fires the batch chain
+            # with skip_hooks={manifest_write_batch_hook}; keep that in sync too.
             batch.append(list(doc_ids))
             super().fire_batch(doc_ids, collection, contents, embeddings,
                                metadatas, catalog_doc_id=catalog_doc_id,
-                               manifest_complete=manifest_complete, invoke=invoke)
+                               manifest_complete=manifest_complete, invoke=invoke,
+                               skip_hooks=skip_hooks)
 
         def fire_document(self, source_path, collection, content, *, doc_id="", invoke=None):  # type: ignore[override]
             doc.append(source_path)
@@ -417,15 +421,14 @@ class TestDriftGuard:
     """
 
     def test_known_t3_write_paths_use_fire_store_chains(self):
-        """The three known broken paths now reference fire_store_chains."""
-        store_py = Path("src/nexus/commands/store.py").read_text()
+        """The known CLI store paths fire the post-store chains.
+
+        ``nx store put`` left ``fire_store_chains`` at RDR-223 P2.6 (nexus-z0o2p.16):
+        it writes the note through ``put_note`` and fires the three chains itself, the
+        batch chain without the manifest hook (the request already wrote the manifest)."""
         memory_py = Path("src/nexus/commands/memory.py").read_text()
         exporter_py = Path("src/nexus/exporter.py").read_text()
 
-        assert "fire_store_chains" in store_py, (
-            "src/nexus/commands/store.py must call HookRegistry.fire_store_chains "
-            "from put_cmd (nexus-9099 regression)"
-        )
         assert "fire_store_chains" in memory_py, (
             "src/nexus/commands/memory.py must call HookRegistry.fire_store_chains "
             "from promote (nexus-9099 regression)"
@@ -435,20 +438,22 @@ class TestDriftGuard:
             "from import_collection (nexus-9099 regression)"
         )
 
-    def test_fire_store_chains_called_after_t3_put_in_put_cmd(self):
-        """In commands/store.py:put_cmd, fire_store_chains must follow t3.put."""
+    def test_the_three_chains_are_fired_after_put_note_in_put_cmd(self):
+        """In commands/store.py:put_cmd, the single, batch and document chains must follow put_note."""
         src = Path("src/nexus/commands/store.py").read_text()
         tree = ast.parse(src)
         for node in ast.walk(tree):
             if isinstance(node, ast.FunctionDef) and node.name == "put_cmd":
-                names = [
-                    n.func.attr if isinstance(n.func, ast.Attribute)
-                    else (n.func.id if isinstance(n.func, ast.Name) else "")
+                calls = sorted(
+                    (n.lineno, n.func.attr if isinstance(n.func, ast.Attribute)
+                     else (n.func.id if isinstance(n.func, ast.Name) else ""))
                     for n in ast.walk(node) if isinstance(n, ast.Call)
-                ]
-                assert "fire_store_chains" in names, (
-                    "put_cmd must call fire_store_chains after t3.put"
                 )
+                names = [name for _line, name in calls]
+                for chain in ("fire_single", "fire_batch", "fire_document"):
+                    assert chain in names, f"put_cmd must fire {chain} after put_note"
+                    assert names.index("put_note") < names.index(chain), (
+                        f"put_cmd must fire {chain} only after put_note returned: {calls}")
                 return
         pytest.fail("put_cmd not found in commands/store.py")
 
