@@ -38,7 +38,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
  * connection (RLS bypassed): {@code RawSqlGateTest}'s test-tree ratchet is reduce-only.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
-abstract class AtomicWriteTestBase {
+public abstract class AtomicWriteTestBase {
 
     protected static final String SVC_ROLE = "svc_atomic_write_test";
     protected static final String SVC_PASS = "svc_atomic_write_test_pass";
@@ -53,7 +53,7 @@ abstract class AtomicWriteTestBase {
     protected final AtomicInteger seq = new AtomicInteger();
 
     @BeforeAll
-    void startAll() throws Exception {
+    protected void startAll() throws Exception {
         pg = PgContainerHelper.start();
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.applyProductSchema(su);
@@ -76,7 +76,7 @@ abstract class AtomicWriteTestBase {
     }
 
     @AfterAll
-    void stopAll() {
+    protected void stopAll() {
         if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
     }
@@ -174,7 +174,7 @@ abstract class AtomicWriteTestBase {
 
     /** Deterministic 384-dim one-hot embedder that counts every text it is asked to embed. */
     protected static final class CountingFakeEmbedder implements Embedder {
-        final AtomicInteger calls = new AtomicInteger();
+        public final AtomicInteger calls = new AtomicInteger();
 
         @Override
         public List<float[]> embed(List<String> texts) {
