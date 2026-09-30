@@ -190,6 +190,8 @@ public final class TaxonomyCentroidRepository {
             // PgSession.DEFAULT_EF_SEARCH_FLOOR) — centroid tables share the
             // same one-index-all-tenants + RLS-after-scan shape as chunks.
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            PgSession.setHnswScanBudget(ctx);
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);

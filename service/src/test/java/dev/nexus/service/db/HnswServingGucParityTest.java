@@ -32,6 +32,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  * statement ({@link PgSession#setSearchStatementTimeout}) so an orphaned or
  * pathological scan cancels instead of pinning xmin for hours.
  *
+ * <p>nexus-wbfpw.47 extends it once more: every such site must ALSO raise the
+ * iterative-scan budget ({@link PgSession#setHnswScanBudget}), so a new HNSW path
+ * cannot ship on pgvector's 20000-tuple / 1x-memory defaults, where recall
+ * collapses past 95% dead chunks. The behavioral proof (values in effect inside
+ * each path's transaction) is {@code HnswScanBudgetOnEverySearchPathIntegrationTest}.
+ *
  * <p>nexus-zrcj7 (2026-09-03): briefly loosened this to a strict-pair-plus-
  * superset relationship when {@code text_gated_search_<dim>}'s single
  * materializing-CTE design replaced {@link PgVectorRepository#hybridSearch}'s
@@ -63,15 +69,17 @@ class HnswServingGucParityTest {
                 int ef = count(body, "setHnswEfSearch(");
                 int timeout = count(body, "setSearchStatementTimeout(");
                 int planMode = count(body, "setSearchPlanCacheMode(");
+                int budget = count(body, "setHnswScanBudget(");
                 if (p.getFileName().toString().equals("PgSession.java")) {
                     continue; // the definitions themselves
                 }
                 iterativeSites += iter;
-                if (iter != ef || iter != timeout || iter != planMode) {
+                if (iter != ef || iter != timeout || iter != planMode || iter != budget) {
                     unpaired.add(p.getFileName() + ": " + iter
                         + " iterative_scan site(s) vs " + ef + " setHnswEfSearch call(s) vs "
                         + timeout + " setSearchStatementTimeout call(s) vs "
-                        + planMode + " setSearchPlanCacheMode call(s)");
+                        + planMode + " setSearchPlanCacheMode call(s) vs "
+                        + budget + " setHnswScanBudget call(s)");
                 }
             }
         } catch (IOException e) {

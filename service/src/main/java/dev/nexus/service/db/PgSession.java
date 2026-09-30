@@ -31,6 +31,9 @@ public final class PgSession {
     private static final Set<String> ALLOWED_GUCS = Set.of(
         "hnsw.iterative_scan",
         "hnsw.ef_search",
+        // nexus-wbfpw.47: the iterative-scan budget pair, see setHnswScanBudget.
+        "hnsw.max_scan_tuples",
+        "hnsw.scan_mem_multiplier",
         "pg_trgm.word_similarity_threshold",
         "statement_timeout",
         // nexus-r0vkh: the taxonomy assign transaction bounds its lock WAIT as
@@ -72,6 +75,28 @@ public final class PgSession {
      * top-2, i.e. the boundary sat right at 40).
      */
     static final int DEFAULT_EF_SEARCH_FLOOR = 200;
+
+    /**
+     * Serving value for {@code hnsw.max_scan_tuples} (nexus-wbfpw.47; pgvector
+     * default 20000). An iterative scan stops at this many visited tuples OR at
+     * {@code work_mem x hnsw.scan_mem_multiplier} bytes, whichever comes first.
+     * Measured 2026-09-30 (T2 nexus/rdr-192-livec-recall-extended-2026-09-30,
+     * nexus-wbfpw.44/.45): at 98% correlated-dead chunks on a shared 768/1024-d
+     * index recall@10 fell to 0.85-0.89 under the old caps; this value together
+     * with {@link #HNSW_SCAN_MEM_MULTIPLIER} restored 1.000 in every cell
+     * measured, and neither alone changed anything. Cost at 98% dead: p50
+     * ~42 to ~80 ms, worst ~60 to ~300 ms; none at 90% dead or below (the caps
+     * never bind). Decided by Sam 2026-09-30.
+     */
+    static final int HNSW_MAX_SCAN_TUPLES = 200_000;
+
+    /**
+     * Serving value for {@code hnsw.scan_mem_multiplier} (nexus-wbfpw.47;
+     * pgvector default 1): the scan may use up to this many times
+     * {@code work_mem} (about 16 MB at the 4 MB default) per concurrent search,
+     * allocated as the scan uses it. Pair of {@link #HNSW_MAX_SCAN_TUPLES}.
+     */
+    static final int HNSW_SCAN_MEM_MULTIPLIER = 4;
 
     /**
      * Env-resolved floor ({@code NX_HNSW_EF_SEARCH}) so the managed cloud can
@@ -409,6 +434,20 @@ public final class PgSession {
      */
     public static void setHnswEfSearch(DSLContext ctx, int nResults) {
         setLocal(ctx, "hnsw.ef_search", Integer.toString(efSearchFor(nResults)));
+    }
+
+    /**
+     * Set the serving iterative-scan budget for this transaction:
+     * {@code hnsw.max_scan_tuples} and {@code hnsw.scan_mem_multiplier}
+     * (nexus-wbfpw.47). Called at every vector-ranked site next to
+     * {@link #setHnswEfSearch}; the pairing is pinned by
+     * {@code HnswServingGucParityTest}. Both must be raised together: the scan
+     * stops at whichever cap it reaches first, so raising one alone changes
+     * nothing (see {@link #HNSW_MAX_SCAN_TUPLES}).
+     */
+    public static void setHnswScanBudget(DSLContext ctx) {
+        setLocal(ctx, "hnsw.max_scan_tuples", Integer.toString(HNSW_MAX_SCAN_TUPLES));
+        setLocal(ctx, "hnsw.scan_mem_multiplier", Integer.toString(HNSW_SCAN_MEM_MULTIPLIER));
     }
 
     /**
