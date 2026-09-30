@@ -1271,9 +1271,19 @@ class _FlakyRunRouter(_RunRouter):
         self.fresh_page = fresh_page
         self.stale_count = stale_count
         self.runs_calls = 0
+        self.unfiltered_calls = 0
 
     def __call__(self, url: str) -> dict:
         if "/runs?" in url or url.endswith("/runs"):
+            if "event=push" not in url:
+                # nexus-j94u4: the UNFILTERED fallback query. These
+                # fixtures model a window that is stale from every angle
+                # (and carry no head_branch/event fields for a client-side
+                # filter to keep), so the fallback finds nothing here;
+                # runs_calls keeps counting only the filtered fetches the
+                # retry tests are about.
+                self.unfiltered_calls += 1
+                return {"workflow_runs": self.stale_page}
             self.runs_calls += 1
             if self.runs_calls <= self.stale_count:
                 return {"workflow_runs": self.stale_page}
@@ -1402,3 +1412,251 @@ def test_backoff_is_not_requested_when_the_first_window_already_reaches_head(
     )
     assert rc == 0
     assert sleep.calls == []
+
+
+# ── nexus-j94u4: the FILTERED run list lags; the UNFILTERED one does not ───
+#
+# Measured 2026-09-30 on b2fa6b657: ``runs?branch=develop&event=push``
+# returned a window whose newest run was three weeks old while the
+# unfiltered ``runs`` list returned the audited commit's run first, at the
+# same moment. ~8 minutes later branch+event was fresh but event=push alone
+# was still stale. Re-asking the same filtered index (the retry above)
+# cannot recover from that, so a window that misses the head falls back to
+# the unfiltered list, filtered client-side.
+
+
+class _TwoSourceRouter:
+    """Fake GitHub API with a stale FILTERED run list and an UNFILTERED one.
+
+    A URL carrying ``event=push`` is the filtered query and always answers
+    *filtered_page* (one page; the fixtures keep it small). Any other
+    runs-list URL is the unfiltered query and answers page ``page=N`` of
+    *unfiltered_runs* at the requested ``per_page``, like GitHub's own
+    pagination.
+    """
+
+    def __init__(self, filtered_page, unfiltered_runs, jobs_by_run_id) -> None:
+        self.filtered_page = filtered_page
+        self.unfiltered_runs = unfiltered_runs
+        self.jobs_by_run_id = jobs_by_run_id
+        self.filtered_calls = 0
+        self.unfiltered_urls: list[str] = []
+
+    def __call__(self, url: str) -> dict:
+        if "/runs?" in url or url.endswith("/runs"):
+            if "event=push" in url:
+                self.filtered_calls += 1
+                return {"workflow_runs": self.filtered_page}
+            self.unfiltered_urls.append(url)
+            qs = dict(kv.split("=", 1) for kv in url.split("?", 1)[1].split("&"))
+            per_page, page = int(qs["per_page"]), int(qs.get("page", "1"))
+            lo = (page - 1) * per_page
+            return {"workflow_runs": self.unfiltered_runs[lo : lo + per_page]}
+        for run_id, jobs in self.jobs_by_run_id.items():
+            if f"/runs/{run_id}/jobs" in url:
+                return {"jobs": [{"name": n, "conclusion": c} for n, c in jobs.items()]}
+        raise AssertionError(f"unexpected URL in test router: {url}")
+
+
+def _raw(run_id: int, sha: str, *, branch: str = "develop", event: str = "push") -> dict:
+    return {
+        "id": run_id,
+        "head_sha": sha,
+        "head_branch": branch,
+        "event": event,
+        "status": "completed",
+    }
+
+
+def test_fetch_unfiltered_push_runs_drops_other_branch_and_non_push_runs() -> None:
+    api_runs = [
+        _raw(1, "a" * 40, event="pull_request"),
+        _raw(2, "b" * 40, branch="feature/x"),
+        _raw(3, "c" * 40),
+        _raw(4, "d" * 40, event="workflow_dispatch"),
+        _raw(5, "e" * 40),
+    ]
+    router = _TwoSourceRouter([], api_runs, {})
+    got = gate.fetch_unfiltered_push_runs(
+        "o/r", "tok", "develop", "ci.yml", max_runs=100, api=router
+    )
+    assert [r["id"] for r in got] == [3, 5]
+    assert len(router.unfiltered_urls) == 1
+    url = router.unfiltered_urls[0]
+    assert "workflows/ci.yml/runs" in url
+    assert "branch=" not in url and "event=" not in url, (
+        "the fallback exists because the FILTERED index lags; it must not "
+        "send a filter to it"
+    )
+
+
+def test_fetch_unfiltered_push_runs_pages_until_max_matching_runs() -> None:
+    """Matching runs are sparse in the unfiltered list (PR and other-branch
+    runs interleave), so paging is driven by MATCHING runs collected, not by
+    raw rows seen."""
+    api_runs = []
+    for i in range(250):
+        # every third run is a develop push; the rest are PR runs
+        if i % 3 == 0:
+            api_runs.append(_raw(i, f"{i:040d}"))
+        else:
+            api_runs.append(_raw(i, f"{i:040d}", event="pull_request"))
+    router = _TwoSourceRouter([], api_runs, {})
+    got = gate.fetch_unfiltered_push_runs(
+        "o/r", "tok", "develop", "ci.yml", max_runs=50, api=router
+    )
+    assert len(got) == 50
+    assert [r["id"] for r in got[:3]] == [0, 3, 6]
+    # 50 pushes need 148 raw rows: two full pages of 100, not one and not three.
+    assert len(router.unfiltered_urls) == 2
+    assert "page=2" in router.unfiltered_urls[1]
+
+
+def test_fetch_unfiltered_push_runs_stops_at_the_page_bound() -> None:
+    """Bounded: a list with no matching runs must not be walked forever."""
+    api_runs = [
+        _raw(i, f"{i:040d}", event="pull_request")
+        for i in range(100 * (gate.UNFILTERED_MAX_PAGES + 5))
+    ]
+    router = _TwoSourceRouter([], api_runs, {})
+    got = gate.fetch_unfiltered_push_runs(
+        "o/r", "tok", "develop", "ci.yml", max_runs=100, api=router
+    )
+    assert got == []
+    assert len(router.unfiltered_urls) == gate.UNFILTERED_MAX_PAGES
+
+
+def test_fetch_unfiltered_push_runs_stops_on_a_short_page() -> None:
+    router = _TwoSourceRouter([], [_raw(1, "a" * 40)], {})
+    got = gate.fetch_unfiltered_push_runs(
+        "o/r", "tok", "develop", "ci.yml", max_runs=100, api=router
+    )
+    assert [r["id"] for r in got] == [1]
+    assert len(router.unfiltered_urls) == 1
+
+
+def test_a_stale_filtered_window_falls_back_to_the_unfiltered_list(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The measured shape: filtered list stale, unfiltered list current and
+    interleaved with pull_request and other-branch runs. The audit proceeds
+    to its ordinary verdict (here 0: the head and the floor are both
+    code-exercised)."""
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    floor_sha = fresh[1]["head_sha"]
+    unfiltered = [
+        _raw(10, tip_sha, event="pull_request"),  # PR run, same sha: must not count
+        _raw(3, tip_sha),
+        _raw(11, "f" * 40, branch="feature/x"),
+        _raw(2, floor_sha),
+        _raw(12, "e" * 40, event="pull_request"),
+        _raw(1, stale[0]["head_sha"]),
+    ]
+    router = _TwoSourceRouter(
+        stale,
+        unfiltered,
+        {**jobs, 10: _CANCELLED_JOBS, 11: _CANCELLED_JOBS, 12: _CANCELLED_JOBS},
+    )
+    sleep = _FakeSleep()
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=sleep,
+    )
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert router.filtered_calls == 1
+    assert sleep.calls == [], (
+        "the fallback is tried BEFORE any backoff: the filtered index stays "
+        "stale for minutes, so sleeping first buys nothing"
+    )
+    assert "unfiltered" in err
+
+
+def test_the_fallback_still_reaches_a_real_verdict_not_just_a_pass(
+    tmp_path: Path,
+) -> None:
+    """Non-vacuity: through the fallback window a genuinely uncovered code
+    commit is still BLOCKED (exit 1), so the fallback did not turn the
+    audit into a rubber stamp."""
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "the floor")
+    lost_sha = _commit(repo, "src/nexus/lost.py", "lost", "cancelled, never tested")
+    tip_sha = _commit(repo, "src/nexus/tip.py", "tip", "skipped tip")
+    unfiltered = [_raw(3, tip_sha), _raw(2, lost_sha), _raw(1, floor_sha)]
+    stale = [{"id": 9, "head_sha": "9" * 40, "status": "completed"}]
+    router = _TwoSourceRouter(
+        stale, unfiltered, {1: _SUCCESS_JOBS, 2: _CANCELLED_JOBS, 3: _SKIPPED_JOBS}
+    )
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=_FakeSleep(),
+    )
+    assert rc == 1
+
+
+def test_both_sources_stale_is_still_cannot_verify(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    unfiltered = [_raw(1, stale[0]["head_sha"])]
+    router = _TwoSourceRouter(stale, unfiltered, jobs)
+    sleep = _FakeSleep()
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=sleep,
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "does not contain a run for" in err
+    assert "unfiltered" in err and "filtered" in err, (
+        "the message must say both sources were tried"
+    )
+    assert router.filtered_calls == gate.WINDOW_FETCH_ATTEMPTS
+    assert len(sleep.calls) == gate.WINDOW_FETCH_ATTEMPTS - 1
+
+
+def test_the_heads_run_only_as_a_pull_request_or_other_branch_is_cannot_verify(
+    tmp_path: Path,
+) -> None:
+    """The client-side filter is what makes the fallback safe: the head's
+    sha appearing in the unfiltered list on a PR run or another branch is
+    not the develop push run the audit's invariant is about."""
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    unfiltered = [
+        _raw(20, tip_sha, event="pull_request"),
+        _raw(21, tip_sha, branch="feature/x"),
+        _raw(1, stale[0]["head_sha"]),
+    ]
+    router = _TwoSourceRouter(stale, unfiltered, jobs)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=_FakeSleep(),
+    )
+    assert rc == 2
+
+
+def test_the_heads_run_indexed_late_is_found_on_a_later_attempt(
+    tmp_path: Path,
+) -> None:
+    """The run genuinely missing from BOTH sources at first (the original
+    indexing race) is still picked up by the backoff loop on a later
+    attempt, via either source."""
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+
+    class _LateRouter(_TwoSourceRouter):
+        def __call__(self, url: str) -> dict:
+            if "/runs?" in url and "event=push" not in url and self.filtered_calls >= 2:
+                self.unfiltered_runs = [
+                    _raw(3, tip_sha),
+                    _raw(2, fresh[1]["head_sha"]),
+                ]
+            return super().__call__(url)
+
+    router = _LateRouter(stale, [_raw(1, stale[0]["head_sha"])], jobs)
+    sleep = _FakeSleep()
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=sleep,
+    )
+    assert rc == 0
+    assert len(sleep.calls) == 1
