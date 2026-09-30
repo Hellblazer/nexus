@@ -1151,8 +1151,19 @@ def _catalog_hook(
     on_phase: Callable[[str], None] | None = None,
     complete_doc_hashes: dict[str, str] | None = None,
     needs_fence: dict[str, tuple[str, str]] | None = None,
+    unregistered: dict[Path, str] | None = None,
 ) -> dict[Path, str]:
     """Register/update indexed files in catalog. Silently skipped if catalog absent.
+
+    ``unregistered`` (nexus-z0o2p.20, RDR-223 P2.10) is an optional OUT-param:
+    ``abs_path -> cause`` for every file this call could NOT resolve to a
+    catalog document, so the run can say why a file has none instead of only
+    that it has none. Causes: ``ephemeral:<reason>`` (registration refused by
+    the worktree/tempdir guard), ``register_failed`` (the per-file register
+    raised), ``fairness_yielded`` (a batch-priority writer yielded before the
+    file was reached; the file may already HAVE a document, this run just
+    could not name it), ``catalog_hook_failed`` (the whole hook raised).
+    Purely additive: nothing else in this function reads it.
 
     ``complete_doc_hashes`` (nexus-vayt7) is the sibling OUT-param of
     ``stale_fence_doc_ids``: every EXISTING document whose reported
@@ -1382,7 +1393,7 @@ def _catalog_hook(
         # existing RDR whose CONTENT hash changed is re-fed to the
         # dependency generator as if new; head-hash-only bumps are not.
         relink_rdr_tumblers: list = []
-        for abs_path, content_type, collection_name in indexed_files:
+        for _file_index, (abs_path, content_type, collection_name) in enumerate(indexed_files):
             if _batch_producer and await_fair_window(
                 writer.is_interactive_write_pending, on_locked,
             ) == "skip":
@@ -1393,6 +1404,11 @@ def _catalog_hook(
                     len(indexed_files) - len(file_to_doc_id)
                     - len(skipped_files) - len(new_batch)
                 )
+                if unregistered is not None:
+                    # nexus-z0o2p.20: the tail includes files that already HAVE
+                    # a document; this pass simply never reached them.
+                    for _tail_path, _t, _c in indexed_files[_file_index:]:
+                        unregistered.setdefault(_tail_path, "fairness_yielded")
                 _log.info(
                     "catalog_write_yielded_skipped",
                     repo=repo_name, deferred=fairness_yielded,
@@ -1461,6 +1477,8 @@ def _catalog_hook(
 
             if _skip_reason is not None:
                 ephemeral_skipped += 1
+                if unregistered is not None:
+                    unregistered[abs_path] = f"ephemeral:{_skip_reason}"
                 _log.warning(
                     "ephemeral_path_registration_skipped",
                     path=_registered_path,
@@ -1592,6 +1610,8 @@ def _catalog_hook(
                 # registration too, leaving the entire repo's chunks
                 # without doc_id metadata (the ghost class).
                 skipped_files.append((abs_path, str(exc)))
+                if unregistered is not None:
+                    unregistered[abs_path] = "register_failed"
                 _log.warning(
                     "catalog_hook_register_failed",
                     rel_path=rel_path,
@@ -1734,6 +1754,9 @@ def _catalog_hook(
                 writer.is_interactive_write_pending, on_locked,
             ) == "skip":
                 fairness_yielded = len(new_batch) - _start
+                if unregistered is not None:
+                    for _tail_path, _d in new_batch[_start:]:
+                        unregistered.setdefault(_tail_path, "fairness_yielded")
                 _log.info(
                     "catalog_write_yielded_skipped",
                     repo=repo_name, deferred=fairness_yielded,
@@ -1892,6 +1915,8 @@ def _catalog_hook(
                             )
                     except Exception as exc:  # noqa: BLE001 — ghost-class per-file isolation
                         skipped_files.append((path, str(exc)))
+                        if unregistered is not None:
+                            unregistered[path] = "register_failed"
                         _log.warning(
                             "catalog_hook_register_failed",
                             abs_path=str(path), error=str(exc), exc_info=True,
@@ -2067,6 +2092,10 @@ def _catalog_hook(
             source_path=str(repo), collection="",
             hook_name="catalog_index_hook", error=str(exc),
         )
+        if unregistered is not None:
+            for _lost_path, _t, _c in indexed_files:
+                if _lost_path not in file_to_doc_id:
+                    unregistered.setdefault(_lost_path, "catalog_hook_failed")
     finally:
         if writer is not None:
             writer.close()
@@ -4428,6 +4457,45 @@ def _aggregate_flush_metas(file_contexts: list) -> list[dict]:
     return agg
 
 
+def _identity_less_files(
+    file_contexts: list, causes: "dict[Path, str]",
+) -> list[dict]:
+    """Name the files of one flush that have no catalog document
+    (nexus-z0o2p.20, RDR-223 P2.10).
+
+    ``[{"file", "chunks", "cause"}, ...]`` in flush order, for every staged
+    file whose context carries an empty ``catalog_doc_id``. *causes* is the
+    hook's ``unregistered`` map; a file it does not explain is
+    ``"unexplained"`` (which would mean the hook returned no id and recorded
+    no reason, itself worth a bug report). Pure: no I/O.
+    """
+    out: list[dict] = []
+    for _path, _c in file_contexts:
+        if not isinstance(_c, dict) or _c.get("catalog_doc_id"):
+            continue
+        out.append({
+            "file": str(_path),
+            "chunks": len(_c.get("ids") or ()),
+            "cause": causes.get(Path(str(_path)), "unexplained"),
+        })
+    return out
+
+
+def _identity_less_event_fields(files: list[dict]) -> dict:
+    """Log fields for a flush's identity-less files: the first 20 names (a
+    flush is capped at a few hundred chunks, so this is rarely truncated),
+    the true file and chunk totals, and a cause histogram."""
+    causes: dict[str, int] = {}
+    for f in files:
+        causes[f["cause"]] = causes.get(f["cause"], 0) + 1
+    return {
+        "files": [f["file"] for f in files[:20]],
+        "file_count": len(files),
+        "file_chunks": sum(f["chunks"] for f in files),
+        "causes": causes,
+    }
+
+
 class _CombinedWritePositionZeroViolation(RuntimeError):
     """Raised by :func:`_build_combined_write_payload` when a doc's batch
     lacks position 0 — see that function's docstring for why this is a
@@ -5368,6 +5436,8 @@ def _run_index(
     # this run's registration determined needs real indexing work (new,
     # or genuinely content-changed) — see _catalog_hook's own docstring.
     _needs_fence: dict[str, tuple[str, str]] = {}
+    # nexus-z0o2p.20: why each file the hook could not resolve has no document.
+    _unregistered_causes: dict[Path, str] = {}
     file_to_doc_id = _catalog_hook(
         repo=repo,
         repo_name=_repo_basename,
@@ -5382,6 +5452,7 @@ def _run_index(
         on_phase=on_phase,
         complete_doc_hashes=_complete_doc_hashes,
         needs_fence=_needs_fence,
+        unregistered=_unregistered_causes,
     )
     if on_phase is not None:
         on_phase(
@@ -5616,10 +5687,12 @@ def _run_index(
                 # INFO, not WARNING: this is the SAME state the pre-commit
                 # code produced silently for identity-less chunks; logging
                 # it is strictly better observability, not a new failure.
+                _orphan_files = _identity_less_files(_file_contexts, _unregistered_causes)
                 _log.info(
                     "combined_write_orphan_chunks_routed_to_legacy_upsert",
                     collection=collection,
                     count=len(orphan_ids),
+                    **_identity_less_event_fields(_orphan_files),
                 )
                 # nexus-y8xjh: batch-indexer rows are complete dicts, so name
                 # the writer-owned keys they dropped as empty (see
@@ -5656,6 +5729,9 @@ def _run_index(
                     "combined_write_batch_missing_doc_identity",
                     collection=collection,
                     batch_size=len(_ids),
+                    **_identity_less_event_fields(
+                        _identity_less_files(_file_contexts, _unregistered_causes),
+                    ),
                 )
                 return
 
