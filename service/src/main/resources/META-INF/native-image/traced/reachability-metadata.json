@@ -3496,15 +3496,6 @@
       "glob": "META-INF/services/org.slf4j.spi.SLF4JServiceProvider"
     },
     {
-      "glob": "ai/onnxruntime/native/osx-aarch64/libonnxruntime.dylib"
-    },
-    {
-      "glob": "ai/onnxruntime/native/osx-aarch64/libonnxruntime4j_jni.dylib"
-    },
-    {
-      "glob": "ai/onnxruntime/native/osx-aarch64/libonnxruntime_providers_shared.dylib"
-    },
-    {
       "glob": "com/sun/jna/darwin-aarch64/libjnidispatch.jnilib"
     },
     {

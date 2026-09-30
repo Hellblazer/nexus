@@ -10,6 +10,14 @@ descriptor's `name`.
 
 ## traced/reachability-metadata.json
 
+- **No per-platform onnxruntime or DJL native-library globs** (nexus-lhr6a). The file is traced
+  on one host, so a glob such as
+  `ai/onnxruntime/native/osx-aarch64/libonnxruntime.dylib` embeds that host's
+  library into every other platform's binary: linux and windows carried the
+  mac onnxruntime until 2026-09-29. Each platform's own libraries come from the
+  pom's `native-libs-*` profiles. A re-trace re-adds these globs; delete them
+  again. `tests/test_native_image_embedded_libs.py` fails until you do.
+
 - **`ai.onnxruntime.OrtException`** (hand-added, nexus-o5xyx.3)
   `libonnxruntime4j_jni` throws it from native code through `FindClass` plus
   the `(int, String)` constructor whenever an ORT call returns an error

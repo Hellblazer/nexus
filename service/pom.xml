@@ -538,6 +538,35 @@
                 </executions>
             </plugin>
 
+            <!-- nexus-lhr6a: declared here, with no executions, ONLY to fix its
+                 position ahead of maven-shade-plugin. The `native` profile's
+                 build-native execution merges into this entry, and executions
+                 bound to one phase run in POM order, so compile-no-fork runs after
+                 jar:jar and BEFORE shade. It must: shadedArtifactAttached=false
+                 makes the uber jar the project artifact, and native-image then
+                 found every native library twice (in its dependency jar and in the
+                 uber jar) and embedded both copies. An explicit <classpath> naming
+                 the uber jar alone also dedups, but it switches off the
+                 reachability-metadata repository (29 entries to 0), so it is not
+                 the fix. tests/test_native_image_embedded_libs.py pins the order.
+                 forceCreation on maven-jar-plugin closes the incremental case:
+                 shade leaves the uber jar at the thin jar's path, and without it
+                 the next `package` (no `clean`) skips jar:jar as up to date and
+                 the native build sees the uber jar again. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.4.1</version>
+                <configuration>
+                    <forceCreation>true</forceCreation>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.graalvm.buildtools</groupId>
+                <artifactId>native-maven-plugin</artifactId>
+                <version>1.1.2</version>
+            </plugin>
+
             <!-- Fat/uber jar for standalone run and jlink input -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -775,7 +804,7 @@
                     <plugin>
                         <groupId>org.graalvm.buildtools</groupId>
                         <artifactId>native-maven-plugin</artifactId>
-                        <version>1.1.2</version>
+                        <!-- version: from the main build's declaration (nexus-lhr6a) -->
                         <extensions>true</extensions>
                         <executions>
                             <execution>
@@ -850,11 +879,14 @@
                                              than bundle ALL platforms into every binary (~120MB of foreign
                                              libs), the ${onnx.native.dir} / ${djl.native.dir} properties are
                                              set per build host by the native-libs-* OS profiles below, so the
-                                             binary carries ONLY its own platform's libs. ExcludeResources
-                                             drops the macOS .dSYM debug-symbol dirs. -->
-                                        <buildArg>-H:IncludeResources=ai/onnxruntime/native/${onnx.native.dir}/.*</buildArg>
+                                             binary carries ONLY its own platform's libs. The onnxruntime
+                                             pattern names the loadable library types directly (nexus-lhr6a):
+                                             the jar also ships debug symbols (macOS .dSYM dirs, and a 290 MB
+                                             onnxruntime.pdb on Windows), and an -H:ExcludeResources for the
+                                             .pdb had no effect on the Windows build. [.] rather than a
+                                             backslash escape, so no argfile layer can rewrite it. -->
+                                        <buildArg>-H:IncludeResources=ai/onnxruntime/native/${onnx.native.dir}/[^/]*[.](so|dylib|dll)</buildArg>
                                         <buildArg>-H:IncludeResources=native/lib/${djl.native.dir}/.*</buildArg>
-                                        <buildArg>-H:ExcludeResources=.*\.dSYM/.*</buildArg>
                                         <!-- Portability: compatibility march for CI/prod (not native) -->
                                         <buildArg>-march=compatibility</buildArg>
                                         <!-- nexus-9yrus (3) builder JVM: explicit, runner-tunable heap +
