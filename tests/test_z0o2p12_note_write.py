@@ -748,7 +748,7 @@ class TestPutNote:
              patch("nexus.doc_indexer._fence_begin") as begin, \
              patch("nexus.catalog.note_write.write_note") as write:
             out = put_note(content="z0o2p12 no document", collection=_COLLECTION, title="z0o2p12-nodoc")
-        assert out.status == nw.NO_CATALOG and out.reason == "catalog registration failed"
+        assert out.status == nw.NO_CATALOG and out.reason.startswith("catalog registration failed")
         begin.assert_not_called()
         write.assert_not_called()
 

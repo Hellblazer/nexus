@@ -276,3 +276,127 @@ def test_the_import_makes_no_ownerless_chunk_write(t3, tmp_path, monkeypatch):
     assert catalog_posts.count("/manifest/write_many") == 2, catalog_posts
     assert "/manifest/write" not in catalog_posts and "/manifest/atomic_replace" not in catalog_posts
 
+
+# ── landing review (RDR-223 Phase 2 joint reviews) ───────────────────────────
+
+
+@pytest.fixture
+def refused_write(monkeypatch: pytest.MonkeyPatch):
+    """Make the ENGINE refuse a note's request: add a manifest row naming a chunk that is not in the
+    request, so the per-document transaction rolls back (``failed_doc_ids``). The refusal is the
+    engine's, not a stub raised before the call."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    real = HttpCatalogClient.write_manifest_many
+
+    def _refused(self, docs, *a, **k):
+        doc, rows = docs[0]
+        return real(self, [(doc, [*rows, {"chash": "f" * 64, "position": len(rows)}])], *a, **k)
+
+    return type("Refused", (), {
+        "arm": staticmethod(lambda: monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", _refused)),
+        "disarm": staticmethod(lambda: monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", real)),
+    })
+
+
+def test_a_failed_reimport_leaves_the_old_manifest_intact(t3, vec, tmp_path, refused_write):
+    """TD3, against the real engine: a re-import of a changed note that the engine refuses changes
+    nothing. The old manifest and its chunks stay, none of the new version's chunks is added, the
+    summary counts the note failed (never imported), and a later good import replaces it whole."""
+    target = _target(t3)
+    old_note, new_note = _body("reimp-old", 1100), _body("reimp-new", 700)
+    old_pieces, new_pieces = _pieces_of(old_note, target), _pieces_of(new_note, target)
+    old_chashes, new_chashes = [_chash(p) for p in old_pieces], [_chash(p) for p in new_pieces]
+    assert len(old_pieces) > 1 and not set(old_chashes) & set(new_chashes), "control: two different notes"
+
+    first = import_bundle(None, None, t3, _bundle(tmp_path / "v1", [_rec("z0o2p18-reimport", old_note)]))
+    assert (first.docs_imported, first.docs_failed) == (1, 0)
+    (doc,) = _docs("z0o2p18-reimport", target)
+    old_manifest = _manifest(str(doc.tumbler))
+    assert [c for _, c in old_manifest] == old_chashes
+
+    refused_write.arm()
+    second = import_bundle(None, None, t3, _bundle(tmp_path / "v2", [_rec("z0o2p18-reimport", new_note)]))
+    refused_write.disarm()
+
+    assert (second.docs_imported, second.docs_failed, second.docs_unverified) == (0, 1, 1)
+    assert "failed_doc_ids" in second.doc_failures[0]["error"]
+    assert "The note was not stored" in second.doc_failures[0]["error"]
+    assert _manifest(str(doc.tumbler)) == old_manifest, "the engine's refusal must leave the old manifest as it was"
+    assert _present(vec, old_chashes, target) == set(old_chashes)
+    assert _present(vec, new_chashes, target) == set()
+    assert len(_docs("z0o2p18-reimport", target)) == 1, "a row this import did not mint stays"
+
+    third = import_bundle(None, None, t3, _bundle(tmp_path / "v3", [_rec("z0o2p18-reimport", new_note)]))
+    assert (third.docs_imported, third.docs_failed) == (1, 0)
+    assert [c for _, c in _manifest(str(doc.tumbler))] == new_chashes
+    assert _present(vec, sorted(set(old_chashes) - set(new_chashes)), target) == set(), "the old version was swept"
+
+
+_FRESH_RECORDED = "knowledge__z0o2p18-fresh__bge-base-en-v15-768__v1"
+
+
+def test_a_first_touch_collection_is_registered_by_the_notes_own_request(t2_service_env, vec, tmp_path, monkeypatch):
+    """Phase 2's other registration case: the collection has never been written to in this tenant
+    (the fixture above pre-registers it). ``write_manifest_many`` registers it before it sends, so
+    the note lands in the one request with no separate T3 write to a collection that does not yet
+    exist, and the registration is visible afterwards."""
+    import nexus.catalog.http_catalog_client as hcc
+    import nexus.db.http_vector_client as hvc
+    from nexus.db import make_t3
+
+    t3_handle = make_t3()
+    fresh = rb.target_collection_for(_FRESH_RECORDED, t3_handle)
+    with pytest.raises(hvc.VectorServiceError, match="not registered"):
+        vec.existing_ids(fresh, ["0" * 64])  # control: nothing has registered it yet
+
+    vector_writes: list[str] = []
+    catalog_posts: list[str] = []
+    real_hvc_post, real_hcc_post = hvc._post, hcc.HttpCatalogClient._post
+
+    def hvc_post(path, *a, **k):
+        if any(path.endswith(s) for s in hvc._T3_WRITE_PATH_SUFFIXES):
+            vector_writes.append(path)
+        return real_hvc_post(path, *a, **k)
+
+    def hcc_post(self, path, *a, **k):
+        catalog_posts.append(path)
+        return real_hcc_post(self, path, *a, **k)
+
+    monkeypatch.setattr(hvc, "_post", hvc_post)
+    monkeypatch.setattr(hcc.HttpCatalogClient, "_post", hcc_post)
+    content = _body("fresh", 1100)
+    rec = {**_rec("z0o2p18-fresh", content), "collection": _FRESH_RECORDED}
+
+    summary = import_bundle(None, None, t3_handle, _bundle(tmp_path, [rec]))
+
+    assert (summary.docs_imported, summary.docs_failed, summary.docs_unverified) == (1, 0, 0)
+    assert vector_writes == [], vector_writes
+    assert catalog_posts.count("/manifest/write_many") == 1, catalog_posts
+    chashes = [_chash(p) for p in _pieces_of(content, fresh)]
+    assert len(chashes) > 1
+    assert _present(vec, chashes, fresh) == set(chashes), "registered, and the whole note is in it"
+    (doc,) = _docs("z0o2p18-fresh", fresh)
+    assert [c for _, c in _manifest(str(doc.tumbler))] == chashes
+
+
+def test_a_client_side_refusal_is_a_failed_note_that_leads_with_its_remedy(t3, tmp_path, monkeypatch):
+    """The import's own wording of a refusal the client made before it sent anything: the note is
+    counted failed (nothing landed), and the recorded error is the shared table's client-refusal row."""
+    from nexus.corpus import LocalVoyageCredentialMissingError
+
+    remedy = "no Voyage API key is configured. Set one with `nx config set voyage_api_key <key>`."
+
+    def refuse(*_a, **_k):
+        raise LocalVoyageCredentialMissingError(remedy)
+
+    monkeypatch.setattr("nexus.corpus.ensure_collection_registered", refuse)
+    summary = import_bundle(None, None, t3, _bundle(tmp_path, [_rec("z0o2p18-keyless", _body("kl"))]))
+
+    assert (summary.docs_imported, summary.docs_failed, summary.docs_uncertain) == (0, 1, 0)
+    error = summary.doc_failures[0]["error"]
+    assert error.startswith(remedy), error
+    assert "Nothing was sent to the engine and nothing changed" in error
+    assert "retry is safe" not in error and "could not" not in error
+    assert _docs("z0o2p18-keyless", _target(t3)) == []
+

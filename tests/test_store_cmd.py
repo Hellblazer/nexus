@@ -293,8 +293,14 @@ def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tm
     assert "Traceback" not in result.output, result.output
     assert result.output.rstrip().splitlines()[-1].startswith("Error: ")
     assert "nx daemon service stop && nx daemon service start" in result.output
-    assert "The note was not stored" in result.output
-    assert "may already have succeeded" not in result.output
+    # RDR-223 Phase 2 joint review: a client-side refusal leads with its own remedy and says
+    # nothing was sent; it never says "retry is safe" (a retry fails the same way until the
+    # operator acts) or "could not catalog <source>" (the refusal has nothing to do with cataloging).
+    assert result.output.rstrip().splitlines()[-1].startswith("Error: " + str(refusal)[:40]), result.output
+    assert "Nothing was sent to the engine and nothing changed" in result.output
+    for wrong in ("may already have succeeded", "retry is safe", "no chunk was left behind",
+                  "could not catalog"):
+        assert wrong not in result.output, (wrong, result.output)
     mock_store.put.assert_not_called()
 
 

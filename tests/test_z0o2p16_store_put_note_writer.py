@@ -315,7 +315,11 @@ class TestClientDeath:
         assert result.exit_code != 0, result.output
         assert "Stored:" not in result.output
         assert "may already have succeeded" not in result.output, result.output
-        assert "was not stored" in result.output, result.output
+        # A client-side refusal leads with its own remedy and says nothing was sent. It is not "retry
+        # is safe" (a retry fails the same way until the operator acts) and not "could not catalog".
+        assert "Nothing was sent to the engine and nothing changed" in result.output, result.output
+        for wrong in ("retry is safe", "no chunk was left behind", "could not catalog"):
+            assert wrong not in result.output, (wrong, result.output)
         chashes = [_chash(p) for p in note_pieces(content, col)]
         assert _present(vec, chashes, col) == set()
 
@@ -340,23 +344,38 @@ class TestOutcomeMessages:
             ["Stored: " + _chash("alpha"), "(2 chunks, split to the embedding model's token window)"], [],
             id="stored-split"),
         pytest.param(
-            _outcome(NO_CATALOG, catalog_doc_id="", reason="catalog registration failed"),
-            ["could not catalog", "catalog registration failed", "Nothing was written"], ["Stored:"],
+            _outcome(NO_CATALOG, catalog_doc_id="", reason="catalog registration failed: RuntimeError: down"),
+            ["could not catalog 'z0o2p16-mapping'", "RuntimeError: down", "Nothing was written"], ["Stored:"],
             id="no-catalog"),
         pytest.param(
-            _outcome(NOT_LANDED, reason="engine said no"),
-            ["could not catalog", "engine said no", "The note was not stored", "retry is safe"], ["Stored:"],
-            id="not-landed"),
+            _outcome(NOT_LANDED, reason="engine said no", refusal="engine"),
+            ["could not store 'z0o2p16-mapping'", "engine said no", "The note was not stored", "retry is safe",
+             "metadata refreshed"], ["Stored:", "could not catalog"],
+            id="not-landed-engine"),
+        pytest.param(
+            _outcome(NOT_LANDED, reason="Set a key with `nx config set voyage_api_key`.", refusal="client"),
+            ["Set a key with `nx config set voyage_api_key`.", "Nothing was sent to the engine"],
+            ["Stored:", "retry is safe", "no chunk was left behind", "could not catalog", "metadata refreshed"],
+            id="not-landed-client"),
         pytest.param(
             _outcome(UNCERTAIN, reason="timed out"),
-            ["could not confirm the catalog manifest landed", "timed out", "Nothing was rolled back",
-             "nx store list"], ["Stored:"],
+            ["could not confirm that 'z0o2p16-mapping' landed", "timed out", "Nothing was rolled back",
+             "nx store list"], ["Stored:", "catalog manifest landed"],
             id="uncertain"),
         pytest.param(
             _outcome(UNCERTAIN, reason="refused", stamp_refused=True, stamp_detail="409 stale hash"),
             ["accepted the write", "refused to stamp the document complete", "409 stale hash",
              "stays 'indexing'", "Nothing was rolled back"], ["Stored:", "may already have succeeded"],
             id="stamp-refused"),
+        pytest.param(
+            _outcome(UNCERTAIN, reason="note 1.2.3 landed but was not stamped complete", unstamped=True),
+            ["was not stamped complete", "Nothing was rolled back"],
+            ["Stored:", "could not confirm", "catalog manifest landed"],
+            id="landed-but-unstamped"),
+        pytest.param(
+            _outcome("bogus"),
+            ["unrecognised state ('bogus')", "nothing was confirmed stored"], ["Stored:"],
+            id="unknown-status"),
     ])
     def test_each_outcome_maps_to_its_message(self, outcome, needles, absent, col):
         with patch("nexus.catalog.note_write.put_note", return_value=outcome), \
@@ -370,7 +389,7 @@ class TestOutcomeMessages:
             assert bad not in result.output, (bad, result.output)
         assert result.exit_code == (0 if outcome.status == STORED else 1), result.output
 
-    @pytest.mark.parametrize("status", [NO_CATALOG, NOT_LANDED, UNCERTAIN])
+    @pytest.mark.parametrize("status", [NO_CATALOG, NOT_LANDED, UNCERTAIN, "bogus"])
     def test_a_failed_outcome_fires_no_post_store_hook(self, status, col):
         outcome = _outcome(status, reason="x")
         with patch("nexus.catalog.note_write.put_note", return_value=outcome), \
@@ -429,6 +448,92 @@ class TestOutcomeMessages:
         assert seen["tags"] == "a,b" and seen["category"] == "c" and seen["ttl_days"] == 30
         assert seen["source_agent"] == "dev" and seen["session_id"] == "s1"
         assert seen["collection"].startswith("knowledge__z0o2p16-note__")
+
+
+class TestEmptyContent:
+    """MCP store_put answers empty content with "content is required". The CLI refuses it the same
+    way, up front: an empty stdin or file must not reach the writer, whose ValueError would surface
+    as a raw traceback after a catalog row was minted."""
+
+    def test_empty_stdin_is_a_clean_refusal_with_nothing_written(self, col, wire):
+        result = _put("z0o2p16-empty", "")
+        assert result.exit_code == 1, result.output
+        assert result.exc_info[0] is SystemExit, result.exc_info
+        assert "Traceback" not in result.output and "ValueError" not in result.output, result.output
+        assert "nothing to store" in result.output and "stdin" in result.output
+        assert wire.paths == [], "nothing may reach the engine for an empty note"
+
+    def test_an_empty_file_is_a_clean_refusal_naming_the_file(self, col, wire, tmp_path):
+        empty = tmp_path / "empty.md"
+        empty.write_text("")
+        result = CliRunner().invoke(main, ["store", "put", str(empty), "-c", _SUBJECT])
+        assert result.exit_code == 1, result.output
+        assert result.exc_info[0] is SystemExit, result.exc_info
+        assert "nothing to store" in result.output and "empty.md" in result.output
+        assert wire.paths == []
+
+
+class TestARealEngineRefusalLeavesTheOldManifest:
+    """The two injected-400 tests above refuse in the transport wrapper BEFORE the call, so their
+    "old manifest intact" assertions could be satisfied by a request that never left the client. This
+    refusal is the engine's: the request carries a manifest row naming a chunk that is not in it, so
+    the engine's per-document transaction rolls back (``failed_doc_ids``)."""
+
+    @pytest.fixture
+    def engine_refuses(self, monkeypatch):
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        real = HttpCatalogClient.write_manifest_many
+
+        def refused(self, docs, *a, **k):
+            doc, rows = docs[0]
+            return real(self, [(doc, [*rows, {"chash": "f" * 64, "position": len(rows)}])], *a, **k)
+
+        return type("Refuse", (), {
+            "arm": staticmethod(lambda: monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", refused)),
+            "disarm": staticmethod(lambda: monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", real)),
+        })
+
+    def test_a_reput_the_engine_refuses_changes_nothing_and_says_the_engine_refused(self, col, vec, wire, engine_refuses):
+        title = "z0o2p16-real-refusal"
+        old, new = _note("real-old"), _note("real-new")
+        assert _put(title, old).exit_code == 0
+        doc = _doc(title, old, col)
+        old_manifest = _manifest(doc)
+        old_chashes = [_chash(p) for p in note_pieces(old, col)]
+        new_chashes = [_chash(p) for p in note_pieces(new, col)]
+        assert old_manifest and not set(old_chashes) & set(new_chashes)
+
+        engine_refuses.arm()
+        second = _put(title, new)
+        engine_refuses.disarm()
+
+        assert second.exit_code != 0 and "Stored:" not in second.output, second.output
+        assert "could not store" in second.output and "failed_doc_ids" in second.output, second.output
+        assert "The note was not stored" in second.output
+        assert "metadata refreshed" in second.output, "the engine received the request, so the qualifier can be true"
+        assert "Nothing was sent to the engine" not in second.output
+        assert _manifest(doc) == old_manifest, "the engine's refusal must leave the old manifest as it was"
+        assert _present(vec, old_chashes, col) == set(old_chashes)
+        assert _present(vec, new_chashes, col) == set()
+        from nexus.catalog.factory import make_catalog_reader
+
+        assert make_catalog_reader().resolve(doc) is not None, "a row this call did not mint stays"
+        # and the next put, with the engine well again, replaces the note whole
+        third = _put(title, new)
+        assert third.exit_code == 0, third.output
+        assert [c for _, c in _manifest(doc)] == new_chashes
+
+    def test_a_refused_first_put_through_the_engine_leaves_no_chunk_and_no_row(self, col, vec, wire, engine_refuses):
+        title, content = "z0o2p16-real-first", _note("real-first", 6)
+        engine_refuses.arm()
+        result = _put(title, content)
+        engine_refuses.disarm()
+        assert result.exit_code != 0 and "Stored:" not in result.output, result.output
+        assert _present(vec, [_chash(p) for p in note_pieces(content, col)], col) == set()
+        from nexus.catalog.factory import make_catalog_reader
+
+        assert [d for d in make_catalog_reader().all_documents() if d.title == title] == []
 
 
 # ── the command no longer makes the split write ──────────────────────────────

@@ -10,8 +10,9 @@ follows from the outcome of that one request:
 put_note outcome          CLI message / exit code        T2 entry
 ========================  =============================  ====================================
 STORED                    "Promoted: ..." / 0            kept; deleted only with ``--remove``
-NOT_LANDED                error "retry is safe" / 1      untouched, ``--remove`` ignored
+NOT_LANDED (engine)       error "retry is safe" / 1      untouched, ``--remove`` ignored
 UNCERTAIN                 error "could not confirm" / 1  untouched, ``--remove`` ignored
+NOT_LANDED (client)       error leads with the remedy / 1  untouched, ``--remove`` ignored
 UNCERTAIN, stamp refused  error "refused to stamp" / 1   untouched, ``--remove`` ignored
 NO_CATALOG                error "could not catalog" / 1  untouched, ``--remove`` ignored
 put_note raises           error / non-zero               untouched, ``--remove`` ignored
@@ -250,7 +251,7 @@ class TestEveryOutcomeLeavesTheT2EntryToTheOutcome:
         assert "Promoted" not in result.output
         assert "The note was not stored" in result.output and "retry is safe" in result.output
         assert "Nothing was written" not in result.output, "a refused request may have refreshed chunk metadata"
-        assert "T2 entry" in result.output and "unchanged" in result.output
+        assert "The T2 entry was left in place, even with --remove." in result.output
         assert _entry(t2, "z0o2p17-refused") is not None, "--remove must not delete the source of a failed promote"
         assert documents_by_title("z0o2p17-refused") == [], "the row this call minted is removed"
         assert _present(vec, [_chash(content)]) == set()
@@ -302,10 +303,56 @@ class TestEveryOutcomeLeavesTheT2EntryToTheOutcome:
              patch("nexus.catalog.note_write.write_note") as write:
             result = _promote(t2, local_t3, row_id, "--remove")
         assert result.exit_code == 1, result.output
-        assert "could not catalog promoted entry" in result.output
+        assert "could not catalog 'z0o2p17-nocat'" in result.output
         assert "Nothing was written" in result.output
         assert write.call_count == 0, "a note is never written without its catalog entry"
         assert _entry(t2, "z0o2p17-nocat") is not None
+
+    def test_a_catalog_that_raises_names_its_cause_in_the_message(self, t2, local_t3):
+        row_id = t2.put(project="proj", title="z0o2p17-nocat-cause", content="z0o2p17 cause body", ttl=None)
+        with patch("nexus.catalog.factory.make_catalog_reader", side_effect=RuntimeError("catalog service is down")):
+            result = _promote(t2, local_t3, row_id, "--remove")
+        assert result.exit_code == 1, result.output
+        assert "catalog service is down" in result.output, result.output
+        assert "catalog registration failed" in result.output
+        assert _entry(t2, "z0o2p17-nocat-cause") is not None
+
+    def test_a_client_side_refusal_leads_with_its_remedy_and_keeps_the_t2_entry(self, t2, local_t3, monkeypatch):
+        from nexus.corpus import LocalVoyageCredentialMissingError
+
+        remedy = "no Voyage API key is configured. Set one with `nx config set voyage_api_key <key>`."
+
+        def refuse(*_a, **_k):
+            raise LocalVoyageCredentialMissingError(remedy)
+
+        monkeypatch.setattr("nexus.corpus.ensure_collection_registered", refuse)
+        row_id = t2.put(project="proj", title="z0o2p17-keyless", content="z0o2p17 keyless body", ttl=None)
+        result = _promote(t2, local_t3, row_id, "--remove")
+        assert result.exit_code == 1, result.output
+        assert _error(result).startswith("Error: " + remedy[:40]), result.output
+        assert "Nothing was sent to the engine and nothing changed" in result.output
+        assert "The T2 entry was left in place, even with --remove." in result.output
+        for wrong in ("retry is safe", "no chunk was left behind", "could not catalog", "may already have succeeded"):
+            assert wrong not in result.output, (wrong, result.output)
+        assert _entry(t2, "z0o2p17-keyless") is not None
+        assert documents_by_title("z0o2p17-keyless") == [], "the row this call minted is removed"
+
+    def test_an_unknown_status_is_an_error_that_fires_nothing_and_keeps_the_t2_entry(self, t2, local_t3):
+        from nexus.catalog.note_write import PutNoteOutcome
+
+        row_id = t2.put(project="proj", title="z0o2p17-bogus", content="z0o2p17 bogus body", ttl=None)
+        bogus = PutNoteOutcome(
+            status="bogus", collection=_COLLECTION, pieces=["x"], manifest_metadatas=[{"chunk_text_hash": _chash("x")}],
+            chunk_ids=[_chash("x")], catalog_doc_id="1.2.3")
+        with patch("nexus.catalog.note_write.put_note", return_value=bogus), \
+             patch("nexus.hook_registry.HookRegistry.fire_single") as single, \
+             patch("nexus.hook_registry.HookRegistry.fire_batch") as batch, \
+             patch("nexus.hook_registry.HookRegistry.fire_document") as document:
+            result = _promote(t2, local_t3, row_id, "--remove")
+        assert result.exit_code == 1, result.output
+        assert "Promoted" not in result.output and "unrecognised state ('bogus')" in result.output, result.output
+        single.assert_not_called(), batch.assert_not_called(), document.assert_not_called()
+        assert _entry(t2, "z0o2p17-bogus") is not None
 
     def test_an_oversized_entry_fails_before_anything_is_minted(self, t2, local_t3):
         from nexus.db.limits import QUOTAS

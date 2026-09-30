@@ -528,8 +528,8 @@ def test_a_split_note_fires_every_piece_and_the_document_chain_once(note_writer)
 
 
 @pytest.mark.parametrize("status, reason, expect", [
-    ("not-landed", "engine refused", "could not write 'seq-note'"),
-    ("no-catalog", "catalog registration failed", "could not catalog 'seq-note'"),
+    ("not-landed", "engine refused", "could not store 'seq-note'"),
+    ("no-catalog", "catalog registration failed: X", "could not catalog 'seq-note'"),
 ])
 def test_a_note_that_did_not_land_raises_a_plain_failure_and_fires_no_hook(note_writer, status, reason, expect):
     import nexus.catalog.recovery_bundle as rb

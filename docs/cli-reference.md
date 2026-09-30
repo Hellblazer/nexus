@@ -2235,6 +2235,19 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 
 A note whose text is too large for the collection's embedding model's token window (small-window local embedders such as bge-base; a Voyage collection never splits, nexus-spujb) is written as several chunk pieces under one title rather than refused or truncated. `put` writes each piece and links them to one catalog document; `get` and the MCP `store_get`/`store_get_many` tools detect a split note by its chunk ids and transparently reassemble the full text, so a caller never has to know the note was split to read it back whole.
 
+**How a `put` ends** (nexus-z0o2p.16, RDR-223 Phase 2). `put` sends the note's chunks and its catalog owner rows to the engine as ONE request, through the note writer MCP `store_put` uses, so no chunk is ever stored without its owner and a failed `put` leaves the note's previous version as it was. Empty input (an empty file, or nothing on stdin) is refused with `nothing to store` before anything is sent. Every outcome is worded by one table shared with `nx memory promote`, `nx catalog import` and MCP `store_put` (`note_write.failure_message`); a `put` that did not store exits 1 and prints one of:
+
+| Outcome | What the message says |
+|---------|-----------------------|
+| Stored | `Stored: <id>  →  <collection>`, plus `(N chunks, split to the embedding model's token window)` for a split note |
+| The client refused before sending (a stale embedding profile, a missing Voyage key, a retired collection name) | The refusal's own remedy first, then `Nothing was sent to the engine and nothing changed; run the command again once that is fixed.` It never says "retry is safe": a retry fails the same way until you act |
+| The engine could not be reached | `could not store '<title>' in <collection>: <reason>. The engine could not be reached, so nothing was sent and nothing changed; retry once it is running.` |
+| The engine refused the request | `could not store '<title>' in <collection>: <reason>. The note was not stored ... no chunk was left behind and any earlier version of the note is unchanged (chunks whose text was already stored may have had their metadata refreshed); retry is safe.` The metadata sentence appears only here |
+| The request died in flight, or its outcome could not be read back | `could not confirm that '<title>' landed ...`. Nothing was rolled back and the write may already have succeeded; check with `nx store list` before retrying (a retry is an idempotent re-write either way) |
+| The engine accepted the write and refused to stamp the document complete (new) | `wrote <id> to <collection> and the engine accepted the write, but it refused to stamp the document complete (<engine's reason>). The document stays 'indexing'. Nothing was rolled back; a retry is an idempotent re-write.` |
+| The write landed and the response did not stamp it complete | `wrote <id> to <collection>, but the document was not stamped complete (...)`. Nothing was rolled back |
+| The note could not be cataloged | `could not catalog '<title>' in <collection>: catalog registration failed: <cause>. Nothing was written` |
+
 **`list` flags:**
 
 | Flag | Description |
@@ -2422,7 +2435,7 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 
 **`promote` flags:** `--collection` (required), `--tags`, `--remove`
 
-`nx memory promote` writes the promoted note to T3 and its catalog manifest in one request to the engine, through the same note writer MCP `store_put` uses. No chunk is ever stored without its catalog owner, and a failed promote leaves the document's previous version as it was. The T2 entry is deleted (with `--remove`) only after the engine confirms the note is stored and stamped complete. If the write fails, or the outcome cannot be confirmed (a timeout, or the engine accepting the write but refusing the completion stamp), the command exits 1 and the T2 entry stays, `--remove` or not. "Retry is safe" in the message means nothing was stored; "could not confirm" means the note may already be stored, and a retry is an idempotent re-write.
+`nx memory promote` writes the promoted note to T3 and its catalog manifest in one request to the engine, through the same note writer MCP `store_put` uses. No chunk is ever stored without its catalog owner, and a failed promote leaves the document's previous version as it was. The T2 entry is deleted (with `--remove`) only after the engine confirms the note is stored and stamped complete. If the write fails, or the outcome cannot be confirmed (a timeout, or the engine accepting the write but refusing the completion stamp), the command exits 1 and the T2 entry stays, `--remove` or not. The message is the one `nx store put` prints for the same outcome (see its table under `nx store`): "retry is safe" means the engine refused and nothing was stored, a refusal the client made before sending (a missing Voyage key, a stale embedding profile) leads with its remedy, and "could not confirm" means the note may already be stored and a retry is an idempotent re-write. A promoted note longer than the embedding model's token window is stored as several chunks, and the command prints `, N chunks` after the id.
 
 **`search` flags:** `--project NAME`
 

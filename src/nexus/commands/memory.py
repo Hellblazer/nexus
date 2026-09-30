@@ -584,10 +584,8 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
         # other outcome raises before the delete, so a promote that did not
         # verifiably store never deletes its source.
         from nexus.catalog.note_write import (  # noqa: PLC0415 — deliberate function-local import: catalog dep deferred, branch-local
-            NO_CATALOG,
-            NOT_LANDED,
-            STORED,
-            UNCERTAIN,
+            failure_message,
+            fire_note_chains,
             put_note,
         )
         from nexus.errors import PutOversizedError  # noqa: PLC0415 — deliberate function-local import: only needed on promote path
@@ -601,79 +599,19 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             # Raised before any catalog row or chunk exists.
             raise click.ClickException(f"{exc} The T2 entry is unchanged.") from exc
 
+        # One wording of every outcome that did not store (note_write.failure_message), the table
+        # the other note producers read. Every such outcome leaves the T2 entry in place.
+        message = failure_message(outcome, subject=repr(entry["title"]), check="'nx store list'")
+        if message is not None:
+            raise click.ClickException(f"{message} The T2 entry was left in place, even with --remove.")
+
+        # nexus-9099: fire post-store chains so the promoted T3 row reaches taxonomy / aspect queue
+        # (RDR-095 symmetric-fire). fire_note_chains is the shared firing: the manifest and the
+        # completion stamp were written by the one request above, so the batch chain runs without the
+        # manifest hook, and the document chain carries the CATALOG doc_id, never a chunk id
+        # (nexus-w8lg1: the aspect queue's composite FK).
+        fire_note_chains(outcome, entry["content"])
         doc_id = outcome.doc_id
-        catalog_doc_id = outcome.catalog_doc_id
-        if outcome.status == NO_CATALOG:
-            raise click.ClickException(
-                f"could not catalog promoted entry in {collection}: "
-                f"{outcome.reason}. Nothing was written: a note is written "
-                f"together with its catalog entry, never without one. The "
-                f"T2 entry is unchanged."
-            )
-        if outcome.status == UNCERTAIN and outcome.stamp_refused:
-            # The cause is KNOWN here, unlike the timeout below: the engine
-            # accepted the write and refused the completion stamp. Still an
-            # error (the note is not confirmed complete), never "Promoted".
-            raise click.ClickException(
-                f"the engine accepted the write of {doc_id} to {collection} "
-                f"but refused to stamp the document complete "
-                f"({outcome.stamp_detail}). The document stays 'indexing'. "
-                f"Nothing was rolled back. The T2 entry was left in place, "
-                f"even with --remove; a retry is an idempotent re-write."
-            )
-        if outcome.status == UNCERTAIN:
-            # An atomic request can still time out with an unknown result: the
-            # note may have landed. Nothing was rolled back, and the T2 entry
-            # is the only other copy, so it stays.
-            raise click.ClickException(
-                f"could not confirm the catalog manifest landed for "
-                f"{doc_id} in {collection}: {outcome.reason}. Nothing was "
-                f"rolled back — the write may already have succeeded; check "
-                f"before retrying (a retry is an idempotent re-write either "
-                f"way). The T2 entry was left in place, even with --remove."
-            )
-        if outcome.status == NOT_LANDED:
-            # Confirmed not landed. The request is one transaction, so no
-            # chunk of this note was added and a previous version of the note
-            # is exactly as it was. Said precisely: a request refused by a
-            # 429 from the embedder comes after the engine's metadata refresh
-            # of chunks whose text it already held.
-            raise click.ClickException(
-                f"could not catalog promoted entry in {collection}: "
-                f"{outcome.reason}. The note was not stored: its chunks and "
-                f"its catalog entry go in one request, so no chunk was left "
-                f"behind and any earlier version of the note is unchanged "
-                f"(chunks whose text was already stored may have had their "
-                f"metadata refreshed); retry is safe. The T2 entry is "
-                f"unchanged."
-            )
-        if outcome.status != STORED:  # a status this command does not know is not a store
-            raise click.ClickException(
-                f"promote of {doc_id} to {collection} ended in an unrecognised "
-                f"state ({outcome.status!r}). The T2 entry is unchanged."
-            )
-
-        # nexus-9099: fire post-store chains so the promoted T3 row reaches
-        # taxonomy / aspect queue (RDR-095 symmetric-fire). The manifest and
-        # the completion stamp were written by the one request above, so the
-        # batch chain runs without the manifest hook — the same skip MCP
-        # store_put makes. The batch carries every piece of the note.
-        from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-local import: hook-registry dep deferred, branch-local
-        from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred import
-
-        hooks = HookRegistry()
-        install_default_hooks(hooks)
-        for piece_id, piece in zip(outcome.chunk_ids, outcome.pieces, strict=True):
-            hooks.fire_single(piece_id, collection, piece)
-        hooks.fire_batch(
-            outcome.chunk_ids, collection, outcome.pieces,
-            metadatas=outcome.manifest_metadatas,
-            catalog_doc_id=catalog_doc_id,
-            skip_hooks={manifest_write_batch_hook},
-        )
-        # The document chain carries the CATALOG doc_id (tumbler), never a
-        # chunk id (nexus-w8lg1: the aspect queue's composite FK).
-        hooks.fire_document(doc_id, collection, entry["content"], doc_id=catalog_doc_id)
 
         split_note = f", {len(outcome.pieces)} chunks" if len(outcome.pieces) > 1 else ""
         if remove:

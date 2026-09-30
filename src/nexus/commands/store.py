@@ -84,6 +84,13 @@ def put_cmd(
         if not title:
             title = path.name
 
+    # MCP store_put refuses empty content up front ("content is required"); so does the CLI, with
+    # the same clean error rather than a ValueError traceback from deep in the writer.
+    if not content:
+        raise click.ClickException(
+            f"nothing to store: {'stdin' if source == '-' else repr(source)} is empty."
+        )
+
     try:
         days = parse_ttl(ttl)
     except ValueError as exc:
@@ -117,7 +124,7 @@ def put_cmd(
     # call minted or put back the identity stamp it changed). A chunk of the note
     # can therefore never land without its owner, and a failed request leaves the
     # previous manifest as it was. This command only words the result.
-    from nexus.catalog.note_write import NO_CATALOG, NOT_LANDED, UNCERTAIN, put_note  # noqa: PLC0415 — deferred: heavy catalog import, rare/branch-local for CLI startup cost
+    from nexus.catalog.note_write import failure_message, fire_note_chains, put_note  # noqa: PLC0415 — deferred: heavy catalog import, rare/branch-local for CLI startup cost
 
     # nexus-s71lr, deliverable 3 (named literally: "nx store put"): a single
     # document is still ONE embed call, and a large document's embed can run
@@ -147,81 +154,25 @@ def put_cmd(
     finally:
         file_heartbeat.disarm()
 
+    # One wording of every outcome that did not store (note_write.failure_message): the same table
+    # MCP store_put, nx memory promote and the recovery import read, so a client-side refusal is told
+    # to fix its key here exactly as it is there, and an outcome no command knows is never "Stored".
+    message = failure_message(outcome, subject=repr(title), check="'nx store list'")
+    if message is not None:
+        raise click.ClickException(message)
+    # nexus-9099: fire the three post-store hook chains so the chash index, taxonomy assignment and
+    # aspect-extraction queue see CLI store-put events (RDR-095 symmetric-fire). fire_note_chains is
+    # MCP store_put's shape (nexus-spujb): the single and batch chains see every piece, the document
+    # chain sees the note once, whole, and carries the CATALOG tumbler (nexus-w8lg1). The manifest and
+    # the completion stamp were written by the one request above, so the batch chain skips the
+    # manifest hook. doc_id is the source identity here: catalog identity for a note is
+    # (collection, title) uniformly (nexus-sdp0u), whether SOURCE was a file or stdin: the file's
+    # on-disk path is deliberately never passed through as catalog file_path, since that leg is
+    # collection-blind and could match/clobber an unrelated `nx index md` document.
+    fire_note_chains(outcome, content)
     pieces = outcome.pieces
-    doc_ids = outcome.chunk_ids
-    doc_id = outcome.doc_id
-    catalog_doc_id = outcome.catalog_doc_id
-    if outcome.status == NO_CATALOG:
-        raise click.ClickException(
-            f"could not catalog {source} in {col_name}: {outcome.reason}. "
-            f"Nothing was written: a note is written together with its "
-            f"catalog entry, never without one."
-        )
-    if outcome.status == UNCERTAIN and outcome.stamp_refused:
-        # The cause is KNOWN here, unlike the timeout below: the engine accepted
-        # the write and refused the completion stamp. The document stays
-        # 'indexing' until a retry stamps it.
-        raise click.ClickException(
-            f"wrote {doc_id} to {col_name} and the engine accepted the write, "
-            f"but it refused to stamp the document complete "
-            f"({outcome.stamp_detail}). The document stays 'indexing'. "
-            f"Nothing was rolled back; 'nx store get' reads the note, and a "
-            f"retry is an idempotent re-write."
-        )
-    if outcome.status == UNCERTAIN:
-        # RDR-192 Step 3a fix-round 1 (critic Critical 1): verify infra failed
-        # or the request died in flight — outcome unknown, must not roll back
-        # (the write may have landed).
-        raise click.ClickException(
-            f"could not confirm the catalog manifest landed for {doc_id} "
-            f"in {col_name}: {outcome.reason}. Nothing was rolled "
-            f"back — the write may already have succeeded; check with "
-            f"'nx store list' before retrying (a retry is an idempotent "
-            f"re-write either way)."
-        )
-    if outcome.status == NOT_LANDED:
-        # Confirmed not landed. The request is one transaction, so no chunk of
-        # this note was added and a previous version (a re-put) is exactly as it
-        # was. A request refused by a 429 from the embedder comes after the
-        # engine's metadata refresh of chunks whose text it already held, hence
-        # the parenthesis (note_write outcome 2).
-        raise click.ClickException(
-            f"could not catalog {source} in {col_name}: {outcome.reason}. "
-            f"The note was not stored: its chunks and its catalog entry go in "
-            f"one request, so no chunk was left behind and any earlier version "
-            f"of the note is unchanged (chunks whose text was already stored "
-            f"may have had their metadata refreshed); retry is safe."
-        )
-    # nexus-9099: fire the three post-store hook chains so the chash
-    # index, taxonomy assignment, and aspect-extraction queue see CLI
-    # store-put events. RDR-095 symmetric-fire; this path was missed by
-    # the original commit. doc_id is the source identity here — catalog
-    # identity for store_put is (collection, title) uniformly (nexus-sdp0u),
-    # regardless of whether SOURCE was a file or stdin: the file variant's
-    # on-disk path is deliberately never passed through as catalog
-    # file_path, since that leg is collection-blind and could match/clobber
-    # an unrelated `nx index md` document registered for the same path.
-    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
-    from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: mcp_infra pulls the MCP layer, only this success branch needs it
-    hooks = HookRegistry()
-    install_default_hooks(hooks)
-    # MCP store_put's shape (nexus-spujb): the single and batch chains see every
-    # piece; the document chain sees the note once, whole, so aspect extraction
-    # reads the full text, and carries the CATALOG tumbler (nexus-w8lg1), never a
-    # chunk id. The manifest and the completion stamp were written by the one
-    # request above (nexus-cotmr's manifest_complete ride is retired for this
-    # path), so the batch chain runs without the manifest hook, the same skip
-    # the flush-grain combined write makes.
-    for piece_id, piece in zip(doc_ids, pieces, strict=True):
-        hooks.fire_single(piece_id, col_name, piece)
-    hooks.fire_batch(
-        doc_ids, col_name, pieces, None, outcome.manifest_metadatas,
-        catalog_doc_id=catalog_doc_id,
-        skip_hooks={manifest_write_batch_hook},
-    )
-    hooks.fire_document(doc_ids[0], col_name, content, doc_id=catalog_doc_id)
     split_note = f"  ({len(pieces)} chunks, split to the embedding model's token window)" if len(pieces) > 1 else ""
-    click.echo(f"Stored: {doc_id}  →  {col_name}{split_note}")
+    click.echo(f"Stored: {outcome.doc_id}  →  {col_name}{split_note}")
 
 
 # nexus-8g79.10 (V1): catalog_store_hook moved to

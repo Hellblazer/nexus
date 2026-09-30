@@ -5453,9 +5453,8 @@ def store_put(
         # unconditionally (not just on the catalog-present path) since
         # fire_batch below needs real metadatas regardless of catalog_doc_id.
         from nexus.catalog.note_write import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
-            NO_CATALOG,
-            NOT_LANDED,
-            UNCERTAIN,
+            failure_message,
+            fire_note_chains,
             put_note,
         )
 
@@ -5474,55 +5473,16 @@ def store_put(
             ttl_days=ttl_days,
         )
         pieces = outcome.pieces
-        manifest_metadatas = outcome.manifest_metadatas
-        doc_ids = outcome.chunk_ids
         doc_id = outcome.doc_id
         catalog_doc_id = outcome.catalog_doc_id
-        if outcome.status == NO_CATALOG:
-            return (
-                f"Error: store_put could not catalog content in {col_name}: "
-                f"{outcome.reason}. Nothing was written: a note is "
-                f"written together with its catalog entry, never without one."
-            )
-        if outcome.status == UNCERTAIN and outcome.stamp_refused:
-            # The cause is KNOWN here, unlike the timeout below: the engine
-            # accepted the write and refused the completion stamp, so say that
-            # once. Still an Error (the note is not confirmed complete), never
-            # a Stored: the document stays `indexing` until a retry stamps it.
-            return (
-                f"Error: store_put wrote {doc_id} to {col_name} and the "
-                f"engine accepted the write, but it refused to stamp the "
-                f"document complete ({outcome.stamp_detail}). The document "
-                f"stays 'indexing'. Nothing was rolled back; store_get reads "
-                f"the note, and a retry is an idempotent re-write."
-            )
-        if outcome.status == UNCERTAIN:
-            # RDR-192 Step 3a fix-round 1 (critic Critical 1): an atomic
-            # request can still time out with an unknown result. Nothing was
-            # rolled back (the note may have landed); a retry is an
-            # idempotent replace either way.
-            return (
-                f"Error: store_put could not confirm the catalog manifest "
-                f"landed for {doc_id} in {col_name}: {outcome.reason}. "
-                f"Nothing was rolled back — the write may already have "
-                f"succeeded; check with store_get before retrying (a "
-                f"retry is an idempotent re-write either way)."
-            )
-        if outcome.status == NOT_LANDED:
-            # Confirmed not landed. The request is one transaction, so no
-            # chunk of this note was added and a previous version of the
-            # note (a re-put) is exactly as it was. Said precisely: a request
-            # refused by a 429 from the embedder comes after the engine's
-            # metadata refresh of chunks whose text it already held, so
-            # "nothing was written" would overstate it (note_write outcome 2).
-            return (
-                f"Error: store_put could not catalog content in {col_name}: "
-                f"{outcome.reason}. The note was not stored: its chunks and "
-                f"its catalog entry go in one request, so no chunk was left "
-                f"behind and any earlier version of the note is unchanged "
-                f"(chunks whose text was already stored may have had their "
-                f"metadata refreshed); retry is safe."
-            )
+        # One wording of every outcome that did not store (note_write.failure_message): the table
+        # nx store put, nx memory promote and the recovery import read too. A client-side refusal
+        # (profile mismatch, missing Voyage key, retired collection) leads with its own remedy, a
+        # refusal the engine made carries the metadata-refresh qualifier, and a status this tool does
+        # not know is never "Stored".
+        message = failure_message(outcome, subject="content", check="store_get")
+        if message is not None:
+            return f"Error: store_put: {message}"
 
         # A committed write makes any cached page burst stale — drop it so a
         # same-identity search re-fetches (batch-f1655f55 critique).
@@ -5555,74 +5515,17 @@ def store_put(
                 structlog.get_logger().debug(
                     "store_put_auto_linked", doc_id=doc_id, link_count=n,
                 )
-        # All three post-store chains fire from every storage event
-        # (RDR-095 symmetric-fire follow-up) via the process-local
-        # ``_hooks`` registry constructed at module load. Single-doc
-        # chain runs registered per-doc consumers; batch chain runs
-        # with a 1-element list so batch-shape consumers (taxonomy,
-        # chash, manifest) see MCP ``store_put`` as a single-document
-        # batch.
-        for piece_id, piece in zip(doc_ids, pieces, strict=True):
-            _hooks.fire_single(piece_id, col_name, piece)
-        # The manifest and the completion stamp were written by the one
-        # request above, so the batch chain runs without the manifest hook
-        # (the same skip the flush-grain combined write makes). The batch
-        # carries every piece of the note (nexus-spujb) for the consumers
-        # that still want it, such as taxonomy.
-        from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred import
-
-        _hooks.fire_batch(
-            doc_ids, col_name, pieces, None, manifest_metadatas,
-            catalog_doc_id=catalog_doc_id,
-            skip_hooks={manifest_write_batch_hook},
-        )
-        # RDR-089 document-grain chain — plain sync call. This comment used to
-        # claim FastMCP thread-pools an @mcp.tool() body at the framework
-        # level. It does not: func_metadata.py calls a sync body directly from
-        # inside its async dispatch, so this whole function held the server's
-        # event loop. The offload is real now, but it comes from
-        # _sdk_patches._patch_sync_tool_offload wrapping what gets REGISTERED,
-        # not from the SDK (nexus-dgvsz).
-        # content is the full document text already in scope; pass it
-        # through literally per the P0.1 content-sourcing contract.
-        # source_path (1st positional) is the chunk natural-id here — there
-        # is no on-disk file at the MCP boundary, so it serves as the stable
-        # per-doc queue key + the identifier the hook uses for failure
-        # attribution. It is NOT foreign-keyed (RDR-156 fk-001: aspect_
-        # extraction_queue.source_path is a storage path, not a tumbler).
-        # nexus-tdgc: forward an explicit doc_id so the aspect-queue hook can
-        # stamp it on the queue row.
-        # RDR-172 / nexus-pyn35 (closes nexus-ov0sw): the queue row's doc_id
-        # carries a composite FK -> catalog_documents(tumbler) (RDR-156
-        # fk-001), so it MUST be the catalog tumbler (catalog_doc_id), NOT
-        # the t3.put chunk natural-id (sha256(content)[:32]) — a chunk hash
-        # is never a tumbler and 500s the service enqueue, which the best-
-        # effort hook then swallows (silent, total loss of RDR-089 aspects in
-        # service mode). This matches every other fire_document caller
-        # (doc_indexer, pipeline_stages, code_indexer, prose_indexer), which
-        # all pass catalog_doc_id.
-        #
-        # hygiene-001 (nexus-tk070.p6a follow-on): when no tumbler was minted,
-        # catalog_doc_id is "" — SUPERSEDES the prior "blank sentinel the
-        # service NULL-coerces" comment above. aspect_extraction_queue.doc_id
-        # is NOT NULL now and the engine refuses a blank doc_id at the
-        # boundary (400 "doc_id required").
-        #
-        # Review round item B (critic C2): the resolve-or-skip decision for a
-        # blank doc_id moved to the CHOKE POINT, aspect_extraction_enqueue_hook
-        # itself — the one place all seven fire_document call sites (this one
-        # included) converge, rather than seven copies of the same guard. So
-        # this call site no longer pre-empts the hook by skipping it here;
-        # catalog_doc_id is forwarded VERBATIM, blank or not, and the hook's
-        # own resolve-by-(collection, source_path) fallback (via the catalog
-        # reader) or its aspect_enqueue_skipped_no_doc_id warning is now the
-        # ONLY place this decision is made. At the MCP boundary source_path
-        # (the ``doc_id`` local below) is a content-hash, not a real
-        # file_path/title, so the hook's catalog-lookup fallback cannot
-        # resolve one for this specific call site either -- the practical
-        # outcome here is unchanged (still skips), but the decision itself is
-        # no longer duplicated.
-        _hooks.fire_document(doc_id, col_name, content, doc_id=catalog_doc_id)
+        # All three post-store chains fire from every storage event (RDR-095 symmetric-fire
+        # follow-up) via the process-local ``_hooks`` registry constructed at module load, through
+        # the one firing every note producer shares (note_write.fire_note_chains): fire_single per
+        # piece; fire_batch over every piece without the manifest hook (the one request above
+        # already wrote the manifest and the completion stamp); fire_document once with the whole
+        # content and the CATALOG tumbler (nexus-w8lg1 / RDR-172: the aspect queue's doc_id carries a
+        # composite FK to catalog_documents(tumbler), so a chunk hash would 500 the service enqueue
+        # and the best-effort hook would swallow it). It is a plain synchronous call: store_put is
+        # `def`, the offload comes from _sdk_patches._patch_sync_tool_offload wrapping what gets
+        # REGISTERED (nexus-dgvsz), never from an await or asyncio.to_thread here (RDR-089).
+        fire_note_chains(outcome, content, hooks=_hooks)
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.

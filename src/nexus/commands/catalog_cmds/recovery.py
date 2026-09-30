@@ -29,7 +29,7 @@ def export_cmd(output: Path) -> None:
 
     Writes a human-inspectable JSONL bundle keyed on source_uri identity
     (never tumblers — they are not stable across reindex). Carries NO
-    embeddings: import re-embeds through the real store_put chain, so the
+    embeddings: import re-embeds through the note writer store_put uses, so the
     bundle is portable across embedding modes. Run this BEFORE a
     reinstall; pair with 'nx export COLLECTION' (.nxexp) when you also
     want an embedding-preserving per-collection backup.
@@ -60,9 +60,10 @@ def export_cmd(output: Path) -> None:
 def import_cmd(bundle: Path) -> None:
     """Import a recovery bundle written by 'nx catalog export'.
 
-    Knowledge docs re-run the real store_put chain (re-embedding,
-    reconciling onto existing rows per the sdp0u identity contract);
-    links resolve endpoints by source_uri. Idempotent: a second import of
+    Knowledge docs are written through the note writer MCP store_put uses
+    (re-embedding, reconciling onto existing rows per the sdp0u identity
+    contract; chunks carry source_agent "recovery-import"); links resolve
+    endpoints by source_uri. Idempotent: a second import of
     the same bundle merges rather than duplicates. Each note is written in
     one request with its catalog owner rows. Partial failures are REPORTED
     per note, never silently dropped — and never abort the rest. Exits

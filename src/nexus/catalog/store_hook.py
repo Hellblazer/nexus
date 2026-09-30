@@ -308,11 +308,12 @@ def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: A
     """Write each piece with ``t3.put`` under the same title, tags and
     catalog document; returns the chunk ids in order.
 
-    RDR-223 P2.2 (nexus-z0o2p.12): MCP ``store_put`` no longer calls this; its
-    pieces are the ``chunks`` of one ``write_manifest_many`` request
-    (:func:`nexus.catalog.note_write.write_note`). The split-write producers
-    (``nx store put``, ``nx memory promote``, the recovery import) still do,
-    until P2.6 to P2.8.
+    RDR-223 Phase 2 (nexus-z0o2p.12 / .16 / .17 / .18): nothing in src calls this
+    any more. MCP ``store_put``, ``nx store put``, ``nx memory promote`` and the
+    recovery import all write a note's pieces as the ``chunks`` of one
+    ``write_manifest_many`` request
+    (:func:`nexus.catalog.note_write.write_note`, through ``put_note``). It stays
+    until nexus-z0o2p.32 retires it with its test fixtures.
 
     A one-piece note is the single ``t3.put`` it always was. For several
     pieces, a failure part-way would leave the pieces already written in T3
@@ -686,15 +687,13 @@ def raise_if_oversized(content: str, *, doc_id: str, collection: str) -> None:
     ``HttpVectorClient.put`` already refuse an over-quota document with
     ``PutOversizedError`` (``fail_on_oversized=True``) — but ONLY once
     called, which is AFTER ``catalog_store_hook_tracked`` has already
-    minted a catalog row for every one of this function's three callers
-    (``mcp/core.py::store_put``, ``commands/store.py::put_cmd``,
-    ``catalog/recovery_bundle.py::_default_import_doc`` — all three call
-    :func:`single_chunk_manifest_metadata` then immediately
-    ``catalog_store_hook_tracked`` before ``put()``). Every oversized
-    attempt was paying for a wasted mint + rollback round trip. Calling
-    this FIRST — right after :func:`single_chunk_manifest_metadata`,
-    before ``catalog_store_hook_tracked`` — fails fast with no catalog
-    side effect at all. ``put()``'s own check stays as the
+    minted a catalog row for every one of the note producers (MCP
+    ``store_put``, ``nx store put``, ``nx memory promote``, the recovery
+    import). Every oversized attempt was paying for a wasted mint + rollback
+    round trip. Its one caller now is
+    :func:`nexus.catalog.note_write.put_note`, which calls this FIRST — right
+    after splitting the note, before ``catalog_store_hook_tracked`` — so an
+    over-quota note fails fast with no catalog side effect at all. ``put()``'s own check stays as the
     defense-in-depth backstop for any caller that skips this pre-check
     (direct test calls, future callers).
 
@@ -878,6 +877,7 @@ def catalog_store_hook(
 def catalog_store_hook_tracked(
     title: str, doc_id: str, collection_name: str, *,
     pre_call_doc_id_out: dict[str, str] | None = None,
+    error_out: dict[str, str] | None = None,
 ) -> tuple[str, bool]:
     """Register a knowledge entry in the catalog.
 
@@ -960,6 +960,12 @@ def catalog_store_hook_tracked(
             Left untouched (absent) on the brand-new-mint leg
             (``writer.register``, ``created=True``): a freshly minted
             document has no prior identity to protect by construction.
+        error_out: Optional out-parameter, like *pre_call_doc_id_out* (no
+            return-shape change). The ``("", False)`` return does not say
+            WHY; when it is returned, ``error_out["error"]`` names the
+            cause (``"RuntimeError: catalog service is down"``, or that no
+            catalog is available), so a caller can report it instead of a
+            bare "registration failed" (RDR-223 Phase 2 review).
     """
     # RDR-146 P1.2: this hook fires on every store_put / memory promote,
     # including the long-lived MCP server process. It MUST NOT open a
@@ -981,6 +987,8 @@ def catalog_store_hook_tracked(
         # opt-out mode with an uninitialised local catalog.
         reader = make_catalog_reader()
         if reader is None:
+            if error_out is not None:
+                error_out["error"] = "no catalog is available (make_catalog_reader returned None)"
             return "", False
 
         # nexus-sdp0u: stable, collection-scoped identity for this document.
@@ -1199,6 +1207,8 @@ def catalog_store_hook_tracked(
         # assigned", so at DEBUG this was a silent non-registration. WARNING +
         # audit row so nx doctor can say how many documents are affected.
         _log.warning("catalog_store_hook_failed", exc_info=True)
+        if error_out is not None:
+            error_out["error"] = f"{type(exc).__name__}: {exc}"
         from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle
 
         record_catalog_hook_failure(
@@ -1828,15 +1838,14 @@ def rollback_uncataloged_chunk_write(
     :class:`ManifestVerifyUncertainError` — see
     :func:`store_put_manifest_direct`'s three-way-outcome docstring.
 
-    Shared by the split-write producers still on it: CLI ``nx store put``,
-    ``nx memory promote``, and the recovery-bundle importer
-    (``catalog/recovery_bundle.py::_default_import_doc``). MCP ``store_put``
-    left this set at RDR-223 P2.2 (nexus-z0o2p.12): it writes a note's pieces
-    and manifest in one request (:mod:`nexus.catalog.note_write`), so a chunk
-    can no longer land without its owner. The function, ``put_note_pieces``,
+    No live caller remains (RDR-223 Phase 2, nexus-z0o2p.12 / .16 / .17 / .18):
+    MCP ``store_put``, CLI ``nx store put``, ``nx memory promote`` and the
+    recovery-bundle importer all write a note's pieces and manifest in one
+    request (:mod:`nexus.catalog.note_write`), so a chunk can no longer land
+    without its owner. The function, ``put_note_pieces``,
     ``store_put_manifest_direct[_with_recovery]`` (with its nexus-bb6n2 reap) and
-    ``ChunkRollbackOutcome`` go when P2.6 to P2.8 move the last three callers
-    onto the note writer. Call this AFTER
+    ``ChunkRollbackOutcome`` are retired by nexus-z0o2p.32 together with
+    their test fixtures. When a split write called it, it ran AFTER
     ``put_note_pieces``/``t3.put`` has already written *doc_ids* (the
     chash(es) of the piece(s) just stored), once the caller has decided
     the put failed: either :func:`catalog_store_hook_tracked` returned no

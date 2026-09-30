@@ -420,33 +420,54 @@ class TestDriftGuard:
     forgets to fire the post-store chains.
     """
 
-    def test_known_t3_write_paths_use_fire_store_chains(self):
-        """The known CLI store paths fire the post-store chains.
+    @staticmethod
+    def _calls_in(source: str, function: str | None = None) -> set[str]:
+        """Names of the calls in *source* (or only in *function*): what a comment, a docstring or a
+        string literal that merely MENTIONS a name cannot satisfy."""
+        tree = ast.parse(source)
+        scope = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function] \
+            if function else [tree]
+        assert scope, f"{function} not found"
+        return {
+            (c.func.id if isinstance(c.func, ast.Name) else c.func.attr)
+            for fn in scope for c in ast.walk(fn)
+            if isinstance(c, ast.Call) and isinstance(c.func, (ast.Name, ast.Attribute))
+        }
 
-        ``nx store put`` left ``fire_store_chains`` at RDR-223 P2.6 (nexus-z0o2p.16):
-        it writes the note through ``put_note`` and fires the three chains itself, the
-        batch chain without the manifest hook (the request already wrote the manifest)."""
-        memory_py = Path("src/nexus/commands/memory.py").read_text()
-        exporter_py = Path("src/nexus/exporter.py").read_text()
+    def test_known_t3_write_paths_fire_the_post_store_chains(self):
+        """The known CLI store paths fire the post-store chains, by CALL (AST), not by a substring a
+        comment could satisfy.
 
-        # RDR-223 P2.7 (nexus-z0o2p.17): promote fires the three chains itself
-        # (single, batch without the manifest hook, document) now that its one
-        # write request has already written the manifest, exactly as MCP
-        # store_put does, so it no longer goes through fire_store_chains.
-        assert all(
-            f"hooks.{chain}(" in memory_py
-            for chain in ("fire_single", "fire_batch", "fire_document")
-        ), (
-            "src/nexus/commands/memory.py must fire the single, batch and "
-            "document chains from promote (nexus-9099 regression)"
-        )
-        assert "fire_store_chains" in exporter_py, (
+        ``nx store put`` and ``nx memory promote`` left ``fire_store_chains`` at RDR-223 P2.6 / P2.7
+        (nexus-z0o2p.16 / .17): each writes its note through ``put_note`` and fires the chains through
+        ``note_write.fire_note_chains`` (the batch chain without the manifest hook: the one request
+        already wrote the manifest). ``nx store import`` still goes through ``fire_store_chains``."""
+        for rel, function in (("commands/memory.py", "promote_cmd"), ("commands/store.py", "put_cmd")):
+            calls = self._calls_in(Path("src/nexus", rel).read_text(), function)
+            assert "fire_note_chains" in calls, (
+                f"src/nexus/{rel}::{function} must fire the post-store chains through "
+                "note_write.fire_note_chains (nexus-9099 regression)")
+            assert not calls & {"fire_single", "fire_batch", "fire_document", "fire_store_chains"}, (
+                f"{function} must not hand-copy the firing: {sorted(calls)}")
+        exporter_calls = self._calls_in(Path("src/nexus/exporter.py").read_text())
+        assert exporter_calls & {"fire_store_chains", "_fire_store_chains_grouped_by_doc"}, (
             "src/nexus/exporter.py must call HookRegistry.fire_store_chains "
-            "from import_collection (nexus-9099 regression)"
-        )
+            "from import_collection (nexus-9099 regression)")
 
-    def test_the_three_chains_are_fired_after_put_note_in_put_cmd(self):
-        """In commands/store.py:put_cmd, the single, batch and document chains must follow put_note."""
+    def test_a_mention_in_a_comment_or_a_string_is_not_a_call(self):
+        """The previous form of this guard was a substring grep, so a comment naming the firing
+        satisfied it. The AST form is not fooled."""
+        mentions_only = (
+            "def promote_cmd():\n"
+            "    \"\"\"fires fire_note_chains(outcome, content)\"\"\"\n"
+            "    # hooks.fire_single( hooks.fire_batch( hooks.fire_document( fire_note_chains(\n"
+            "    label = 'fire_note_chains('\n"
+            "    return label\n")
+        assert "fire_note_chains" not in self._calls_in(mentions_only, "promote_cmd")
+        assert "fire_note_chains" in self._calls_in("def promote_cmd():\n    fire_note_chains(o, c)\n", "promote_cmd")
+
+    def test_the_chains_are_fired_after_put_note_in_put_cmd(self):
+        """In commands/store.py:put_cmd, the chains are fired only after put_note returned."""
         src = Path("src/nexus/commands/store.py").read_text()
         tree = ast.parse(src)
         for node in ast.walk(tree):
@@ -457,10 +478,9 @@ class TestDriftGuard:
                     for n in ast.walk(node) if isinstance(n, ast.Call)
                 )
                 names = [name for _line, name in calls]
-                for chain in ("fire_single", "fire_batch", "fire_document"):
-                    assert chain in names, f"put_cmd must fire {chain} after put_note"
-                    assert names.index("put_note") < names.index(chain), (
-                        f"put_cmd must fire {chain} only after put_note returned: {calls}")
+                assert "fire_note_chains" in names, "put_cmd must fire the chains after put_note"
+                assert names.index("put_note") < names.index("fire_note_chains"), (
+                    f"put_cmd must fire the chains only after put_note returned: {calls}")
                 return
         pytest.fail("put_cmd not found in commands/store.py")
 

@@ -433,26 +433,6 @@ class ImportDocUncertain(RuntimeError):
         self.stamp_refused = stamp_refused
 
 
-def _fire_post_store_hooks(outcome: Any, rec: dict) -> None:
-    """The post-store chains for a note that landed: chash/taxonomy consumers per piece and batch,
-    and the aspect queue once, for the whole note. The manifest and the completion stamp rode the
-    write request, so the batch chain runs without the manifest hook (MCP ``store_put``'s shape).
-    Per-hook failures are isolated by the registry."""
-    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle
-    from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred import
-
-    hooks = HookRegistry()
-    install_default_hooks(hooks)
-    col_name, pieces, doc_ids = outcome.collection, outcome.pieces, outcome.chunk_ids
-    for piece_id, piece in zip(doc_ids, pieces, strict=True):
-        hooks.fire_single(piece_id, col_name, piece)
-    hooks.fire_batch(
-        doc_ids, col_name, pieces, None, outcome.manifest_metadatas,
-        catalog_doc_id=outcome.catalog_doc_id, skip_hooks={manifest_write_batch_hook},
-    )
-    hooks.fire_document(doc_ids[0], col_name, rec["content"], doc_id=outcome.catalog_doc_id)
-
-
 def _default_import_doc(t3: Any, rec: dict) -> None:
     """Write one note through the note writer (RDR-223 P2.8, nexus-z0o2p.18).
 
@@ -461,19 +441,23 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     the note never lands without its owner and a failed request leaves the previous manifest as it
     was. ``put_note`` also registers the catalog document (the sdp0u identity), begins the index-run
     fence and settles a failure (fail the fence, remove the row this call minted); this function
-    words the outcome as the import's three results:
+    words the outcome as the import's three results, from the same message table every note producer
+    reads (:func:`~nexus.catalog.note_write.failure_message`):
 
-    * landed and verified: returns, after the post-store hook chains;
-    * not landed, or never catalogued: raises ``RuntimeError`` (a definitive failure);
-    * may have landed: raises :class:`ImportDocUncertain`, and fires no hook.
+    * landed and verified: returns, after the post-store hook chains
+      (:func:`~nexus.catalog.note_write.fire_note_chains`, the one firing every producer shares);
+    * not landed, never catalogued, or an outcome this code does not know: raises ``RuntimeError``
+      (a definitive failure, never an import);
+    * may have landed, or landed and was not stamped complete: raises :class:`ImportDocUncertain`,
+      and fires no hook.
 
     Deferred imports: this module sits below ``commands/`` and the writer's pieces live in sibling
     modules with heavy import graphs. *t3* is used only to resolve the target collection.
     """
     from nexus.catalog.note_write import (  # noqa: PLC0415 — deferred, sibling with heavy import graph
-        NO_CATALOG,
-        NOT_LANDED,
         UNCERTAIN,
+        failure_message,
+        fire_note_chains,
         put_note,
     )
 
@@ -484,30 +468,12 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         tags=rec.get("tags", ""), category=rec.get("category", ""),
         source_agent="recovery-import",
     )
-    if outcome.status == NO_CATALOG:
-        raise RuntimeError(
-            f"could not catalog {title!r} in {col_name}: {outcome.reason}. "
-            "Nothing was written: a note is written together with its catalog entry, never without one."
-        )
-    if outcome.status == NOT_LANDED:
-        raise RuntimeError(
-            f"could not write {title!r} in {col_name}: {outcome.reason}. The note was not "
-            "stored and any earlier version of it is unchanged; retry is safe."
-        )
-    if outcome.status == UNCERTAIN and outcome.stamp_refused:
-        raise ImportDocUncertain(
-            f"the engine accepted the write of {title!r} in {col_name} but refused to stamp the "
-            f"document complete ({outcome.stamp_detail}). The document stays 'indexing'; nothing was "
-            "rolled back and a retry is an idempotent re-write.",
-            stamp_refused=True,
-        )
-    if outcome.status == UNCERTAIN:
-        raise ImportDocUncertain(
-            f"could not confirm the write of {title!r} in {col_name} landed: {outcome.reason}. "
-            "Nothing was rolled back: the write may already have succeeded; check before retrying "
-            "(a retry is an idempotent re-write either way)."
-        )
-    _fire_post_store_hooks(outcome, rec)
+    message = failure_message(outcome, subject=repr(title))
+    if message is not None:
+        if outcome.status == UNCERTAIN:
+            raise ImportDocUncertain(message, stamp_refused=outcome.stamp_refused)
+        raise RuntimeError(message)
+    fire_note_chains(outcome, rec["content"])
 
 
 def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:

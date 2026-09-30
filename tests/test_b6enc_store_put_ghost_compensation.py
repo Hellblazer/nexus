@@ -425,7 +425,7 @@ class TestMcpManifestFailLoud:
             local_t3, content, "b6enc-manifest-mcp",
         )
         assert result.startswith("Error"), result
-        assert "could not catalog" in result
+        assert "could not store" in result
         assert "Stored:" not in result, (
             "a manifest failure must never produce a bare 'Stored:' result"
         )
