@@ -708,7 +708,8 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     assert result["owned_count"] == 0
     assert (result["imported_count"], result["skipped_count"]) == (0, 1), result
     assert result["unowned_count"] == 1
-    assert result["unowned_documents"] == [{"tumbler": doc, "title": "wbfpw40 note"}]
+    assert result["unowned_documents"] == [
+        {"tumbler": doc, "title": "wbfpw40 note", "index_state": None, "left_out": 1}]
 
     # The CLI turns that into a command the operator can run as printed.
     with patch("nexus.commands.store._t3", return_value=client):

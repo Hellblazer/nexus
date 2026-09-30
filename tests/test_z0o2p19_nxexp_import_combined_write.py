@@ -956,3 +956,66 @@ def test_a_cce_collection_is_paged_at_the_write_cap_not_at_the_embed_cap(
     import_collection(db=client, input_path=f, target_collection=dst)
 
     assert pages and max(pages) == len(records), pages
+
+
+def test_the_snapshot_minus_written_sweep_list_runs_through_trailing_sweeps_against_the_real_engine(
+    t2_service_env, monkeypatch,
+):
+    """A fresh document whose pre-run manifest has 650 chunks is rewritten as two rows (one of them an
+    old chunk). The deferred sweep is the begin snapshot minus what the run wrote, 649 chashes: 300
+    ride the last data append, two sweep-only appends carry the rest, and the stamp rides the last.
+    Every other piece is pinned by a fake or by a Java test; this drives the composition end to end."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    cat = make_catalog_writer(priority="interactive")
+    owner = cat.register_owner("knowledge", "curator")
+    dst = _coll("trailsweep")
+    uri = f"file:///z0o2p19/{dst}/big.py"
+    doc = str(cat.register(owner=owner, title="big.py", content_type="code",
+                           physical_collection=dst, source_uri=uri))
+    rng = np.random.default_rng(650)
+
+    def chunk(text: str) -> dict:
+        return {"chash": _chash(text), "text": text, "metadata": {},
+                "embedding": rng.standard_normal(_DIM).astype(np.float32).tolist()}
+
+    old = [chunk(f"z0o2p19 old chunk {i}") for i in range(650)]
+    rows = [{"chash": c["chash"], "position": i} for i, c in enumerate(old)]
+    cat.write_manifest_many([(doc, rows[:300])], collection=dst, chunks=old[:300], embedding_model=_MODEL)
+    cat.append_manifest_many([(doc, rows[300:600])], collection=dst, chunks=old[300:600], embedding_model=_MODEL)
+    cat.append_manifest_many([(doc, rows[600:])], collection=dst, chunks=old[600:], embedding_model=_MODEL)
+    assert len(_manifest(reader, doc)) == 650
+
+    appends: list[dict] = []
+    real_append = hcc.HttpCatalogClient.append_manifest_many
+
+    def _spy(self, docs, *a, **kw):
+        out = real_append(self, docs, *a, **kw)
+        appends.append({"sweep": (kw.get("sweep_chashes") or {}).get(doc), "complete": kw.get("complete"),
+                        "swept": out.get("swept"), "skipped": out.get("sweep_skipped")})
+        return out
+
+    monkeypatch.setattr(hcc.HttpCatalogClient, "append_manifest_many", _spy)
+    new = chunk("z0o2p19 the one new chunk")
+    w = MultiDocumentImportWriter(
+        cat, collection=dst, content_hash=_chash("the file"), embedding_model=_MODEL,
+        force_re_embed=True, metadata_merge=True)
+    w.register_document(doc, total_rows=2, max_position=1)
+    w.write_page({doc: [{"chash": new["chash"], "position": w.claim_position(doc, 0)}]},
+                 {new["chash"]: new})
+    res = w.write_page({doc: [{"chash": old[0]["chash"], "position": w.claim_position(doc, 1)}]},
+                       {old[0]["chash"]: old[0]})
+
+    assert res.finished == [doc]
+    assert [len(a["sweep"] or []) for a in appends] == [300, 300, 49], appends
+    assert [a["complete"] is not None for a in appends] == [False, False, True]
+    assert sum(int(a["swept"] or 0) for a in appends) == 649 and not any(a["skipped"] for a in appends)
+    assert w.sweep_skipped == 0
+    survivors = {c["chash"] for c in old} | {new["chash"]}
+    stored = set()
+    ids = sorted(survivors)
+    for i in range(0, len(ids), 300):
+        stored |= client.existing_ids(dst, ids[i:i + 300])
+    assert stored == {old[0]["chash"], new["chash"]}, "every swept chunk is gone and the two live ones stay"
+    assert [c for _, c in _manifest(reader, doc)] == [new["chash"], old[0]["chash"]]
+    assert reader.resolve(doc).index_state == "complete"

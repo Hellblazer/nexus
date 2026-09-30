@@ -822,10 +822,13 @@ class _OwnerImport:
       finished with the APPEND form (same file, same positions: an upsert by position drops nothing,
       needs no sweep, and leaves no chunk of the dead run ownerless while the rerun catches up). A
       document in any other state, or with another hash, that owns chunks stays kept;
-    * WRITTEN: it owns nothing here, so its first page is a replace and later pages append.
+    * WRITTEN: it owns nothing here, so its first request is a replace and later pages append.
 
-    Decisions are made with one batched ``get_manifests`` per page (plus one ``resolve_many`` for the
-    documents that own chunks). The written documents' rows and chunks go out through
+    Groups are resolved to documents once, in :meth:`plan`, so a document reached through several
+    groups is finished once with their combined count. Decisions are made with one batched
+    ``get_manifests`` per page (plus one ``resolve_many`` for the documents that own chunks). A
+    kept document's chash sets are dropped as soon as all its records have been seen. The written
+    documents' rows and chunks go out through
     :class:`~nexus.catalog.multi_document_write.MultiDocumentImportWriter`, which sweeps and stamps
     each document on its own last page; :meth:`plan` supplies every document's record count from a
     prepass (:func:`_prepass_groups`), which is how the last page is known. A crash therefore costs
@@ -1230,14 +1233,19 @@ def import_collection(
     already existed with a manifest that does not name them: an existing
     document's manifest is never replaced or extended by an import, and a
     chunk is never written without an owner row, so these are not stored.
-    ``unowned_documents`` lists those documents as ``{"tumbler", "title"}``.
+    ``unowned_documents`` lists those documents as ``{"tumbler", "title",
+    "index_state", "left_out"}`` (``index_state`` tells a document another run
+    left unfinished from a finished one). ``sweep_skipped`` counts documents
+    whose replaced chunks the engine's fail-open sweep did not delete.
     ``vector_mismatches`` is the number of stored vectors that differed from
     the file's and were replaced by it (0 when the target held none).
 
-    Against the engine (RDR-223, nexus-z0o2p.19) the file is read twice. A
-    first pass counts the records and the highest position of each owner
-    group and keeps nothing else (:func:`_prepass_groups`); the second writes,
-    page by page. Each page's records are grouped by owner identity -- a legacy
+    Against the engine (RDR-223, nexus-z0o2p.19) the file is read three times:
+    hashed (the fence's content hash), then a counting pass that keeps the
+    records and the highest position of each owner group and nothing else
+    (:func:`_prepass_groups`), then the writing pass, page by page. Every owner
+    group is resolved to its document BEFORE the first page, so a document
+    several groups resolve to is counted once, with the sum. Each page's records are grouped by owner identity -- a legacy
     record carrying ``meta.doc_id`` by that doc_id (:func:`_locate_legacy_group`),
     every other record by its export-time ``owner`` or the file fallback
     (:func:`_locate_owner_group`) -- and each group is resolved to a catalog

@@ -8,8 +8,8 @@ many pages. This module is the same protocol driven from the other side: a page 
 for several documents and is written as a few requests, and every document is finished (swept and
 stamped) on ITS OWN last page, not at the end of the stream.
 
-The caller knows each document's record count beforehand (the import reads its file once to count
-them) and says so with :meth:`MultiDocumentImportWriter.register_document`; a document's last page is
+The caller knows each document's record count beforehand (the import counts them in a pass of its
+own, before it writes) and says so with :meth:`MultiDocumentImportWriter.register_document`; a document's last page is
 the one that brings its received rows up to that count.
 
 Per page, for the documents it holds rows of:
