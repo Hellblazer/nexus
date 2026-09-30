@@ -3267,12 +3267,20 @@ def _index_pdf_file(
     # rows through the multi-batch combined writer, so a client that dies
     # partway leaves no chunk without an owner (see nexus.oversize_write).
     # use_writer() picks the path by what the T3 is: a service-backed one
-    # (every real install) writes through the combined writer, and a file with
-    # no catalog identity (nexus-z0o2p.20 counts and stops those) or a
+    # (every real install) writes through the combined writer, and a
     # non-service T3 (the in-memory test topology, which the engine's combined
-    # write cannot reach) keeps the old upsert.
-    from nexus.oversize_write import use_writer, write_oversize_file  # noqa: PLC0415 — deferred: rare oversize path
+    # write cannot reach) keeps the old upsert. A file with no catalog
+    # document on a service-backed T3 is written by neither: it has no owner
+    # row to write a chunk with (RDR-223, nexus-z0o2p.20), so it is counted
+    # as a drop and nothing is written.
+    from nexus.oversize_write import (  # noqa: PLC0415 — deferred: rare oversize path
+        refuse_identity_less_file,
+        use_writer,
+        write_oversize_file,
+    )
 
+    if refuse_identity_less_file(db, catalog_doc_id, file, collection_name, len(ids)):
+        return 0
     _via_writer = use_writer(db, batcher, catalog_doc_id)
     with _stage("upload"):
         if _via_writer:

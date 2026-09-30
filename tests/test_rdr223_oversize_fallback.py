@@ -470,16 +470,42 @@ def test_a_400_from_the_write_itself_propagates_unwrapped(cat, tmp_path, monkeyp
 # ── which path a fallback takes ──────────────────────────────────────────────
 
 
-def test_a_file_with_no_catalog_identity_keeps_the_old_upsert_until_its_own_bead(
+def test_an_identity_less_oversize_file_writes_zero_chunks_and_is_counted(
     cat, tmp_path, monkeypatch, run,
 ) -> None:
-    """A file with no catalog document has no owner row to write a chunk with; counting and
-    stopping those files is nexus-z0o2p.20. Until it lands the fallback writes them as before."""
+    """RDR-223 (nexus-z0o2p.20): a file with no catalog document has no owner row to write a
+    chunk with, so the fallback writes nothing on a service-backed T3 and records the file in the
+    identity-drop collector the flush route uses (``written=False``: the run summary names it and
+    the run fails). It used to write the chunks with the ownerless upsert."""
+    from nexus.mcp_infra import get_manifest_identity_drops, reset_manifest_identity_drops
+
+    reset_manifest_identity_drops()
     _cap(monkeypatch, 16)
     db = _http_db()
-    run(tmp_path, monkeypatch, doc_id="", db=db)
+    n = run(tmp_path, monkeypatch, doc_id="", db=db)
+    assert n == 0
+    assert db.mock_calls == [], db.mock_calls       # no upsert, no other T3 call
+    assert cat.calls == []                          # and no catalog write either
+    drops = get_manifest_identity_drops()
+    assert len(drops) == 1 and drops[0]["written"] is False
+    assert drops[0]["batch_size"] > 16              # an oversize file: more chunks than one batch
+    [f] = drops[0]["files"]
+    assert f["cause"] == "oversize_no_catalog_document" and f["chunks"] == drops[0]["batch_size"]
+
+
+def test_an_identity_less_file_on_a_non_service_t3_keeps_its_write(
+    cat, tmp_path, monkeypatch, run,
+) -> None:
+    """The in-memory test topology has no owner concept; it keeps the old write and records no
+    drop."""
+    from nexus.mcp_infra import get_manifest_identity_drops, reset_manifest_identity_drops
+
+    reset_manifest_identity_drops()
+    _cap(monkeypatch, 16)
+    db = MagicMock()                                # not an HttpVectorClient
+    run(tmp_path, monkeypatch, doc_id="", db=db, hooks=HookRegistry())
     assert db.upsert_chunks_with_embeddings.call_count == 1
-    assert cat.calls == []
+    assert get_manifest_identity_drops() == []
 
 
 def test_a_non_service_t3_keeps_the_old_write(cat, tmp_path, monkeypatch, run) -> None:
@@ -508,17 +534,15 @@ def test_an_identity_less_file_with_no_batcher_never_needs_the_writer(
     cat, tmp_path, monkeypatch, run,
 ) -> None:
     """A file with no catalog document never reaches the writer, so a service-backed T3 that
-    carries no ChunkBatcher is no wiring bug for it: ``use_writer`` answers False on identity
-    before it asks about the batcher (the ``_index_pdf_file`` callers of
-    ``test_y8xjh_force_reindex_clears_sparse_keys.py`` are this shape)."""
+    carries no ChunkBatcher is no wiring bug for it: it is refused before the batcher is asked
+    about (``use_writer`` answers False on identity too)."""
     from nexus.oversize_write import use_writer
 
     assert use_writer(_http_db(), None, "") is False
     _cap(monkeypatch, 16)
     db = _http_db()
-    run(tmp_path, monkeypatch, doc_id="", batcher=None, db=db)
-    assert db.upsert_chunks_with_embeddings.call_count == 1
-    assert cat.calls == []
+    assert run(tmp_path, monkeypatch, doc_id="", batcher=None, db=db) == 0
+    assert db.mock_calls == [] and cat.calls == []
 
 
 # ── which exception ended the write ──────────────────────────────────────────
