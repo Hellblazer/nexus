@@ -1013,24 +1013,39 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def begin_index_run(
         self, doc_id: str, content_hash: str, run_id: str, collection: str,
-    ) -> None:
+        *, snapshot_manifest: bool = False,
+    ) -> dict | None:
         """POST /v1/catalog/index-run/begin — stamp ``index_state='indexing'``
         BEFORE the first chunk upsert (memo §3.5 T0: the fence is committed
         before the first byte of content and cleared only after the last).
 
         Idempotent; NOT a lock (nexus-lcmbp non-goal, memo §5) — a retry or a
         second concurrent run simply re-stamps the same shape.
+
+        *snapshot_manifest* (RDR-223, nexus-z0o2p.10; additive engine field): also return the
+        document's PRE-RUN manifest, read in the same transaction as the stamp:
+        ``{"ok": True, "prior_chashes": [<distinct chash, position order>], "prior_count":
+        <manifest ROW count>}``. A multi-batch writer computes its deferred sweep from it. Without
+        the flag the response is ``{"ok": True}`` and no manifest is read.
+
+        Returns the response dict, or ``None`` on a 404 (an engine with no fence route, logged at
+        WARNING). Existing callers ignore the value; a caller that needs the fence or the snapshot
+        must treat ``None`` as an error.
         """
+        body: dict = {
+            "doc_id": doc_id, "content_hash": content_hash,
+            "run_id": run_id, "collection": collection,
+        }
+        if snapshot_manifest:
+            body["snapshot_manifest"] = True
         try:
-            self._post("/index-run/begin", {
-                "doc_id": doc_id, "content_hash": content_hash,
-                "run_id": run_id, "collection": collection,
-            })
+            result = self._post("/index-run/begin", body)
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 _log.warning("index_run_begin_engine_floor", doc_id=doc_id)
-                return
+                return None
             raise
+        return result if isinstance(result, dict) else {}
 
     def complete_index_run(
         self, doc_id: str, content_hash: str, chunk_count: int,
@@ -3619,6 +3634,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             )
         for d, lst in sweeps.items():
             _check_sweep_chashes(f"append_manifest_many sweep_chashes[{d!r}]", lst)
+        sweep_requested = any(sweeps.values())
         _check_supplied_vectors("append_manifest_many", chunks, embedding_model)
         body_docs: list[dict] = []
         for d, rows in docs:
@@ -3653,6 +3669,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 f"append_many ack mismatch for {collection!r}: sent {len(chunks)} chunks but "
                 "the response carried no 'chunks_written' key — refusing to treat the chunk "
                 "content as durably written"
+            )
+        if sweep_requested and "swept" not in out:
+            raise RuntimeError(
+                f"append_many ack mismatch for {collection!r}: sent sweep_chashes but the "
+                "response carried no 'swept' key; the engine did not run the deferred sweeps"
             )
         _echo_supplied_vectors("append_manifest_many", chunks, out)
         return out

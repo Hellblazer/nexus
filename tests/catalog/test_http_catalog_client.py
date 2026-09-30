@@ -204,6 +204,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     last_begin_index_run_many_body: dict[str, Any] = {}
     last_complete_index_run_body: dict[str, Any] = {}
     last_fail_index_run_body: dict[str, Any] = {}
+    #: RDR-223 (nexus-z0o2p.10): what /index-run/begin's snapshot_manifest answers.
+    begin_index_run_prior: tuple[list[str], int] = ([], 0)
     #: RDR-223 P2.0 (nexus-z0o2p.10): last bodies POSTed to /manifest/append and
     #: /manifest/append_many.
     last_manifest_append_body: dict[str, Any] = {}
@@ -240,6 +242,7 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.last_fail_index_run_body = {}
         cls.last_manifest_append_body = {}
         cls.last_manifest_append_many_body = {}
+        cls.begin_index_run_prior = ([], 0)
         cls.last_owner_deactivate_body = {}
         cls.last_owner_reactivate_body = {}
         cls.last_owners_by_type_body = {}
@@ -779,7 +782,12 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/index-run/begin":
             # nexus-5xn3k.3: mirrors CatalogHandler.handleIndexRunBegin.
             FakeCatalogHandler.last_begin_index_run_body = body
-            self._send_json({"ok": True})
+            resp = {"ok": True}
+            if body.get("snapshot_manifest"):
+                # Mirrors CatalogHandler.handleIndexRunBegin's opt-in pre-run snapshot.
+                chashes, count = FakeCatalogHandler.begin_index_run_prior
+                resp.update(prior_chashes=list(chashes), prior_count=count)
+            self._send_json(resp)
         elif op == "/index-run/begin-many":
             # nexus-vw594 F1: mirrors CatalogHandler.handleIndexRunBeginMany's
             # {docs, failed_doc_ids} success shape.
@@ -1027,6 +1035,12 @@ class TestRdr223AppendRoundTrip:
         assert sent["docs"][1]["sweep_chashes"] == [self._A]
         assert [r["doc_id"] for r in out["results"]] == ["1.1.1", "1.1.2"]
         assert out["chunks_written"] == 2 and out["failed_doc_ids"] == []
+
+    def test_begin_index_run_snapshot_round_trips(self, client: HttpCatalogClient) -> None:
+        FakeCatalogHandler.begin_index_run_prior = ([self._A, self._B], 3)
+        out = client.begin_index_run("1.1.1", "h", "run-1", "docs__c__m__v1", snapshot_manifest=True)
+        assert FakeCatalogHandler.last_begin_index_run_body["snapshot_manifest"] is True
+        assert out == {"ok": True, "prior_chashes": [self._A, self._B], "prior_count": 3}
 
     def test_supplied_vectors_round_trip_with_the_acknowledgement(
         self, client: HttpCatalogClient,

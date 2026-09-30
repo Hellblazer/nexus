@@ -364,3 +364,118 @@ def test_chunk_cap_env_override_above_300_never_puts_more_than_300_chunks_in_a_r
     assert len(_manifest(doc)) == 650 and res.completed
     assert _present(_COLLECTION, _chashes(big)) == set(_chashes(big))
     assert _index_state(doc) == "complete"
+
+
+# ── the completion count is manifest ROWS ─────────────────────────────────────
+
+
+def test_a_chash_repeated_across_and_within_batches_is_stamped_complete(tmp_path) -> None:
+    """The same text at several positions is one chunk and several manifest rows. The engine's
+    completion check compares the claimed count with count(*) over the rows, so a writer that
+    claimed the distinct chash count would be refused with a 409 after everything had landed."""
+    cat = _writer_proxy()
+    doc = _register(tmp_path, "repeat-chash")
+    a, b, c = _texts("repeat-chash", 0, 3)
+
+    def row(text: str, pos: int) -> dict:
+        return {"chash": _chash(text), "position": pos}
+
+    def chunk(text: str) -> dict:
+        return {"chash": _chash(text), "text": text, "metadata": {}}
+
+    # Batch 1 repeats `a` within itself (positions 0 and 2); batch 2 repeats `b` from batch 1.
+    batch1 = ([row(a, 0), row(b, 1), row(a, 2)], [chunk(a), chunk(b)])
+    batch2 = ([row(b, 3), row(c, 4)], [chunk(c)])
+    with _traffic() as log:
+        res = write_document(cat, [batch1, batch2], doc_id=doc, collection=_COLLECTION,
+                             content_hash="hash-rep")
+    stamp = [body for path, body in log if path == "/index-run/complete"][0]
+    assert stamp["chunk_count"] == 5                       # rows, not the 3 distinct chashes
+    assert res.completed and res.distinct_chashes == 3 and res.manifest_rows == 5
+    assert [ch for _, ch in _manifest(doc)] == [_chash(t) for t in (a, b, a, b, c)]
+    assert _index_state(doc) == "complete"
+
+    # And within ONE request (the stamp rides the write_many).
+    single = _register(tmp_path, "repeat-chash-single")
+    res1 = write_document(cat, [([row(a, 0), row(a, 1)], [chunk(a)])], doc_id=single,
+                          collection=_COLLECTION, content_hash="hash-rep1")
+    assert res1.completed and _index_state(single) == "complete"
+
+
+# ── the pre-run snapshot survives a resent first batch ────────────────────────
+
+
+@contextmanager
+def _resend_first_write_many() -> Iterator[None]:
+    """The transport resends the first write_many: the request is committed twice and the caller
+    sees the SECOND response (the first was lost), which read the manifest the first already
+    replaced."""
+    orig = HttpCatalogClient._post
+    state = {"n": 0}
+
+    def _post(self, path, body=None, **kw):
+        if path == "/manifest/write_many":
+            state["n"] += 1
+            if state["n"] == 1:
+                orig(self, path, body, **kw)          # committed; its response is "lost"
+        return orig(self, path, body, **kw)
+
+    HttpCatalogClient._post = _post  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        HttpCatalogClient._post = orig  # type: ignore[method-assign]
+
+
+def test_a_resent_first_batch_still_sweeps_the_previous_tail_on_the_last_append(tmp_path) -> None:
+    cat = _writer_proxy()
+    doc = _register(tmp_path, "resend")
+    old = _batches("resend-old", [3, 3])
+    write_document(cat, old, doc_id=doc, collection=_COLLECTION, content_hash="hash-old")
+    old_c = _chashes(old)
+
+    new = _batches("resend-new", [2, 2, 2])
+    with _resend_first_write_many():
+        res = write_document(cat, new, doc_id=doc, collection=_COLLECTION,
+                             content_hash="hash-new")
+    # The resend's own dropped_chashes is empty (it read the replaced manifest); the sweep came
+    # from the begin snapshot, so the whole previous version is gone.
+    assert res.dropped_count == 6 and res.swept == 6
+    assert _present(_COLLECTION, old_c) == set()
+    assert _present(_COLLECTION, _chashes(new)) == set(_chashes(new))
+    assert _index_state(doc) == "complete"
+
+
+# ── a re-index that yields no chunks ──────────────────────────────────────────
+
+
+def test_finish_with_no_batch_clears_the_old_manifest_and_stamps_complete(tmp_path) -> None:
+    cat = _writer_proxy()
+    doc = _register(tmp_path, "empty-reindex")
+    old = _batches("empty-old", [3])
+    write_document(cat, old, doc_id=doc, collection=_COLLECTION, content_hash="hash-old")
+
+    with MultiBatchDocumentWriter(cat, doc_id=doc, collection=_COLLECTION,
+                                  content_hash="hash-empty") as w:
+        res = w.finish()
+    assert _manifest(doc) == []
+    assert res.completed and res.dropped_count == 3
+    assert _present(_COLLECTION, _chashes(old)) == set()
+    assert _index_state(doc) == "complete"
+
+
+def test_the_context_manager_marks_the_run_failed_when_the_caller_raises(tmp_path) -> None:
+    cat = _writer_proxy()
+    doc = _register(tmp_path, "ctx-abort")
+    old = _batches("ctx-old", [2])
+    write_document(cat, old, doc_id=doc, collection=_COLLECTION, content_hash="hash-old")
+    new = _batches("ctx-new", [2, 2])
+    with pytest.raises(RuntimeError, match="caller failed"):
+        with MultiBatchDocumentWriter(cat, doc_id=doc, collection=_COLLECTION,
+                                      content_hash="hash-new") as w:
+            for rows, chunks in new:
+                w.add_batch(rows, chunks)
+            raise RuntimeError("caller failed")
+    # Batch 1 was sent (the second add_batch showed it was not the last); the run is failed, not
+    # left "indexing" and not the old "complete".
+    assert _index_state(doc) == "failed"

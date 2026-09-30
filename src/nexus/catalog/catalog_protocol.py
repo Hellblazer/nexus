@@ -287,7 +287,7 @@ class CatalogWriter(Protocol):
     def resync_chunk_count_cache(self, doc_id) -> object:  # canonical
         ...
 
-    def begin_index_run(self, doc_id, content_hash, run_id, collection) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
+    def begin_index_run(self, doc_id, content_hash, run_id, collection, *, snapshot_manifest=...) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3; RDR-223 nexus-z0o2p.10: snapshot_manifest returns the pre-run manifest)
         ...
 
     def begin_index_run_many(self, docs, collection) -> object:  # canonical (RUNFENCE, nexus-vw594 F1)

@@ -336,6 +336,12 @@ class TestAppendManifestMany:
                 [("1.1.1", [])], sweep_chashes={"9.9.9": [_A]}, collection=_COLLECTION)
         assert rec.calls == []
 
+    def test_a_response_without_swept_to_a_sweep_request_is_an_ack_mismatch(self, monkeypatch) -> None:
+        c, _ = _client(monkeypatch, {"docs": 1, "results": [], "failed_doc_ids": []})
+        with pytest.raises(RuntimeError, match="swept"):
+            c.append_manifest_many(
+                [("1.1.1", [_row(_A, 0)])], sweep_chashes={"1.1.1": [_B]}, collection=_COLLECTION)
+
     def test_old_engine_404_is_a_typed_refusal_not_a_fallback(self, monkeypatch) -> None:
         """No per-document append fallback: it would orphan chunks, which is what the route exists
         to prevent."""
@@ -347,6 +353,31 @@ class TestAppendManifestMany:
         with pytest.raises(ManifestAppendManyUnsupportedError):
             c.append_manifest_many([("1.1.1", [_row(_A, 0)])], collection=_COLLECTION)
         assert len(rec.calls) == 1
+
+
+# ── begin_index_run: the pre-run snapshot ─────────────────────────────────────
+
+
+class TestBeginIndexRunSnapshot:
+    def test_plain_begin_body_is_unchanged_and_returns_the_response(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch, {"ok": True})
+        out = c.begin_index_run("1.1.1", "h", "run", _COLLECTION)
+        assert rec.calls[0][0] == "/index-run/begin"
+        assert rec.calls[0][1] == {
+            "doc_id": "1.1.1", "content_hash": "h", "run_id": "run", "collection": _COLLECTION}
+        assert out == {"ok": True}
+
+    def test_snapshot_flag_rides_the_body_and_the_fields_come_back(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch, {"ok": True, "prior_chashes": [_A, _B], "prior_count": 3})
+        out = c.begin_index_run("1.1.1", "h", "run", _COLLECTION, snapshot_manifest=True)
+        assert rec.calls[0][1]["snapshot_manifest"] is True
+        assert out["prior_chashes"] == [_A, _B] and out["prior_count"] == 3
+
+    def test_a_404_returns_none(self, monkeypatch) -> None:
+        req = httpx.Request("POST", "http://x/v1/catalog/index-run/begin")
+        err = httpx.HTTPStatusError("404", request=req, response=httpx.Response(404, request=req))
+        c, _ = _client(monkeypatch, err)
+        assert c.begin_index_run("1.1.1", "h", "run", _COLLECTION) is None
 
 
 # ── the whitelist, the protocol, the gateway classifier ───────────────────────

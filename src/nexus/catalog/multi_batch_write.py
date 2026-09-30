@@ -8,33 +8,42 @@ client leaves a document that is whole up to some batch, never chunks without an
 
 The protocol (RDR-223 Technical Design 1):
 
-* **One batch**: one ``write_manifest_many`` carrying the chunks, sweep on, and the completion
-  stamp riding the same call (``write_many`` stamps the document complete against that request's
-  own row count).
-* **Several batches**:
+* **One request** (one batch that fits the chunk cap): one ``write_manifest_many`` carrying the
+  chunks, sweep on, and the completion stamp riding the same call (``write_many`` stamps the
+  document complete against that request's own row count). The fence is optional here.
+* **Several requests** (a second batch, or one batch larger than the chunk cap). ``content_hash``
+  is REQUIRED: the fence is what keeps a stale ``complete`` stamp off a half-replaced manifest.
 
-  1. ``begin_index_run`` (when a ``content_hash`` is given): the fence. ``write_manifest_many``
-     never clears a prior ``complete``, so without it a rerun that dies partway would leave the
-     old stamp on a half-replaced document and the next run would skip it.
+  1. ``begin_index_run(snapshot_manifest=True)``: the fence, and the document's PRE-RUN manifest
+     (distinct chashes in position order, and the row count), read by the engine in the same
+     transaction as the stamp. ``write_manifest_many`` never clears a prior ``complete``, so
+     without the fence a rerun that dies partway would leave the old stamp on a half-replaced
+     document and the next run would skip it. The snapshot, not the first batch's response, is
+     the source of the deferred sweep: a first batch whose response is lost and resent reads the
+     manifest its first attempt already replaced and would report nothing dropped.
   2. Batch 1: ``write_manifest_many`` with the chunks, sweep OFF and NO ``complete``. A sweep on a
-     first batch would delete the previous run's chunks before the later batches land. Its
-     ``dropped_chashes`` (the previous manifest minus batch 1) are kept.
+     first batch would delete the previous run's chunks before the later batches land.
   3. Batches 2..N: ``append_manifest_chunks`` with the chunks inline: chunk rows and owner rows in
      one transaction.
-  4. The LAST append carries the kept list as ``sweep_chashes``, minus every chash this run wrote
-     (so an unchanged re-index sends no sweep at all), at most 300 per request; a longer list
-     continues in trailing sweep-only appends. Nothing is ever swept before the last data batch
-     has landed.
-  5. ``complete_index_run(doc_id, content_hash, distinct chash count)``, after the last append and
-     its sweeps. Batch 1 carried no ``complete``, so a client killed after batch 1 leaves a
-     document that is not stamped and is replaced by the next run.
+  4. The LAST append carries the drop list (snapshot chashes minus every chash this run wrote, so
+     an unchanged re-index sends no sweep at all) as ``sweep_chashes``, at most 300 per request; a
+     longer list continues in trailing sweep-only appends. Nothing is ever swept before the last
+     data batch has landed.
+  5. ``complete_index_run(doc_id, content_hash, manifest ROW count)``, after the last append and
+     its sweeps. The engine compares the count with ``count(*)`` over the manifest rows, so a
+     chash used at two positions counts twice; positions are unique per run (the writer refuses a
+     repeat), so the row count is the number of distinct positions written. Batch 1 carried no
+     ``complete``, so a client killed after batch 1 leaves a document that is not stamped and is
+     replaced by the next run.
 
 A crash at any point leaves every chunk this run wrote with an owner row. What a crash before the
 last append leaves is the previous run's dropped chunks, ownerless and hidden until the RDR-192
 reaper removes them; that is the accepted cost of not sweeping early.
 
 Batches are buffered one deep: whether a batch is the first of several, the only one, or the last
-is not known until the next batch arrives or :meth:`finish` is called.
+is not known until the next batch arrives or :meth:`finish` is called. ``finish()`` with no batch
+at all writes an EMPTY manifest (``write_manifest_many`` with no rows, sweep on, completion count 0
+when fenced): a re-index that yields no chunks must still clear the old manifest.
 
 Every combined-write request is clamped to ``min(per_collection_chunk_cap(collection), 300)``
 chunks, whatever ``NX_ONNX_LOCAL_UPSERT_CHUNK_CAP`` says: ``append_many`` caps chunks at 300 on the
@@ -46,13 +55,22 @@ this run already carried.
 Only write ops are used, so ``cat`` may be the ``get_catalog_writer()`` proxy (the closed
 ``CATALOG_WRITE_OPS`` whitelist); the writer never reads the catalog. A request that fails
 propagates its exception unchanged (a killed process is the model) and poisons the writer;
-:meth:`abort` marks the fence failed for a caller that survives the failure.
+:meth:`abort` marks the fence failed for a caller that survives the failure, and the writer is a
+context manager that does so on an exception.
+
+Idempotent requests (the fence begin, every append and sweep-only append, the completion stamp) are
+retried a bounded number of times on connectivity errors only (``nexus.retry``'s manifest-write
+retry); a ``CombinedWriteEmbedTimeoutError`` is never retried (a retry would start an uncancelled
+duplicate embed), and neither is ``write_manifest_many``.
+
+ONE WRITER PER DOCUMENT AT A TIME, and a writer is not thread-safe: there is no lock, on the
+document or in the writer. Two writers on one document interleave their manifests.
 """
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Any, Iterable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 
 import structlog
 
@@ -67,15 +85,15 @@ class RepeatedPositionError(ValueError):
     """A position was written twice in one run.
 
     A revisited position with a different chash drops the old chash from the manifest outside
-    ``sweep_chashes`` (the drop list is computed against the previous manifest, not this run's
-    earlier batches), so the writer refuses the batch before sending it.
+    ``sweep_chashes`` (the drop list is computed from the pre-run manifest, not this run's earlier
+    batches), so the writer refuses the batch before sending it.
     """
 
 
 class BatchWriteFailedError(NexusError):
     """A batch of a multi-batch write did not land, or the engine's answer cannot be trusted.
 
-    Attributes: ``doc_id``, ``batch`` (1-based index of the batch or step that failed).
+    Attributes: ``doc_id``, ``batch`` (1-based index of the request or step that failed).
     """
 
     def __init__(self, *, doc_id: str, batch: int, reason: str) -> None:
@@ -90,9 +108,16 @@ class DocumentWriteResult:
     """What one :meth:`MultiBatchDocumentWriter.finish` did.
 
     ``batches`` counts data requests (a batch larger than the chunk cap is several); ``requests``
-    adds the sweep-only appends (not the fence or the completion stamp). ``distinct_chashes`` is the post-dedup chash count the completion stamp claims.
-    ``sweep_deferred_unknown`` is True when the engine could not read the previous manifest, so
-    the deferred sweep was omitted and the previous run's chunks are left to the reaper.
+    adds the sweep-only appends (not the fence or the completion stamp). ``distinct_chashes`` is
+    the number of distinct chashes the run wrote; ``manifest_rows`` the row count the completion
+    stamp claims.
+
+    ``dropped`` and ``dropped_count`` are the chashes the write dropped from the document's
+    previous manifest, and their number. One request: the ``write_many`` response's own
+    ``dropped_chashes`` / ``dropped_count`` (the list the sweep ran on). Several requests: the
+    swept set, i.e. the pre-run snapshot minus what the run wrote. ``dropped_unknown`` is True
+    (and both are ``None``) when the engine could not read the previous manifest of a one-request
+    write, so the drop list does not exist.
     """
 
     batches: int = 0
@@ -104,7 +129,10 @@ class DocumentWriteResult:
     swept: int = 0
     sweep_skipped: int = 0
     distinct_chashes: int = 0
-    sweep_deferred_unknown: bool = False
+    manifest_rows: int = 0
+    dropped: list[str] | None = None
+    dropped_count: int | None = None
+    dropped_unknown: bool = False
     completed: bool = False
 
 
@@ -115,7 +143,8 @@ class MultiBatchDocumentWriter:
     """Write one document as N batches with the RDR-223 protocol. See the module docstring.
 
     *cat* is a catalog writer (``get_catalog_writer()`` or ``HttpCatalogClient``). *content_hash*
-    turns on the index-run fence and the completion stamp; without it the caller stamps (or not).
+    turns on the index-run fence and the completion stamp; it is required as soon as the document
+    takes more than one request. Without it the caller stamps (or not).
     """
 
     def __init__(
@@ -150,24 +179,40 @@ class MultiBatchDocumentWriter:
         self._force_re_embed = force_re_embed
         self._pending: tuple[list[dict], list[dict]] | None = None
         self._carried: set[str] = set()      # chashes whose chunk payload an earlier request carried
-        self._sent = 0                       # batches sent so far
+        self._sent = 0                       # data requests sent so far
         self._positions: set[int] = set()
         self._run_chashes: dict[str, None] = {}      # distinct, insertion-ordered
-        self._dropped: list[str] = []
-        self._dropped_unknown = False
+        self._prior: list[str] | None = None         # the pre-run manifest's distinct chashes
         self._fenced = False
         self._failed = False
         self._finished = False
         self._result = DocumentWriteResult()
+
+    def __enter__(self) -> "MultiBatchDocumentWriter":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc_type is not None:
+            self.abort(f"{exc_type.__name__}: {exc}")
 
     # ── public ────────────────────────────────────────────────────────────────
 
     def add_batch(self, rows: Sequence[dict], chunks: Sequence[dict]) -> None:
         """Add the next batch: *rows* are manifest rows (``chash`` and an explicit integer
         ``position``), *chunks* the ``{chash, text, metadata[, embedding]}`` payload those rows
-        reference. Sends the previously buffered batch (it is now known not to be the last)."""
+        reference. Sends the previously buffered request (it is now known not to be the last).
+
+        Raises ``ValueError`` BEFORE anything is sent when the document would take a second
+        request and no ``content_hash`` was given."""
         self._require_usable()
         rows_l, by_chash = self._validate(rows, chunks)
+        parts = -(-len(rows_l) // self._cap)
+        if self._content_hash is None and (self._pending is not None or self._sent > 0 or parts > 1):
+            raise ValueError(
+                f"MultiBatchDocumentWriter.add_batch: {self._doc_id!r} would take more than one "
+                "request (a second batch, or a batch over the chunk cap of "
+                f"{self._cap}) and no 'content_hash' was given: the index-run fence is what keeps "
+                "a stale 'complete' stamp off a half-replaced manifest")
         self._positions.update(r["position"] for r in rows_l)
         self._run_chashes.update(dict.fromkeys(r["chash"] for r in rows_l))
         for start in range(0, len(rows_l), self._cap):
@@ -183,10 +228,11 @@ class MultiBatchDocumentWriter:
             self._pending = (part, payload)
 
     def finish(self) -> DocumentWriteResult:
-        """Send the last batch, the deferred sweep and the completion stamp."""
+        """Send the last request, the deferred sweep and the completion stamp. With no batch at
+        all: an empty manifest (sweep on, completion count 0 when fenced)."""
         self._require_usable()
         if self._pending is None:
-            raise ValueError("MultiBatchDocumentWriter.finish: no batch was added")
+            self._pending = ([], [])
         try:
             self._send_pending(last=True)
         except BaseException:
@@ -194,6 +240,7 @@ class MultiBatchDocumentWriter:
             raise
         self._finished = True
         self._result.distinct_chashes = len(self._run_chashes)
+        self._result.manifest_rows = len(self._positions)
         return self._result
 
     def abort(self, error: str) -> None:
@@ -248,11 +295,35 @@ class MultiBatchDocumentWriter:
 
     # ── requests ──────────────────────────────────────────────────────────────
 
-    def _begin_fence(self) -> None:
+    def _retrying(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """Call an IDEMPOTENT request with nexus.retry's bounded connectivity retry. A
+        ``CombinedWriteEmbedTimeoutError`` has no transport error in its chain, so it is not
+        retried (a retry would start an uncancelled duplicate embed)."""
+        from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
+        return _manifest_write_with_retry(fn, *args, **kwargs)
+
+    def _fail(self, batch: int, reason: str) -> BatchWriteFailedError:
+        return BatchWriteFailedError(doc_id=self._doc_id, batch=batch, reason=reason)
+
+    def _begin_fence(self, *, snapshot: bool) -> None:
         if self._content_hash is None or self._fenced:
             return
-        self._cat.begin_index_run(
-            self._doc_id, self._content_hash, self._run_id, self._collection)
+        resp = self._retrying(
+            self._cat.begin_index_run, self._doc_id, self._content_hash, self._run_id,
+            self._collection, **({"snapshot_manifest": True} if snapshot else {}))
+        if resp is None:
+            raise self._fail(1, "the engine has no index-run fence route (begin_index_run "
+                                "answered 404); a write without the fence is not safe")
+        if snapshot:
+            prior = resp.get("prior_chashes")
+            count = resp.get("prior_count")
+            if (not isinstance(prior, list) or isinstance(count, bool)
+                    or not isinstance(count, int) or count < len(prior)
+                    or (prior and count == 0)):
+                raise self._fail(1, "begin_index_run(snapshot_manifest=True) returned no usable "
+                                    f"pre-run manifest (prior_chashes={type(prior).__name__}, "
+                                    f"prior_count={count!r})")
+            self._prior = [str(c) for c in prior]
         self._fenced = True
 
     def _send_pending(self, *, last: bool) -> None:
@@ -261,11 +332,11 @@ class MultiBatchDocumentWriter:
         n = self._sent + 1
         try:
             if n == 1:
-                self._begin_fence()
-            if n == 1 and last:
-                self._send_only_batch(rows, chunks)
-            elif n == 1:
-                self._send_first_of_many(rows, chunks)
+                self._begin_fence(snapshot=not last)
+                if last:
+                    self._send_only_request(rows, chunks)
+                else:
+                    self._send_first_of_many(rows, chunks)
             else:
                 self._send_append(n, rows, chunks, last=last)
         except BaseException:
@@ -282,6 +353,21 @@ class MultiBatchDocumentWriter:
         r.embed_skipped += int(resp.get("embed_skipped") or 0)
         r.chunks_deduped += int(resp.get("chunks_deduped") or 0)
 
+    def _check_unreferenced(self, resp: dict, batch: int, *, required: bool) -> None:
+        """The engine counts payload chunks no row of the request referenced and drops them
+        (neither embedded nor inserted). The writer sends only referenced chunks, so any count is
+        content that silently did not land. ``append`` and ``append_many`` always report it; a
+        response without it there is an engine that does not know the check, not a zero."""
+        if "chunks_unreferenced" not in resp:
+            if required:
+                raise self._fail(batch, "the append response carried no 'chunks_unreferenced'; "
+                                        "the engine cannot say whether every chunk was written")
+            return
+        n = int(resp["chunks_unreferenced"] or 0)
+        if n:
+            raise self._fail(
+                batch, f"the engine dropped {n} chunk(s) as referenced by no row of the request")
+
     def _write_many(
         self, rows: list[dict], chunks: list[dict], *, sweep: bool, complete: dict | None,
     ) -> dict:
@@ -291,24 +377,12 @@ class MultiBatchDocumentWriter:
             embedding_model=self._embedding_model)
         resp = resp if isinstance(resp, dict) else {}
         if self._doc_id in (resp.get("failed_doc_ids") or ()):
-            raise BatchWriteFailedError(
-                doc_id=self._doc_id, batch=self._sent + 1,
-                reason="the engine reported the document in failed_doc_ids")
+            raise self._fail(self._sent + 1, "the engine reported the document in failed_doc_ids")
         self._account(resp)
-        self._check_unreferenced(resp, self._sent + 1)
+        self._check_unreferenced(resp, self._sent + 1, required=False)
         return resp
 
-    def _check_unreferenced(self, resp: dict, batch: int) -> None:
-        """The engine counts payload chunks no row of the request referenced and drops them
-        (neither embedded nor inserted). The writer sends only referenced chunks, so any count is
-        content that silently did not land."""
-        n = int(resp.get("chunks_unreferenced") or 0)
-        if n:
-            raise BatchWriteFailedError(
-                doc_id=self._doc_id, batch=batch,
-                reason=f"the engine dropped {n} chunk(s) as referenced by no row of the request")
-
-    def _send_only_batch(self, rows: list[dict], chunks: list[dict]) -> None:
+    def _send_only_request(self, rows: list[dict], chunks: list[dict]) -> None:
         complete = {self._doc_id: self._content_hash} if self._content_hash else None
         resp = self._write_many(rows, chunks, sweep=True, complete=complete)
         for refused in resp.get("complete_refused") or ():
@@ -322,47 +396,33 @@ class MultiBatchDocumentWriter:
         self._result.swept += int(resp.get("swept") or 0)
         self._result.sweep_skipped += int(resp.get("sweep_skipped") or 0)
         self._result.completed = complete is not None
+        # The drop list the sweep ran on, for callers that report it (nexus-wbfpw.25).
+        if self._doc_id in (resp.get("dropped_unknown") or ()):
+            self._result.dropped_unknown = True
+            return
+        dropped_map, counts = resp.get("dropped_chashes"), resp.get("dropped_count")
+        if (not isinstance(dropped_map, dict) or self._doc_id not in dropped_map
+                or not isinstance(counts, dict) or self._doc_id not in counts):
+            raise self._fail(1, "the write_many response carried neither dropped_chashes and "
+                                "dropped_count entries nor a dropped_unknown marker for the document")
+        dropped = list(dropped_map[self._doc_id] or ())
+        if int(counts[self._doc_id]) != len(dropped):
+            raise self._fail(1, f"dropped_count says {counts[self._doc_id]} but dropped_chashes "
+                                f"lists {len(dropped)}; the list is truncated or corrupt")
+        self._result.dropped = dropped
+        self._result.dropped_count = len(dropped)
 
     def _send_first_of_many(self, rows: list[dict], chunks: list[dict]) -> None:
-        resp = self._write_many(rows, chunks, sweep=False, complete=None)
-        unknown = self._doc_id in (resp.get("dropped_unknown") or ())
-        dropped_map = resp.get("dropped_chashes")
-        if unknown:
-            self._dropped_unknown = True
-            self._result.sweep_deferred_unknown = True
-            _log.warning(
-                "multi_batch_dropped_unknown_sweep_omitted",
-                doc_id=self._doc_id, collection=self._collection)
-            return
-        if not isinstance(dropped_map, dict) or self._doc_id not in dropped_map:
-            raise BatchWriteFailedError(
-                doc_id=self._doc_id, batch=1,
-                reason="the write_many response carried neither a 'dropped_chashes' entry nor a "
-                       "'dropped_unknown' marker for the document; the drop list cannot be "
-                       "guessed (empty would strand the previous run's chunks, sweeping now "
-                       "would delete them under the later batches)")
-        dropped = list(dropped_map[self._doc_id] or ())
-        counts = resp.get("dropped_count")
-        if not isinstance(counts, dict) or self._doc_id not in counts:
-            raise BatchWriteFailedError(
-                doc_id=self._doc_id, batch=1,
-                reason="the write_many response carried no 'dropped_count' entry for the document; "
-                       "without it a truncated 'dropped_chashes' list cannot be told from a "
-                       "complete one")
-        if int(counts[self._doc_id]) != len(dropped):
-            raise BatchWriteFailedError(
-                doc_id=self._doc_id, batch=1,
-                reason=f"dropped_count says {counts[self._doc_id]} but dropped_chashes lists "
-                       f"{len(dropped)}; the list is truncated or corrupt")
-        self._dropped = dropped
+        # Sweep OFF and no `complete`. The response's dropped_chashes is NOT the source of the
+        # deferred sweep (the begin snapshot is): a resent first batch reads the manifest its
+        # first attempt already replaced.
+        self._write_many(rows, chunks, sweep=False, complete=None)
 
     def _sweep_list(self) -> list[str]:
-        """The kept drop list minus every chash this run wrote, de-duplicated, in order."""
-        if self._dropped_unknown:
-            return []
+        """The pre-run snapshot minus every chash this run wrote, de-duplicated, in order."""
         seen: set[str] = set()
         out: list[str] = []
-        for c in self._dropped:
+        for c in self._prior or ():
             if c in self._run_chashes or c in seen:
                 continue
             seen.add(c)
@@ -373,30 +433,36 @@ class MultiBatchDocumentWriter:
         cap = MANIFEST_APPEND_SWEEP_CHASHES_CAP
         sweep = self._sweep_list() if last else []
         first, rest = sweep[:cap], sweep[cap:]
-        resp = self._cat.append_manifest_chunks(
-            self._doc_id, rows, collection=self._collection, chunk_payload=chunks or None,
-            sweep_chashes=first or None, force_re_embed=self._force_re_embed,
-            embedding_model=self._embedding_model)
+        resp = self._retrying(
+            self._cat.append_manifest_chunks, self._doc_id, rows, collection=self._collection,
+            chunk_payload=chunks or None, sweep_chashes=first or None,
+            force_re_embed=self._force_re_embed, embedding_model=self._embedding_model)
         resp = resp if isinstance(resp, dict) else {}
         self._account(resp)
-        self._check_unreferenced(resp, n)
+        self._check_unreferenced(resp, n, required=bool(chunks))
         self._result.swept += int(resp.get("swept") or 0)
         self._result.sweep_skipped += int(resp.get("sweep_skipped") or 0)
         if not last:
             return
         for i in range(0, len(rest), cap):
-            part = rest[i:i + cap]
-            sresp = self._cat.append_manifest_chunks(
-                self._doc_id, [], collection=self._collection, sweep_chashes=part)
+            sresp = self._retrying(
+                self._cat.append_manifest_chunks, self._doc_id, [], collection=self._collection,
+                sweep_chashes=rest[i:i + cap])
             sresp = sresp if isinstance(sresp, dict) else {}
             self._result.requests += 1
             self._result.swept += int(sresp.get("swept") or 0)
             self._result.sweep_skipped += int(sresp.get("sweep_skipped") or 0)
+        self._result.dropped = sweep
+        self._result.dropped_count = len(sweep)
         if self._content_hash is not None:
-            # The distinct, post-dedup chash count of the manifest this run wrote, which is what
-            # the engine compares against the stored manifest (a mismatch is a 409).
-            self._cat.complete_index_run(
-                self._doc_id, self._content_hash, len(self._run_chashes))
+            # The engine compares this with count(*) over the manifest ROWS. Positions are unique
+            # in a run, so that is the number of positions written, not the distinct chashes.
+            done = self._retrying(
+                self._cat.complete_index_run, self._doc_id, self._content_hash,
+                len(self._positions))
+            if done is None:
+                raise self._fail(n, "complete_index_run answered 404: the engine has no "
+                                    "index-run fence route, so the document was NOT stamped")
             self._result.completed = True
 
 
@@ -410,17 +476,15 @@ def write_document(
     run_id: str | None = None,
     embedding_model: str | None = None,
     force_re_embed: bool = False,
+    chunk_cap: int | None = None,
 ) -> DocumentWriteResult:
     """Write *batches* (``(rows, chunks)`` pairs) as one document; see
     :class:`MultiBatchDocumentWriter`. On a failure the fence is marked failed and the exception
     propagates."""
-    w = MultiBatchDocumentWriter(
+    with MultiBatchDocumentWriter(
         cat, doc_id=doc_id, collection=collection, content_hash=content_hash, run_id=run_id,
-        embedding_model=embedding_model, force_re_embed=force_re_embed)
-    try:
+        embedding_model=embedding_model, force_re_embed=force_re_embed, chunk_cap=chunk_cap,
+    ) as w:
         for rows, chunks in batches:
             w.add_batch(rows, chunks)
         return w.finish()
-    except BaseException as exc:
-        w.abort(f"{type(exc).__name__}: {exc}")
-        raise
