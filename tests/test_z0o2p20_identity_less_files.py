@@ -7,9 +7,10 @@ the batch flush wrote those chunks anyway, through the legacy upsert, and
 
 * Stage 1: WHY a file ends up with no document. ``_catalog_hook`` reports a
   cause per unregistered file through its ``unregistered`` out-parameter; each
-  shape the bead named (main checkout, worktree, warm re-run, batch-priority
-  fairness yield, register failure, catalog hook failure) is driven against the
-  real engine catalog.
+  shape the bead named (main checkout, worktree, warm re-run, register failure,
+  catalog hook failure) is driven against the real engine catalog. The
+  batch-priority fairness yield is NOT among them: the service catalog writer's
+  ``is_interactive_write_pending`` is always False, so no production run yields.
 * Stage 1: the flush event names the files, their chunk counts and causes.
 * Stage 2: the flush writes no chunk of an identity-less file.
 * Stage 3: the run refuses such a file before chunking it.
@@ -113,44 +114,6 @@ class TestUnregisteredCauses:
         ids, unregistered = _hook(main_repo, [polluted, good], repo_hash="z0o2p2002")
         assert good in ids
         assert unregistered == {polluted: "ephemeral:worktree_or_tempdir"}
-
-    def test_pass1_fairness_yield_names_the_unresolved_tail(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("NX_WRITE_PRIORITY", "batch")
-        repo = tmp_path / "main"
-        files = [_write(repo, f"u{i}.py", f"code {i}") for i in range(3)]
-        _hook(repo, files, head="v1")
-        seen = {"n": 0}
-
-        def fake_await(pending_fn, on_locked):
-            seen["n"] += 1
-            return "skip" if seen["n"] == 2 else "wait"
-
-        monkeypatch.setattr("nexus.catalog.write_priority.await_fair_window", fake_await)
-        ids, unregistered = _hook(repo, files, head="v2")
-        # Files 1 and 2 already HAVE documents, but the yield stopped the
-        # resolution pass before it reached them, so this run cannot name them.
-        assert set(ids) == {files[0]}
-        assert unregistered == {files[1]: "fairness_yielded", files[2]: "fairness_yielded"}
-
-    def test_pass2_fairness_yield_names_the_unregistered_new_files(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("NX_WRITE_PRIORITY", "batch")
-        monkeypatch.setattr("nexus.indexer._CATALOG_REGISTER_PAGE", 2)
-        repo = tmp_path / "main"
-        files = [_write(repo, f"y{i}.py", f"code {i}") for i in range(3)]
-        seen = {"n": 0}
-
-        def fake_await(pending_fn, on_locked):
-            seen["n"] += 1
-            return "skip" if seen["n"] == 5 else "wait"
-
-        monkeypatch.setattr("nexus.catalog.write_priority.await_fair_window", fake_await)
-        ids, unregistered = _hook(repo, files)
-        assert set(ids) == {files[0], files[1]}
-        assert unregistered == {files[2]: "fairness_yielded"}
 
     def test_a_register_failure_names_the_file(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

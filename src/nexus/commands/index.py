@@ -775,6 +775,12 @@ class _ETATicker:
             )
             self._thread.start()
 
+    def reduce_total(self, count: int) -> None:
+        """Files announced to :meth:`start` that will never be recorded
+        (nexus-z0o2p.20: refused for want of a catalog document)."""
+        with self._lock:
+            self._total = max(self._total - count, 0)
+
     def start(self, total: int) -> None:
         # Review remediation (Reviewer A/S-4): refuse double-start. Two
         # threads would share ``_done`` + ``_lock`` and ``stop()`` only
@@ -1251,6 +1257,19 @@ def index_repo_cmd(
             if count:
                 eta_ticker.restart_phase("rdr", count)
 
+        def on_refused(count: int) -> None:
+            # nexus-z0o2p.20: `count` of the files announced by on_start were
+            # refused for want of a catalog document and will not be
+            # dispatched; shrink the totals so the bar and the ETA end at 100%.
+            nonlocal total
+            if count <= 0:
+                return
+            total = max(total - count, 0)
+            if bar is not None:
+                bar.total = total
+                bar.refresh()
+            eta_ticker.reduce_total(count)
+
         def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
             nonlocal n, total_chunks, skipped_files
             n += 1
@@ -1546,7 +1565,7 @@ def index_repo_cmd(
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
                                      force_re_embed=re_embed,
                                      since_head=since_head,
-                                     on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_file=on_file,
+                                     on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file,
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers,
@@ -1593,17 +1612,6 @@ def index_repo_cmd(
             click.echo(
                 f"  skipped: index fresh (use --force) — {skipped_files} of "
                 f"{n} file(s) unchanged"
-            )
-        # nexus-z0o2p.20 (RDR-223 P2.10): files a batch-priority writer never
-        # reached were refused before chunking, so they are neither indexed nor
-        # fresh. Not a failure (the next pass registers them); said out loud so
-        # the counts above are not read as covering them.
-        _identity_less_deferred = (stats or {}).get("identity_less_deferred_files", 0)
-        if _identity_less_deferred:
-            click.echo(
-                f"  deferred: {_identity_less_deferred} file(s) NOT indexed this "
-                f"run — a catalog write yielded to an interactive write; "
-                f"re-run 'nx index repo' to pick them up"
             )
         if not frecency_only and stats:
             rdr_indexed = stats.get("rdr_indexed", 0)

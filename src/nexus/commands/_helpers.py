@@ -504,8 +504,8 @@ def _emit_identity_drops_warning() -> bool:
             f"collection(s): {', '.join(cols)}) were NOT indexed: catalog "
             f"registration returned no document identity to own their "
             f"chunks, so nothing was written. Fix the registration failure "
-            f"(see the 'preflight_register_failed' or 'catalog_hook_failed' "
-            f"log event) and re-run the index.",
+            f"(see the 'catalog_hook_register_failed', 'catalog_hook_failed' "
+            f"or 'preflight_register_failed' log event) and re-run the index.",
             err=True,
         )
         # nexus-z0o2p.20: name the files and the reason each has no document.

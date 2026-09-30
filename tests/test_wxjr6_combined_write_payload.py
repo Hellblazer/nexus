@@ -95,14 +95,14 @@ class TestBuildCombinedWritePayload:
     def test_chunks_payload_shape(self) -> None:
         fctx = [_file_ctx("a.py", "1.1", 2, prefix="a")]
         ids, docs, metas = _mk_flush(fctx)
-        chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
+        chunks, full_docs, complete, orphan_ids = (
             _build_combined_write_payload(ids, docs, metas, fctx)
         )
         assert chunks == [
             {"chash": ids[0], "text": docs[0], "metadata": metas[0]},
             {"chash": ids[1], "text": docs[1], "metadata": metas[1]},
         ]
-        assert orphan_ids == orphan_docs == orphan_metas == []
+        assert orphan_ids == []
 
     def test_chunks_deduped_by_chash_first_wins(self) -> None:
         # Same chash referenced by two files (identical chunk text) in
@@ -113,7 +113,7 @@ class TestBuildCombinedWritePayload:
             ("b.py", {"ids": [shared_id], "documents": ["shared-again"], "metadatas": [{"content_hash": "h2" * 32}], "catalog_doc_id": "1.2"}),
         ]
         ids, docs, metas = _mk_flush(fctx)
-        chunks, _full_docs, _complete, _oi, _od, _om = _build_combined_write_payload(ids, docs, metas, fctx)
+        chunks, _full_docs, _complete, _oi = _build_combined_write_payload(ids, docs, metas, fctx)
         assert len(chunks) == 1
         assert chunks[0]["chash"] == shared_id
         assert chunks[0]["text"] == "shared"  # first occurrence wins
@@ -121,7 +121,7 @@ class TestBuildCombinedWritePayload:
     def test_full_docs_grouped_by_doc_id_with_position_0(self) -> None:
         fctx = [_file_ctx("a.py", "1.1", 3, prefix="a"), _file_ctx("b.py", "1.2", 1, prefix="b")]
         ids, docs, metas = _mk_flush(fctx)
-        _chunks, full_docs, _complete, _oi, _od, _om = _build_combined_write_payload(ids, docs, metas, fctx)
+        _chunks, full_docs, _complete, _oi = _build_combined_write_payload(ids, docs, metas, fctx)
         by_id = dict(full_docs)
         assert sorted(by_id) == ["1.1", "1.2"]
         assert [r["position"] for r in by_id["1.1"]] == [0, 1, 2]
@@ -131,22 +131,18 @@ class TestBuildCombinedWritePayload:
         # An ALL-orphan flush (every file lacks catalog identity): no
         # content is silently lost — everything routes to the orphan
         # return values, chunks_payload/full_docs are both empty. The
-        # caller (_batch_flush) sends orphan_ids through the legacy
-        # upsert-chunks call AND still logs combined_write_batch_missing_
-        # doc_identity for the (now-empty) combined-write side.
+        # caller (_batch_flush) writes orphan_ids nowhere (nexus-z0o2p.20).
         fctx = [
             ("a.py", {"ids": ["e" * 64], "documents": ["x"], "metadatas": [{"content_hash": "h" * 64}], "catalog_doc_id": ""}),
         ]
         ids, docs, metas = _mk_flush(fctx)
-        chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
+        chunks, full_docs, complete, orphan_ids = (
             _build_combined_write_payload(ids, docs, metas, fctx)
         )
         assert chunks == []
         assert full_docs == []
         assert complete == {}
         assert orphan_ids == ["e" * 64]
-        assert orphan_docs == ["x"]
-        assert orphan_metas == [{"content_hash": "h" * 64}]
 
     def test_complete_map_restricted_to_full_docs_with_content_hash(self) -> None:
         fctx = [
@@ -154,7 +150,7 @@ class TestBuildCombinedWritePayload:
             _file_ctx("b.py", "1.2", 1, prefix="b", content_hash=""),
         ]
         ids, docs, metas = _mk_flush(fctx)
-        _chunks, full_docs, complete, _oi, _od, _om = _build_combined_write_payload(ids, docs, metas, fctx)
+        _chunks, full_docs, complete, _oi = _build_combined_write_payload(ids, docs, metas, fctx)
         # 1.1 has a content_hash -> claimed complete; 1.2's content_hash
         # is empty -> NOT claimed (empty string is falsy, matches the old
         # _fire_flush_grain_hooks _manifest_complete construction).
@@ -182,15 +178,13 @@ class TestBuildCombinedWritePayload:
             _build_combined_write_payload(ids, docs, metas, fctx)
 
     def test_no_content_and_no_chunks_returns_all_empty(self) -> None:
-        chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
+        chunks, full_docs, complete, orphan_ids = (
             _build_combined_write_payload([], [], [], [])
         )
         assert chunks == []
         assert full_docs == []
         assert complete == {}
         assert orphan_ids == []
-        assert orphan_docs == []
-        assert orphan_metas == []
 
 
 class TestMixedIdentityBatch:
@@ -241,7 +235,7 @@ class TestMixedIdentityBatch:
         ids, docs, metas = _mk_flush(fctx)
         orphan_chash = ids[1]
 
-        chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
+        chunks, full_docs, complete, orphan_ids = (
             _build_combined_write_payload(ids, docs, metas, fctx)
         )
         chunk_payload_ids = {c["chash"] for c in chunks}
@@ -257,52 +251,32 @@ class TestMixedIdentityBatch:
             _file_ctx("no_id.py", "", 1, prefix="b"),
         ]
         ids, docs, metas = _mk_flush(fctx)
-        chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
+        chunks, full_docs, complete, orphan_ids = (
             _build_combined_write_payload(ids, docs, metas, fctx)
         )
         assert orphan_ids == [ids[1]]
-        assert orphan_docs == [docs[1]]
-        assert orphan_metas == [metas[1]]
         # The identity-having file's doc is unaffected.
         assert dict(full_docs)["1.1"][0]["chash"] == ids[0]
 
-    def test_shared_chash_across_identity_and_orphan_file_rides_both_paths(self) -> None:
-        # nexus-3mwuo (P3, C1-residual from the wxjr6 delta re-review,
-        # T2 review-wxjr6-client-2026-08-09 [22014]): a chash claimed by
-        # BOTH an identity file and an identity-less file (duplicate
-        # chunk text across files, routine boilerplate) is safely
-        # referenceable via the identity file's manifest row IF that
-        # file's own per-doc write succeeds server-side — but the split
-        # is computed client-side, BEFORE the request, so it cannot know
-        # that in advance. Fix direction (a): route shared chashes
-        # through BOTH paths — the combined payload (cheap, common-case
-        # correct) AND the orphan slice (legacy upsert_chunks_with_
-        # embeddings, idempotent server-side via ON CONFLICT), so an
-        # orphan copy survives even if the identity doc's write later
-        # lands in failed_doc_ids. Duplication in the common (identity
-        # doc succeeds) case is an accepted, cheap cost for closing the
-        # no-recovery-path corner.
+    def test_shared_chash_is_written_only_through_the_identity_document(self) -> None:
+        # nexus-3mwuo copied a chash claimed by BOTH an identity file and an
+        # identity-less file into the orphan slice, so the legacy ownerless
+        # upsert kept it alive if the identity document's own write failed.
+        # nexus-z0o2p.20 removed that upsert: the shared chash stays in the
+        # combined payload (and so in that document's manifest rows) and is
+        # NOT an orphan.
         shared_id = "f" * 64
         fctx = [
             ("has_id.py", {"ids": [shared_id], "documents": ["shared"], "metadatas": [{"content_hash": "h1" * 32, "chunk_text_hash": shared_id}], "catalog_doc_id": "1.1"}),
             ("no_id.py", {"ids": [shared_id], "documents": ["shared"], "metadatas": [{"content_hash": "h2" * 32, "chunk_text_hash": shared_id}], "catalog_doc_id": ""}),
         ]
         ids, docs, metas = _mk_flush(fctx)
-        chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
+        chunks, full_docs, complete, orphan_ids = (
             _build_combined_write_payload(ids, docs, metas, fctx)
         )
-        # Still in the combined payload (unchanged, common-case path).
         assert {c["chash"] for c in chunks} == {shared_id}
         assert dict(full_docs)["1.1"][0]["chash"] == shared_id
-        # NEW: also rides the orphan slice, so the legacy upsert call
-        # persists an orphaned-but-searchable copy regardless of what
-        # happens to doc "1.1"'s per-doc write server-side. Deduped
-        # first-occurrence-wins (mirrors chunks_payload's own dedup) —
-        # the shared chash appears once per claiming file in the raw
-        # flush, one orphan copy is enough to close the recovery gap.
-        assert orphan_ids == [shared_id]
-        assert orphan_docs == ["shared"]
-        assert orphan_metas == [{"content_hash": "h1" * 32, "chunk_text_hash": shared_id}]
+        assert orphan_ids == []
 
     def test_orphan_only_chash_not_duplicated_into_orphan_slice(self) -> None:
         # Sanity companion to the shared-chash test above: a chash
@@ -317,7 +291,7 @@ class TestMixedIdentityBatch:
         ]
         ids, docs, metas = _mk_flush(fctx)
         orphan_chash = ids[1]
-        chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
+        chunks, full_docs, complete, orphan_ids = (
             _build_combined_write_payload(ids, docs, metas, fctx)
         )
         assert orphan_chash not in {c["chash"] for c in chunks}
@@ -330,10 +304,8 @@ class TestMixedIdentityBatch:
             _file_ctx("no_id_2.py", "", 1, prefix="c"),
         ]
         ids, docs, metas = _mk_flush(fctx)
-        chunks, full_docs, complete, orphan_ids, orphan_docs, orphan_metas = (
+        chunks, full_docs, complete, orphan_ids = (
             _build_combined_write_payload(ids, docs, metas, fctx)
         )
         assert len(chunks) == 2  # only has_id.py's 2 chunks
         assert sorted(orphan_ids) == sorted(ids[2:4])  # both no_id files' chunks
-        assert len(orphan_docs) == 2
-        assert len(orphan_metas) == 2
