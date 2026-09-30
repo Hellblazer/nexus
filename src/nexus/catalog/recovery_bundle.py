@@ -21,8 +21,9 @@ docs carry the nexus-sdp0u synthesized ``uri_for(collection, title)``
 identity (or none at all for pre-sdp0u legacy rows); ``knowledge_doc``
 records therefore ALSO carry ``(collection, title)`` so import re-derives
 identity under the TARGET install's collection set. NO EMBEDDINGS are
-carried (locked decision): import re-runs the real store_put chain, which
-re-embeds — model-portable by construction.
+carried (locked decision): import writes each note through the note writer
+(``note_write.put_note``, the writer MCP ``store_put`` uses; RDR-223 P2.8), one
+owner-carrying request per note, which re-embeds — model-portable by construction.
 
 The store-put-origin classifier below is a LOCAL reimplementation of the
 shape in ``commands/catalog_cmds/reconcile_stale.py`` (and its sibling in
@@ -127,13 +128,33 @@ class ExportSummary:
 
 @dataclass(slots=True)
 class ImportSummary:
+    """Per-note outcomes of an import. Each note lands in exactly one of four counts:
+
+    * ``docs_imported``: written and verified complete;
+    * ``docs_failed``: definitively not written (``doc_failures`` names each and why);
+    * ``docs_uncertain``: may have landed, the run cannot say (``doc_unverified``);
+    * ``docs_stamp_refused``: written, but the engine refused to stamp it complete, so the document
+      stays ``indexing`` (``doc_unverified``).
+
+    Only ``docs_imported`` is verified; ``docs_unverified`` is the other three together, and the
+    ``nx catalog import`` exit status is non-zero when it is not zero.
+    """
+
     docs_imported: int = 0
     docs_failed: int = 0
+    docs_uncertain: int = 0
+    docs_stamp_refused: int = 0
     links_created: int = 0
     links_merged: int = 0
     links_missing_span: int = 0
     unresolvable_links: list[dict] = field(default_factory=list)
     doc_failures: list[dict] = field(default_factory=list)
+    doc_unverified: list[dict] = field(default_factory=list)
+
+    @property
+    def docs_unverified(self) -> int:
+        """Notes that did not verify: failed, uncertain, or written but not stamped complete."""
+        return self.docs_failed + self.docs_uncertain + self.docs_stamp_refused
 
 
 def enumerate_all_documents(reader: Any) -> list[CatalogEntry]:
@@ -398,169 +419,61 @@ def target_collection_for(recorded: str, t3: Any) -> str:
     return t3_collection_name(base, t3=t3, for_write=True, allow_placeholder=True)
 
 
+class ImportDocUncertain(RuntimeError):
+    """A note's write may have landed, and this run cannot say so either way.
+
+    The request died in flight, or the manifest read that would settle it failed, or the engine
+    accepted the write and refused to stamp the document complete (``stamp_refused``; the document
+    stays ``indexing`` and nothing is rolled back). The note is NOT verified: the import counts it
+    apart from a definitive failure, and a retry is an idempotent re-write either way.
+    """
+
+    def __init__(self, message: str, *, stamp_refused: bool = False) -> None:
+        super().__init__(message)
+        self.stamp_refused = stamp_refused
+
+
 def _default_import_doc(t3: Any, rec: dict) -> None:
-    """The real store_put chain, mirroring ``commands/store.py::put_cmd`` /
-    ``mcp/core.py::store_put`` (hook → fence begin → t3.put → manifest
-    direct → fire_store_chains, with the b6enc compensation on failure —
-    the hook-chain leg was a review-fold: without it an imported doc gets
-    no chash-index row, no taxonomy assignment, and never enters the
-    aspect queue, with no sweep to catch it later). Deferred imports:
-    this module sits below ``commands/`` and the chain's pieces live in
-    sibling modules with heavy import graphs."""
-    from nexus.catalog.store_hook import (  # noqa: PLC0415 — deferred, sibling with heavy import graph
-        ManifestVerifyUncertainError,
-        catalog_store_hook_tracked,
-        describe_rollback_outcome,
-        note_manifest_metadata,
-        note_pieces,
-        put_note_pieces,
-        raise_if_oversized,
-        rollback_uncataloged_chunk_write,
-        store_put_manifest_direct_with_recovery,
+    """Write one note through the note writer (RDR-223 P2.8, nexus-z0o2p.18).
+
+    The note's pieces and its owner rows go to the engine as ONE ``write_manifest_many`` request
+    (:func:`nexus.catalog.note_write.put_note`, the writer MCP ``store_put`` uses), so a chunk of
+    the note never lands without its owner and a failed request leaves the previous manifest as it
+    was. ``put_note`` also registers the catalog document (the sdp0u identity), begins the index-run
+    fence and settles a failure (fail the fence, remove the row this call minted); this function
+    words the outcome as the import's three results, from the same message table every note producer
+    reads (:func:`~nexus.catalog.note_write.failure_message`):
+
+    * landed and verified: returns, after the post-store hook chains
+      (:func:`~nexus.catalog.note_write.fire_note_chains`, the one firing every producer shares);
+    * not landed, never catalogued, or an outcome this code does not know: raises ``RuntimeError``
+      (a definitive failure, never an import);
+    * may have landed, or landed and was not stamped complete: raises :class:`ImportDocUncertain`,
+      and fires no hook.
+
+    Deferred imports: this module sits below ``commands/`` and the writer's pieces live in sibling
+    modules with heavy import graphs. *t3* is used only to resolve the target collection.
+    """
+    from nexus.catalog.note_write import (  # noqa: PLC0415 — deferred, sibling with heavy import graph
+        UNCERTAIN,
+        failure_message,
+        fire_note_chains,
+        put_note,
     )
-    from nexus.doc_indexer import _fence_begin, _fence_fail  # noqa: PLC0415 — deferred; test patch target
 
     col_name = target_collection_for(rec["collection"], t3)
-    content = rec["content"]
-    # nexus-spujb: split to the collection model's token window, as store_put does.
-    pieces = note_pieces(content, col_name)
-    chunk_id, manifest_metadatas = note_manifest_metadata(pieces)
-    # nexus-xzyr3 fold-in: refuse an over-quota record BEFORE minting a
-    # catalog row for it — see store_hook.raise_if_oversized's docstring.
-    # A recovery-bundle restore that hits this fails loud on the offending
-    # record rather than leaving a ghost catalog row; the bundle format has
-    # no per-record catch-and-continue today, so this propagates like any
-    # other _default_import_doc failure.
-    raise_if_oversized(content, doc_id=chunk_id, collection=col_name)
-    # nexus-k54nk fix-round 1: captures the document's pre-call
-    # meta.doc_id when the hook reconciles this call onto an existing
-    # row — see rollback_uncataloged_chunk_write's SELF-EXCLUSION guard.
-    pre_call_doc_id_out: dict[str, str] = {}
-    catalog_doc_id, minted = catalog_store_hook_tracked(
-        title=rec["title"], doc_id=chunk_id, collection_name=col_name,
-        pre_call_doc_id_out=pre_call_doc_id_out,
+    title = rec.get("title", "")
+    outcome = put_note(
+        content=rec["content"], collection=col_name, title=rec["title"],
+        tags=rec.get("tags", ""), category=rec.get("category", ""),
+        source_agent="recovery-import",
     )
-    from nexus.catalog.store_hook import note_content_hash  # noqa: PLC0415 — deferred, sibling module
-
-    # nexus-spujb: the whole note's hash, whether it was split or not.
-    content_hash = note_content_hash(content, manifest_metadatas)
-    if catalog_doc_id:
-        _fence_begin(catalog_doc_id, content_hash, col_name)
-    try:
-        doc_ids = put_note_pieces(
-            t3, col_name, pieces,
-            title=rec["title"],
-            tags=rec.get("tags", ""),
-            category=rec.get("category", ""),
-            catalog_doc_id=catalog_doc_id,
-        )
-    except Exception as put_exc:
-        if catalog_doc_id:
-            _fence_fail(catalog_doc_id, str(put_exc))
-        if catalog_doc_id and minted:
-            from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — deferred, sibling module
-            rollback_minted_catalog_entry(catalog_doc_id, original_error=str(put_exc))
-        raise
-    # RDR-192 Step 3a (nexus-wbfpw.28, Sam's ruling 2026-09-26: rollback,
-    # not a marker column): a blank catalog_doc_id (registration failed
-    # above) leaves the chunk put_note_pieces just wrote with no catalog
-    # owner at all — the census's no-owner shape. Roll it back and fail
-    # this record loud (import_bundle's per-record catch already
-    # attributes the failure without aborting the rest of the import).
-    if not catalog_doc_id:
-        outcome = rollback_uncataloged_chunk_write(
-            t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
-            pre_call_doc_id=pre_call_doc_id_out.get("doc_id", ""),
-        )
-        raise RuntimeError(
-            f"could not catalog {rec.get('title', '')!r} in {col_name}: "
-            f"catalog registration failed. {describe_rollback_outcome(outcome)}"
-        )
-    # RDR-192 Step 3a fix-round 2, Decision (b): the chunk(s) this call
-    # just wrote can be deleted out from under it by a CONCURRENT
-    # rollback before this manifest write's own INSERT lands (the
-    # opposite-ordering race from fix-round 1's Significant 3) —
-    # store_put_manifest_direct_with_recovery re-puts exactly the
-    # affected piece(s) and retries once; every other outcome reaches
-    # this try/except unchanged.
-    _chash_to_piece = {
-        m.get("chunk_text_hash", ""): pieces[i]
-        for i, m in enumerate(manifest_metadatas)
-    }
-
-    def _repiece_import(chash: str) -> None:
-        put_note_pieces(
-            t3, col_name, [_chash_to_piece[chash]],
-            title=rec["title"], tags=rec.get("tags", ""),
-            category=rec.get("category", ""), catalog_doc_id=catalog_doc_id,
-        )
-
-    try:
-        store_put_manifest_direct_with_recovery(
-            catalog_doc_id, manifest_metadatas, collection=col_name,
-            repiece=_repiece_import,
-        )
-    except ManifestVerifyUncertainError as manifest_exc:
-        # RDR-192 Step 3a fix-round 1 (critic Critical 1): verify infra
-        # failed — outcome unknown, must not roll back (the write may
-        # have landed). Fence stamped 'failed' regardless so a stuck
-        # 'indexing' state doesn't wait on the 6h doctor sweep alone;
-        # the raised message says "uncertain", never "rolled back".
-        _fence_fail(catalog_doc_id, str(manifest_exc))
-        raise RuntimeError(
-            f"could not confirm the catalog manifest landed for "
-            f"{rec.get('title', '')!r} in {col_name}: {manifest_exc}. "
-            f"Nothing was rolled back — the write may already have "
-            f"succeeded; check before retrying (a retry is an "
-            f"idempotent re-write either way)."
-        ) from manifest_exc
-    except Exception as manifest_exc:
-        _fence_fail(catalog_doc_id, str(manifest_exc))
-        # RDR-192 Step 3a: the manifest write CONFIRMED it did not land
-        # after the chunk was already written — same no-manifest-owner
-        # shape as the blank-catalog_doc_id branch above, just discovered
-        # one step later. fix-round 1 Important (both reviewers): also
-        # roll back the ghost catalog row when THIS call minted it.
-        if minted:
-            from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — deferred, sibling module
-            rollback_minted_catalog_entry(catalog_doc_id, original_error=str(manifest_exc))
-        outcome = rollback_uncataloged_chunk_write(
-            t3, doc_ids, collection=col_name, catalog_doc_id=catalog_doc_id,
-            pre_call_doc_id=pre_call_doc_id_out.get("doc_id", ""),
-        )
-        raise RuntimeError(
-            f"could not catalog {rec.get('title', '')!r} in {col_name}: "
-            f"{manifest_exc}. {describe_rollback_outcome(outcome)}"
-        ) from manifest_exc
-    # Post-store hook chains (review-fold blocker): chash index, taxonomy,
-    # aspect-queue enqueue — the same unconditional ride put_cmd/MCP
-    # store_put fire; per-hook failures are isolated by fire_batch.
-    from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle
-
-    hooks = HookRegistry()
-    install_default_hooks(hooks)
-    manifest_complete = {catalog_doc_id: content_hash} if catalog_doc_id else None
-    if len(pieces) == 1:
-        hooks.fire_store_chains(
-            doc_ids, col_name, pieces,
-            metadatas=manifest_metadatas,
-            catalog_doc_id=catalog_doc_id,
-            manifest_complete=manifest_complete,
-        )
-    else:
-        # nexus-spujb: a note written as several pieces fires in MCP
-        # store_put's shape. The single and batch chains see every piece;
-        # the document chain sees the note once, whole, so aspect
-        # extraction reads the full text (fire_store_chains would fire it
-        # once per fragment). Inline, so the fence above covers this
-        # fire_batch in the same function (nexus-vw594 gate).
-        for piece_id, piece in zip(doc_ids, pieces, strict=True):
-            hooks.fire_single(piece_id, col_name, piece)
-        hooks.fire_batch(
-            doc_ids, col_name, pieces, None, manifest_metadatas,
-            catalog_doc_id=catalog_doc_id, manifest_complete=manifest_complete,
-        )
-        hooks.fire_document(doc_ids[0], col_name, content, doc_id=catalog_doc_id)
+    message = failure_message(outcome, subject=repr(title))
+    if message is not None:
+        if outcome.status == UNCERTAIN:
+            raise ImportDocUncertain(message, stamp_refused=outcome.stamp_refused)
+        raise RuntimeError(message)
+    fire_note_chains(outcome, rec["content"])
 
 
 def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:
@@ -634,6 +547,20 @@ def import_bundle(
         try:
             do_import(t3, rec)
             summary.docs_imported += 1
+        except ImportDocUncertain as exc:
+            if exc.stamp_refused:
+                summary.docs_stamp_refused += 1
+            else:
+                summary.docs_uncertain += 1
+            summary.doc_unverified.append(
+                {"title": rec.get("title", ""), "error": str(exc), "stamp_refused": exc.stamp_refused}
+            )
+            _log.warning(
+                "recovery_import_doc_unverified",
+                title=rec.get("title", ""),
+                stamp_refused=exc.stamp_refused,
+                error=str(exc),
+            )
         except Exception as exc:  # noqa: BLE001 — per-record fail-loud summary; the import must complete for the rest
             summary.docs_failed += 1
             summary.doc_failures.append(
@@ -686,6 +613,8 @@ def import_bundle(
         path=str(path),
         docs_imported=summary.docs_imported,
         docs_failed=summary.docs_failed,
+        docs_uncertain=summary.docs_uncertain,
+        docs_stamp_refused=summary.docs_stamp_refused,
         links_created=summary.links_created,
         links_merged=summary.links_merged,
         unresolvable=len(summary.unresolvable_links),

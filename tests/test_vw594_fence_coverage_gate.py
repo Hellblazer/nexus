@@ -54,6 +54,8 @@ import ast
 import pathlib
 from dataclasses import dataclass
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "nexus"
 
@@ -140,24 +142,6 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
         ),
         same_function=False,
     ),
-    ("commands/store.py", "put_cmd"): _Coverage(
-        reason=(
-            "producer 10, nx store put, split-note path (nexus-spujb): a "
-            "note written as several chunks fires fire_batch inline; "
-            "_fence_begin is called in this same function before the first "
-            "piece is written. A one-piece note still rides "
-            "fire_store_chains."
-        ),
-        same_function=True,
-    ),
-    ("catalog/recovery_bundle.py", "_default_import_doc"): _Coverage(
-        reason=(
-            "recovery-bundle import, split-note path (nexus-spujb): same "
-            "shape as nx store put; _fence_begin is called in this same "
-            "function before the first piece is written."
-        ),
-        same_function=True,
-    ),
     ("code_indexer.py", "index_code_file"): _Coverage(
         reason=(
             "producer 5 (nx index repo, code, per-file path for a file the "
@@ -214,18 +198,22 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
         ),
         same_function=True,
     ),
-    ("mcp/core.py", "store_put"): _Coverage(
+    ("catalog/note_write.py", "fire_note_chains"): _Coverage(
         reason=(
-            "producer 10 (MCP store_put): the fence begins in "
-            "nexus.catalog.note_write.put_note, which store_put calls "
-            "before it fires the batch chain (RDR-223 P2.2, "
-            "nexus-z0o2p.12); the completion stamp rides the note's one "
-            "write_manifest_many request, and the batch chain skips "
-            "manifest_write_batch_hook. Cross-function: put_note is the "
-            "one function every note producer calls; "
-            "test_store_put_fence_begins_in_put_note_before_the_write below proves "
-            "store_put calls put_note and put_note calls _fence_begin before "
-            "write_note."
+            "producers 10-13 (MCP store_put, nx store put, nx memory promote, the "
+            "recovery-bundle import; RDR-223 P2.2/.6/.7/.8, nexus-z0o2p.12/.16/"
+            ".17/.18): the four note producers fire their batch chain through this "
+            "one function, after nexus.catalog.note_write.put_note wrote the note. "
+            "The fence begins in put_note (before its write_note); the completion "
+            "stamp rides the note's one write_manifest_many request, and the batch "
+            "chain skips manifest_write_batch_hook. Cross-function: put_note is the "
+            "one function every note producer calls, and fire_note_chains raises "
+            "for any outcome that is not a stored note, so it cannot fire for a "
+            "write that did not land. "
+            "test_note_producers_begin_the_fence_in_put_note_before_the_write proves "
+            "put_note calls _fence_begin before write_note, and "
+            "test_note_producers_write_before_they_fire proves each of the four "
+            "producers calls put_note before fire_note_chains."
         ),
         same_function=False,
     ),
@@ -398,11 +386,15 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
     Pins the count so a future author cannot quietly reclassify a
     same-function site as cross-function to dodge the AST proof above.
 
-    ``mcp/core.py::store_put`` joined them at RDR-223 P2.2 (nexus-z0o2p.12):
-    its fence begins in ``note_write.put_note``, the one function every note
-    producer calls. That claim is proven below, not asserted."""
+    ``catalog/note_write.py::fire_note_chains`` joined them at RDR-223 Phase 2
+    (nexus-z0o2p.12/.16/.17/.18): it is the one place MCP ``store_put``, ``nx store put``,
+    ``nx memory promote`` and the recovery-bundle import fire their batch chain, and the fence
+    begins in ``note_write.put_note``, the one function every note producer calls first. That
+    claim is proven below, not asserted. (Until the joint review of those four each producer
+    carried its own entry; the firing was hand-copied four times.)"""
     cross = sorted(k for k, cov in _ALLOWLIST.items() if not cov.same_function)
     assert cross == [
+        ("catalog/note_write.py", "fire_note_chains"),
         ("doc_indexer.py", "_index_document"),
         ("doc_indexer.py", "_index_pdf_incremental"),
         ("doc_indexer.py", "index_pdf"),
@@ -410,24 +402,60 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
         ("indexer.py", "_fire_flush_grain_hooks"),
         ("mcp/core.py", "store_put"),
         ("pipeline_stages.py", "_flag"),
+        ("pipeline_stages.py", "uploader_loop"),
     ], (
         "cross-function allowlist entries changed — this is the escape "
         f"hatch from AST proof, keep it to the documented minimum: {cross}"
     )
 
 
-def test_store_put_fence_begins_in_put_note_before_the_write() -> None:
-    """The proof behind ``store_put``'s cross-function entry: ``store_put`` calls
-    ``put_note``, and ``put_note`` calls ``_fence_begin`` before it calls
-    ``write_note`` (RDR-223 P2.2, nexus-z0o2p.12)."""
-    core = ast.parse((SRC_ROOT / "mcp" / "core.py").read_text())
-    store_put = next(
-        n for n in ast.walk(core)
-        if isinstance(n, ast.FunctionDef) and n.name == "store_put")
-    assert any(
-        isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "put_note"
-        for c in ast.walk(store_put)), "store_put must write its note through note_write.put_note"
+#: The note producers whose fence begins in ``put_note`` (the ``fire_note_chains`` entry above).
+_PUT_NOTE_CALLERS = (
+    ("mcp/core.py", "store_put"),
+    ("commands/store.py", "put_cmd"),
+    ("commands/memory.py", "promote_cmd"),
+    ("catalog/recovery_bundle.py", "_default_import_doc"),
+)
 
+
+def _call_names_in(rel_path: str, function: str) -> list[tuple[int, str]]:
+    """``(line, callee-name)`` of every call in *function*, in source order."""
+    tree = ast.parse((SRC_ROOT / rel_path).read_text())
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == function)
+    return sorted(
+        (c.lineno, c.func.id if isinstance(c.func, ast.Name) else c.func.attr)
+        for c in ast.walk(fn)
+        if isinstance(c, ast.Call) and isinstance(c.func, (ast.Name, ast.Attribute)))
+
+
+@pytest.mark.parametrize("rel_path,function", _PUT_NOTE_CALLERS)
+def test_note_producers_call_put_note(rel_path: str, function: str) -> None:
+    """Each note producer writes its note through ``put_note`` (RDR-223 P2.2 nexus-z0o2p.12,
+    P2.6 nexus-z0o2p.16, P2.7 nexus-z0o2p.17, P2.8 nexus-z0o2p.18)."""
+    names = [n for _l, n in _call_names_in(rel_path, function)]
+    assert "put_note" in names, f"{function} must write its note through note_write.put_note"
+
+
+@pytest.mark.parametrize("rel_path,function", _PUT_NOTE_CALLERS)
+def test_note_producers_write_before_they_fire(rel_path: str, function: str) -> None:
+    """The ordering half of the fence claim, for every producer: the ``put_note`` call (whose
+    ``_fence_begin`` precedes ``write_note``, proven below) comes BEFORE the call that fires the
+    batch chain, and nothing fires by hand: a producer that fired ``fire_batch`` first, or fired it
+    itself, would batch-complete a document whose fence never began."""
+    calls = _call_names_in(rel_path, function)
+    names = [n for _l, n in calls]
+    assert "fire_note_chains" in names, f"{function} must fire its chains through fire_note_chains"
+    assert names.index("put_note") < names.index("fire_note_chains"), (
+        f"{function} must write (and so fence) before it fires the batch chain: {calls}")
+    assert "fire_batch" not in names, f"{function} fires fire_batch itself: {calls}"
+
+
+def test_note_producers_begin_the_fence_in_put_note_before_the_write() -> None:
+    """The proof behind the cross-function entries: ``put_note`` calls ``_fence_begin`` before it
+    calls ``write_note`` (RDR-223 P2.2, nexus-z0o2p.12). :func:`test_note_producers_call_put_note`
+    proves each producer calls ``put_note``."""
     note_write = ast.parse((SRC_ROOT / "catalog" / "note_write.py").read_text())
     put_note = next(
         n for n in ast.walk(note_write)

@@ -91,7 +91,7 @@ nx index repo ./my-project
 | Flag | Description |
 |------|-------------|
 | `--frecency-only` | Update frecency scores only; skip re-embedding (faster, for re-ranking refresh). Mutually exclusive with `--force` |
-| `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes) are skipped. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`. The per-commit hook's fast path |
+| `--since-head` | Index only the git delta since the last indexed commit (`owners.head_hash`): changed files re-index, deleted files' docs prune, full-tree passes (staleness pulls, housekeeping, misclassified/orphan prunes) are skipped. Worktree-inclusive. Falls back to a full index when no usable base exists; ignored with `--force`. The per-commit hook's fast path. The base is NOT advanced past a run that dropped a file for want of a catalog document (see the paragraph on files with no catalog document below), and a `since_head_base_not_advanced` WARNING says so; the next run re-offers the file |
 | `--corpus [docs\|knowledge]` | Corpus routing for auto-classified prose/PDF files (default: `docs`). `docs` routes to `docs__` collections; `knowledge` routes to `knowledge__` collections instead. The opt-in is durable: it stamps a marker on the `knowledge__` collection's catalog row so a later, unrelated write (a T3 chunk write, a migration cascade) can never silently repoint prose back to `docs__` (GH #451; nexus-l52ms). **Repos that opted in before this marker existed:** re-run `nx index repo --corpus knowledge` once — the command always re-derives and re-registers the knowledge collection on every invocation, which backfills the marker on the existing row with no other action needed |
 | `--on-locked {skip,wait}` | Behavior under contention (default: `wait`). Per-repo advisory lock (two `nx index repo` on the same repo): `skip` exits immediately, `wait` blocks. Catalog-write fairness (RDR-146): when a foreground interactive catalog write is pending, `skip` defers this run's catalog writes to the next idempotent pass, `wait` proceeds after a bounded yield. `NX_WRITE_PRIORITY=interactive|batch` overrides the tty-based priority of a run's catalog writes. |
 
@@ -128,6 +128,16 @@ Two related output lines are new since the RUNFENCE arc (nexus-5xn3k): `skipped:
 **Superseded-chunk sweep summary (nexus-39upx):** when a re-index changes a document's extracted text, the new chunks land under new content hashes and the old ones fall out of the manifest — searchable T3 rows referenced by nothing until swept. `nx index repo` / `nx dt index` / `nx index pdf` / `nx index md` now report this at end-of-run: `swept N superseded T3 chunk(s) left behind by a changed re-index (nexus-39upx)` is informational (a successful cleanup, not a problem — it does not affect the exit code). `WARNING: superseded-chunk sweep skipped for N document(s) (REASON, ...) — old/superseded T3 rows may still be searchable. Re-index, or run 'nx t3 gc -c COLLECTION' once the underlying issue clears.` means the sweep could not verify orphanhood or note-safety for one or more documents this run (reasons: `before_read_failed`, `note_lookup_failed`, `delete_failed`) — capability-honest, never silent, and counted toward the non-zero exit described next.
 
 **Exit code (nexus-tp8yk):** `nx index repo` and `nx dt index` now EXIT NON-ZERO when the run ends with any completion refusal, catalog manifest-write failure, manifest-identity drop, or superseded-chunk sweep skip — the WARNING classes described above. Previously these were WARNING-only (`rc=0`); a script or CI job that gated on the exit code alone could not tell a damaged run from a clean one. The failure message names the remedy (re-index with `--force`; `nx catalog manifest-verify <tumbler>`, formerly also named here, is [retired](#nx-catalog-manifest-verify--retired) as of RDR-191 Phase 6 — use `nx catalog show <tumbler>` instead). This is a NEW exit-code condition on an existing command — a "clean" run that used to exit 0 with WARNING lines now exits non-zero; any automation keying on `nx index repo` / `nx dt index`'s rc should account for this. An UNCONFIRMED completion stamp (a pre-fence engine's `None` sentinel — no verify was possible at all) is a separate case and stays WARNING-only at `rc=0`; only a POSITIVE engine verdict (a refusal) or a write/identity failure triggers the non-zero exit.
+
+**Files with no catalog document (RDR-223, nexus-z0o2p.20):** `nx index repo` no longer writes the chunks of a file that has no catalog document. Before, those chunks went through the legacy ownerless upsert: stored, hidden from every read by the `live(c)` filter, and refused outright once the engine stops accepting ownerless writes. Now the run refuses such a file before chunking it, counts it as neither indexed nor fresh, and prints, on stderr at end of run:
+
+```
+  WARNING: 2 document(s) (collection(s): code__repo__voyage-code-3__v1) were NOT indexed: catalog registration returned no document identity to own their chunks, so nothing was written. Fix the registration failure (see the 'catalog_hook_register_failed', 'catalog_hook_failed' or 'preflight_register_failed' log event) and re-run the index.
+    not indexed: /path/to/a.py (register_failed)
+    not indexed: /path/to/b.py (catalog_hook_failed)
+```
+
+The cause after each name is `register_failed` (the per-file register raised), `catalog_hook_failed` (the registration step itself raised, for example a catalog outage), `oversize_no_catalog_document` (an oversize file whose document id was lost after the run dispatched it, so its oversize write had no owner; the net under the up-front refusal) or `unexplained`. Up to 10 files are named; the rest are counted. **The run exits non-zero** when this happens, where a per-file register failure or a catalog outage used to exit 0 with ownerless chunks hidden from search. A script that gated on `rc=0` against a real catalog can now see a failure it never saw before. The remedy is to fix the registration failure (`nx doctor`, the service health) and re-run; nothing was written, so there is nothing for `nx catalog reconcile` to repair. The same files are recorded in the durable per-file failure record (`nx index failures`) under error class `IdentityLessFile` with the cause, so the going-forward count does not depend on rotating logs. Because `nx doctor` fails on any unacknowledged row of that record, every `IdentityLessFile` row is a file that was lost: `nx doctor` names it with its cause and says to fix the registration failure, re-run `nx index repo`, and clear the run's rows (`nx index failures --clear --run-id ...`). Files that registration refused on purpose (a worktree or temp-dir path) are NOT recorded there: they keep their own `skipped — not registered` summary line and do not fail the run, hold the `--since-head` base or turn `nx doctor` red. If the durable write itself fails the run prints `WARNING: N dropped file(s) could not be durably recorded` (the files are still named in the summary and the run still exits non-zero for the drop); `nx doctor` will not report them. A refused file does not count toward the extraction-skip ratio of the systemic-skip verdict, and the progress total shrinks by it. A file dropped by the oversize backstop (`oversize_no_catalog_document`) is counted as dropped and never as `skipped: index fresh`, holds the `--since-head` base like the others, and is listed and recorded the same way.
 
 **Deferred-file exit code (nexus-z0o2p.14): a file whose write hit a transient error fails the run.** A file whose write to the engine hits a transient condition (an HTTP 429, 502, 503 or 504, the embed timeout, or a connection-level failure the client's own retries could not outlast) is deferred: nothing was indexed for it this run, and the run goes on with the rest. After the rest has finished, `nx index repo` prints `Warning: N/M file(s) deferred on a transient write error (nothing was indexed for them this run): <paths> [and K more]. Re-run 'nx index repo' to retry.` (the first ten paths are named) and EXITS NON-ZERO. Earlier a deferred file left one log line and `rc=0`, a clean-looking run that had not indexed the file. Re-run the command to retry; a deferred file is stale, so the next run picks it up. Two consequences to plan for. A file that always times out (an oversize file behind a gateway that cuts its requests short) makes every run exit non-zero until it succeeds or is excluded (`.nexus.yml` `server.ignorePatterns`). And `--since-head`'s base stays pinned at its previous commit while any file is deferred, so the next `--since-head` run re-walks the same delta instead of advancing. When a run has several failures, every warning line prints first and the command exits once, with the message of the first failure (manifest problems, quality gate, systemic skips, chunk flush, deferred files, taxonomy assignment, in that order).
 
@@ -906,9 +916,10 @@ One paired recovery verb (GH #1419.9): a human-inspectable JSONL bundle
 carrying the catalog **link graph** and **store_put-origin knowledge
 content** — the two things a reinstall cannot regenerate. Identity is
 `source_uri` (tumblers are not stable across reindex); no embeddings are
-carried (import re-embeds through the real store_put chain, so the
+carried (import re-embeds through the note writer `store_put` uses, so the
 bundle survives an embedding-mode change); import is idempotent and
-reports every unresolvable link or failed doc without aborting the rest.
+reports every unresolvable link or failed note without aborting the rest,
+and exits non-zero when any note did not verify.
 See `docs/catalog.md` § Recovery bundle for the format contract. For an
 embedding-preserving per-collection backup use `nx store export COLLECTION`
 (`.nxexp`) instead.
@@ -1110,6 +1121,8 @@ The summary splits unmatched documents into two classes so real regressions are 
 Also see the end-of-run summary on `nx index repo`: a persistent manifest-write failure during indexing is now surfaced there (`WARNING: catalog manifest write failed for N document(s)`) with a pointer to this command.
 
 **Manifest write failures vs. identity drops at exit time (RDR-192 Step 3b, nexus-wbfpw.29):** a manifest-write hook EXCEPTION during `nx index repo` (not just a detected write failure) is recorded per document and fails the run — UNLESS the same run's own self-heal pass above actually closed the gap. Confirmation is checked AFTER the whole run (self-heal included) finishes, by reading the catalog manifest back and verifying every chash the failing write was trying to record is now present; a confirmed doc prints an informational `restored by self-heal in this same run — no action needed` line instead. (Round 5 tried comparing self-heal's rebuilt row count against the document's `chunk_count` at self-heal time instead — that reads 0 for a document whose manifest hook raised, since only a successful hook write ever bumps it, so it wrongly confirmed any rebuild including a genuinely partial one; round 6 replaced it with the manifest read-back above.) A merely PARTIAL same-run repair (missing at least one chash the failed write was trying to record) is never treated as confirmed, so the run still fails loud. Manifest-identity drops (a chunk batch indexed with no resolvable catalog document identity) always fail the run — there is no same-run self-heal for this class. Remedies differ by cause: a write failure alone names `nx catalog reconcile`; an identity drop names `nx catalog reconcile`, then `--force` re-index for anything still missing afterward (reconcile can sometimes rebuild an identity-dropped document from an already-registered catalog entry, but not one that never registered at all); a completion refusal names `nx catalog show <tumbler>` or `--force` re-index.
+
+An identity drop whose chunks were **never written** (a file refused for want of a catalog document, above) is the exception to the `nx catalog reconcile` remedy: there is no manifest to rebuild because no chunk exists. The failure message then says to fix the registration failure and re-run the index.
 
 #### Orphan-GC quarantine (soft delete)
 
@@ -2234,6 +2247,19 @@ echo "# Cache Strategy" | nx store put - --collection distributed-systems --titl
 
 A note whose text is too large for the collection's embedding model's token window (small-window local embedders such as bge-base; a Voyage collection never splits, nexus-spujb) is written as several chunk pieces under one title rather than refused or truncated. `put` writes each piece and links them to one catalog document; `get` and the MCP `store_get`/`store_get_many` tools detect a split note by its chunk ids and transparently reassemble the full text, so a caller never has to know the note was split to read it back whole.
 
+**How a `put` ends** (nexus-z0o2p.16, RDR-223 Phase 2). `put` sends the note's chunks and its catalog owner rows to the engine as ONE request, through the note writer MCP `store_put` uses, so no chunk is ever stored without its owner and a failed `put` leaves the note's previous version as it was. Empty input (an empty file, or nothing on stdin) is refused with `nothing to store` before anything is sent. Every outcome is worded by one table shared with `nx memory promote`, `nx catalog import` and MCP `store_put` (`note_write.failure_message`); a `put` that did not store exits 1 and prints one of:
+
+| Outcome | What the message says |
+|---------|-----------------------|
+| Stored | `Stored: <id>  →  <collection>`, plus `(N chunks, split to the embedding model's token window)` for a split note |
+| The client refused before writing (a stale embedding profile, a missing Voyage key, a retired collection name) | The refusal's own remedy first, then `The note was not written and its chunks and manifest are unchanged; run the command again once that is fixed. If the note was stored before, its index state may read 'failed' until a write succeeds.` It never says "retry is safe": a retry fails the same way until you act |
+| The engine could not be reached | `could not store '<title>' in <collection>: <reason>. The engine could not be reached, so the note was not written and its chunks and manifest are unchanged; retry once it is running. If the note was stored before, its index state may read 'failed' until a write succeeds.` |
+| The engine refused the request | `could not store '<title>' in <collection>: <reason>. The note was not stored ... no chunk was left behind and any earlier version of the note is unchanged (chunks whose text was already stored may have had their metadata refreshed); retry is safe.` The metadata sentence appears only here |
+| The request died in flight, or its outcome could not be read back | `could not confirm that '<title>' landed ...`. Nothing was rolled back and the write may already have succeeded; check with `nx store list` before retrying (a retry is an idempotent re-write either way); a caller with no check command says `look for the note in the store` |
+| The engine accepted the write and refused to stamp the document complete (new) | `wrote <id> to <collection> and the engine accepted the write, but it refused to stamp the document complete (<engine's reason>). The document stays 'indexing'. Nothing was rolled back; a retry is an idempotent re-write.` |
+| The write landed and the response did not stamp it complete | `wrote <id> to <collection>, but the document was not stamped complete.` Nothing was rolled back |
+| The note could not be cataloged | `could not catalog '<title>' in <collection>: catalog registration failed: <cause>. Nothing was written` |
+
 **`list` flags:**
 
 | Flag | Description |
@@ -2303,30 +2329,82 @@ The count line is omitted when K is 0. Exit is non-zero only when X was not remo
 | `-c` / `--collection NAME` | Override target collection name (default: from export header). Resolved as every store verb resolves `-c`: a bare subject or a legacy two-segment name that has no existing collection becomes the conformant name for this install's model, and an existing legacy collection keeps its name unless its conformant counterpart also exists, which wins (nexus-8o7ae, nexus-sis0m.5) |
 | `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
 | `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
-| `--skip-existing` | Skip records whose id already exists in the target collection, instead of overwriting. Useful for resuming a partial import |
+| `--skip-existing` | Do not send the text or vector of a record whose chunk the target collection already holds: the stored chunk and vector stay, and the record still gets its owner row. Without it every record is written with the file's vector, which replaces a stored one |
 
 Non-conformant legacy chunk ids (16- or 32-char pre-migration ids that fail
 the service backend's `chash` length constraint) are re-hashed to full 64-char
 content-derived ids automatically (RDR-180); the CLI reports how many were
 re-hashed.
 
-**Owner registration:** after every chunk batch is written, `import` finds or
-registers a catalog document per owner group and writes its manifest
-(nexus-wbfpw.31), so an imported chunk stays visible under RDR-192 Step 5's
-live(c) read predicate — a chunk with no manifest row in its own collection
-is otherwise invisible to search and get.
+**Owner registration:** `import` writes every chunk together with its owner row
+(RDR-223, nexus-z0o2p.19), so a chunk is never stored without a catalog
+document that owns it. Since RDR-192 Step 5 a chunk with no manifest row in
+its own collection is invisible to search and get (the live(c) read
+predicate), and the reaper deletes it after its grace window. The client needs
+an engine that carries the RDR-223 routes (`append_many` with `complete`, the
+`begin-many` manifest snapshot, supplied vectors). Against an older engine the
+import stops before it has stored a chunk, says "the engine is older than this
+client", and names the fix: upgrade the local engine (`nx upgrade`, then
+`nx daemon service start`), or wait for the cloud engine deploy. There is no
+fallback to the old write. An older engine's `begin-many` has already marked
+the documents of its first page `indexing` by the time the client sees it has
+no snapshot; the failed import marks them `failed`, and a rerun resumes
+`indexing` and `failed` documents alike.
 
-- Chunks are grouped by owner identity — the export's `owner` record field
-  (`source_uri`, `title`, `content_type`, `position`) — across the whole
-  file, and each group's document is found or registered once every batch
-  has upserted, not per batch: the per-batch manifest hook restarts position
-  numbering at each 300-chunk batch and would corrupt a multi-batch
-  document's manifest.
+- The file is read three times: once to hash it (the hash is the fence's content
+  hash, and how a rerun recognizes its own dead run), once to count the records
+  of each owner group (the export's `owner` record field: `source_uri`, `title`,
+  `content_type`, `position`; memory holds the counts, never the records), then
+  to write. The counts say which page is a document's last.
+- Between the count and the first page every owner group is resolved to its
+  catalog document, found or registered. A document is counted once however
+  many groups resolve to it (a live document holding both owner-tagged and
+  legacy records, two legacy ids aliased to one document, a literal
+  `nxexp://<target>/<uri>` identity beside the original that was copied to it):
+  its count is the sum of theirs, so it is finished once, when all of its
+  records have arrived.
+- Pages hold up to 300 records (the combined-write request cap). The
+  per-collection embed cap (64 for a CCE collection) does not apply: it bounds
+  the engine's embedding time, and an import embeds nothing.
+- Each page goes to the engine through the catalog manifest routes with the
+  exported vectors: a document's first request replaces its manifest
+  (`write_many`) and every later request appends to it (`append_many`), each
+  carrying the page's chunks. A document written in a SINGLE request (its first
+  page is its last) is written with the sweep on and its stamp in that same
+  request; every other first request has the sweep off and no stamp. The engine
+  embeds nothing; the model and dimension are checked against the collection,
+  and an engine that embeds anyway fails the import. For a legacy two-segment
+  target the request names the model the collection is registered with (the
+  export header holds only a prefix-based guess, which in a local install is
+  not the local model); the dimension check still applies.
+- **Every payload chunk is written with the file's vector**, replacing the
+  stored one when the collection already holds the chunk, including a chunk
+  another live document shares (Sam, 2026-09-30). The engine counts the stored
+  vectors that differed, and the command reports the count. Metadata is
+  merged, not replaced, so keys another document's enrichment set on a shared
+  chunk survive.
+- A document is fenced (`index_state` `indexing`) before its first page. On
+  its own last page the same request carries its deferred sweep (what the
+  replace dropped from its previous manifest, from the snapshot the fence
+  returns) and its completion stamp (content hash and manifest row count,
+  verified by the engine), so a finished document reads `complete` while the
+  import is still running, and `nx t3 gc` and `nx doctor` see it as done. A
+  crash costs only the documents still open. A run that survives a failure marks
+  the fences of at most 50 of them `failed` (there is no batch route; each is one
+  request) and leaves the rest `indexing`, and the next run of the same file
+  resumes both alike. The fence is not a lock: two writers on one document (an
+  import beside an `nx index` of the same file, two imports of different files
+  that share a document) are not supported. Their stamps are still verified, so a
+  manifest the other writer changed no longer has the row count this run landed,
+  the engine refuses the stamp, and the document is reported and stays
+  `indexing`.
+- A document whose superseded chunks the engine could not sweep (its sweep fails
+  open) is complete, and the summary counts these documents; the old chunks stay
+  stored, owned by no document, until `nx t3 gc` removes them.
 - Importing into a collection other than the one the documents live in
   (`-c`/`--collection`) COPIES rather than moves: the source collection's
   documents are left untouched and stay live, and the target gets its own
-  documents under `nxexp://<target>/<original source_uri>`. Re-importing the
-  same file finds that qualified document again, so the copy is idempotent.
+  documents under `nxexp://<target>/<original source_uri>`.
 - A legacy record carrying `meta.doc_id` (a pre-RDR-108 export with no
   `owner` field) keeps that document when it is still live in the target
   collection, and otherwise gets a new one scoped to the file
@@ -2334,24 +2412,41 @@ is otherwise invisible to search and get.
 - A record with no owner at all (an older export predating this field, or a
   live-but-unmanifested chunk the export could not resolve) is grouped under
   one document per import file, keyed by the target collection and file name.
-- An import never replaces the manifest of a document that already owns
-  chunks (nexus-wbfpw.40). That document's current chunk list is what search
-  shows; an older export imported over a re-put note would otherwise hide the
-  correction. The file's chunks such a document does not own stay unowned:
-  not searchable, and in a `knowledge__` collection removable by the RDR-192
-  reaper after its grace window. The command reports how many and names up
-  to 5 documents. To restore a document from the file instead, delete it
-  first, then import.
-- `--skip-existing` does not change ownership: grouping happens before
-  duplicate filtering, so a chunk dropped as an existing duplicate is owned
-  exactly as it would be without the flag.
+- Two records of one document that claim one position keep both chunks: the
+  later one goes past the document's highest position, so no legitimate
+  record moves.
+- **Keep-existing, and its one exception.** An import never replaces or
+  extends the manifest of a document that already owns chunks (nexus-wbfpw.40).
+  That document's current chunk list is what search shows; an older export
+  imported over a re-put note would otherwise hide the correction. The file's
+  chunks for such a document are left out of the import altogether (counted
+  as skipped, and never stored ownerless). The command reports how many chunks
+  were left out and names up to 5 documents. To restore a document from the
+  file instead, delete it first, then import. A kept document another run left
+  `indexing` or `failed` (another export, or an index run) is reported as
+  unfinished, not as one "with a different chunk list", with the same remedy. The exception (Sam,
+  2026-09-30): a document left `indexing` or `failed` whose recorded content
+  hash equals THIS file's hash is the leftover of an earlier run of this same
+  file that died. A rerun finishes it, with the append form (same file, same
+  positions: each row is an upsert by position, so nothing is dropped and no
+  chunk of the dead run is left without an owner while the rerun catches up).
+  A document with another hash, or in any other state (`complete` included),
+  stays kept.
+- `--skip-existing` does not change ownership: a record whose chunk is already
+  stored is sent without its text and vector, so the stored vector stays, and
+  its owner row is still written; a chunk stored earlier without an owner
+  gains one.
 - An owner with no title (an export whose document had none) keeps its
   source URI as the registered document's title.
-- If an owner document or its manifest fails to write, the rest of the
-  import still completes; the command then fails, naming every failed
-  source URI (capped at 5, with a count of the rest) and noting that
-  re-running the same import is safe — document lookup and manifest writes
-  are idempotent.
+- `taxonomy__*` and `quarantine-*` targets are refused before anything is
+  written: their ids are not chunk hashes and they have no catalog documents,
+  so no chunk of theirs can be written with an owner row.
+- If a document cannot be registered, written, swept or stamped, the rest of
+  the import still completes; the command then fails, naming up to 5 of them
+  (`source <URI>` for a group that could not be registered, `document
+  <tumbler>` for one that failed while writing or stamping; a count of the
+  rest). Running the same command again finishes the documents it left
+  unfinished.
 
 **Restoring a pre-migration (Chroma-era) backup:**
 
@@ -2364,11 +2459,11 @@ nx store import old-backup.nxexp --assume-model bge-base-en-v15-768
 ```
 
 ```
-nx store import partial-backup.nxexp
-# Error: ... Hint: this looks like a chunk-id constraint conflict --
-# a non-conformant legacy chunk id or a duplicate key. If you're
-# re-running a partial import, retry with --skip-existing.
-nx store import partial-backup.nxexp --skip-existing
+nx store import big-backup.nxexp
+# interrupted (^C, a dropped connection, a killed process)
+nx store import big-backup.nxexp
+# finishes the documents the first run left open; documents it completed are
+# kept as they are
 ```
 
 ---
@@ -2420,6 +2515,8 @@ nx memory put "auth uses JWT" --project nexus_active --title findings.md --ttl 3
 `nx memory rollup` is the attended step that makes quarantined entries reapable. It groups one project's unmarked quarantined entries by month and prints the groups before doing anything; the cost is one summarizer call (`claude -p`, the same path `operator_summarize` uses) per group. The month is that of each entry's timestamp, which is its last write, since a put or a merge refreshes it and no creation date is kept. A summary must contain every source entry's title, or that group is reported and left unmarked; this is a floor, not a check that the summary is faithful. A group that passes is stored as a summary and its entries are marked, one group at a time. A group that fails (the summarizer errors, the title check fails, one of its entries was restored or re-put while its summary was being written, or the engine refuses the summary) is reported, the other groups still run, and the command exits nonzero. Marking deletes nothing: `nx memory reap` does that later, and `nx memory restore` still brings an entry back until then.
 
 **`promote` flags:** `--collection` (required), `--tags`, `--remove`
+
+`nx memory promote` writes the promoted note to T3 and its catalog manifest in one request to the engine, through the same note writer MCP `store_put` uses. No chunk is ever stored without its catalog owner, and a failed promote leaves the document's previous version as it was. The T2 entry is deleted (with `--remove`) only after the engine confirms the note is stored and stamped complete. If the write fails, or the outcome cannot be confirmed (a timeout, or the engine accepting the write but refusing the completion stamp), the command exits 1 and the T2 entry stays, `--remove` or not. The message is the one `nx store put` prints for the same outcome (see its table under `nx store`): "retry is safe" means the engine refused and nothing was stored, a refusal the client made before sending (a missing Voyage key, a stale embedding profile) leads with its remedy, and "could not confirm" means the note may already be stored and a retry is an idempotent re-write. A promoted note longer than the embedding model's token window is stored as several chunks, and the command prints `, N chunks` after the id.
 
 **`search` flags:** `--project NAME`
 

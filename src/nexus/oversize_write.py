@@ -45,7 +45,9 @@ import structlog
 
 from nexus.errors import CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
 
-__all__ = ["OversizeWriteDeferred", "use_writer", "write_oversize_file"]
+__all__ = [
+    "OversizeWriteDeferred", "refuse_identity_less_file", "use_writer", "write_oversize_file",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -96,6 +98,46 @@ def use_writer(db: object, batcher: object, catalog_doc_id: str) -> bool:
         raise RuntimeError(
             "the oversize fallback got a service-backed T3 and no ChunkBatcher: _run_index builds "
             "the batcher for every HttpVectorClient, so this is a wiring bug, not a topology")
+    return True
+
+
+def refuse_identity_less_file(
+    db: object, catalog_doc_id: str, file_path: object, collection: str, chunk_count: int,
+) -> bool:
+    """Write nothing for an oversize file with no catalog document; True when refused.
+
+    RDR-223 (nexus-z0o2p.20): a chunk is written together with its owner row, and a file with no
+    catalog document has no owner. The fallback used to write such a file with the ownerless
+    ``upsert-chunks`` (stored, hidden from every read by ``live(c)``, and refused by the engine
+    from the paired release on). On a service-backed T3 it now records the file in the same
+    identity-drop collector the flush route uses (``written=False``, so the run summary names it
+    and the run fails) and the caller returns without writing or firing hooks. A non-service T3
+    (the in-memory test topology) has no owner concept and keeps its write: this returns False.
+
+    ``_run_index`` refuses such a file before it is ever dispatched, so this is the backstop for
+    a file that reaches a fallback anyway (a direct caller, or a hook that lost the id mid-run).
+    The caller's return value (0) looks to the progress counter like a file with nothing to
+    write; ``nx index repo`` tells the two apart by asking the drop collector
+    (``is_identity_dropped_file``), so the file is reported as not indexed and never as "index
+    fresh". ``_run_index`` reads the collector back at the end of the run: the file is counted in
+    ``identity_less_dropped_files`` (which holds the ``--since-head`` base) and recorded in
+    ``nx index failures`` like a file refused up front.
+    """
+    from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred: the vector client imports back into catalog code
+
+    if catalog_doc_id or not is_service_backed(db):
+        return False
+    from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
+
+    cause = "oversize_no_catalog_document"
+    _record_manifest_identity_drop(
+        collection, chunk_count, written=False,
+        files=[{"file": str(file_path), "chunks": chunk_count, "cause": cause}],
+    )
+    _log.warning(
+        "oversize_identity_less_file_not_written",
+        file=str(file_path), collection=collection, chunks_not_written=chunk_count, cause=cause,
+    )
     return True
 
 

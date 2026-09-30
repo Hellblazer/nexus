@@ -426,130 +426,203 @@ def test_import_doc_failure_lands_in_summary_not_raise(fake_catalog, tmp_path):
     assert isinstance(summary, ImportSummary)
 
 
-# ── the real import chain's call sequence (seam-pinned) ─────────────────────
+# ── the import's call sequence into the note writer (seam-pinned) ───────────
+#
+# RDR-223 P2.8 (nexus-z0o2p.18): a note is written by note_write.put_note, one
+# owner-carrying request. The real-engine behavior (one request, no ownerless
+# chunk, re-import, per-note failure) is tests/test_z0o2p18_recovery_import.py;
+# THIS pins what the importer hands put_note and how it words each outcome.
 
 
-def test_default_import_doc_drives_the_real_store_put_chain(monkeypatch, tmp_path):
-    """_default_import_doc must mirror commands/store.py::put_cmd's chain
-    EXACTLY: hook -> fence begin -> t3.put(catalog_doc_id=...) -> manifest
-    direct. The chain's real behavior against a live engine is
-    test_store_put_cli_parity.py's territory; THIS pins that the importer
-    calls the same sequence with the same threading (a silently dropped
-    catalog_doc_id or skipped manifest write would recreate the b6enc
-    ghost class through the recovery path)."""
-    import nexus.catalog.recovery_bundle as rb
+def _outcome(status: str, **kw: Any):
+    from nexus.catalog.note_write import PutNoteOutcome
 
-    calls: list[tuple] = []
+    base = dict(
+        status=status, collection=KNOW, pieces=["body"],
+        manifest_metadatas=[{"chunk_text_hash": "h" * 64, "chunk_index": 0}],
+        chunk_ids=["h" * 64], catalog_doc_id="1.7.7", minted=True,
+    )
+    base.update(kw)
+    return PutNoteOutcome(**base)
+
+
+class _Hooks:
+    """Records the post-store chains; stands in for the registry the importer builds."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple] = []
+
+    def fire_single(self, doc_id, collection, content, **kw):
+        self.events.append(("single", doc_id, collection, content))
+
+    def fire_batch(self, doc_ids, collection, contents, embeddings=None, metadatas=None, **kw):
+        self.events.append(("batch", tuple(doc_ids), collection, tuple(contents), kw))
+
+    def fire_document(self, source_path, collection, content, **kw):
+        self.events.append(("document", source_path, collection, content, kw.get("doc_id")))
+
+    def fire_store_chains(self, *a, **kw):
+        raise AssertionError("the importer must not ride fire_store_chains: it would re-write the manifest")
+
+
+@pytest.fixture
+def note_writer(monkeypatch):
+    """Patch the resolver, put_note and the hook registry; returns (put_note calls, hooks, result)."""
+    calls: list[dict] = []
+    hooks = _Hooks()
+    result: dict[str, Any] = {"outcome": _outcome("stored")}
+
+    def _put_note(**kw):
+        calls.append(kw)
+        return result["outcome"]
 
     monkeypatch.setattr(
         "nexus.corpus.t3_collection_name",
         lambda name, t3=None, for_write=False, allow_placeholder=False: KNOW,
     )
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.single_chunk_manifest_metadata",
-        lambda content: ("chunk-id-1", [{"chunk_text_hash": "h" * 64, "chunk_index": 0}]),
-    )
-
-    class _Hooks:
-        def fire_store_chains(self, ids, col, contents, **kw):
-            calls.append(("chains", ids[0], col, kw.get("catalog_doc_id")))
-
-    monkeypatch.setattr("nexus.hook_registry.HookRegistry", lambda: _Hooks())
+    monkeypatch.setattr("nexus.catalog.note_write.put_note", _put_note)
+    monkeypatch.setattr("nexus.hook_registry.HookRegistry", lambda: hooks)
     monkeypatch.setattr("nexus.hook_registry.install_default_hooks", lambda h: None)
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.catalog_store_hook_tracked",
-        lambda title, doc_id, collection_name, **_kw: (
-            calls.append(("hook", title, doc_id, collection_name)) or ("1.7.7", True)
-        ),
-    )
-    monkeypatch.setattr(
-        "nexus.doc_indexer._fence_begin",
-        lambda doc_id, content_hash, col: calls.append(("fence", doc_id, content_hash)),
-    )
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.store_put_manifest_direct",
-        lambda doc_id, metadatas, collection: calls.append(("manifest", doc_id, collection)),
-    )
+    return calls, hooks, result
 
+
+_REC = {
+    "record": "knowledge_doc", "source_uri": "", "collection": KNOW,
+    "title": "seq-note", "tags": "t", "category": "ref", "content": "body",
+}
+
+
+def test_default_import_doc_hands_the_note_to_put_note_and_fires_the_chains(note_writer):
+    import nexus.catalog.recovery_bundle as rb
+    from nexus.mcp_infra import manifest_write_batch_hook
+
+    calls, hooks, _ = note_writer
     t3 = _FakeT3()
-    rec = {
-        "record": "knowledge_doc", "source_uri": "", "collection": KNOW,
-        "title": "seq-note", "tags": "t", "category": "", "content": "body",
-    }
-    rb._default_import_doc(t3, rec)
+    rb._default_import_doc(t3, dict(_REC))
 
-    assert [c[0] for c in calls] == ["hook", "fence", "manifest", "chains"]
-    assert calls[0][1:] == ("seq-note", "chunk-id-1", KNOW)
-    assert calls[1][1:] == ("1.7.7", "h" * 64)
-    assert calls[2][1:] == ("1.7.7", KNOW)
-    # review-fold blocker pin: the post-store hook chains (chash index,
-    # taxonomy, aspect enqueue) fire with the put's doc_id + catalog id.
-    assert calls[3][1] == "put-seq-note"
-    assert calls[3][2] == KNOW
-    assert calls[3][3] == "1.7.7"
-    assert len(t3.puts) == 1
-    put = t3.puts[0]
-    assert put["catalog_doc_id"] == "1.7.7"
-    assert put["content"] == "body"
-    assert put["title"] == "seq-note"
+    assert len(calls) == 1
+    call = calls[0]
+    assert (call["content"], call["collection"], call["title"]) == ("body", KNOW, "seq-note")
+    assert (call["tags"], call["category"]) == ("t", "ref")
+    assert call["source_agent"] == "recovery-import"
+    assert t3.puts == [], "the importer wrote a chunk itself instead of through put_note"
+    # the post-store chains: per piece, the batch without the manifest hook (the write request
+    # already wrote and stamped it), and the aspect chain once with the catalog document id
+    assert [e[0] for e in hooks.events] == ["single", "batch", "document"]
+    batch = hooks.events[1]
+    assert batch[4]["catalog_doc_id"] == "1.7.7"
+    assert batch[4]["skip_hooks"] == {manifest_write_batch_hook}
+    assert hooks.events[2][-1] == "1.7.7" and hooks.events[2][3] == "body"
 
 
-def test_default_import_doc_put_failure_fences_and_rolls_back(monkeypatch):
-    """The b6enc compensation: a t3.put failure must fence-fail AND roll
-    back a row minted in this call, then re-raise."""
+def test_a_split_note_fires_every_piece_and_the_document_chain_once(note_writer):
     import nexus.catalog.recovery_bundle as rb
 
-    events: list[str] = []
-    monkeypatch.setattr(
-        "nexus.corpus.t3_collection_name", lambda name, t3=None, for_write=False, allow_placeholder=False: name
-    )
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.single_chunk_manifest_metadata",
-        lambda content: ("cid", [{"chunk_text_hash": "h" * 64, "chunk_index": 0}]),
-    )
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.catalog_store_hook_tracked",
-        lambda **kw: ("1.7.8", True),
-    )
-    monkeypatch.setattr(
-        "nexus.doc_indexer._fence_begin", lambda *a, **k: events.append("begin")
-    )
-    monkeypatch.setattr(
-        "nexus.doc_indexer._fence_fail", lambda *a, **k: events.append("fail")
-    )
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.rollback_minted_catalog_entry",
-        lambda doc_id, original_error="": events.append(f"rollback:{doc_id}"),
-    )
+    _calls, hooks, result = note_writer
+    result["outcome"] = _outcome(
+        "stored", pieces=["ab", "cd"], chunk_ids=["1" * 64, "2" * 64],
+        manifest_metadatas=[{"chunk_text_hash": "1" * 64}, {"chunk_text_hash": "2" * 64}])
+    rb._default_import_doc(_FakeT3(), {**_REC, "content": "abcd"})
+    assert [e[0] for e in hooks.events] == ["single", "single", "batch", "document"]
+    assert hooks.events[-1][3] == "abcd", "aspect extraction must read the whole note"
 
-    class _BoomT3:
-        def put(self, **kw: Any) -> str:
-            raise RuntimeError("put exploded")
 
-    rec = {"record": "knowledge_doc", "source_uri": "", "collection": KNOW,
-           "title": "x", "tags": "", "category": "", "content": "b"}
+@pytest.mark.parametrize("status, reason, expect", [
+    ("not-landed", "engine refused", "could not store 'seq-note'"),
+    ("no-catalog", "catalog registration failed: X", "could not catalog 'seq-note'"),
+])
+def test_a_note_that_did_not_land_raises_a_plain_failure_and_fires_no_hook(note_writer, status, reason, expect):
+    import nexus.catalog.recovery_bundle as rb
+
+    _calls, hooks, result = note_writer
+    result["outcome"] = _outcome(status, reason=reason)
+    with pytest.raises(RuntimeError, match=expect) as err:
+        rb._default_import_doc(_FakeT3(), dict(_REC))
+    assert not isinstance(err.value, rb.ImportDocUncertain)
+    assert reason in str(err.value)
+    assert hooks.events == []
+
+
+def test_an_uncertain_note_raises_uncertain_and_fires_no_hook(note_writer):
+    import nexus.catalog.recovery_bundle as rb
+
+    _calls, hooks, result = note_writer
+    result["outcome"] = _outcome("uncertain", reason="timed out in flight")
+    with pytest.raises(rb.ImportDocUncertain, match="Nothing was rolled back") as err:
+        rb._default_import_doc(_FakeT3(), dict(_REC))
+    assert err.value.stamp_refused is False
+    assert hooks.events == []
+
+
+def test_a_refused_stamp_raises_uncertain_with_the_stamp_flag(note_writer):
+    import nexus.catalog.recovery_bundle as rb
+
+    _calls, hooks, result = note_writer
+    result["outcome"] = _outcome(
+        "uncertain", reason="stamp refused", stamp_refused=True, stamp_detail="row count mismatch")
+    with pytest.raises(rb.ImportDocUncertain, match="row count mismatch") as err:
+        rb._default_import_doc(_FakeT3(), dict(_REC))
+    assert err.value.stamp_refused is True
+    assert "'indexing'" in str(err.value)
+    assert hooks.events == []
+
+
+def test_a_put_note_exception_propagates_as_a_failure(note_writer, monkeypatch):
+    import nexus.catalog.recovery_bundle as rb
+
+    def _boom(**kw):
+        raise RuntimeError("put exploded")
+
+    monkeypatch.setattr("nexus.catalog.note_write.put_note", _boom)
     with pytest.raises(RuntimeError, match="put exploded"):
-        rb._default_import_doc(_BoomT3(), rec)
-    assert events == ["begin", "fail", "rollback:1.7.8"]
+        rb._default_import_doc(_FakeT3(), dict(_REC))
 
 
-# ── review-fold blockers (2026-08-31 stacked review) ───────────────────────
+def test_import_bundle_counts_each_outcome_and_finishes_the_rest(fake_catalog, tmp_path):
+    """Three notes, three unverified outcomes (failed, uncertain, stamp refused): each lands in
+    exactly one count, each is named, and a failure does not stop the notes after it."""
+    import nexus.catalog.recovery_bundle as rb
+
+    url, _ = fake_catalog
+    bundle = tmp_path / "b.jsonl"
+    with _client(url) as reader:
+        export_bundle(reader, _FakeT3(), bundle)
+
+    seen: list[str] = []
+
+    def _mixed(t3: Any, rec: dict) -> None:
+        seen.append(rec["title"])
+        if rec["title"] == "title-a":
+            raise RuntimeError("definitive refusal")
+        if rec["title"] == "title-b":
+            raise rb.ImportDocUncertain("may have landed")
+        if rec["title"] == "legacy-note":
+            raise rb.ImportDocUncertain("not stamped", stamp_refused=True)
+
+    with _client(url) as client:
+        summary = import_bundle(client, client, _FakeT3(), bundle, import_doc=_mixed)
+
+    assert sorted(seen) == ["legacy-note", "title-a", "title-b"], "a failure stopped the rest"
+    assert summary.docs_imported == 0
+    assert (summary.docs_failed, summary.docs_uncertain, summary.docs_stamp_refused) == (1, 1, 1)
+    assert summary.docs_unverified == 3
+    assert [f["title"] for f in summary.doc_failures] == ["title-a"]
+    assert sorted((u["title"], u["stamp_refused"]) for u in summary.doc_unverified) == [
+        ("legacy-note", True), ("title-b", False)]
 
 
-def test_import_rederives_collection_under_changed_embedding_mode(monkeypatch):
-    """Critique ship-blocker: the recorded (source-install) collection name
-    embeds the SOURCE's embedding model; import must reduce it to the
-    mode-independent type__owner base and resolve THAT under the target —
-    else a mode-changed reinstall raises IncompatibleCollectionError or
-    fragments the corpus. The resolver here models a bge->voyage target.
+def test_target_collection_reaches_put_note_under_a_changed_embedding_mode(note_writer, monkeypatch):
+    """Critique ship-blocker: the recorded (source-install) collection name embeds the SOURCE's
+    embedding model; import must reduce it to the mode-independent type__owner base and resolve THAT
+    under the target, else a mode-changed reinstall raises IncompatibleCollectionError or fragments
+    the corpus. put_note must be handed the TARGET's collection.
 
-    Neutral model token on purpose (RDR-109 mode lint): the resolver
-    below is monkeypatched to return this literal directly, so it is
-    opaque simulation data for the mode change, never a real embedder
-    call.
+    Neutral model token on purpose (RDR-109 mode lint): the resolver below returns this literal
+    directly, so it is opaque simulation data for the mode change, never a real embedder call.
     """
     import nexus.catalog.recovery_bundle as rb
 
+    calls, _hooks, _ = note_writer
     resolved: list[str] = []
     target = "knowledge__knowledge__model-ctx__v1"
 
@@ -558,35 +631,10 @@ def test_import_rederives_collection_under_changed_embedding_mode(monkeypatch):
         return target
 
     monkeypatch.setattr("nexus.corpus.t3_collection_name", _resolver)
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.single_chunk_manifest_metadata",
-        lambda content: ("cid", [{"chunk_text_hash": "h" * 64, "chunk_index": 0}]),
-    )
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.catalog_store_hook_tracked",
-        lambda title, doc_id, collection_name, **_kw: ("1.7.9", False),
-    )
-    monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: None)
-    monkeypatch.setattr(
-        "nexus.catalog.store_hook.store_put_manifest_direct", lambda *a, **k: None
-    )
+    rb._default_import_doc(_FakeT3(), {**_REC, "title": "mode-note"})
 
-    class _Hooks:
-        def fire_store_chains(self, *a, **k):
-            pass
-
-    monkeypatch.setattr("nexus.hook_registry.HookRegistry", lambda: _Hooks())
-    monkeypatch.setattr("nexus.hook_registry.install_default_hooks", lambda h: None)
-
-    t3 = _FakeT3()
-    rec = {"record": "knowledge_doc", "source_uri": "", "collection": KNOW,
-           "title": "mode-note", "tags": "", "category": "", "content": "b"}
-    rb._default_import_doc(t3, rec)
-
-    # The resolver saw the mode-independent BASE, never the recorded
-    # model-bearing name; the put landed in the TARGET's collection.
     assert resolved == ["knowledge__knowledge"]
-    assert t3.puts[0]["collection"] == target
+    assert calls[0]["collection"] == target
 
 
 def test_target_collection_for_passes_nonconformant_names_through(monkeypatch):

@@ -423,13 +423,18 @@ Locked format decisions (design of record: T2
   carry `(collection, title)` so import re-derives the synthesized
   identity under the target install's collection set (works across an
   embedding-mode change).
-- **No embeddings.** Import re-runs the real store_put chain, which
-  re-embeds — the bundle is portable across embedding models. For an
+- **No embeddings.** Import writes each note through the note writer
+  (the one `store_put` uses), which re-embeds — the bundle is portable across embedding models. For an
   embedding-preserving per-collection backup use `nx export COLLECTION`
   (`.nxexp`) — a different tool for a different job.
 - **Fail-loud summary, never abort.** Unresolvable link endpoints and
-  per-doc failures are enumerated in the import report; the resolvable
-  remainder still imports. Exit 0 with the report visible.
+  per-note outcomes are enumerated in the import report; the resolvable
+  remainder still imports. Each note is written in one request together
+  with its catalog owner rows, and lands in exactly one count: imported,
+  failed (definitively not written), uncertain (the write may have
+  landed), or written but not stamped complete. The command exits
+  non-zero when any note did not verify; unresolvable links alone do
+  not change the exit status.
 - **Idempotent.** Re-importing the same bundle merges (the engine's
   duplicate-link `co_discovered_by` contract; store_put reconciles) —
   zero net growth on a second pass.

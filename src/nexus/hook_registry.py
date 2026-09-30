@@ -435,9 +435,15 @@ class HookRegistry:
         *invoke* (nexus-eslkl) — threaded through unchanged to all three
         internal fire_* calls; see :meth:`fire_single`'s docstring.
 
-        Used by MCP ``store_put`` and the CLI store-path entry points
-        (``nx store put``, ``nx memory promote``, ``nx store import``).
-        Bulk ``nx index *`` paths still call the three fire methods
+        Live callers: ``nx store import`` (``exporter.py``, grouped per
+        document) and the collection re-embed (``commands/collection.py``).
+        MCP ``store_put``, ``nx store put``, ``nx memory promote`` and the
+        recovery-bundle import left this method at RDR-223 Phase 2
+        (nexus-z0o2p.12 / .16 / .17 / .18): each writes its note through
+        ``note_write.put_note``, whose one request already wrote the manifest
+        and the completion stamp, and fires the three chains through
+        ``note_write.fire_note_chains``, the batch chain without the manifest
+        hook. Bulk ``nx index *`` paths still call the three fire methods
         directly to preserve the existing per-batch shape.
 
         INVARIANT (nexus-w8lg1): ``catalog_doc_id`` is scoped to the
@@ -451,15 +457,17 @@ class HookRegistry:
         *manifest_complete* (nexus-cotmr / nexus-tafjk): threaded straight
         through to the internal :meth:`fire_batch` call — see that
         method's own docstring for the ``{doc_id: content_hash}`` contract
-        and the file-atomicity precondition. Callers that fence their own
-        ``_fence_begin`` before the vector put (single-chunk, file-atomic
-        producers — CLI ``nx store put`` / ``nx memory promote``, mirroring
-        MCP ``store_put``'s F2 pattern) pass this so the completion stamp
-        rides the SAME round trip the manifest hook already pays for, no
-        extra call. Callers that do not fence (``nx store import``'s
-        multi-chunk-per-doc grouped batches; the ``collection.py`` re-embed
-        path, which passes no ``catalog_doc_id`` at all) simply omit it —
-        default ``None`` preserves their exact prior behavior.
+        and the file-atomicity precondition. A caller that fences its own
+        ``_fence_begin`` before the vector put and writes its manifest
+        through the batch chain passes this so the completion stamp rides
+        the SAME round trip the manifest hook already pays for. No live
+        caller does: the single-chunk producers that did (CLI ``nx store
+        put`` / ``nx memory promote``) now stamp inside the note's one
+        write request and fire through ``note_write.fire_note_chains``,
+        and the two callers left (``nx store import``'s multi-chunk-per-doc
+        grouped batches; the ``collection.py`` re-embed path, which passes
+        no ``catalog_doc_id`` at all) omit it — default ``None`` preserves
+        their exact prior behavior.
         """
         n = len(doc_ids)
         if len(contents) != n:

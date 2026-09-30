@@ -425,7 +425,7 @@ class TestMcpManifestFailLoud:
             local_t3, content, "b6enc-manifest-mcp",
         )
         assert result.startswith("Error"), result
-        assert "could not catalog" in result
+        assert "could not store" in result
         assert "Stored:" not in result, (
             "a manifest failure must never produce a bare 'Stored:' result"
         )
@@ -525,14 +525,26 @@ class TestStorePutManifestDirectUnit:
 
 
 class TestCliStorePut:
-    def _invoke(self, tmp_path: Path, t3, title: str, content: str):
+    """``nx store put``, on the note writer since RDR-223 P2.6 (nexus-z0o2p.16): the
+    note's chunks and owner rows are ONE request, so a failure leaves no chunk to delete
+    and the previous version untouched. *t3* only resolves the collection name."""
+
+    _COLLECTION = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+
+    def _invoke(self, tmp_path: Path, t3, title: str, content: str, *, write_error: Exception | None = None):
+        from contextlib import ExitStack
+
         from click.testing import CliRunner
 
         from nexus.cli import main
 
         f = tmp_path / "note.md"
         f.write_text(content)
-        with patch("nexus.commands.store._t3", lambda: t3):
+        with ExitStack() as stack:
+            stack.enter_context(patch("nexus.commands.store._t3", lambda: t3))
+            if write_error is not None:
+                stack.enter_context(patch(
+                    "nexus.catalog.note_write.write_note", side_effect=write_error))
             return CliRunner().invoke(main, [
                 "store", "put", str(f),
                 "--collection", "fixture-subject",
@@ -544,6 +556,7 @@ class TestCliStorePut:
     ) -> None:
         result = self._invoke(
             tmp_path, _FailingT3(), "b6enc-ghost-cli", "cli ghost content",
+            write_error=_WRITE_500,
         )
         assert result.exit_code != 0
         assert _catalog_rows(catalog_env, "b6enc-ghost-cli") == [], (
@@ -551,37 +564,31 @@ class TestCliStorePut:
         )
 
     def test_manifest_failure_rolls_back_and_is_explicit_error(
-        self, catalog_env: Path, tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+        self, catalog_env: Path, tmp_path: Path, t2_service_env: str, refused_write,
     ) -> None:
-        """RDR-192 Step 3a (nexus-wbfpw.28): superseding this file's old
-        'stored but NOT cataloged, content left in T3' contract — a
-        failed manifest write now rolls back the chunk it just wrote."""
-        import nexus.commands.store as store_mod
+        """RDR-192 Step 3a (nexus-wbfpw.28) superseded the old 'stored but NOT
+        cataloged, content left in T3' contract with a rollback of the chunk; RDR-223
+        P2.6 (nexus-z0o2p.16) makes the rollback unnecessary: the engine refuses the
+        one request as a whole, so no chunk of the note was added, and the row this
+        call minted is removed."""
+        import nexus.db.http_vector_client as hvc
 
         local = T3Database(
             _client=make_vector_test_client(),
             _ef_override=DefaultEmbeddingFunction(),
         )
-        monkeypatch.setattr(
-            store_mod, "_store_put_manifest_direct_with_recovery",
-            lambda *a, **k: (_ for _ in ()).throw(
-                RuntimeError("manifest write refused")
-            ),
-        )
+        refused_write.arm()
         result = self._invoke(
             tmp_path, local, "b6enc-manifest-cli", "cli manifest fail",
         )
         assert result.exit_code != 0
-        assert "manifest write refused" in result.output
         assert "Stored:" not in result.output
+        assert "The note was not stored" in result.output
+        assert "retry is safe" in result.output
         chash = hashlib.sha256(b"cli manifest fail").hexdigest()
-        cols = [c["name"] for c in local.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local.get_by_id(cols[0], chash) is None, (
-            "a failed manifest write must roll back the chunk it just "
-            "wrote, not leave a manifest-less orphan in T3"
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert _present_in(client, self._COLLECTION, [chash]) == set(), (
+            "a refused request must not leave the chunk it carried in T3"
         )
         assert _catalog_rows(catalog_env, "b6enc-manifest-cli") == [], (
             "a failed manifest write must roll back the catalog row this "
@@ -609,11 +616,20 @@ class TestCliStorePut:
 
 
 class TestPromoteGhostRegisterCompensation:
-    """``nx memory promote`` shared the identical register-before-put
+    """``nx memory promote`` shared the identical register-before-write
     seam the two store_put producers were fixed for — same compensation,
-    same fail-loud manifest leg, locked here promote-shaped."""
+    same fail-loud write, locked here promote-shaped.
 
-    def _invoke_promote(self, tmp_path: Path, t3, title: str, content: str):
+    RDR-223 P2.7 (nexus-z0o2p.17): promote writes its note through
+    ``note_write.put_note`` (one request), exactly as MCP ``store_put`` does,
+    so the failure leg is injected the way ``_mcp_store_put_with`` does it: at
+    the writer (*write_error*) or as a real engine refusal (``refused_write``).
+    """
+
+    def _invoke_promote(
+        self, tmp_path: Path, t3, title: str, content: str, *,
+        write_error: Exception | None = None,
+    ):
         from click.testing import CliRunner
 
         from nexus.cli import main
@@ -623,25 +639,32 @@ class TestPromoteGhostRegisterCompensation:
         row_id = db.put(project="proj", title=title, content=content, ttl=7)
         with patch("nexus.commands.memory.t2_handle", return_value=db), \
              patch("nexus.db.make_t3", return_value=t3):
-            return CliRunner().invoke(main, [
-                "memory", "promote", str(row_id),
-                "--collection", "fixture-subject",
-            ])
+            if write_error is None:
+                return CliRunner().invoke(main, [
+                    "memory", "promote", str(row_id),
+                    "--collection", "fixture-subject",
+                ])
+            with patch("nexus.catalog.note_write.write_note", side_effect=write_error):
+                return CliRunner().invoke(main, [
+                    "memory", "promote", str(row_id),
+                    "--collection", "fixture-subject",
+                ])
 
-    def test_t3_failure_rolls_back_minted_row(
+    def test_write_failure_rolls_back_minted_row(
         self, catalog_env: Path, tmp_path: Path,
     ) -> None:
         result = self._invoke_promote(
             tmp_path, _FailingT3(), "b6enc-ghost-promote", "promote ghost content",
+            write_error=_WRITE_500,
         )
         assert result.exit_code != 0
-        assert "engine 500" in result.output
+        assert "engine 500" in result.output or "engine 500" in str(result.exception)
         assert _catalog_rows(catalog_env, "b6enc-ghost-promote") == [], (
-            "promote's t3.put failure must roll back the just-minted "
+            "promote's write failure must roll back the just-minted "
             "catalog row (nexus-v4paa)"
         )
 
-    def test_t3_failure_preserves_preexisting_deduped_row(
+    def test_write_failure_preserves_preexisting_deduped_row(
         self, catalog_env: Path, tmp_path: Path,
     ) -> None:
         content = "promote dedup content survives"
@@ -656,61 +679,48 @@ class TestPromoteGhostRegisterCompensation:
 
         result = self._invoke_promote(
             tmp_path, _FailingT3(), "b6enc-dedup-promote", content,
+            write_error=_WRITE_500,
         )
         assert result.exit_code != 0
         assert len(_catalog_rows(catalog_env, "b6enc-dedup-promote")) == 1, (
             "pre-existing deduped row must survive promote's compensation"
         )
 
-    def test_manifest_failure_rolls_back_and_surfaces_loudly(
-        self, catalog_env: Path, tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_refused_write_leaves_no_chunk_and_no_row_and_surfaces_loudly(
+        self, catalog_env: Path, t2_service_env: str, tmp_path: Path,
+        local_t3: T3Database, refused_write,
     ) -> None:
-        """RDR-192 Step 3a (nexus-wbfpw.28): superseding this file's old
-        'stored but NOT cataloged, content left in T3' contract — a
-        failed manifest write now rolls back the chunk it just wrote."""
-        local = T3Database(
-            _client=make_vector_test_client(),
-            _ef_override=DefaultEmbeddingFunction(),
-        )
-        monkeypatch.setattr(
-            "nexus.catalog.store_hook.store_put_manifest_direct",
-            lambda *a, **k: (_ for _ in ()).throw(
-                RuntimeError("manifest write refused")
-            ),
-        )
+        """RDR-192 Step 3a (nexus-wbfpw.28): a failed write is a loud failure,
+        never a bare 'Promoted:'. RDR-223: the engine refuses the one request,
+        so no chunk reaches T3 (nothing to roll back) and the row this call
+        minted is removed."""
+        import nexus.db.http_vector_client as hvc
+
+        refused_write.arm()
+        content = "promote manifest fail"
         result = self._invoke_promote(
-            tmp_path, local, "b6enc-manifest-promote", "promote manifest fail",
+            tmp_path, local_t3, "b6enc-manifest-promote", content,
         )
         assert result.exit_code != 0
-        assert "manifest write refused" in result.output
         assert "Promoted:" not in result.output, (
-            "a manifest failure must never produce a bare 'Promoted:' echo"
+            "a failed write must never produce a bare 'Promoted:' echo"
         )
-        chash = hashlib.sha256(b"promote manifest fail").hexdigest()
-        cols = [c["name"] for c in local.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local.get_by_id(cols[0], chash) is None, (
-            "a failed manifest write must roll back the chunk it just "
-            "wrote, not leave a manifest-less orphan in T3"
-        )
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert _present_in(
+            client, "knowledge__fixture-subject__bge-base-en-v15-768__v1", [chash],
+        ) == set(), "a refused request must leave no manifest-less chunk in T3"
         assert _catalog_rows(catalog_env, "b6enc-manifest-promote") == [], (
-            "a failed manifest write must roll back the catalog row this "
+            "a refused request must roll back the catalog row this "
             "call minted, not leave a chunk_count=0 ghost behind"
         )
 
     def test_success_counts_align(
-        self, catalog_env: Path, tmp_path: Path,
+        self, catalog_env: Path, tmp_path: Path, local_t3: T3Database,
     ) -> None:
-        local = T3Database(
-            _client=make_vector_test_client(),
-            _ef_override=DefaultEmbeddingFunction(),
-        )
         content = "healthy promote content"
-        _seed_for_store_put(local, content)
         result = self._invoke_promote(
-            tmp_path, local, "b6enc-ok-promote", content,
+            tmp_path, local_t3, "b6enc-ok-promote", content,
         )
         assert result.exit_code == 0, result.output
         assert "Promoted:" in result.output
@@ -950,32 +960,35 @@ class TestWbfpw28CliCatalogRegistrationFailure:
             ])
 
     def test_registration_failure_rolls_back_and_is_explicit_error(
-        self, catalog_env: Path, tmp_path: Path,
+        self, catalog_env: Path, tmp_path: Path, t2_service_env: str,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        import nexus.db.http_vector_client as hvc
+
         local = T3Database(
             _client=make_vector_test_client(),
             _ef_override=DefaultEmbeddingFunction(),
         )
-        # commands/store.py imports catalog_store_hook_tracked ONCE at
-        # module load (a module-level alias, not a deferred per-call
-        # import like the MCP/promote/recovery-bundle paths) — patch the
-        # local alias, not the source module's attribute.
+        # RDR-223 P2.6 (nexus-z0o2p.16): put_cmd registers through
+        # note_write.put_note, which looks catalog_store_hook_tracked up on the
+        # store_hook module at call time, so that is the name to patch (the
+        # module-level alias commands/store.py used to import is gone).
         monkeypatch.setattr(
-            "nexus.commands.store._catalog_store_hook_tracked",
+            "nexus.catalog.store_hook.catalog_store_hook_tracked",
             lambda *a, **k: ("", False),
         )
         content = "wbfpw28 registration fail content cli"
         result = self._invoke(tmp_path, local, "wbfpw28-reg-cli", content)
         assert result.exit_code != 0
         assert "catalog registration failed" in result.output
+        assert "Nothing was written" in result.output
         assert "Stored:" not in result.output
         assert _catalog_rows(catalog_env, "wbfpw28-reg-cli") == []
         chash = hashlib.sha256(content.encode()).hexdigest()
-        cols = [c["name"] for c in local.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local.get_by_id(cols[0], chash) is None
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert _present_in(
+            client, "knowledge__fixture-subject__bge-base-en-v15-768__v1", [chash],
+        ) == set(), "a note with no catalog row is never written"
 
 
 class TestWbfpw28PromoteCatalogRegistrationFailure:
@@ -998,31 +1011,29 @@ class TestWbfpw28PromoteCatalogRegistrationFailure:
                 "--collection", "fixture-subject",
             ])
 
-    def test_registration_failure_rolls_back_and_surfaces_loudly(
-        self, catalog_env: Path, tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
+    def test_registration_failure_writes_nothing_and_surfaces_loudly(
+        self, catalog_env: Path, t2_service_env: str, tmp_path: Path,
+        local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        local = T3Database(
-            _client=make_vector_test_client(),
-            _ef_override=DefaultEmbeddingFunction(),
-        )
+        import nexus.db.http_vector_client as hvc
+
         monkeypatch.setattr(
             "nexus.catalog.store_hook.catalog_store_hook_tracked",
             lambda *a, **k: ("", False),
         )
         content = "wbfpw28 registration fail content promote"
         result = self._invoke_promote(
-            tmp_path, local, "wbfpw28-reg-promote", content,
+            tmp_path, local_t3, "wbfpw28-reg-promote", content,
         )
         assert result.exit_code != 0
         assert "catalog registration failed" in result.output
         assert "Promoted:" not in result.output
         assert _catalog_rows(catalog_env, "wbfpw28-reg-promote") == []
         chash = hashlib.sha256(content.encode()).hexdigest()
-        cols = [c["name"] for c in local.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local.get_by_id(cols[0], chash) is None
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert _present_in(
+            client, "knowledge__fixture-subject__bge-base-en-v15-768__v1", [chash],
+        ) == set(), "a note is never written without its catalog entry"
 
 
 class TestWbfpw28ConcurrentIdenticalContentRace:
@@ -1072,10 +1083,11 @@ class TestWbfpw28ConcurrentIdenticalContentRace:
 
 
 class TestWbfpw28RecoveryBundleRollback:
-    """``catalog/recovery_bundle.py::_default_import_doc`` shares the same
-    register -> t3.put -> manifest shape; it already re-raised a manifest
-    failure (unlike the three callers above, pre-fix) but never rolled
-    back the chunk, and never detected a blank ``catalog_doc_id`` at all."""
+    """``catalog/recovery_bundle.py::_default_import_doc`` writes a note through
+    ``note_write.put_note`` (RDR-223 P2.8, nexus-z0o2p.18), the same writer MCP ``store_put``
+    uses: a registration that yields no document writes nothing, and a write that is confirmed not
+    to have landed removes the catalog row this call minted. There is no chunk to roll back any
+    more: the pieces and the owner rows are one request (``tests/test_z0o2p18_recovery_import.py``)."""
 
     def _rec(self, content: str, title: str) -> dict:
         return {
@@ -1086,7 +1098,7 @@ class TestWbfpw28RecoveryBundleRollback:
             "category": "",
         }
 
-    def test_registration_failure_rolls_back_and_raises(
+    def test_registration_failure_writes_nothing_and_raises(
         self, catalog_env: Path, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -1096,41 +1108,34 @@ class TestWbfpw28RecoveryBundleRollback:
             "nexus.catalog.store_hook.catalog_store_hook_tracked",
             lambda *a, **k: ("", False),
         )
+
+        def _no_write(**kw):
+            raise AssertionError("a note with no catalog document must not be written")
+
+        monkeypatch.setattr("nexus.catalog.note_write.write_note", _no_write)
         content = "wbfpw28 recovery bundle registration fail"
         with pytest.raises(RuntimeError, match="catalog registration failed"):
             _default_import_doc(local_t3, self._rec(content, "wbfpw28-rb-reg"))
         assert _catalog_rows(catalog_env, "wbfpw28-rb-reg") == []
-        chash = hashlib.sha256(content.encode()).hexdigest()
-        cols = [c["name"] for c in local_t3.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local_t3.get_by_id(cols[0], chash) is None
 
-    def test_manifest_failure_rolls_back_and_raises(
+    def test_a_write_that_did_not_land_removes_the_row_it_minted_and_raises(
         self, catalog_env: Path, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        from nexus.catalog.note_write import NoteWriteError
         from nexus.catalog.recovery_bundle import _default_import_doc
 
-        monkeypatch.setattr(
-            "nexus.catalog.store_hook.store_put_manifest_direct",
-            lambda *a, **k: (_ for _ in ()).throw(
-                RuntimeError("manifest write refused")
-            ),
-        )
+        def _refused(**kw):
+            raise NoteWriteError(
+                catalog_doc_id=kw["catalog_doc_id"], collection=kw["collection"],
+                reason="manifest write refused", manifest_empty=True)
+
+        monkeypatch.setattr("nexus.catalog.note_write.write_note", _refused)
         content = "wbfpw28 recovery bundle manifest fail"
         with pytest.raises(RuntimeError, match="manifest write refused"):
             _default_import_doc(local_t3, self._rec(content, "wbfpw28-rb-manifest"))
-        chash = hashlib.sha256(content.encode()).hexdigest()
-        cols = [c["name"] for c in local_t3.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local_t3.get_by_id(cols[0], chash) is None, (
-            "a failed manifest write must roll back the chunk it just "
-            "wrote, not leave a manifest-less orphan in T3"
-        )
         assert _catalog_rows(catalog_env, "wbfpw28-rb-manifest") == [], (
-            "a failed manifest write must roll back the catalog row this "
+            "a write confirmed not to have landed must remove the catalog row this "
             "call minted, not leave a chunk_count=0 ghost behind"
         )
 
@@ -1140,7 +1145,6 @@ class TestWbfpw28RecoveryBundleRollback:
         from nexus.catalog.recovery_bundle import _default_import_doc
 
         content = "wbfpw28 recovery bundle healthy import"
-        _seed_for_store_put(local_t3, content)
         _default_import_doc(local_t3, self._rec(content, "wbfpw28-rb-ok"))
         rows = _catalog_rows(catalog_env, "wbfpw28-rb-ok")
         assert len(rows) == 1

@@ -126,7 +126,7 @@ entries linked from it):
   CI-wiring problem, not a marker-reclassification one.
 - **`session.items` shrinks under `--splits`/`--group` too, not just `-m lint`**
   (nexus-vdti6, 2026-08-06). CI's real PR-gating `test` job runs
-  `pytest tests/ --splits 4 --group N` (pytest-split); its
+  `pytest tests/ --splits 6 --group N` (pytest-split); its
   `pytest_collection_modifyitems` does `items[:] = group.selected` — the
   identical `session.items`-mutation mechanism `-m`/`-k` deselection uses. A
   session.items-based census left in the default loop (the nexus-8x4le fix

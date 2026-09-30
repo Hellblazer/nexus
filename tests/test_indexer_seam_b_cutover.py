@@ -438,22 +438,17 @@ def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path,
     reset_superseded_sweep_stats()
 
 
-def test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_failure(
+def test_run_index_batch_flush_shared_chash_is_not_copied_into_an_ownerless_upsert(
     tmp_path, monkeypatch,
 ):
-    """nexus-3mwuo (P3, C1-residual from the wxjr6 delta re-review, T2
-    review-wxjr6-client-2026-08-09 [22014]): a chash shared by an
-    identity file ("has_id.py", catalog_doc_id="1.1") and an orphan
-    file ("no_id.py", no catalog identity) must survive even when the
-    identity doc's OWN per-doc write lands in the combined-write
-    response's ``failed_doc_ids`` — a real, already-modeled server-side
-    outcome. Fix direction (a): the shared chash rides BOTH paths, so
-    ``db.upsert_chunks_with_embeddings`` (the legacy, idempotent-via-
-    ON-CONFLICT orphan route) carries it regardless of what the combined
-    write's response says about doc "1.1". This test is fake-level (the
-    engine-side idempotency of the legacy upsert is already proven
-    elsewhere) — it only asserts the CLIENT unconditionally sends the
-    orphan copy.
+    """nexus-3mwuo, superseded by nexus-z0o2p.20 (RDR-223 P2.10): a chash
+    shared by an identity file ("has_id.py", catalog_doc_id="1.1") and an
+    identity-less file ("no_id.py") used to ride BOTH the combined write and
+    the legacy ownerless upsert, so it survived the identity document's own
+    failed write (``failed_doc_ids``). The ownerless upsert is gone: the
+    engine refuses ownerless writes, and a chunk is written with its owner
+    or not at all. The shared chash now rides only the identity document's
+    combined write; ``db.upsert_chunks_with_embeddings`` is never called.
     """
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.indexer import _run_index
@@ -540,22 +535,12 @@ def test_run_index_batch_flush_shared_chash_orphan_copy_survives_identity_doc_fa
             fctx,
         )
 
-    # The combined write still ran (and its response says doc "1.1"
-    # failed) — but that is orthogonal to whether the orphan copy landed.
+    # The combined write ran and carries the shared chash exactly once.
     assert catalog_writer.write_manifest_many.call_count == 1
-    # The legacy orphan-path upsert must have been called with the
-    # shared chash, UNCONDITIONALLY — it is dispatched before the
-    # combined write's response is even known, so it cannot react to
-    # (and does not need to wait for) doc "1.1"'s outcome.
-    db.upsert_chunks_with_embeddings.assert_called_once()
-    upsert_kwargs = db.upsert_chunks_with_embeddings.call_args.kwargs
-    assert upsert_kwargs["ids"] == [shared_chash], (
-        "shared chash did not ride the orphan (legacy upsert) path — "
-        "if doc 1.1's per-doc write fails server-side (as simulated by "
-        "failed_doc_ids above), this chash would be lost for BOTH "
-        "has_id.py and no_id.py with no recovery path (nexus-3mwuo)"
-    )
-    assert upsert_kwargs["documents"] == ["shared"]
+    sent = catalog_writer.write_manifest_many.call_args.kwargs["chunks"]
+    assert [c["chash"] for c in sent] == [shared_chash]
+    # No ownerless copy: not even when doc "1.1"'s own write failed.
+    db.upsert_chunks_with_embeddings.assert_not_called()
 
 
 def test_run_index_service_mode_uses_get_t3_not_make_t3(tmp_path, monkeypatch):

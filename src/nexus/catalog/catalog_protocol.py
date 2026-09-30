@@ -275,7 +275,7 @@ class CatalogWriter(Protocol):
     def append_manifest_chunks(self, doc_id, chunks, *, collection, chunk_payload=..., sweep_chashes=..., force_re_embed=..., embedding_model=..., metadata_merge=..., metadata_delete_keys=...) -> object:  # canonical (RDR-191: collection now REQUIRED, 2026-08-12; RDR-223 P2.0 nexus-z0o2p.10: inline chunk_payload, deferred sweep_chashes, supplied-vector embedding_model)
         ...
 
-    def append_manifest_many(self, docs, *, collection, chunks=..., sweep_chashes=..., force_re_embed=..., embedding_model=..., metadata_merge=..., metadata_delete_keys=...) -> object:  # canonical (RDR-223 P2.0 nexus-z0o2p.10: the multi-document append, POST /manifest/append_many)
+    def append_manifest_many(self, docs, *, collection, chunks=..., sweep_chashes=..., complete=..., force_re_embed=..., embedding_model=..., metadata_merge=..., metadata_delete_keys=...) -> object:  # canonical (RDR-223 P2.0 nexus-z0o2p.10: the multi-document append, POST /manifest/append_many; nexus-z0o2p.19: per-document complete stamp)
         ...
 
     def atomic_manifest_replace(self, doc_id, chunks, *, collection, new_collection=..., new_chunk_count=...) -> object:  # canonical (RDR-191: collection now REQUIRED, 2026-08-12)
@@ -290,7 +290,7 @@ class CatalogWriter(Protocol):
     def begin_index_run(self, doc_id, content_hash, run_id, collection, *, snapshot_manifest=...) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3; RDR-223 nexus-z0o2p.10: snapshot_manifest returns the pre-run manifest)
         ...
 
-    def begin_index_run_many(self, docs, collection) -> object:  # canonical (RUNFENCE, nexus-vw594 F1)
+    def begin_index_run_many(self, docs, collection, *, snapshot_manifest=...) -> object:  # canonical (RUNFENCE, nexus-vw594 F1; RDR-223 nexus-z0o2p.19: snapshot_manifest returns each document's pre-run manifest)
         ...
 
     def complete_index_run(self, doc_id, content_hash, chunk_count) -> object:  # canonical (RUNFENCE, nexus-5xn3k.3)
