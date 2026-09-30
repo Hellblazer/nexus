@@ -20,7 +20,11 @@ The journeys (RDR-223 Test Plan 8 for each path, and the bead tests):
   makes no ``upsert-chunks`` call;
 * re-indexing an unchanged PDF re-embeds nothing and sweeps nothing;
 * a forced re-index keeps the ``bib_*`` enrichment;
-* the streaming run stamps the document complete only after its metadata post-pass.
+* the streaming run stamps the document complete only after its metadata post-pass;
+* a streaming upload killed hard (no failure handler runs, the buffer keeps its flags) is finished
+  by ONE rerun, from scratch, with the whole manifest and no ownerless chunk;
+* a failure after the writer's first request leaves a freshly minted document and its chunks alone;
+* a dry run is confined to its throwaway store and sends the engine nothing.
 
 "Owner" means a ``catalog_document_chunks`` row of the document; "written by the run" means a chash
 of the run's own chunks that the vector store holds.
@@ -45,6 +49,10 @@ _COLLECTION = "docs__z0o2p11-pdf__bge-base-en-v15-768__v1"
 _CONTROL_COLLECTION = "docs__z0o2p11-control__bge-base-en-v15-768__v1"
 _CATALOG_DATA_PATHS = ("/manifest/write_many", "/manifest/append")
 _UPSERT_CHUNKS = "/v1/vectors/upsert-chunks"
+_STORE_PUT = "/v1/vectors/store-put"
+#: The two vector routes that write a chunk with no owner row. A PDF path must make no call to
+#: either (the engine will refuse them); ``_Traffic.upserts`` collects both.
+_OWNERLESS_CHUNK_WRITES = (_UPSERT_CHUNKS, _STORE_PUT)
 _UPDATE_METADATA = "/v1/vectors/update-metadata"
 _FENCE_BEGIN = "/index-run/begin"
 _FENCE_COMPLETE = "/index-run/complete"
@@ -160,9 +168,9 @@ class _Traffic:
 
     def __init__(self) -> None:
         self.catalog: list[tuple[str, dict, dict]] = []
-        self.upserts: list[dict] = []
+        self.upserts: list[dict] = []     # bodies of upsert-chunks AND store-put requests
         self.events: list[str] = []
-        self.writes = 0     # write requests seen: catalog data requests + upsert-chunks pages
+        self.writes = 0     # write requests seen: catalog data requests + upsert-chunks/store-put
 
     def data(self) -> list[tuple[str, dict, dict]]:
         return [t for t in self.catalog if t[0] in _CATALOG_DATA_PATHS]
@@ -172,17 +180,19 @@ class _Traffic:
 
 
 @contextmanager
-def _traffic(*, die_after: int | None = None) -> Iterator[_Traffic]:
+def _traffic(*, die_after: int | None = None, error: type[BaseException] = ClientDied) -> Iterator[_Traffic]:
     """Record the traffic; with ``die_after=k`` the client "dies" at the (k+1)-th WRITE request
-    (a catalog ``write_many``/``append``, or a page of ``upsert-chunks``), right after the k-th
-    one completed."""
+    (a catalog ``write_many``/``append``, or a page of ``upsert-chunks``/``store-put``), right
+    after the k-th one completed. *error* is what is raised: the default is a ``BaseException`` (a
+    killed process, which runs no handler); an ``Exception`` class is a request that failed in a
+    process that survives it."""
     t = _Traffic()
     orig_cat = HttpCatalogClient._post
     orig_vec = hvc._post
 
     def _gate() -> None:
         if die_after is not None and t.writes >= die_after:
-            raise ClientDied(f"client died before write request {t.writes + 1}")
+            raise error(f"client died before write request {t.writes + 1}")
         t.writes += 1
 
     def cat_post(self, path, body=None, **kw):
@@ -194,7 +204,7 @@ def _traffic(*, die_after: int | None = None) -> Iterator[_Traffic]:
         return resp
 
     def vec_post(path, body, **kw):
-        if path == _UPSERT_CHUNKS:
+        if path in _OWNERLESS_CHUNK_WRITES:
             _gate()
             t.upserts.append(body)
         t.events.append(path)
@@ -256,7 +266,7 @@ def test_a_small_pdf_is_one_write_many_with_sweep_on_and_makes_no_upsert(tmp_pat
     body = data[0][1]
     assert body["sweep"] is True and body["complete"]
     assert len(body["chunks"]) == 10 and len(body["docs"][0]["rows"]) == 10
-    assert t.upserts == [], "no separate chunk upload"
+    assert t.upserts == [], "no separate chunk upload (neither upsert-chunks nor store-put)"
     assert t.events.index(_FENCE_BEGIN) < t.events.index("/manifest/write_many")
     doc, _ = _register(path, "small")
     assert _manifest(doc) == [(i, _sha(x)) for i, x in enumerate(lines)]
@@ -282,7 +292,7 @@ def test_a_multi_request_pdf_ends_with_the_manifest_of_one_combined_write(
     assert data[0][0] == "/manifest/write_many" and not data[0][1].get("sweep")
     assert "complete" not in data[0][1], "batch 1 carries neither a sweep nor a stamp"
     assert all(p == "/manifest/append" for p, _, _ in data[1:])
-    assert t.upserts == [], "no separate chunk upload"
+    assert t.upserts == [], "no separate chunk upload (neither upsert-chunks nor store-put)"
     assert t.events.count(_FENCE_BEGIN) == 1
     assert t.events.index(_FENCE_BEGIN) < t.events.index("/manifest/write_many")
     every = [_sha(x) for x in lines]
@@ -501,16 +511,21 @@ def test_a_forced_reindex_clears_the_owned_keys_a_non_streaming_pdf_dropped(tmp_
     assert all("quality_gate_overridden" in b["metadata_delete_keys"] for b in sent)
 
 
+@pytest.mark.parametrize(
+    "streaming,size", [("always", "multi"), ("never", "multi"), ("never", "small")],
+    ids=["streaming", "incremental", "small"])
 @pytest.mark.parametrize("re_embed", [False, True], ids=["force", "force-re-embed"])
-def test_force_re_embed_reaches_the_engine_on_every_pdf_path(tmp_path, fake_pdf, re_embed) -> None:
-    lines = _multi_lines(f"reembed-{int(re_embed)}")
+def test_force_re_embed_reaches_the_engine_on_every_pdf_path(
+    tmp_path, fake_pdf, streaming, size, re_embed,
+) -> None:
+    marker = f"reembed-{streaming}-{size}-{int(re_embed)}"
+    lines = _multi_lines(marker) if size == "multi" else _lines(marker, 12)
     fake_pdf(lines)
-    marker = f"reembed-{int(re_embed)}"
     path = _write_pdf(tmp_path, marker)
-    _index(path, marker, streaming="always")
+    _index(path, marker, streaming=streaming)
 
     with _traffic() as t:
-        _index(path, marker, streaming="always", force=True, force_re_embed=re_embed)
+        _index(path, marker, streaming=streaming, force=True, force_re_embed=re_embed)
 
     sent = [b for p, b, _ in t.data() if "chunks" in b]
     assert sent
@@ -520,6 +535,7 @@ def test_force_re_embed_reaches_the_engine_on_every_pdf_path(tmp_path, fake_pdf,
     else:
         assert t.total("embed_embedded") == 0
         assert not any(b.get("force_re_embed") for b in sent)
+    assert t.upserts == []
 
 
 # ── no catalog identity ───────────────────────────────────────────────────────
@@ -542,3 +558,396 @@ def test_a_pdf_with_no_catalog_identity_fails_the_run_and_writes_nothing(
 
     assert t.writes == 0
     assert _present(_COLLECTION, [_sha(x) for x in lines]) == set()
+
+
+# ── a streaming PDF of at most one batch ──────────────────────────────────────
+
+
+def test_a_small_streaming_pdf_is_one_write_many_and_a_separate_stamp_after_the_post_pass(
+    tmp_path, fake_pdf,
+) -> None:
+    """The common shape: at most 128 chunks, so the writer's one request is a ``write_many`` with
+    the sweep on. Its completion is DEFERRED (the streaming run enriches metadata after the last
+    chunk lands), so the ``write_many`` carries no stamp and the orchestrator sends
+    ``complete_index_run`` afterwards, after the metadata post-pass."""
+    lines = _lines("streamsmall", 10)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, "streamsmall")
+    with _traffic() as t:
+        n = _index(path, "streamsmall", streaming="always")
+
+    assert n == 10
+    data = t.data()
+    assert [p for p, _, _ in data] == ["/manifest/write_many"], "exactly one data request"
+    body = data[0][1]
+    assert body["sweep"] is True
+    assert not body.get("complete"), "the stamp is not riding the write: it is deferred"
+    assert len(body["chunks"]) == 10 and len(body["docs"][0]["rows"]) == 10
+    assert t.upserts == [], "no separate chunk upload"
+    enrich = [i for i, e in enumerate(t.events) if e == _UPDATE_METADATA]
+    stamp = [i for i, e in enumerate(t.events) if e == _FENCE_COMPLETE]
+    write = t.events.index("/manifest/write_many")
+    assert t.events.index(_FENCE_BEGIN) < write < min(enrich) < stamp[0] and len(stamp) == 1
+    doc, _ = _register(path, "streamsmall")
+    every = [_sha(x) for x in lines]
+    assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
+    assert _present(_COLLECTION, every) == set(every)
+    assert _index_state(doc) == "complete"
+
+
+# ── a hard-killed streaming upload ────────────────────────────────────────────
+
+
+def _buffer_evidence(path: Path) -> tuple[int, int]:
+    """(chunk rows flagged uploaded, the progress counter) of *path*'s pipeline row, read through a
+    fresh client the way the next process would find them."""
+    from nexus.db.http_pipeline_client import HttpPipelineDB
+    from nexus.doc_indexer import _sha256
+
+    content_hash = _sha256(path)
+    db = HttpPipelineDB()
+    (row,) = [r for r in db._get("/v1/pipeline/list")["pipelines"]
+              if r["content_hash"] == content_hash and r["pdf_path"] == str(path)]
+    db._pipeline_ids[content_hash] = int(row["pipeline_id"])     # name the row, as create_pipeline would
+    flagged = db.count_embedded_chunks(content_hash) - len(db.read_uploadable_chunks(content_hash))
+    return flagged, int(row["chunks_uploaded"] or 0)
+
+
+@pytest.mark.parametrize("lag", [False, True], ids=["counter-current", "counter-lagging"])
+def test_a_hard_killed_streaming_upload_is_finished_by_one_rerun(
+    tmp_path, fake_pdf, monkeypatch, lag,
+) -> None:
+    """A killed process runs no handler: the buffer keeps the head it flagged, the pipeline row is
+    left behind, the fence stays ``indexing``. The next run finds a resumed row with chunks already
+    sent and a writer whose state is gone. It must not send the remaining tail alone (that would
+    replace the manifest with the tail and sweep the head): it discards the buffer and runs the
+    document again, and that ONE rerun completes it.
+
+    ``lag=True`` is the kill that lands between the flag and the buffered progress counter's
+    flush, so the rows say the head went out and the counter says nothing did.
+
+    The handlers that a survived failure runs are stubbed out (the failure fence and the buffer
+    reset). The one thing the test does for the killed process is mark its pipeline row failed
+    WITHOUT clearing the buffer: a killed process leaves its row ``running`` until the heartbeat
+    goes stale, and a rerun inside that window is refused (409) rather than resumed; a stale row is
+    resumed exactly as a failed one is."""
+    import nexus.doc_indexer as di
+    import nexus.pipeline_stages as ps
+    from nexus.db.http_pipeline_client import HttpPipelineDB
+
+    marker = f"hardkill-{int(lag)}"
+    # Four streaming batches of 128, so the writer is mid-document when the kill lands. One batch
+    # is ``r`` requests when the per-collection chunk cap is under 128, and the uploader flags a
+    # batch only after the NEXT batch was handed over: batch 1 is flagged once 2r-1 requests went
+    # out, so the kill is the 2r-th request (the writer sending batch 2's last part).
+    lines = _lines(marker, 4 * 128 + 10)
+    requests_per_batch = -(-128 // min(_cap(), 300))
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+    every = [_sha(x) for x in lines]
+
+    def _row_left_behind_not_running(db, content_hash, first_exc):
+        db.mark_failed(content_hash, error="killed")   # no clear_orphan_wal: the buffer survives
+        return False
+
+    with monkeypatch.context() as killed_process:
+        killed_process.setattr(di, "_fence_fail", lambda *a, **k: None)
+        killed_process.setattr(ps, "_mark_failed_and_reset_wal", _row_left_behind_not_running)
+        if lag:
+            real_progress = HttpPipelineDB.update_progress
+
+            def _drop_the_uploaded_counter(self, content_hash, **fields):
+                fields.pop("chunks_uploaded", None)
+                if fields:
+                    real_progress(self, content_hash, **fields)
+
+            killed_process.setattr(HttpPipelineDB, "update_progress", _drop_the_uploaded_counter)
+        with _traffic(die_after=2 * requests_per_batch - 1) as killed:
+            with pytest.raises(ClientDied):
+                _index(path, marker, streaming="always")
+
+    doc, _ = _register(path, marker)
+    written = _present(_COLLECTION, every)
+    assert written and len(written) < len(every), "non-vacuity: the kill cut the upload short"
+    assert written <= {c for _, c in _manifest(doc)}, "the head it wrote is owned"
+    assert _index_state(doc) == "indexing"
+    assert killed.writes == 2 * requests_per_batch - 1
+
+    # Non-vacuity: what the kill left in the buffer is what the test claims. Some rows are flagged
+    # uploaded; with lag=True the progress counter says none were, with lag=False it says some were.
+    flagged, counter = _buffer_evidence(path)
+    assert flagged > 0, "the killed run left flagged rows in the buffer"
+    assert (counter == 0) if lag else (counter > 0), (flagged, counter)
+
+    # ONE rerun, no handler stubs.
+    with _traffic() as rerun:
+        n = _index(path, marker, streaming="always")
+
+    assert n == len(every)
+    data = rerun.data()
+    assert data[0][0] == "/manifest/write_many", "the rerun starts the document over"
+    assert data[0][1]["docs"][0]["rows"][0]["position"] == 0, "never a tail alone"
+    assert rerun.upserts == []
+    assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
+    assert _present(_COLLECTION, every) == set(every)
+    assert {c for _, c in _manifest(doc)} >= _present(_COLLECTION, every), "no ownerless chunk"
+    assert _index_state(doc) == "complete"
+
+
+# ── a failure after the writer's first request ────────────────────────────────
+
+
+@_PATHS
+def test_a_failed_second_request_leaves_the_freshly_minted_document_and_its_chunks(
+    tmp_path, fake_pdf, streaming, label,
+) -> None:
+    """A request that FAILS in a process that survives it (an ``Exception``, not a kill) after the
+    first request landed: the document was minted by this very call, and rolling it back would
+    tombstone it and hide the chunks the first request wrote and owns. It is left, marked failed
+    for the next run to redo."""
+    marker = f"fail2-{label}"
+    lines = _multi_lines(marker)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+    every = [_sha(x) for x in lines]
+
+    with _traffic(die_after=1, error=RuntimeError) as t:
+        with pytest.raises(RuntimeError, match="died before write request 2"):
+            _index(path, marker, streaming=streaming)
+
+    assert t.writes == 1
+    doc, created = _register(path, marker)
+    assert not created, "the document the failed call minted is still there"
+    entry = _reader().resolve(doc)
+    assert entry is not None
+    written = _present(_COLLECTION, every)
+    assert written and len(written) < len(every), "non-vacuity: request 1 landed and only it"
+    assert written <= {c for _, c in _manifest(doc)}, "and its chunks are readable through their owner rows"
+    assert _index_state(doc) == "failed"
+
+    with _traffic():
+        _index(path, marker, streaming=streaming)
+    assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
+    assert _index_state(doc) == "complete"
+
+
+@_PATHS
+def test_a_failed_stamp_after_the_last_chunk_leaves_the_document_and_is_not_success(
+    tmp_path, fake_pdf, monkeypatch, streaming, label,
+) -> None:
+    """Every chunk landed and the completion stamp's request fails. The chunks are written and
+    owned, so the freshly minted document is NOT rolled back; the error surfaces; the document is
+    not complete (the streaming run leaves the fence ``indexing``, the incremental one marks it
+    failed), and a rerun finishes it."""
+    marker = f"stampfail-{label}"
+    lines = _multi_lines(marker)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+    every = [_sha(x) for x in lines]
+
+    def _stamp_transport_down(self, *args, **kwargs):
+        raise RuntimeError("stamp transport down")
+
+    with monkeypatch.context() as down:
+        down.setattr(HttpCatalogClient, "complete_index_run", _stamp_transport_down)
+        with pytest.raises(RuntimeError, match="stamp transport down"):
+            _index(path, marker, streaming=streaming)
+
+    doc, created = _register(path, marker)
+    assert not created, "the document was not rolled back"
+    assert _reader().resolve(doc) is not None
+    assert _manifest(doc) == [(i, h) for i, h in enumerate(every)], "every chunk landed and is owned"
+    assert _present(_COLLECTION, every) == set(every)
+    state = _index_state(doc)
+    assert state != "complete"
+    if streaming == "always":
+        assert state == "indexing", "the fence is left as begin left it"
+
+    with _traffic():
+        _index(path, marker, streaming=streaming)
+    assert _index_state(doc) == "complete"
+
+
+# ── a dry run ─────────────────────────────────────────────────────────────────
+
+
+def test_a_dry_run_with_no_throwaway_store_is_refused_and_writes_nothing_to_the_engine(
+    tmp_path, fake_pdf,
+) -> None:
+    """``index_pdf(dry_run=True)`` given no ``t3`` resolves the ENGINE's client in service mode. It
+    used to preview into it with ownerless ``upsert-chunks`` requests; it is refused before it
+    registers a collection or reads through the client."""
+    from nexus.doc_indexer import index_pdf
+    from nexus.errors import DryRunStoreError
+
+    fake_pdf(_lines("dry-engine", 10))
+    path = _write_pdf(tmp_path, "dry-engine")
+    with _traffic() as t:
+        with pytest.raises(DryRunStoreError, match="in-memory"):
+            index_pdf(path, "z0o2p11-dry-engine", t3=None, collection_name=_COLLECTION,
+                      dry_run=True, streaming="never")
+    assert t.events == [] and t.catalog == [], "the engine saw nothing"
+    assert t.upserts == []
+
+
+@pytest.mark.parametrize("streaming,size", [("always", "multi"), ("never", "multi"), ("never", "small")],
+                         ids=["streaming", "incremental", "small"])
+def test_a_dry_run_into_a_throwaway_store_previews_and_sends_the_engine_nothing(
+    tmp_path, fake_pdf, streaming, size,
+) -> None:
+    """The positive control, as ``nx index pdf --dry-run`` builds it: an in-memory store, no hooks,
+    no embedding. The chunks land in the throwaway store, and no vector or catalog request reaches
+    the engine."""
+    from unittest.mock import MagicMock
+
+    from nexus.db import make_t3
+    from nexus.db.inmemory_vector_store import InMemoryVectorClient
+    from nexus.doc_indexer import index_pdf
+    from nexus.hook_registry import HookRegistry
+
+    marker = f"dry-store-{streaming}-{size}"
+    lines = _multi_lines(marker) if size == "multi" else _lines(marker, 12)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+    store = make_t3(_client=InMemoryVectorClient(), _ef_override=MagicMock())
+    with _traffic() as t:
+        n = index_pdf(
+            path, f"z0o2p11-{marker}", t3=store, collection_name=_COLLECTION, streaming=streaming,
+            embed_fn=lambda texts, model: ([[] for _ in texts], model), hooks=HookRegistry(),
+            dry_run=True)
+    assert n == len(lines)
+    assert t.events == [] and t.catalog == [], "the engine saw nothing"
+    got = store.get_or_create_collection(_COLLECTION).get(ids=[_sha(lines[0])])
+    assert got["ids"] == [_sha(lines[0])], "the preview landed in the throwaway store"
+
+
+# ── a chunk the first request dropped and a later request re-adds ──────────────
+
+
+@_PATHS
+def test_a_chunk_dropped_by_the_first_request_and_re_added_by_a_later_one_is_not_swept(
+    tmp_path, fake_pdf, streaming, label,
+) -> None:
+    """The first request REPLACES the manifest, so every chunk of the previous version that it does
+    not carry is "dropped" from the manifest at that moment. The sweep therefore runs after the
+    LAST request, over (previous manifest minus everything this run wrote): a chunk that batch 1
+    dropped and a later batch put back must survive. v2 = 128 fresh chunks, then v1's tail."""
+    v1 = _multi_lines(f"readd-{label}")
+    fake_pdf(v1)
+    path = _write_pdf(tmp_path, f"readd-{label}")
+    _index(path, f"readd-{label}", streaming=streaming)
+    doc, _ = _register(path, f"readd-{label}")
+
+    head = 128
+    assert len(v1) > head + 5, "non-vacuity: v1 has a tail past the first request"
+    v2 = _lines(f"readd-fresh-{label}", head) + v1[head:]
+    fake_pdf(v2)
+    path.write_bytes(b"%PDF-1.4 z0o2p11 readd v2\n")     # a new content hash: the staleness gate opens
+    with _traffic() as t:
+        _index(path, f"readd-{label}", streaming=streaming)
+
+    v2_hashes = [_sha(x) for x in v2]
+    gone = [_sha(x) for x in v1[:head]]
+    assert _manifest(doc) == [(i, h) for i, h in enumerate(v2_hashes)]
+    assert _present(_COLLECTION, v2_hashes) == set(v2_hashes), "the re-added tail is still stored"
+    assert _present(_COLLECTION, gone) == set(), "and what only v1's head owned is swept"
+    assert t.total("swept") == len(gone)
+    assert _index_state(doc) == "complete"
+
+
+# ── hooks and the stamp ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "streaming,size", [("always", "multi"), ("never", "multi"), ("never", "small")],
+    ids=["streaming", "incremental", "small"])
+def test_a_post_store_hook_that_raises_never_fails_a_stamped_document(
+    tmp_path, fake_pdf, streaming, size,
+) -> None:
+    """Order, per path: streaming fires each batch's hooks once its request is sent and stamps LAST
+    (after the post-pass and the document hooks); the incremental and small paths, like
+    ``_index_document``, stamp with the write and fire the hooks after it. The second order is safe
+    because ``HookRegistry`` contains a hook's ``Exception`` (logged, recorded, never raised), so a
+    hook cannot turn the stamped document into a failed one. This pins that: a hook of every grain
+    raises, and the document ends ``complete`` with the run reporting success."""
+    from nexus.db.http_vector_client import HttpVectorClient
+    from nexus.doc_indexer import index_pdf
+    from nexus.hook_registry import HookRegistry
+
+    marker = f"hookraise-{streaming}-{size}"
+    lines = _multi_lines(marker) if size == "multi" else _lines(marker, 12)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("hook exploded")
+
+    hooks = HookRegistry()
+    hooks.register_batch(_boom)
+    hooks.register_single(_boom)
+    hooks.register_document(_boom)
+
+    n = index_pdf(path, f"z0o2p11-{marker}", t3=HttpVectorClient(), collection_name=_COLLECTION,
+                  streaming=streaming, hooks=hooks)
+
+    assert n == len(lines)
+    doc, _ = _register(path, marker)
+    assert _index_state(doc) == "complete"
+    assert [c for _, c in _manifest(doc)] == [_sha(x) for x in lines]
+
+
+# ── a streaming run with nothing to write ─────────────────────────────────────
+
+
+def test_a_zero_chunk_streaming_run_marks_the_document_failed_without_a_begin(tmp_path, fake_pdf) -> None:
+    """The zero-chunk failure calls ``_fence_fail`` with no writer, so no ``begin`` ever ran. What
+    the engine does with that: it stamps ``failed`` on the document whatever its state was (a
+    ``complete`` document from an earlier version becomes ``failed``), and touches nothing else,
+    so the earlier manifest and its chunks stay readable. No data request is sent."""
+    v1 = _lines("zero-v1", 10)
+    fake_pdf(v1)
+    path = _write_pdf(tmp_path, "zero")
+    _index(path, "zero", streaming="always")
+    doc, _ = _register(path, "zero")
+    before = _manifest(doc)
+    assert _index_state(doc) == "complete" and len(before) == 10
+
+    fake_pdf([])
+    path.write_bytes(b"%PDF-1.4 z0o2p11 zero v2\n")
+    with _traffic() as t:
+        try:
+            _index(path, "zero", streaming="always")
+        except Exception:      # the CLI-level outcome is not the subject; the fence and manifest are
+            pass
+
+    assert t.data() == [], "nothing was written"
+    assert _index_state(doc) == "failed"
+    assert _manifest(doc) == before, "the earlier version stays as it was"
+    assert _present(_COLLECTION, [c for _, c in before]) == {c for _, c in before}
+
+
+@_PATHS
+def test_a_failed_pdf_write_does_not_heal_the_manifest_from_stored_chunks(
+    tmp_path, fake_pdf, monkeypatch, streaming, label,
+) -> None:
+    """``_fence_fail`` used to rebuild a failed run's manifest from the chunks it stored
+    (``_heal_failed_document``, for paths that wrote chunks BEFORE their owner rows). The PDF
+    writer's manifest is the record and every chunk it sent is owned, so the rebuild has nothing to
+    do and, on a failed re-index, would replace the manifest with a fragment found by the OLD
+    content hash. It is not run."""
+    import nexus.doc_indexer as di
+
+    marker = f"noheal-{label}"
+    lines = _multi_lines(marker)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+    healed: list[str] = []
+    monkeypatch.setattr(di, "_heal_failed_document", lambda doc_id: healed.append(doc_id))
+
+    with _traffic(die_after=1, error=RuntimeError):
+        with pytest.raises(RuntimeError, match="died before write request 2"):
+            _index(path, marker, streaming=streaming)
+
+    assert healed == []
+    doc, _ = _register(path, marker)
+    assert _index_state(doc) == "failed"
