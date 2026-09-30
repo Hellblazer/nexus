@@ -4755,6 +4755,18 @@ public final class CatalogRepository {
     private static final String SWEEP_STATEMENT_TIMEOUT_MS = "5000";
 
     /**
+     * Test-only seam (RDR-223 fix round): invoked with the doc id INSIDE the savepoint-guarded
+     * previous-manifest read of {@link #writeManifestMany}, so a test can make that read fail and
+     * pin the {@code dropped_unknown} contract. Null (a no-op) in production.
+     */
+    private volatile java.util.function.Consumer<String> beforeReadHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the previous-manifest read hook. */
+    public void setBeforeReadHookForTests(java.util.function.Consumer<String> hook) {
+        this.beforeReadHookForTests = hook;
+    }
+
+    /**
      * SHARED half of the gate. Every transaction that inserts into, or
      * bulk-repoints the collection of, {@code catalog_document_chunks} takes
      * this before doing so — before {@link #acquireIndexRunLock} too, on the
@@ -5162,8 +5174,18 @@ public final class CatalogRepository {
      *        PgVectorRepository.NeedEmbedResolution} makes on the direct
      *        upsert-chunks path. Only {@code true} entries feed {@link
      *        #upsertManifestChunkVectors}'s raced-embed count.
+     * @param keepStoredOnConflict RDR-223 P1.5 fix round: {@code true} for a chunk carrying a
+     *        CLIENT-SUPPLIED vector written without {@code force_re_embed}. If the chash exists by the
+     *        time the insert runs (a writer that committed it between the existence partition and
+     *        here), the insert must NOT replace the stored text or vector; only the metadata is
+     *        refreshed. A supplied vector never overwrites a stored one unless the client forced it.
      */
-    public record ResolvedChunk(String text, float[] embedding, String metadataJson, boolean originalAbsent) {}
+    public record ResolvedChunk(String text, float[] embedding, String metadataJson, boolean originalAbsent,
+                                boolean keepStoredOnConflict) {
+        public ResolvedChunk(String text, float[] embedding, String metadataJson, boolean originalAbsent) {
+            this(text, embedding, metadataJson, originalAbsent, false);
+        }
+    }
 
     /**
      * nexus-kl2z6 increment 1 (design memo §0/§1.4): upsert THIS doc's chunk
@@ -5284,12 +5306,25 @@ public final class CatalogRepository {
             }
         }
 
-        var insert = ctx.insertInto(ch.table(),
-                ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
+        // RDR-223 P1.5 fix round: chunks carrying a client-supplied vector written WITHOUT
+        // force_re_embed are inserted with ON CONFLICT keeping the stored text and vector (only
+        // the metadata is refreshed); every other chunk keeps the full overwrite. Two statements
+        // only when a request mixes both kinds.
+        List<String> overwriteChashes = new ArrayList<>();
+        List<String> keepChashes = new ArrayList<>();
         for (String c : toWrite) {
-            ResolvedChunk rc = resolved.get(c);
-            insert = insert.values(tenant, collection, c, rc.text(),
-                    Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
+            (resolved.get(c).keepStoredOnConflict() ? keepChashes : overwriteChashes).add(c);
+        }
+        if (!overwriteChashes.isEmpty() && !keepChashes.isEmpty()) {
+            // Two statements would take row locks in two passes; take them all first, in the one
+            // global chash order (nexus-ps9wb), so a writer that classifies the same chashes the
+            // other way round cannot deadlock against this one.
+            ctx.select(ch.chash()).from(ch.table())
+               .where(ch.tenantId().eq(tenant).and(ch.collection().eq(collection))
+                      .and(ch.chash().in(toWrite)))
+               .orderBy(ch.chash())
+               .forUpdate()
+               .fetch();
         }
         long raced = 0;
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #1): a bounded sample
@@ -5305,7 +5340,16 @@ public final class CatalogRepository {
         // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): same (xmax = 0) RETURNING idiom as
         // PgVectorRepository.upsertChunksInternal's final INSERT — see that call
         // site's comment for the RawSqlGateTest rationale.
-        var returned = insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+        List<org.jooq.Record2<String, Boolean>> returned = new ArrayList<>();
+        if (!overwriteChashes.isEmpty()) {
+            var insert = ctx.insertInto(ch.table(),
+                    ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
+            for (String c : overwriteChashes) {
+                ResolvedChunk rc = resolved.get(c);
+                insert = insert.values(tenant, collection, c, rc.text(),
+                        Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
+            }
+            returned.addAll(insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
               .doUpdate()
               .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
               .set(ch.embedding(), DSL.excluded(ch.embedding()))
@@ -5318,7 +5362,26 @@ public final class CatalogRepository {
               .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
               .returningResult(ch.chash(), DSL.field(
                   DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
-              .fetch();
+              .fetch());
+        }
+        if (!keepChashes.isEmpty()) {
+            var insert = ctx.insertInto(ch.table(),
+                    ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
+            for (String c : keepChashes) {
+                ResolvedChunk rc = resolved.get(c);
+                insert = insert.values(tenant, collection, c, rc.text(),
+                        Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
+            }
+            returned.addAll(insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+              .doUpdate()
+              // The chash exists: keep the stored text and vector, refresh the metadata like
+              // the metadata-only refresh does (RDR-223 P1.5, R-14 cell 4).
+              .set(ch.metadata(),  DSL.excluded(ch.metadata()))
+              .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
+              .returningResult(ch.chash(), DSL.field(
+                  DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
+              .fetch());
+        }
         for (var r : returned) {
             if (!Boolean.TRUE.equals(r.value2()) && originalAbsentChashes.contains(r.value1())) {
                 raced++;
@@ -5514,6 +5577,9 @@ public final class CatalogRepository {
         // committed, whether or not `sweep` is on. Insertion-ordered so the response follows
         // request order. See the dropped_chashes note at the response build below.
         Map<String, List<String>> droppedByDoc = new LinkedHashMap<>();
+        // RDR-223 fix round: committed documents whose previous-manifest read failed, so their drop
+        // list is UNKNOWN (not empty). Reported explicitly as dropped_unknown, never as a missing key.
+        List<String> droppedUnknown = new ArrayList<>();
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, code-review CRITICAL): chashes
         // already WRITTEN (committed) by an earlier doc of THIS SAME call. A doc's
         // own per-doc INSERT hitting ON CONFLICT against a chash a SIBLING doc of
@@ -5584,7 +5650,11 @@ public final class CatalogRepository {
                         long tBeforeReadStart = System.nanoTime();
                         Set<String> beforeRead =
                             withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
-                                  tenant, docId, () -> currentManifestChashes(ctx, tenant, docId), null);
+                                  tenant, docId, () -> {
+                                      java.util.function.Consumer<String> hook = beforeReadHookForTests;
+                                      if (hook != null) hook.accept(docId);
+                                      return currentManifestChashes(ctx, tenant, docId);
+                                  }, null);
                         long tBeforeReadEnd = System.nanoTime();
                         beforeReadNanosTotal[0] += (tBeforeReadEnd - tBeforeReadStart);
                         boolean beforeReadFailed = sweep && beforeRead == null;
@@ -5639,6 +5709,9 @@ public final class CatalogRepository {
                     // construction: a doc that lands in `failed` below never
                     // reaches this line, so a rolled-back manifest write can
                     // no longer contribute a "swept" count to the response.
+                    if (beforeHolder[0] == null) {
+                        droppedUnknown.add(docId);
+                    }
                     if (beforeHolder[0] != null) {
                         List<String> dropped = computeDroppedChashes(beforeHolder[0], rows);
                         droppedByDoc.put(docId, dropped);
@@ -5741,6 +5814,15 @@ public final class CatalogRepository {
         // nexus-z0o2p.1). A multi-batch writer carries a document's list to that document's
         // last append as `sweep_chashes`.
         result.put("dropped_chashes", droppedByDoc);
+        // The scalar twin of dropped_chashes: every list that gates a destructive decision carries
+        // a count. Same key set as dropped_chashes.
+        Map<String, Integer> droppedCount = new LinkedHashMap<>();
+        for (var e : droppedByDoc.entrySet()) droppedCount.put(e.getKey(), e.getValue().size());
+        result.put("dropped_count", droppedCount);
+        // A committed document listed here has NO entry in dropped_chashes / dropped_count because
+        // its previous-manifest read failed: its drop list is unknown, which is different from an
+        // empty one. An absent doc_id is in neither map nor this array only if its write failed.
+        result.put("dropped_unknown", droppedUnknown);
         // nexus-kl2z6 increment 1 (design memo §5.1/§5.2): ONLY present when
         // this call actually carried `chunks` — an absent field is what
         // makes the no-chunks path byte-for-byte identical to pre-kl2z6
@@ -6395,6 +6477,13 @@ public final class CatalogRepository {
             // acquireIndexRunLock's javadoc) — this was the one mutation path
             // left outside the lock when it landed.
             acquireIndexRunLock(ctx, tenant, docId);
+            // An append with rows learns of a tombstone at its chunk_count fold below; a sweep-only
+            // append (empty rows) has no fold, so check here: it must be refused 409 like any
+            // other append to a tombstoned document, not sweep on its behalf.
+            if (rows.isEmpty() && isTombstonedDocument(ctx, tenant, docId)) {
+                throw new TombstonedDocumentException(docId,
+                    "appendManifestChunks refused: document is tombstoned: " + docId);
+            }
             // RDR-223 P1.1: the chunk-vector UPSERT runs AFTER the index-run
             // lock and BEFORE the manifest rows, in this same transaction --
             // writeManifestRows' order exactly (RDR-223 F-2). The raced-embed
@@ -6561,6 +6650,23 @@ public final class CatalogRepository {
         out.put("sweep_detail", sweepDetail);
         out.put("results", results);
         return out;
+    }
+
+    /**
+     * RDR-223 fix round: which of {@code docIds} have a {@code catalog_documents} row (tombstoned
+     * ones included, exactly like {@link #requireDocumentExists}), in ONE query. Lets {@code
+     * append_many} skip embedding chunks that only unregistered documents reference.
+     */
+    public Set<String> registeredDocIds(String tenant, java.util.Collection<String> docIds) {
+        if (docIds == null || docIds.isEmpty()) return Set.of();
+        return tenantScope.withTenant(tenant, ctx -> {
+            Set<String> out = new HashSet<>();
+            ctx.select(CATALOG_DOCUMENTS.TUMBLER).from(CATALOG_DOCUMENTS)
+               .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant))
+               .and(CATALOG_DOCUMENTS.TUMBLER.in(docIds))
+               .fetch().forEach(r -> out.add(r.value1()));
+            return out;
+        });
     }
 
     /**

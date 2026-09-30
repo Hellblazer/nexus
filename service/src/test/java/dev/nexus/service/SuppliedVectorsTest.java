@@ -235,21 +235,40 @@ class SuppliedVectorsTest extends AtomicWriteTestBase {
 
     // ── Test Plan 10: wrong dimension / wrong model refused, nothing stored ─────
 
+    private static Map<String, Object> chunkMeta(String chash, String text, String value) {
+        return Map.of("chash", chash, "text", text, "metadata", Map.of("m", value));
+    }
+
+    /** Stores {@code chash} (metadata m=original) through a document of its own, in {@code f}'s collection. */
+    private void seedExisting(Fx f, String chash, String text) {
+        String holder = freshDoc("seed", f.collection());
+        svc.writeManyCombined(TENANT, f.collection(), List.of(chunkMeta(chash, text, "original")),
+            List.of(doc(holder, List.of(row(0, chash)))), null, false, false);
+    }
+
     @Test
     void aWrongDimension_isRefused_namingBothValues_andNothingIsStored_onEveryRoute() throws Exception {
         for (var e : routes().entrySet()) {
             Fx f = fixture("dim");
             String good = ch("dim-good-" + e.getKey()), bad = ch("dim-bad-" + e.getKey());
+            String existing = ch("dim-existing-" + e.getKey());
+            seedExisting(f, existing, "existing text");
             long chunksBefore = chunkCount(f.collection());
 
-            assertThatThrownBy(() -> e.getValue().write(f, List.of(row(0, good), row(1, bad)),
-                    List.of(vchunk(good, "good", vec(1)), vchunk(bad, "bad", new float[383])), MODEL))
+            // The refused request also carries an EXISTING chash with CHANGED metadata: the
+            // refusal must come before the existence partition's metadata refresh (phase 2a).
+            assertThatThrownBy(() -> e.getValue().write(f, List.of(row(0, good), row(1, bad), row(2, existing)),
+                    List.of(vchunk(good, "good", vec(1)), vchunk(bad, "bad", new float[383]),
+                            chunkMeta(existing, "existing text", "changed")), MODEL))
                 .as(e.getKey())
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("383").hasMessageContaining("384").hasMessageContaining("chunks[1]");
 
             assertThat(chunkCount(f.collection())).as("%s: nothing stored", e.getKey()).isEqualTo(chunksBefore);
             assertThat(repo.getManifest(TENANT, f.docId())).as(e.getKey()).isEmpty();
+            assertThat(storedMetadata(f.collection(), existing))
+                .as("%s: the existing chunk's metadata was not refreshed by a refused request", e.getKey())
+                .contains("original").doesNotContain("changed");
         }
     }
 
@@ -258,16 +277,126 @@ class SuppliedVectorsTest extends AtomicWriteTestBase {
         for (var e : routes().entrySet()) {
             Fx f = fixture("mdl");
             String c = ch("mdl-" + e.getKey());
+            String existing = ch("mdl-existing-" + e.getKey());
+            seedExisting(f, existing, "existing text");
             long chunksBefore = chunkCount(f.collection());
 
-            assertThatThrownBy(() -> e.getValue().write(f, List.of(row(0, c)),
-                    List.of(vchunk(c, "c", vec(2))), "voyage-context-3"))
+            assertThatThrownBy(() -> e.getValue().write(f, List.of(row(0, c), row(1, existing)),
+                    List.of(vchunk(c, "c", vec(2)), chunkMeta(existing, "existing text", "changed")),
+                    "voyage-context-3"))
                 .as(e.getKey())
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("voyage-context-3").hasMessageContaining(MODEL);
 
             assertThat(chunkCount(f.collection())).as("%s: nothing stored", e.getKey()).isEqualTo(chunksBefore);
+            assertThat(storedMetadata(f.collection(), existing))
+                .as("%s: refused before the metadata refresh", e.getKey())
+                .contains("original").doesNotContain("changed");
         }
+    }
+
+    // ── R-14 cell 4 in full: a supplied vector never overwrites a stored one unless forced ──
+
+    @Test
+    void withForceReEmbed_theSuppliedVectorIsWritten_andTheDifferingStoredOneIsCounted() throws Exception {
+        Fx f = fixture("force");
+        String c = ch("force-c");
+        float[] stored = vec(21), supplied = vec(22);
+        svc.writeManyCombined(TENANT, f.collection(), List.of(vchunk(c, "force text", stored)),
+            List.of(doc(f.docId(), List.of(row(0, c)))), null, false, false, MODEL);
+        long before = SuppliedVectorMismatchActivity.total();
+
+        var response = svc.writeManyCombined(TENANT, f.collection(), List.of(vchunk(c, "force text", supplied)),
+            List.of(doc(freshDoc("force2", f.collection()), List.of(row(0, c)))), null, false, true, MODEL).response();
+
+        assertThat(storedVector(f.collection(), c)).as("explicit intent: written").containsExactly(supplied);
+        assertThat(response).containsEntry("vectors_supplied", 1).containsEntry("vector_mismatches", 1);
+        assertThat(SuppliedVectorMismatchActivity.total() - before).isEqualTo(1L);
+    }
+
+    @Test
+    void withoutForce_anExistingChashKeepsItsStoredVector_evenWhenTheSuppliedTextDiffers() throws Exception {
+        Fx f = fixture("keep");
+        String c = ch("keep-c");
+        float[] stored = vec(31), supplied = vec(32);
+        svc.writeManyCombined(TENANT, f.collection(), List.of(vchunk(c, "original text", stored)),
+            List.of(doc(f.docId(), List.of(row(0, c)))), null, false, false, MODEL);
+        long before = SuppliedVectorMismatchActivity.total();
+
+        var response = svc.writeManyCombined(TENANT, f.collection(),
+            List.of(vchunk(c, "DIFFERENT text", supplied)),
+            List.of(doc(freshDoc("keep2", f.collection()), List.of(row(0, c)))), null, false, false, MODEL).response();
+
+        assertThat(storedVector(f.collection(), c)).containsExactly(stored);
+        assertThat(chunkText(f.collection(), c)).as("text kept with the vector").isEqualTo("original text");
+        assertThat(response).containsEntry("vectors_supplied", 0).containsEntry("vector_mismatches", 1)
+            .containsEntry("embed_embedded", 0);
+        assertThat(SuppliedVectorMismatchActivity.total() - before).isEqualTo(1L);
+    }
+
+    @Test
+    void aWriterThatCommitsTheChashBetweenTheExistenceCheckAndTheInsert_isNotOverwrittenBySuppliedVectors() throws Exception {
+        for (var e : routes().entrySet()) {
+            Fx f = fixture("race");
+            String c = ch("race-c-" + e.getKey());
+            String text = "race text " + e.getKey();
+            String otherDoc = freshDoc("race-other", f.collection());
+            float[] supplied = vec(41);
+            float[] winnerVector = new CountingFakeEmbedder().embed(List.of(text)).get(0);
+            assertThat(winnerVector).as("sanity: the winner's vector differs from the supplied one")
+                .isNotEqualTo(supplied);
+
+            var slow = new dev.nexus.service.db.CombinedWriteService(tenantScope, repo,
+                new dev.nexus.service.vectors.EmbedderRouter(embedder, "document"));
+            var winner = new dev.nexus.service.db.CombinedWriteService(tenantScope, repo,
+                new dev.nexus.service.vectors.EmbedderRouter(embedder, "document"));
+            // After slow's existence partition found c ABSENT, the winner commits it (server-embedded).
+            slow.setAfterNeedEmbedResolvedHookForTests(() ->
+                winner.writeManyCombined(TENANT, f.collection(), List.of(chunk(c, text)),
+                    List.of(doc(otherDoc, List.of(row(0, c)))), null, false, false));
+
+            switch (e.getKey()) {
+                case "write_many" -> slow.writeManyCombined(TENANT, f.collection(),
+                    List.of(Map.of("chash", c, "text", text, "metadata", Map.of("m", "racer"), "embedding", supplied)),
+                    List.of(doc(f.docId(), List.of(row(0, c)))), null, false, false, MODEL);
+                case "append" -> slow.appendCombined(TENANT, f.collection(), f.docId(), List.of(row(0, c)),
+                    List.of(Map.of("chash", c, "text", text, "metadata", Map.of("m", "racer"), "embedding", supplied)),
+                    false, null, MODEL);
+                default -> slow.appendManyCombined(TENANT, f.collection(),
+                    List.of(doc(f.docId(), List.of(row(0, c)))),
+                    List.of(Map.of("chash", c, "text", text, "metadata", Map.of("m", "racer"), "embedding", supplied)),
+                    false, MODEL);
+            }
+
+            assertThat(storedVector(f.collection(), c))
+                .as("%s: the racing writer's stored vector survives the ON CONFLICT", e.getKey())
+                .containsExactly(winnerVector);
+            assertThat(storedMetadata(f.collection(), c)).as("%s: metadata still refreshed", e.getKey()).contains("racer");
+            assertThat(manifestChashes(f.docId())).as(e.getKey()).containsExactly(c);
+        }
+    }
+
+    @Test
+    void aMismatchIsCountedOnlyOnceTheWriteHasCommitted() throws Exception {
+        Fx f = fixture("commit");
+        String c = ch("commit-c");
+        float[] stored = vec(51), different = vec(52);
+        svc.writeManyCombined(TENANT, f.collection(), List.of(vchunk(c, "commit text", stored)),
+            List.of(doc(freshDoc("commit-holder", f.collection()), List.of(row(0, c)))), null, false, false, MODEL);
+        assertThat(repo.deleteDocument(TENANT, f.docId())).isEqualTo(1);
+        long before = SuppliedVectorMismatchActivity.total();
+
+        // The append fails (tombstoned document) after the mismatch was detected in the partition.
+        assertThatThrownBy(() -> svc.appendCombined(TENANT, f.collection(), f.docId(), List.of(row(0, c)),
+                List.of(vchunk(c, "commit text", different)), false, null, MODEL))
+            .isInstanceOf(dev.nexus.service.db.CatalogRepository.TombstonedDocumentException.class);
+        assertThat(SuppliedVectorMismatchActivity.total() - before)
+            .as("a failed write that the client will retry must not be counted").isZero();
+
+        Fx g = fixture("commit2");
+        svc.appendCombined(TENANT, g.collection(), g.docId(), List.of(row(0, ch("commit2-x"))),
+            List.of(chunk(ch("commit2-x"), "x")), false);   // unrelated success: still nothing counted
+        assertThat(SuppliedVectorMismatchActivity.total() - before).isZero();
     }
 
     @Test

@@ -159,6 +159,23 @@ class AppendSweepChashesTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void aSweepOnlyAppendToATombstonedDocument_isRefusedLikeAnAppendWithRows_andSweepsNothing() throws Exception {
+        Fx f = fixture("tombsweep");
+        String x = ch("tombsweep-x");
+        String holder = ownerOf(f, "tombsweep-holder", List.of(x));
+        repo.writeManifestMany(TENANT, List.of(doc(holder, List.of())), f.collection(), null, false);
+        assertThat(repo.deleteDocument(TENANT, f.docId())).isEqualTo(1);
+
+        assertThatThrownBy(() -> svc.appendCombined(TENANT, f.collection(), f.docId(),
+                List.of(), List.of(), false, List.of(x)))
+            .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
+        assertThatThrownBy(() -> repo.appendManifestChunks(TENANT, f.docId(), f.collection(), List.of(),
+                null, null, List.of(x)))
+            .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
+        assertThat(chunkExists(f.collection(), x)).as("nothing was swept on a tombstoned document's behalf").isTrue();
+    }
+
+    @Test
     void duplicateChashesInTheListAreSweptAndCountedOnce() throws Exception {
         Fx f = fixture("dup");
         String x = ch("dup-x");

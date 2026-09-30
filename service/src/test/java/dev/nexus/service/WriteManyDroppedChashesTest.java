@@ -129,6 +129,72 @@ class WriteManyDroppedChashesTest extends AtomicWriteTestBase {
         assertThat(result.get("failed_doc_ids")).isEqualTo(List.of("aw.no-such-doc"));
     }
 
+    @SuppressWarnings("unchecked")
+    private static Map<String, Integer> droppedCount(Map<String, Object> response) {
+        return (Map<String, Integer>) response.get("dropped_count");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<String> droppedUnknown(Map<String, Object> response) {
+        return (List<String>) response.get("dropped_unknown");
+    }
+
+    @Test
+    void droppedCount_isTheScalarTwinOfDroppedChashes_onEveryPath() throws Exception {
+        Fx f = fixture("cnt");
+        String other = freshDoc("cnt-other", f.collection());
+        String[] abc = seedABC(f, "cnt");
+        String x = ch("cnt-x");
+
+        var combined = svc.writeManyCombined(TENANT, f.collection(),
+            List.of(chunk(x, "cnt x")),
+            List.of(doc(f.docId(), List.of(row(0, abc[0]))),      // drops b, c
+                    doc(other, List.of(row(0, x)))),              // new document
+            null, false, false).response();
+        assertThat(droppedCount(combined)).containsExactly(
+            Map.entry(f.docId(), 2), Map.entry(other, 0));
+        assertThat(droppedUnknown(combined)).isEmpty();
+        assertThat(dropped(combined).keySet()).isEqualTo(droppedCount(combined).keySet());
+
+        var plain = repo.writeManifestMany(TENANT,
+            List.of(doc(f.docId(), List.of())), f.collection(), null, true);        // sweep on: drops a
+        assertThat(droppedCount(plain)).containsExactly(Map.entry(f.docId(), 1));
+        assertThat(plain.get("swept")).isEqualTo(1);
+    }
+
+    @Test
+    void whenThePreviousManifestReadFails_theCommittedDocIsListedAsDroppedUnknown_notSilentlyMissing() throws Exception {
+        Fx f = fixture("unk");
+        String healthy = freshDoc("unk-healthy", f.collection());
+        String[] abc = seedABC(f, "unk");
+        String x = ch("unk-x");
+        try {
+            repo.setBeforeReadHookForTests(docId -> {
+                if (docId.equals(f.docId())) throw new IllegalStateException("simulated before-read failure");
+            });
+
+            var response = svc.writeManyCombined(TENANT, f.collection(),
+                List.of(chunk(x, "unk x")),
+                List.of(doc(f.docId(), List.of(row(0, x))), doc(healthy, List.of(row(0, x)))),
+                null, false, false).response();
+
+            assertThat(response.get("docs")).as("the write itself committed for both").isEqualTo(2);
+            assertThat(droppedUnknown(response)).containsExactly(f.docId());
+            assertThat(dropped(response)).as("no entry claims to know the unknown").containsOnlyKeys(healthy);
+            assertThat(droppedCount(response)).containsOnlyKeys(healthy);
+            assertThat(manifestChashes(f.docId())).containsExactly(x);
+            for (String c : abc) assertThat(chunkExists(f.collection(), c)).isTrue();
+
+            // With sweep ON the same failure is reported both ways: sweep_detail errored, and unknown.
+            var swept = repo.writeManifestMany(TENANT,
+                List.of(doc(f.docId(), List.of(row(0, x)))), f.collection(), null, true);
+            assertThat(droppedUnknown(swept)).containsExactly(f.docId());
+            assertThat(swept.get("sweep_skipped")).isEqualTo(1);
+        } finally {
+            repo.setBeforeReadHookForTests(null);
+        }
+    }
+
     @Test
     void anUnchangedRewrite_dropsNothing() throws Exception {
         Fx f = fixture("same");

@@ -199,6 +199,7 @@ public final class CombinedWriteService {
         // one per-doc transaction at a time.
         Map<String, Object> response =
             catalogRepo.writeManifestMany(tenant, docs, collection, complete, sweep, batch.resolved());
+        recordMismatches(collection, batch);
         // nexus-acvi7: merge the embed-partition counts into the SAME
         // response envelope `chunks_written` already rides — this is the
         // right seam (CatalogRepository.writeManifestMany's map, built at
@@ -283,14 +284,17 @@ public final class CombinedWriteService {
             if (c instanceof String s) referenced.add(s);
         }
         List<Map<String, Object>> relevant = new ArrayList<>();
+        Set<String> unreferenced = new HashSet<>();
         for (Map<String, Object> c : chunks != null ? chunks : List.<Map<String, Object>>of()) {
             // A non-string chash is kept so resolveChunks rejects it loudly.
             if (!(c.get("chash") instanceof String s) || referenced.contains(s)) relevant.add(c);
+            else unreferenced.add(s);
         }
 
         ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed);
         CatalogRepository.AppendOutcome outcome = catalogRepo.appendManifestChunks(
             tenant, docId, collection, rows, batch.resolved(), null, sweepChashes);
+        recordMismatches(collection, batch);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("ok", true);
@@ -301,6 +305,9 @@ public final class CombinedWriteService {
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
         response.put("vector_mismatches", batch.mismatches());
+        // Distinct chashes of the request's chunks that no row referenced: neither embedded nor
+        // inserted. Non-zero is a client bug made visible.
+        response.put("chunks_unreferenced", unreferenced.size());
         outcome.addSweepFieldsTo(response);
         return new CombinedWriteResult(response, batch.tokens());
     }
@@ -344,8 +351,17 @@ public final class CombinedWriteService {
             return new CombinedWriteResult(
                 catalogRepo.appendManifestMany(tenant, collection, docs, null), 0L);
         }
+        // One query: which documents exist at all. A chunk that only an unregistered document
+        // references would be embedded for nothing (that document fails in place), so it is
+        // treated as unreferenced. The per-document in-transaction check stays authoritative.
+        List<String> docIds = new ArrayList<>();
+        for (Map<String, Object> d : docs) {
+            if (d.get("doc_id") instanceof String id) docIds.add(id);
+        }
+        Set<String> registered = catalogRepo.registeredDocIds(tenant, docIds);
         Set<String> referenced = new HashSet<>();
         for (Map<String, Object> d : docs) {
+            if (!(d.get("doc_id") instanceof String id) || !registered.contains(id)) continue;
             if (d.get("rows") instanceof List<?> rows) {
                 for (Object r : rows) {
                     if (r instanceof Map<?, ?> m && m.get("chash") instanceof String c) referenced.add(c);
@@ -353,24 +369,42 @@ public final class CombinedWriteService {
             }
         }
         List<Map<String, Object>> relevant = new ArrayList<>();
+        Set<String> unreferenced = new HashSet<>();
         for (Map<String, Object> c : chunks) {
             if (!(c.get("chash") instanceof String s) || referenced.contains(s)) relevant.add(c);
+            else unreferenced.add(s);
         }
         ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed);
         Map<String, Object> response =
             catalogRepo.appendManifestMany(tenant, collection, docs, batch.resolved());
+        recordMismatches(collection, batch);
         response.put("chunks_deduped", batch.deduped());
         response.put("embed_skipped", batch.skipped());
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
         response.put("vector_mismatches", batch.mismatches());
+        response.put("chunks_unreferenced", unreferenced.size());
         return new CombinedWriteResult(response, batch.tokens());
     }
 
     /** Output of the dedupe / existence-partition / embed phases. */
     private record ResolvedBatch(Map<String, CatalogRepository.ResolvedChunk> resolved,
                                  int deduped, int skipped, int embedded, int supplied,
-                                 int mismatches, long tokens) {}
+                                 List<String> mismatchedChashes, long tokens) {
+        int mismatches() { return mismatchedChashes.size(); }
+    }
+
+    /**
+     * Counts and logs the supplied-vector mismatches of a batch, once the write that used it has
+     * COMMITTED (a request that fails and is retried by the client must not count twice).
+     */
+    private static void recordMismatches(String collection, ResolvedBatch batch) {
+        List<String> m = batch.mismatchedChashes();
+        if (m.isEmpty()) return;
+        SuppliedVectorMismatchActivity.record(m.size());
+        log.info("event=supplied_vector_mismatch collection={} mismatched={} chashes={}",
+                 collection, m.size(), String.join(",", m.subList(0, Math.min(8, m.size()))));
+    }
 
     /**
      * RDR-223 P1.5 (bead nexus-z0o2p.6) -- validate every client-supplied vector BEFORE any
@@ -580,12 +614,21 @@ public final class CombinedWriteService {
                 mismatchedChashes.clear();
                 List<Integer> need = new ArrayList<>();
                 List<Integer> metadataOnly = new ArrayList<>();
+                List<Integer> existingWithSupplied = new ArrayList<>();
                 for (int i = 0; i < dedupChashes.size(); i++) {
                     String stored = existingText.get(dedupChashes.get(i));
                     if (stored == null) {
                         originalAbsentIdx.add(i);
                     }
-                    if (forceReEmbed || stored == null || !stored.equals(dedupTexts.get(i))) {
+                    boolean supplied = dedupVectors.get(i) != null;
+                    if (supplied && stored != null) {
+                        existingWithSupplied.add(i);
+                    }
+                    if (supplied && !forceReEmbed && stored != null) {
+                        // R-14 cell 4: an existing chash keeps its stored vector (and text)
+                        // whatever the supplied one says; only the metadata is refreshed.
+                        metadataOnly.add(i);
+                    } else if (forceReEmbed || stored == null || !stored.equals(dedupTexts.get(i))) {
                         need.add(i);
                     } else {
                         metadataOnly.add(i);
@@ -600,18 +643,15 @@ public final class CombinedWriteService {
                 if (existencePartitionHook != null) {
                     existencePartitionHook.run();
                 }
-                // RDR-223 P1.5, Technical Design 2 (R-14): an existing chash (identical text)
-                // that also carries a supplied vector KEEPS its stored vector. Compare the
-                // two so a disagreement is counted and logged, never written.
-                List<Integer> withSupplied = new ArrayList<>();
-                for (int i : metadataOnly) {
-                    if (dedupVectors.get(i) != null) withSupplied.add(i);
-                }
-                if (!withSupplied.isEmpty()) {
-                    List<String> hexes = new ArrayList<>(withSupplied.size());
-                    for (int i : withSupplied) hexes.add(dedupChashes.get(i));
+                // RDR-223 P1.5, Technical Design 2 (R-14): an existing chash that also carries a
+                // supplied vector KEEPS its stored vector unless the client forced the write.
+                // Compare the two so a disagreement is counted and logged (under force the
+                // supplied vector is written, and the differing stored one is what is counted).
+                if (!existingWithSupplied.isEmpty()) {
+                    List<String> hexes = new ArrayList<>(existingWithSupplied.size());
+                    for (int i : existingWithSupplied) hexes.add(dedupChashes.get(i));
                     Map<String, float[]> storedVectors = selectStoredVectors(ctx, ch, tenant, collection, hexes);
-                    for (int i : withSupplied) {
+                    for (int i : existingWithSupplied) {
                         float[] stored = storedVectors.get(dedupChashes.get(i));
                         // A chash whose vector cannot be read back (concurrently deleted) is
                         // not a mismatch: the zero-row reroute below re-stores it.
@@ -649,17 +689,10 @@ public final class CombinedWriteService {
             needEmbedResolvedHook.run();
         }
 
-        if (!mismatchedChashes.isEmpty()) {
-            SuppliedVectorMismatchActivity.record(mismatchedChashes.size());
-            log.info("event=supplied_vector_mismatch collection={} mismatched={} chashes={}",
-                     collection, mismatchedChashes.size(),
-                     String.join(",", mismatchedChashes.subList(0, Math.min(8, mismatchedChashes.size()))));
-        }
-
         // RDR-223 P1.5: a chunk that needs writing AND carries a supplied vector stores that
         // vector as-is (no embedder call); only the rest go to the embedder. A supplied vector
-        // also wins under force_re_embed and for a content-divergent existing chash: both mean
-        // "write this chunk", and the client already computed the vector to write.
+        // is stored for a chash that is absent, or under force_re_embed (explicit intent to
+        // overwrite); for a chash that already exists it never replaces the stored vector.
         List<String> textsToEmbed = new ArrayList<>(needEmbedIdx.size());
         int suppliedCount = 0;
         for (int idx : needEmbedIdx) {
@@ -723,11 +756,14 @@ public final class CombinedWriteService {
             resolved.put(chash,
                 new CatalogRepository.ResolvedChunk(dedupTexts.get(idx),
                     supplied != null ? supplied : embeddings.get(nextEmbedding++), metadataJson,
-                    supplied == null && originalAbsentIdx.contains(idx)));
+                    supplied == null && originalAbsentIdx.contains(idx),
+                    // A supplied vector written without force must not overwrite one a racing
+                    // writer stored between the existence check and the insert.
+                    supplied != null && !forceReEmbed));
         }
 
         return new ResolvedBatch(resolved, dedupChashes.size(), skippedCount, embeddedCount,
-            suppliedCount, mismatchedChashes.size(), embedResult.tokens());
+            suppliedCount, new ArrayList<>(mismatchedChashes), embedResult.tokens());
     }
 
     /**

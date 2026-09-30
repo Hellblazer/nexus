@@ -330,6 +330,18 @@ class CatalogHandlerAppendChunksTest {
     }
 
     @Test
+    void append_sweepOnlyOnATombstonedDocument_409() throws Exception {
+        registerDoc("aph.tomb");
+        assertThat(repo.deleteDocument(TENANT, "aph.tomb")).isEqualTo(1);
+        CapturingExchange ex = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.tomb\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],"
+            + "\"sweep_chashes\":[\"" + ch("aph-tomb-x") + "\"]}");
+        handle(handlerWithoutService, ex);
+        assertThat(ex.status).isEqualTo(409);
+        assertThat(ex.bodyString()).contains("tombstoned");
+    }
+
+    @Test
     void append_sweepChashesForMissingDocument_409() throws Exception {
         CapturingExchange ex = post("/v1/catalog/manifest/append",
             "{\"doc_id\":\"aph.no-such-2\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],"

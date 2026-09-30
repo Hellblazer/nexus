@@ -171,6 +171,91 @@ class AppendManyTest extends AtomicWriteTestBase {
         assertThat(chunkExists(f.collection(), stray)).isFalse();
     }
 
+    // ── import shape (RDR-223 F-6): chash-ordered pages scatter a document's positions ──
+
+    private List<String> positionsAndChashes(String docId) {
+        List<String> out = new ArrayList<>();
+        for (var r : repo.getManifest(TENANT, docId)) out.add(r.get("position") + "=" + r.get("chash"));
+        return out;
+    }
+
+    @Test
+    void scatteredPositions_acrossAppendManyPages_endUpInManifestOrder() throws Exception {
+        Fx f = fixture("scat");
+        String c0 = ch("scat-0"), c1 = ch("scat-1"), c3 = ch("scat-3"), c5 = ch("scat-5"), c40 = ch("scat-40");
+
+        // Page 1 carries positions 40, 5, 1 in that (chash) order; page 2 carries 3 and 0.
+        var p1 = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(40, c40), row(5, c5), row(1, c1)))),
+            List.of(chunk(c40, "40"), chunk(c5, "5"), chunk(c1, "1")), false).response();
+        var p2 = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(3, c3), row(0, c0)))),
+            List.of(chunk(c3, "3"), chunk(c0, "0")), false).response();
+
+        assertThat(p1).containsEntry("failed_doc_ids", List.of());
+        assertThat(p2).containsEntry("failed_doc_ids", List.of());
+        assertThat(positionsAndChashes(f.docId()))
+            .as("scattered positions land where they say, read back in position order")
+            .containsExactly("0=" + c0, "1=" + c1, "3=" + c3, "5=" + c5, "40=" + c40);
+        assertThat(repo.getManifest(TENANT, f.docId()).get(4)).containsEntry("chunk_index", 40);
+    }
+
+    @Test
+    void aFirstSightingWriteManyMixedWithAppendMany_replacesTheStaleManifestOnceAndOnlyOnce() throws Exception {
+        Fx f = fixture("mix");
+        String docB = freshDoc("mix-b", f.collection());
+        String o0 = ch("mix-o0"), o1 = ch("mix-o1"), o2 = ch("mix-o2"), o3 = ch("mix-o3");
+        String a0 = ch("mix-a0"), a1 = ch("mix-a1"), a2 = ch("mix-a2");
+        String b0 = ch("mix-b0"), b1 = ch("mix-b1"), b3 = ch("mix-b3");
+        // A previous import left doc A with a stale four-row manifest.
+        svc.writeManyCombined(TENANT, f.collection(),
+            List.of(chunk(o0, "o0"), chunk(o1, "o1"), chunk(o2, "o2"), chunk(o3, "o3")),
+            List.of(doc(f.docId(), List.of(row(0, o0), row(1, o1), row(2, o2), row(3, o3)))), null, false, false);
+        // Page 0: doc B's first sighting (write_many).
+        svc.writeManyCombined(TENANT, f.collection(), List.of(chunk(b3, "b3")),
+            List.of(doc(docB, List.of(row(3, b3)))), null, false, false);
+
+        // Page 1: doc A's FIRST sighting (write_many replaces its stale manifest) AND doc B's
+        // continuation (append_many), against the same collection.
+        var wm = svc.writeManyCombined(TENANT, f.collection(), List.of(chunk(a2, "a2")),
+            List.of(doc(f.docId(), List.of(row(2, a2)))), null, false, false).response();
+        var am = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(docB, List.of(row(1, b1)))), List.of(chunk(b1, "b1")), false).response();
+        // Page 2: continuations of BOTH documents in ONE append_many.
+        var am2 = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(0, a0), row(1, a1))), mdoc(docB, List.of(row(0, b0)))),
+            List.of(chunk(a0, "a0"), chunk(a1, "a1"), chunk(b0, "b0")), false).response();
+
+        assertThat(wm).containsEntry("failed_doc_ids", List.of());
+        assertThat(am).containsEntry("failed_doc_ids", List.of());
+        assertThat(am2).containsEntry("failed_doc_ids", List.of()).containsEntry("docs", 2);
+        assertThat(positionsAndChashes(f.docId())).as("first sighting replaced the stale rows; the appends only added")
+            .containsExactly("0=" + a0, "1=" + a1, "2=" + a2);
+        assertThat(positionsAndChashes(docB)).containsExactly("0=" + b0, "1=" + b1, "3=" + b3);
+        assertThat((Map<String, List<String>>) wm.get("dropped_chashes"))
+            .containsEntry(f.docId(), List.of(o0, o1, o2, o3));
+        for (String stale : List.of(o0, o1, o2, o3)) {
+            assertThat(chunkExists(f.collection(), stale)).as("no sweep ran in this mix").isTrue();
+        }
+    }
+
+    @Test
+    void chunksOnlyAnUnregisteredDocumentReferences_areNotEmbedded_andAreCountedUnreferenced() throws Exception {
+        Fx f = fixture("unreg");
+        String mine = ch("unreg-mine"), theirs = ch("unreg-theirs");
+        int before = embedder.calls.get();
+
+        var response = svc.appendManyCombined(TENANT, f.collection(),
+            List.of(mdoc(f.docId(), List.of(row(0, mine))), mdoc("aw.unreg-missing", List.of(row(0, theirs)))),
+            List.of(chunk(mine, "mine"), chunk(theirs, "theirs"), chunk(ch("unreg-stray"), "stray")),
+            false).response();
+
+        assertThat(embedder.calls.get() - before).as("only the registered document's chunk is embedded").isEqualTo(1);
+        assertThat(response).containsEntry("docs", 1).containsEntry("failed_doc_ids", List.of("aw.unreg-missing"))
+            .containsEntry("chunks_unreferenced", 2).containsEntry("chunks_deduped", 1);
+        assertThat(chunkExists(f.collection(), theirs)).isFalse();
+    }
+
     @Test
     void manyDocumentsInOneRequest_allLand() throws Exception {
         Fx f = fixture("many");

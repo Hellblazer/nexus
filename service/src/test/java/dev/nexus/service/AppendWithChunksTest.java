@@ -133,6 +133,41 @@ class AppendWithChunksTest extends AtomicWriteTestBase {
             .isZero();
     }
 
+    // ── atomicity: a failure AFTER the chunk insert leaves zero chunks ───────────
+
+    @Test
+    void append_failingAfterTheChunkInsert_leavesZeroChunksAndNoRows() throws Exception {
+        Fx f = fixture("tomb");
+        String c = ch("tomb-c");
+        // A tombstoned document passes the existence pre-check and the in-transaction document
+        // check; the append fails at the chunk_count fold, the LAST statement, after the chunk
+        // upsert and the manifest row insert have already run in the same transaction.
+        assertThat(repo.deleteDocument(TENANT, f.docId())).isEqualTo(1);
+        long chunksBefore = chunkCount(f.collection());
+        int embedsBefore = embedder.calls.get();
+
+        assertThatThrownBy(() -> svc.appendCombined(TENANT, f.collection(), f.docId(),
+                List.of(row(0, c)), List.of(chunk(c, "tomb text")), false))
+            .isInstanceOf(CatalogRepository.TombstonedDocumentException.class);
+
+        assertThat(embedder.calls.get() - embedsBefore)
+            .as("non-vacuity: the chunk WAS embedded and reached the insert before the failure").isEqualTo(1);
+        assertThat(chunkCount(f.collection())).as("the rolled-back transaction took the chunk with it")
+            .isEqualTo(chunksBefore);
+        assertThat(chunkExists(f.collection(), c)).isFalse();
+        assertThat(repo.getManifest(TENANT, f.docId())).isEmpty();
+    }
+
+    @Test
+    void append_chunksNoRowReferences_areCountedAsUnreferenced() throws Exception {
+        Fx f = fixture("unrefc");
+        String used = ch("unrefc-used"), s1 = ch("unrefc-s1"), s2 = ch("unrefc-s2");
+        var response = svc.appendCombined(TENANT, f.collection(), f.docId(),
+            List.of(row(0, used)),
+            List.of(chunk(used, "used"), chunk(s1, "s1"), chunk(s2, "s2"), chunk(s2, "s2")), false).response();
+        assertThat(response).containsEntry("chunks_unreferenced", 2).containsEntry("chunks_written", 1);
+    }
+
     // ── raced-embed counter (RDR-222) counts on the append path ─────────────────
 
     @Test
@@ -228,7 +263,12 @@ class AppendWithChunksTest extends AtomicWriteTestBase {
                         List.of(doc(sweeperDoc, List.of())), f.collection(), null, true);
                 });
                 appendF.get(60, TimeUnit.SECONDS);   // ExecutionException here = deadlock or failure
-                sweepF.get(60, TimeUnit.SECONDS);
+                @SuppressWarnings("unchecked")
+                Map<String, Object> sweepResult = (Map<String, Object>) sweepF.get(60, TimeUnit.SECONDS);
+                assertThat(sweepResult.get("sweep_skipped"))
+                    .as("iteration %d: the sweep ran to completion (a deadlock victim or a gate timeout"
+                        + " would fail open as sweep_skipped=1 and pass every other assertion here)", i)
+                    .isEqualTo(0);
 
                 assertThat(manifestChashes(f.docId()))
                     .as("iteration %d: the appended row survives", i)

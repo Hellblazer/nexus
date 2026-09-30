@@ -270,6 +270,11 @@ class TombstoneFilterGateTest {
      * particular gate mechanism did.
      */
     private static final List<ExemptEntry> TOMBSTONE_EXEMPT = List.of(
+        new ExemptEntry("CatalogRepository.java", "registeredDocIds",
+            "existence pre-check for append_many (RDR-223): answers 'is there a catalog_documents row', "
+            + "tombstoned rows included, exactly like requireDocumentExists (a selectOne the gate does not "
+            + "scan); it only decides whether to spend an embed, and a tombstoned document is refused "
+            + "by the authoritative in-transaction write (409), so filtering here would change nothing"),
         new ExemptEntry("CatalogRepository.java", "highestChildSeq",
             "tumbler allocator: the tumbler PK does not exclude tombstones, and filtering "
             + "would re-issue an already-taken child sequence number to a NEW document"),
