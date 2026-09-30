@@ -3049,8 +3049,17 @@ public final class CatalogHandler implements HttpHandler {
         String contentHash = (String) body.get("content_hash");
         String runId       = (String) body.get("run_id");
         String collection  = (String) body.get("collection");
-        repo.beginIndexRun(tenant, docId, contentHash, runId, collection);
-        HttpUtil.send(exchange, 200, "{\"ok\":true}");
+        // RDR-223 (nexus-z0o2p.10): opt-in pre-run manifest snapshot, additive response fields.
+        boolean snapshot = Boolean.TRUE.equals(body.get("snapshot_manifest"));
+        var prior = repo.beginIndexRun(tenant, docId, contentHash, runId, collection, snapshot);
+        if (prior == null) {
+            HttpUtil.send(exchange, 200, "{\"ok\":true}");
+            return;
+        }
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("ok", true);
+        response.putAll(prior);
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(response));
     }
 
     /**
