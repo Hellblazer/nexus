@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+import nexus.catalog.factory as factory
 import nexus.db as nexus_db
 from nexus.db.http_vector_client import VectorServiceError
 from nexus.upgrade_ladder.completion import CompletionRecord
@@ -33,6 +34,7 @@ from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (
     CensusUnavailable,
     CollectionReading,
     Rdr192ManifestBackfillRung,
+    _cross_process_lock,
     _default_census,
     _remedy,
     rdr192_backfill_complete,
@@ -574,8 +576,6 @@ def _patch_catalog_chunk_count(monkeypatch, count: int | Exception) -> None:
                 raise count
             return {"chunk_count": count}
 
-    import nexus.catalog.factory as factory
-
     monkeypatch.setattr(factory, "make_catalog_reader", lambda: _Catalog())
 
 
@@ -729,3 +729,17 @@ def test_default_census_empty_listing_with_an_unreadable_catalog_defers(monkeypa
     _patch_catalog_chunk_count(monkeypatch, ConnectionError("catalog down"))
     with pytest.raises(CensusUnavailable, match="could not confirm"):
         _default_census()
+
+
+# ── the real cross-process lock ──────────────────────────────────────────────
+
+
+def test_the_real_lock_excludes_a_second_holder_and_frees_on_release() -> None:
+    """flock is per open file description, so two acquisitions in one process
+    contend exactly as two processes do."""
+    with _cross_process_lock() as first:
+        assert first is True
+        with _cross_process_lock() as second:
+            assert second is False, "a concurrent session start must not stack a backfill"
+    with _cross_process_lock() as again:
+        assert again is True, "the lock is released when the holder leaves"
