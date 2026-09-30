@@ -27,8 +27,10 @@ arc exists to kill.
 ## Scenarios (bead nexus-5xn3k.7 + its four registered comment additions)
 
 1.  BASE (bead body): ``test_consistent_truncation_recovers_without_force``
-    — kill mid-index via an injected exception inside ``uploader_loop``'s
-    upsert call (never timing-based); assert the CONSISTENT-truncation
+    — kill mid-index via an injected exception at the multi-batch writer's
+    SECOND data request (RDR-223: the chunks ride the catalog
+    ``write_many`` / ``append`` request with their owner rows, so that is
+    the seam; never timing-based); assert the CONSISTENT-truncation
     shape (T3 chunks == manifest rows, both < total, ``index_state ==
     'indexing'``); re-index WITHOUT ``--force``, driven at ``index_pdf``
     (which reads the fence and re-invokes ``pipeline_index_pdf``); assert
@@ -460,8 +462,13 @@ def _count_chunks(col, content_hash: str) -> int:
 
 _COLLECTION = "docs__runfence-gate__bge-base-en-v15-768__v1"
 _TOTAL_CHUNKS = 200
-_KILL_AT_CALL = 2  # raise on the SECOND upsert call — the first batch (<=128
+_KILL_AT_CALL = 2  # raise on the SECOND data request — the first one (<=128
                    # chunks, _UPLOAD_BATCH_SIZE) always lands fully first.
+#: The writer's chunk-carrying requests (RDR-223, nexus-z0o2p.11/.15): the first batch is a
+#: ``write_many`` and every later one an ``append``, each with its chunks and owner rows inline.
+#: These replaced the ``upsert_chunks_with_embeddings`` seam this gate used to inject at; a PDF
+#: path no longer calls that method, so a patch on it never fires.
+_DATA_REQUEST_PATHS = ("/manifest/write_many", "/manifest/append")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -507,13 +514,13 @@ def _reset_pipeline_buffer(content_hash: str) -> None:
 
 def _kill_mid_index(tmp_path: Path, corpus: str, chunk_prefix: str):
     """Drive index_pdf -> pipeline_index_pdf against the real substrate and
-    interrupt uploader_loop's upsert deterministically after the first
-    landed batch. Returns (pdf_path, content_hash, doc_id, t3, result,
+    interrupt the multi-batch writer deterministically at its second data
+    request, after the first batch landed with its owner rows. Returns (pdf_path, content_hash, doc_id, t3, result,
     fake_chunks) for the caller to continue against.
 
     PRECISELY what this models, and what it does not (code-review-expert
     IMPORTANT, 2026-08-02): the exception is a REAL, injected failure in
-    uploader_loop's upsert call (never timing-based) — that part is a
+    the writer's second data request (never timing-based) — that part is a
     genuine interruption, not a mock. But it is a CAUGHT Python exception,
     not a process death: pipeline_index_pdf's own except-block runs for
     real, including the real ``db.mark_failed`` + ``db.clear_orphan_wal``
@@ -540,6 +547,7 @@ def _kill_mid_index(tmp_path: Path, corpus: str, chunk_prefix: str):
     one residual gap (nexus-glzrn, a WAL-preserved hang variant) this
     still leaves unverified.
     """
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.doc_indexer import _register_or_lookup_doc_id, _sha256, index_pdf
 
@@ -553,13 +561,14 @@ def _kill_mid_index(tmp_path: Path, corpus: str, chunk_prefix: str):
 
     t3 = HttpVectorClient()
     calls = {"n": 0}
-    orig_upsert = t3.upsert_chunks_with_embeddings
+    orig_post = HttpCatalogClient._post
 
-    def _kill_after_first_batch(*a, **k):
-        calls["n"] += 1
-        if calls["n"] >= _KILL_AT_CALL:
-            raise RuntimeError("runfence_gate_injected_kill")
-        return orig_upsert(*a, **k)
+    def _kill_at_second_data_request(self, path, body=None, **kw):
+        if path in _DATA_REQUEST_PATHS:
+            calls["n"] += 1
+            if calls["n"] >= _KILL_AT_CALL:
+                raise RuntimeError("runfence_gate_injected_kill")
+        return orig_post(self, path, body, **kw)
 
     result = _extraction_result(2)
     fake_chunks = _fake_chunks(_TOTAL_CHUNKS, prefix=chunk_prefix)
@@ -567,7 +576,7 @@ def _kill_mid_index(tmp_path: Path, corpus: str, chunk_prefix: str):
     with patch("nexus.pipeline_stages.PDFExtractor") as ME, \
          patch("nexus.pipeline_stages.PDFChunker") as MC, \
          patch("nexus.pipeline_stages._POLL_INTERVAL", 0.01), \
-         patch.object(t3, "upsert_chunks_with_embeddings", side_effect=_kill_after_first_batch), \
+         patch.object(HttpCatalogClient, "_post", _kill_at_second_data_request), \
          patch("nexus.doc_indexer._fence_fail", lambda *a, **k: None):
         ME.return_value.extract.side_effect = _extract_side_effect(2, result)
         MC.return_value.chunk.return_value = fake_chunks
@@ -849,7 +858,7 @@ def _incr_prepared(n: int, content_hash: str, nonce: str) -> list[tuple[str, str
     fixed text set collides with a prior same-process run of this test —
     e.g. a pytest rerun/retry within one session. A colliding chash
     routes batch 1's upsert through the existing-chunk metadata-refresh
-    branch instead of a fresh insert, and the test's Event-based mid-run
+    write with nothing to embed, and the test's Event-based mid-run
     pause then waits on a signal whose surrounding call shape no longer
     matches what was verified — an unhelpful timeout, not a clear
     assertion failure. Matches the marker discipline already applied to
@@ -881,12 +890,14 @@ def test_multi_batch_incremental_explicit_complete_round_trip(
     explicit-complete round-trip against the real substrate.
 
     'indexing' is observed mid-run via a deterministic ``threading.Event``
-    pause — the background thread blocks right after batch 1's upsert
-    returns, before batch 2 or the tail ``/complete`` call, so the read is
+    pause — the background thread blocks right after the first data request
+    (batch 1's chunks and owner rows) returns, before request 2 or the tail
+    ``/complete`` call, so the read is
     guaranteed to land inside the run's own window rather than racing it.
     Completion is stamped at the tail with the run's total ``chunk_count``.
     """
     from nexus.catalog.factory import make_catalog_reader
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.doc_indexer import (
         _index_pdf_incremental,
@@ -910,23 +921,24 @@ def test_multi_batch_incremental_explicit_complete_round_trip(
     batch1_landed = threading.Event()
     proceed = threading.Event()
     calls = {"n": 0}
-    orig_upsert = t3.upsert_chunks_with_embeddings
+    orig_post = HttpCatalogClient._post
 
-    def _pausing_upsert(*a, **k):
-        calls["n"] += 1
-        res = orig_upsert(*a, **k)
-        if calls["n"] == 1:
-            batch1_landed.set()
-            if not proceed.wait(timeout=15):
-                raise RuntimeError("test stalled waiting on the proceed event")
-        return res
+    def _pausing_post(self, path, body=None, **kw):
+        resp = orig_post(self, path, body, **kw)
+        if path in _DATA_REQUEST_PATHS:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                batch1_landed.set()
+                if not proceed.wait(timeout=15):
+                    raise RuntimeError("test stalled waiting on the proceed event")
+        return resp
 
     result_holder: dict = {}
     error_holder: dict = {}
 
     def _run() -> None:
         try:
-            with patch.object(t3, "upsert_chunks_with_embeddings", side_effect=_pausing_upsert):
+            with patch.object(HttpCatalogClient, "_post", _pausing_post):
                 result_holder["total"] = _index_pdf_incremental(
                     pdf_path, corpus, prepared, content_hash, _INCR_COLLECTION, t3,
                     doc_id=doc_id,
