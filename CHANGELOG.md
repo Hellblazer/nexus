@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`nx upgrade` backfills legacy notes that RDR-192 hid from search** (nexus-wbfpw.41). A note stored before nexus-b6enc has a catalog document but no manifest row, and the engine's `live(c)` predicate has hidden such a chunk since RDR-192 Phase 2; only the operator tenant had been censused and backfilled, so every other install kept invisible notes that the coming reaper would delete. The upgrade ladder has a new rung, `rdr192-manifest-backfill`: it censuses every non-quarantine collection, backfills each one holding a legacy-unmanifested chunk, and records completion in `nexus.ladder_completions` only after a fresh census reads zero. It deletes nothing and is safe to re-run. A chunk it cannot heal fails `nx upgrade` with the collections named and no record written; an unreachable engine defers. The engine side is `Rdr192BackfillGate`, which the reaper (nexus-2x9xa) calls and which refuses to reap on a tenant without the record. See `docs/migration-runbook.md`.
+
 ## [7.67.0] - 2026-09-29
 
 Pairs with engine-service-v0.1.142. The engine carries changeset `catalog-044` (a code, docs or rdr collection's `owner_id` comes from its documents, with a one-off repair of existing rows at boot, nexus-6pbwx), the shutdown crash fixes around ONNX Runtime (nexus-o5xyx), the `reason` code on the unregistered-collection 422 (nexus-bgvnx), descending tuple reads (nexus-kp5q3), and a registered collection owner that later registrations no longer replace (nexus-7tys2). The managed service has run engine-service-v0.1.141 since 2026-09-29, which already carries nexus-7tys2, nexus-kp5q3, nexus-bgvnx and the model-load half of nexus-o5xyx; v0.1.142 adds `catalog-044` and the inference half. Local installs get the new engine with this release. The engine-dependent client changes fall back on an older engine: `nx tuple rd --newest` pages oldest first as before, and the client recognises an unregistered collection by the error's wording.

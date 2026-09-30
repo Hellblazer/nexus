@@ -12,6 +12,11 @@ every current and fresh install; see the file's own git history for the
 deletion). What remains:
 
 1. package → everything            (:data:`PRECONDITION_PACKAGE` → ``*``)
+2. :data:`RUNG_RDR192_MANIFEST_BACKFILL` — the RDR-192 census and
+   legacy-unmanifested backfill (nexus-wbfpw.41), the first rung since
+   nexus-lgdel.l1 emptied the ladder. It has no rung-to-rung edge: it needs
+   only the engine at the pinned tag, which the precondition stage
+   guarantees before the walk.
 
 Package/engine/process are STATELESS preconditions (RDR-185 Constraints):
 re-derived from ON-DISK state at every invocation, converged before the
@@ -19,10 +24,10 @@ ladder walks (wired in P3, nexus-n7u38.23) — they are NOT rungs and never
 appear in :data:`RUNG_ORDER`. Their edges here document the walk contract;
 the registry can only mechanically enforce rung-to-rung order.
 
-:data:`RUNG_ORDER` is intentionally EMPTY — the ladder is rung-less until a
-future data transition needs one. Inserting a new rung means adding both a
-:data:`RUNG_ORDER` entry and its edges in :data:`HARD_EDGES`; the order is
-validated against the edges at import/construction time.
+:data:`RUNG_ORDER` holds one rung today (:data:`RUNG_RDR192_MANIFEST_BACKFILL`).
+Inserting a new rung means adding both a :data:`RUNG_ORDER` entry and its edges
+in :data:`HARD_EDGES`; the order is validated against the edges at
+import/construction time.
 
 The hooks/config axis has NO assigned position: that is the P3 decision
 spike (nexus-n7u38.22, the gate's one genuine ambiguity — chicken-and-egg
@@ -43,6 +48,11 @@ from nexus.upgrade_ladder.protocol import Rung
 #: than kept as a dead reservation (directive of record, T2
 #: nexus/plan-legacy-retirement-2026-08-16: "no preservation campaign").
 
+#: RDR-192 census and legacy-unmanifested backfill (nexus-wbfpw.41). The
+#: literal is shared with the engine reaper's gate
+#: (``Rdr192BackfillGate.RUNG_NAME``, Java); a test pins the two equal.
+RUNG_RDR192_MANIFEST_BACKFILL = "rdr192-manifest-backfill"
+
 #: Stateless preconditions — NOT rungs (see module docstring).
 PRECONDITION_PACKAGE = "precondition:package"
 PRECONDITION_ENGINE = "precondition:engine"
@@ -54,9 +64,9 @@ ALL_RUNGS = "*"
 #: Canonical total order over the known DATA rungs. New rungs are inserted
 #: here (with their edges in :data:`HARD_EDGES`) — the order is validated
 #: against the edges at import/construction time, so an inconsistent insert
-#: fails immediately rather than walking in a wrong order. EMPTY since
-#: nexus-lgdel.l1 retired the sole surviving rung (chash-rekey).
-RUNG_ORDER: tuple[str, ...] = ()
+#: fails immediately rather than walking in a wrong order. Empty from
+#: nexus-lgdel.l1 (which retired chash-rekey) until nexus-wbfpw.41.
+RUNG_ORDER: tuple[str, ...] = (RUNG_RDR192_MANIFEST_BACKFILL,)
 
 #: RQ2 hard edges as ``(before, after)`` pairs; ``after == ALL_RUNGS`` means
 #: the source precedes every rung.
@@ -180,12 +190,19 @@ class LadderRegistry:
 def default_registry() -> LadderRegistry:
     """The production ladder.
 
-    RDR-155 P4b: the t2-schema and substrate-etl rungs died with the
-    migration machinery (Chroma + client-SQLite retirement), leaving the
-    RDR-180 chash-rekey rung as the ladder's sole data rung. nexus-lgdel.l1
-    retired that rung too — the legacy-identity era it converged installs
-    out of is gone, and its detect() had already read as permanently
-    converged on every current and fresh install. The ladder is rung-less
-    until a future data transition needs one (see :data:`RUNG_ORDER`).
+    RDR-155 P4b killed the t2-schema and substrate-etl rungs with the
+    migration machinery; nexus-lgdel.l1 retired the last survivor
+    (chash-rekey) and the ladder was rung-less. nexus-wbfpw.41 adds the
+    RDR-192 census and legacy-unmanifested backfill: local installs took
+    ``live(c)`` with the engine pin and were never censused, and the reaper
+    must not run on a tenant this rung has not recorded.
+
+    The rung is imported here, not at module scope, so importing the registry
+    (done by ``nx doctor`` and the CLI's version-transition trigger) stays
+    cheap.
     """
-    return LadderRegistry(())
+    from nexus.upgrade_ladder.rungs.rdr192_manifest_backfill import (  # noqa: PLC0415 — deferred; keeps registry import cheap and avoids a cycle
+        Rdr192ManifestBackfillRung,
+    )
+
+    return LadderRegistry((Rdr192ManifestBackfillRung(),))
