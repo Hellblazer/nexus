@@ -5191,11 +5191,19 @@ public final class CatalogRepository {
      *        time the insert runs (a writer that committed it between the existence partition and
      *        here), the insert must NOT replace the stored text or vector; only the metadata is
      *        refreshed. A supplied vector never overwrites a stored one unless the client forced it.
+     * @param mergeDeleteKeys RDR-223 (nexus-z0o2p.13): {@code null} REPLACES the stored metadata on
+     *        conflict (the default). A list (possibly empty) MERGES in the same statement:
+     *        {@code (stored - mergeDeleteKeys) || incoming}. The same list rides every chunk of a request.
      */
     public record ResolvedChunk(String text, float[] embedding, String metadataJson, boolean originalAbsent,
-                                boolean keepStoredOnConflict) {
+                                boolean keepStoredOnConflict, List<String> mergeDeleteKeys) {
+        public ResolvedChunk(String text, float[] embedding, String metadataJson, boolean originalAbsent,
+                             boolean keepStoredOnConflict) {
+            this(text, embedding, metadataJson, originalAbsent, keepStoredOnConflict, null);
+        }
+
         public ResolvedChunk(String text, float[] embedding, String metadataJson, boolean originalAbsent) {
-            this(text, embedding, metadataJson, originalAbsent, false);
+            this(text, embedding, metadataJson, originalAbsent, false, null);
         }
     }
 
@@ -5354,11 +5362,18 @@ public final class CatalogRepository {
             : DSL.when(ch.chash().in(keepChashes), ch.chunkText()).else_(DSL.excluded(ch.chunkText()));
         Field<Vector> embeddingSet = keepChashes.isEmpty() ? DSL.excluded(ch.embedding())
             : DSL.when(ch.chash().in(keepChashes), ch.embedding()).else_(DSL.excluded(ch.embedding()));
+        // RDR-223 (nexus-z0o2p.13): merge mode carries its delete keys on every chunk of the request
+        // (null = replace). The merge runs in this statement, over the row's CURRENT value, so a
+        // metadata write that committed after the caller's existence partition is not overwritten.
+        List<String> mergeKeys = resolved.get(toWrite.get(0)).mergeDeleteKeys();
+        Field<JSONB> metadataSet = mergeKeys == null ? DSL.excluded(ch.metadata())
+            : dev.nexus.service.vectors.PgVectorRepository.mergeMetadata(
+                ch.metadata(), DSL.excluded(ch.metadata()), mergeKeys);
         var returned = insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
               .doUpdate()
               .set(ch.chunkText(), textSet)
               .set(ch.embedding(), embeddingSet)
-              .set(ch.metadata(),  DSL.excluded(ch.metadata()))
+              .set(ch.metadata(),  metadataSet)
               // nexus-wbfpw.43: the combined write's chunk upsert re-writes an existing
               // chunk (changed text, or a writer that raced this one), so it restarts
               // reapable(c)'s grace window; see PgVectorRepository's content upsert.

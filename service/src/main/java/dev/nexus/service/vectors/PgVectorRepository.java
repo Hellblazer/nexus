@@ -3773,9 +3773,9 @@ FROM scope s
      * @param deleteKeys top-level keys to strip from the stored value before the merge;
      *                   {@code null}/empty strips nothing
      */
-    private static org.jooq.Field<JSONB> mergeMetadata(org.jooq.Field<JSONB> current,
-                                                        org.jooq.Field<JSONB> incoming,
-                                                        List<String> deleteKeys) {
+    public static org.jooq.Field<JSONB> mergeMetadata(org.jooq.Field<JSONB> current,
+                                                       org.jooq.Field<JSONB> incoming,
+                                                       List<String> deleteKeys) {
         // jsonb_delete(jsonb, text) and jsonb_concat(jsonb, jsonb) are the pg_catalog
         // functions behind the `-` and `||` operators: typed calls, no SQL template
         // (RawSqlGateTest). The key is cast to text so the (jsonb, text) overload is
@@ -3900,13 +3900,15 @@ FROM scope s
      * {@link #batchUpdateMetadata(DSLContext, DimTables.ChunkTable, String, List, List, List)}
      * with a write mode (nexus-w94eo / nexus-y8xjh). {@code deleteKeys == null} REPLACES
      * each row's metadata wholesale, the pre-nexus-w94eo semantics: that is the
-     * combined-write caller ({@code CombinedWriteService}), whose insert branch
-     * ({@code CatalogRepository.upsertManifestChunkVectors}) also still replaces, so its
+     * combined-write caller ({@code CombinedWriteService}) by default, whose insert branch
+     * ({@code CatalogRepository.upsertManifestChunkVectors}) also replaces, so its
      * metadata-only branch must too or a clean re-index could not clear a sparse key
      * through that endpoint. A non-null list (possibly empty) MERGES via {@link
      * #mergeMetadata}, stripping the named keys from the stored value first: that is
      * {@link #resolveNeedEmbedIdx}'s have-vector branch of {@code upsert-chunks}, which
-     * carries the request's {@code delete_keys}.
+     * carries the request's {@code delete_keys}, and the combined write under its
+     * {@code metadata_merge} mode (RDR-223, nexus-z0o2p.13), whose insert branch then
+     * merges with the same list in its own ON CONFLICT.
      */
     public static List<Integer> batchUpdateMetadata(DSLContext ctx, DimTables.ChunkTable ch,
                                                        String collection, List<String> ids,

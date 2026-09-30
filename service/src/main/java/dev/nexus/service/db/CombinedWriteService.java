@@ -256,6 +256,9 @@ public final class CombinedWriteService {
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
         response.put("vector_mismatches", mismatchesCounted);
+        // Echo of the metadata write mode (RDR-223, nexus-z0o2p.13): present only when the request asked
+        // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
+        if (metadataMode.merge()) response.put("metadata_merge", true);
         return new CombinedWriteResult(response, batch.tokens());
     }
 
@@ -352,6 +355,9 @@ public final class CombinedWriteService {
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
         response.put("vector_mismatches", mismatchesCounted);
+        // Echo of the metadata write mode (RDR-223, nexus-z0o2p.13): present only when the request asked
+        // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
+        if (metadataMode.merge()) response.put("metadata_merge", true);
         // Distinct chashes of the request's chunks that no row referenced: neither embedded nor
         // inserted. Non-zero is a client bug made visible.
         response.put("chunks_unreferenced", unreferenced.size());
@@ -441,6 +447,9 @@ public final class CombinedWriteService {
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
         response.put("vector_mismatches", mismatchesCounted);
+        // Echo of the metadata write mode (RDR-223, nexus-z0o2p.13): present only when the request asked
+        // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
+        if (metadataMode.merge()) response.put("metadata_merge", true);
         response.put("chunks_unreferenced", unreferenced.size());
         return new CombinedWriteResult(response, batch.tokens());
     }
@@ -642,18 +651,19 @@ public final class CombinedWriteService {
         // -- the DIRECT upsert path already had this; the combined-write
         // path did not.
         //
-        // nexus-w94eo: the two branches DIVERGE on semantics. The direct
-        // path's have-vector branch MERGES ((stored - delete_keys) ||
-        // incoming); this one calls the 6-arg batchUpdateMetadata, which
-        // REPLACES, matching CatalogRepository.upsertManifestChunkVectors'
-        // insert on the same payload. write_many carries no delete_keys, so
-        // switching this to merge alone would let keys the caller omits
-        // (the normalize() sparse drops) survive a rewrite they used to be
-        // cleared by -- the nexus-y8xjh class. One consequence of REPLACE:
-        // stored keys the write_many caller does not send (e.g. bib_* on a
-        // docs/rdr/code chunk re-indexed by `nx index repo`) are cleared.
-        // Pinned by PgVectorRepositoryContractTest
-        // .batchUpdateMetadata_sixArgCombinedWriteMode_stillReplaces.
+        // nexus-w94eo / RDR-223 (nexus-z0o2p.13): the write mode of a stored
+        // chash's metadata is the request's MetadataMode. REPLACE (the default):
+        // this call passes null delete keys to batchUpdateMetadata, which replaces,
+        // matching CatalogRepository.upsertManifestChunkVectors' insert on the same
+        // payload; a caller that omits a key (the normalize() sparse drops) clears
+        // it, and so does the bib_* enrichment on a docs/rdr/code chunk re-indexed
+        // by `nx index repo`. Pinned by PgVectorRepositoryContractTest
+        // .batchUpdateMetadata_sixArgCombinedWriteMode_stillReplaces. MERGE
+        // (metadata_merge): this call passes the request's delete keys, so
+        // batchUpdateMetadata MERGES in SQL ((stored - delete_keys) || incoming), and
+        // the insert branch merges in its ON CONFLICT SET in one statement (the
+        // ResolvedChunk carries the keys), so a metadata write that lands between
+        // this transaction and the insert is not overwritten.
         //
         // nexus-hxrcm: under the same 40P01 retry belt as every multi-row
         // vector write (DeadlockRetry). batchUpdateMetadata now orders its
@@ -673,11 +683,6 @@ public final class CombinedWriteService {
         Set<Integer> originalAbsentIdx = new HashSet<>();
         // RDR-223 P1.5: chashes whose stored vector (identical text) differs from the supplied one.
         List<String> mismatchedChashes = new ArrayList<>();
-        // RDR-223 (nexus-z0o2p.13): under MetadataMode.merge, the merged metadata of a stored
-        // chash that is written through the insert branch (force_re_embed, or text that changed
-        // under a colliding chash); the metadata-only branch merges in SQL instead. Reset per
-        // attempt with the rest of this transaction's outputs.
-        Map<Integer, Map<String, Object>> mergedForInsert = new HashMap<>();
         // RDR-223: chashes kept as stored although the request's text differs (a supplied vector
         // without force never rewrites an existing chash). Logged at debug, not counted.
         List<String> keptDivergent = new ArrayList<>();
@@ -699,7 +704,6 @@ public final class CombinedWriteService {
                 // reset for the full rationale).
                 originalAbsentIdx.clear();
                 mismatchedChashes.clear();
-                mergedForInsert.clear();
                 keptDivergent.clear();
                 List<Integer> need = new ArrayList<>();
                 List<Integer> metadataOnly = new ArrayList<>();
@@ -767,28 +771,6 @@ public final class CombinedWriteService {
                     need.addAll(PgVectorRepository.batchUpdateMetadata(
                         ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly,
                         metadataMode.merge() ? metadataMode.deleteKeys() : null));
-                }
-                if (metadataMode.merge()) {
-                    // The insert branch REPLACES on conflict, so merge in Java for the stored
-                    // chashes headed there: read their metadata under this same transaction.
-                    List<Integer> storedNeed = new ArrayList<>();
-                    for (int i : need) {
-                        if (existingText.get(dedupChashes.get(i)) != null) storedNeed.add(i);
-                    }
-                    if (!storedNeed.isEmpty()) {
-                        List<String> hexes = new ArrayList<>(storedNeed.size());
-                        for (int i : storedNeed) hexes.add(dedupChashes.get(i));
-                        Map<String, Map<String, Object>> storedMeta =
-                            selectStoredMetadata(ctx, ch, tenant, collection, hexes);
-                        for (int i : storedNeed) {
-                            Map<String, Object> stored = storedMeta.get(dedupChashes.get(i));
-                            if (stored == null) continue;   // deleted meanwhile: plain insert
-                            Map<String, Object> merged = new LinkedHashMap<>(stored);
-                            for (String k : metadataMode.deleteKeys()) merged.remove(k);
-                            merged.putAll(dedupMetas.get(i));
-                            mergedForInsert.put(i, merged);
-                        }
-                    }
                 }
                 return need;
             }));
@@ -867,8 +849,7 @@ public final class CombinedWriteService {
             float[] supplied = dedupVectors.get(idx);
             String metadataJson;
             try {
-                metadataJson = CatalogRepository.MAPPER.writeValueAsString(
-                    mergedForInsert.getOrDefault(idx, dedupMetas.get(idx)));
+                metadataJson = CatalogRepository.MAPPER.writeValueAsString(dedupMetas.get(idx));
             } catch (Exception e) {
                 throw new IllegalArgumentException(
                     "chunks[].metadata for chash '" + chash + "' is not JSON-serializable", e);
@@ -881,7 +862,9 @@ public final class CombinedWriteService {
                     supplied == null && originalAbsentIdx.contains(idx),
                     // A supplied vector written without force must not overwrite one a racing
                     // writer stored between the existence check and the insert.
-                    supplied != null && !forceReEmbed));
+                    supplied != null && !forceReEmbed,
+                    // Merge mode: the insert's ON CONFLICT merges in the same statement.
+                    metadataMode.merge() ? metadataMode.deleteKeys() : null));
         }
 
         return new ResolvedBatch(resolved, dedupChashes.size(), skippedCount, embeddedCount,
@@ -917,33 +900,6 @@ public final class CombinedWriteService {
                   .and(ch.chash().in(chashes)))
            .fetch()
            .forEach(r -> { if (r.value2() != null) out.put(r.value1(), r.value2().floats()); });
-        return out;
-    }
-
-    /** The stored metadata of each of {@code chashes} that exists in the collection (RDR-223, nexus-z0o2p.13). */
-    private static Map<String, Map<String, Object>> selectStoredMetadata(DSLContext ctx,
-            DimTables.ChunkTable ch, String tenant, String collection, List<String> chashes) {
-        Map<String, Map<String, Object>> out = new HashMap<>();
-        ctx.select(ch.chash(), ch.metadata()).from(ch.table())
-           .where(ch.tenantId().eq(tenant)
-                  .and(ch.collection().eq(collection))
-                  .and(ch.chash().in(chashes)))
-           .fetch()
-           .forEach(r -> {
-               Map<String, Object> m = new LinkedHashMap<>();
-               if (r.value2() != null && r.value2().data() != null) {
-                   try {
-                       @SuppressWarnings("unchecked")
-                       Map<String, Object> parsed =
-                           CatalogRepository.MAPPER.readValue(r.value2().data(), Map.class);
-                       if (parsed != null) m.putAll(parsed);
-                   } catch (Exception e) {
-                       throw new IllegalStateException(
-                           "stored metadata of chash '" + r.value1() + "' is not a JSON object", e);
-                   }
-               }
-               out.put(r.value1(), m);
-           });
         return out;
     }
 

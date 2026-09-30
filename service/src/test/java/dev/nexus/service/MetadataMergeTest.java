@@ -180,6 +180,62 @@ class MetadataMergeTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void merge_isEchoedOnAllThreeRoutes_andReplaceIsNot() throws Exception {
+        Fx f = fixture("echo");
+        String a = seed(f, "echo");
+        var mode = new MetadataMode(true, List.of());
+        Map<String, Object> d = new LinkedHashMap<>();
+        d.put("doc_id", f.docId());
+        d.put("rows", List.of(row(0, a)));
+
+        assertThat(svc.writeManyCombined(TENANT, f.collection(), List.of(chunkM(a, "echo a", incoming())),
+            List.of(doc(f.docId(), List.of(row(0, a)))), null, false, false, null, mode).response())
+            .containsEntry("metadata_merge", true);
+        assertThat(svc.appendCombined(TENANT, f.collection(), f.docId(), List.of(row(0, a)),
+            List.of(chunkM(a, "echo a", incoming())), false, null, null, mode).response())
+            .containsEntry("metadata_merge", true);
+        assertThat(svc.appendManyCombined(TENANT, f.collection(), List.of(d),
+            List.of(chunkM(a, "echo a", incoming())), false, null, mode).response())
+            .containsEntry("metadata_merge", true);
+        assertThat(svc.writeManyCombined(TENANT, f.collection(), List.of(chunkM(a, "echo a", incoming())),
+            List.of(doc(f.docId(), List.of(row(0, a)))), null, false, false).response())
+            .doesNotContainKey("metadata_merge");
+    }
+
+    @Test
+    void merge_doesNotOverwriteAMetadataWriteThatLandsBetweenTheExistenceCheckAndTheInsert() throws Exception {
+        Fx f = fixture("race");
+        String a = seed(f, "race");
+        // Between phase 2a (the existence partition) and the per-doc INSERT, another writer
+        // (nx enrich, update_chunks) sets bib_year. force_re_embed sends the chunk down the
+        // insert branch, whose ON CONFLICT must merge over the row's CURRENT value.
+        svc.setAfterNeedEmbedResolvedHookForTests(() -> {
+            try (Connection su = pg.createConnection("")) {
+                su.setAutoCommit(true);
+                DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                    .set(CHUNKS.METADATA, DSL.function("jsonb_concat", org.jooq.JSONB.class, CHUNKS.METADATA,
+                        DSL.val(org.jooq.JSONB.jsonb("{\"bib_year\":1999}"))))
+                    .where(CHUNKS.TENANT_ID.eq(TENANT))
+                    .and(CHUNKS.COLLECTION.eq(f.collection()))
+                    .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(a)))
+                    .execute();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        try {
+            svc.writeManyCombined(TENANT, f.collection(), List.of(chunkM(a, "race a", incoming())),
+                List.of(doc(f.docId(), List.of(row(0, a)))), null, false, true, null,
+                new MetadataMode(true, List.of("stale")));
+        } finally {
+            svc.setAfterNeedEmbedResolvedHookForTests(null);
+        }
+
+        assertThat(storedMeta(f.collection(), a)).isEqualTo(
+            meta("content_hash", "v2", "section", "new", "bib_year", 1999));
+    }
+
+    @Test
     void deleteKeysWithoutMerge_isRefused() {
         assertThatThrownBy(() -> new MetadataMode(false, List.of("x")))
             .isInstanceOf(IllegalArgumentException.class)

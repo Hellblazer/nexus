@@ -617,6 +617,102 @@ class CatalogHandlerAppendChunksTest {
         assertThat(badModelType.bodyString()).contains("'embedding_model' must be a string");
     }
 
+    // ── metadata write mode (RDR-223, bead nexus-z0o2p.13) ───────────────────────
+    //
+    // The parser has its own unit test; these pin that each of the three routes reads the
+    // fields off the request and forwards them (the response echoes `metadata_merge` only
+    // when merge was applied), and refuses a malformed request before any write.
+
+    private static final String MERGE = "\"metadata_merge\":true,\"metadata_delete_keys\":[\"k\"]";
+    private static final String KEYS_WITHOUT_MERGE = "\"metadata_delete_keys\":[\"k\"]";
+
+    private String writeManyBody(String docId, String c, String extra) {
+        return "{\"collection\":\"" + COLLECTION + "\"," + extra + ",\"docs\":[{\"doc_id\":\"" + docId
+            + "\",\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}]}],"
+            + "\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"" + docId + " text\",\"metadata\":{\"k\":\"v\"}}]}";
+    }
+
+    private String appendBody(String docId, String c, String extra) {
+        return "{\"doc_id\":\"" + docId + "\",\"collection\":\"" + COLLECTION + "\"," + extra
+            + ",\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"" + docId + " text\",\"metadata\":{\"k\":\"v\"}}]}";
+    }
+
+    private String appendManyBody(String docId, String c, String extra) {
+        return "{\"collection\":\"" + COLLECTION + "\"," + extra + ",\"docs\":[{\"doc_id\":\"" + docId
+            + "\",\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}]}],"
+            + "\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"" + docId + " text\",\"metadata\":{\"k\":\"v\"}}]}";
+    }
+
+    @Test
+    void writeMany_metadataMode_forwardedAndEchoed_andMalformedRefused() throws Exception {
+        registerDoc("aph.m1");
+        String c = ch("aphm1-c");
+        CapturingExchange merged = post("/v1/catalog/manifest/write_many", writeManyBody("aph.m1", c, MERGE));
+        handle(handler, merged);
+        assertThat(merged.status).isEqualTo(200);
+        assertThat(merged.bodyString()).contains("\"metadata_merge\":true");
+
+        registerDoc("aph.m1b");
+        CapturingExchange plain = post("/v1/catalog/manifest/write_many",
+            writeManyBody("aph.m1b", ch("aphm1b-c"), "\"force_re_embed\":false"));
+        handle(handler, plain);
+        assertThat(plain.status).isEqualTo(200);
+        assertThat(plain.bodyString()).as("replace mode does not echo").doesNotContain("metadata_merge");
+
+        CapturingExchange bad = post("/v1/catalog/manifest/write_many",
+            writeManyBody("aph.m1", ch("aphm1-bad"), KEYS_WITHOUT_MERGE));
+        handle(handler, bad);
+        assertThat(bad.status).isEqualTo(400);
+        assertThat(bad.bodyString()).contains("metadata_merge");
+    }
+
+    @Test
+    void append_metadataMode_forwardedAndEchoed_andMalformedRefused() throws Exception {
+        registerDoc("aph.m2");
+        String c = ch("aphm2-c");
+        CapturingExchange merged = post("/v1/catalog/manifest/append", appendBody("aph.m2", c, MERGE));
+        handle(handler, merged);
+        assertThat(merged.status).isEqualTo(200);
+        assertThat(merged.bodyString()).contains("\"metadata_merge\":true");
+
+        registerDoc("aph.m2b");
+        CapturingExchange plain = post("/v1/catalog/manifest/append",
+            appendBody("aph.m2b", ch("aphm2b-c"), "\"force_re_embed\":false"));
+        handle(handler, plain);
+        assertThat(plain.status).isEqualTo(200);
+        assertThat(plain.bodyString()).doesNotContain("metadata_merge");
+
+        CapturingExchange bad = post("/v1/catalog/manifest/append",
+            appendBody("aph.m2", ch("aphm2-bad"), KEYS_WITHOUT_MERGE));
+        handle(handler, bad);
+        assertThat(bad.status).isEqualTo(400);
+        assertThat(bad.bodyString()).contains("metadata_merge");
+    }
+
+    @Test
+    void appendMany_metadataMode_forwardedAndEchoed_andMalformedRefused() throws Exception {
+        registerDoc("aph.m3");
+        String c = ch("aphm3-c");
+        CapturingExchange merged = post("/v1/catalog/manifest/append_many", appendManyBody("aph.m3", c, MERGE));
+        handle(handler, merged);
+        assertThat(merged.status).isEqualTo(200);
+        assertThat(merged.bodyString()).contains("\"metadata_merge\":true");
+
+        registerDoc("aph.m3b");
+        CapturingExchange plain = post("/v1/catalog/manifest/append_many",
+            appendManyBody("aph.m3b", ch("aphm3b-c"), "\"force_re_embed\":false"));
+        handle(handler, plain);
+        assertThat(plain.status).isEqualTo(200);
+        assertThat(plain.bodyString()).doesNotContain("metadata_merge");
+
+        CapturingExchange bad = post("/v1/catalog/manifest/append_many",
+            appendManyBody("aph.m3", ch("aphm3-bad"), KEYS_WITHOUT_MERGE));
+        handle(handler, bad);
+        assertThat(bad.status).isEqualTo(400);
+        assertThat(bad.bodyString()).contains("metadata_merge");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     private void handle(CatalogHandler h, CapturingExchange ex) throws Exception {
