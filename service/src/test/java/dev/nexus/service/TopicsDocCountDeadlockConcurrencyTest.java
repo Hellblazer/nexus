@@ -23,11 +23,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -96,7 +99,12 @@ import static org.assertj.core.api.Assertions.assertThat;
  *       deadlocks even with the FIXED trigger live, in both a chash-sorted and a
  *       topic_id-sorted variant of the bypass INSERT — source (2)'s implicit FK-lock
  *       hazard is NOT insertion-order-controllable from the client side the way this
- *       approach assumed, so it contaminates the isolated-source-1 measurement too.</li>
+ *       approach assumed, so it contaminates the isolated-source-1 measurement too.
+ *       SUPERSEDED: that measurement predates nexus-6n51g (a40038920), which moved the
+ *       trigger to {@code FOR NO KEY UPDATE} and closed source (2). A one-off control
+ *       (nexus-yr9b4, 2026-09-30: RED's raw INSERT with the fixed body left live, 700
+ *       rounds) saw 0 deadlocks, so the raw-INSERT bypass now does isolate source
+ *       (1).</li>
  *   <li>Raising round concurrency so a regressed trigger would exhaust
  *       {@code DeadlockRetry}'s {@code MAX_ATTEMPTS=4}: at only 3 concurrent threads
  *       per round (still through the real, CORRECTLY-FIXED call path), 2 of 10 rounds
@@ -138,33 +146,39 @@ class TopicsDocCountDeadlockConcurrencyTest {
     private static final int ROUNDS = 20;
 
     /**
-     * RED's round budget (nexus-yr9b4). RED stops at its first deadlock, so this is only
-     * spent in full when the repro is broken.
+     * RED's round budget (nexus-yr9b4): a hedge that fails loudly, not a probability
+     * bound. RED stops at its first deadlock, so the budget is spent in full only when
+     * RED is going to fail.
      *
-     * <p>Sizing. Measured against real PG with the pre-fix body and stop-at-first
-     * disabled, 100 rounds per run, three runs before and three after moving the
-     * connection setup in front of the barrier: 38/38/38 and 38/36/37 deadlocked rounds,
-     * a per-round rate near 0.37, and every run saw its first deadlock at round 3. The
-     * rate is structural, not timing: ten consecutive runs each saw the first deadlock at
-     * round 3, and moving the {@code topics} id sequence before the first round moved it
-     * (first deadlock at round 2 to 5 across starting offsets 0, 1, 2, 3, 5, 8, 13, 100
-     * and 1000). So which topic ids a round draws decides whether it deadlocks, most
-     * likely because the trigger's {@code SELECT DISTINCT} visits the shared topics in an
-     * id-dependent order and two writers deadlock only when their orders invert. A CI
-     * container whose sequence starts elsewhere therefore runs a different sequence of
-     * rounds, which is how a fixed 20 could come up empty there. On the pre-refactor
-     * shape, ten runs of 20 rounds gave 99 deadlocked rounds of 200; a fixed 20 at 0.37
-     * misses with probability 0.63^20, about 1e-4 per run if rounds were independent.
+     * <p>What was measured locally (2026-09-30, pre-fix body, real PG): with stop-at-first
+     * off, three runs of 100 rounds before and three after moving the connection setup in
+     * front of the barrier gave 38/38/38 and 38/36/37 deadlocked rounds; twelve
+     * consecutive early-stop runs found the first deadlock at round 3 (once at round 1);
+     * and moving the {@code topics} id sequence before the first round moved the first
+     * deadlock to round 2 through 5 across starting offsets 0, 1, 2, 3, 5, 8, 13, 100 and
+     * 1000. So locally the outcome is a near-deterministic function of the ids the round
+     * draws (most likely the trigger's {@code SELECT DISTINCT} visiting the shared topics
+     * in an id-dependent order; not verified), not an independent per-round chance, and
+     * no per-round probability or miss bound is claimed here.
      *
-     * <p>The budget assumes a floor of p = 0.01 per round, 37 times below the measured
-     * rate. The chance that 1400 rounds all miss at p = 0.01 is
-     * 0.99^1400 = exp(1400 * ln 0.99) = exp(-14.07), about 8e-7. At the measured 0.37 it
-     * is 0.63^1400, about 1e-280. A round that does not deadlock costs about 0.04 s
-     * (measured: 700 rounds against the fixed trigger body took 27 s), and one that does
-     * waits out PG's 1 s deadlock_timeout, so the full budget is about a minute and is
-     * reached only when RED is going to fail. Verified to fail for the right reason: with
-     * the downgrade skipped so the fixed body stays live, 700 of 700 rounds saw no
-     * deadlock and the assertion failed.
+     * <p>What is NOT known: why develop run 36757457264 saw 0 deadlocks in 20 rounds.
+     * Each test class gets a fresh database cloned from one template and
+     * {@code topics.id} is a BIGSERIAL, so CI starts at the same ids as a local run; the
+     * id sequence does not explain it. The open candidate is environmental timing: the
+     * two trigger windows are a few milliseconds wide and may rarely overlap on a loaded
+     * runner. 1400 rounds re-roll that overlap many times (a round that does not
+     * deadlock costs about 0.04 s and a deadlock waits out PG's 1 s deadlock_timeout:
+     * 700 rounds against the fixed body took 27 s, so the full budget is about a minute).
+     *
+     * <p>Each {@code runRounds} call logs one {@code DCDL repro} line to stderr with the
+     * rounds used and the elapsed time, so CI's real rate gets measured rather than
+     * guessed. If this test flakes again, the fix is a deterministic repro that forces
+     * the order inversion (for example one writer pre-locking the shared topics in
+     * descending order while the other inserts), not more rounds.
+     *
+     * <p>Control, one-off (2026-09-30, nexus-yr9b4): with the downgrade skipped so the
+     * fixed trigger body stayed live, RED's raw INSERT saw 0 deadlocks in 700 of 700
+     * rounds and the assertion failed, so RED does go red when the hazard is absent.
      */
     private static final int RED_MAX_ROUNDS = 1400;
     private static final long BARRIER_AWAIT_S = 30;
@@ -223,21 +237,19 @@ class TopicsDocCountDeadlockConcurrencyTest {
             // is the bead's NAMED root cause and this changeset's actual target.
             //
             // Runs rounds until the FIRST deadlock, up to RED_MAX_ROUNDS (see that
-            // constant for the sizing). Whether a given round deadlocks is decided by
-            // the plan-dependent traversal order of the trigger's DISTINCT over that
-            // round's topic ids, so it is a per-round chance and a fixed 20 rounds could
-            // miss by luck (nexus-yr9b4: 0 of 20 on a CI runner, once). A miss across the
-            // whole budget is therefore not chance, it means the old trigger shape no
-            // longer reproduces the hazard.
+            // constant). A fixed 20 rounds once came up empty on CI (nexus-yr9b4); the
+            // cause there is unknown, so the budget is a hedge that fails loudly, and
+            // the rounds-used line it logs is how CI's rate gets measured.
             RunResult red = runRounds("red", RED_MAX_ROUNDS, null, this::rawInsertTask, true);
             assertThat(red.deadlocks())
                 .as("pre-fix topics_doc_count_recount_ins/_del body (unordered per-row"
                     + " correlated-subquery UPDATE) must deadlock at least once across "
                     + RED_MAX_ROUNDS + " rounds of concurrent overlapping-topic-set writers"
-                    + " (ran " + red.roundsRun() + ") — a miss over this budget is not"
-                    + " chance (see RED_MAX_ROUNDS): the repro shape below no longer"
-                    + " reproduces the production hazard and needs revisiting, not the"
-                    + " assertion loosened")
+                    + " (ran " + red.roundsRun() + ") — either the repro shape below no"
+                    + " longer reproduces the production hazard, or the two trigger"
+                    + " windows rarely overlap in this environment (see RED_MAX_ROUNDS;"
+                    + " the DCDL repro stderr line carries the elapsed time). Either way"
+                    + " the repro needs revisiting, not the assertion loosened")
                 .isGreaterThan(0);
         } finally {
             restoreFixedTriggerBody();
@@ -279,9 +291,9 @@ class TopicsDocCountDeadlockConcurrencyTest {
         int escaped = runRounds("green", ROUNDS, allTopicIds, this::assignFromChashesTask, false).deadlocks();
         assertThat(escaped)
             .as("no deadlock may escape to the caller across " + ROUNDS + " rounds of the"
-                + " identical concurrent-writer shape that reliably deadlocked pre-fix,"
-                + " through the REAL assignFromChashes call path (trigger fix +"
-                + " DeadlockRetry belt together)")
+                + " same overlapping-topic-set writer pair RED uses (there on a raw INSERT"
+                + " against the pre-fix trigger), here through the REAL assignFromChashes"
+                + " call path (trigger fix + DeadlockRetry belt together)")
             .isZero();
 
         for (long topicId : allTopicIds) {
@@ -394,6 +406,7 @@ class TopicsDocCountDeadlockConcurrencyTest {
             throws Exception {
         int deadlocks = 0;
         int roundsRun = 0;
+        long startNanos = System.nanoTime();
         for (int round = 0; round < rounds; round++) {
             String collection = "code__dcdl_" + label + round + "__voyage-code-3__v1";
             List<Long> topicIds = new ArrayList<>(TOPICS_A);
@@ -432,22 +445,48 @@ class TopicsDocCountDeadlockConcurrencyTest {
             Callable<SQLException> taskB = taskFactory.build(collection, pairsB, barrier);
             Future<SQLException> futA = pool.submit(taskA);
             Future<SQLException> futB = pool.submit(taskB);
-            SQLException exA = futA.get(BARRIER_AWAIT_S, TimeUnit.SECONDS);
-            SQLException exB = futB.get(BARRIER_AWAIT_S, TimeUnit.SECONDS);
+            SQLException exA = null;
+            SQLException exB = null;
+            Throwable failA = null;
+            Throwable failB = null;
+            try {
+                exA = futA.get(BARRIER_AWAIT_S, TimeUnit.SECONDS);
+            } catch (ExecutionException | TimeoutException e) {
+                failA = e;
+            }
+            // A failed before reaching the barrier (connection or setup error): B would
+            // otherwise sit at the barrier for BARRIER_AWAIT_S and hide A's error behind
+            // that timeout. Interrupting B breaks its barrier wait at once.
+            if (failA != null || (exA != null && !"40P01".equals(exA.getSQLState()))) {
+                futB.cancel(true);
+            }
+            try {
+                exB = futB.get(BARRIER_AWAIT_S, TimeUnit.SECONDS);
+            } catch (ExecutionException | TimeoutException | CancellationException e) {
+                failB = e;
+            }
             roundsRun++;
 
-            if (exA != null) {
-                if ("40P01".equals(exA.getSQLState())) deadlocks++;
-                else throw exA;
+            boolean badA = failA != null || (exA != null && !"40P01".equals(exA.getSQLState()));
+            boolean badB = failB != null || (exB != null && !"40P01".equals(exB.getSQLState()));
+            if (badA || badB) {
+                // Report both sides: one is often only the consequence of the other.
+                Throwable causeA = failA != null ? failA : exA;
+                Throwable causeB = failB != null ? failB : exB;
+                IllegalStateException ise = new IllegalStateException(
+                    "round " + round + " (" + label + ") did not run cleanly: A=" + causeA
+                        + " B=" + causeB, badA ? causeA : causeB);
+                if (badA && badB) ise.addSuppressed(causeB);
+                throw ise;
             }
-            if (exB != null) {
-                if ("40P01".equals(exB.getSQLState())) deadlocks++;
-                else throw exB;
-            }
+            if (exA != null) deadlocks++;
+            if (exB != null) deadlocks++;
             if (stopAtFirstDeadlock && deadlocks > 0) break;
         }
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000L;
         System.err.println("DCDL repro label=" + label + " rounds_run=" + roundsRun + " of_budget=" + rounds
-            + " deadlocks=" + deadlocks);
+            + " deadlocks=" + deadlocks + " elapsed_ms=" + elapsedMs
+            + " ms_per_round=" + (roundsRun == 0 ? 0 : elapsedMs / roundsRun));
         return new RunResult(deadlocks, roundsRun);
     }
 
