@@ -159,6 +159,29 @@ public final class CombinedWriteService {
     public record CombinedWriteResult(Map<String, Object> response, long tokens) {}
 
     /**
+     * How a combined route writes the metadata of a chunk whose chash is already stored
+     * (RDR-223, bead nexus-z0o2p.13). {@link #REPLACE} (the default, and every request that
+     * names neither field) replaces the stored metadata with the incoming metadata. With {@code
+     * merge}, stored metadata becomes {@code (stored - deleteKeys) || incoming}: the semantics of
+     * {@code /v1/vectors/upsert-chunks}, so a writer that owns only some keys of a chunk (an
+     * indexer re-writing content keys, leaving the {@code bib_*} enrichment another writer set)
+     * does not wipe the rest. The keys the caller names in {@code deleteKeys} are the ones it
+     * owns and dropped from this write. A chunk that is not stored yet takes the incoming
+     * metadata as is under either mode.
+     */
+    public record MetadataMode(boolean merge, List<String> deleteKeys) {
+        public static final MetadataMode REPLACE = new MetadataMode(false, List.of());
+
+        public MetadataMode {
+            deleteKeys = deleteKeys == null ? List.of() : List.copyOf(deleteKeys);
+            if (!merge && !deleteKeys.isEmpty()) {
+                throw new IllegalArgumentException(
+                    "'metadata_delete_keys' requires 'metadata_merge': true");
+            }
+        }
+    }
+
+    /**
      * @param tenant        tenant principal for RLS scoping
      * @param collection    four-segment conformant collection name (drives
      *                      {@code chunks_<dim>} dispatch AND the manifest
@@ -192,8 +215,20 @@ public final class CombinedWriteService {
     public CombinedWriteResult writeManyCombined(String tenant, String collection,
             List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
             Map<String, String> complete, boolean sweep, boolean forceReEmbed, String embeddingModel) {
+        return writeManyCombined(tenant, collection, chunks, docs, complete, sweep, forceReEmbed,
+            embeddingModel, MetadataMode.REPLACE);
+    }
+
+    /**
+     * {@link #writeManyCombined(String, String, List, List, Map, boolean, boolean, String)} with a
+     * metadata write mode (RDR-223, bead nexus-z0o2p.13); see {@link MetadataMode}.
+     */
+    public CombinedWriteResult writeManyCombined(String tenant, String collection,
+            List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
+            Map<String, String> complete, boolean sweep, boolean forceReEmbed, String embeddingModel,
+            MetadataMode metadataMode) {
         checkSuppliedVectors(tenant, collection, chunks, embeddingModel);
-        ResolvedBatch batch = resolveChunks(tenant, collection, chunks, forceReEmbed);
+        ResolvedBatch batch = resolveChunks(tenant, collection, chunks, forceReEmbed, metadataMode);
 
         // Phase 3: dispatch — every actual WRITE happens inside this call,
         // one per-doc transaction at a time.
@@ -221,6 +256,9 @@ public final class CombinedWriteService {
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
         response.put("vector_mismatches", mismatchesCounted);
+        // Echo of the metadata write mode (RDR-223, nexus-z0o2p.13): present only when the request asked
+        // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
+        if (metadataMode.merge()) response.put("metadata_merge", true);
         return new CombinedWriteResult(response, batch.tokens());
     }
 
@@ -271,6 +309,17 @@ public final class CombinedWriteService {
     public CombinedWriteResult appendCombined(String tenant, String collection, String docId,
             List<Map<String, Object>> rows, List<Map<String, Object>> chunks, boolean forceReEmbed,
             List<String> sweepChashes, String embeddingModel) {
+        return appendCombined(tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes,
+            embeddingModel, MetadataMode.REPLACE);
+    }
+
+    /**
+     * {@link #appendCombined(String, String, String, List, List, boolean, List, String)} with a
+     * metadata write mode (RDR-223, bead nexus-z0o2p.13); see {@link MetadataMode}.
+     */
+    public CombinedWriteResult appendCombined(String tenant, String collection, String docId,
+            List<Map<String, Object>> rows, List<Map<String, Object>> chunks, boolean forceReEmbed,
+            List<String> sweepChashes, String embeddingModel, MetadataMode metadataMode) {
         if (docId == null || docId.isBlank()) {
             throw new IllegalArgumentException("'doc_id' required");
         }
@@ -291,7 +340,7 @@ public final class CombinedWriteService {
             else unreferenced.add(s);
         }
 
-        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed);
+        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed, metadataMode);
         CatalogRepository.AppendOutcome outcome = catalogRepo.appendManifestChunks(
             tenant, docId, collection, rows, batch.resolved(), null, sweepChashes);
         // The append returned, so its transaction committed: every mismatch counts.
@@ -306,6 +355,9 @@ public final class CombinedWriteService {
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
         response.put("vector_mismatches", mismatchesCounted);
+        // Echo of the metadata write mode (RDR-223, nexus-z0o2p.13): present only when the request asked
+        // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
+        if (metadataMode.merge()) response.put("metadata_merge", true);
         // Distinct chashes of the request's chunks that no row referenced: neither embedded nor
         // inserted. Non-zero is a client bug made visible.
         response.put("chunks_unreferenced", unreferenced.size());
@@ -339,6 +391,17 @@ public final class CombinedWriteService {
     public CombinedWriteResult appendManyCombined(String tenant, String collection,
             List<Map<String, Object>> docs, List<Map<String, Object>> chunks, boolean forceReEmbed,
             String embeddingModel) {
+        return appendManyCombined(tenant, collection, docs, chunks, forceReEmbed, embeddingModel,
+            MetadataMode.REPLACE);
+    }
+
+    /**
+     * {@link #appendManyCombined(String, String, List, List, boolean, String)} with a metadata
+     * write mode (RDR-223, bead nexus-z0o2p.13); see {@link MetadataMode}.
+     */
+    public CombinedWriteResult appendManyCombined(String tenant, String collection,
+            List<Map<String, Object>> docs, List<Map<String, Object>> chunks, boolean forceReEmbed,
+            String embeddingModel, MetadataMode metadataMode) {
         checkSuppliedVectors(tenant, collection, chunks, embeddingModel);
         // Size-check every document's sweep list BEFORE the embed: the cheapest refusal.
         for (Map<String, Object> d : docs) {
@@ -375,7 +438,7 @@ public final class CombinedWriteService {
             if (!(c.get("chash") instanceof String s) || referenced.contains(s)) relevant.add(c);
             else unreferenced.add(s);
         }
-        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed);
+        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed, metadataMode);
         Map<String, Object> response =
             catalogRepo.appendManifestMany(tenant, collection, docs, batch.resolved());
         int mismatchesCounted = recordMismatches(collection, batch, docs, response.get("failed_doc_ids"));
@@ -384,6 +447,9 @@ public final class CombinedWriteService {
         response.put("embed_embedded", batch.embedded());
         response.put("vectors_supplied", batch.supplied());
         response.put("vector_mismatches", mismatchesCounted);
+        // Echo of the metadata write mode (RDR-223, nexus-z0o2p.13): present only when the request asked
+        // for merge and it was applied, so a client that asked for merge can tell an engine that ignored it.
+        if (metadataMode.merge()) response.put("metadata_merge", true);
         response.put("chunks_unreferenced", unreferenced.size());
         return new CombinedWriteResult(response, batch.tokens());
     }
@@ -508,7 +574,7 @@ public final class CombinedWriteService {
      * embed the rest, all OUTSIDE any manifest transaction.
      */
     private ResolvedBatch resolveChunks(String tenant, String collection,
-            List<Map<String, Object>> chunks, boolean forceReEmbed) {
+            List<Map<String, Object>> chunks, boolean forceReEmbed, MetadataMode metadataMode) {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("'collection' is required and must be non-blank");
         }
@@ -585,18 +651,19 @@ public final class CombinedWriteService {
         // -- the DIRECT upsert path already had this; the combined-write
         // path did not.
         //
-        // nexus-w94eo: the two branches DIVERGE on semantics. The direct
-        // path's have-vector branch MERGES ((stored - delete_keys) ||
-        // incoming); this one calls the 6-arg batchUpdateMetadata, which
-        // REPLACES, matching CatalogRepository.upsertManifestChunkVectors'
-        // insert on the same payload. write_many carries no delete_keys, so
-        // switching this to merge alone would let keys the caller omits
-        // (the normalize() sparse drops) survive a rewrite they used to be
-        // cleared by -- the nexus-y8xjh class. One consequence of REPLACE:
-        // stored keys the write_many caller does not send (e.g. bib_* on a
-        // docs/rdr/code chunk re-indexed by `nx index repo`) are cleared.
-        // Pinned by PgVectorRepositoryContractTest
-        // .batchUpdateMetadata_sixArgCombinedWriteMode_stillReplaces.
+        // nexus-w94eo / RDR-223 (nexus-z0o2p.13): the write mode of a stored
+        // chash's metadata is the request's MetadataMode. REPLACE (the default):
+        // this call passes null delete keys to batchUpdateMetadata, which replaces,
+        // matching CatalogRepository.upsertManifestChunkVectors' insert on the same
+        // payload; a caller that omits a key (the normalize() sparse drops) clears
+        // it, and so does the bib_* enrichment on a docs/rdr/code chunk re-indexed
+        // by `nx index repo`. Pinned by PgVectorRepositoryContractTest
+        // .batchUpdateMetadata_sixArgCombinedWriteMode_stillReplaces. MERGE
+        // (metadata_merge): this call passes the request's delete keys, so
+        // batchUpdateMetadata MERGES in SQL ((stored - delete_keys) || incoming), and
+        // the insert branch merges in its ON CONFLICT SET in one statement (the
+        // ResolvedChunk carries the keys), so a metadata write that lands between
+        // this transaction and the insert is not overwritten.
         //
         // nexus-hxrcm: under the same 40P01 retry belt as every multi-row
         // vector write (DeadlockRetry). batchUpdateMetadata now orders its
@@ -699,8 +766,11 @@ public final class CombinedWriteService {
                     // (with identical text) at the SELECT above, so it is the
                     // zero-row-reroute class, deliberately excluded from the
                     // raced-embed count exactly like the direct upsert path.
+                    // Merge mode passes the caller's delete keys (non-null list = MERGE in
+                    // SQL: (stored - delete_keys) || incoming); replace mode passes null.
                     need.addAll(PgVectorRepository.batchUpdateMetadata(
-                        ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly));
+                        ctx, ch, collection, dedupChashes, dedupMetas, metadataOnly,
+                        metadataMode.merge() ? metadataMode.deleteKeys() : null));
                 }
                 return need;
             }));
@@ -792,7 +862,9 @@ public final class CombinedWriteService {
                     supplied == null && originalAbsentIdx.contains(idx),
                     // A supplied vector written without force must not overwrite one a racing
                     // writer stored between the existence check and the insert.
-                    supplied != null && !forceReEmbed));
+                    supplied != null && !forceReEmbed,
+                    // Merge mode: the insert's ON CONFLICT merges in the same statement.
+                    metadataMode.merge() ? metadataMode.deleteKeys() : null));
         }
 
         return new ResolvedBatch(resolved, dedupChashes.size(), skippedCount, embeddedCount,

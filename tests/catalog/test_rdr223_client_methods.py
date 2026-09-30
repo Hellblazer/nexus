@@ -422,3 +422,91 @@ def test_chunk_carrying_appends_get_the_embed_504_floor(path: str) -> None:
     assert _is_embed_server_side_write_path(path, {"chunks": [{"chash": _A}]}) is True
     assert _is_embed_server_side_write_path(path, {"rows": []}) is False
     assert _is_embed_server_side_write_path(path, {"chunks": []}) is False
+
+
+# ── metadata write mode (nexus-z0o2p.13) ──────────────────────────────────────
+
+
+class TestMetadataMergeFields:
+    """``metadata_merge`` / ``metadata_delete_keys`` ride the chunk-carrying request only, are absent
+    (the engine's replace behaviour) by default, and are checked before any round trip."""
+
+    _OK = {"chunks_written": 1, "failed_doc_ids": [], "ok": True, "docs": 1, "rows": 1, "count": 1,
+           "metadata_merge": True}
+
+    def test_write_many_sends_the_fields_when_merge_is_on(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch, self._OK)
+        c.write_manifest_many(
+            [("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION,
+            metadata_merge=True, metadata_delete_keys=["x", "y"])
+        body = rec.calls[0][1]
+        assert body["metadata_merge"] is True and body["metadata_delete_keys"] == ["x", "y"]
+
+    @pytest.mark.parametrize("route", ["write_many", "append", "append_many"])
+    def test_an_engine_that_does_not_echo_the_mode_is_refused(self, monkeypatch, route) -> None:
+        """An old engine ignores the fields and REPLACES metadata; the client must not carry on."""
+        old_engine = {k: v for k, v in self._OK.items() if k != "metadata_merge"}
+        c, _ = _client(monkeypatch, old_engine)
+        with pytest.raises(RuntimeError, match="metadata_merge"):
+            if route == "write_many":
+                c.write_manifest_many(
+                    [("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION,
+                    metadata_merge=True)
+            elif route == "append":
+                c.append_manifest_chunks(
+                    "1.1.1", [_row(_A, 0)], collection=_COLLECTION, chunk_payload=[_chunk(_A)],
+                    metadata_merge=True)
+            else:
+                c.append_manifest_many(
+                    [("1.1.1", [_row(_A, 0)])], collection=_COLLECTION, chunks=[_chunk(_A)],
+                    metadata_merge=True)
+
+    def test_no_echo_is_needed_when_merge_was_not_asked_for(self, monkeypatch) -> None:
+        old_engine = {k: v for k, v in self._OK.items() if k != "metadata_merge"}
+        c, _ = _client(monkeypatch, old_engine)
+        c.write_manifest_many([("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION)
+
+    def test_write_many_sends_nothing_by_default(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch, self._OK)
+        c.write_manifest_many([("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION)
+        assert "metadata_merge" not in rec.calls[0][1]
+        assert "metadata_delete_keys" not in rec.calls[0][1]
+
+    def test_merge_without_keys_sends_only_the_flag(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch, self._OK)
+        c.write_manifest_many(
+            [("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION, metadata_merge=True)
+        assert rec.calls[0][1]["metadata_merge"] is True
+        assert "metadata_delete_keys" not in rec.calls[0][1]
+
+    def test_append_and_append_many_send_them_with_chunks(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch, self._OK, self._OK)
+        c.append_manifest_chunks(
+            "1.1.1", [_row(_A, 0)], collection=_COLLECTION, chunk_payload=[_chunk(_A)],
+            metadata_merge=True, metadata_delete_keys=["k"])
+        c.append_manifest_many(
+            [("1.1.1", [_row(_A, 0)])], collection=_COLLECTION, chunks=[_chunk(_A)],
+            metadata_merge=True, metadata_delete_keys=["k"])
+        for _, body, _kw in rec.calls:
+            assert body["metadata_merge"] is True and body["metadata_delete_keys"] == ["k"]
+
+    def test_a_sweep_only_append_carries_neither(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch, {"ok": True, "swept": 0})
+        c.append_manifest_chunks(
+            "1.1.1", [], collection=_COLLECTION, sweep_chashes=[_B],
+            metadata_merge=True, metadata_delete_keys=["k"])
+        assert "metadata_merge" not in rec.calls[0][1]
+
+    @pytest.mark.parametrize("merge, keys", [
+        (False, ["k"]),                      # keys without merge
+        (True, ["k"] * 65),                  # over the cap
+        (True, ["  "]),                      # blank
+        (True, [1]),                         # not a string
+    ])
+    def test_bad_combinations_are_refused_before_any_round_trip(self, monkeypatch, merge, keys) -> None:
+        c, rec = _client(monkeypatch, self._OK)
+        with pytest.raises(ValueError):
+            c.write_manifest_many(
+                [("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION,
+                metadata_merge=merge, metadata_delete_keys=keys)
+        assert rec.calls == []

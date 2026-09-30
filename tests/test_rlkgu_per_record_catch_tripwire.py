@@ -377,6 +377,12 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
     # gained them.
     "SourceUriNotFoundError",
     "SourceUriCollectionMismatchError",
+    # nexus-z0o2p.13 (RDR-223): fires from doc_indexer._index_document when a
+    # document's registration returned no identity, so its chunks have no owner
+    # to be written with. Reachable from batch_index_markdowns and dt.py's
+    # per-record loops; one record without identity must fail that record only.
+    # Single-file `nx index md` converts it to a ClickException.
+    "CatalogIdentityMissingError",
     # RDR-223 (nexus-z0o2p.10): MultiBatchDocumentWriter raises it when one document's
     # combined write fails or the engine's answer cannot be trusted. The writer runs once per
     # document inside the per-record loops (nx dt index, index_markdown/index_pdf), so one

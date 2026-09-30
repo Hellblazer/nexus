@@ -800,7 +800,8 @@ class TestIndexRdrSummaryTruthful:
         }
         with patch("nexus.doc_indexer.batch_index_markdowns", return_value=results):
             result = runner.invoke(main, ["index", "rdr", str(repo)])
-        assert result.exit_code == 0, result.output
+        # nexus-z0o2p.13: a batch with a failed document no longer exits 0.
+        assert result.exit_code != 0, result.output
         assert "Indexed 1 of 3 RDR document(s)." in result.output
         assert "skipped: index fresh (use --force) — 1 document(s)" in result.output
         assert "1 document(s) failed" in result.output

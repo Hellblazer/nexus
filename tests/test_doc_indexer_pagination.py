@@ -55,9 +55,19 @@ def _no_catalog_identity(monkeypatch):
     rather than depending on how the real engine's
     ``docs_for_chashes`` happens to answer for non-hex synthetic ids.
     """
+    # nexus-z0o2p.13 (RDR-223) UPDATE: a document with no catalog identity has no
+    # owner for its chunks, so ``_index_document`` now fails it instead of
+    # writing them ownerless (the "" stub above no longer reaches the write).
+    # This file's subject is the (deleted) prune, not the write: give the
+    # document a fake identity and replace the combined chunk+owner write with
+    # a recorder (its real-engine coverage is
+    # tests/integration/test_rdr223_index_document_journey.py).
     monkeypatch.setattr(
-        "nexus.doc_indexer._register_or_lookup_doc_id", lambda *a, **kw: "",
+        "nexus.doc_indexer._register_or_lookup_doc_id", lambda *a, **kw: "1.1.1",
     )
+    from tests import _owner_write_double
+
+    _owner_write_double.install(monkeypatch)
     monkeypatch.setattr(
         "nexus.catalog.factory.make_catalog_reader", lambda *a, **kw: None,
     )

@@ -46,14 +46,17 @@ class _RecordingFenceWriter:
         self.begin_calls: list[dict] = []
         self.complete_calls: list[dict] = []
         self.fail_calls: list[dict] = []
+        self.write_calls: list[dict] = []
         self.closed = False
 
-    def begin_index_run(self, doc_id, content_hash, run_id, collection):
+    def begin_index_run(self, doc_id, content_hash, run_id, collection, **kwargs):
         self.begin_calls.append({
             "doc_id": doc_id, "content_hash": content_hash,
             "run_id": run_id, "collection": collection,
         })
         self._seq.append(("begin", doc_id))
+        # The engine's answer to a begin (a None would read as "no fence route").
+        return {"prior_chashes": [], "prior_count": 0}
 
     def complete_index_run(self, doc_id, content_hash, chunk_count):
         self.complete_calls.append({
@@ -68,6 +71,21 @@ class _RecordingFenceWriter:
     def fail_index_run(self, doc_id, error):
         self.fail_calls.append({"doc_id": doc_id, "error": error})
         self._seq.append(("fail", doc_id))
+
+    def write_manifest_many(self, docs, complete=None, *, sweep=False, chunks=None,
+                            collection, force_re_embed=False, embedding_model=None,
+                            metadata_merge=False, metadata_delete_keys=None):
+        """The RDR-223 combined write: chunks and manifest rows in one request."""
+        self.write_calls.append({
+            "docs": docs, "complete": complete, "sweep": sweep, "chunks": chunks,
+            "collection": collection, "force_re_embed": force_re_embed,
+            "metadata_merge": metadata_merge, "metadata_delete_keys": metadata_delete_keys,
+        })
+        self._seq.append(("write", docs[0][0]))
+        doc = docs[0][0]
+        return {"chunks_written": len(chunks or []), "failed_doc_ids": [],
+                "complete_refused": [], "complete_refused_count": 0,
+                "dropped_chashes": {doc: []}, "dropped_count": {doc: 0}}
 
     def close(self):
         self.closed = True
@@ -96,9 +114,16 @@ class _RecordingHooks:
     def fire_document(self, *a, **k):
         self._seq.append(("fire_document",))
 
+    def without_batch(self, hook):
+        # RDR-223: _index_document drops the manifest hook (the write already
+        # carried the manifest). The double models the registry's copy-on-drop.
+        self.dropped_batch_hooks = [*getattr(self, "dropped_batch_hooks", []), hook]
+        return self
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _index_document: hoist + begin + single-flush completion ride
+# _index_document: hoist + begin + single-flush completion ride (RDR-223: the
+# begin, the chunk+owner write and the stamp are one writer protocol)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -162,10 +187,11 @@ def _drive_index_document(tmp_path: Path, seq: list, fence: _RecordingFenceWrite
     return n, hooks, register_calls
 
 
-def test_index_document_register_and_begin_precede_first_upsert(tmp_path) -> None:
+def test_index_document_register_and_begin_precede_first_write(tmp_path) -> None:
     """The hoist (bead .4): doc_id resolution AND the fence begin must both
-    land before the first chunk upsert — the fence needs a doc_id before the
-    first byte of content is written."""
+    land before the first write request — the fence needs a doc_id before
+    the first byte of content is written. RDR-223: the write is the combined
+    chunk+owner request, so there is no separate chunk upsert at all."""
     seq: list = []
     fence = _RecordingFenceWriter(seq)
     n, hooks, register_calls = _drive_index_document(tmp_path, seq, fence)
@@ -173,9 +199,9 @@ def test_index_document_register_and_begin_precede_first_upsert(tmp_path) -> Non
     assert n == 1
     assert register_calls, "doc_id was never resolved"
     ops = [op for op, *_ in seq]
-    assert "upsert" in ops
-    assert ops.index("register") < ops.index("upsert"), seq
-    assert ops.index("begin") < ops.index("upsert"), seq
+    assert "upsert" not in ops, seq
+    assert "write" in ops
+    assert ops.index("register") < ops.index("begin") < ops.index("write"), seq
 
 
 def test_index_document_begin_uses_the_one_computed_content_hash(tmp_path) -> None:
@@ -195,54 +221,54 @@ def test_index_document_begin_uses_the_one_computed_content_hash(tmp_path) -> No
     assert fence.begin_calls[0]["collection"] == COLLECTION
 
 
-def test_index_document_explicit_complete_after_manifest_not_a_ride(tmp_path) -> None:
-    """nexus-tp8yk D2a: single-flush documents USED TO ride
-    write_manifest_many's optional `complete` map — but the production
-    writer never exposes write_manifest_many (dcv2k: the op is absent from
-    both CATALOG_WRITE_OPS and _SERVICE_ONLY_WRITE_OPS), so that ride was
-    structurally unreachable on every real run; the completion stamp fell
-    through to mcp_infra's per-doc `_stamp_index_run_complete`, whose
-    IndexRunVerifyRefused is swallowed at the call site (never propagates
-    to the CLI). Post-D2a, `_index_document` drops the ride and calls the
-    PROPAGATING `_fence_complete` explicitly at the tail — mirroring
-    `_index_pdf_incremental`'s multi-batch shape. fire_batch's
-    manifest_complete must now be None, and the explicit complete call
-    must land with the SAME content_hash begin carried, strictly AFTER
-    the manifest batch fired.
+def test_index_document_completion_rides_the_one_request_write(tmp_path) -> None:
+    """RDR-223 (nexus-z0o2p.13): a document that fits one request is one
+    write_manifest_many carrying its chunks, the sweep, and the completion
+    stamp (``complete``) with the SAME content_hash begin carried. There is
+    no separate complete call, and the batch manifest hook is dropped so the
+    manifest is not written a second time. (Before RDR-223 the stamp was an
+    explicit ``_fence_complete`` after a hook-written manifest, nexus-tp8yk
+    D2a.)
     """
     seq: list = []
-    fence = _RecordingFenceWriter(seq, complete_result={
-        "referenced": 1, "present": 1, "missing": 0, "flagged": 0,
-    })
+    fence = _RecordingFenceWriter(seq)
     n, hooks, _ = _drive_index_document(tmp_path, seq, fence)
 
     assert n == 1
+    assert len(fence.write_calls) == 1, "one request for a one-request document"
+    w = fence.write_calls[0]
+    assert w["sweep"] is True
+    assert w["complete"] == {DOC_ID: fence.begin_calls[0]["content_hash"]}
+    assert len(w["chunks"]) == 1 and w["chunks"][0]["text"] == "chunk text"
+    # The write MERGES chunk metadata (the old upsert's semantics), naming the owned keys this
+    # document's rows dropped, so bib_* enrichment survives a re-index.
+    assert w["metadata_merge"] is True
+    assert isinstance(w["metadata_delete_keys"], list)
+    assert fence.complete_calls == [], "the stamp rides the write; no second call"
     assert hooks.batch_calls, "fire_batch never fired"
-    assert hooks.batch_calls[0]["manifest_complete"] is None, (
-        "the manifest_complete ride must be dropped — it never reached "
-        "the production writer (dcv2k); completion is now explicit"
+    assert hooks.batch_calls[0]["manifest_complete"] is None
+    assert len(getattr(hooks, "dropped_batch_hooks", [])) == 1, (
+        "the batch manifest hook must be dropped: the write carried the manifest"
     )
-    assert fence.complete_calls, "_fence_complete never fired explicitly"
-    assert fence.complete_calls[0]["doc_id"] == DOC_ID
-    assert (
-        fence.complete_calls[0]["content_hash"]
-        == fence.begin_calls[0]["content_hash"]
-    )
-    assert fence.complete_calls[0]["chunk_count"] == 1
     ops = [op for op, *_ in seq]
-    assert ops.index("complete") > ops.index("manifest_batch"), seq
+    assert ops.index("write") < ops.index("manifest_batch"), seq
 
 
-def test_index_document_no_catalog_skips_fence(tmp_path) -> None:
-    """doc_id='' (catalog absent) — the no-catalog ingest contract: no begin,
-    no manifest_complete, indexing proceeds."""
+def test_index_document_no_catalog_identity_fails_the_run(tmp_path) -> None:
+    """doc_id='' (registration returned nothing): there is no owner for the
+    chunks, so nothing is written and the run fails — no begin, no write, no
+    hooks. (Before RDR-223 the chunks were written ownerless.)"""
+    from nexus.errors import CatalogIdentityMissingError
+
     seq: list = []
     fence = _RecordingFenceWriter(seq)
-    n, hooks, _ = _drive_index_document(tmp_path, seq, fence, register_returns="")
+    with pytest.raises(CatalogIdentityMissingError, match="no catalog document to own 1 chunk"):
+        _drive_index_document(tmp_path, seq, fence, register_returns="")
 
-    assert n == 1
     assert fence.begin_calls == []
-    assert hooks.batch_calls[0]["manifest_complete"] is None
+    assert fence.write_calls == []
+    assert fence.fail_calls == []
+    assert [op for op, *_ in seq] == ["register"]
 
 
 def test_index_document_fresh_skip_never_registers(tmp_path) -> None:

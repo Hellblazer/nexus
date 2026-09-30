@@ -121,10 +121,14 @@ jobs:
     needs: changes
     if: needs.changes.outputs.service == 'true'
     runs-on: ubuntu-latest
-    # Testcontainers pulls pgvector/pgvector:pg17 on first run (~180 MB);
-    # subsequent runs use the Docker layer cache.  30m covers a cold
-    # runner: Maven cache miss + Docker image pull + suite (~8s locally).
-    timeout-minutes: 30
+    # Measured on develop, 2026-09-29/30: the job took 23-30 min and hit the
+    # old 30-minute limit three times with no test failure (nexus-rjk2a):
+    # release PR #1583, 5de0e23f9 (30m flat) and 54d37bf43 (30m16s). The
+    # suite is about 3,800 tests and grows with every engine bead, so the
+    # bound is 45m: enough headroom that a slow runner is not a red, short
+    # enough that a genuine hang still fails. It is a REQUIRED check on
+    # main, so a timeout here blocks a release merge.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5

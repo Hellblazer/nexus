@@ -303,7 +303,7 @@ def test_indexer_seam_b_index_search_round_trip(
     # the pre-fix guard-ordering bug hide again), so the auto-heal path's
     # DEFAULT registration (ensure_collection_registered's derivation via
     # effective_embedding_model_for_writes) would read managed posture and
-    # request voyage-context-3, which this ONNX engine's bge-768 profile
+    # request the managed (Voyage CCE) model, which this ONNX engine's bge-768 profile
     # refuses. Register explicitly with the model this engine actually
     # serves, bypassing that derivation entirely, and warm the per-process
     # cache so _index_document's own write never touches the derivation
@@ -421,7 +421,7 @@ def test_store_put_get_roundtrip_ij9hg(
     monkeypatch.setenv("NX_SERVICE_URL", base_url)
     monkeypatch.setenv("NX_SERVICE_TOKEN", token)
     # RDR-204 (nexus-f5wwx): NX_SERVICE_URL alone reads as managed mode and
-    # derives voyage-context-3 for the store_put registration, which this
+    # derives the managed (Voyage CCE) model for the store_put registration, which this
     # ONNX engine's bge-768 profile refuses with 422 -- unlike the sibling
     # seam-B test above, this test has no non-vacuity dependency on local
     # posture being absent, so pinning it is safe.

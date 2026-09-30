@@ -78,11 +78,18 @@ class _Coverage:
 _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
     ("doc_indexer.py", "_index_document"): _Coverage(
         reason=(
-            "producer 1 (nx index md / nx dt index text): _fence_begin "
-            "called in this same function before the fire_batch upsert "
-            "(nexus-5xn3k.3)."
+            "producer 1 (nx index md / nx index rdr / nx dt index text): the "
+            "fence begin is the first request of the combined writer "
+            "(_write_chunks_with_owner_rows -> MultiBatchDocumentWriter."
+            "_begin_fence), which this function calls before its "
+            "fire_batch — cross-function by RDR-223 design, since the "
+            "writer owns the begin, the chunk+owner writes and the "
+            "completion stamp as one protocol (nexus-z0o2p.13). Ordering "
+            "is pinned by tests/integration/"
+            "test_rdr223_index_document_journey.py (begin precedes the "
+            "first write request)."
         ),
-        same_function=True,
+        same_function=False,
     ),
     ("doc_indexer.py", "_index_pdf_incremental"): _Coverage(
         reason=(
@@ -353,7 +360,9 @@ def test_same_function_allowlist_entries_are_proven() -> None:
 def test_cross_function_entries_are_the_documented_minimum() -> None:
     """Exactly the two ChunkBatcher flush-grain closures use cross-function
     coverage (their begin fires from a sibling on_batch_begin callback,
-    not inline) — plus the pre-existing streaming-pipeline stage split.
+    not inline) — plus the pre-existing streaming-pipeline stage split, plus
+    ``_index_document`` since RDR-223 (nexus-z0o2p.13), whose begin is the
+    first request of the combined chunk+owner writer it calls.
     Pins the count so a future author cannot quietly reclassify a
     same-function site as cross-function to dodge the AST proof above.
 
@@ -362,6 +371,7 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
     producer calls. That claim is proven below, not asserted."""
     cross = sorted(k for k, cov in _ALLOWLIST.items() if not cov.same_function)
     assert cross == [
+        ("doc_indexer.py", "_index_document"),
         ("indexer.py", "_fire_deferred_hooks"),
         ("indexer.py", "_fire_flush_grain_hooks"),
         ("mcp/core.py", "store_put"),
