@@ -171,10 +171,13 @@ def test_a_refused_stamp_is_recorded_and_propagates_without_marking_the_run_fail
     assert cat.failed == []
 
 
-def test_on_request_is_called_before_the_first_chunk_carrying_request() -> None:
+def test_on_request_is_called_after_a_chunk_carrying_request_came_back() -> None:
     """RDR-223 (nexus-z0o2p.11 / .15): ``index_pdf`` must not roll back a freshly minted document
-    once the writer has sent a request, so the write reports that it is about to send one, BEFORE
-    the request (a request that fails after that point may have landed)."""
+    once a request has written, or may have written, its chunks, so the write reports each
+    request that came back (and one that failed in a way that leaves its outcome open, see
+    ``tests/catalog/test_metadata_merging_catalog.py``). It does NOT report before the send: a
+    request refused cleanly wrote nothing, and the registration it follows is a phantom to roll
+    back."""
     from nexus.doc_indexer import _write_chunks_with_owner_rows
 
     text = "wcor chunk"
@@ -186,6 +189,6 @@ def test_on_request_is_called_before_the_first_chunk_carrying_request() -> None:
             COLLECTION, DOC_ID, "h" * 64, [chash], [text], [{"chunk_text_hash": chash}],
             on_request=lambda: seen.append(list(cat.calls)))
 
-    assert seen == [["begin"]], "called once, after the fence begin and before the write"
+    assert seen == [["begin", "write"]], "called once, after the fence begin and the write"
     assert cat.calls == ["begin", "write"]
 

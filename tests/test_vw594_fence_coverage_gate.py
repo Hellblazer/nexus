@@ -662,7 +662,10 @@ def test_owner_write_entries_are_exactly_the_rdr223_cross_function_entries() -> 
     cross = {k for k, cov in _ALLOWLIST.items() if not cov.same_function}
     assert set(_OWNER_WRITE_ENTRIES) <= cross
     assert cross - set(_OWNER_WRITE_ENTRIES) == {
-        ("indexer.py", "_fire_deferred_hooks"), ("indexer.py", "_fire_flush_grain_hooks")}
+        ("indexer.py", "_fire_deferred_hooks"), ("indexer.py", "_fire_flush_grain_hooks"),
+        # the note writer's entry (RDR-223 P2.2): proved by its own test above, not an owner-write
+        # caller of the PDF/document kind this list checks
+        ("mcp/core.py", "store_put")}
 
 
 def test_owner_write_leg_kill_control_flags_a_fire_batch_ahead_of_the_write() -> None:
@@ -687,3 +690,75 @@ def test_owner_write_leg_kill_control_flags_a_fire_batch_ahead_of_the_write() ->
         "    _flag(1)\n    run.open_writer()\n")
     assert _owner_write_order_problems(ast.parse(nested_ok), "_flag", "nested") == []
     assert _owner_write_order_problems(ast.parse(nested_bad), "_flag", "nested")
+
+
+# ── RDR-223 decision D2: the completion stamp is the LAST thing a non-streaming path does ────
+#
+# The stamp used to ride the write, so a process killed in a post-store hook left a document that
+# read complete and never got its taxonomy assignment or aspect enqueue. Each non-streaming
+# writer path now sends it after ``fire_batch`` / ``fire_document``. Nothing but a code reading
+# enforced that, and a reorder keeps every test that does not kill a hook green. This leg checks
+# it syntactically: every ``.complete()`` call is the last call of its innermost ``try`` body that
+# involves a hook, i.e. no ``fire_*`` call follows it in that body.
+
+_STAMP_LAST_ENTRIES: tuple[tuple[str, str], ...] = (
+    ("doc_indexer.py", "_index_document"),
+    ("doc_indexer.py", "_index_pdf_incremental"),
+    ("doc_indexer.py", "index_pdf"),
+)
+
+
+def _stamp_last_problems(tree: ast.Module, function: str) -> list[str]:
+    defs = [n for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == function]
+    if not defs:
+        return [f"{function}() not found"]
+    problems: list[str] = []
+    for fn in defs:
+        completes = [c for c in ast.walk(fn)
+                     if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                     and c.func.attr == "complete"]
+        if not completes:
+            problems.append(f"{function}() never sends a deferred completion stamp")
+        for c in completes:
+            tries = [t for t in ast.walk(fn) if isinstance(t, ast.Try)
+                     and any(x is c for stmt in t.body for x in ast.walk(stmt))]
+            if not tries:
+                problems.append(f"{function}(): complete() at line {c.lineno} is not inside a try")
+                continue
+            body_nodes = [x for stmt in min(tries, key=lambda t: sum(1 for _ in ast.walk(t))).body
+                          for x in ast.walk(stmt)]
+            later = sorted(x.lineno for x in body_nodes
+                           if isinstance(x, ast.Call) and _call_name(x) in {"fire_batch", "fire_document", "fire_single"}
+                           and x.lineno > c.lineno)
+            if later:
+                problems.append(
+                    f"{function}(): complete() at line {c.lineno} precedes a hook fire at line {later[0]}")
+            fired_before = [x for x in body_nodes
+                            if isinstance(x, ast.Call) and _call_name(x) in {"fire_batch", "fire_document"}
+                            and x.lineno < c.lineno]
+            # _index_pdf_incremental hands the stamp to its caller when one is given; its own
+            # stamp branch still follows its own hooks.
+            if not fired_before and function != "index_pdf":
+                problems.append(f"{function}(): complete() at line {c.lineno} follows no fire_batch/fire_document")
+    return problems
+
+
+def test_every_non_streaming_path_stamps_complete_after_its_hooks() -> None:
+    problems: list[str] = []
+    for rel, function in _STAMP_LAST_ENTRIES:
+        tree = ast.parse((SRC_ROOT / rel).read_text(encoding="utf-8"), filename=rel)
+        problems += [f"{rel}: {p}" for p in _stamp_last_problems(tree, function)]
+    assert not problems, (
+        "RDR-223 D2: a non-streaming writer path no longer stamps the document complete after its "
+        "post-store hooks, so a kill in a hook would leave a complete document whose hooks never "
+        "ran:\n  " + "\n  ".join(problems))
+
+
+def test_stamp_last_leg_kill_control_flags_a_stamp_ahead_of_a_hook() -> None:
+    good = "def f():\n    try:\n        pending = w()\n        hooks.fire_batch(b)\n        hooks.fire_document(d)\n        pending.complete()\n    finally:\n        pass\n"
+    early = "def f():\n    try:\n        pending = w()\n        hooks.fire_batch(b)\n        pending.complete()\n        hooks.fire_document(d)\n    finally:\n        pass\n"
+    none = "def f():\n    try:\n        hooks.fire_batch(b)\n    finally:\n        pass\n"
+    assert _stamp_last_problems(ast.parse(good), "f") == []
+    assert _stamp_last_problems(ast.parse(early), "f")
+    assert _stamp_last_problems(ast.parse(none), "f")

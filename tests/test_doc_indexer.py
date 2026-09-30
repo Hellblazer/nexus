@@ -599,13 +599,20 @@ def _refusal(doc_id: str):
 
 
 class TestIndexPdfFreshMintRollback:
-    def test_index_run_verify_refused_rolls_back_freshly_minted_doc(
+    def test_index_run_verify_refused_keeps_a_freshly_minted_doc(
         self, sample_pdf, mock_t3, monkeypatch, owner_write,
     ):
-        """A run that MINTED its own catalog Document (created=True) and
-        then fails the completion fence must roll that registration back
-        exactly once, with the minted doc_id, then re-raise -- never
-        silently swallowing the refusal."""
+        """A run that MINTED its own catalog Document (created=True) and then has the engine refuse
+        the completion stamp: every request of the write had already come back, so the document
+        has its chunks, each with an owner row, and tombstoning the document would hide them. The
+        document is KEPT (no rollback), the refusal propagates, and the fence is left ``indexing``
+        (``_fence_fail`` is not called; the real-engine case is in
+        ``tests/integration/test_rdr223_pdf_journey.py``).
+
+        The recorder does what the real writer does: it reports each request that came back
+        (``on_request``) before the stamp is tried. An earlier version of this test had the write
+        itself raise the refusal without ever reporting a request, a state the real writer cannot
+        produce, and asserted a rollback it cannot reach."""
         from nexus.doc_indexer import index_pdf
         from nexus.errors import IndexRunVerifyRefused
         from nexus.hook_registry import HookRegistry
@@ -638,18 +645,18 @@ class TestIndexPdfFreshMintRollback:
         with patch(
             "nexus.doc_indexer._register_or_lookup_doc_id",
             side_effect=_register_side_effect,
-        ):
-            # RDR-223 (nexus-z0o2p.15): the completion stamp rides the chunk+owner write, so the
-            # engine's refusal is raised BY that write.
-            owner_write.raises = _refusal(minted_doc_id)
+        ), patch("nexus.doc_indexer._fence_fail") as mock_fail:
+            # RDR-223 (D2): the stamp is its own request, after the write and the hooks.
+            owner_write.complete_raises = _refusal(minted_doc_id)
             with pdf_extract_patches_ctx():
                 with pytest.raises(IndexRunVerifyRefused):
                     index_pdf(
                         sample_pdf, corpus="uxg4u-rollback", t3=mock_t3,
                         embed_fn=_fake_embed, hooks=HookRegistry(),
                     )
-        assert len(rollback_calls) == 1
-        assert rollback_calls[0][0] == minted_doc_id
+        assert rollback_calls == [], "the chunks landed: the document is kept"
+        mock_fail.assert_not_called()   # the fence stays 'indexing'
+        assert [e[0] for e in owner_write.events] == ["write", "complete"]
 
     def test_index_run_verify_refused_on_preexisting_doc_never_rolls_back(
         self, sample_pdf, mock_t3, monkeypatch, owner_write,
@@ -685,7 +692,7 @@ class TestIndexPdfFreshMintRollback:
             "nexus.doc_indexer._register_or_lookup_doc_id",
             side_effect=_register_side_effect,
         ), patch("nexus.doc_indexer._fence_fail") as mock_fail:
-            owner_write.raises = _refusal(existing_doc_id)
+            owner_write.complete_raises = _refusal(existing_doc_id)
             with pdf_extract_patches_ctx():
                 with pytest.raises(IndexRunVerifyRefused):
                     index_pdf(
@@ -693,7 +700,7 @@ class TestIndexPdfFreshMintRollback:
                         embed_fn=_fake_embed, hooks=HookRegistry(),
                     )
         assert rollback_calls == []
-        assert len(owner_write.calls) == 1, "the refusal came from the one write"
+        assert len(owner_write.calls) == 1, "the refusal came from the stamp of the one write"
         # A refused stamp propagates directly (nexus-5xn3k.4 contract) -- it is not routed back
         # through _fence_fail, which is reserved for the write's own failures.
         mock_fail.assert_not_called()
@@ -783,7 +790,7 @@ class TestIndexPdfFreshMintRollback:
         mock_fail.assert_called_once_with(minted_doc_id, "request 2 failed", heal=False)
         assert rollback_calls == ([] if request_sent else [minted_doc_id])
 
-    def test_worktree_skip_then_fallback_mint_rolls_back_on_fence_refusal(
+    def test_worktree_skip_then_fallback_mint_is_seen_by_the_rollback_and_kept_after_a_refusal(
         self, sample_pdf, mock_t3, monkeypatch, owner_write,
     ):
         """nexus-uxg4u round 2 (code-review-expert Finding B): doc_id can
@@ -791,10 +798,12 @@ class TestIndexPdfFreshMintRollback:
         for a reason OTHER than "no catalog" -- the worktree/tempdir
         ephemeral-skip path or a swallowed pre-flight exception both
         return ("", False). When that second call independently mints
-        (created=True), that mint must be just as rollback-eligible on a
-        later fence refusal as a pre-flight mint would have been -- not
-        invisible to the closure that only knew about the pre-flight's
-        own (empty) outcome."""
+        (created=True), the rollback closure must KNOW about that mint,
+        not only about the pre-flight's own (empty) outcome. After a
+        refused stamp (the chunks landed) it then keeps the document, and
+        the log event it writes names the fallback-minted id: proof the
+        closure saw the mint and chose to keep it because the write had
+        happened, not because it never heard of it."""
         from nexus.doc_indexer import index_pdf
         from nexus.errors import IndexRunVerifyRefused
         from nexus.hook_registry import HookRegistry
@@ -827,13 +836,14 @@ class TestIndexPdfFreshMintRollback:
             "nexus.catalog.store_hook.rollback_minted_catalog_entry",
             _fake_rollback,
         )
+        from structlog.testing import capture_logs
+
         with patch(
             "nexus.doc_indexer._register_or_lookup_doc_id",
             side_effect=_register_side_effect,
-        ):
-            # RDR-223 (nexus-z0o2p.15): the completion stamp rides the chunk+owner write, so the
-            # engine's refusal is raised BY that write.
-            owner_write.raises = _refusal(fallback_doc_id)
+        ), capture_logs() as logs:
+            # RDR-223 (D2): the stamp is its own request, after the write and the hooks.
+            owner_write.complete_raises = _refusal(fallback_doc_id)
             with pdf_extract_patches_ctx():
                 with pytest.raises(IndexRunVerifyRefused):
                     index_pdf(
@@ -841,8 +851,101 @@ class TestIndexPdfFreshMintRollback:
                         embed_fn=_fake_embed, hooks=HookRegistry(),
                     )
         assert calls["n"] >= 2, "the fallback (small-doc second) call never fired"
-        assert len(rollback_calls) == 1
-        assert rollback_calls[0] == fallback_doc_id
+        assert rollback_calls == [], "the chunks landed: the fallback-minted document is kept"
+        kept = [e for e in logs if e.get("event") == "index_pdf_fresh_registration_kept_after_write"]
+        assert [e["doc_id"] for e in kept] == [fallback_doc_id], "the closure saw the fallback mint"
+
+
+class _Killed(BaseException):
+    """A hook that dies with the process: a BaseException, so no ``except Exception`` sees it."""
+
+
+class TestTheStampComesLast:
+    """RDR-223 decision D2 (2026-09-30): every non-streaming writer path sends the completion stamp
+    AFTER the post-store hooks (``fire_batch`` / ``fire_document``), as the streaming pipeline does.
+    A stamp that rode the write left a process killed in a hook with a document that read complete
+    and never got its taxonomy assignment or aspect enqueue. The recorder's shared ``events`` log
+    holds the order of the write, each hook and the stamp."""
+
+    PATHS = ["small-pdf", "incremental-pdf", "markdown"]
+
+    @staticmethod
+    def _hooks(owner_write, *, die_in: str | None = None):
+        from nexus.hook_registry import HookRegistry
+
+        reg = HookRegistry()
+
+        def _batch_hook(*a, **kw):
+            owner_write.events.append(("batch-hook",))
+            if die_in == "batch":
+                raise _Killed()
+
+        def _document_hook(*a, **kw):
+            owner_write.events.append(("document-hook",))
+            if die_in == "document":
+                raise _Killed()
+
+        reg.register_batch(_batch_hook)
+        reg.register_document(_document_hook)
+        return reg
+
+    def _drive(self, path, *, sample_pdf, sample_md, mock_t3, monkeypatch, hooks):
+        """Run one indexing of *path* against the recorder. The catalog lookups a real run makes
+        for the document-grain hook are replaced; nothing else about the path is."""
+        monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id",
+                            lambda *a, with_created=False, **kw: ("1.1.d2", False) if with_created else "1.1.d2")
+        if path == "markdown":
+            set_credentials(monkeypatch)
+            mock_chunk = MagicMock()
+            mock_chunk.text = "chunk text"
+            mock_chunk.chunk_index = 0
+            mock_chunk.metadata = {"chunk_start_char": 0, "chunk_end_char": 10, "page_number": 0, "header_path": "Hello"}
+            with patch("nexus.doc_indexer.make_t3", return_value=mock_t3), \
+                    patch("nexus.doc_indexer.SemanticMarkdownChunker") as chk_cls:
+                chk_cls.return_value.chunk.return_value = [mock_chunk]
+                return index_markdown(sample_md, corpus="docs", t3=mock_t3, hooks=hooks, force=True)
+        if path == "incremental-pdf":
+            monkeypatch.setattr("nexus.doc_indexer._INCREMENTAL_THRESHOLD", 0)
+        monkeypatch.setattr("nexus.doc_indexer._lookup_existing_doc_id", lambda *a, **kw: "1.1.d2")
+        monkeypatch.setattr("nexus.catalog.factory.make_catalog_reader", lambda *a, **kw: MagicMock())
+        monkeypatch.setattr("nexus.doc_indexer._check_document_fork", lambda *a, **kw: [])
+        with pdf_extract_patches_ctx():
+            return index_pdf(sample_pdf, corpus="d2", t3=mock_t3, embed_fn=_fake_embed,
+                             hooks=hooks, streaming="never", force=True)
+
+    @pytest.mark.parametrize("path", PATHS)
+    def test_the_stamp_is_the_last_event(self, path, sample_pdf, sample_md, mock_t3, monkeypatch, owner_write):
+        self._drive(path, sample_pdf=sample_pdf, sample_md=sample_md, mock_t3=mock_t3,
+                    monkeypatch=monkeypatch, hooks=self._hooks(owner_write))
+        kinds = [e[0] for e in owner_write.events]
+        assert kinds[0] == "write" and kinds[-1] == "complete", kinds
+        assert kinds.count("complete") == 1
+        assert "batch-hook" in kinds[1:-1]
+        if path != "markdown":
+            assert "document-hook" in kinds[1:-1], "the document-grain hook also precedes the stamp"
+        assert all(p.closed >= 1 for p in owner_write.pendings), "the write's catalog client is released"
+
+    @pytest.mark.parametrize("die_in", ["batch", "document"])
+    @pytest.mark.parametrize("path", PATHS)
+    def test_a_kill_in_a_hook_leaves_the_document_unstamped_and_the_next_run_refires_the_hooks(
+        self, path, die_in, sample_pdf, sample_md, mock_t3, monkeypatch, owner_write,
+    ):
+        if path == "markdown" and die_in == "document":
+            pytest.skip("the markdown path fires no separate document-grain hook after its batch hook")
+        with patch("nexus.doc_indexer._fence_fail") as mock_fail:
+            with pytest.raises(_Killed):
+                self._drive(path, sample_pdf=sample_pdf, sample_md=sample_md, mock_t3=mock_t3,
+                            monkeypatch=monkeypatch, hooks=self._hooks(owner_write, die_in=die_in))
+            killed_run = [e[0] for e in owner_write.events]
+            assert "complete" not in killed_run, killed_run
+            mock_fail.assert_not_called()   # a kill marks nothing: the fence stays 'indexing'
+            assert all(p.closed >= 1 for p in owner_write.pendings), "even a kill releases the client"
+
+            owner_write.events.clear()
+            self._drive(path, sample_pdf=sample_pdf, sample_md=sample_md, mock_t3=mock_t3,
+                        monkeypatch=monkeypatch, hooks=self._hooks(owner_write))
+        rerun = [e[0] for e in owner_write.events]
+        assert rerun[0] == "write" and rerun[-1] == "complete" and "batch-hook" in rerun, rerun
 
 
 class TestIndexPdfPreFenceVectorFailure:

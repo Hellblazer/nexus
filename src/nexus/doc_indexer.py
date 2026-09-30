@@ -1430,6 +1430,41 @@ def _register_before_read(db: Any, collection_name: str) -> None:
     ensure_collection_registered(collection_name, registrar=registrar)
 
 
+class _DeferredOwnerWrite:
+    """A chunk+owner write that has sent every request and not yet stamped the document complete.
+
+    RDR-223 decision D2 (2026-09-30): the non-streaming paths stamp LAST, after the post-store
+    hooks, as the streaming pipeline does. The stamp used to ride the write, so a process killed
+    in the hook phase left a document that read complete and never got its taxonomy assignment or
+    aspect enqueue, and nothing would fire them again. With the stamp last, a kill before it
+    leaves the fence ``indexing`` and the next run redoes the document and its hooks. The cost is
+    one extra request per document.
+
+    :meth:`complete` sends the stamp (a refusal is recorded by the writer and leaves the fence
+    ``indexing``, see :class:`~nexus.catalog.multi_batch_write.MultiBatchDocumentWriter`);
+    :meth:`close` releases the catalog client and is safe to call more than once.
+    """
+
+    def __init__(self, writer: Any, raw_cat: Any, result: "DocumentWriteResult", doc_id: str) -> None:
+        self.writer = writer
+        self.doc_id = doc_id
+        #: What the writer sent, before the stamp.
+        self.result = result
+        self._raw_cat = raw_cat
+        self._closed = False
+
+    def complete(self) -> "DocumentWriteResult":
+        return self.writer.complete()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        close = getattr(self._raw_cat, "close", None)
+        if close is not None:
+            close()
+
+
 def _write_chunks_with_owner_rows(
     collection_name: str,
     doc_id: str,
@@ -1442,17 +1477,23 @@ def _write_chunks_with_owner_rows(
     batch_size: int = 0,
     on_progress: "Callable[[int, int], None] | None" = None,
     on_request: "Callable[[], None] | None" = None,
-) -> "DocumentWriteResult":
+    defer_completion: bool = False,
+) -> "DocumentWriteResult | _DeferredOwnerWrite":
     """Write one document's chunks together with their owner rows (RDR-223, nexus-z0o2p.13).
 
     *ids* are the chunks' chashes (``chunk_id == sha256(text)``, RDR-180), so the
     manifest row of position ``i`` names ``ids[i]``. Everything goes through
     :class:`~nexus.catalog.multi_batch_write.MultiBatchDocumentWriter`: a document
-    that fits one request is one ``write_manifest_many`` with the sweep on and the
-    completion stamp riding it; a larger one begins the index-run fence, writes its
-    first request with the sweep off, appends the rest with their chunks, sweeps
-    after the last, and stamps. A client that dies between two requests leaves every
-    chunk it wrote owned. *content_hash* turns on the fence and the stamp.
+    that fits one request is one ``write_manifest_many`` with the sweep on; a larger
+    one begins the index-run fence, writes its first request with the sweep off,
+    appends the rest with their chunks, and sweeps after the last. A client that
+    dies between two requests leaves every chunk it wrote owned. *content_hash* turns
+    on the fence and the stamp.
+
+    *defer_completion* (decision D2) sends no completion stamp: the function returns a
+    :class:`_DeferredOwnerWrite`, and the caller stamps it with ``complete()`` after its
+    post-store hooks, then ``close()``s it. Without it the stamp is sent here and the plain
+    :class:`~nexus.catalog.multi_batch_write.DocumentWriteResult` comes back.
 
     *batch_size* (nexus-z0o2p.15, the incremental PDF path) hands the writer the
     document in batches of that many chunks, the way the embed loop it replaces
@@ -1460,23 +1501,25 @@ def _write_chunks_with_owner_rows(
     chunk cap. *on_progress* is called as ``(chunks_sent, total)``: after each batch
     that is handed over, with the chunks whose requests have been SENT (the writer
     holds the latest batch back until it knows whether it is the last), and once with
-    ``(total, total)`` when the write finished. *on_request* is called just before each request
-    that carries chunks is sent: from that point the document has, or may have, chunks in the
-    store, all with owner rows, and a caller that would undo a registration on failure must not
-    (:func:`index_pdf`'s ``_rollback_if_freshly_minted``).
+    ``(total, total)`` when the write finished. *on_request* is called when a request that
+    carries chunks has, or may have, written them (see
+    :class:`~nexus.catalog.metadata_merging_catalog.MetadataMergingCatalog`): from that point the
+    document may have chunks in the store, all with owner rows, and a caller that would undo a
+    registration on failure must not (:func:`index_pdf`'s ``_rollback_if_freshly_minted``).
 
-    The writer raises for a request that fails or an answer it cannot trust (the
-    run fails, and the caller's fence bracket marks it), and
-    :class:`~nexus.errors.IndexRunVerifyRefused` for a refused stamp. Side effects
-    the manifest hook used to carry are ported here: the sweep counters the run
-    summary reads (nexus-39upx: a skipped sweep is never silent, and it keeps the
-    engine's own reason, ``gate_timeout`` / ``statement_timeout`` / ...).
+    The writer raises for a request that fails or an answer it cannot trust (the run fails, and
+    the caller's fence bracket marks it), and :class:`~nexus.errors.IndexRunVerifyRefused` for a
+    refused stamp. Side effects the manifest hook used to carry are ported here: the sweep
+    counters the run summary reads (nexus-39upx: a skipped sweep is never silent, and it keeps
+    the engine's own reason, ``gate_timeout`` / ``statement_timeout`` / ...).
 
     Metadata is MERGED into what the engine already stores for a chash (the old
     upsert's semantics), not replaced: the keys this writer owns and dropped from a
     row (:func:`nexus.metadata_schema.rewrite_delete_keys`) are cleared, and the
     ``bib_*`` enrichment another writer set survives a forced re-index.
     """
+    import sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
     from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
     from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: shared with the oversize fallbacks (nexus-z0o2p.14)
@@ -1495,32 +1538,45 @@ def _write_chunks_with_owner_rows(
     raw_cat = make_catalog_writer()
     cat = MetadataMergingCatalog(
         raw_cat, collection_name, rewrite_delete_keys(metadatas), on_request=on_request)
-    try:
-        with MultiBatchDocumentWriter(
-            cat, doc_id=doc_id, collection=collection_name, content_hash=content_hash,
-            force_re_embed=force_re_embed,
-        ) as w:
-            for start in range(0, total, size):
-                w.add_batch(rows[start:start + size], chunks[start:start + size])
-                if on_progress is not None and start > 0:
-                    on_progress(start, total)
-            result = w.finish()
-    finally:
+    w = MultiBatchDocumentWriter(
+        cat, doc_id=doc_id, collection=collection_name, content_hash=content_hash,
+        force_re_embed=force_re_embed, defer_completion=defer_completion)
+
+    def _release() -> None:
         close = getattr(raw_cat, "close", None)
         if close is not None:
             close()
-    # The wrapper recorded each response's swept count and reasoned sweep skips; a skip the engine
-    # counted without a reason (an older shape without detail) is recorded here.
-    cat.account_unexplained_skips(doc_id, result.sweep_skipped)
+
+    try:
+        for start in range(0, total, size):
+            w.add_batch(rows[start:start + size], chunks[start:start + size])
+            if on_progress is not None and start > 0:
+                on_progress(start, total)
+        result = w.finish()
+        # The wrapper recorded each response's swept count and reasoned sweep skips; a skip the
+        # engine counted without a reason (an older shape without detail) is recorded here.
+        cat.account_unexplained_skips(doc_id, result.sweep_skipped)
+        if on_progress is not None:
+            if defer_completion:
+                on_progress(total, total)
+            else:
+                # The stamp rode the write: the document is complete, so a progress display that
+                # raises must not reach the caller's failure handling, which would mark it failed.
+                try:
+                    on_progress(total, total)
+                except Exception:  # noqa: BLE001 — boundary catch: a progress callback is display only, and the write is already stamped
+                    _log.warning("write_progress_callback_failed_after_stamp", doc_id=doc_id, exc_info=True)
+    except BaseException:
+        # What ``with writer:`` did: fail the fence, except after a refusal (recorded, the fence
+        # stays 'indexing') or once stamped. A killed process needs none of it.
+        w.__exit__(*sys.exc_info())
+        _release()
+        raise
     # No dropped_unknown branch: this caller always passes content_hash, so the writer is fenced and
     # takes the drop list from the begin snapshot, never from the write_many response.
-    if on_progress is not None:
-        # After the stamp (it rides finish()): the document is complete, so a progress display
-        # that raises must not reach the caller's failure handling, which would mark it failed.
-        try:
-            on_progress(total, total)
-        except Exception:  # noqa: BLE001 — boundary catch: a progress callback is display only, and the write is already stamped
-            _log.warning("write_progress_callback_failed_after_stamp", doc_id=doc_id, exc_info=True)
+    if defer_completion:
+        return _DeferredOwnerWrite(w, raw_cat, result, doc_id)
+    _release()
     return result
 
 
@@ -1569,6 +1625,26 @@ def _require_throwaway_store(t3: Any, entry: str) -> None:
             f"(make_t3(_client=InMemoryVectorClient())), got {type(t3).__name__}. The dry run "
             "writes chunks with no owner row and touches no catalog, which is safe only in a "
             "store discarded with the process; nothing was read from or written to it."
+        )
+
+
+def _require_throwaway_pipeline(db: Any, entry: str) -> None:
+    """Refuse a dry run whose pipeline buffer is the engine's (RDR-223).
+
+    A streaming PDF run stages its pages and chunks in a buffer keyed on the file's content hash.
+    The engine's buffer is shared by every run of the same bytes, so a preview that used it would
+    flag, reset or delete the rows of a real run in flight, and would send the engine traffic a dry
+    run promises not to. Only the in-memory twin
+    (:func:`nexus.db.inmemory_pipeline.make_in_memory_pipeline_db`) passes.
+    """
+    from nexus.errors import DryRunStoreError  # noqa: PLC0415 - circular-dep avoidance (nexus.errors)
+
+    if not getattr(db, "in_memory", False):
+        raise DryRunStoreError(
+            f"{entry}: a dry run needs an in-memory pipeline buffer "
+            f"(nexus.db.inmemory_pipeline.make_in_memory_pipeline_db), got {type(db).__name__}. "
+            "The engine's buffer is shared with real runs of the same bytes, and a preview must "
+            "not touch it; nothing was read from or written to it."
         )
 
 
@@ -1840,9 +1916,11 @@ def _index_document(
     # nexus-5xn3k.4 review follow-up (code-review-expert MEDIUM): the fail
     # bracket around the embed/write/hook region. RDR-223: the index-run
     # fence BEGINS inside the combined writer, as its first request, and the
-    # completion stamp rides its last one (see _write_chunks_with_owner_rows).
-    # The skip paths (early `return 0` above) precede the writer and stay
-    # fence-untouched by construction — they are outside this try block.
+    # completion stamp comes LAST, after the hooks (decision D2; see
+    # _write_chunks_with_owner_rows). The skip paths (early `return 0`
+    # above) precede the writer and stay fence-untouched by construction —
+    # they are outside this try block.
+    pending: "_DeferredOwnerWrite | None" = None
     try:
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(documents, target_model)
@@ -1870,10 +1948,12 @@ def _index_document(
         # already hold (RDR-181), so an unchanged document re-embeds nothing.
         # A document that fits one request is one write_manifest_many with the
         # sweep on; a larger one goes as N requests, each carrying the chunks
-        # its own rows reference, with the sweep after the last.
-        _write_chunks_with_owner_rows(
+        # its own rows reference, with the sweep after the last. The stamp is deferred (D2): it follows the
+        # hooks below.
+        pending = _write_chunks_with_owner_rows(
             collection_name, _catalog_doc_id_for_batch, content_hash,
             ids, documents, metadatas, force_re_embed=force_re_embed,
+            defer_completion=True,
         )
 
         # Post-store hook chains (RDR-095). Both single-doc and batch chains
@@ -1891,7 +1971,7 @@ def _index_document(
         hooks = hooks.without_batch(manifest_write_batch_hook)
         # doc_id resolution HOISTED above the write (nexus-5xn3k.4) — see
         # `_catalog_doc_id_for_batch` up near `metadatas = [p[2] for p in
-        # prepared]`. The completion stamp rode the write (RDR-223), so
+        # prepared]`. The completion stamp is sent after the hooks (RDR-223, D2), so
         # manifest_complete is not passed.
         hooks.fire_batch(
             ids, collection_name, documents, embeddings, metadatas,
@@ -1908,6 +1988,9 @@ def _index_document(
             sp, collection_name, "",
             doc_id=_catalog_doc_id_for_batch,
         )
+        # The stamp, LAST (D2): a hook that dies with the process leaves the fence 'indexing', so
+        # the next run redoes the document and fires the hooks again.
+        pending.complete()
     except IndexRunVerifyRefused:
         # The engine refused the completion stamp: the manifest is NOT verified
         # complete. The writer deliberately leaves the fence 'indexing' after a
@@ -1929,6 +2012,9 @@ def _index_document(
         # propagates unmasked.
         _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
+    finally:
+        if pending is not None:
+            pending.close()
 
     # nexus-tbkk1: stale-chunk prune via _identity_where's source_path
     # fallback DELETED as dead code. RDR-102 D2 (2026-05-02) removed
@@ -1971,6 +2057,7 @@ def _index_pdf_incremental(
     dry_run: bool = False,
     on_doc_registered: Callable[[str, bool], None] | None = None,
     on_write_started: Callable[[], None] | None = None,
+    pending_stamp: "list[_DeferredOwnerWrite] | None" = None,
 ) -> int:
     """Write a large PDF's chunks with their owner rows, in batches (RDR-223, nexus-z0o2p.15).
 
@@ -1978,9 +2065,14 @@ def _index_pdf_incremental(
     writer (:func:`_write_chunks_with_owner_rows`, batches of ``_INCREMENTAL_BATCH_SIZE``): the
     fence begins inside the first request, the first request replaces the manifest with the
     sweep off, later requests append their chunks and owner rows together, the last one sweeps what
-    the previous version owned and this one dropped, and the completion stamp follows. A client
-    that dies part way leaves every chunk it wrote owned and the document unstamped, so the
-    next run redoes it.
+    the previous version owned and this one dropped, and the completion stamp comes LAST, after
+    the post-store hooks (decision D2). A client that dies part way, or in a hook, leaves every
+    chunk it wrote owned and the document unstamped, so the next run redoes it.
+
+    *pending_stamp* lets the caller stamp later still: ``index_pdf`` fires the document-grain hooks
+    after this function returns, so it passes a list, receives the write's
+    :class:`_DeferredOwnerWrite` in it, stamps it after those hooks and closes it. Without one the
+    stamp is sent here, after this function's own hooks.
 
     There is no resume point. A checkpoint recorded chunks uploaded ahead of any owner row;
     the writer keeps no state across processes, so every run starts at chunk 0 and a checkpoint
@@ -2022,8 +2114,8 @@ def _index_pdf_incremental(
     for the whole run, and the caller's own created-tracking (if any)
     has no way to see it without this callback.
 
-    *on_write_started* is called just before the first request that carries chunks (see
-    :func:`_write_chunks_with_owner_rows`).
+    *on_write_started* is called when a request that carries chunks has, or may have, written them
+    (see :func:`_write_chunks_with_owner_rows`).
 
     Returns the total number of chunks indexed.
     """
@@ -2082,6 +2174,7 @@ def _index_pdf_incremental(
     if not dry_run and not _catalog_doc_id_for_batch:
         _raise_identity_missing(file_path, collection_name, len(ids_all))
 
+    pending: "_DeferredOwnerWrite | None" = None
     try:
         # Embed per batch, as the loop this replaced did. The write below discards client
         # vectors (the service embeds server-side); they feed the post-store hooks and a dry
@@ -2126,13 +2219,13 @@ def _index_pdf_incremental(
                     on_progress(batch_end, total)
         else:
             # One document, several requests: the first replaces the manifest with the sweep
-            # off, later ones append with their chunks, the last carries the sweep, then the
-            # stamp (see _write_chunks_with_owner_rows).
-            _write_chunks_with_owner_rows(
+            # off, later ones append with their chunks, the last carries the sweep. The stamp
+            # follows the hooks (see _write_chunks_with_owner_rows).
+            pending = _write_chunks_with_owner_rows(
                 collection_name, _catalog_doc_id_for_batch, content_hash,
                 ids_all, documents_all, metadatas_all, force_re_embed=force_re_embed,
                 batch_size=_INCREMENTAL_BATCH_SIZE, on_progress=on_progress,
-                on_request=on_write_started,
+                on_request=on_write_started, defer_completion=True,
             )
 
         # Post-store hook chains (RDR-095), after the write: the hooks read stored chunks.
@@ -2167,6 +2260,13 @@ def _index_pdf_incremental(
                 )
                 for _did, _doc in zip(batch_ids, batch_docs):
                     hooks.fire_single(_did, collection_name, _doc)
+        if pending is not None:
+            if pending_stamp is None:
+                pending.complete()
+            else:
+                # The caller stamps, after the document-grain hooks it fires; it closes the write.
+                pending_stamp.append(pending)
+                pending = None
     except IndexRunVerifyRefused:
         # The engine refused the completion stamp: the manifest is NOT verified complete. The
         # writer recorded the refusal and left the fence as the begin left it (a refusal is not a
@@ -2184,6 +2284,9 @@ def _index_pdf_incremental(
         if _catalog_doc_id_for_batch:
             _fence_fail(_catalog_doc_id_for_batch, str(exc), heal=False)
         raise
+    finally:
+        if pending is not None:
+            pending.close()
 
     # nexus-tbkk1: stale-chunk prune via _identity_where's source_path
     # fallback DELETED as dead code — same rationale as _index_document's
@@ -2712,10 +2815,12 @@ def index_pdf(
     }
 
     def _note_write_started() -> None:
-        """The writer is about to send its first chunk-carrying request (called before every
-        one). From here the document may have chunks in the store, every one with an owner row,
-        so a failure must leave the registration alone: tombstoning the document would hide the
-        chunks that landed."""
+        """A chunk-carrying request came back, or died in a way that leaves its outcome open (see
+        ``MetadataMergingCatalog``). From here the document has, or may have, chunks in the store,
+        every one with an owner row, so a failure must leave the registration alone: tombstoning
+        the document would hide the chunks that landed. A request that was refused cleanly (a
+        connect error, a 4xx) never calls this, so a fresh registration whose first request was
+        refused is rolled back."""
         _mint_state["written"] = True
 
     def _note_fallback_mint(fallback_doc_id: str, created: bool) -> None:
@@ -3055,40 +3160,66 @@ def index_pdf(
             from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — circular-dep avoidance: deferred intra-package import
             hooks = HookRegistry()
             install_default_hooks(hooks)
+        # The write's completion stamp is sent below, after the document-grain hook (RDR-223, D2).
+        _stamps: "list[_DeferredOwnerWrite]" = []
         try:
-            count = _index_pdf_incremental(
-                pdf_path, corpus, prepared, content_hash, col_name, db,
-                embed_fn=embed_fn, on_progress=on_progress, hooks=hooks,
-                force_re_embed=force_re_embed,
-                doc_id=doc_id,
-                source_uri=source_uri,
-                dry_run=dry_run,
-                on_doc_registered=_note_fallback_mint,
-                on_write_started=_note_write_started,
-            )
-        except Exception as exc:
-            _rollback_if_freshly_minted(exc)
-            raise
-        metadatas = [p[2] for p in prepared]
-        _register_in_catalog(metadatas, len(metadatas))
-        # RDR-089 document-grain chain — fires once per PDF boundary at the
-        # incremental-branch tail. content="" (chunks already paginated
-        # through T3); the hook reads source_path itself per the P0.1
-        # content-sourcing contract.
-        # nexus-tdgc: forward the catalog doc_id (lookup is post-register
-        # so the entry exists by this point in the incremental path).
-        #
-        # nexus-uxg4u round 2: gated on dry_run -- both the fire_document
-        # call itself (a hook, per code-review-expert Finding A) and the
-        # catalog read that resolves its doc_id argument, which is
-        # pointless work on a dry run (nothing was registered to look up).
-        if not dry_run:
-            from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
-            _cat = make_catalog_reader()
-            hooks.fire_document(
-                str(pdf_path), col_name, "",
-                doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
-            )
+            try:
+                count = _index_pdf_incremental(
+                    pdf_path, corpus, prepared, content_hash, col_name, db,
+                    embed_fn=embed_fn, on_progress=on_progress, hooks=hooks,
+                    force_re_embed=force_re_embed,
+                    doc_id=doc_id,
+                    source_uri=source_uri,
+                    dry_run=dry_run,
+                    on_doc_registered=_note_fallback_mint,
+                    on_write_started=_note_write_started,
+                    pending_stamp=_stamps,
+                )
+            except Exception as exc:
+                _rollback_if_freshly_minted(exc)
+                raise
+            metadatas = [p[2] for p in prepared]
+            try:
+                _register_in_catalog(metadatas, len(metadatas))
+                # RDR-089 document-grain chain — fires once per PDF boundary at the
+                # incremental-branch tail. content="" (chunks already paginated
+                # through T3); the hook reads source_path itself per the P0.1
+                # content-sourcing contract.
+                # nexus-tdgc: forward the catalog doc_id (lookup is post-register
+                # so the entry exists by this point in the incremental path).
+                #
+                # nexus-uxg4u round 2: gated on dry_run -- both the fire_document
+                # call itself (a hook, per code-review-expert Finding A) and the
+                # catalog read that resolves its doc_id argument, which is
+                # pointless work on a dry run (nothing was registered to look up).
+                if not dry_run:
+                    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.factory)
+                    _cat = make_catalog_reader()
+                    hooks.fire_document(
+                        str(pdf_path), col_name, "",
+                        doc_id=_lookup_existing_doc_id(_cat, str(pdf_path), corpus),
+                    )
+                # The stamp, LAST (D2): a kill in any hook above leaves the fence 'indexing', so
+                # the next run redoes the document and fires the hooks again.
+                for _pending in _stamps:
+                    _pending.complete()
+            except IndexRunVerifyRefused as exc:
+                from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+
+                # Recorded by the writer; the fence stays 'indexing'. The chunks landed, so the
+                # rollback of a fresh registration is a no-op (see _rollback_if_freshly_minted).
+                for _pending in _stamps:
+                    discard_deferred_superseded_vectors(_pending.doc_id)
+                _rollback_if_freshly_minted(exc)
+                raise
+            except Exception as exc:
+                for _pending in _stamps:
+                    _fence_fail(_pending.doc_id, str(exc), heal=False)
+                _rollback_if_freshly_minted(exc)
+                raise
+        finally:
+            for _pending in _stamps:
+                _pending.close()
         # nexus-y8qtj: end-of-run fork check (see the streaming branch above).
         _forks = _check_document_fork(doc_id, col_name)
         if on_fork_detected is not None:
@@ -3151,6 +3282,7 @@ def index_pdf(
                 _rollback_if_freshly_minted(exc)
                 raise
 
+    pending: "_DeferredOwnerWrite | None" = None
     try:
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(documents, target_model)
@@ -3178,11 +3310,13 @@ def index_pdf(
                 db, col_name, ids, documents, embeddings, metadatas_list,
                 force_re_embed=force_re_embed)
         else:
-            # One request, sweep on, the completion stamp riding it. The engine embeds only the
-            # chunks it does not already hold (RDR-181), so an unchanged PDF re-embeds nothing.
-            _write_chunks_with_owner_rows(
+            # One request, sweep on. The engine embeds only the chunks it does not already hold
+            # (RDR-181), so an unchanged PDF re-embeds nothing. The completion stamp follows the
+            # hooks below (RDR-223, D2).
+            pending = _write_chunks_with_owner_rows(
                 col_name, _catalog_doc_id_for_batch, content_hash, ids, documents,
                 metadatas_list, force_re_embed=force_re_embed, on_request=_note_write_started,
+                defer_completion=True,
             )
 
         # Post-store hook chains (RDR-095), after the write. Both single-doc and batch chains
@@ -3214,10 +3348,14 @@ def index_pdf(
                 str(pdf_path), col_name, "",
                 doc_id=_catalog_doc_id_for_batch,
             )
+        # The stamp, LAST (D2): a kill in a hook above leaves the fence 'indexing', so the next
+        # run redoes the document and fires the hooks again.
+        if pending is not None:
+            pending.complete()
     except IndexRunVerifyRefused as exc:
-        # The engine refused the completion stamp (recorded by the writer; the fence stays as
-        # the begin left it). A freshly minted document is rolled back, as the explicit-stamp
-        # branch this replaced did (nexus-uxg4u round 2).
+        # The engine refused the completion stamp (recorded by the writer; the fence stays
+        # 'indexing'). The chunks landed, so the rollback of a fresh registration below is a
+        # no-op: the document is kept, and the fence is what makes the next run redo it.
         from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
 
         discard_deferred_superseded_vectors(_catalog_doc_id_for_batch)
@@ -3239,14 +3377,17 @@ def index_pdf(
         # deletes) -- the exact reported bug.
         _rollback_if_freshly_minted(exc)
         raise
+    finally:
+        if pending is not None:
+            pending.close()
 
     # nexus-tbkk1: stale-chunk prune via _identity_where's source_path fallback DELETED as dead
     # code — same rationale as _index_document's and _index_pdf_incremental's former prune
     # blocks. Replacement protection (RDR-223) is the engine's own sweep inside the write; nx t3
     # gc is the manual backstop. Full evidence: _identity_where's docstring above.
 
-    # The completion stamp rode the write (RDR-223), before catalog metadata registration, so a
-    # refusal above never reaches _register_in_catalog for this run.
+    # The completion stamp was sent above (RDR-223, D2), so a refusal never reaches
+    # _register_in_catalog for this run.
     _register_in_catalog(metadatas_list, len(metadatas_list))
 
     # nexus-y8qtj: end-of-run fork check (see the streaming branch above).
