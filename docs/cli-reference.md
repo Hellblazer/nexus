@@ -2308,18 +2308,26 @@ the service backend's `chash` length constraint) are re-hashed to full 64-char
 content-derived ids automatically (RDR-180); the CLI reports how many were
 re-hashed.
 
-**Owner registration:** after every chunk batch is written, `import` finds or
-registers a catalog document per owner group and writes its manifest
-(nexus-wbfpw.31), so an imported chunk stays visible under RDR-192 Step 5's
-live(c) read predicate — a chunk with no manifest row in its own collection
-is otherwise invisible to search and get.
+**Owner registration:** `import` writes every chunk together with its owner row
+(RDR-223, nexus-z0o2p.19), so a chunk is never stored without a catalog
+document that owns it. Since RDR-192 Step 5 a chunk with no manifest row in
+its own collection is invisible to search and get (the live(c) read
+predicate), and the reaper deletes it after its grace window.
 
 - Chunks are grouped by owner identity — the export's `owner` record field
   (`source_uri`, `title`, `content_type`, `position`) — across the whole
-  file, and each group's document is found or registered once every batch
-  has upserted, not per batch: the per-batch manifest hook restarts position
-  numbering at each 300-chunk batch and would corrupt a multi-batch
-  document's manifest.
+  file. Each page of the file finds or registers the documents it meets for
+  the first time, then goes to the engine through the catalog manifest routes
+  with the exported vectors: a document's first page replaces its manifest
+  (`write_many`, sweep off) and every later page appends to it
+  (`append_many`), each with the page's chunks. The engine embeds nothing:
+  the vectors in the file are stored as they are, and the model and dimension
+  are checked against the collection.
+- Every document the import writes is fenced (`index_state` `indexing`) before
+  its first page and stamped `complete` after the last, so `nx t3 gc` and
+  `nx doctor` see it as a finished document. A client that dies mid-import
+  leaves each document whole up to some page and never a chunk without its
+  owner; rerunning the same import finishes the documents it left `indexing`.
 - Importing into a collection other than the one the documents live in
   (`-c`/`--collection`) COPIES rather than moves: the source collection's
   documents are left untouched and stay live, and the target gets its own
@@ -2332,24 +2340,24 @@ is otherwise invisible to search and get.
 - A record with no owner at all (an older export predating this field, or a
   live-but-unmanifested chunk the export could not resolve) is grouped under
   one document per import file, keyed by the target collection and file name.
-- An import never replaces the manifest of a document that already owns
-  chunks (nexus-wbfpw.40). That document's current chunk list is what search
-  shows; an older export imported over a re-put note would otherwise hide the
-  correction. The file's chunks such a document does not own stay unowned:
-  not searchable, and in a `knowledge__` collection removable by the RDR-192
-  reaper after its grace window. The command reports how many and names up
-  to 5 documents. To restore a document from the file instead, delete it
-  first, then import.
-- `--skip-existing` does not change ownership: grouping happens before
-  duplicate filtering, so a chunk dropped as an existing duplicate is owned
-  exactly as it would be without the flag.
+- Two records of one document that claim one position keep both chunks: the
+  later one takes the next free position after the highest claimed.
+- An import never replaces or extends the manifest of a document that already
+  owns chunks (nexus-wbfpw.40). That document's current chunk list is what
+  search shows; an older export imported over a re-put note would otherwise
+  hide the correction. The file's chunks for such a document are left out of
+  the import altogether (counted as skipped, and never stored ownerless). The
+  command reports how many chunks were left out and names up to 5 documents.
+  To restore a document from the file instead, delete it first, then import.
+- `--skip-existing` skips the chunk payload of a record whose chunk the
+  collection already holds; the record's owner row is still written, so a
+  chunk stored earlier without an owner gains one.
 - An owner with no title (an export whose document had none) keeps its
   source URI as the registered document's title.
-- If an owner document or its manifest fails to write, the rest of the
+- If a document cannot be registered, written or stamped, the rest of the
   import still completes; the command then fails, naming every failed
-  source URI (capped at 5, with a count of the rest) and noting that
-  re-running the same import is safe — document lookup and manifest writes
-  are idempotent.
+  source URI (capped at 5, with a count of the rest). Re-running the same
+  import is safe.
 
 **Restoring a pre-migration (Chroma-era) backup:**
 

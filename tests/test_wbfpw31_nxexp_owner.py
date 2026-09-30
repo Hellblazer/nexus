@@ -36,8 +36,7 @@ from nexus.db.http_vector_client import HttpVectorClient
 from nexus.db.limits import QUOTAS
 from nexus.errors import NexusError
 from nexus.exporter import (
-    _accumulate_owner_group,
-    _manifest_rows,
+    _locate_owner_group,
     _resolve_import_owner_tumbler,
     export_collection,
     import_collection,
@@ -89,6 +88,21 @@ def _owned_doc(writer, client, collection: str, owner_tumbler, title: str, conte
     return str(tumbler), source_uri, chashes
 
 
+
+def _spy_combined_writes(monkeypatch) -> list[str]:
+    """Doc ids named by every combined write (``write_many`` / ``append_many``) the test makes."""
+    named: list[str] = []
+    for name in ("write_manifest_many", "append_manifest_many"):
+        real = getattr(hcc.HttpCatalogClient, name)
+
+        def _wrap(self, docs, *a, _real=real, **kw):
+            named.extend(d for d, _ in docs)
+            return _real(self, docs, *a, **kw)
+
+        monkeypatch.setattr(hcc.HttpCatalogClient, name, _wrap)
+    return named
+
+
 def _read_nxexp_records(path: Path) -> list[dict]:
     with open(path, "rb") as f:
         f.readline()  # header
@@ -128,64 +142,38 @@ def _write_hand_crafted_nxexp(
                 gz.write(msgpack.packb(r, use_bin_type=True))
 
 
-# ── Unit: _accumulate_owner_group (no catalog, no T3) ───────────────────────
+# ── Unit: _locate_owner_group (no catalog, no T3) ───────────────────────────
 
 
-def test_accumulate_owner_group_position_and_uri_synthesis():
+def test_locate_owner_group_position_and_uri_synthesis():
 
     target = "knowledge__x__bge-base-en-v15-768__v1"
     groups: dict = {}
+    kw = dict(fallback_source_uri="nxexp://col/f", fallback_title="f",
+              fallback_content_type="knowledge", target_collection=target)
 
     # Explicit source_uri + explicit position: honored verbatim.
-    _accumulate_owner_group(
+    group, position = _locate_owner_group(
         groups,
         {"source_uri": "file:///a", "title": "A", "content_type": "knowledge", "position": 3},
-        "chashA",
-        fallback_source_uri="nxexp://col/f", fallback_title="f",
-        fallback_content_type="knowledge", target_collection=target,
+        **kw,
     )
-    assert groups["file:///a"]["rows"] == [(3, "chashA")]
-    assert groups["file:///a"]["content_type"] == "knowledge"
+    assert position == 3
+    assert groups["file:///a"] is group
+    assert group["content_type"] == "knowledge"
 
     # Title-only owner (no source_uri): synthesizes the SAME chroma://
     # convention catalog_store_hook_tracked uses for a title-only note.
-    _accumulate_owner_group(
-        groups, {"title": "B"}, "chashB",
-        fallback_source_uri="nxexp://col/f", fallback_title="f",
-        fallback_content_type="knowledge", target_collection=target,
-    )
+    group, position = _locate_owner_group(groups, {"title": "B"}, **kw)
     synthesized = uri_for(target, "B")
-    assert groups[synthesized]["rows"] == [(0, "chashB")]
+    assert groups[synthesized] is group and position == 0
 
-    # No owner field at all: file-fallback identity, sequential position.
-    _accumulate_owner_group(
-        groups, None, "chashC",
-        fallback_source_uri="nxexp://col/f", fallback_title="f",
-        fallback_content_type="knowledge", target_collection=target,
-    )
-    _accumulate_owner_group(
-        groups, None, "chashD",
-        fallback_source_uri="nxexp://col/f", fallback_title="f",
-        fallback_content_type="knowledge", target_collection=target,
-    )
-    assert groups["nxexp://col/f"]["rows"] == [(0, "chashC"), (1, "chashD")]
-    assert groups["nxexp://col/f"]["title"] == "f"
-
-
-def test_manifest_rows_orders_and_renumbers_colliding_positions():
-
-    # Distinct positions: kept verbatim, ordered by position.
-    assert _manifest_rows([(3, "a"), (0, "b")]) == [
-        {"chash": "b", "position": 0}, {"chash": "a", "position": 3},
-    ]
-    # A mixed file can give two chunks position 0 (explicit owner position
-    # plus a position-less record's running count): keep order, renumber,
-    # never hand write_manifest a duplicate primary key.
-    assert _manifest_rows([(0, "a"), (0, "b"), (2, "c")]) == [
-        {"chash": "a", "position": 0},
-        {"chash": "b", "position": 1},
-        {"chash": "c", "position": 2},
-    ]
+    # No owner field at all: file-fallback identity, sequential position across calls.
+    g1, p1 = _locate_owner_group(groups, None, **kw)
+    g2, p2 = _locate_owner_group(groups, None, **kw)
+    assert g1 is g2 is groups["nxexp://col/f"]
+    assert (p1, p2) == (0, 1)
+    assert g1["title"] == "f"
 
 
 # ── Round trip: multi-batch documents stay owned ────────────────────────────
@@ -664,14 +652,17 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
         assert chash in client.get_collection(dst).get(ids=[chash], include=[])["ids"]
 
 
-def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_env, tmp_path):
+def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_env, tmp_path, monkeypatch):
     """nexus-wbfpw.40 (Sam, 2026-09-29: keep existing). An import that
     resolves to a live document which already owns chunks must not replace
     its manifest with the file's rows: the engine's manifest write deletes
     every row for the document first, so an older export imported over a
-    re-put note hid the correction and made it reapable. The file's chunks
-    the document does not own stay unowned, and the result says how many.
-    Not integration-marked, so CI's default selection runs it."""
+    re-put note hid the correction and made it reapable. RDR-223
+    (nexus-z0o2p.19) changed what happens to the file's chunks the document
+    does not own: they are no longer stored ownerless, they are skipped and
+    counted (``unowned_count`` now means "left out of the import"), and NO
+    write of any kind reaches the document. Not integration-marked, so CI's
+    default selection runs it."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
     writer = make_catalog_writer(priority="interactive")
@@ -692,12 +683,15 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     )
     writer.write_manifest(doc, [{"chash": v2, "position": 0}], collection=coll)
 
+    writes = _spy_combined_writes(monkeypatch)
     result = import_collection(db=client, input_path=old_export, target_collection=coll, skip_existing=True)
 
     assert [r.chash for r in reader.get_manifest(doc)] == [v2], "the import replaced the current manifest"
+    assert doc not in writes, "the import must not write to a document that keeps its manifest"
     assert v2 in client.get_collection(coll).get(ids=[v2], include=[])["ids"], "the correction must stay visible"
     assert v1 not in client.get_collection(coll).get(ids=[v1], include=[])["ids"], "the old export must not resurrect v1"
     assert result["owned_count"] == 0
+    assert (result["imported_count"], result["skipped_count"]) == (0, 1), result
     assert result["unowned_count"] == 1
     assert result["unowned_documents"] == [{"tumbler": doc, "title": "wbfpw40 note"}]
 
@@ -713,9 +707,11 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     again = import_collection(db=client, input_path=current_export, target_collection=coll, skip_existing=True)
     assert [r.chash for r in reader.get_manifest(doc)] == [v2]
     assert (again["owned_count"], again["unowned_count"]) == (1, 0)
+    assert (again["imported_count"], again["skipped_count"]) == (0, 1), again
+    assert doc not in writes
 
 
-def test_legacy_doc_id_import_leaves_an_existing_documents_manifest_alone(t2_service_env, tmp_path):
+def test_legacy_doc_id_import_leaves_an_existing_documents_manifest_alone(t2_service_env, tmp_path, monkeypatch):
     """nexus-wbfpw.40 review round: the legacy meta.doc_id shape reached the
     same replace through the per-batch manifest_write_batch_hook, which
     fired for each upserted batch BEFORE the keep-existing check and then
@@ -735,17 +731,23 @@ def test_legacy_doc_id_import_leaves_an_existing_documents_manifest_alone(t2_ser
         "id": v3, "document": v3_text,
         "metadata": {"chunk_text_hash": v3, "doc_id": doc, "chunk_index": 0},
     }])
+    writes = _spy_combined_writes(monkeypatch)
     result = import_collection(db=client, input_path=f, target_collection=coll)
 
     assert [r.chash for r in reader.get_manifest(doc)] == [v2], "the legacy import replaced the current manifest"
     assert v2 in client.get_collection(coll).get(ids=[v2], include=[])["ids"]
     assert (result["owned_count"], result["unowned_count"]) == (0, 1)
+    # RDR-223: the stale record's chunk is left out of the import, not stored hidden.
+    assert client.existing_ids(coll, [v3]) == set(), "a chunk of a kept document must not be stored"
+    assert (result["imported_count"], result["skipped_count"]) == (0, 1), result
+    assert doc not in writes
 
 
 def test_a_failed_manifest_read_never_overwrites(t2_service_env, tmp_path, monkeypatch):
     """If the existing manifest cannot be read, the document is reported as
-    failed and its manifest is not written: an unread manifest may hold
-    chunks the write would hide."""
+    failed and nothing is written to it: an unread manifest may hold chunks
+    a write would hide. The read is one batched ``get_manifests`` per page
+    (nexus-z0o2p.19), so the failure covers the documents of that page."""
     client = HttpVectorClient(tenant=t2_service_env)
     reader = make_catalog_reader()
     writer = make_catalog_writer(priority="interactive")
@@ -755,20 +757,16 @@ def test_a_failed_manifest_read_never_overwrites(t2_service_env, tmp_path, monke
     out = tmp_path / "readfail.nxexp"
     export_collection(db=client, collection_name=coll, output_path=out)
 
-    def _boom(self, doc_id):
+    def _boom(self, doc_ids):
         raise RuntimeError("wbfpw40 injected manifest read failure")
 
-    real_get = hcc.HttpCatalogClient.get_manifest
-    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifest", _boom)
-    writes: list[str] = []
-    real_write = hcc.HttpCatalogClient.write_manifest
-    monkeypatch.setattr(hcc.HttpCatalogClient, "write_manifest",
-                        lambda self, d, rows, **kw: (writes.append(d), real_write(self, d, rows, **kw))[1])
+    real_get = hcc.HttpCatalogClient.get_manifests
+    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifests", _boom)
+    writes = _spy_combined_writes(monkeypatch)
     with pytest.raises(NexusError, match="injected manifest read failure"):
         import_collection(db=client, input_path=out, target_collection=coll, skip_existing=True)
     assert doc not in writes
-    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifest", real_get)
-    monkeypatch.setattr(hcc.HttpCatalogClient, "write_manifest", real_write)
+    monkeypatch.setattr(hcc.HttpCatalogClient, "get_manifests", real_get)
     assert [r.chash for r in reader.get_manifest(doc)] == [v1]
 
 

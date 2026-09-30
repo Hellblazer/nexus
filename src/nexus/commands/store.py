@@ -1044,15 +1044,19 @@ def import_cmd(
         f"{result['collection_name']}  ({result['elapsed_seconds']:.1f}s)"
     )
     if result.get("skipped_count"):
-        click.echo(f"  Skipped {result['skipped_count']} existing records (--skip-existing).")
+        click.echo(
+            f"  Skipped {result['skipped_count']} records: already stored (--skip-existing), or "
+            "belonging to a document that keeps its current chunk list."
+        )
     if result.get("owned_count"):
         click.echo(f"  {result['owned_count']} records are owned by a catalog document.")
     if result.get("unowned_count"):
         docs = result.get("unowned_documents") or []
         click.echo(
-            f"  {result['unowned_count']} records were left unowned and are not searchable: their "
+            f"  {result['unowned_count']} records were left out of the import: their "
             f"{len(docs)} document(s) already exist with a different chunk list, which an import "
-            "never replaces. To restore one from this file instead, delete it (this discards its "
+            "never replaces, and a chunk is never stored without its owner. To restore one from "
+            "this file instead, delete it (this discards its "
             "current version, and --title removes every document with that title in the "
             "collection), then import again:"
         )
