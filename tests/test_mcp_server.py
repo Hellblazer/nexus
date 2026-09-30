@@ -163,12 +163,18 @@ def _clear_ephemeral_collections(client) -> None:
 
 
 @pytest.fixture()
-def t3():
+def t3(monkeypatch):
     client = make_vector_test_client()
     _clear_ephemeral_collections(client)
     ef = MiniLMDirectEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
+    # RDR-223 P2.2 (nexus-z0o2p.12): store_put's note write is one request to the
+    # real engine. These tests use store_put only to have a note to list, search or
+    # get from this fake T3, so its note lands here (see tests/_note_write_double.py).
+    from tests._note_write_double import route_note_writes_to
+
+    route_note_writes_to(monkeypatch, db)
 
     # RDR-192 Step 3a (nexus-wbfpw.28): a real store_put/promote manifest
     # write now rolls back the whole call when it can't find the chash's

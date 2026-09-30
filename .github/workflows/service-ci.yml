@@ -121,14 +121,33 @@ jobs:
     needs: changes
     if: needs.changes.outputs.service == 'true'
     runs-on: ubuntu-latest
-    # Measured on develop, 2026-09-29/30: the job took 23-30 min and hit the
-    # old 30-minute limit three times with no test failure (nexus-rjk2a):
-    # release PR #1583, 5de0e23f9 (30m flat) and 54d37bf43 (30m16s). The
-    # suite is about 3,800 tests and grows with every engine bead, so the
-    # bound is 45m: enough headroom that a slow runner is not a red, short
-    # enough that a genuine hang still fails. It is a REQUIRED check on
-    # main, so a timeout here blocks a release merge.
-    timeout-minutes: 45
+    # nexus-rjk2a, measured 2026-09-29/30 (14 runs in 30 hours): the job took
+    # 21 to 34 min. The old 30-minute limit cut three runs with no test failure
+    # (release PR #1583, 5de0e23f9 at 30m flat, 54d37bf43 at 30m16s); the
+    # longest run so far, 36733252314, took 34m06s (suite step 22m04s,
+    # integration step 11m30s). Runner variance is real: two trees differing
+    # only in non-test files differed by 5.5 min in the suite step.
+    #
+    # How the three bounds interact (the job bound is not a sum of the others):
+    #   - suite step: surefire kills a wedged fork at 45 min
+    #     (forkedProcessTimeoutInSeconds, service/pom.xml) and the step fails.
+    #     The integration step is then skipped, so a killed suite never adds
+    #     the integration time to the job. Setup before the suite is a few
+    #     minutes, so the job ends at about 50 min with a surefire timeout
+    #     message, before the 60-minute line below.
+    #   - integration step: it starts after a normal suite (about 22 min) and
+    #     has its own 45-minute fork bound, which would fire at about 70 min
+    #     into the job. The 60-minute job line fires first, about 35 min into
+    #     that step. So an integration-step hang is caught by THIS line, not
+    #     by the fork bound.
+    #   - 60 sits above the longest job measured (34m06s) with room for the
+    #     suite step to grow toward its fork bound, and above 45 min + setup so
+    #     that a wedged suite fork gets surefire's own message.
+    # It is a STOPGAP sized from one afternoon of data, not a derived
+    # steady-state bound: the per-class timing step at the end of this job
+    # exists to replace it with one once a few runs of per-class data are in.
+    # This is a REQUIRED check on main and develop, so a timeout blocks a merge.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
@@ -224,7 +243,9 @@ jobs:
       # the cross-check between the combined-query functions and the repository
       # path, which is precisely the surface an engine release changes. A parity
       # suite that never runs is worse than none, because its existence gets
-      # cited as coverage. ~3 minutes for 25 tests, measured locally.
+      # cited as coverage. Cost on CI: 5.5 to 11.5 min over 14 runs on
+      # 2026-09-29/30 (an earlier local figure of ~3 min for 25 tests was
+      # wrong for the CI runner), across the 9 classes carrying the tag.
       - name: Run Java integration group (SQL-vs-stitch parity fixtures)
         working-directory: service
         run: ./mvnw -q test -Dtest.excluded.groups= -Dgroups=integration -Dnexus.test.forks=1
@@ -267,6 +288,18 @@ jobs:
           python3 scripts/assert_bge_gates_ran.py \
             service/target/surefire-reports/TEST-dev.nexus.service.Bge768ParityTest.xml \
             service/target/surefire-reports/TEST-dev.nexus.service.vectors.Bge768BatchCompositionTest.xml
+
+      # nexus-rjk2a: per-class timing, so the next duration question has data.
+      # `-q` only quiets maven's console; surefire still writes TEST-*.xml (the
+      # asserts above read them). Both mvn invocations write into the same
+      # surefire-reports directory (the integration classes are excluded from
+      # the first, and nothing cleans between), so ONE call sees every class.
+      # `if: always()` so a timed-out or red run still leaves the ranking; the
+      # script never fails, so it cannot redden a run on its own. Python
+      # stdlib only, no uv sync.
+      - name: Slowest test classes (diagnostic, never fails)
+        if: always()
+        run: python3 scripts/surefire_slowest.py service/target/surefire-reports --top 25
 
   # 2026-07-06 CI-cost pass: the native-image-build-and-smoke job that lived
   # here was removed — every service/** push was building the native image

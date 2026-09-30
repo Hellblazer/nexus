@@ -23,10 +23,12 @@ WHY IT LIVES IN PYTEST AND QUERIES A LIVE DATABASE
 --------------------------------------------------
 Two placement facts, both verified rather than assumed:
 
-1. ``service-ci`` is NOT a required check on develop or main (nexus-hq9na). A Java
-   test of this invariant would be ADVISORY at merge — which, for a class that has
-   now recurred three times and shipped a P0 twice, is not a gate at all. This file
-   rides ``pytest-gate``, which IS required.
+1. When this was written ``service-ci`` was NOT a required check on
+   develop or main (nexus-hq9na), so a Java test of this invariant would have been
+   ADVISORY at merge — which, for a class that has now recurred three times and
+   shipped a P0 twice, is not a gate at all. The Java job is required on both
+   branches now (nexus-rjk2a, 2026-09-30); this file stays in pytest for the
+   reason in point 2, and because it rides ``pytest-gate``, which is required too.
 
 2. The obvious cheap implementation — regex the Liquibase changelogs — would make
    this gate a PROXY FOR THE SCHEMA. That is precisely the failure shape of the three

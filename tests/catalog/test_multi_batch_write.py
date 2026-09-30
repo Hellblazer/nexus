@@ -1011,3 +1011,47 @@ def test_write_document_aborts_the_fence_when_a_request_fails() -> None:
         write_document(cat, [_batch(0, 2), _batch(2, 2)], doc_id=_DOC,
                        collection=_COLLECTION, content_hash="hash1")
     assert len(cat.of("fail_index_run")) == 1
+
+
+def test_a_repeated_chunk_keeps_the_FIRST_occurrences_metadata_in_one_request() -> None:
+    """A document that repeats a chunk's text under different metadata writes one chunk; the old
+    upsert and the ChunkBatcher keep the first occurrence's metadata, so the writer does too."""
+    cat = FakeCat()
+    w = _writer(cat, content_hash="h")
+    rows = [{"chash": _h(1), "position": 0}, {"chash": _h(1), "position": 1}]
+    chunks = [
+        {"chash": _h(1), "text": "t", "metadata": {"which": "first"}},
+        {"chash": _h(1), "text": "t", "metadata": {"which": "second"}},
+    ]
+    w.add_batch(rows, chunks)
+    w.finish()
+    sent = cat.of("write_manifest_many")[0]["chunks"]
+    assert [c["metadata"]["which"] for c in sent] == ["first"]
+
+
+def test_a_repeated_chunk_keeps_the_FIRST_occurrences_metadata_across_requests() -> None:
+    cat = FakeCat()
+    w = _writer(cat, content_hash="h")
+    first = {"chash": _h(1), "text": "t", "metadata": {"which": "first"}}
+    later = {"chash": _h(1), "text": "t", "metadata": {"which": "later"}}
+    w.add_batch([{"chash": _h(1), "position": 0}], [first, later])
+    w.add_batch([{"chash": _h(2), "position": 1}], [{"chash": _h(2), "text": "u", "metadata": {}}])
+    w.finish()
+    sent = cat.of("write_manifest_many")[0]["chunks"]
+    assert [c["metadata"]["which"] for c in sent] == ["first"]
+
+
+def test_write_one_request_keeps_the_FIRST_occurrence_of_a_repeated_chunk() -> None:
+    from nexus.catalog.multi_batch_write import write_one_request
+
+    cat = FakeCat()
+    chunks = [
+        {"chash": _h(1), "text": "t", "metadata": {"which": "first"}},
+        {"chash": _h(2), "text": "u", "metadata": {}},
+        {"chash": _h(1), "text": "t", "metadata": {"which": "second"}},
+    ]
+    write_one_request(
+        cat, doc_id=_DOC, collection=_COLLECTION,
+        rows=[{"chash": _h(1), "position": 0}, {"chash": _h(2), "position": 1}], chunks=chunks)
+    sent = cat.of("write_manifest_many")[0]["chunks"]
+    assert [(c["chash"], c["metadata"].get("which")) for c in sent] == [(_h(1), "first"), (_h(2), None)]

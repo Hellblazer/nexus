@@ -22,13 +22,10 @@ from tokenizers import Tokenizer, models, pre_tokenizers
 
 from nexus.catalog import recovery_bundle, store_hook
 from nexus.corpus import t3_collection_name
-from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction as DefaultEmbeddingFunction
-from nexus.db.t3 import T3Database
 from nexus.embed_window import TokenWindow
 from nexus.mcp.core import store_get, store_put
 from nexus.mcp_infra import inject_t3
-from tests._catalog_fixture_ops import active_reader, documents_by_title, seed_manifest_chunks
-from tests.conftest import make_vector_test_client
+from tests._catalog_fixture_ops import active_reader, documents_by_title
 
 SUBJECT = "fixture-subject"
 NOTE = " ".join(f"Sentence {i:03d} is part of a long note." for i in range(60))
@@ -39,14 +36,18 @@ def _sha(text: str) -> str:
 
 
 @pytest.fixture
-def local_t3() -> T3Database:
-    return T3Database(_client=make_vector_test_client(), _ef_override=DefaultEmbeddingFunction())
+def engine_t3(t2_service_env: str):
+    """The real engine's vector client, injected as the MCP tools' T3.
 
+    RDR-223 P2.2 (nexus-z0o2p.12): ``store_put`` writes a note's pieces and its
+    manifest in one request to the engine, so what it wrote is read back from
+    the engine, not from an in-memory double.
+    """
+    from nexus.db.http_vector_client import HttpVectorClient
 
-@pytest.fixture
-def inject_local_t3(local_t3: T3Database):
-    inject_t3(local_t3)
-    yield local_t3
+    client = HttpVectorClient(tenant=t2_service_env)
+    inject_t3(client)
+    yield client
     inject_t3(None)
 
 
@@ -79,7 +80,7 @@ def windowless(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(store_hook, "window_for_model", lambda model: None)
 
 
-def _store(t3: T3Database, content: str, title: str) -> str:
+def _store(t3, content: str, title: str) -> str:
     with patch("nexus.mcp.core._get_t3", return_value=t3):
         return store_put(content=content, collection=SUBJECT, title=title)
 
@@ -158,17 +159,16 @@ def test_one_piece_keeps_the_single_chunk_manifest_exactly() -> None:
 # ── store_put and store_get through the real catalog ─────────────────────────
 
 def test_store_put_writes_every_piece_and_a_manifest_in_order(
-    inject_local_t3, catalog_env, small_window,
+    engine_t3, catalog_env, small_window,
 ) -> None:
     col_name = t3_collection_name(SUBJECT)
     pieces = store_hook.note_pieces(NOTE, col_name)
-    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
 
-    result = _store(inject_local_t3, NOTE, "long-note")
+    result = _store(engine_t3, NOTE, "long-note")
 
     assert result.startswith(f"Stored: {_sha(pieces[0])}"), result
     for piece in pieces:
-        entry = inject_local_t3.get_by_id(col_name, _sha(piece))
+        entry = engine_t3.get_by_id(col_name, _sha(piece))
         assert entry is not None and entry["content"] == piece
     docs = documents_by_title("long-note")
     assert len(docs) == 1
@@ -177,14 +177,13 @@ def test_store_put_writes_every_piece_and_a_manifest_in_order(
 
 
 def test_store_get_returns_the_whole_note_by_id_and_by_title(
-    inject_local_t3, catalog_env, small_window,
+    engine_t3, catalog_env, small_window,
 ) -> None:
     col_name = t3_collection_name(SUBJECT)
     pieces = store_hook.note_pieces(NOTE, col_name)
-    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
-    _store(inject_local_t3, NOTE, "long-note-get")
+    _store(engine_t3, NOTE, "long-note-get")
 
-    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+    with patch("nexus.mcp.core._get_t3", return_value=engine_t3):
         by_id = store_get(_sha(pieces[0]), SUBJECT)
         by_title = store_get("long-note-get", SUBJECT)
 
@@ -194,7 +193,7 @@ def test_store_get_returns_the_whole_note_by_id_and_by_title(
 
 
 def test_store_get_by_a_later_chunk_names_the_note_not_that_chunk(
-    inject_local_t3, catalog_env, small_window,
+    engine_t3, catalog_env, small_window,
 ) -> None:
     """nexus-zdzm5 (7.64.1 shakeout surface C F10): store_get by a
     non-first chunk hash reassembled the note but printed that chunk's hash
@@ -202,10 +201,9 @@ def test_store_get_by_a_later_chunk_names_the_note_not_that_chunk(
     col_name = t3_collection_name(SUBJECT)
     pieces = store_hook.note_pieces(NOTE, col_name)
     assert len(pieces) > 1
-    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
-    _store(inject_local_t3, NOTE, "long-note-later-chunk")
+    _store(engine_t3, NOTE, "long-note-later-chunk")
 
-    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+    with patch("nexus.mcp.core._get_t3", return_value=engine_t3):
         out = store_get(_sha(pieces[-1]), SUBJECT)
 
     assert out.splitlines()[0] == f"ID:         {_sha(pieces[0])}"
@@ -213,7 +211,7 @@ def test_store_get_by_a_later_chunk_names_the_note_not_that_chunk(
 
 
 def test_store_get_reassembles_a_windowless_split_note(
-    inject_local_t3, catalog_env, windowless,
+    engine_t3, catalog_env, windowless,
 ) -> None:
     """nexus-b2tld read side. Until note_pieces learned to split a windowless
     collection, `only a collection whose model has a small token window can
@@ -226,10 +224,9 @@ def test_store_get_reassembles_a_windowless_split_note(
     col_name = t3_collection_name(SUBJECT)
     pieces = store_hook.note_pieces(NOTE, col_name)
     assert len(pieces) > 1, "fixture note must cross NOTE_SPLIT_CHARS"
-    seed_manifest_chunks(col_name, [_sha(p) for p in pieces])
-    _store(inject_local_t3, NOTE, "windowless-note-get")
+    _store(engine_t3, NOTE, "windowless-note-get")
 
-    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+    with patch("nexus.mcp.core._get_t3", return_value=engine_t3):
         by_id = store_get(_sha(pieces[0]), SUBJECT)
         by_title = store_get("windowless-note-get", SUBJECT)
 
@@ -240,7 +237,7 @@ def test_store_get_reassembles_a_windowless_split_note(
 
 
 def test_a_windowless_single_chunk_note_still_reads_back_plain(
-    inject_local_t3, catalog_env, windowless,
+    engine_t3, catalog_env, windowless,
 ) -> None:
     """The other side of dropping the has_small_window short-circuit: a note
     that fits in one piece has a one-row manifest, so split_note_text must
@@ -248,10 +245,9 @@ def test_a_windowless_single_chunk_note_still_reads_back_plain(
     short = "A short windowless note."
     col_name = t3_collection_name(SUBJECT)
     assert store_hook.note_pieces(short, col_name) == [short]
-    seed_manifest_chunks(col_name, [_sha(short)])
-    _store(inject_local_t3, short, "windowless-short")
+    _store(engine_t3, short, "windowless-short")
 
-    with patch("nexus.mcp.core._get_t3", return_value=inject_local_t3):
+    with patch("nexus.mcp.core._get_t3", return_value=engine_t3):
         out = store_get(_sha(short), SUBJECT)
 
     assert short in out
