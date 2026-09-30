@@ -50,13 +50,20 @@ _log = structlog.get_logger(__name__)
 DEFAULT_MAX_STEPS_PER_RUNG = 10_000
 
 
-def _installed_package_version() -> str:
+def installed_package_version() -> str:
+    """The installed ``conexus`` version, stamped on every completion record.
+    Public so a rung that compares its record's ``package_version`` to the
+    installed one (``rdr192-manifest-backfill``) uses the SAME probe the
+    runner records with."""
     from importlib.metadata import version  # noqa: PLC0415 — deferred; only needed when recording
 
     try:
         return version("conexus")
     except Exception:  # noqa: BLE001 — completion records must survive a broken metadata probe; "unknown" is honest and non-blocking
         return "unknown"
+
+
+_installed_package_version = installed_package_version
 
 
 class StructlogReporter:
@@ -71,8 +78,10 @@ def pending_rungs(registry: LadderRegistry) -> list[tuple[str, RungStatus]]:
 
     The dry-run-truth surface (``resolve_pending_steps`` precedent): the
     ``nx doctor`` pending-rungs check and ``nx upgrade --dry-run`` report
-    from this without touching anything, and without even opening the
-    completion store.
+    from this without writing anything. The runner itself does not open the
+    completion store here, but a rung's ``detect()`` may READ it (and other
+    engine state); it must stay cheap, since this sweep also runs from the
+    root CLI's version-transition callout.
 
     PER-RUNG degradation, like :meth:`LadderRunner._run_rung` and the
     dry-run loop (nexus-fffey). A bare comprehension let one rung's raising
@@ -246,10 +255,21 @@ class LadderRunner:
                 RungOutcome.VERIFY_FAILED,
                 detail=detail or "verify failed after converge; completion NOT recorded",
             )
-        self._store.record_verified(
-            rung.name,
-            package_version=self._package_version_fn(),
-        )
+        # OPTIONAL structural surface (like ``verify_detail``): a rung may
+        # carry the evidence its verify() just read, so the durable record
+        # says what was examined and not only that something passed.
+        record_detail_fn = getattr(rung, "record_detail", None)
+        record_detail = record_detail_fn() if callable(record_detail_fn) else ""
+        if record_detail:
+            self._store.record_verified(
+                rung.name,
+                package_version=self._package_version_fn(),
+                detail=record_detail,
+            )
+        else:
+            self._store.record_verified(
+                rung.name, package_version=self._package_version_fn(),
+            )
         self._reporter.emit("ladder_rung_recorded", rung=rung.name)
         return RungRun(rung.name, RungOutcome.RECORDED)
 

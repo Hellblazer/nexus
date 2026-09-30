@@ -48,21 +48,37 @@ reads zero legacy-unmanifested and zero unclassified chunks. It never deletes a
 chunk and leaves the `superseded`, `dead-owner` and `no-owner` buckets to the
 reaper.
 
-- A tenant with no collections records at once.
-- An unreachable engine, or one older than the census route, defers: nothing is
-  recorded and the next `nx upgrade` retries.
+- A tenant with no collections records at once, provided the catalog agrees it
+  is empty. An empty listing over a catalog that holds manifest rows is a
+  listing failure and defers.
+- An unreachable engine, one older than the census route, or a census answer
+  missing its bucket totals defers: nothing is recorded and the next
+  `nx upgrade` retries. An answer without the totals is never read as clean.
 - A legacy chunk the backfill cannot heal (its owner is registered under a
-  different collection, a chash divergence, a zero-chunk match) makes
-  `nx upgrade` fail with the collections named and no record written. List them
-  with `nx t3 census-manifest-less --all`, resolve them, and run `nx upgrade`
-  again.
-- Once recorded, later walks do not re-census (the ladder runs at every session
-  start). Re-derive on demand with
-  `nx t3 census-manifest-less --all --require-zero legacy-unmanifested`.
+  different collection, no matching chunk, a chash divergence, a chunk-count
+  mismatch, several chunks at one position) DEFERS the rung; it does not fail
+  `nx upgrade`. The rest of the upgrade runs and exits 0, the walk prints the
+  collections and the remedy, `nx doctor` keeps the rung pending, and nothing is
+  recorded. No verb heals a skipped note. List each chunk and its owner with
+  `nx t3 census-manifest-less --collection <c>`, then re-put the note with
+  `nx store put` under the same title: the new chunk is manifested and the old
+  one becomes the reaper's. An unchanged residual is not retried at each session
+  start (a T2 note, `upgrade_ladder_state/rdr192-manifest-backfill.residual`,
+  holds its fingerprint); it is retried when the residual or the package version
+  changes. A file lock keeps concurrent session starts from stacking backfills.
+- `detect()` never takes a census. A completion recorded at the installed
+  package version is converged; otherwise the rung is pending and `converge`
+  does the census. So a new package version re-derives the record once, and
+  `nx doctor` and `nx upgrade --dry-run` cost one ledger read. Re-derive on
+  demand with `nx t3 census-manifest-less --all --require-zero legacy-unmanifested`.
+- The record's `detail` carries the census summary (collections scanned,
+  quarantine skipped, per-bucket totals).
 - The record is per tenant and written by whichever client runs `nx upgrade`
   against it. The reaper refuses to run on a tenant without it
   (`Rdr192BackfillGate` in the engine), so a cloud tenant no client has
-  upgraded since this rung shipped stays unreaped until one does.
+  upgraded since this rung shipped stays unreaped until one does. The record is
+  an attestation, not proof: the reaper must also re-check the census in the
+  engine (nexus-2x9xa).
 
 ## Verifying
 

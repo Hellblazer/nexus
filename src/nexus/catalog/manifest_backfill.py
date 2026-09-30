@@ -380,6 +380,15 @@ class BackfillResult:
     # Non-vacuity: an operator with a legacy multi-piece reverse-owned note
     # must SEE this count rise, never a silent partial heal.
     docs_reverse_multi_piece_skipped: int = 0
+    # nexus-wbfpw.41 (review S2): forward-path documents skipped because the
+    # matched chunk population cannot be one manifest: two matched chunks at
+    # the same position, or (under only_gapped) a matched count that differs
+    # from the document's registered chunk_count. The typical case is a
+    # legacy note whose old and current text both still carry its tumbler --
+    # the census calls EVERY such chunk legacy-unmanifested, and manifesting
+    # them all would either be refused (two rows at one position) or publish
+    # superseded text. Never written; the operator re-puts the note.
+    docs_skipped_chunk_count_mismatch: int = 0
 
 
 # nexus-b91tv: the two metadata keys a doc's tumbler can be stamped under.
@@ -1026,11 +1035,52 @@ def backfill_manifest_for_collection(
             )
             continue
 
+        if not is_reverse:
+            positions = [c["position"] for c in chunks]
+            registered = int(getattr(doc, "chunk_count", 0) or 0)
+            duplicate_positions = len(set(positions)) != len(positions)
+            count_mismatch = only_gapped and registered > 0 and registered != len(chunks)
+            if duplicate_positions or count_mismatch:
+                # nexus-wbfpw.41 (review S2). write_manifest is an atomic
+                # REPLACE onto PRIMARY KEY (tenant, doc_id, position): two
+                # rows at one position make the whole write fail (the
+                # engine's unique-violation, seen here as a 409 and, before
+                # this guard, mislabelled fk_409). And a matched population
+                # larger than the registered chunk_count means chunks the
+                # document no longer owns still carry its tumbler. Neither is
+                # decidable here, so report and leave it for the operator.
+                result.docs_skipped_chunk_count_mismatch += 1
+                _log.warning(
+                    "manifest_backfill_doc_skipped_chunk_count_mismatch",
+                    collection=collection_name,
+                    doc_id=doc_id,
+                    matched=len(chunks),
+                    registered_chunk_count=registered,
+                    duplicate_positions=duplicate_positions,
+                    chashes=[c["chash"] for c in chunks],
+                )
+                continue
+
         chunks.sort(key=lambda c: c["position"])
 
         if dry_run:
             result.chunks_would_write += len(chunks)
         else:
+            if only_gapped and catalog.get_manifest(doc_id):
+                # nexus-wbfpw.41 (review S2): the pre-pass read is minutes
+                # old on a large collection, and write_manifest is an atomic
+                # REPLACE with no compare-and-set. A note re-put since then
+                # already has its manifest; replacing it would hide the new
+                # chunk. One fresh read narrows the window to a single round
+                # trip; it cannot close it (the engine has no CAS on this
+                # route).
+                result.docs_skipped_has_manifest += 1
+                _log.info(
+                    "manifest_backfill_doc_skipped_manifest_appeared",
+                    collection=collection_name,
+                    doc_id=doc_id,
+                )
+                continue
             try:
                 catalog.write_manifest(doc_id, chunks, collection=collection_name)
             except httpx.HTTPStatusError as exc:
