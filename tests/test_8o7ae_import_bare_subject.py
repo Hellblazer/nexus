@@ -24,6 +24,7 @@ from nexus.cli import main
 from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.exporter import export_collection
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = pytest.mark.integration
 
@@ -48,8 +49,8 @@ def test_import_into_bare_subject_lands_where_other_verbs_read(t2_service_env, t
         physical_collection=src, source_uri=source_uri,
     ))
     chash = hashlib.sha256(body.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        src, ids=[chash], documents=[body], embeddings=[],
+    seed_chunks_direct(
+        src, ids=[chash], documents=[body], embed=True,
         metadatas=[{"title": title, "chunk_text_hash": chash,
                     "indexed_at": datetime.now(UTC).isoformat()}],
     )

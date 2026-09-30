@@ -58,6 +58,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = [pytest.mark.integration]
 
@@ -85,11 +86,11 @@ def _seed_owned_note(client, content: str, title: str) -> str:
     # land BEFORE the manifest write below (chunk-then-manifest, matching
     # production's real hook ordering) -- the FK now refuses a manifest row
     # naming a chash with no matching nexus.chunks row.
-    client.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         _COLLECTION,
         ids=[chash],
         documents=[content],
-        embeddings=[],
+        embed=True,
         metadatas=[{"title": title, "chunk_text_hash": chash, "doc_id": tumbler}],
     )
     store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)

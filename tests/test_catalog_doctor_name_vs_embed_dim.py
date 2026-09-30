@@ -22,6 +22,7 @@ from click.testing import CliRunner
 
 from nexus.commands.catalog_cmds.doctor import doctor_cmd
 from tests.conftest import make_vector_test_client
+from tests._chunk_seed import seed_chunks_direct
 
 
 @pytest.fixture()
@@ -420,8 +421,8 @@ def test_the_check_lists_collections_once_however_many_it_probes(t2_service_env)
     for i, name in enumerate(names):
         text = f"z0us probe collection {i}"
         chash = hashlib.sha256(text.encode()).hexdigest()
-        client.upsert_chunks_with_embeddings(
-            name, ids=[chash], documents=[text], embeddings=[],
+        seed_chunks_direct(
+            name, ids=[chash], documents=[text], embed=True,
             metadatas=[{"title": text, "indexed_at": datetime.now(UTC).isoformat()}],
         )
         # An owned chunk: live(c) hides a chunk with no manifest owner.

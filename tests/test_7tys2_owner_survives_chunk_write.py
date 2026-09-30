@@ -17,7 +17,7 @@ import pytest
 
 from nexus import corpus
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
-from nexus.db.http_vector_client import HttpVectorClient
+from tests._chunk_seed import seed_chunks_direct
 
 _MODEL = "bge-base-en-v15-768"
 # The production shape: the hyphenated owner segment (owner_segment_for_tumbler), not the dotted tumbler.
@@ -47,11 +47,10 @@ def test_chunk_upsert_keeps_the_owner_the_collection_was_registered_with(t2_serv
     # re-registers the name with the owner segment parsed from it.
     corpus._REGISTERED_COLLECTIONS.clear()
     corpus._REGISTERED_COLLECTIONS_SCOPED.clear()
-    client = HttpVectorClient(tenant=t2_service_env)
     text = "def f():\n    return 1\n"
     chash = hashlib.sha256(text.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        name, ids=[chash], documents=[text], embeddings=[],
+    seed_chunks_direct(
+        name, ids=[chash], documents=[text], embed=True,
         metadatas=[{"chunk_text_hash": chash, "title": "f.py"}],
     )
     assert name in corpus._REGISTERED_COLLECTIONS or any(

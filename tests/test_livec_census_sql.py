@@ -6,11 +6,12 @@ psql, exactly as conexus will run it against production -- as ``nexus_svc``
 ``set_config('nexus.tenant', ...)`` inside the file's own transaction.
 
 Real engine substrate (``t2_service_env``; see ``tests/_engine_substrate.py``
-and ``tests/test_wbfpw31_nxexp_owner.py``): chunks and catalog rows are
-created through ``HttpVectorClient.upsert_chunks_with_embeddings`` and the
-real catalog writer (``register``/``write_manifest``/``delete_document``),
-the same paths production writes through -- never a raw INSERT that could
-seed a shape the engine itself cannot produce.
+and ``tests/test_wbfpw31_nxexp_owner.py``): catalog rows are created through
+the real catalog writer (``register``/``write_manifest``/``delete_document``).
+The chunks are INSERTed with substrate SQL (``tests/_chunk_seed.py``): the
+engine refuses an ownerless ``/v1/vectors/upsert-chunks`` write from RDR-223
+Phase 3 on, and the ``no-manifest`` / ``other-collection-only`` shapes this
+census exists to classify are ownerless chunks by definition.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ import pytest
 import nexus.db.http_vector_client as hvc
 from nexus.catalog.chunk_quarantine import now_stamp, quarantine_collection_name
 from tests._catalog_fixture_ops import ActiveCatalog
+from tests._chunk_seed import seed_chunks_direct
 from tests._engine_substrate import ensure_engine, mint_test_tenant
 
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
@@ -55,7 +57,6 @@ def _seed_one_chunk_per_cause(coll: str, coll2: str) -> dict[str, str]:
     than being a test-only shortcut.
     """
     cat = ActiveCatalog()
-    db = hvc.HttpVectorClient(tenant="unused-client-side-tag")
     owner = cat.register_owner(f"{coll}-owner", "curator")
 
     chash_live = _chash(f"{coll}:live")
@@ -63,14 +64,13 @@ def _seed_one_chunk_per_cause(coll: str, coll2: str) -> dict[str, str]:
     chash_other = _chash(f"{coll}:other")
     chash_none = _chash(f"{coll}:none")
 
-    db.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         coll,
         ids=[chash_live, chash_tomb, chash_other, chash_none],
         documents=[
             "livec census live chunk", "livec census tombstoned-owner chunk",
             "livec census other-collection-only chunk", "livec census no-manifest chunk",
         ],
-        embeddings=[],
         metadatas=[
             {"chunk_text_hash": chash_live, "title": "live.txt:1-1"},
             {"chunk_text_hash": chash_tomb, "title": "tomb.txt:1-1"},
@@ -79,11 +79,10 @@ def _seed_one_chunk_per_cause(coll: str, coll2: str) -> dict[str, str]:
         ],
     )
     # FK-satisfying copy: same chash, physically stored under coll2 too.
-    db.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         coll2,
         ids=[chash_other],
         documents=["livec census other-collection-only chunk"],
-        embeddings=[],
         metadatas=[{"chunk_text_hash": chash_other, "title": "other.txt:1-1"}],
     )
 
@@ -270,13 +269,12 @@ def test_livec_census_reports_quarantine_siblings_as_their_own_cause(
     Seeded through the real GC route, not a hand-named collection."""
     coll = _coll("quar")
     cat = ActiveCatalog()
-    db = hvc.HttpVectorClient(tenant="unused-client-side-tag")
+    db = hvc.HttpVectorClient(tenant="unused-client-side-tag")  # gc route only
     owner = cat.register_owner(f"{coll}-owner", "curator")
     live, orphan = _chash(f"{coll}:live"), _chash(f"{coll}:orphan")
-    db.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         coll, ids=[live, orphan],
         documents=["livec census quarantine live chunk", "livec census quarantine orphan chunk"],
-        embeddings=[],
         metadatas=[
             {"chunk_text_hash": live, "title": "qlive.txt:1-1"},
             {"chunk_text_hash": orphan, "title": "qorphan.txt:1-1"},

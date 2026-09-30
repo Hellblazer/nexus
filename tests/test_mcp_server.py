@@ -447,7 +447,11 @@ class TestNexusHmxiRoundTripGrandfathering:
             lambda *a, **kw: ("9.9.9", True),
         )
 
-        _seed_for_store_put("Greenfield content", "knowledge__greenfield")
+        # No _seed_for_store_put here. The seed used to reach the (stubbed)
+        # ``_post`` above and land nowhere; it is substrate SQL now, which the
+        # stub cannot intercept, and with the writer faked the collection is
+        # not registered on the real substrate for it to land in. The manifest
+        # write is stubbed too, so no real chunk is needed.
         result = store_put(
             content="Greenfield content",
             collection="knowledge__greenfield",

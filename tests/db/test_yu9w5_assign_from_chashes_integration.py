@@ -31,6 +31,7 @@ import hashlib
 import pytest
 
 from tests._catalog_fixture_ops import give_chunks_a_live_owner
+from tests._chunk_seed import seed_chunks_direct
 
 _COLL = "knowledge__yu9w5test__bge-base-en-v15-768__v1"
 
@@ -55,10 +56,11 @@ def test_assign_from_chashes_route_persists_real_assignment(t2_service_env) -> N
         "beta content about beaches and boats",
     ]
 
-    # Server-side embed (NX_LOCAL=1 posture — bge-768, no Voyage key needed).
-    t3.upsert_chunks_with_embeddings(
-        collection_name=_COLL, ids=ids, documents=docs,
-        embeddings=[[] for _ in ids], metadatas=[{}, {}],
+    # Substrate SQL with the engine's real embedding (NX_LOCAL=1 posture — bge-768,
+    # no Voyage key needed); the engine refuses ownerless upsert-chunks from RDR-223 P3.
+    seed_chunks_direct(
+        collection=_COLL, ids=ids, documents=docs,
+        embed=True, metadatas=[{}, {}],
     )
     # RDR-192 Step 5 (nexus-wbfpw.10): get_embeddings is a live-visibility
     # gated read; a raw upsert with no catalog manifest has no live owner.
@@ -142,9 +144,9 @@ def test_hook_reaches_route_and_persists_without_embeddings_fetch(t2_service_env
     chash_c = _chash("gamma content about glaciers")
     ids = [chash_c]
 
-    t3.upsert_chunks_with_embeddings(
-        collection_name=_COLL, ids=ids, documents=["gamma content about glaciers"],
-        embeddings=[[]], metadatas=[{}],
+    seed_chunks_direct(
+        collection=_COLL, ids=ids, documents=["gamma content about glaciers"],
+        embed=True, metadatas=[{}],
     )
     # RDR-192 Step 5 (nexus-wbfpw.10): see the sibling test above.
     give_chunks_a_live_owner(_COLL, ids)

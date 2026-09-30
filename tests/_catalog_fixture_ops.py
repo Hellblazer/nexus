@@ -229,9 +229,10 @@ def seed_manifest_chunks(collection: str, chashes: Iterable[str], *, dim: int | 
     seed the same chash more than once (e.g. re-writing a manifest for an
     idempotency test) without consequence.
 
-    Uses the same-model PASSTHROUGH form (explicit zero ``embeddings``,
-    ``nexus.db.http_vector_client.HttpVectorClient.upsert_chunks``'s
-    ``embeddings=`` kwarg) rather than letting the server embed — two
+    Stores explicit zero ``embeddings`` (``tests/_chunk_seed.seed_chunks_direct``;
+    it was ``HttpVectorClient.upsert_chunks``'s same-model PASSTHROUGH until
+    RDR-223 P3.1 took the write off the ownerless route) rather than letting the
+    server embed — two
     reasons: (1) it works uniformly for BOTH locally-embeddable collection
     names (``bge-base-en-v15-768`` / ``minilm-l6-v2-384``) and cloud-model
     names (``voyage-*``), which the test substrate's ``onnx-local``
@@ -262,16 +263,19 @@ def seed_manifest_chunks(collection: str, chashes: Iterable[str], *, dim: int | 
     model beforehand (e.g. an explicit ``register_collection`` override)
     passes ``dim=`` to match it.
     """
-    from nexus.db.http_vector_client import HttpVectorClient
     from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL
     from nexus.db.reconcile import dim_for_model_token
+    from tests._chunk_seed import seed_chunks_direct
 
     ids = sorted({c for c in chashes if c})
     if not ids:
         return
     if dim is None:
         dim = dim_for_model_token(_MODEL_TOKENS[_TIER1_MODEL])
-    HttpVectorClient().upsert_chunks(
+    # RDR-223 P3.1: substrate SQL, not upsert-chunks. The chunk lands before
+    # its manifest row (the FK requires that order), which is exactly the
+    # ownerless write the engine refuses from Phase 3 on.
+    seed_chunks_direct(
         collection, ids, [f"fk-stub chunk for {c}" for c in ids],
         embeddings=[[0.0] * dim for _ in ids],
     )

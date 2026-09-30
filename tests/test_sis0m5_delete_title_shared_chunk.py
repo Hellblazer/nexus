@@ -25,6 +25,7 @@ from nexus.aspect_readers import uri_for
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.cli import main
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = pytest.mark.integration
 
@@ -44,8 +45,8 @@ def _note(writer, client, owner, collection: str, title: str, content: str) -> t
         physical_collection=collection, source_uri=source_uri,
     ))
     chash = hashlib.sha256(content.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        collection, ids=[chash], documents=[content], embeddings=[],
+    seed_chunks_direct(
+        collection, ids=[chash], documents=[content], embed=True,
         metadatas=[{
             "title": title, "chunk_text_hash": chash,
             "indexed_at": datetime.now(UTC).isoformat(),
@@ -118,8 +119,8 @@ def _two_chunk_note(writer, client, owner, collection: str, title: str) -> tuple
     ))
     bodies = [f"{title} piece one", f"{title} piece two"]
     chashes = [hashlib.sha256(b.encode()).hexdigest() for b in bodies]
-    client.upsert_chunks_with_embeddings(
-        collection, ids=chashes, documents=bodies, embeddings=[],
+    seed_chunks_direct(
+        collection, ids=chashes, documents=bodies, embed=True,
         metadatas=[{"title": title, "chunk_text_hash": c,
                     "indexed_at": datetime.now(UTC).isoformat()} for c in chashes],
     )
@@ -210,8 +211,8 @@ def test_a_ghost_titled_document_is_reaped_too(t2_service_env):
     _tb, ub, chash = _note(writer, client, owner, col, "sis0m5 live twin", body)
     ghost = str(writer.register(owner=owner, title="sis0m5 ghost", content_type="knowledge"))
     writer.write_manifest(ghost, [{"chash": chash, "position": 0}], collection=col)
-    client.upsert_chunks_with_embeddings(
-        col, ids=[chash], documents=[body], embeddings=[],
+    seed_chunks_direct(
+        col, ids=[chash], documents=[body], embed=True,
         metadatas=[{"title": "sis0m5 ghost", "chunk_text_hash": chash,
                     "indexed_at": datetime.now(UTC).isoformat()}],
     )
@@ -237,8 +238,8 @@ def test_a_ghost_is_reaped_when_its_twin_wrote_the_chunk_last(t2_service_env):
     body = "sis0m5 ghost-first shared body"
     ghost = str(writer.register(owner=owner, title="sis0m5 early ghost", content_type="knowledge"))
     chash = hashlib.sha256(body.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        col, ids=[chash], documents=[body], embeddings=[],
+    seed_chunks_direct(
+        col, ids=[chash], documents=[body], embed=True,
         metadatas=[{"title": "sis0m5 early ghost", "chunk_text_hash": chash,
                     "indexed_at": datetime.now(UTC).isoformat()}],
     )

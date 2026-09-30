@@ -53,6 +53,7 @@ an in-memory double reproduces.
 from __future__ import annotations
 
 import pytest
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = [pytest.mark.integration]
 
@@ -84,11 +85,11 @@ def _put_note(client, *, collection: str, title: str, content: str):
     )
     chashes = [m["chunk_text_hash"] for m in manifest_metadatas]
     for piece, chash, meta in zip(pieces, chashes, manifest_metadatas):
-        client.upsert_chunks_with_embeddings(
+        seed_chunks_direct(
             collection,
             ids=[chash],
             documents=[piece],
-            embeddings=[],
+            embed=True,
             metadatas=[{"title": title, "chunk_text_hash": chash, "doc_id": tumbler}],
         )
     store_put_manifest_direct(tumbler, manifest_metadatas, collection=collection)

@@ -42,6 +42,7 @@ from nexus.exporter import (
     export_collection,
     import_collection,
 )
+from tests._chunk_seed import seed_chunks_direct
 
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself
 # and CI's default selection must run these import-owner pins.
@@ -72,8 +73,8 @@ def _owned_doc(writer, client, collection: str, owner_tumbler, title: str, conte
     chashes: list[str] = []
     for content in contents:
         chash = hashlib.sha256(content.encode()).hexdigest()
-        client.upsert_chunks_with_embeddings(
-            collection, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            collection, ids=[chash], documents=[content], embed=True,
             metadatas=[{
                 "title": title, "chunk_text_hash": chash,
                 "indexed_at": datetime.now(UTC).isoformat(),
@@ -472,8 +473,8 @@ def test_import_into_slug_owned_code_collection_is_owned(t2_service_env, tmp_pat
     for i in range(2):
         content = f"wbfpw33 slug chunk {i}"
         chash = hashlib.sha256(content.encode()).hexdigest()
-        client.upsert_chunks_with_embeddings(
-            dst, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            dst, ids=[chash], documents=[content], embed=True,
             metadatas=[{"chunk_text_hash": chash, "indexed_at": datetime.now(UTC).isoformat()}],
         )
         records.append({"id": chash, "document": content, "metadata": {"chunk_text_hash": chash}})
@@ -580,8 +581,8 @@ def test_legacy_doc_id_records_are_owned_even_when_skipped(t2_service_env, tmp_p
         idx = per_doc.get(doc_id, 0)
         per_doc[doc_id] = idx + 1
         meta = {"chunk_text_hash": chash, "doc_id": doc_id, "chunk_index": idx}
-        client.upsert_chunks_with_embeddings(
-            dst, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            dst, ids=[chash], documents=[content], embed=True,
             metadatas=[{**meta, "indexed_at": datetime.now(UTC).isoformat()}],
         )
         records.append({"id": chash, "document": content, "metadata": meta, "chash": chash})
@@ -639,8 +640,8 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
         content = f"wbfpw31 mixed chunk {i}"
         chash = hashlib.sha256(content.encode()).hexdigest()
         meta = {"chunk_text_hash": chash, "doc_id": doc, "chunk_index": i}
-        client.upsert_chunks_with_embeddings(
-            dst, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            dst, ids=[chash], documents=[content], embed=True,
             metadatas=[{**meta, "indexed_at": datetime.now(UTC).isoformat()}],
         )
         rec = {"id": chash, "document": content, "metadata": meta}
@@ -684,8 +685,8 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     # The note is re-put: its manifest now names only v2.
     v2_text = "wbfpw40 version two, the correction"
     v2 = hashlib.sha256(v2_text.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        coll, ids=[v2], documents=[v2_text], embeddings=[],
+    seed_chunks_direct(
+        coll, ids=[v2], documents=[v2_text], embed=True,
         metadatas=[{"title": "wbfpw40 note", "chunk_text_hash": v2,
                     "indexed_at": datetime.now(UTC).isoformat()}],
     )
@@ -784,8 +785,8 @@ def test_delete_then_import_restores_a_document_from_the_file(t2_service_env, tm
     export_collection(db=client, collection_name=coll, output_path=out)
     v2_text = "wbfpw40 restore v2"
     v2 = hashlib.sha256(v2_text.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        coll, ids=[v2], documents=[v2_text], embeddings=[],
+    seed_chunks_direct(
+        coll, ids=[v2], documents=[v2_text], embed=True,
         metadatas=[{"title": "wbfpw40 restore note", "chunk_text_hash": v2,
                     "indexed_at": datetime.now(UTC).isoformat()}],
     )
@@ -812,8 +813,8 @@ def test_the_printed_delete_command_quotes_a_hostile_title(t2_service_env, tmp_p
     export_collection(db=client, collection_name=coll, output_path=out)
     v2_text = "wbfpw40 hostile v2"
     v2 = hashlib.sha256(v2_text.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        coll, ids=[v2], documents=[v2_text], embeddings=[],
+    seed_chunks_direct(
+        coll, ids=[v2], documents=[v2_text], embed=True,
         metadatas=[{"title": title, "chunk_text_hash": v2, "indexed_at": datetime.now(UTC).isoformat()}],
     )
     writer.write_manifest(doc, [{"chash": v2, "position": 0}], collection=coll)

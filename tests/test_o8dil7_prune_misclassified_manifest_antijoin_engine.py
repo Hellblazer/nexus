@@ -68,6 +68,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = [pytest.mark.integration]
 
@@ -191,8 +192,8 @@ def test_prune_misclassified_real_engine_no_dangling_manifest_row(t2_service_env
     # misclassified duplicate this prune exists to clean up; both copies
     # coexisting is exactly the "stale write into the wrong collection that
     # a later re-index never swept" scenario this test's own docstring names.
-    client.upsert_chunks_with_embeddings(
-        _RIGHT_COLL, ids=[chash], documents=[content], embeddings=[],
+    seed_chunks_direct(
+        _RIGHT_COLL, ids=[chash], documents=[content], embed=True,
         metadatas=[{"title": "o8dil7-prune-doc", "chunk_text_hash": chash}],
     )
     cat.append_manifest_chunks(
@@ -207,8 +208,8 @@ def test_prune_misclassified_real_engine_no_dangling_manifest_row(t2_service_env
     # ...but the SAME chash is ALSO physically present in _WRONG_COLL -- the
     # misclassified-collection shape this prune exists to clean up (a stale
     # write into the wrong collection that a later re-index never swept).
-    client.upsert_chunks_with_embeddings(
-        _WRONG_COLL, ids=[chash], documents=[content], embeddings=[],
+    seed_chunks_direct(
+        _WRONG_COLL, ids=[chash], documents=[content], embed=True,
         metadatas=[{"title": "o8dil7-prune-wrong-copy", "chunk_text_hash": chash}],
     )
 
@@ -301,8 +302,8 @@ def test_prune_misclassified_shared_chash_second_live_document_protected(t2_serv
     doc_b = str(tumbler_b)
     # RDR-194 P3d / catalog-029-manifest-chunk-fk.xml: the chunk must exist
     # under _SHARED_COLL BEFORE either manifest write below.
-    client.upsert_chunks_with_embeddings(
-        _SHARED_COLL, ids=[chash], documents=[content], embeddings=[],
+    seed_chunks_direct(
+        _SHARED_COLL, ids=[chash], documents=[content], embed=True,
         metadatas=[{"title": "o8dil7-tbj48-shared", "chunk_text_hash": chash}],
     )
     cat.append_manifest_chunks(
