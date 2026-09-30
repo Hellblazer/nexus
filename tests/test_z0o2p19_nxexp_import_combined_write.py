@@ -201,9 +201,9 @@ def test_import_makes_no_upsert_chunks_call(t2_service_env, tmp_path, small_page
     monkeypatch.setattr(hvc, "_post", _vec_spy)
     monkeypatch.setattr(hcc.HttpCatalogClient, "_post", _cat_spy)
     import_collection(db=client, input_path=f, target_collection=dst)
+    assert not [p for p in vector_paths if p.endswith("/upsert-chunks")], vector_paths
     assert set(catalog_paths) & set(_DATA_PATHS), (
         "the spies saw no combined write: they are not watching the import")
-    assert not [p for p in vector_paths if p.endswith("/upsert-chunks")], vector_paths
 
 
 # ── Test Plan 8 ─────────────────────────────────────────────────────────────

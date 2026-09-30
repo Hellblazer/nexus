@@ -59,6 +59,7 @@ from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
 from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — same cross-module reuse pattern as commands/catalog_cmds/doctor.py
 from nexus.errors import (
+    BatchWriteFailedError,
     EmbeddingDimensionMismatch,
     EmbeddingModelMismatch,
     FormatVersionError,
@@ -867,6 +868,8 @@ class _OwnerImport:
                     }
         try:
             result = writer.write_page(rows_by_doc, chunks)
+        except BatchWriteFailedError:
+            raise                       # its text names the engine answer it cannot trust
         except Exception as exc:
             msg = str(exc).lower()
             if any(keyword in msg for keyword in _CONSTRAINT_HINT_KEYWORDS):
