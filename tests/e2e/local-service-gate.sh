@@ -614,7 +614,7 @@ echo "[gate] throwaway service on 127.0.0.1:$SERVICE_PORT"
 # LIVED_IN_EXPECTED / CLOUD_MODE_EXPECTED below: every assertion increments
 # SMOKE_PASSED, and a mismatch against SMOKE_EXPECTED FAILS the gate — an
 # unreachable service or a malformed response fails loud, never skips.
-SMOKE_EXPECTED=13  # 12->13 (nexus-wbfpw.10 live(c)): the vector leg writes a manifest row so its chunk has a live owner; 11->12 (nexus-ft04v.7): the vector leg registers its collection first; 12->11 at 3b2901141: the manifest/verify leg was retired
+SMOKE_EXPECTED=12  # 13->12 (nexus-z0o2p.31): the vector leg writes chunk + owner in one write_many, one check where upsert-chunks and manifest/write took two; 12->13 (nexus-wbfpw.10 live(c)): the vector leg writes a manifest row so its chunk has a live owner; 11->12 (nexus-ft04v.7): the vector leg registers its collection first; 12->11 at 3b2901141: the manifest/verify leg was retired
                    # with the catalog-030 subtraction but the count was not
                    # lowered, making the gate structurally unpassable (caught
                    # by its own vacuity guard in the 7.8.0 battery).
@@ -779,21 +779,17 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/collections/upsert"
   smoke_check "POST /v1/catalog/collections/upsert -> ok" "d.get('ok') is True"
 
-  smoke_request POST /v1/vectors/upsert-chunks \
-    "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_CHASH'],'documents':['$SMOKE_CHUNK_TEXT'],'metadatas':[{'source':'gate-smoke'}]}))")"
-  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks"
-  smoke_check "POST /v1/vectors/upsert-chunks -> upserted=1" "d.get('upserted')==1"
-
-  # RDR-192 Step 5 (fc99baac9, nexus-wbfpw.10): every content read goes
-  # through live(c), so a chunk is searchable only when a catalog manifest
-  # row ties it to a live (non-tombstoned) document in the same collection.
-  # A real client always follows a chunk write with a manifest write; so
-  # does this leg, reusing the smoke document registered in step c. Without
-  # it the search below returns nothing against engine-service-v0.1.137+.
-  smoke_request POST /v1/catalog/manifest/write \
-    "$(python3 -c "import json;print(json.dumps({'doc_id':'$SMOKE_DOC_TUMBLER','collection':'$SMOKE_VEC_COLLECTION','rows':[{'position':0,'chash':'$SMOKE_CHASH'}]}))")"
-  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/manifest/write"
-  smoke_check "POST /v1/catalog/manifest/write -> ok, count=1 (chunk gets a live owner)" "d.get('ok') is True and d.get('count')==1"
+  # RDR-223 P3: the chunk and its owner land in ONE request. The engine refuses
+  # an ownerless chunk write (upsert-chunks / store-put), so this leg no longer
+  # posts the raw route and then a manifest write: it posts the combined write
+  # the real client uses (write_many with an inline `chunks` array), reusing the
+  # smoke document registered in step c. RDR-192 Step 5 still applies: a chunk is
+  # searchable only when a manifest row ties it to a live document in the same
+  # collection, and the combined write commits that row with the chunk.
+  smoke_request POST /v1/catalog/manifest/write_many \
+    "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','docs':[{'doc_id':'$SMOKE_DOC_TUMBLER','rows':[{'position':0,'chash':'$SMOKE_CHASH'}]}],'chunks':[{'chash':'$SMOKE_CHASH','text':'$SMOKE_CHUNK_TEXT','metadata':{'source':'gate-smoke'}}]}))")"
+  [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/catalog/manifest/write_many"
+  smoke_check "POST /v1/catalog/manifest/write_many -> chunks_written=1 (chunk written with its live owner)" "d.get('chunks_written')==1"
 
   smoke_request POST /v1/vectors/search \
     "$(python3 -c "import json;print(json.dumps({'query':'$SMOKE_CHUNK_TEXT','collections':['$SMOKE_VEC_COLLECTION'],'n_results':5}))")"

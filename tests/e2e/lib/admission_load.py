@@ -114,7 +114,22 @@ Two design choices worth reading before changing the network layer:
    write traffic on a short-TTL minted data token, never the static token
    alone, and this driver now matches that.
 
-3. **Collection lifecycle reuses the real write path's own functions**
+3. **The route under load is a refusal target since RDR-223 P3.2.**
+   ``/v1/vectors/upsert-chunks`` refuses a chunk no catalog manifest row owns,
+   so this gate no longer posts ownerless chunks. Before the ramp it seeds
+   every chash the ramp will send through ONE ``write_many`` (owner, document,
+   manifest rows and placeholder chunks in a single request, the combined
+   write a real client uses; :func:`seed_owned_chunks`), then the measured
+   request is the same raw ``upsert-chunks`` POST as before, now carrying
+   ``force_re_embed`` so the owned, already-stored chash still goes through the
+   embedder (without it the engine's existence partition would skip the embed
+   and the gate would measure nothing). SQL seeding is not an option here:
+   this gate runs against the cloud engine through the public edge. The seed
+   leaves one throwaway owner row (``9.<n>``, same synthetic namespace the
+   local-service-gate uses); the document and chunks go with the collection
+   delete.
+
+4. **Collection lifecycle reuses the real write path's own functions**
    (``nexus.corpus.t3_collection_name`` / ``ensure_collection_registered``,
    ``nexus.db.collection_purge.purge_collection_cascade``) rather than
    re-deriving names or hand-rolling a delete.
@@ -761,6 +776,62 @@ def find_orphan_collections(exclude: str | None = None) -> list[str]:
     return sorted(n for n in names if isinstance(n, str) and n.startswith(ORPHAN_PREFIX) and n != exclude)
 
 
+def load_chashes(nonce: str, ramp_steps: Sequence[int], target_bytes: int = DEFAULT_TARGET_BYTES) -> list[str]:
+    """Every chunk id the ramp can send, in send order: the ``(step_index,
+    i)`` tags :func:`fire_step` hands :func:`post_upsert`, so a seeded chash
+    is exactly a chash a later request will post."""
+    return [
+        load_document_id(nonce, f"{step_index}-{i}", target_bytes)
+        for step_index, concurrency in enumerate(ramp_steps)
+        for i in range(concurrency)
+    ]
+
+
+def load_owner_prefix(nonce: str) -> str:
+    """The throwaway owner tumbler prefix for this run's seed document
+    (``9.<n>``, ``n`` derived from *nonce*): the synthetic top-level
+    namespace tests/e2e/local-service-gate.sh's own smoke leg uses, apart from
+    the ``1.x`` owners real repos and notes register under."""
+    return f"9.{int(nonce, 36) % 1_000_000_000}"
+
+
+def _seed_post(client: httpx.Client, path: str, body: dict[str, Any], what: str) -> dict[str, Any]:
+    resp = client.post(path, content=json.dumps(body).encode("utf-8"))
+    if resp.status_code != 200:
+        raise RuntimeError(f"seed step {what!r} -> {resp.status_code}: {resp.text[:200]}")
+    out = resp.json()
+    return out if isinstance(out, dict) else {}
+
+
+def seed_owned_chunks(client: httpx.Client, collection: str, nonce: str, chashes: Sequence[str]) -> None:
+    """Give every chash in *chashes* a live owner in *collection* before the
+    ramp, so ``/v1/vectors/upsert-chunks`` (which refuses ownerless chunks
+    from RDR-223 P3.2) accepts the measured writes. Owner, document, and
+    ONE ``write_many`` carrying the manifest rows plus a short placeholder
+    chunk per chash: the combined write, so no chunk is ever ownerless.
+    Raises ``RuntimeError`` naming the failing step; :func:`run_gate` folds it
+    into the run's ``error``. The placeholder text is short so the seed is
+    cheap; the measured request re-embeds the real ~12KB text under
+    ``force_re_embed``."""
+    prefix = load_owner_prefix(nonce)
+    _seed_post(client, "/v1/catalog/owners/upsert",
+               {"tumbler_prefix": prefix, "name": f"u2mlh-load-{nonce}", "owner_type": "admission_load"}, "owners/upsert")
+    doc = _seed_post(client, "/v1/catalog/doc/register", {
+        "owner_prefix": prefix, "title": f"u2mlh-load-seed-{nonce}",
+        "content_type": "knowledge", "physical_collection": collection,
+    }, "doc/register")
+    doc_id = doc.get("tumbler")
+    if not isinstance(doc_id, str):
+        raise RuntimeError(f"seed step 'doc/register' returned no tumbler: {doc!r}")
+    ack = _seed_post(client, "/v1/catalog/manifest/write_many", {
+        "collection": collection,
+        "docs": [{"doc_id": doc_id, "rows": [{"position": i, "chash": c} for i, c in enumerate(chashes)]}],
+        "chunks": [{"chash": c, "text": f"u2mlh load seed {nonce} {i}", "metadata": {}} for i, c in enumerate(chashes)],
+    }, "manifest/write_many")
+    if ack.get("chunks_written") != len(chashes):
+        raise RuntimeError(f"seed write_many wrote {ack.get('chunks_written')!r} chunks, wanted {len(chashes)}: {ack!r}")
+
+
 def post_upsert(
     client: httpx.Client,
     collection: str,
@@ -782,7 +853,13 @@ def post_upsert(
     """
     text = generate_document(nonce, tag, target_bytes)
     doc_id = load_document_id(nonce, tag, target_bytes)
-    body = {"collection": collection, "ids": [doc_id], "documents": [text], "metadatas": [{}]}
+    body = {
+        "collection": collection, "ids": [doc_id], "documents": [text], "metadatas": [{}],
+        # RDR-223 P3.2: the chash is already owned (see seed_owned_chunks), so the
+        # engine's existence partition would skip the embed; force it so this
+        # request still loads the embedder, which is what the gate measures.
+        "force_re_embed": True,
+    }
     headers = {"X-Nexus-Request-Deadline-Ms": str(deadline_ms)}
     t0 = time.monotonic()
     try:
@@ -953,6 +1030,7 @@ def run_gate(
             print(f"[admission-load] plan: {json.dumps(plan)}")
 
             register_load_collection(name)
+            seed_owned_chunks(client, name, nonce, load_chashes(nonce, ramp_steps, target_bytes))
 
             for step_index, concurrency in enumerate(ramp_steps):
                 remaining = wall_clock_cap_s - (time.monotonic() - start)

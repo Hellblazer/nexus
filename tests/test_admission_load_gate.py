@@ -506,6 +506,69 @@ def test_post_upsert_sends_the_documented_body_and_deadline_header() -> None:
     assert body["collection"] == "knowledge__x__voyage-context-3__v1"
     assert body["ids"] == [admission_load.load_document_id("nonce1", "0-0")]
     assert body["documents"] == [admission_load.generate_document("nonce1", "0-0")]
+    # RDR-223 P3.2: the chash is owned by the pre-ramp seed, so the embed must be forced.
+    assert body["force_re_embed"] is True
+
+
+def test_load_chashes_are_exactly_the_ids_the_ramp_posts() -> None:
+    chashes = admission_load.load_chashes("nonce1", (2, 3))
+    assert len(chashes) == 5 and len(set(chashes)) == 5
+    assert chashes[0] == admission_load.load_document_id("nonce1", "0-0")
+    assert chashes[2] == admission_load.load_document_id("nonce1", "1-0")
+    assert chashes[4] == admission_load.load_document_id("nonce1", "1-2")
+
+
+def test_seed_owned_chunks_writes_owner_doc_rows_and_chunks_in_one_write_many() -> None:
+    seen: list[tuple[str, dict[str, Any]]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _json.loads(request.content)
+        seen.append((request.url.path, body))
+        if request.url.path == "/v1/catalog/doc/register":
+            return httpx.Response(200, json={"tumbler": "9.7.1"})
+        if request.url.path == "/v1/catalog/manifest/write_many":
+            return httpx.Response(200, json={"ok": True, "chunks_written": len(body["chunks"])})
+        return httpx.Response(200, json={"ok": True})
+
+    chashes = admission_load.load_chashes("nonce1", (2,))
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://fake.example") as client:
+        admission_load.seed_owned_chunks(client, "coll", "nonce1", chashes)
+
+    assert [p for p, _ in seen] == [
+        "/v1/catalog/owners/upsert", "/v1/catalog/doc/register", "/v1/catalog/manifest/write_many",
+    ]
+    doc = seen[1][1]
+    assert doc["owner_prefix"] == admission_load.load_owner_prefix("nonce1") == seen[0][1]["tumbler_prefix"]
+    assert doc["physical_collection"] == "coll"
+    many = seen[2][1]
+    assert many["collection"] == "coll"
+    assert many["docs"][0]["doc_id"] == "9.7.1"
+    assert [r["chash"] for r in many["docs"][0]["rows"]] == chashes
+    assert [c["chash"] for c in many["chunks"]] == chashes  # every owned row carries its chunk
+
+
+def test_seed_owned_chunks_fails_loud_naming_the_step() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/catalog/doc/register":
+            return httpx.Response(422, text="no such owner")
+        return httpx.Response(200, json={"ok": True})
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://fake.example") as client:
+        with pytest.raises(RuntimeError, match="doc/register"):
+            admission_load.seed_owned_chunks(client, "coll", "nonce1", ["a" * 64])
+
+
+def test_seed_owned_chunks_refuses_a_short_write_ack() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/catalog/doc/register":
+            return httpx.Response(200, json={"tumbler": "9.7.1"})
+        if request.url.path == "/v1/catalog/manifest/write_many":
+            return httpx.Response(200, json={"ok": True, "chunks_written": 0})
+        return httpx.Response(200, json={"ok": True})
+
+    with httpx.Client(transport=httpx.MockTransport(handler), base_url="https://fake.example") as client:
+        with pytest.raises(RuntimeError, match="chunks_written|wrote"):
+            admission_load.seed_owned_chunks(client, "coll", "nonce1", ["a" * 64])
 
 
 def test_post_upsert_captures_refused_503_evidence() -> None:
@@ -671,6 +734,7 @@ STATUS_FAIL_TRANSPORT = object()
 
 def _client_factory_for(status_sequence: list, upsert_responder):
     calls = {"status": 0}
+    owned: set[str] = set()
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/status":
@@ -682,7 +746,21 @@ def _client_factory_for(status_sequence: list, upsert_responder):
             if entry is STATUS_FAIL_TRANSPORT:
                 raise httpx.ConnectError("boom", request=request)
             return httpx.Response(200, json=entry)
+        # RDR-223 P3.2 seed (owner + doc + one combined write_many): the fake engine
+        # records which chashes it owns and REFUSES an upsert-chunks for any other,
+        # as the real engine does once the refusal lands, so a driver that stops
+        # seeding turns every ramp response into a 422 instead of passing quietly.
+        if request.url.path in ("/v1/catalog/owners/upsert", "/v1/catalog/doc/register", "/v1/catalog/manifest/write_many"):
+            payload = _json.loads(request.content)
+            if request.url.path == "/v1/catalog/doc/register":
+                return httpx.Response(200, json={"tumbler": "9.1.1"})
+            if request.url.path == "/v1/catalog/manifest/write_many":
+                owned.update(r["chash"] for d in payload["docs"] for r in d["rows"])
+                return httpx.Response(200, json={"ok": True, "chunks_written": len(payload["chunks"])})
+            return httpx.Response(200, json={"ok": True})
         if request.url.path == "/v1/vectors/upsert-chunks":
+            if not set(_json.loads(request.content)["ids"]) <= owned:
+                return httpx.Response(422, text="ownerless chunk write refused")
             return upsert_responder(request)
         return httpx.Response(404)
 
