@@ -2868,16 +2868,43 @@ def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
     per-document extraction failure), this is a TRANSIENT upsert condition that
     self-heals via the next run's RDR-181 existence-partition retry, same as any
     other entry in ``_TRANSIENT_UPSERT_CODES``.
+
+    RDR-223 P2.4 (nexus-z0o2p.14): the oversize fallbacks write through the
+    catalog's combined write, so the same transient conditions arrive as
+    ``httpx.HTTPStatusError`` (a status in ``_TRANSIENT_UPSERT_CODES``) and
+    ``CombinedWriteEmbedTimeoutError`` instead. Both defer the file exactly as
+    the vector-client errors above do.
     """
+    import httpx  # noqa: PLC0415 — deferred: only the failure arm needs the types
+
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
+    from nexus.errors import CombinedWriteEmbedTimeoutError  # noqa: PLC0415 — circular-dep avoidance: nexus.errors
     from nexus.retry import VectorUpsertTimeoutError  # noqa: PLC0415 -- circular-dep avoidance: nexus.retry
 
     try:
         return fn()
-    except VectorUpsertTimeoutError as exc:
+    except (VectorUpsertTimeoutError, CombinedWriteEmbedTimeoutError) as exc:
+        # RDR-223 P2.4 (nexus-z0o2p.14): an oversize file's chunks now ride the
+        # catalog's combined write, whose embed timeout
+        # (CombinedWriteEmbedTimeoutError) is the catalog-side twin of
+        # VectorUpsertTimeoutError: the same synchronous server-side embed,
+        # the same no-retry rule, so it defers the same way.
         _log.warning(
             "index_file_transient_upsert_deferred",
             file=str(file), code="upsert-timeout", error=str(exc),
+        )
+        _record_transient_upsert_deferred()
+        return 0
+    except httpx.HTTPStatusError as exc:
+        # The same gateway/pool/rate-limit statuses, as the catalog client
+        # raises them once its own bounded retry is spent (a 4xx or a
+        # non-transient 5xx is permanent and still raises).
+        code = exc.response.status_code if exc.response is not None else None
+        if code not in _TRANSIENT_UPSERT_CODES:
+            raise
+        _log.warning(
+            "index_file_transient_upsert_deferred",
+            file=str(file), code=code, error=str(exc),
         )
         _record_transient_upsert_deferred()
         return 0
@@ -3214,36 +3241,56 @@ def _index_pdf_file(
         from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 — deferred import; test patch target
         _fence_begin(catalog_doc_id, content_hash_hex, collection_name)
 
+    # RDR-223 P2.4 (nexus-z0o2p.14): an oversize PDF — the ChunkBatcher is
+    # present and refused it — writes its chunks together with their owner
+    # rows through the multi-batch combined writer, so a client that dies
+    # partway leaves no chunk without an owner (see nexus.oversize_write).
+    # Two topologies keep the old upsert, both outside what this bead moves: a
+    # file with no catalog identity has no owner row to write (counting and
+    # stopping those is nexus-z0o2p.20), and a call with no batcher holds a
+    # non-HTTP T3 (the in-memory test topology; _run_index builds the batcher
+    # for every HttpVectorClient, i.e. every real install) that the engine's
+    # combined write cannot reach.
+    _via_writer = batcher is not None and bool(catalog_doc_id)
     with _stage("upload"):
-        # nexus-y8xjh: the engine merges chunk metadata (nexus-w94eo), and both
-        # normalize() and the _EMPTY_VALUES filter above drop falsy keys, so a
-        # clean --force re-index would otherwise leave a stale
-        # quality_gate_overridden=True (and any other key this rewrite dropped
-        # as empty) on the stored row. Name them so the engine strips them.
-        from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
-        _pdf_delete_keys = rewrite_delete_keys(metadatas)
-        try:
-            db.upsert_chunks_with_embeddings(
-                collection_name=collection_name,
-                ids=ids,
-                documents=documents,
-                embeddings=embeddings,
-                metadatas=metadatas,
-                # nexus-4jj40: --force alone re-sends without re-embedding;
-                # only the explicit --re-embed opt-in forces a re-embed.
-                force_re_embed=force_re_embed,
-                **({"delete_keys": _pdf_delete_keys} if _pdf_delete_keys else {}),
+        if _via_writer:
+            from nexus.oversize_write import write_oversize_file  # noqa: PLC0415 — deferred: rare oversize path
+
+            write_oversize_file(
+                catalog_doc_id=catalog_doc_id, content_hash=content_hash_hex,
+                collection=collection_name, ids=ids, documents=documents,
+                metadatas=metadatas, force_re_embed=force_re_embed,
             )
-        except Exception as upload_exc:
-            # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp
-            # 'failed' unconditionally so the fence does not wedge at
-            # 'indexing' with only the 6h doctor sweep as signal.
-            # _fence_fail never raises, so the re-raise below always
-            # carries the original exception unmasked.
-            if catalog_doc_id:
-                from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
-                _fence_fail(catalog_doc_id, str(upload_exc))
-            raise
+        else:
+            # nexus-y8xjh: the engine merges chunk metadata (nexus-w94eo), and both
+            # normalize() and the _EMPTY_VALUES filter above drop falsy keys, so a
+            # clean --force re-index would otherwise leave a stale
+            # quality_gate_overridden=True (and any other key this rewrite dropped
+            # as empty) on the stored row. Name them so the engine strips them.
+            from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+            _pdf_delete_keys = rewrite_delete_keys(metadatas)
+            try:
+                db.upsert_chunks_with_embeddings(
+                    collection_name=collection_name,
+                    ids=ids,
+                    documents=documents,
+                    embeddings=embeddings,
+                    metadatas=metadatas,
+                    # nexus-4jj40: --force alone re-sends without re-embedding;
+                    # only the explicit --re-embed opt-in forces a re-embed.
+                    force_re_embed=force_re_embed,
+                    **({"delete_keys": _pdf_delete_keys} if _pdf_delete_keys else {}),
+                )
+            except Exception as upload_exc:
+                # nexus-bhlfy: mirrors commands/store.py's cotmr fix — stamp
+                # 'failed' unconditionally so the fence does not wedge at
+                # 'indexing' with only the 6h doctor sweep as signal.
+                # _fence_fail never raises, so the re-raise below always
+                # carries the original exception unmasked.
+                if catalog_doc_id:
+                    from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 — deferred import; test patch target
+                    _fence_fail(catalog_doc_id, str(upload_exc))
+                raise
 
         # Post-store hook chains (RDR-095). Both single-doc and batch
         # chains fire from every storage event; consumers register in
@@ -3255,14 +3302,22 @@ def _index_pdf_file(
             from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
             hooks = HookRegistry()
             install_default_hooks(hooks)
-        # nexus-vw594 F1: this file's whole chunk set lands in the ONE
-        # upsert above (file-atomic) — manifest_complete rides this
-        # existing call through manifest_write_batch_hook's
-        # write_manifest_many completion stamp, no extra round trip.
+        # nexus-vw594 F1: on the old upsert path this file's whole chunk set
+        # lands in the ONE upsert above (file-atomic) — manifest_complete rides
+        # this existing call through manifest_write_batch_hook's
+        # write_manifest_many completion stamp, no extra round trip. On the
+        # writer path the manifest is already written and stamped, so the
+        # manifest hook is excluded (a second write would double-count the
+        # sweep accounting) and no completion claim rides along.
+        _chain: dict = {
+            "manifest_complete": {catalog_doc_id: content_hash_hex} if catalog_doc_id else None,
+        }
+        if _via_writer:
+            from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
+            _chain = {"skip_hooks": {manifest_write_batch_hook}}
         hooks.fire_batch(
             ids, collection_name, documents, embeddings, metadatas,
-            catalog_doc_id=catalog_doc_id,
-            manifest_complete={catalog_doc_id: content_hash_hex} if catalog_doc_id else None,
+            catalog_doc_id=catalog_doc_id, **_chain,
         )
         for _did, _doc in zip(ids, documents):
             hooks.fire_single(_did, collection_name, _doc)
