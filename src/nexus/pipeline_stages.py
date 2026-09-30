@@ -539,11 +539,13 @@ class UploadRun:
     caller of :func:`uploader_loop` (no *run* given) stamps in ``finish()``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, on_request: Callable[[], None] | None = None) -> None:
         self.writer: Any = None
         self.cat: Any = None
         self.finished = False          # every chunk landed: the writer's finish() returned
         self._raw_cat: Any = None
+        #: Called just before each chunk-carrying request (see ``_MetadataMergingCatalog``).
+        self._on_request = on_request
 
     def open_writer(
         self, *, doc_id: str, collection: str, content_hash: str, force_re_embed: bool,
@@ -556,7 +558,7 @@ class UploadRun:
         # The streaming stub's metadata is deliberately partial (the post-pass fills title, author
         # and extraction method), so the write MERGES it into what is stored and names no keys to
         # delete: replacing would strip the ``bib_*`` enrichment a forced re-index must keep.
-        self.cat = _MetadataMergingCatalog(self._raw_cat, [])
+        self.cat = _MetadataMergingCatalog(self._raw_cat, [], on_request=self._on_request)
         self.writer = MultiBatchDocumentWriter(
             self.cat, doc_id=doc_id, collection=collection, content_hash=content_hash,
             force_re_embed=force_re_embed, defer_completion=defer_completion)
@@ -1215,6 +1217,7 @@ def pipeline_index_pdf(
     on_doc_registered: Callable[[str, bool], None] | None = None,
     extraction_stats: dict | None = None,
     title_override: str = "",
+    on_write_started: Callable[[], None] | None = None,
 ) -> int:
     """Three-stage streaming pipeline for PDFs.
 
@@ -1300,6 +1303,12 @@ def pipeline_index_pdf(
     caller tracking created-vs-matched for rollback purposes (e.g.
     ``index_pdf``'s own closure) has no way to see it without this
     callback.
+
+    *on_write_started* is called just before each request that carries chunks (RDR-223): from
+    the first one the document may have chunks in the store, all with owner rows, and a caller
+    that would undo a fresh registration on failure must not (``index_pdf``'s rollback). A failure
+    of the completion stamp after the last chunk landed is one such failure: it propagates, and the
+    document's fence stays ``indexing``.
 
     Returns total chunks indexed.
     """
@@ -1420,7 +1429,7 @@ def pipeline_index_pdf(
     # RDR-223: the index-run fence begins inside the writer, as its first request, so no chunk
     # lands before it (the old explicit begin sat here). The writer stays open until the tail
     # stamps it complete, after the post-passes.
-    run = UploadRun()
+    run = UploadRun(on_request=on_write_started)
     try:
         cancel = threading.Event()
         extraction_done = threading.Event()

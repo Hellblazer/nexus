@@ -169,3 +169,23 @@ def test_a_refused_stamp_is_recorded_and_propagates_without_marking_the_run_fail
     assert cat.calls == ["begin", "write"]
     # The writer leaves the fence 'indexing' after a refusal: nothing marks it failed.
     assert cat.failed == []
+
+
+def test_on_request_is_called_before_the_first_chunk_carrying_request() -> None:
+    """RDR-223 (nexus-z0o2p.11 / .15): ``index_pdf`` must not roll back a freshly minted document
+    once the writer has sent a request, so the write reports that it is about to send one, BEFORE
+    the request (a request that fails after that point may have landed)."""
+    from nexus.doc_indexer import _write_chunks_with_owner_rows
+
+    text = "wcor chunk"
+    chash = hashlib.sha256(text.encode()).hexdigest()
+    cat = _Cat()
+    seen: list[list[str]] = []
+    with patch("nexus.catalog.factory.make_catalog_writer", return_value=cat):
+        _write_chunks_with_owner_rows(
+            COLLECTION, DOC_ID, "h" * 64, [chash], [text], [{"chunk_text_hash": chash}],
+            on_request=lambda: seen.append(list(cat.calls)))
+
+    assert seen == [["begin"]], "called once, after the fence begin and before the write"
+    assert cat.calls == ["begin", "write"]
+

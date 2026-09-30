@@ -18,7 +18,10 @@ from nexus.catalog.multi_batch_write import DocumentWriteResult
 class OwnerWriteRecorder:
     """Records each call and answers like a write that fully succeeded."""
 
-    def __init__(self, *, raises: BaseException | None = None) -> None:
+    def __init__(self, *, raises: BaseException | None = None, request_sent: bool = False) -> None:
+        #: True: the recorded write reports that it sent a request (``on_request``) before it
+        #: raised, as the real writer does once it has begun writing.
+        self.request_sent = request_sent
         self.calls: list[dict[str, Any]] = []
         #: Every metadata dict passed, across calls, in order. A live list: a test may
         #: hold it before the write runs.
@@ -34,7 +37,7 @@ class OwnerWriteRecorder:
     def __call__(
         self, collection_name: str, doc_id: str, content_hash: str, ids: list[str],
         documents: list[str], metadatas: list[dict], *, force_re_embed: bool = False,
-        batch_size: int = 0, on_progress: Any = None,
+        batch_size: int = 0, on_progress: Any = None, on_request: Any = None,
     ) -> DocumentWriteResult:
         self.calls.append({
             "collection_name": collection_name, "doc_id": doc_id, "content_hash": content_hash,
@@ -42,6 +45,8 @@ class OwnerWriteRecorder:
             "force_re_embed": force_re_embed, "batch_size": batch_size,
         })
         self.metadatas.extend(metadatas)
+        if self.request_sent and on_request is not None:
+            on_request()
         if self.raises is not None:
             raise self.raises
         if on_progress is not None:
@@ -59,12 +64,14 @@ class OwnerWriteRecorder:
             completed=True)
 
 
-def install(monkeypatch: Any, *, raises: BaseException | None = None) -> OwnerWriteRecorder:
+def install(
+    monkeypatch: Any, *, raises: BaseException | None = None, request_sent: bool = False,
+) -> OwnerWriteRecorder:
     """Replace the write with a recorder for the life of the test."""
     import nexus.doc_indexer as di
 
     real = di._write_chunks_with_owner_rows
-    rec = OwnerWriteRecorder(raises=raises)
+    rec = OwnerWriteRecorder(raises=raises, request_sent=request_sent)
     rec.restore_real_write = lambda: monkeypatch.setattr(  # type: ignore[attr-defined]
         "nexus.doc_indexer._write_chunks_with_owner_rows", real)
     monkeypatch.setattr("nexus.doc_indexer._write_chunks_with_owner_rows", rec)

@@ -747,6 +747,42 @@ class TestIndexPdfFreshMintRollback:
         assert len(rollback_calls) == 1
         assert rollback_calls[0] == minted_doc_id
 
+    @pytest.mark.parametrize("request_sent", [False, True], ids=["before-any-request", "after-a-request"])
+    def test_a_fresh_registration_is_rolled_back_only_if_the_writer_sent_nothing(
+        self, sample_pdf, mock_t3, monkeypatch, owner_write, request_sent,
+    ):
+        """RDR-223 (nexus-z0o2p.11 / .15): once the writer has sent a request the document may
+        have chunks in the store, every one with an owner row, and tombstoning the document would
+        hide them. So the rollback of a freshly minted registration is for a failure BEFORE the
+        first chunk-carrying request only; after it the document is left as the fence marks it.
+        The write itself is the recorder here: ``request_sent`` makes it report a request the way
+        the real writer does, just before it raises."""
+        from nexus.doc_indexer import index_pdf
+        from nexus.hook_registry import HookRegistry
+
+        minted_doc_id = "1.1.z0o2p-rollback"
+        rollback_calls: list[str] = []
+        monkeypatch.setattr(
+            "nexus.catalog.store_hook.rollback_minted_catalog_entry",
+            lambda tumbler, *, original_error="": rollback_calls.append(tumbler) or True,
+        )
+        owner_write.request_sent = request_sent
+        owner_write.raises = RuntimeError("request 2 failed")
+
+        def _register(*args, with_created=False, **kwargs):
+            return (minted_doc_id, True) if with_created else minted_doc_id
+
+        with patch("nexus.doc_indexer._register_or_lookup_doc_id", side_effect=_register), \
+                patch("nexus.doc_indexer._fence_fail") as mock_fail:
+            with pdf_extract_patches_ctx():
+                with pytest.raises(RuntimeError, match="request 2 failed"):
+                    index_pdf(
+                        sample_pdf, corpus="z0o2p-rollback", t3=mock_t3, embed_fn=_fake_embed,
+                        hooks=HookRegistry(), streaming="never",
+                    )
+        mock_fail.assert_called_once()
+        assert rollback_calls == ([] if request_sent else [minted_doc_id])
+
     def test_worktree_skip_then_fallback_mint_rolls_back_on_fence_refusal(
         self, sample_pdf, mock_t3, monkeypatch, owner_write,
     ):

@@ -1435,9 +1435,14 @@ class _MetadataMergingCatalog:
     other attribute is the wrapped writer's.
     """
 
-    def __init__(self, cat: Any, delete_keys: list[str]) -> None:
+    def __init__(
+        self, cat: Any, delete_keys: list[str], on_request: "Callable[[], None] | None" = None,
+    ) -> None:
         self._cat = cat
         self._delete_keys = list(delete_keys)
+        #: Called just BEFORE each chunk-carrying request is sent, so a caller can tell that the
+        #: writer has begun writing (a request that fails after this point may still have landed).
+        self._on_request = on_request
         #: ``[{doc_id, reason}, ...]``: sweeps the engine reported as errored, with its reason.
         self.sweep_errors: list[dict] = []
 
@@ -1451,10 +1456,14 @@ class _MetadataMergingCatalog:
         return resp
 
     def write_manifest_many(self, *args: Any, **kwargs: Any) -> Any:
+        if self._on_request is not None:
+            self._on_request()
         return self._note(self._cat.write_manifest_many(
             *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
 
     def append_manifest_chunks(self, *args: Any, **kwargs: Any) -> Any:
+        if self._on_request is not None:
+            self._on_request()
         return self._note(self._cat.append_manifest_chunks(
             *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
 
@@ -1473,6 +1482,7 @@ def _write_chunks_with_owner_rows(
     force_re_embed: bool = False,
     batch_size: int = 0,
     on_progress: "Callable[[int, int], None] | None" = None,
+    on_request: "Callable[[], None] | None" = None,
 ) -> "DocumentWriteResult":
     """Write one document's chunks together with their owner rows (RDR-223, nexus-z0o2p.13).
 
@@ -1491,7 +1501,10 @@ def _write_chunks_with_owner_rows(
     chunk cap. *on_progress* is called as ``(chunks_sent, total)``: after each batch
     that is handed over, with the chunks whose requests have been SENT (the writer
     holds the latest batch back until it knows whether it is the last), and once with
-    ``(total, total)`` when the write finished.
+    ``(total, total)`` when the write finished. *on_request* is called just before each request
+    that carries chunks is sent: from that point the document has, or may have, chunks in the
+    store, all with owner rows, and a caller that would undo a registration on failure must not
+    (:func:`index_pdf`'s ``_rollback_if_freshly_minted``).
 
     The writer raises for a request that fails or an answer it cannot trust (the
     run fails, and the caller's fence bracket marks it), and
@@ -1520,7 +1533,7 @@ def _write_chunks_with_owner_rows(
     total = len(ids)
     size = batch_size if 0 < batch_size < total else max(total, 1)
     raw_cat = make_catalog_writer()
-    cat = _MetadataMergingCatalog(raw_cat, rewrite_delete_keys(metadatas))
+    cat = _MetadataMergingCatalog(raw_cat, rewrite_delete_keys(metadatas), on_request=on_request)
     try:
         with MultiBatchDocumentWriter(
             cat, doc_id=doc_id, collection=collection_name, content_hash=content_hash,
@@ -2009,6 +2022,7 @@ def _index_pdf_incremental(
     source_uri: str = "",
     dry_run: bool = False,
     on_doc_registered: Callable[[str, bool], None] | None = None,
+    on_write_started: Callable[[], None] | None = None,
 ) -> int:
     """Write a large PDF's chunks with their owner rows, in batches (RDR-223, nexus-z0o2p.15).
 
@@ -2059,6 +2073,9 @@ def _index_pdf_incremental(
     case THIS function's fallback mint is the only registration event
     for the whole run, and the caller's own created-tracking (if any)
     has no way to see it without this callback.
+
+    *on_write_started* is called just before the first request that carries chunks (see
+    :func:`_write_chunks_with_owner_rows`).
 
     Returns the total number of chunks indexed.
     """
@@ -2167,6 +2184,7 @@ def _index_pdf_incremental(
                 collection_name, _catalog_doc_id_for_batch, content_hash,
                 ids_all, documents_all, metadatas_all, force_re_embed=force_re_embed,
                 batch_size=_INCREMENTAL_BATCH_SIZE, on_progress=on_progress,
+                on_request=on_write_started,
             )
 
         # Post-store hook chains (RDR-095), after the write: the hooks read stored chunks.
@@ -2742,8 +2760,15 @@ def index_pdf(
     # rollback closure below cover every mint this call can make, not just
     # the pre-flight's own.
     _mint_state: dict[str, object] = {
-        "doc_id": doc_id, "freshly_minted": _doc_id_freshly_minted,
+        "doc_id": doc_id, "freshly_minted": _doc_id_freshly_minted, "written": False,
     }
+
+    def _note_write_started() -> None:
+        """The writer is about to send its first chunk-carrying request (called before every
+        one). From here the document may have chunks in the store, every one with an owner row,
+        so a failure must leave the registration alone: tombstoning the document would hide the
+        chunks that landed."""
+        _mint_state["written"] = True
 
     def _note_fallback_mint(fallback_doc_id: str, created: bool) -> None:
         """Record a fallback registration performed by THIS call, wherever
@@ -2765,10 +2790,20 @@ def index_pdf(
         left exactly as the fence marked it — never a rollback candidate,
         since deleting it could discard someone else's prior, unrelated
         indexing work. Never masks *exc* — this is a best-effort
-        compensation the caller re-raises past regardless of outcome.
+        compensation the caller re-raises past regardless of outcome. Skipped once the writer
+        has sent a request (RDR-223): the chunks it wrote are owned by this document, and
+        deleting the document would hide them.
         """
         _mint_doc_id = _mint_state["doc_id"]
         if dry_run or not _mint_state["freshly_minted"] or not _mint_doc_id:
+            return
+        if _mint_state["written"]:
+            _log.warning(
+                "index_pdf_fresh_registration_kept_after_write",
+                doc_id=_mint_doc_id, pdf=str(pdf_path), reason=str(exc),
+                note="the writer had sent a request, so chunks may be stored with owner rows; "
+                     "the document is left as the fence marked it and the next run redoes it",
+            )
             return
         from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — circular-dep avoidance (nexus.catalog.store_hook)
         rollback_minted_catalog_entry(_mint_doc_id, original_error=str(exc))
@@ -2859,6 +2894,7 @@ def index_pdf(
                     dry_run=dry_run,
                     title_override=title_override,
                     on_doc_registered=_note_fallback_mint,
+                    on_write_started=_note_write_started,
                     extraction_stats=_extraction_stats,
                 )
             except Exception as exc:
@@ -3080,6 +3116,7 @@ def index_pdf(
                 source_uri=source_uri,
                 dry_run=dry_run,
                 on_doc_registered=_note_fallback_mint,
+                on_write_started=_note_write_started,
             )
         except Exception as exc:
             _rollback_if_freshly_minted(exc)
@@ -3197,7 +3234,7 @@ def index_pdf(
             # chunks it does not already hold (RDR-181), so an unchanged PDF re-embeds nothing.
             _write_chunks_with_owner_rows(
                 col_name, _catalog_doc_id_for_batch, content_hash, ids, documents,
-                metadatas_list, force_re_embed=force_re_embed,
+                metadatas_list, force_re_embed=force_re_embed, on_request=_note_write_started,
             )
 
         # Post-store hook chains (RDR-095), after the write. Both single-doc and batch chains
