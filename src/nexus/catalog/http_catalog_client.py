@@ -292,6 +292,19 @@ def _metadata_mode_fields(
     return out
 
 
+def _check_metadata_merge_echo(what: str, merge_fields: dict, result: "dict | None") -> None:
+    """ACK-ECHO for the metadata write mode (RDR-223, nexus-z0o2p.13): a request that asked for
+    ``metadata_merge`` is answered with ``metadata_merge: true`` by an engine that applied it. An
+    engine that predates the field ignores it and REPLACES the stored metadata (clearing ``bib_*``
+    enrichment), so its answer carries no echo and this raises rather than let the caller carry on;
+    client and engine are released as a pair, there is no old-engine fallback."""
+    if merge_fields and not (isinstance(result, dict) and result.get("metadata_merge") is True):
+        raise RuntimeError(
+            f"{what}: asked for metadata_merge but the response did not echo it; the engine "
+            "predates the metadata write mode and REPLACED the stored chunk metadata"
+        )
+
+
 def _check_sweep_chashes(what: str, sweep_chashes: "list[str] | None") -> None:
     """Refuse an over-cap ``sweep_chashes`` list locally (the engine 400s it, but only after the
     request was built and, on a chunk-carrying append, an embed budget was set aside)."""
@@ -3603,6 +3616,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             result = self._post_embedding_write(
                 "/manifest/append", body, collection=collection, chunk_count=len(chunk_payload))
         out: dict = dict(result) if isinstance(result, dict) else {}
+        if chunk_payload is not None:
+            _check_metadata_merge_echo("append_manifest_chunks", merge_fields, out)
         if chunk_payload is not None and "chunks_written" not in out:
             raise RuntimeError(
                 f"append ack mismatch for {collection!r} doc {doc_id!r}: sent "
@@ -3706,6 +3721,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     collection=collection, doc_count=len(docs)) from exc
             raise
         out: dict = dict(result) if isinstance(result, dict) else {}
+        if chunks is not None:
+            _check_metadata_merge_echo("append_manifest_many", merge_fields, out)
         if chunks is not None and "chunks_written" not in out:
             raise RuntimeError(
                 f"append_many ack mismatch for {collection!r}: sent {len(chunks)} chunks but "
@@ -4393,6 +4410,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                         "written"
                     )
                 chunks_written = int(result.get("chunks_written") or 0)
+                _check_metadata_merge_echo("write_manifest_many", merge_fields, result)
                 _echo_supplied_vectors("write_manifest_many", chunks, result)
                 for k in ("embed_embedded", "embed_skipped", "chunks_deduped",
                           "vectors_supplied", "vector_mismatches"):

@@ -1811,8 +1811,8 @@ def _write_chunks_with_owner_rows(
     if result.sweep_skipped > len(cat.sweep_errors):
         # The engine counted skips it gave no reason for (or an older shape without detail).
         _record_superseded_sweep_skip(doc_id, collection_name, "sweep_failed")
-    if result.dropped_unknown:
-        _record_superseded_sweep_skip(doc_id, collection_name, "before_read_failed")
+    # No dropped_unknown branch: this caller always passes content_hash, so the writer is fenced and
+    # takes the drop list from the begin snapshot, never from the write_many response.
     return result
 
 
@@ -2151,12 +2151,12 @@ def _index_document(
         )
     except IndexRunVerifyRefused:
         # The engine refused the completion stamp: the manifest is NOT verified
-        # complete. The write_document context manager has already marked the
-        # fence 'failed' (its abort), so this handler does not call _fence_fail a
-        # second time; either state makes the next run redo the document. Record
-        # the refusal for the run summary (nexus-5xn3k.6) and drop any deferred
-        # sweep, then let the refusal propagate: it is the signal the fence
-        # exists to raise.
+        # complete. The writer deliberately leaves the fence 'indexing' after a
+        # refusal (its abort is a no-op then), which already makes the next run
+        # redo the document; marking it 'failed' as well would say nothing more.
+        # Record the refusal for the run summary (nexus-5xn3k.6) and drop any
+        # deferred sweep, then let the refusal propagate: it is the signal the
+        # fence exists to raise.
         from nexus.mcp_infra import (  # noqa: PLC0415 — deferred import: avoids import cycle at module load
             _record_complete_refusal,
             discard_deferred_superseded_vectors,

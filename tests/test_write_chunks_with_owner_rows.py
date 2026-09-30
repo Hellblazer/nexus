@@ -118,15 +118,6 @@ def test_chunk_metadata_is_merged_naming_the_keys_the_document_dropped() -> None
     assert not any(k.startswith("bib_") for k in keys)
 
 
-def test_an_unreadable_previous_manifest_is_a_recorded_sweep_skip() -> None:
-    from nexus.mcp_infra import get_superseded_sweep_stats
-
-    _write(_Cat(dropped_chashes={}, dropped_count={}, dropped_unknown=[DOC_ID]))
-
-    assert get_superseded_sweep_stats()["skipped"] == [
-        {"doc_id": DOC_ID, "collection": COLLECTION, "reason": "before_read_failed"}]
-
-
 def test_a_clean_write_records_no_skip_and_no_refusal() -> None:
     from nexus.mcp_infra import get_complete_refusals, get_superseded_sweep_stats
 
@@ -176,8 +167,5 @@ def test_a_refused_stamp_is_recorded_and_propagates_without_marking_the_run_fail
     assert get_complete_refusals() == [DOC_ID]
     fence_fail.assert_not_called()
     assert cat.calls == ["begin", "write"]
-    # write_document's context manager marks the fence failed (its abort) when the refusal
-    # propagates, so the document is 'failed', not left 'indexing'; either makes the next run
-    # redo it. TODO(nexus-z0o2p.10 writer round): the writer's abort semantics are being revised;
-    # re-assert whatever they become here.
-    assert cat.failed == [DOC_ID]
+    # The writer leaves the fence 'indexing' after a refusal: nothing marks it failed.
+    assert cat.failed == []

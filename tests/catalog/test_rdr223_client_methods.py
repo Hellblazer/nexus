@@ -431,7 +431,8 @@ class TestMetadataMergeFields:
     """``metadata_merge`` / ``metadata_delete_keys`` ride the chunk-carrying request only, are absent
     (the engine's replace behaviour) by default, and are checked before any round trip."""
 
-    _OK = {"chunks_written": 1, "failed_doc_ids": [], "ok": True, "docs": 1, "rows": 1, "count": 1}
+    _OK = {"chunks_written": 1, "failed_doc_ids": [], "ok": True, "docs": 1, "rows": 1, "count": 1,
+           "metadata_merge": True}
 
     def test_write_many_sends_the_fields_when_merge_is_on(self, monkeypatch) -> None:
         c, rec = _client(monkeypatch, self._OK)
@@ -440,6 +441,30 @@ class TestMetadataMergeFields:
             metadata_merge=True, metadata_delete_keys=["x", "y"])
         body = rec.calls[0][1]
         assert body["metadata_merge"] is True and body["metadata_delete_keys"] == ["x", "y"]
+
+    @pytest.mark.parametrize("route", ["write_many", "append", "append_many"])
+    def test_an_engine_that_does_not_echo_the_mode_is_refused(self, monkeypatch, route) -> None:
+        """An old engine ignores the fields and REPLACES metadata; the client must not carry on."""
+        old_engine = {k: v for k, v in self._OK.items() if k != "metadata_merge"}
+        c, _ = _client(monkeypatch, old_engine)
+        with pytest.raises(RuntimeError, match="metadata_merge"):
+            if route == "write_many":
+                c.write_manifest_many(
+                    [("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION,
+                    metadata_merge=True)
+            elif route == "append":
+                c.append_manifest_chunks(
+                    "1.1.1", [_row(_A, 0)], collection=_COLLECTION, chunk_payload=[_chunk(_A)],
+                    metadata_merge=True)
+            else:
+                c.append_manifest_many(
+                    [("1.1.1", [_row(_A, 0)])], collection=_COLLECTION, chunks=[_chunk(_A)],
+                    metadata_merge=True)
+
+    def test_no_echo_is_needed_when_merge_was_not_asked_for(self, monkeypatch) -> None:
+        old_engine = {k: v for k, v in self._OK.items() if k != "metadata_merge"}
+        c, _ = _client(monkeypatch, old_engine)
+        c.write_manifest_many([("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION)
 
     def test_write_many_sends_nothing_by_default(self, monkeypatch) -> None:
         c, rec = _client(monkeypatch, self._OK)
