@@ -72,10 +72,24 @@ propagates its exception unchanged (a killed process is the model) and poisons t
 :meth:`abort` marks the fence failed for a caller that survives the failure, and the writer is a
 context manager that does so on an exception.
 
-Idempotent requests (the fence begin, every append and sweep-only append, the completion stamp) are
-retried a bounded number of times on connectivity errors only (``nexus.retry``'s manifest-write
-retry); a ``CombinedWriteEmbedTimeoutError`` is never retried (a retry would start an uncancelled
-duplicate embed), and neither is ``write_manifest_many``.
+Every request (the fence begin, the first or only ``write_manifest_many``, every append and
+sweep-only append, the completion stamp) goes through ``nexus.retry``'s manifest-write retry: a
+bounded number of attempts on connectivity errors, and a rate-limit answer (429, or a 503 with
+Retry-After) trips the shared ``RateLimitBrake`` so every writer in the process backs off together.
+A ``CombinedWriteEmbedTimeoutError`` is never retried (a retry would start an uncancelled duplicate
+embed). A resent first ``write_manifest_many`` is safe for a multi-request document because its
+sweep comes from the begin snapshot; for an UNFENCED single request the resend makes the response's
+own drop list empty, so ``DocumentWriteResult.dropped`` can under-report there (the sweep itself ran
+server-side on the first attempt).
+
+The fence after a failure. ``abort()`` (and the ``with`` block) marks the run ``failed`` EXCEPT
+when the completion stamp already succeeded (nothing to undo) or the engine REFUSED the stamp
+(``IndexRunVerifyRefused``): a refusal leaves ``index_state`` exactly as ``begin`` left it,
+``indexing`` (IndexRunFenceTest pins that engine contract, and ``doc_indexer._fence_complete`` lets
+the refusal propagate past every ``_fence_fail`` site for the same reason), and the writer RECORDS
+it in ``mcp_infra``'s refusal collector, the one the record-level summary reads. ``abort()`` acts at
+most once, and a caller that already failed the fence itself calls :meth:`mark_fence_handled` so the
+``with`` block does not fail it again.
 
 ONE WRITER PER DOCUMENT AT A TIME, and a writer is not thread-safe: there is no lock, on the
 document or in the writer. Two writers on one document interleave their manifests.
@@ -200,14 +214,22 @@ class MultiBatchDocumentWriter:
         self._fenced = False
         self._failed = False
         self._finished = False
+        self._refused = False        # the engine refused the completion stamp
+        self._aborted = False        # the fence was already failed (by abort() or the caller)
         self._result = DocumentWriteResult()
 
     def __enter__(self) -> "MultiBatchDocumentWriter":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
-        if exc_type is not None:
-            self.abort(f"{exc_type.__name__}: {exc}")
+        if exc_type is None:
+            return
+        if issubclass(exc_type, IndexRunVerifyRefused):
+            # A refusal raised inside the block by the caller's own completion stamp: same policy
+            # as a refusal the writer met itself.
+            self._note_refusal()
+            return
+        self.abort(f"{exc_type.__name__}: {exc}")
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -262,11 +284,21 @@ class MultiBatchDocumentWriter:
         self._result.manifest_rows = len(self._positions)
         return self._result
 
+    def mark_fence_handled(self) -> None:
+        """Tell the writer the caller already failed (or deliberately left) the index run, so
+        :meth:`abort` and the ``with`` block do not fail it again."""
+        self._aborted = True
+
     def abort(self, error: str) -> None:
         """Mark the index run failed, if a fence was begun. Best effort; for a caller that
-        survives a failed write (a killed process needs nothing: the fence stays ``indexing``)."""
-        if self._finished or not self._fenced or self._content_hash is None:
+        survives a failed write (a killed process needs nothing: the fence stays ``indexing``).
+
+        A no-op once the writer finished (the stamp landed), after the engine refused the stamp
+        (the fence stays ``indexing``, see the module docstring) and after the first call."""
+        if (self._finished or self._refused or self._aborted or not self._fenced
+                or self._content_hash is None):
             return
+        self._aborted = True
         try:
             self._cat.fail_index_run(self._doc_id, error)
         except Exception as exc:  # noqa: BLE001 — best-effort fence marking must never mask the original failure
@@ -315,11 +347,23 @@ class MultiBatchDocumentWriter:
     # ── requests ──────────────────────────────────────────────────────────────
 
     def _retrying(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """Call an IDEMPOTENT request with nexus.retry's bounded connectivity retry. A
-        ``CombinedWriteEmbedTimeoutError`` has no transport error in its chain, so it is not
-        retried (a retry would start an uncancelled duplicate embed)."""
+        """Call a request with nexus.retry's bounded retry: connectivity errors, and a rate-limit
+        answer paces the shared brake. A ``CombinedWriteEmbedTimeoutError`` has no transport error
+        in its chain, so it is not retried (a retry would start an uncancelled duplicate embed)."""
         from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
         return _manifest_write_with_retry(fn, *args, **kwargs)
+
+    def _note_refusal(self) -> None:
+        """The engine refused the completion stamp: record it for the record-level summary and
+        leave the fence as ``begin`` left it."""
+        if self._refused:
+            return
+        self._refused = True
+        try:
+            from nexus.mcp_infra import _record_complete_refusal  # noqa: PLC0415 — deferred: mcp_infra imports back into catalog code
+            _record_complete_refusal(self._doc_id)
+        except Exception as exc:  # noqa: BLE001 — recording is advisory; the refusal itself propagates
+            _log.warning("multi_batch_refusal_record_failed", doc_id=self._doc_id, error=str(exc))
 
     def _fail(self, batch: int, reason: str) -> BatchWriteFailedError:
         return BatchWriteFailedError(doc_id=self._doc_id, batch=batch, reason=reason)
@@ -392,7 +436,8 @@ class MultiBatchDocumentWriter:
     def _write_many(
         self, rows: list[dict], chunks: list[dict], *, sweep: bool, complete: dict | None,
     ) -> dict:
-        resp = self._cat.write_manifest_many(
+        resp = self._retrying(
+            self._cat.write_manifest_many,
             [(self._doc_id, rows)], complete=complete, sweep=sweep, chunks=chunks or None,
             collection=self._collection, force_re_embed=self._force_re_embed,
             embedding_model=self._embedding_model)
@@ -410,6 +455,7 @@ class MultiBatchDocumentWriter:
             if refused.get("doc_id") == self._doc_id:
                 referenced = int(refused.get("referenced") or 0)
                 missing = int(refused.get("missing") or 0)
+                self._note_refusal()
                 raise IndexRunVerifyRefused(
                     doc_id=self._doc_id, referenced=referenced,
                     present=referenced - missing, missing=missing,
@@ -494,9 +540,13 @@ class MultiBatchDocumentWriter:
         if self._content_hash is not None:
             # The engine compares this with count(*) over the manifest ROWS. Positions are unique
             # in a run, so that is the number of positions written, not the distinct chashes.
-            done = self._retrying(
-                self._cat.complete_index_run, self._doc_id, self._content_hash,
-                len(self._positions))
+            try:
+                done = self._retrying(
+                    self._cat.complete_index_run, self._doc_id, self._content_hash,
+                    len(self._positions))
+            except IndexRunVerifyRefused:
+                self._note_refusal()
+                raise
             if done is None:
                 raise self._fail(n, "complete_index_run answered 404: the engine has no "
                                     "index-run fence route, so the document was NOT stamped")
