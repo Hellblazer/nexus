@@ -128,13 +128,22 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
         ),
         same_function=True,
     ),
-    ("catalog/recovery_bundle.py", "_default_import_doc"): _Coverage(
+    ("catalog/recovery_bundle.py", "_fire_post_store_hooks"): _Coverage(
         reason=(
-            "recovery-bundle import, split-note path (nexus-spujb): same "
-            "shape as nx store put; _fence_begin is called in this same "
-            "function before the first piece is written."
+            "recovery-bundle import (RDR-223 P2.8, nexus-z0o2p.18): the "
+            "fence begins in nexus.catalog.note_write.put_note, which "
+            "_default_import_doc calls before it calls this function "
+            "(_fire_post_store_hooks, the batch-chain firing); "
+            "the completion stamp rides the note's one write_manifest_many "
+            "request and the batch chain skips manifest_write_batch_hook. "
+            "Cross-function like store_put: "
+            "test_recovery_import_writes_its_notes_through_put_note below "
+            "proves _default_import_doc calls put_note and only then "
+            "_fire_post_store_hooks, and "
+            "test_store_put_fence_begins_in_put_note_before_the_write "
+            "proves put_note calls _fence_begin before write_note."
         ),
-        same_function=True,
+        same_function=False,
     ),
     ("code_indexer.py", "index_code_file"): _Coverage(
         reason=(
@@ -368,9 +377,12 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
 
     ``mcp/core.py::store_put`` joined them at RDR-223 P2.2 (nexus-z0o2p.12):
     its fence begins in ``note_write.put_note``, the one function every note
-    producer calls. That claim is proven below, not asserted."""
+    producer calls. That claim is proven below, not asserted. The
+    recovery-bundle import (``catalog/recovery_bundle.py::_default_import_doc``)
+    joined them at P2.8 (nexus-z0o2p.18) on the same proof."""
     cross = sorted(k for k, cov in _ALLOWLIST.items() if not cov.same_function)
     assert cross == [
+        ("catalog/recovery_bundle.py", "_fire_post_store_hooks"),
         ("doc_indexer.py", "_index_document"),
         ("indexer.py", "_fire_deferred_hooks"),
         ("indexer.py", "_fire_flush_grain_hooks"),
@@ -406,6 +418,24 @@ def test_store_put_fence_begins_in_put_note_before_the_write() -> None:
     assert "_fence_begin" in names and "write_note" in names, names
     assert names.index("_fence_begin") < names.index("write_note"), (
         f"put_note must begin the fence before it writes: {calls}")
+
+
+def test_recovery_import_writes_its_notes_through_put_note() -> None:
+    """The other half of the recovery import's cross-function entry (RDR-223 P2.8,
+    nexus-z0o2p.18): ``_default_import_doc`` hands each note to ``put_note``, the function that
+    begins the fence before it writes (proven by the test above), and only afterwards calls
+    ``_fire_post_store_hooks``, the function that fires the batch chain."""
+    tree = ast.parse((SRC_ROOT / "catalog" / "recovery_bundle.py").read_text())
+    fn = next(
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "_default_import_doc")
+    calls = sorted(
+        (c.lineno, c.func.id) for c in ast.walk(fn)
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        and c.func.id in {"put_note", "_fire_post_store_hooks"})
+    names = [name for _line, name in calls]
+    assert names == ["put_note", "_fire_post_store_hooks"], (
+        f"_default_import_doc must write through note_write.put_note, then fire the chains: {calls}")
 
 
 # ── RDR-223 (nexus-z0o2p.10): the multi-batch writer's fence leg ──────────────

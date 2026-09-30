@@ -8,13 +8,13 @@ its real ``/list?source_uri`` resolution, not a fake's approximation of
 either.
 
 Scope note (recorded on nexus-xn3fr): the knowledge-doc half runs with a
-registration-only importer here — the full store_put chain's live
-behavior (sdp0u reconcile, manifest write, fence) is
-``tests/test_store_put_cli_parity.py``'s standing territory, and the
-importer's exact call sequence into that chain is seam-pinned by
-``tests/catalog/test_recovery_bundle.py``'s
-``test_default_import_doc_drives_the_real_store_put_chain``. Duplicating
-the full embedding env here would re-prove the chain, not the bundle.
+registration-only importer here. The real note write (one owner-carrying
+request per note, re-import, per-note failure) is
+``tests/test_z0o2p18_recovery_import.py``'s territory against the suite's
+engine substrate, and the importer's call into the note writer is
+seam-pinned by ``tests/catalog/test_recovery_bundle.py``'s
+``test_default_import_doc_hands_the_note_to_put_note_and_fires_the_chains``.
+Duplicating the full embedding env here would re-prove the chain, not the bundle.
 
 Harness mirrors ``tests/db/test_http_catalog_integration.py`` (hermetic
 PG via the bundled binaries, the shaded JAR with Liquibase at boot,
