@@ -412,7 +412,10 @@ def test_the_agent_scopes_the_recurrence_search_to_the_brief_and_guards_devices(
     assert "never the document itself" in text
     assert "Never cut a voice-card device, however section 6 of the brief or a diagnostic reads." in text
     assert "turn it into a query" in text  # a closing line with no twin becomes a query
-    assert "three-item construction" in text and "is a query, not an edit or a paragraph proposal" in text
+    # Sam 2026-09-30: restructuring a three-item construction may be proposed, unless it is a voice-card device.
+    assert "You may propose restructuring a three-item construction" in text
+    assert "unless it is a device on the voice card; a device stays as it is." in text
+    assert "is a query, not an edit or a paragraph proposal" not in text
 
 
 def test_the_agent_treats_only_pure_filler_as_a_default_cut() -> None:

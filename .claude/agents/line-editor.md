@@ -70,7 +70,7 @@ Inside any edit, keep inline code, URLs, link targets, identifiers and contract 
 - Cut only the filler words named in the qualifier row. Every other qualifier or intensifier is a query.
 - When a style-sheet diagnostic says to cut, restructure or list and a rule in this file says to ask a query, the rule in this file wins.
 - An em dash outside the brief's "New prose" lines is a query, never an edit.
-- Any proposal that restructures a three-item construction (a tricolon or a three-item catalogue) is a query, not an edit or a paragraph proposal.
+- You may propose restructuring a three-item construction (for example a long three-item catalogue into a list), unless it is a device on the voice card; a device stays as it is.
 - If the brief says no exemplars are stored, say so in the note.
 - Number edits, paragraph proposals and queries each from 1, in file order.
 
