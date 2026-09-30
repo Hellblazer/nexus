@@ -268,17 +268,6 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "exercised through the live fake server, delete this entry and add "
         "the branch then"
     ),
-    "/manifest/append_many": (
-        "RDR-223 P1.4 (nexus-z0o2p.5): the multi-document append (chunks + "
-        "sweep_chashes per document) with NO Python client method yet -- the "
-        "client half is RDR-223 P2.0 (nexus-z0o2p.10) and .nxexp import "
-        "(nexus-z0o2p.19). Like its sibling `/manifest/write_many` above, its "
-        "wire shape (per-document results, embed counts, deferred sweeps) is "
-        "pinned Java-side by AppendManyTest and CatalogHandlerAppendChunksTest, "
-        "and a live-fake branch would have to fabricate a combined-write "
-        "response; delete this entry and add the branch if the client method "
-        "is ever exercised through the live fake server"
-    ),
     "/manifest/resync": (
         "backs HttpCatalogClient.resync_chunk_count_cache() via raw _post "
         "— unit-tested against a mocked _post, not the live fake server"

@@ -981,6 +981,7 @@ class TestDtContentExceptionHandling:
 #   for the exact revert/restore transcript).
 
 from nexus.errors import (  # noqa: E402 — grouped with this section's test-only imports
+    BatchWriteFailedError,
     ChunkLandingUnverifiedError,
     ExtractionQualityError,
     IndexRunVerifyRefused,
@@ -992,6 +993,9 @@ from nexus.errors import (  # noqa: E402 — grouped with this section's test-on
 )
 
 _MEMBER_KWARGS: dict[type, dict] = {
+    # nexus-z0o2p.10: the RDR-223 writer's per-document failure fails that
+    # record, never the rest of an nx dt index batch.
+    BatchWriteFailedError: {"doc_id": "1.99.1", "batch": 1, "reason": "write_many named the document in failed_doc_ids"},
     ChunkLandingUnverifiedError: {
         "collection": "docs__dt-test__voyage-context-3__v1", "count": 3,
     },

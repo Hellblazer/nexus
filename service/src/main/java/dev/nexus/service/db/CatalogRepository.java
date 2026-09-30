@@ -6936,9 +6936,32 @@ public final class CatalogRepository {
      * without a DB round-trip.
      */
     public void beginIndexRun(String tenant, String docId, String contentHash, String runId, String collection) {
-        log.debug("event=index_run_begin tenant={} doc_id={} run_id={} collection={}",
-                   tenant, docId, runId, collection);
-        tenantScope.withTenant(tenant, ctx -> {
+        beginIndexRun(tenant, docId, contentHash, runId, collection, false);
+    }
+
+    /**
+     * {@link #beginIndexRun(String, String, String, String, String)} that can also return the
+     * document's PRE-RUN manifest (RDR-223, bead nexus-z0o2p.10).
+     *
+     * <p>With {@code snapshotManifest} true the result is {@code {prior_chashes, prior_count}}:
+     * {@code prior_chashes} the DISTINCT chashes of the document's manifest in position order,
+     * {@code prior_count} the manifest ROW count (a chash used at two positions counts twice),
+     * both read in the SAME transaction as the {@code indexing} stamp and before any write of
+     * the run. A multi-batch writer computes its deferred sweep from this snapshot instead of
+     * from the first batch's {@code dropped_chashes}: a first-batch response that is lost and
+     * resent reads the manifest the first attempt already replaced, and would report nothing
+     * dropped. A begin is idempotent and precedes every write of the run, so a resent begin
+     * still snapshots the pre-run manifest. Without the flag the result is {@code null} and no
+     * manifest is read (every existing caller).
+     *
+     * <p>A document with no live row (unknown tumbler) snapshots empty, as the stamp itself is
+     * a no-op for it; a tombstoned one is refused exactly as before.
+     */
+    public Map<String, Object> beginIndexRun(String tenant, String docId, String contentHash,
+                                             String runId, String collection, boolean snapshotManifest) {
+        log.debug("event=index_run_begin tenant={} doc_id={} run_id={} collection={} snapshot={}",
+                   tenant, docId, runId, collection, snapshotManifest);
+        return tenantScope.withTenant(tenant, ctx -> {
             int updated = ctx.update(CATALOG_DOCUMENTS)
                .set(CATALOG_DOCUMENTS.INDEX_STATE, "indexing")
                .set(CATALOG_DOCUMENTS.INDEX_CONTENT_HASH, nne(contentHash))
@@ -6960,7 +6983,24 @@ public final class CatalogRepository {
                 // for an unknown tumbler stays a no-op, not a thrown exception).
                 log.warn("event=index_run_begin_unknown_doc tenant={} doc_id={}", tenant, docId);
             }
-            return null;
+            if (!snapshotManifest) return null;
+            // ONE fetch of every manifest row's chash in position order: the count is its size and
+            // the distinct list its first-seen order, so the two fields cannot disagree.
+            var rowChashes = ctx.select(CHK_CHASH_HEX).from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
+                       .and(liveParentDoc(ctx, tenant)))
+                .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
+                .fetch();
+            Set<String> distinct = new LinkedHashSet<>();
+            for (var r : rowChashes) {
+                String c = r.value1();
+                if (c != null && !c.isBlank()) distinct.add(c);
+            }
+            Map<String, Object> snapshot = new LinkedHashMap<>();
+            snapshot.put("prior_chashes", new ArrayList<>(distinct));
+            snapshot.put("prior_count", rowChashes.size());
+            return snapshot;
         });
     }
 

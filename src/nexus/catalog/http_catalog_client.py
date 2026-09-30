@@ -249,6 +249,60 @@ _find_all_by_file_paths_404_warned: bool = False
 # NOT this fix.
 _COMBINED_WRITE_EMBED_TIMEOUT_S = 600.0
 
+#: The engine's caps on the RDR-223 append routes (Phase 1, P1.3/P1.4). Refused here, locally and
+#: before any round trip, so a violation reads as a client bug naming the cap instead of a 400
+#: that arrives after an embed budget was set aside. ``sweep_chashes`` at most this many per
+#: append (per document, on ``append_many``): a longer list is split across several appends by
+#: the caller (``nexus.catalog.multi_batch_write``).
+MANIFEST_APPEND_SWEEP_CHASHES_CAP = 300
+#: ``append_many`` accepts at most this many documents / request-level chunks; the client holds
+#: ``append`` to the same chunk count.
+MANIFEST_APPEND_MANY_MAX_DOCS = 1000
+MANIFEST_APPEND_MANY_MAX_CHUNKS = 300
+
+
+def _check_sweep_chashes(what: str, sweep_chashes: "list[str] | None") -> None:
+    """Refuse an over-cap ``sweep_chashes`` list locally (the engine 400s it, but only after the
+    request was built and, on a chunk-carrying append, an embed budget was set aside)."""
+    if sweep_chashes and len(sweep_chashes) > MANIFEST_APPEND_SWEEP_CHASHES_CAP:
+        raise ValueError(
+            f"{what}: {len(sweep_chashes)} sweep_chashes exceeds the engine cap of "
+            f"{MANIFEST_APPEND_SWEEP_CHASHES_CAP} per request; split the list across appends"
+        )
+
+
+def _echo_supplied_vectors(
+    what: str, chunks: "list[dict] | None", result: dict,
+) -> None:
+    """Ack-echo for client-supplied vectors: a request that carried an ``embedding`` and got a
+    response with no ``vectors_supplied`` key was handled by an engine that does not know the
+    field, which would have embedded the text itself and ignored the vector. That is silent
+    substitution of content the caller chose, so it is a hard error (the client and the engine
+    are released as a pair; there is no old-engine fallback)."""
+    if any(c.get("embedding") is not None for c in (chunks or ())) and "vectors_supplied" not in result:
+        raise RuntimeError(
+            f"{what}: sent client-supplied embeddings but the response carried no "
+            "'vectors_supplied' key; the engine does not understand supplied vectors and "
+            "embedded the text itself"
+        )
+
+
+def _check_supplied_vectors(
+    what: str, chunks: "list[dict] | None", embedding_model: "str | None",
+) -> None:
+    """A chunk carrying a client-supplied ``embedding`` needs the request's ``embedding_model``
+    (RDR-223 P1.5: the engine refuses a vector it cannot tie to the collection's model). Checked
+    before any round trip."""
+    if embedding_model:
+        return
+    for i, c in enumerate(chunks or ()):
+        if c.get("embedding") is not None:
+            raise ValueError(
+                f"{what}: chunks[{i}] carries a client-supplied 'embedding' but no "
+                "'embedding_model' was given; the engine refuses a vector it cannot tie to the "
+                "collection's embedding model"
+            )
+
 #: Page size for update_many POSTs — same MAX_BATCH_DOC_IDS cap as
 #: register_many (nexus-xedhp).
 _UPDATE_MANY_PAGE = 1000
@@ -959,24 +1013,39 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
     def begin_index_run(
         self, doc_id: str, content_hash: str, run_id: str, collection: str,
-    ) -> None:
+        *, snapshot_manifest: bool = False,
+    ) -> dict | None:
         """POST /v1/catalog/index-run/begin — stamp ``index_state='indexing'``
         BEFORE the first chunk upsert (memo §3.5 T0: the fence is committed
         before the first byte of content and cleared only after the last).
 
         Idempotent; NOT a lock (nexus-lcmbp non-goal, memo §5) — a retry or a
         second concurrent run simply re-stamps the same shape.
+
+        *snapshot_manifest* (RDR-223, nexus-z0o2p.10; additive engine field): also return the
+        document's PRE-RUN manifest, read in the same transaction as the stamp:
+        ``{"ok": True, "prior_chashes": [<distinct chash, position order>], "prior_count":
+        <manifest ROW count>}``. A multi-batch writer computes its deferred sweep from it. Without
+        the flag the response is ``{"ok": True}`` and no manifest is read.
+
+        Returns the response dict, or ``None`` on a 404 (an engine with no fence route, logged at
+        WARNING). Existing callers ignore the value; a caller that needs the fence or the snapshot
+        must treat ``None`` as an error.
         """
+        body: dict = {
+            "doc_id": doc_id, "content_hash": content_hash,
+            "run_id": run_id, "collection": collection,
+        }
+        if snapshot_manifest:
+            body["snapshot_manifest"] = True
         try:
-            self._post("/index-run/begin", {
-                "doc_id": doc_id, "content_hash": content_hash,
-                "run_id": run_id, "collection": collection,
-            })
+            result = self._post("/index-run/begin", body)
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 _log.warning("index_run_begin_engine_floor", doc_id=doc_id)
-                return
+                return None
             raise
+        return result if isinstance(result, dict) else {}
 
     def complete_index_run(
         self, doc_id: str, content_hash: str, chunk_count: int,
@@ -3427,20 +3496,211 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             "rows": self._manifest_rows(chunks),
         })
 
-    def append_manifest_chunks(self, doc_id: str, chunks: list[dict], *, collection: str) -> None:
-        """Append manifest rows for doc_id.
+    def append_manifest_chunks(
+        self, doc_id: str, chunks: list[dict], *, collection: str,
+        chunk_payload: "list[dict] | None" = None,
+        sweep_chashes: "list[str] | None" = None,
+        force_re_embed: bool = False,
+        embedding_model: str | None = None,
+    ) -> dict:
+        """Append manifest rows for doc_id (rows upsert BY POSITION).
 
         RDR-191: *collection* is REQUIRED — see :meth:`write_manifest`.
+
+        *chunks* is the manifest ROW list (``{chash, position, ...}``), as it has always been.
+        RDR-223 P2.0 adds four optional, keyword-only fields, each a Phase 1 engine addition:
+
+        *chunk_payload* — ``[{chash, text, metadata[, embedding]}, ...]``: the chunk rows the
+        appended rows reference, embedded (RDR-181 existence partition) and inserted in the SAME
+        transaction as the rows, so no chunk lands without an owner. Same element shape as
+        :meth:`write_manifest_many`'s ``chunks``. Uses the combined write's embed budget and, like
+        it, never retries a ReadTimeout (a retry would start an uncancelled duplicate embed): the
+        timeout surfaces as :class:`~nexus.errors.CombinedWriteEmbedTimeoutError`. ACK-ECHO: a
+        response with no ``chunks_written`` means the engine dropped the unknown field (it predates
+        RDR-223) and the chunks were NOT written, so this raises ``RuntimeError`` rather than let
+        the caller carry on with a manifest naming chunks that never landed.
+
+        *sweep_chashes* — at most :data:`MANIFEST_APPEND_SWEEP_CHASHES_CAP` chashes the engine
+        sweeps after this append commits, under its NOT EXISTS guards (a chash a later batch
+        re-added, or another document owns, survives). An empty *chunks* with a non-empty
+        *sweep_chashes* is a sweep-only append. ACK-ECHO: a response with no ``swept`` key means
+        the engine ignored the field and did not sweep; that raises ``RuntimeError`` (client and
+        engine are released as a pair, there is no old-engine fallback).
+
+        *force_re_embed* mirrors :meth:`write_manifest_many`'s. *embedding_model* is required as
+        soon as any *chunk_payload* element carries an ``embedding`` (a client-supplied vector);
+        checked locally before any round trip.
+
+        Returns the engine's response (``{ok, count[, chunks_written, chunks_deduped,
+        embed_skipped, embed_embedded, swept, sweep_skipped, sweep_detail]}``).
         """
         if not collection:
             raise ValueError(
                 "append_manifest_chunks: 'collection' is required and must "
                 "be non-blank (RDR-191 — the engine no longer infers it)"
             )
-        self._post("/manifest/append", {
+        _check_sweep_chashes("append_manifest_chunks", sweep_chashes)
+        _check_supplied_vectors("append_manifest_chunks", chunk_payload, embedding_model)
+        if chunk_payload is not None and len(chunk_payload) > MANIFEST_APPEND_MANY_MAX_CHUNKS:
+            raise ValueError(
+                f"append_manifest_chunks: {len(chunk_payload)} chunks exceeds the "
+                f"{MANIFEST_APPEND_MANY_MAX_CHUNKS}-chunk request cap (the engine caps "
+                "append_many at that and append follows it)"
+            )
+        body: dict = {
             "doc_id": doc_id, "collection": collection,
             "rows": self._manifest_rows(chunks),
-        })
+        }
+        if sweep_chashes:
+            body["sweep_chashes"] = list(sweep_chashes)
+        if chunk_payload is None:
+            result = self._post("/manifest/append", body)
+        else:
+            from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+            ensure_collection_registered(collection, registrar=self._catalog_registrar)
+            body["chunks"] = chunk_payload
+            if force_re_embed:
+                body["force_re_embed"] = True
+            if embedding_model:
+                body["embedding_model"] = embedding_model
+            result = self._post_embedding_write(
+                "/manifest/append", body, collection=collection, chunk_count=len(chunk_payload))
+        out: dict = dict(result) if isinstance(result, dict) else {}
+        if chunk_payload is not None and "chunks_written" not in out:
+            raise RuntimeError(
+                f"append ack mismatch for {collection!r} doc {doc_id!r}: sent "
+                f"{len(chunk_payload)} chunks but the response carried no 'chunks_written' "
+                "key — the engine may predate RDR-223's append-with-chunks; refusing to treat "
+                "the chunk content as durably written"
+            )
+        if sweep_chashes and "swept" not in out:
+            raise RuntimeError(
+                f"append ack mismatch for {collection!r} doc {doc_id!r}: sent "
+                f"{len(sweep_chashes)} sweep_chashes but the response carried no 'swept' key; "
+                "the engine did not run the deferred sweep"
+            )
+        _echo_supplied_vectors("append_manifest_chunks", chunk_payload, out)
+        return out
+
+    def append_manifest_many(
+        self, docs: "list[tuple[str, list[dict]]]", *, collection: str,
+        chunks: "list[dict] | None" = None,
+        sweep_chashes: "dict[str, list[str]] | None" = None,
+        force_re_embed: bool = False,
+        embedding_model: str | None = None,
+    ) -> dict:
+        """Append rows for several documents in ONE request (RDR-223 P1.4, ``append_many``).
+
+        ``write_manifest_many``'s request shape with append semantics: each document's rows
+        upsert by position in its own transaction together with the chunk rows THAT document's
+        rows reference (from the request-level *chunks*, deduped and embedded once), so a failing
+        document rolls back alone. *sweep_chashes* maps a ``doc_id`` in *docs* to the chashes swept
+        after that document commits (run after every document of the request has been appended).
+
+        Caps, refused locally before any round trip: :data:`MANIFEST_APPEND_MANY_MAX_DOCS`
+        documents, :data:`MANIFEST_APPEND_MANY_MAX_CHUNKS` chunks,
+        :data:`MANIFEST_APPEND_SWEEP_CHASHES_CAP` sweep chashes per document.
+
+        A chunk-carrying request rides the combined write's embed budget and never retries a
+        ReadTimeout, and its ack is echoed as for :meth:`append_manifest_chunks`. An engine with
+        no such route answers 404, raised as :class:`~nexus.errors.ManifestAppendManyUnsupportedError`;
+        there is NO per-document fallback (it would orphan chunks).
+
+        Returns the engine's response: ``{docs, rows, failed_doc_ids, failed, chunks_written,
+        swept, sweep_skipped, sweep_detail, results}`` (``results`` one entry per document in
+        request order: ``{doc_id, ok, ...}``) plus the embed counts when *chunks* was sent. A
+        document that failed is in ``failed_doc_ids``; it is NOT an exception here.
+        """
+        if not collection:
+            raise ValueError(
+                "append_manifest_many: 'collection' is required and must be non-blank"
+            )
+        if len(docs) > MANIFEST_APPEND_MANY_MAX_DOCS:
+            raise ValueError(
+                f"append_manifest_many: {len(docs)} docs exceeds the engine cap of "
+                f"{MANIFEST_APPEND_MANY_MAX_DOCS} docs per request"
+            )
+        if chunks is not None and len(chunks) > MANIFEST_APPEND_MANY_MAX_CHUNKS:
+            raise ValueError(
+                f"append_manifest_many: {len(chunks)} chunks exceeds the engine cap of "
+                f"{MANIFEST_APPEND_MANY_MAX_CHUNKS} chunks per request"
+            )
+        sweeps = sweep_chashes or {}
+        known = {d for d, _ in docs}
+        stray = sorted(set(sweeps) - known)
+        if stray:
+            raise ValueError(
+                f"append_manifest_many: sweep_chashes names document(s) not in docs: {stray}"
+            )
+        for d, lst in sweeps.items():
+            _check_sweep_chashes(f"append_manifest_many sweep_chashes[{d!r}]", lst)
+        sweep_requested = any(sweeps.values())
+        _check_supplied_vectors("append_manifest_many", chunks, embedding_model)
+        body_docs: list[dict] = []
+        for d, rows in docs:
+            entry: dict = {"doc_id": d, "rows": self._manifest_rows(rows)}
+            if sweeps.get(d):
+                entry["sweep_chashes"] = list(sweeps[d])
+            body_docs.append(entry)
+        body: dict = {"docs": body_docs, "collection": collection}
+        try:
+            if chunks is None:
+                result = self._post("/manifest/append_many", body)
+            else:
+                from nexus.corpus import ensure_collection_registered  # noqa: PLC0415 — deferred: nexus.corpus imports back into catalog
+                ensure_collection_registered(collection, registrar=self._catalog_registrar)
+                body["chunks"] = chunks
+                if force_re_embed:
+                    body["force_re_embed"] = True
+                if embedding_model:
+                    body["embedding_model"] = embedding_model
+                result = self._post_embedding_write(
+                    "/manifest/append_many", body, collection=collection,
+                    chunk_count=len(chunks))
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                from nexus.errors import ManifestAppendManyUnsupportedError  # noqa: PLC0415 — deferred: only the 404 path needs it
+                raise ManifestAppendManyUnsupportedError(
+                    collection=collection, doc_count=len(docs)) from exc
+            raise
+        out: dict = dict(result) if isinstance(result, dict) else {}
+        if chunks is not None and "chunks_written" not in out:
+            raise RuntimeError(
+                f"append_many ack mismatch for {collection!r}: sent {len(chunks)} chunks but "
+                "the response carried no 'chunks_written' key — refusing to treat the chunk "
+                "content as durably written"
+            )
+        if sweep_requested and "swept" not in out:
+            raise RuntimeError(
+                f"append_many ack mismatch for {collection!r}: sent sweep_chashes but the "
+                "response carried no 'swept' key; the engine did not run the deferred sweeps"
+            )
+        _echo_supplied_vectors("append_manifest_many", chunks, out)
+        return out
+
+    def _post_embedding_write(
+        self, path: str, body: dict, *, collection: str, chunk_count: int,
+    ) -> Any:
+        """POST a chunk-carrying combined-write request (nexus-y9t08).
+
+        The engine embeds synchronously inside the request, so it gets the embed budget instead
+        of the control-plane default, and a ReadTimeout is neither retried here
+        (``retry_read_timeout=False``) nor at the outer ``_manifest_write_with_retry`` layer: it
+        is converted to :class:`~nexus.errors.CombinedWriteEmbedTimeoutError`, raised OUTSIDE the
+        ``except`` block so no ``__context__`` chains back to the ReadTimeout (a chained context
+        would still classify as connectivity at the outer layer).
+        """
+        pending: httpx.ReadTimeout | None = None
+        result: Any = None
+        try:
+            result = self._post(
+                path, body, timeout=_COMBINED_WRITE_EMBED_TIMEOUT_S, retry_read_timeout=False)
+        except httpx.ReadTimeout as rt:
+            pending = rt
+        if pending is not None:
+            raise CombinedWriteEmbedTimeoutError(
+                collection=collection or "", chunk_count=chunk_count, original=str(pending))
+        return result
 
     def get_manifest(self, doc_id: str) -> list[ManifestRow]:
         """Return ordered manifest rows — typed like local Catalog.get_manifest.
@@ -3873,6 +4133,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         chunks: "list[dict] | None" = None,
         collection: str,
         force_re_embed: bool = False,
+        embedding_model: str | None = None,
     ) -> dict:
         """Atomic per-doc manifest REPLACE for many docs in one POST.
 
@@ -3949,6 +4210,27 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         counts are carried separately so a truncated list is detectable
         (bead-amendment MUST, same discipline ``complete_refused_count``
         already established).
+
+        RDR-223 P2.0 (nexus-z0o2p.10) adds to that result, each key present ONLY when the
+        engine sent it, so absence stays distinguishable from zero:
+
+        * ``dropped_chashes`` — ``{doc_id: [chash, ...]}``, the chashes each committed write
+          dropped from that document's PREVIOUS manifest (empty for a new or unchanged
+          document; a failed document has no entry), merged across pages. Present whether or
+          not *sweep* is on; with *sweep* off nothing is swept and this is the list a
+          multi-batch writer carries to the document's last append as ``sweep_chashes``. The
+          key is present exactly when the engine sent it; this method does not invent it, and
+          the multi-batch writer treats its absence for a committed document as an error.
+        * ``dropped_count`` / ``dropped_unknown`` — the engine's per-document count of the
+          dropped list (``{doc_id: n}``) and the doc_ids whose previous-manifest read failed
+          after the commit (their drop list is UNKNOWN, not empty). Passed through when sent.
+        * ``embed_embedded`` / ``embed_skipped`` / ``chunks_deduped`` /
+          ``vectors_supplied`` / ``vector_mismatches`` — the combined write's counters, when
+          *chunks* was sent.
+
+        *embedding_model* (RDR-223 P1.5) names the model that produced any ``embedding`` a
+        chunk carries — REQUIRED as soon as one does (checked here, before any round trip) and
+        ignored by the engine otherwise. Sent on the chunk-carrying page only.
         """
         if not collection:
             raise ValueError(
@@ -3973,6 +4255,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         # (nexus-dvgsf): a client pinned to a second engine must register
         # the collection where it is about to write it.
         ensure_collection_registered(collection, registrar=self._catalog_registrar)
+        _check_supplied_vectors("write_manifest_many", chunks, embedding_model)
         failed: list[str] = []
         refused: list[dict] = []
         refused_count = 0
@@ -3980,6 +4263,10 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         sweep_skipped_total = 0
         sweep_detail: list[dict] = []
         chunks_written: int | None = None
+        dropped_chashes: dict[str, list[str]] | None = None
+        dropped_counts: dict[str, int] | None = None
+        dropped_unknown: list[str] | None = None
+        combined_counts: dict[str, int] = {}
         for page_num, start in enumerate(range(0, len(docs), _MANIFEST_GET_MANY_PAGE)):
             page = docs[start : start + _MANIFEST_GET_MANY_PAGE]
             # RDR-191: 'collection' rides EVERY page's body, not only the
@@ -4006,6 +4293,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 body["chunks"] = chunks
                 if force_re_embed:
                     body["force_re_embed"] = True
+                if embedding_model:
+                    body["embedding_model"] = embedding_model
             if page_carries_chunks:
                 # nexus-y9t08: this page's POST triggers a synchronous
                 # server-side embed — give it the embed-appropriate
@@ -4030,21 +4319,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 # would still classify as connectivity at the outer layer
                 # despite the new top-level type (verified: `raise ... from
                 # None` clears __cause__ but NOT __context__).
-                _pending_timeout: httpx.ReadTimeout | None = None
-                try:
-                    result = self._post(
-                        "/manifest/write_many", body,
-                        timeout=_COMBINED_WRITE_EMBED_TIMEOUT_S,
-                        retry_read_timeout=False,
-                    )
-                except httpx.ReadTimeout as _rt:
-                    _pending_timeout = _rt
-                if _pending_timeout is not None:
-                    raise CombinedWriteEmbedTimeoutError(
-                        collection=collection or "",
-                        chunk_count=len(chunks) if chunks else 0,
-                        original=str(_pending_timeout),
-                    )
+                result = self._post_embedding_write(
+                    "/manifest/write_many", body, collection=collection,
+                    chunk_count=len(chunks) if chunks else 0)
             else:
                 result = self._post("/manifest/write_many", body)
             result = result if isinstance(result, dict) else {}
@@ -4060,6 +4337,24 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                         "written"
                     )
                 chunks_written = int(result.get("chunks_written") or 0)
+                _echo_supplied_vectors("write_manifest_many", chunks, result)
+                for k in ("embed_embedded", "embed_skipped", "chunks_deduped",
+                          "vectors_supplied", "vector_mismatches"):
+                    if k in result:
+                        combined_counts[k] = int(result.get(k) or 0)
+            page_dropped = result.get("dropped_chashes")
+            if isinstance(page_dropped, dict):
+                if dropped_chashes is None:
+                    dropped_chashes = {}
+                for d, lst in page_dropped.items():
+                    dropped_chashes[d] = list(lst or [])
+            page_counts = result.get("dropped_count")
+            if isinstance(page_counts, dict):
+                dropped_counts = {**(dropped_counts or {}),
+                                  **{d: int(n) for d, n in page_counts.items()}}
+            page_unknown = result.get("dropped_unknown")
+            if isinstance(page_unknown, list):
+                dropped_unknown = [*(dropped_unknown or []), *page_unknown]
             failed.extend(result.get("failed_doc_ids", []))
             refused.extend(result.get("complete_refused") or [])
             refused_count += int(result.get("complete_refused_count") or 0)
@@ -4087,6 +4382,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         }
         if chunks is not None:
             out["chunks_written"] = chunks_written or 0
+            out.update(combined_counts)
+        if dropped_chashes is not None:
+            out["dropped_chashes"] = dropped_chashes
+        if dropped_counts is not None:
+            out["dropped_count"] = dropped_counts
+        if dropped_unknown is not None:
+            out["dropped_unknown"] = dropped_unknown
         return out
 
     def resync_chunk_count_cache(self, doc_id: str) -> None:
