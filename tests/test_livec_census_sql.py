@@ -334,13 +334,28 @@ def test_livec_census_manifest_probe_is_an_index_condition_under_rls(
     assert flags.returncode == 0, flags.stderr
     assert flags.stdout.split() == ["byteaeq,t", "texteq,t"], flags.stdout
 
-    # On a near-empty table the planner may cost (tenant, collection) the
-    # same as (tenant, chash) and pick it, which says nothing about pushdown.
-    # So, as the substrate superuser, drop that competitor inside a
-    # transaction that is rolled back, switch to nexus_svc, and require the
-    # chash equality to appear in the Index Cond of idx_catalog_chunks_chash.
+    # On a near-empty table the planner may cost any tenant_id-leading index
+    # the same as (tenant, chash) and pick it, which says nothing about
+    # pushdown. Dropping only idx_catalog_chunks_collection was not enough:
+    # CI then picked idx_catalog_chunks_doc_id with chash as a Filter
+    # (nexus-wbfpw.38, the first time a routine gate ran this test). So, as
+    # the substrate superuser, drop EVERY other index and the primary key
+    # inside a transaction that is rolled back, switch to nexus_svc, and
+    # require the chash equality in the Index Cond of the one index left.
+    # If byteaeq stops being leakproof the chash test becomes a Filter and
+    # the cond assertion below still fails.
     q = (
-        "BEGIN; DROP INDEX nexus.idx_catalog_chunks_collection; "
+        "BEGIN; DO $$ DECLARE r record; BEGIN "
+        "FOR r IN SELECT conname FROM pg_constraint "
+        "WHERE conrelid = 'nexus.catalog_document_chunks'::regclass "
+        "AND contype IN ('p', 'u') LOOP "
+        "EXECUTE format('ALTER TABLE nexus.catalog_document_chunks "
+        "DROP CONSTRAINT %I CASCADE', r.conname); END LOOP; "
+        "FOR r IN SELECT i.relname FROM pg_index x "
+        "JOIN pg_class i ON i.oid = x.indexrelid "
+        "WHERE x.indrelid = 'nexus.catalog_document_chunks'::regclass "
+        "AND i.relname <> 'idx_catalog_chunks_chash' LOOP "
+        "EXECUTE format('DROP INDEX nexus.%I', r.relname); END LOOP; END $$; "
         "SET LOCAL ROLE nexus_svc; SET LOCAL enable_seqscan = off; "
         f"SELECT set_config('nexus.tenant', '{t2_service_env}', true); "
         "EXPLAIN SELECT 1 FROM nexus.catalog_document_chunks m "
