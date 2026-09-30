@@ -7,7 +7,7 @@ Real engine substrate (``t2_service_env``) for every test that exercises
 export/import against a live catalog: owner resolution reads
 ``docs_for_chashes``/``get_manifests``/``resolve_many`` and writes
 ``register``/``write_manifest`` on the real ``HttpCatalogClient``, which a
-mocked T3 client cannot stand in for. ``test_accumulate_owner_group_*`` is
+mocked T3 client cannot stand in for. ``test_locate_owner_group_*`` is
 the one pure-unit exception (no catalog or T3 call at all).
 """
 from __future__ import annotations
@@ -89,14 +89,24 @@ def _owned_doc(writer, client, collection: str, owner_tumbler, title: str, conte
 
 
 
-def _spy_combined_writes(monkeypatch) -> list[str]:
-    """Doc ids named by every combined write (``write_many`` / ``append_many``) the test makes."""
-    named: list[str] = []
+class _CombinedWrites(list):
+    """Doc ids named by every combined write; ``chashes`` are the chunk payloads those writes carried."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.chashes: set[str] = set()
+
+
+def _spy_combined_writes(monkeypatch) -> _CombinedWrites:
+    """Doc ids named by every combined write (``write_many`` / ``append_many``) the test makes, and the
+    chashes of the chunk payloads they carried."""
+    named = _CombinedWrites()
     for name in ("write_manifest_many", "append_manifest_many"):
         real = getattr(hcc.HttpCatalogClient, name)
 
         def _wrap(self, docs, *a, _real=real, **kw):
             named.extend(d for d, _ in docs)
+            named.chashes.update(c["chash"] for c in (kw.get("chunks") or ()))
             return _real(self, docs, *a, **kw)
 
         monkeypatch.setattr(hcc.HttpCatalogClient, name, _wrap)
@@ -645,6 +655,8 @@ def test_live_document_with_owner_and_legacy_chunks_keeps_all_of_them(t2_service
     _write_hand_crafted_nxexp(f, dst, records)
     result = import_collection(db=client, input_path=f, target_collection=dst, skip_existing=True)
     assert result["owned_count"] == 4
+    assert reader.resolve(doc).index_state == "complete", (
+        "two owner groups, one document: it is finished once, when all four records have arrived")
 
     rows = sorted(reader.get_manifest(doc), key=lambda r: r.position)
     assert [r.chash for r in rows] == chashes
@@ -690,6 +702,9 @@ def test_import_leaves_an_existing_documents_current_manifest_alone(t2_service_e
     assert doc not in writes, "the import must not write to a document that keeps its manifest"
     assert v2 in client.get_collection(coll).get(ids=[v2], include=[])["ids"], "the correction must stay visible"
     assert v1 not in client.get_collection(coll).get(ids=[v1], include=[])["ids"], "the old export must not resurrect v1"
+    # The read above is live-filtered, so it cannot tell "not written" from "written ownerless":
+    # nothing carrying v1 may have been sent at all.
+    assert v1 not in writes.chashes, "a kept document's chunk was sent to the engine"
     assert result["owned_count"] == 0
     assert (result["imported_count"], result["skipped_count"]) == (0, 1), result
     assert result["unowned_count"] == 1

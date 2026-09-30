@@ -943,8 +943,10 @@ def export_cmd(
                    "Pre-migration .nxexp files can carry a wrong label (GH #1370); "
                    "use this to supply the true model instead of trusting the header.")
 @click.option("--skip-existing", is_flag=True, default=False,
-              help="Skip records whose id already exists in the target collection, "
-                   "instead of overwriting. Useful for resuming a partial import.")
+              help="Do not send the text or vector of a record whose chunk the target collection "
+                   "already holds: the stored chunk and vector stay, and the record still gets "
+                   "its owner. Without it every record is written with the file's vector, which "
+                   "replaces a stored one.")
 def import_cmd(
     file: str,
     collection: str | None,
@@ -1015,7 +1017,7 @@ def import_cmd(
         is_tty=sys.stdout.isatty(),
         echo=lambda msg, nl: click.echo(msg, nl=nl, err=True),
         interval=5.0,
-        prefix="embed",
+        prefix="import",
     )
     file_heartbeat.arm(f"importing {input_path.name}")
     try:
@@ -1050,6 +1052,12 @@ def import_cmd(
         )
     if result.get("owned_count"):
         click.echo(f"  {result['owned_count']} records are owned by a catalog document.")
+    if result.get("vector_mismatches"):
+        n = result["vector_mismatches"]
+        click.echo(
+            f"  {n} stored vector{'s' if n != 1 else ''} differed from the file's and "
+            f"{'were' if n != 1 else 'was'} replaced by it."
+        )
     if result.get("unowned_count"):
         docs = result.get("unowned_documents") or []
         click.echo(

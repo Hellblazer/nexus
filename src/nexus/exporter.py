@@ -643,7 +643,7 @@ def _locate_owner_group(
 
     group = owner_groups.setdefault(
         source_uri,
-        {"source_uri": source_uri, "title": title, "content_type": content_type, "seen": 0},
+        {"key": source_uri, "source_uri": source_uri, "title": title, "content_type": content_type, "seen": 0},
     )
     if position is None:
         position = group["seen"]
@@ -671,6 +671,7 @@ def _locate_legacy_group(
     group = owner_groups.setdefault(
         f"legacy:{doc_id}",
         {
+            "key": f"legacy:{doc_id}",
             "source_uri": f"{file_source_uri}#{doc_id}",
             "title": meta.get("title") or doc_id,
             "content_type": fallback_content_type,
@@ -748,31 +749,70 @@ def _file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _prepass_groups(
+    input_path: Path,
+    *,
+    fallback_source_uri: str,
+    fallback_title: str,
+    fallback_content_type: str,
+    target_collection: str,
+) -> dict[str, dict]:
+    """Read the file once and return its owner groups with their record counts (``seen``) and
+    highest position (``maxpos``), never the records: memory is one small dict per group. The
+    import needs both before it writes anything. A document's LAST PAGE is the one that brings its
+    received rows up to its count, which is when it is swept and stamped; and a row that claims a
+    position already taken goes past the document's highest one, which only a whole-file scan can
+    name. Grouping is the import's own (:func:`_locate_owner_group`,
+    :func:`_locate_legacy_group`), so the keys and counts agree with the pass that writes."""
+    groups: dict[str, dict] = {}
+    with open(input_path, "rb") as f:
+        f.readline()  # header
+        with gzip.GzipFile(fileobj=f, mode="rb") as gz:
+            unpacker = msgpack.Unpacker(gz, raw=False, max_buffer_size=10 * 1024 * 1024)
+            for record in unpacker:
+                meta = record["metadata"]
+                if meta.get("doc_id") and not record.get("owner"):
+                    group, position = _locate_legacy_group(
+                        groups, meta, file_source_uri=fallback_source_uri,
+                        fallback_content_type=fallback_content_type)
+                else:
+                    group, position = _locate_owner_group(
+                        groups, record.get("owner"), fallback_source_uri=fallback_source_uri,
+                        fallback_title=fallback_title, fallback_content_type=fallback_content_type,
+                        target_collection=target_collection)
+                group["maxpos"] = max(group.get("maxpos", -1), position)
+    return groups
+
+
 class _OwnerImport:
     """The service-backed leg of :func:`import_collection` (RDR-223, nexus-z0o2p.19): every chunk is
     written together with its owner row, through the catalog manifest routes, carrying the
     exported vector. See ``import_collection``'s docstring for the whole contract.
 
     A page of records arrives; each record's owner group is resolved to a catalog document (found
-    or registered), then a document met for the first time is either KEPT (it already owns chunks in
-    this collection, so the import never replaces or extends its manifest: nexus-wbfpw.40) or
-    WRITTEN. The written documents' rows and chunks go out through
-    :class:`~nexus.catalog.multi_document_write.MultiDocumentImportWriter`: the first page of a
-    document is a replace (``write_manifest_many``), every later page an ``append_many``, and the
-    writer closes the run at :meth:`finish` (deferred sweeps, then completion stamps).
+    or registered), then a document met for the first time is one of
 
-    Kept-document policy. A document is kept when its manifest, restricted to this collection, is
-    non-empty, EXCEPT that a document whose ``index_state`` is ``indexing`` or ``failed`` and whose
-    ``index_content_hash`` is this file's hash is the leftover of an earlier run of this very
-    import that died: it is written again. Without that exception a rerun after a crash would keep
-    every half-written document and leave the rest of its chunks out for good.
+    * KEPT: it already owns chunks in this collection, so the import never replaces or extends its
+      manifest (nexus-wbfpw.40, Sam 2026-09-29) and the file's chunks for it are skipped and counted;
+    * RESUMED: it is ``indexing`` or ``failed`` and its ``index_content_hash`` is THIS file's sha256,
+      so it is the leftover of an earlier run of this same file that died (Sam 2026-09-30). It is
+      finished with the APPEND form (same file, same positions: an upsert by position drops nothing,
+      needs no sweep, and leaves no chunk of the dead run ownerless while the rerun catches up). A
+      document in any other state, or with another hash, that owns chunks stays kept;
+    * WRITTEN: it owns nothing here, so its first page is a replace and later pages append.
 
-    The last-page decision. The file is read once and its order is chash order, so a document's
-    last page is not known until the stream ends. The import therefore does not put a document's
-    ``sweep_chashes`` on a data append: the writer sends them as a trailing sweep-only append per
-    document at the end of the stream, before the completion stamp (see the writer's docstring).
-    Under keep-existing a document's previous manifest in this collection is empty, so the list is
-    empty for nearly every document and no request is sent for it.
+    Decisions are made with one batched ``get_manifests`` per page (plus one ``resolve_many`` for the
+    documents that own chunks). The written documents' rows and chunks go out through
+    :class:`~nexus.catalog.multi_document_write.MultiDocumentImportWriter`, which sweeps and stamps
+    each document on its own last page; :meth:`plan` supplies every document's record count from a
+    prepass (:func:`_prepass_groups`), which is how the last page is known. A crash therefore costs
+    only the documents still open, and each of those resumes on the next run.
+
+    Every payload chunk is written with ``force_re_embed`` so the exported vector replaces a stored
+    one, including a chash another live document shares (Sam 2026-09-30): the engine counts the
+    differing ones (``vector_mismatches``, reported in the import summary). A record whose chunk the
+    target already holds under ``--skip-existing`` is sent without a payload, so its stored vector
+    stays. ``metadata_merge`` keeps the keys another document's enrichment set on a shared chunk.
     """
 
     def __init__(
@@ -791,13 +831,18 @@ class _OwnerImport:
         self.embedding_model = embedding_model
         self.file_hash = file_hash
         self.skip_existing = skip_existing
-        #: identity of every owner group met so far (rows are never kept: the import streams)
+        #: owner groups met so far by the writing pass (rows are never kept: the import streams)
         self.groups: dict[str, dict] = {}
         self.imported_count = 0
         self.skipped_count = 0
+        self.vector_mismatches = 0
+        #: ``(label, reason)``: a group that failed to resolve carries its source URI, a document
+        #: that failed to write or stamp carries its tumbler; the label says which.
         self.failures: list[tuple[str, str]] = []
-        self._state: dict[str, str] = {}          # document tumbler -> "write" | "kept" | "failed"
+        self._state: dict[str, str] = {}          # document tumbler -> "write" | "resume" | "kept" | "failed"
         self._kept: dict[str, dict[str, set[str]]] = {}   # tumbler -> {"existing": ..., "file": ...}
+        self._family: dict[str, tuple[int, int]] = {}     # group key -> (records, highest position)
+        self._live_legacy: dict[str, Any] = {}
         self._reader: Any = None
         self._writer: Any = None
         self._import_writer: Any = None
@@ -814,7 +859,7 @@ class _OwnerImport:
         self._writer = make_catalog_writer(priority="interactive")
         self._import_writer = MultiDocumentImportWriter(
             self._writer, collection=self.collection_name, content_hash=self.file_hash,
-            embedding_model=self.embedding_model,
+            embedding_model=self.embedding_model, force_re_embed=True, metadata_merge=True,
         )
 
     def close(self) -> None:
@@ -826,6 +871,37 @@ class _OwnerImport:
         if self._import_writer is not None:
             self._import_writer.abort(error)
 
+    def progress(self) -> tuple[int, int]:
+        """``(documents stamped complete, documents begun)``."""
+        return self._import_writer.progress() if self._import_writer is not None else (0, 0)
+
+    # ── prepass ───────────────────────────────────────────────────────────────
+
+    def plan(self, pre: dict[str, dict]) -> None:
+        """Fix each group's record count and highest position from the prepass. Two groups that
+        will resolve to ONE document (a live document in this collection holding both owner-tagged
+        records and legacy ``doc_id`` records) are merged into a family whose figures are the sums,
+        so the document is finished once, when all of its records have arrived."""
+        self._ensure()
+        legacy_ids = [g["legacy_doc_id"] for g in pre.values() if g.get("legacy_doc_id")]
+        if legacy_ids:
+            self._live_legacy = {
+                doc_id: entry for doc_id, entry in self._reader.resolve_many(legacy_ids).items()
+                if entry.physical_collection == self.collection_name
+            }
+        family: dict[str, list[int]] = {k: [g["seen"], g.get("maxpos", -1)] for k, g in pre.items()}
+        owner_of: dict[str, str] = {}
+        for k, g in pre.items():
+            entry = self._live_legacy.get(g.get("legacy_doc_id") or "")
+            if entry is not None and entry.source_uri in pre and not pre[entry.source_uri].get("legacy_doc_id"):
+                owner_of[k] = entry.source_uri
+        for k, root in owner_of.items():
+            family[root][0] += pre[k]["seen"]
+            family[root][1] = max(family[root][1], pre[k].get("maxpos", -1))
+        for k in pre:
+            root = owner_of.get(k, k)
+            self._family[k] = (family[root][0], family[root][1])
+
     # ── one page ──────────────────────────────────────────────────────────────
 
     def flush(self, page: list[_PageRec]) -> None:
@@ -834,9 +910,12 @@ class _OwnerImport:
             return
         self._ensure()
         self._resolve_groups(page)
-        docs = list(dict.fromkeys(
-            r.group["doc_id"] for r in page if r.group.get("doc_id")))
-        self._decide([d for d in docs if d not in self._state])
+        first_group: dict[str, dict] = {}
+        for r in page:
+            doc = r.group.get("doc_id")
+            if doc and doc not in self._state:
+                first_group.setdefault(doc, r.group)
+        self._decide(first_group)
 
         writer = self._import_writer
         rows_by_doc: dict[str, list[dict]] = {}
@@ -850,7 +929,7 @@ class _OwnerImport:
                 self._kept[doc]["file"].add(r.rec_id)
                 self.skipped_count += 1
                 continue
-            if state != "write" or writer.failure(doc) is not None:
+            if state not in ("write", "resume") or writer.failure(doc) is not None:
                 continue
             rows_by_doc.setdefault(doc, []).append(
                 {"chash": r.rec_id, "position": writer.claim_position(doc, r.position)})
@@ -866,19 +945,8 @@ class _OwnerImport:
                     chunks[r.rec_id] = {
                         "chash": r.rec_id, "text": r.doc, "metadata": r.meta, "embedding": r.emb,
                     }
-        try:
-            result = writer.write_page(rows_by_doc, chunks)
-        except BatchWriteFailedError:
-            raise                       # its text names the engine answer it cannot trust
-        except Exception as exc:
-            msg = str(exc).lower()
-            if any(keyword in msg for keyword in _CONSTRAINT_HINT_KEYWORDS):
-                raise NexusError(
-                    f"{exc}\nHint: this looks like a chunk-id constraint conflict in collection "
-                    f"{self.collection_name!r} -- a non-conformant legacy chunk id or a duplicate "
-                    "key. If you're re-running a partial import, retry with --skip-existing."
-                ) from exc
-            raise
+        result = writer.write_page(rows_by_doc, chunks)
+        self.vector_mismatches += result.vector_mismatches
         sent_ids: list[str] = []
         sent_docs: list[str] = []
         sent_embs: list[list[float]] = []
@@ -898,8 +966,8 @@ class _OwnerImport:
                 sent_ids, self.collection_name, sent_docs, sent_embs, sent_metas, self.hooks,
             )
         _log.debug(
-            "import_page_written", documents=len(result.written), failed=len(result.failed),
-            chunks=len(sent_ids), total_so_far=self.imported_count,
+            "import_page_written", documents=len(result.written), finished=len(result.finished),
+            failed=len(result.failed), chunks=len(sent_ids), total_so_far=self.imported_count,
         )
 
     def _existing_ids(self, ids: list[str]) -> set[str]:
@@ -933,19 +1001,13 @@ class _OwnerImport:
         if self._owner_tumbler is None:
             self._owner_tumbler = _resolve_import_owner_tumbler(
                 self.collection_name, self._reader, self._writer)
-        legacy_ids = [g["legacy_doc_id"] for g in new if g.get("legacy_doc_id")]
-        live_legacy = {
-            doc_id: entry
-            for doc_id, entry in (self._reader.resolve_many(legacy_ids) if legacy_ids else {}).items()
-            if entry.physical_collection == self.collection_name
-        }
         # One group's failure must not strand every later group: record it, carry on, report all
         # at the end.
         for g in new:
             try:
                 g["doc_id"] = _resolve_owner_document(
                     g, self.collection_name, self._owner_tumbler, self._reader, self._writer,
-                    live_legacy,
+                    self._live_legacy,
                 )
             except Exception as exc:  # noqa: BLE001 — collected and re-raised at the end as one NexusError
                 _log.warning(
@@ -953,12 +1015,13 @@ class _OwnerImport:
                     collection=self.collection_name, source_uri=g["source_uri"], error=str(exc),
                 )
                 g["failed"] = True
-                self.failures.append((g["source_uri"], str(exc)))
+                self.failures.append((f"source {g['source_uri']}", str(exc)))
 
-    def _decide(self, new_docs: list[str]) -> None:
-        """Keep or write each document met for the first time (one batched manifest read)."""
-        if not new_docs:
+    def _decide(self, first_group: dict[str, dict]) -> None:
+        """Keep, resume or write each document met for the first time (one batched manifest read)."""
+        if not first_group:
             return
+        new_docs = list(first_group)
         try:
             manifests = self._reader.get_manifests(new_docs)
         except Exception as exc:  # noqa: BLE001 — cannot prove the documents are empty: do not write them
@@ -968,7 +1031,7 @@ class _OwnerImport:
             )
             for d in new_docs:
                 self._state[d] = "failed"
-                self.failures.append((d, str(exc)))
+                self.failures.append((f"document {d}", f"its manifest could not be read: {exc}"))
             return
         existing = {
             d: {
@@ -981,6 +1044,7 @@ class _OwnerImport:
         }
         occupied = [d for d in new_docs if existing[d]]
         resumable: set[str] = set()
+        entries: dict[str, Any] = {}
         if occupied:
             try:
                 entries = self._reader.resolve_many(occupied)
@@ -991,11 +1055,10 @@ class _OwnerImport:
                 )
                 for d in occupied:
                     self._state[d] = "failed"
-                    self.failures.append((d, str(exc)))
-                entries = {}
+                    self.failures.append((f"document {d}", f"its index state could not be read: {exc}"))
             for d in occupied:
                 e = entries.get(d)
-                if (e is not None and e.index_state in ("indexing", "failed")
+                if (d not in self._state and e is not None and e.index_state in ("indexing", "failed")
                         and e.index_content_hash == self.file_hash):
                     resumable.add(d)
         for d in new_docs:
@@ -1009,21 +1072,25 @@ class _OwnerImport:
                 # chunks for it out: since RDR-223 a chunk is only ever written with an owner row.
                 self._state[d] = "kept"
                 self._kept[d] = {"existing": existing[d], "file": set()}
-            else:
-                self._state[d] = "write"
+                continue
+            total, max_position = self._family[first_group[d]["key"]]
+            self._import_writer.register_document(
+                d, total_rows=total, max_position=max_position, resume=d in resumable)
+            self._state[d] = "resume" if d in resumable else "write"
 
     # ── end of stream ─────────────────────────────────────────────────────────
 
     def finish(self) -> dict[str, Any]:
-        """Close the run (sweeps, then completion stamps) and summarise. Returns ``owned_count``,
-        ``unowned_count`` and ``unowned_documents``; failures are in :attr:`failures`."""
+        """Collect the run's verdict and summarise. Returns ``owned_count``, ``unowned_count`` and
+        ``unowned_documents``; failures are in :attr:`failures`. Every document was swept and stamped
+        on its own last page, so nothing is sent here."""
         owned_count = 0
         unowned_count = 0
         unowned_tumblers: list[str] = []
         if self._import_writer is not None:
             done = self._import_writer.finish()
-            for d, reason in {**self._import_writer.failures(), **done.failed}.items():
-                self.failures.append((d, reason))
+            for d, reason in done.failed.items():
+                self.failures.append((f"document {d}", reason))
             owned_count += self._import_writer.rows_landed
         for doc, k in self._kept.items():
             file_chashes = k["file"]
@@ -1094,7 +1161,7 @@ def import_collection(
     -------
     dict with keys: collection_name, imported_count, skipped_count,
     rehashed_count, owned_count, unowned_count, unowned_documents,
-    elapsed_seconds.
+    vector_mismatches, elapsed_seconds.
     ``imported_count`` is the number of records written with their chunk;
     ``skipped_count`` those not written: already stored (``skip_existing``:
     their owner row is still written), or belonging to a document that keeps
@@ -1178,6 +1245,16 @@ def import_collection(
             "The file may be corrupt or was produced by an incompatible version."
         )
     collection_name: str = target_collection or source_collection
+    if _owners_apply(db) and collection_name.startswith(_BYPASS_SCHEMA_PREFIXES):
+        # Their ids are not chunk hashes and they have no catalog documents, so no chunk of theirs
+        # can be written with an owner row, and the engine refuses an ownerless write. Say so now,
+        # before anything is read or written, rather than fail halfway (or embed the text and drop
+        # the exported vectors, which is all the plain upsert could do).
+        raise NexusError(
+            f"Importing into {collection_name!r} is not supported: its ids are not chunk hashes and "
+            "it has no catalog documents, and the engine writes a chunk only together with an owner "
+            "row. Nothing was written."
+        )
     try:
         export_model: str = header["embedding_model"]
     except KeyError:
@@ -1251,7 +1328,7 @@ def import_collection(
     # bypass-schema collections (``taxonomy__*``: ids that are not chashes, no
     # catalog documents) keep the plain upsert -- production never takes either.
     owner_import: _OwnerImport | None = None
-    if _owners_apply(db) and not collection_name.startswith(_BYPASS_SCHEMA_PREFIXES):
+    if _owners_apply(db):
         from nexus.db.http_vector_client import per_collection_chunk_cap  # noqa: PLC0415 — deferred to avoid import cycle
         page_size = min(
             page_size,
@@ -1263,8 +1340,6 @@ def import_collection(
             embedding_model=effective_model, file_hash=_file_sha256(input_path),
             skip_existing=skip_existing,
         )
-    elif _owners_apply(db):
-        _log.info("import_owners_skipped_bypass_schema", collection=collection_name)
     else:
         # A non-service handle (the InMemoryVectorClient unit-test substrate).
         _log.info("import_owners_skipped_non_service_handle", collection=collection_name)
@@ -1331,8 +1406,18 @@ def import_collection(
 
     owned_count = 0
     unowned_count = 0
+    vector_mismatches = 0
+    failures: list[tuple[str, str]] = []
     unowned_documents: list[dict[str, Any]] = []
     try:
+        if owner_import is not None:
+            # A first read of the file, for counts only: each document's record count says which
+            # page is its last (when it is swept and stamped), and its highest position says where
+            # a colliding row goes. See _prepass_groups.
+            owner_import.plan(_prepass_groups(
+                input_path, fallback_source_uri=file_fallback_source_uri,
+                fallback_title=file_fallback_title, fallback_content_type=default_content_type,
+                target_collection=collection_name))
         with open(input_path, "rb") as f:
             f.readline()  # skip header (already parsed above)
             with gzip.GzipFile(fileobj=f, mode="rb") as gz:
@@ -1447,6 +1532,7 @@ def import_collection(
             owned_count = summary["owned_count"]
             unowned_count = summary["unowned_count"]
             unowned_documents = summary["unowned_documents"]
+            vector_mismatches = owner_import.vector_mismatches
             failures = owner_import.failures
             _log.info(
                 "import_owners_reconciled",
@@ -1454,18 +1540,9 @@ def import_collection(
                 document_groups=len(owner_import.groups),
                 owned_count=owned_count,
                 unowned_count=unowned_count,
-                failed_groups=len(failures),
+                vector_mismatches=vector_mismatches,
+                failures=len(failures),
             )
-            if failures:
-                shown = "; ".join(f"{uri}: {err}" for uri, err in failures[:5])
-                more = f" (and {len(failures) - 5} more)" if len(failures) > 5 else ""
-                raise NexusError(
-                    f"Import could not finish {len(failures)} of {len(owner_import.groups)} owner "
-                    f"documents in {collection_name!r}: {shown}{more}. A chunk is only ever written "
-                    f"with its owner row, so none of their chunks is stored ownerless; the chunks a "
-                    f"document did not receive are not stored. Re-running the same import finishes "
-                    f"them (a document left mid-import by this file is written again)."
-                )
         elif ids:
             f_ids, f_docs, f_embs, f_metas, skipped = _filter_existing(
                 ids, documents, embeddings, metadatas,
@@ -1476,11 +1553,27 @@ def import_collection(
             imported_count += len(f_ids)
     except BaseException as exc:
         if owner_import is not None:
+            stamped, begun = owner_import.progress()
+            _log.warning(
+                "import_aborted", collection=collection_name, documents_complete=stamped,
+                documents_begun=begun, error=f"{type(exc).__name__}: {exc}")
             owner_import.abort(f"{type(exc).__name__}: {exc}")
         raise
     finally:
         if owner_import is not None:
             owner_import.close()
+
+    if failures:
+        assert owner_import is not None          # only the owner leg collects failures
+        shown = "; ".join(f"{label}: {err}" for label, err in failures[:5])
+        more = f" (and {len(failures) - 5} more)" if len(failures) > 5 else ""
+        raise NexusError(
+            f"Import of {collection_name!r} could not finish {len(failures)} of "
+            f"{len(owner_import.groups)} owner documents: {shown}{more}. Every chunk that was stored "
+            "has its owner row (none is stored ownerless). A document left unfinished stays "
+            "indexing, and running the same import again finishes it; a document whose completion "
+            "stamp was refused needs a look at the engine log."
+        )
 
     elapsed = time.monotonic() - t0
 
@@ -1508,5 +1601,6 @@ def import_collection(
         "owned_count": owned_count,
         "unowned_count": unowned_count,
         "unowned_documents": unowned_documents,
+        "vector_mismatches": vector_mismatches,
         "elapsed_seconds": round(elapsed, 2),
     }

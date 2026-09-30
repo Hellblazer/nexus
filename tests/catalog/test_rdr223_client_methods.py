@@ -342,6 +342,47 @@ class TestAppendManifestMany:
             c.append_manifest_many(
                 [("1.1.1", [_row(_A, 0)])], sweep_chashes={"1.1.1": [_B]}, collection=_COLLECTION)
 
+    # ── per-document `complete` (nexus-z0o2p.19): the stamp rides a document's last append ──
+
+    def test_complete_rides_the_document_entry_and_the_refusal_fields_come_back(self, monkeypatch) -> None:
+        resp = {"docs": 2, "failed_doc_ids": [], "chunks_written": 1, "results": [],
+                "complete_refused": [{"doc_id": "1.1.2", "referenced": 1, "missing": 0, "chunk_count": 9}],
+                "complete_refused_count": 1}
+        c, rec = _client(monkeypatch, resp)
+        out = c.append_manifest_many(
+            [("1.1.1", [_row(_A, 0)]), ("1.1.2", [_row(_B, 0)])], chunks=[_chunk(_A), _chunk(_B)],
+            complete={"1.1.1": ("h1", 1), "1.1.2": ("h2", 9)}, collection=_COLLECTION)
+        body = rec.calls[0][1]
+        assert body["docs"] == [
+            {"doc_id": "1.1.1", "rows": [_row(_A, 0)], "complete": {"content_hash": "h1", "chunk_count": 1}},
+            {"doc_id": "1.1.2", "rows": [_row(_B, 0)], "complete": {"content_hash": "h2", "chunk_count": 9}},
+        ]
+        assert out["complete_refused_count"] == 1 and out["complete_refused"][0]["doc_id"] == "1.1.2"
+
+    def test_a_request_without_complete_carries_no_complete_key(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch, {"docs": 1, "results": [], "failed_doc_ids": []})
+        c.append_manifest_many([("1.1.1", [_row(_A, 0)])], collection=_COLLECTION)
+        assert all("complete" not in d for d in rec.calls[0][1]["docs"])
+
+    def test_an_answer_without_complete_refused_count_is_an_ack_mismatch(self, monkeypatch) -> None:
+        c, _ = _client(monkeypatch, {"docs": 1, "results": [], "failed_doc_ids": []})
+        with pytest.raises(RuntimeError, match="complete_refused_count"):
+            c.append_manifest_many(
+                [("1.1.1", [_row(_A, 0)])], complete={"1.1.1": ("h", 1)}, collection=_COLLECTION)
+
+    @pytest.mark.parametrize("stamp", [("", 1), ("h", -1), ("h", True), ("h", "1")])
+    def test_a_malformed_stamp_is_refused_before_any_post(self, monkeypatch, stamp) -> None:
+        c, rec = _client(monkeypatch)
+        with pytest.raises(ValueError, match="complete"):
+            c.append_manifest_many([("1.1.1", [_row(_A, 0)])], complete={"1.1.1": stamp}, collection=_COLLECTION)
+        assert rec.calls == []
+
+    def test_complete_naming_an_unknown_doc_is_refused(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch)
+        with pytest.raises(ValueError, match="not in docs"):
+            c.append_manifest_many([("1.1.1", [_row(_A, 0)])], complete={"9.9.9": ("h", 1)}, collection=_COLLECTION)
+        assert rec.calls == []
+
     def test_old_engine_404_is_a_typed_refusal_not_a_fallback(self, monkeypatch) -> None:
         """No per-document append fallback: it would orphan chunks, which is what the route exists
         to prevent."""
@@ -372,6 +413,34 @@ class TestBeginIndexRunSnapshot:
         out = c.begin_index_run("1.1.1", "h", "run", _COLLECTION, snapshot_manifest=True)
         assert rec.calls[0][1]["snapshot_manifest"] is True
         assert out["prior_chashes"] == [_A, _B] and out["prior_count"] == 3
+
+    def test_begin_many_with_snapshots_rides_the_flag_and_returns_them(self, monkeypatch) -> None:
+        resp = {"docs": 1, "failed_doc_ids": [],
+                "snapshots": {"1.1.1": {"prior_chashes": [_A], "prior_count": 2}}}
+        c, rec = _client(monkeypatch, resp)
+        out = c.begin_index_run_many(
+            [{"doc_id": "1.1.1", "content_hash": "h", "run_id": "r"}], _COLLECTION, snapshot_manifest=True)
+        assert rec.calls[0][0] == "/index-run/begin-many"
+        assert rec.calls[0][1]["snapshot_manifest"] is True
+        assert out["snapshots"]["1.1.1"]["prior_count"] == 2
+
+    def test_begin_many_without_the_flag_sends_the_old_body(self, monkeypatch) -> None:
+        c, rec = _client(monkeypatch, {"docs": 1, "failed_doc_ids": []})
+        c.begin_index_run_many([{"doc_id": "1.1.1", "content_hash": "h", "run_id": "r"}], _COLLECTION)
+        assert "snapshot_manifest" not in rec.calls[0][1]
+
+    def test_begin_many_asked_for_snapshots_but_answered_without_is_an_ack_mismatch(self, monkeypatch) -> None:
+        c, _ = _client(monkeypatch, {"docs": 1, "failed_doc_ids": []})
+        with pytest.raises(RuntimeError, match="snapshots"):
+            c.begin_index_run_many(
+                [{"doc_id": "1.1.1", "content_hash": "h", "run_id": "r"}], _COLLECTION, snapshot_manifest=True)
+
+    def test_begin_many_404_stays_the_empty_sentinel(self, monkeypatch) -> None:
+        req = httpx.Request("POST", "http://x/v1/catalog/index-run/begin-many")
+        err = httpx.HTTPStatusError("404", request=req, response=httpx.Response(404, request=req))
+        c, _ = _client(monkeypatch, err)
+        assert c.begin_index_run_many(
+            [{"doc_id": "1.1.1", "content_hash": "h", "run_id": "r"}], _COLLECTION, snapshot_manifest=True) == {}
 
     def test_a_404_returns_none(self, monkeypatch) -> None:
         req = httpx.Request("POST", "http://x/v1/catalog/index-run/begin")
@@ -412,7 +481,9 @@ def test_protocol_carries_the_new_signatures() -> None:
     assert {"chunk_payload", "sweep_chashes", "force_re_embed", "embedding_model"} <= params
     assert "embedding_model" in inspect.signature(CatalogWriter.write_manifest_many).parameters
     many = set(inspect.signature(CatalogWriter.append_manifest_many).parameters)
-    assert {"docs", "chunks", "sweep_chashes", "collection", "force_re_embed", "embedding_model"} <= many
+    assert {"docs", "chunks", "sweep_chashes", "complete", "collection", "force_re_embed",
+            "embedding_model"} <= many
+    assert "snapshot_manifest" in inspect.signature(CatalogWriter.begin_index_run_many).parameters
 
 
 @pytest.mark.parametrize("path", ["/v1/catalog/manifest/append", "/v1/catalog/manifest/append_many"])

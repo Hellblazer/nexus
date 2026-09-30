@@ -1029,7 +1029,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
     # ══════════════════════════════════════════════════════════════════════
 
     def begin_index_run_many(
-        self, docs: list[dict], collection: str,
+        self, docs: list[dict], collection: str, *, snapshot_manifest: bool = False,
     ) -> dict:
         """POST /v1/catalog/index-run/begin-many — batch ``index_state=
         'indexing'`` stamp for N documents in ONE round trip (nexus-vw594
@@ -1039,21 +1039,37 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         flush-grain repo path pays ONE round trip per FLUSH instead of one
         per FILE (the ``indexer.py`` ``:3631`` cost objection this closes).
 
+        *snapshot_manifest* (RDR-223, nexus-z0o2p.19; additive engine field): also return each
+        document's PRE-RUN manifest, read in the same transaction as that document's stamp, as
+        ``{"snapshots": {doc_id: {"prior_chashes": [...distinct, position order], "prior_count":
+        <manifest ROW count>}}}``. A document whose begin failed has no entry (it is in
+        ``failed_doc_ids``). ACK-ECHO: a response with no ``snapshots`` key means the engine
+        ignored the field, so this raises ``RuntimeError`` (client and engine are released as a
+        pair; there is no old-engine fallback).
+
         Returns ``{}`` on a 404 (pre-fence engine, engine-floor-tolerated:
         logged at WARNING) — same sentinel-vs-empty-success distinction as
         :meth:`begin_index_run`'s single-doc 404 handling. Any other
         transport failure propagates; the caller (:func:`nexus.doc_indexer.
         _fence_begin_many`) wraps this in its own advisory fail-open catch.
         """
+        body: dict = {"docs": docs, "collection": collection}
+        if snapshot_manifest:
+            body["snapshot_manifest"] = True
         try:
-            return self._post("/index-run/begin-many", {
-                "docs": docs, "collection": collection,
-            }) or {}
+            result = self._post("/index-run/begin-many", body) or {}
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 404:
                 _log.warning("index_run_begin_many_engine_floor", doc_count=len(docs))
                 return {}
             raise
+        if snapshot_manifest and result and not isinstance(result.get("snapshots"), dict):
+            raise RuntimeError(
+                f"begin_index_run_many: asked for snapshot_manifest for {len(docs)} document(s) in "
+                f"{collection!r} but the response carried no 'snapshots' object; the engine "
+                "predates the manifest snapshot and a sweep computed without it is not safe"
+            )
+        return result
 
     def begin_index_run(
         self, doc_id: str, content_hash: str, run_id: str, collection: str,
@@ -3638,6 +3654,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         self, docs: "list[tuple[str, list[dict]]]", *, collection: str,
         chunks: "list[dict] | None" = None,
         sweep_chashes: "dict[str, list[str]] | None" = None,
+        complete: "dict[str, tuple[str, int]] | None" = None,
         force_re_embed: bool = False,
         embedding_model: str | None = None,
         metadata_merge: bool = False,
@@ -3650,6 +3667,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         rows reference (from the request-level *chunks*, deduped and embedded once), so a failing
         document rolls back alone. *sweep_chashes* maps a ``doc_id`` in *docs* to the chashes swept
         after that document commits (run after every document of the request has been appended).
+
+        *complete* (RDR-223 fix round, nexus-z0o2p.19; additive engine field) maps a ``doc_id``
+        in *docs* to ``(content_hash, manifest ROW count)``: after that document's rows (and
+        chunks) land, in the SAME transaction, the engine runs ``write_many``'s fail-closed verify
+        (no manifest row names a missing chunk AND the manifest has exactly that many ROWS, so a
+        chash used at two positions counts twice) and stamps ``index_state='complete'``. A failed
+        verify does NOT fail the append (the rows are correct); the document lands in the response's
+        ``complete_refused`` and ``complete_refused_count`` counts it. ACK-ECHO: a request that
+        sent *complete* and got a response with no ``complete_refused_count`` was handled by an
+        engine that ignores the field, so this raises ``RuntimeError`` rather than let the caller
+        believe the document is stamped.
 
         Caps, refused locally before any round trip: :data:`MANIFEST_APPEND_MANY_MAX_DOCS`
         documents, :data:`MANIFEST_APPEND_MANY_MAX_CHUNKS` chunks,
@@ -3689,6 +3717,16 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         for d, lst in sweeps.items():
             _check_sweep_chashes(f"append_manifest_many sweep_chashes[{d!r}]", lst)
         sweep_requested = any(sweeps.values())
+        stamps = complete or {}
+        stray = sorted(set(stamps) - known)
+        if stray:
+            raise ValueError(
+                f"append_manifest_many: complete names document(s) not in docs: {stray}")
+        for d, (content_hash, row_count) in stamps.items():
+            if not content_hash or isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+                raise ValueError(
+                    f"append_manifest_many: complete[{d!r}] needs a non-empty content hash and a "
+                    f"non-negative integer row count, got ({content_hash!r}, {row_count!r})")
         _check_supplied_vectors("append_manifest_many", chunks, embedding_model)
         merge_fields = _metadata_mode_fields(
             "append_manifest_many", metadata_merge, metadata_delete_keys)
@@ -3697,6 +3735,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             entry: dict = {"doc_id": d, "rows": self._manifest_rows(rows)}
             if sweeps.get(d):
                 entry["sweep_chashes"] = list(sweeps[d])
+            if d in stamps:
+                entry["complete"] = {"content_hash": stamps[d][0], "chunk_count": stamps[d][1]}
             body_docs.append(entry)
         body: dict = {"docs": body_docs, "collection": collection}
         try:
@@ -3733,6 +3773,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             raise RuntimeError(
                 f"append_many ack mismatch for {collection!r}: sent sweep_chashes but the "
                 "response carried no 'swept' key; the engine did not run the deferred sweeps"
+            )
+        if stamps and "complete_refused_count" not in out:
+            raise RuntimeError(
+                f"append_many ack mismatch for {collection!r}: sent complete for {len(stamps)} "
+                "document(s) but the response carried no 'complete_refused_count' key; the engine "
+                "does not stamp on append_many and the documents are NOT complete"
             )
         _echo_supplied_vectors("append_manifest_many", chunks, out)
         return out
