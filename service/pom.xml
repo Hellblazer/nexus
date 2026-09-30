@@ -883,8 +883,12 @@
                                              pattern names the loadable library types directly (nexus-lhr6a):
                                              the jar also ships debug symbols (macOS .dSYM dirs, and a 290 MB
                                              onnxruntime.pdb on Windows), and an -H:ExcludeResources for the
-                                             .pdb had no effect on the Windows build. [.] rather than a
-                                             backslash escape, so no argfile layer can rewrite it. -->
+                                             .pdb had no effect on the Windows build. Measured
+                                             (nexus-vwfc0): there -H:ExcludeResources=.*[.]pdb excluded both
+                                             .pdb files (exe 143 MB) while -H:ExcludeResources=.*\.pdb, one arg
+                                             changed, did not (435 MB). The mechanism is not established (a
+                                             merely dropped backslash would still have matched), so write a
+                                             literal dot as [.] and never put a backslash in a buildArg. -->
                                         <buildArg>-H:IncludeResources=ai/onnxruntime/native/${onnx.native.dir}/[^/]*[.](so|dylib|dll)</buildArg>
                                         <buildArg>-H:IncludeResources=native/lib/${djl.native.dir}/.*</buildArg>
                                         <!-- Portability: compatibility march for CI/prod (not native) -->
