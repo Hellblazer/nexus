@@ -69,6 +69,7 @@ carries no method signature for a contract change to reconcile against) is a
 
 ## Unshipped
 
+- `53775f9f9` -- bead nexus-z0o2p.2 -- engine tag `the next cut after engine-service-v0.1.142, not yet tagged` -- [additive] `POST /v1/catalog/manifest/append` gains an OPTIONAL body field `chunks` (`[{chash, text, metadata}]`, the element shape of `write_many`) and an optional `force_re_embed`. When `chunks` is present the chunk rows the appended `rows` reference are embedded under the RDR-181 existence partition and inserted in the same transaction as those rows, and the response gains `chunks_written`, `chunks_deduped`, `embed_skipped` and `embed_embedded` plus the `X-Nexus-Usage-Tokens` header; `chunks` present with no CombinedWriteService wired answers 503. Without `chunks` the request and the `{"ok":true,"count":N}` response are unchanged. The per-commit detector does not flag the commit (no client wire module changed), so this entry is recorded by hand; the client half is RDR-223 P2.0 (nexus-z0o2p.10). OLD client + NEW engine is safe: no released client sends `chunks`, so every append is answered exactly as before. NEW client + OLD engine: the old engine ignores `chunks` and answers `{ok,count}` with no `chunks_written`, which the client must treat as "this engine did not write my chunks" and refuse to continue.
 
 ## Shipped
 
