@@ -348,6 +348,142 @@ class CatalogHandlerAppendChunksTest {
         assertThat(ex.status).isEqualTo(409);
     }
 
+    // ── append_many (RDR-223 P1.4, bead nexus-z0o2p.5) ──────────────────────────
+
+    private static String manyBody(String docsJson, String extra) {
+        return "{\"collection\":\"" + COLLECTION + "\",\"docs\":" + docsJson + extra + "}";
+    }
+
+    @Test
+    void appendMany_withChunks_landsEveryDocument_reportsPerDocumentResultsAndTokens() throws Exception {
+        registerDoc("aph.m1");
+        registerDoc("aph.m2");
+        String a = ch("aphm-a"), b = ch("aphm-b");
+        CapturingExchange ex = post("/v1/catalog/manifest/append_many", manyBody(
+            "[{\"doc_id\":\"aph.m1\",\"rows\":[{\"position\":0,\"chash\":\"" + a + "\"}]},"
+            + "{\"doc_id\":\"aph.m2\",\"rows\":[{\"position\":0,\"chash\":\"" + b + "\"},"
+            + "{\"position\":1,\"chash\":\"" + a + "\"}]}]",
+            ",\"chunks\":[{\"chash\":\"" + a + "\",\"text\":\"aphm a\"},{\"chash\":\"" + b + "\",\"text\":\"aphm b\"}]"));
+        handle(handler, ex);
+
+        assertThat(ex.status).isEqualTo(200);
+        String body = ex.bodyString();
+        assertThat(body).contains("\"docs\":2").contains("\"rows\":3").contains("\"failed_doc_ids\":[]")
+            .contains("\"chunks_written\":3").contains("\"chunks_deduped\":2").contains("\"embed_embedded\":2")
+            .contains("\"results\":[{\"doc_id\":\"aph.m1\",\"ok\":true,\"count\":1,\"chunks_written\":1},"
+                + "{\"doc_id\":\"aph.m2\",\"ok\":true,\"count\":2,\"chunks_written\":2}]");
+        assertThat(ex.responseHeaders.getFirst(VectorHandler.USAGE_TOKENS_HEADER)).isEqualTo("14");
+        assertThat(repo.getManifest(TENANT, "aph.m2")).hasSize(2);
+    }
+
+    @Test
+    void appendMany_withoutChunks_appendsRowsThatReferenceStoredChunks_noServiceNeeded() throws Exception {
+        registerDoc("aph.m3");
+        registerDoc("aph.m4");
+        String c = ch("aphm3-c");
+        CapturingExchange seed = post("/v1/catalog/manifest/append", "{\"doc_id\":\"aph.m3\",\"collection\":\"" + COLLECTION + "\","
+            + "\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}],"
+            + "\"chunks\":[{\"chash\":\"" + c + "\",\"text\":\"aphm3 c\"}]}");
+        handle(handler, seed);
+        assertThat(seed.status).isEqualTo(200);
+
+        CapturingExchange ex = post("/v1/catalog/manifest/append_many", manyBody(
+            "[{\"doc_id\":\"aph.m4\",\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}]}]", ""));
+        handle(handlerWithoutService, ex);
+
+        assertThat(ex.status).isEqualTo(200);
+        assertThat(ex.bodyString()).contains("\"docs\":1").contains("\"chunks_written\":0")
+            .doesNotContain("chunks_deduped");
+        assertThat(repo.getManifest(TENANT, "aph.m4")).hasSize(1);
+    }
+
+    @Test
+    void appendMany_aMissingDocument_isReportedInPlace_200() throws Exception {
+        registerDoc("aph.m5");
+        String d = ch("aphm5-d");
+        CapturingExchange ex = post("/v1/catalog/manifest/append_many", manyBody(
+            "[{\"doc_id\":\"aph.m-missing\",\"rows\":[{\"position\":0,\"chash\":\"" + d + "\"}]},"
+            + "{\"doc_id\":\"aph.m5\",\"rows\":[{\"position\":0,\"chash\":\"" + d + "\"}]}]",
+            ",\"chunks\":[{\"chash\":\"" + d + "\",\"text\":\"aphm5 d\"}]"));
+        handle(handler, ex);
+        assertThat(ex.status).isEqualTo(200);
+        assertThat(ex.bodyString()).contains("\"docs\":1").contains("\"failed_doc_ids\":[\"aph.m-missing\"]")
+            .contains("{\"doc_id\":\"aph.m-missing\",\"ok\":false,\"reason\":\"manifest write refused: document not registered: aph.m-missing\"}");
+    }
+
+    @Test
+    void appendMany_validation_400s_beforeAnyTransaction() throws Exception {
+        registerDoc("aph.m6");
+        String c = ch("aphm6-c");
+        String good = "{\"doc_id\":\"aph.m6\",\"rows\":[{\"position\":0,\"chash\":\"" + c + "\"}]}";
+
+        CapturingExchange notList = post("/v1/catalog/manifest/append_many",
+            "{\"collection\":\"" + COLLECTION + "\",\"docs\":\"x\"}");
+        handle(handler, notList);
+        assertThat(notList.status).isEqualTo(400);
+        assertThat(notList.bodyString()).contains("'docs' must be a list");
+
+        CapturingExchange noCollection = post("/v1/catalog/manifest/append_many", "{\"docs\":[" + good + "]}");
+        handle(handler, noCollection);
+        assertThat(noCollection.status).isEqualTo(400);
+        assertThat(noCollection.bodyString()).contains("'collection' required");
+
+        CapturingExchange noDocId = post("/v1/catalog/manifest/append_many", manyBody("[" + good + ",{\"rows\":[]}]", ""));
+        handle(handler, noDocId);
+        assertThat(noDocId.status).isEqualTo(400);
+        assertThat(noDocId.bodyString()).contains("docs[1]").contains("'doc_id' required");
+
+        CapturingExchange badChash = post("/v1/catalog/manifest/append_many", manyBody(
+            "[" + good + ",{\"doc_id\":\"aph.m6\",\"rows\":[{\"position\":0,\"chash\":\"" + "a".repeat(32) + "\"}]}]", ""));
+        handle(handler, badChash);
+        assertThat(badChash.status).isEqualTo(400);
+        assertThat(badChash.bodyString()).contains("docs[1]").contains("rows[0]").contains("legacy 32-hex");
+        assertThat(repo.getManifest(TENANT, "aph.m6")).as("the valid first document was not written").isEmpty();
+
+        StringBuilder sweep = new StringBuilder();
+        for (int i = 0; i < 301; i++) {
+            if (i > 0) sweep.append(',');
+            sweep.append('"').append(ch("aphm6-sweep-" + i)).append('"');
+        }
+        CapturingExchange overCap = post("/v1/catalog/manifest/append_many", manyBody(
+            "[{\"doc_id\":\"aph.m6\",\"rows\":[],\"sweep_chashes\":[" + sweep + "]}]", ""));
+        handle(handler, overCap);
+        assertThat(overCap.status).isEqualTo(400);
+        assertThat(overCap.bodyString()).contains("docs[0]").contains("300");
+    }
+
+    @Test
+    void appendMany_caps_docsAndChunks() throws Exception {
+        StringBuilder docs = new StringBuilder("[");
+        for (int i = 0; i < 1001; i++) {
+            if (i > 0) docs.append(',');
+            docs.append("{\"doc_id\":\"aph.cap.").append(i).append("\",\"rows\":[]}");
+        }
+        docs.append(']');
+        CapturingExchange tooManyDocs = post("/v1/catalog/manifest/append_many", manyBody(docs.toString(), ""));
+        handle(handler, tooManyDocs);
+        assertThat(tooManyDocs.status).isEqualTo(400);
+        assertThat(tooManyDocs.bodyString()).contains("too many docs (max 1000)");
+
+        StringBuilder chunks = new StringBuilder(",\"chunks\":[");
+        for (int i = 0; i < 301; i++) {
+            if (i > 0) chunks.append(',');
+            chunks.append("{\"chash\":\"").append(ch("aph-cap-chunk-" + i)).append("\",\"text\":\"t\"}");
+        }
+        chunks.append(']');
+        CapturingExchange tooManyChunks = post("/v1/catalog/manifest/append_many", manyBody("[]", chunks.toString()));
+        handle(handler, tooManyChunks);
+        assertThat(tooManyChunks.status).isEqualTo(400);
+        assertThat(tooManyChunks.bodyString()).contains("too many chunks (max 300)");
+    }
+
+    @Test
+    void appendMany_chunksWithNoCombinedWriteService_503() throws Exception {
+        CapturingExchange ex = post("/v1/catalog/manifest/append_many", manyBody("[]", ",\"chunks\":[]"));
+        handle(handlerWithoutService, ex);
+        assertThat(ex.status).isEqualTo(503);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────
 
     private void handle(CatalogHandler h, CapturingExchange ex) throws Exception {

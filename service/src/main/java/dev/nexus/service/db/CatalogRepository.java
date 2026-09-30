@@ -6351,8 +6351,34 @@ public final class CatalogRepository {
                                               Map<String, ResolvedChunk> resolvedChunks,
                                               List<String>[] writtenChashesOut,
                                               List<String> sweepChashes) {
-        requireNonBlank(collection, "collection");
         List<String> toSweep = normalizeSweepChashes(sweepChashes);
+        int chunksWritten = appendOneDocumentTx(tenant, docId, collection, rows, resolvedChunks,
+                writtenChashesOut, Set.of());
+        // The append has COMMITTED (the transaction above returned). Only now does the deferred
+        // sweep run, in its own transaction: it cannot share the append's, which holds the sweep
+        // gate SHARED (see runSweepTransaction), and a rolled-back append must sweep nothing.
+        Map<String, Object> sweepOutcome = toSweep.isEmpty()
+            ? null : runSweepTransaction(tenant, docId, collection, toSweep);
+        return new AppendOutcome(chunksWritten, sweepOutcome);
+    }
+
+    /**
+     * The one-document append TRANSACTION: document check, sweep gate SHARED, index-run lock,
+     * chunk upsert, rows, chunk_count fold. It does not sweep; the callers do, after the commit.
+     *
+     * @param writtenThisRequest chashes an EARLIER document of the same {@code append_many}
+     *        request already wrote and committed, excluded from this document's raced-embed
+     *        count (the request's own shared-chash fan-out is not a race with another writer;
+     *        see {@link #writeManifestMany}'s {@code requestWrittenChashes}). Empty for a
+     *        single-document append.
+     * @return the count of chunk rows written
+     */
+    private int appendOneDocumentTx(String tenant, String docId, String collection,
+                                    List<Map<String, Object>> rows,
+                                    Map<String, ResolvedChunk> resolvedChunks,
+                                    List<String>[] writtenChashesOut,
+                                    Set<String> writtenThisRequest) {
+        requireNonBlank(collection, "collection");
         int[] chunksWritten = new int[1];
         tenantScope.withTenant(tenant, ctx -> {
             // Case-1 duty only (RDR-191): does docId exist at all? A ghost
@@ -6373,12 +6399,12 @@ public final class CatalogRepository {
             // lock and BEFORE the manifest rows, in this same transaction --
             // writeManifestRows' order exactly (RDR-223 F-2). The raced-embed
             // counter (RDR-222) counts here too: upsertManifestChunkVectors
-            // reads ResolvedChunk#originalAbsent. writtenThisRequest is empty:
-            // an append is one document, so no sibling doc of this request
-            // could explain an ON CONFLICT.
+            // reads ResolvedChunk#originalAbsent. writtenThisRequest holds what an
+            // earlier document of the same append_many request wrote, so a chash
+            // shared between two documents of one request is not counted as a race.
             if (resolvedChunks != null) {
                 chunksWritten[0] = upsertManifestChunkVectors(ctx, tenant, collection, rows,
-                        resolvedChunks, Set.of(), writtenChashesOut);
+                        resolvedChunks, writtenThisRequest, writtenChashesOut);
             }
             if (!rows.isEmpty()) {
                 stampIndexedAt(ctx, tenant, docId);
@@ -6418,12 +6444,123 @@ public final class CatalogRepository {
             }
             return null;
         });
-        // The append has COMMITTED (withTenant returned). Only now does the deferred sweep run,
-        // in its own transaction: it cannot share the append's, which holds the sweep gate
-        // SHARED (see runSweepTransaction), and a rolled-back append must sweep nothing.
-        Map<String, Object> sweepOutcome = toSweep.isEmpty()
-            ? null : runSweepTransaction(tenant, docId, collection, toSweep);
-        return new AppendOutcome(chunksWritten[0], sweepOutcome);
+        return chunksWritten[0];
+    }
+
+    /**
+     * RDR-223 P1.4 (bead nexus-z0o2p.5) -- the multi-document append behind {@code POST
+     * /v1/catalog/manifest/append_many}. Each document is appended in its OWN transaction
+     * (per-document atomicity, cross-document isolation, exactly {@link #writeManifestMany}'s
+     * shape) via {@link #appendOneDocument}, with that document's deferred sweep fired after
+     * ITS commit only. A document that fails rolls back alone: it gets a failure entry, no chunk
+     * only it references is inserted (the chunk upsert is inside its rolled-back transaction),
+     * and its {@code sweep_chashes} are not swept.
+     *
+     * <p>{@code resolvedChunks} is the request-level {@code chunks} array resolved once (deduped,
+     * existence-partitioned, embedded) by {@code CombinedWriteService}; each document inserts
+     * only the chashes its own rows reference.
+     *
+     * @param docs each {@code {doc_id, rows, sweep_chashes?}}, already shape-validated by the
+     *        handler; {@code sweep_chashes} is a {@code List<String>} of at most {@link
+     *        #MAX_SWEEP_CHASHES_PER_APPEND}
+     * @return {@code {docs, rows, failed_doc_ids, failed, chunks_written, swept, sweep_skipped,
+     *         sweep_detail, results}}; {@code results} has one entry per request document in
+     *         request order: {@code {doc_id, ok:true, count, chunks_written[, swept,
+     *         sweep_skipped, sweep_detail]}} or {@code {doc_id, ok:false, reason[, sqlstate]}}
+     */
+    public Map<String, Object> appendManifestMany(String tenant, String collection,
+                                                  List<Map<String, Object>> docs,
+                                                  Map<String, ResolvedChunk> resolvedChunks) {
+        requireNonBlank(collection, "collection");
+        long tStart = System.nanoTime();
+        List<Map<String, Object>> results = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
+        List<Map<String, Object>> failedDetail = new ArrayList<>();
+        List<Map<String, Object>> sweepDetail = new ArrayList<>();
+        Set<String> requestWrittenChashes = new HashSet<>();
+        // The deferred sweeps of the documents that committed, run only after EVERY document has
+        // been appended. A sweep fired straight after its own document's commit could delete a
+        // chash a LATER document of this same request is about to reference (the chunk was
+        // "already stored", so the request did not resend it): that document would then fail
+        // loud. Deferred, the later document's row exists by the time the guard runs and the
+        // chash survives. Each sweep is still one document's list, run after that document's
+        // commit; a document that failed never contributes one.
+        List<Object[]> pendingSweeps = new ArrayList<>();   // {results index, docId, List<String>}
+        int okDocs = 0, totalRows = 0, totalChunksWritten = 0, totalSwept = 0, sweepSkipped = 0;
+        for (Map<String, Object> d : docs == null ? List.<Map<String, Object>>of() : docs) {
+            String docId = s(d, "doc_id");
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> rows = d.get("rows") instanceof List<?> l
+                ? (List<Map<String, Object>>) l : List.of();
+            @SuppressWarnings("unchecked")
+            List<String> sweepChashes = d.get("sweep_chashes") instanceof List<?> l
+                ? (List<String>) l : List.of();
+            List<String>[] written = new List[1];
+            try {
+                if (docId == null || docId.isBlank()) {
+                    throw new IllegalArgumentException("'doc_id' required");
+                }
+                List<String> toSweep = normalizeSweepChashes(sweepChashes);
+                int chunksWritten = appendOneDocumentTx(tenant, docId, collection, rows,
+                        resolvedChunks, written, requestWrittenChashes);
+                // Merged only now that this document's transaction has committed.
+                if (written[0] != null) requestWrittenChashes.addAll(written[0]);
+                okDocs++;
+                totalRows += rows.size();
+                totalChunksWritten += chunksWritten;
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("doc_id", docId);
+                r.put("ok", true);
+                r.put("count", rows.size());
+                r.put("chunks_written", chunksWritten);
+                results.add(r);
+                if (!toSweep.isEmpty()) {
+                    pendingSweeps.add(new Object[] {r, docId, toSweep});
+                }
+            } catch (Exception e) {
+                Map<String, Object> detail = failureDetail(docId, e);
+                log.debug("event=append_many_doc_failed tenant={} doc_id={} reason={} sqlstate={}",
+                          tenant, docId, detail.get("reason"), detail.get("sqlstate"));
+                failed.add(docId);
+                failedDetail.add(detail);
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("doc_id", docId == null ? "" : docId);
+                r.put("ok", false);
+                r.put("reason", detail.get("reason"));
+                if (detail.containsKey("sqlstate")) r.put("sqlstate", detail.get("sqlstate"));
+                results.add(r);
+            }
+        }
+        for (Object[] p : pendingSweeps) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> r = (Map<String, Object>) p[0];
+            @SuppressWarnings("unchecked")
+            List<String> toSweep = (List<String>) p[2];
+            Map<String, Object> sweep = runSweepTransaction(tenant, (String) p[1], collection, toSweep);
+            new AppendOutcome(0, sweep).addSweepFieldsTo(r);
+            sweepDetail.add(sweep);
+            totalSwept += (Integer) sweep.get("swept");
+            if (Boolean.TRUE.equals(sweep.get("errored"))) sweepSkipped++;
+        }
+        log.info("event=append_many_timing tenant={} docs={} ok={} rows={} chunks_written={} swept={} sweep_failed={} total_ms={}",
+            tenant, docs == null ? 0 : docs.size(), okDocs, totalRows, totalChunksWritten, totalSwept,
+            sweepSkipped, (System.nanoTime() - tStart) / 1_000_000);
+        if (!failedDetail.isEmpty()) {
+            log.warn("event=append_many_failures tenant={} failed={} of={} sample={}",
+                     tenant, failedDetail.size(), docs == null ? 0 : docs.size(),
+                     failedDetail.subList(0, Math.min(3, failedDetail.size())));
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("docs", okDocs);
+        out.put("rows", totalRows);
+        out.put("failed_doc_ids", failed);
+        out.put("failed", failedDetail);
+        out.put("chunks_written", totalChunksWritten);
+        out.put("swept", totalSwept);
+        out.put("sweep_skipped", sweepSkipped);
+        out.put("sweep_detail", sweepDetail);
+        out.put("results", results);
+        return out;
     }
 
     /**

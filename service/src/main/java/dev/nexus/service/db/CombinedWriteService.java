@@ -274,6 +274,54 @@ public final class CombinedWriteService {
         return new CombinedWriteResult(response, batch.tokens());
     }
 
+    /**
+     * RDR-223 P1.4 (bead nexus-z0o2p.5) -- the multi-document append behind {@code POST
+     * /v1/catalog/manifest/append_many}: {@code chunks} (the request-level array the documents'
+     * rows reference) are deduped, existence-partitioned (RDR-181) and embedded ONCE, outside any
+     * transaction, then {@link CatalogRepository#appendManifestMany} appends each document in its
+     * own transaction, each inserting only the chashes its own rows reference, each firing its
+     * own deferred sweep after its own commit. Only chunks some document's rows reference are
+     * resolved, as for {@link #appendCombined}. A {@code null} {@code chunks} skips the embed
+     * entirely (the rows must reference chunks that already exist).
+     *
+     * @param docs each {@code {doc_id, rows, sweep_chashes?}}
+     * @param chunks the request-level {@code chunks} array, or {@code null} for none
+     */
+    public CombinedWriteResult appendManyCombined(String tenant, String collection,
+            List<Map<String, Object>> docs, List<Map<String, Object>> chunks, boolean forceReEmbed) {
+        // Size-check every document's sweep list BEFORE the embed: the cheapest refusal.
+        for (Map<String, Object> d : docs) {
+            if (d.get("sweep_chashes") instanceof List<?> l) {
+                @SuppressWarnings("unchecked")
+                List<String> sweep = (List<String>) l;
+                CatalogRepository.normalizeSweepChashes(sweep);
+            }
+        }
+        if (chunks == null) {
+            return new CombinedWriteResult(
+                catalogRepo.appendManifestMany(tenant, collection, docs, null), 0L);
+        }
+        Set<String> referenced = new HashSet<>();
+        for (Map<String, Object> d : docs) {
+            if (d.get("rows") instanceof List<?> rows) {
+                for (Object r : rows) {
+                    if (r instanceof Map<?, ?> m && m.get("chash") instanceof String c) referenced.add(c);
+                }
+            }
+        }
+        List<Map<String, Object>> relevant = new ArrayList<>();
+        for (Map<String, Object> c : chunks) {
+            if (!(c.get("chash") instanceof String s) || referenced.contains(s)) relevant.add(c);
+        }
+        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed);
+        Map<String, Object> response =
+            catalogRepo.appendManifestMany(tenant, collection, docs, batch.resolved());
+        response.put("chunks_deduped", batch.deduped());
+        response.put("embed_skipped", batch.skipped());
+        response.put("embed_embedded", batch.embedded());
+        return new CombinedWriteResult(response, batch.tokens());
+    }
+
     /** Output of the dedupe / existence-partition / embed phases. */
     private record ResolvedBatch(Map<String, CatalogRepository.ResolvedChunk> resolved,
                                  int deduped, int skipped, int embedded, long tokens) {}

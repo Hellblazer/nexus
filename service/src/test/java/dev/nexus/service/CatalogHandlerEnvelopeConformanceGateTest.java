@@ -250,6 +250,9 @@ class CatalogHandlerEnvelopeConformanceGateTest {
         neither("/manifest/write", "handleManifestWrite"),
         neither("/manifest/append", "handleManifestAppend"),
         idListOk("/manifest/write_many", "handleManifestWriteMany"),
+        // RDR-223 P1.4 (nexus-z0o2p.5): the append twin of write_many -- same request shape
+        // (docs capped at MAX_BATCH_DOC_IDS), same bounded-by-input response.
+        idListOk("/manifest/append_many", "handleManifestAppendMany"),
         collectionOk("/manifest/get", "handleManifestGet"),
         both("/manifest/get_many", "handleManifestGetMany", null),
         // nexus-eslkl / T2 nexus/design-eslkl-hook-lock-narrowing §8.1: same

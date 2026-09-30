@@ -173,6 +173,7 @@ public final class CatalogHandler implements HttpHandler {
                 // ── Manifest ──────────────────────────────────────────────────
                 case "/manifest/write"        -> handleManifestWrite(exchange, tenant, method);
                 case "/manifest/append"       -> handleManifestAppend(exchange, tenant, method);
+                case "/manifest/append_many"  -> handleManifestAppendMany(exchange, tenant, method);
                 case "/manifest/write_many"   -> handleManifestWriteMany(exchange, tenant, method);
                 case "/manifest/get"          -> handleManifestGet(exchange, tenant, method);
                 case "/manifest/get_many"     -> handleManifestGetMany(exchange, tenant, method);
@@ -1163,6 +1164,91 @@ public final class CatalogHandler implements HttpHandler {
         }
         repo.appendManifestChunks(tenant, docId, collection, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
+    }
+
+    /** Most {@code chunks} one {@code append_many} request carries (the 300-record write cap). */
+    private static final int MAX_APPEND_MANY_CHUNKS = 300;
+
+    /**
+     * POST /v1/catalog/manifest/append_many (RDR-223 P1.4, bead nexus-z0o2p.5).
+     *
+     * <p>Body {@code {"collection": "...", "docs": [{"doc_id", "rows", "sweep_chashes"?}, ...],
+     * "chunks"?: [{"chash","text","metadata"}, ...], "force_re_embed"?}}: {@code write_many}'s
+     * request shape with append semantics. Each document is appended (rows upserted BY
+     * POSITION) in its own transaction, together with the chunk rows its own rows reference
+     * (from the request-level {@code chunks}), and its {@code sweep_chashes} are swept after
+     * its own commit. A failing document rolls back alone. Caps: {@value #MAX_BATCH_DOC_IDS}
+     * docs, {@value #MAX_APPEND_MANY_CHUNKS} chunks, {@link
+     * CatalogRepository#MAX_SWEEP_CHASHES_PER_APPEND} {@code sweep_chashes} per document.
+     * Response: {@code {docs, rows, failed_doc_ids, failed, chunks_written, swept,
+     * sweep_skipped, sweep_detail, results}} plus, when {@code chunks} was sent,
+     * {@code chunks_deduped}/{@code embed_skipped}/{@code embed_embedded} and the
+     * {@code X-Nexus-Usage-Tokens} header; {@code results} is one entry per document in
+     * request order. 503 for {@code chunks} with no {@code CombinedWriteService}.
+     */
+    @SuppressWarnings("unchecked")
+    private void handleManifestAppendMany(HttpExchange exchange, String tenant, String method) throws IOException {
+        if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
+        Map<String, Object> body = readBody(exchange);
+        if (!(body.get("docs") instanceof List<?> l)) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"'docs' must be a list\"}"); return;
+        }
+        if (l.stream().anyMatch(o -> !(o instanceof Map))) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"every 'docs' element must be an object\"}"); return;
+        }
+        if (l.size() > MAX_BATCH_DOC_IDS) {
+            HttpUtil.send(exchange, 400, "{\"error\":\"too many docs (max "
+                + MAX_BATCH_DOC_IDS + ")\"}"); return;
+        }
+        String collection = requireCollection(exchange, body);
+        if (collection == null) return;
+        // Every document is validated up front, so the whole request 400s before ANY transaction.
+        List<Map<String, Object>> docs = new ArrayList<>(l.size());
+        for (int d = 0; d < l.size(); d++) {
+            Map<String, Object> in = (Map<String, Object>) l.get(d);
+            try {
+                if (!(in.get("doc_id") instanceof String docId) || docId.isBlank()) {
+                    throw new IllegalArgumentException("'doc_id' required");
+                }
+                List<Map<String, Object>> rows = strictRows(in.get("rows"));
+                requireCanonicalChashes(rows);
+                Map<String, Object> doc = new LinkedHashMap<>();
+                doc.put("doc_id", docId);
+                doc.put("rows", rows);
+                doc.put("sweep_chashes", parseSweepChashes(in.get("sweep_chashes")));
+                docs.add(doc);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("docs[" + d + "]." + e.getMessage());
+            }
+        }
+        Object rawChunks = body.get("chunks");
+        List<Map<String, Object>> chunks = null;
+        if (rawChunks != null) {
+            if (combinedWriteService == null) {
+                HttpUtil.send(exchange, 503, "{\"error\":\"combined write not configured"
+                    + " (no CombinedWriteService)\"}");
+                return;
+            }
+            chunks = parseChunks(rawChunks);
+            if (chunks.size() > MAX_APPEND_MANY_CHUNKS) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"too many chunks (max "
+                    + MAX_APPEND_MANY_CHUNKS + ")\"}"); return;
+            }
+        }
+        if (chunks == null) {
+            // No embed: the rows reference chunks that already exist. Same repository entry point,
+            // so the response shape is the one the chunks path returns, minus the embed counts.
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(
+                repo.appendManifestMany(tenant, collection, docs, null)));
+            return;
+        }
+        boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+        var combined = combinedWriteService.appendManyCombined(tenant, collection, docs, chunks, forceReEmbed);
+        if (combined.tokens() > 0) {
+            exchange.getResponseHeaders().set(
+                VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
+        }
+        HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
     }
 
     /**
