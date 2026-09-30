@@ -12,8 +12,9 @@ code AROUND it had been hand-copied four times and had drifted:
   writer's own behaviour change had no test at all;
 * an outcome status no surface knew fell through to "Stored:" in two of the four.
 
-The engine-free tests here run the real writer against a real engine substrate only where the claim is
-about the request (the ``put_note`` level); the message table is pure.
+The ``put_note`` and MCP ``store_put`` tests run against the real engine substrate, because the claim
+there is about what happens to the catalog row and the request; the message table and the firing are
+pure.
 """
 from __future__ import annotations
 
@@ -76,9 +77,9 @@ def _client_refusals() -> dict[str, Exception]:
     from nexus.corpus import EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError
 
     return {
-        "profile-mismatch": EmbeddingProfileMismatchError("knowledge", "voyage-context-3", "bge-base-en-v15-768"),
+        "profile-mismatch": EmbeddingProfileMismatchError("knowledge", "intent-model-x", "bge-base-en-v15-768"),
         "missing-voyage-key": LocalVoyageCredentialMissingError(
-            "local.embed_model='voyage-context-3' requires a Voyage API key, but none is configured. "
+            "local.embed_model names a Voyage model and requires a Voyage API key, but none is configured. "
             "Set one with `nx config set voyage_api_key <key>`, then restart the local service."),
         "retired-collection": SupersededCollectionWriteError("knowledge__old__v1", "knowledge__new__v2"),
     }
@@ -335,7 +336,7 @@ class TestFailureMessageTable:
         assert msg is not None and "unrecognised" in msg and repr(status) in msg
 
     def test_the_client_refusal_leads_with_its_reason(self):
-        reason = "local.embed_model='voyage-context-3' requires a Voyage API key. Set one with `nx config set`."
+        reason = "local.embed_model names a Voyage model and requires a Voyage API key. Set one with `nx config set`."
         msg = failure_message(_outcome(NOT_LANDED, reason=reason, refusal="client"), subject="notes.md")
         assert msg.startswith(reason)
 

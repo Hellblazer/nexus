@@ -305,7 +305,7 @@ class TestClientDeath:
         from nexus.corpus import EmbeddingProfileMismatchError
 
         def refuse(*_a, **_k):
-            raise EmbeddingProfileMismatchError("knowledge", "voyage-context-3", "bge-base-en-v15-768")
+            raise EmbeddingProfileMismatchError("knowledge", "intent-model-x", "bge-base-en-v15-768")
 
         monkeypatch.setattr("nexus.corpus.ensure_collection_registered", refuse)
         content = _note("profile", 6)
