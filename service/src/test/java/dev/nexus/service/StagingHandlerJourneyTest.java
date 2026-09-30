@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.db.InstallPingRepository;
 import dev.nexus.service.db.TenantScope;
 import dev.nexus.service.vectors.DimTables;
 import dev.nexus.service.vectors.EmbedderRouter;
@@ -27,11 +28,16 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.Connection;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.INSTALL_PINGS;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -51,7 +57,10 @@ class StagingHandlerJourneyTest {
     private static final String TENANT = "staging-journey-tenant";
     private static final String COLL   = "knowledge__journey__voyage-context-3__v1";
 
-    private static final String TEXT_REUSE = "journey chunk with reusable vector";
+    /** 16 lowercase hex, exactly what InstallPingHandler stores as source_hash. */
+    private static final String PING_SOURCE_HASH = "0123456789abcdef";
+
+    private static final String TEXT_REUSE ="journey chunk with reusable vector";
     private static final String TEXT_FILL  = "journey chunk needing embed fill";
 
     PostgreSQLContainer<?> pg;
@@ -290,11 +299,18 @@ class StagingHandlerJourneyTest {
         // nexus-6u63y: install_pings is global (no RLS) and its source_hash is a
         // 16-hex HMAC prefix -- once populated it must NOT trip the post-finalize
         // census as legacy residue for every tenant.
-        new dev.nexus.service.db.InstallPingRepository(svcDs, java.time.Clock.systemUTC())
-            .record(new dev.nexus.service.db.InstallPingRepository.Ping(java.util.UUID.randomUUID(),
-                "7.67.0", "cloud", "linux", "amd64", "3.12", "0123456789abcdef"));
-
-        Map<String, Object> fin = postOk("/v1/staging/finalize", Map.of("orphan_policy", "drop"));
+        new InstallPingRepository(svcDs, Clock.fixed(Instant.parse("2026-09-29T12:00:00Z"), ZoneOffset.UTC))
+            .record(new InstallPingRepository.Ping(UUID.randomUUID(),
+                "7.67.0", "cloud", "linux", "amd64", "3.12", PING_SOURCE_HASH));
+        Map<String, Object> fin;
+        try {
+            fin = postOk("/v1/staging/finalize", Map.of("orphan_policy", "drop"));
+        } finally {
+            try (Connection su = pg.createConnection("")) {
+                DSL.using(su, SQLDialect.POSTGRES).deleteFrom(INSTALL_PINGS)
+                   .where(INSTALL_PINGS.SOURCE_HASH.eq(PING_SOURCE_HASH)).execute();
+            }
+        }
         assertThat(((Number) fin.get("manifest_promoted")).intValue()).isEqualTo(1);
         assertThat(((Number) fin.get("residual_mismatched")).intValue()).isEqualTo(0);
         assertThat(((Number) fin.get("dangling_manifest")).intValue()).isEqualTo(0);

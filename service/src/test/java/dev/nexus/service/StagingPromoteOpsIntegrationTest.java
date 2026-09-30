@@ -602,24 +602,25 @@ class StagingPromoteOpsIntegrationTest {
         // THE missed-leg killer proof (Hal directive): seed legacy residue in
         // a NOVEL column no hand list has ever named — the census must find
         // it with zero code changes.
-        // nexus.census_canary: CREATEd ad hoc by this test method (immediately below)
-        // and DROPped again below; it is not part of the real product schema and so,
-        // like the staging.* tables, carries no generated jOOQ Table -- built via
-        // jOOQ's typed CREATE TABLE/GRANT/DROP TABLE DDL API instead (nexus-cbo4a
-        // batch 11), never a raw SQL string.
-        Table<?> censusCanary = DSL.table(DSL.name("nexus", "census_canary"));
-        Field<String> ccTenantId = DSL.field(DSL.name("tenant_id"), String.class);
+        // The novel column is ADDED ad hoc to nexus.relevance_log (an RLS tenant
+        // table the census covers) by this test method and DROPped again below;
+        // it is not part of the real product schema, so it is built via jOOQ's
+        // typed ALTER TABLE DDL with DSL.field(DSL.name(...)) (nexus-cbo4a
+        // batch 11), never a raw SQL string. nexus-6u63y: the census scopes to
+        // RLS-enabled tables, so a standalone CREATE TABLE canary would sit
+        // outside it; a column on an existing RLS table is the faithful stand-in.
         Field<String> ccMysteryRef = DSL.field(DSL.name("mystery_ref"), String.class);
         try (Connection su = pg.createConnection("")) {
             su.setAutoCommit(true);
             DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
-            suCtx.createTable(censusCanary)
-                 .column(ccTenantId, SQLDataType.CLOB.nullable(false).defaultValue(""))
-                 .column(ccMysteryRef, SQLDataType.CLOB)
-                 .execute();
-            suCtx.grant(DSL.privilege("SELECT")).on(censusCanary).to(DSL.role(SVC_ROLE)).execute();
-            suCtx.insertInto(censusCanary, ccTenantId, ccMysteryRef)
-                 .values(T1, "0123456789abcdef0123456789abcdef")
+            suCtx.alterTable(RELEVANCE_LOG).addColumn(ccMysteryRef, SQLDataType.CLOB).execute();
+            suCtx.insertInto(RELEVANCE_LOG)
+                 .set(RELEVANCE_LOG.TENANT_ID, T1)
+                 .set(RELEVANCE_LOG.QUERY, "census-canary")
+                 .set(RELEVANCE_LOG.CHUNK_ID, "b".repeat(64))
+                 .set(RELEVANCE_LOG.ACTION, "view")
+                 .set(RELEVANCE_LOG.TIMESTAMP, java.time.OffsetDateTime.parse("2026-09-29T12:00:00Z"))
+                 .set(ccMysteryRef, "0123456789abcdef0123456789abcdef")
                  .execute();
         }
         try {
@@ -628,11 +629,13 @@ class StagingPromoteOpsIntegrationTest {
             assertThat(residue)
                 .as("a legacy-shaped value in a column NO hand list names must "
                     + "be discovered — the census is schema-derived or it is nothing")
-                .containsEntry("census_canary.mystery_ref", 1);
+                .containsEntry("relevance_log.mystery_ref", 1);
         } finally {
             try (Connection su = pg.createConnection("")) {
                 su.setAutoCommit(true);
-                DSL.using(su, SQLDialect.POSTGRES).dropTable(censusCanary).execute();
+                DSLContext suCtx = DSL.using(su, SQLDialect.POSTGRES);
+                suCtx.deleteFrom(RELEVANCE_LOG).where(RELEVANCE_LOG.QUERY.eq("census-canary")).execute();
+                suCtx.alterTable(RELEVANCE_LOG).dropColumn(ccMysteryRef).execute();
             }
         }
         // Post-cleanup the migrated store scans clean.

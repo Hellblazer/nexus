@@ -14,25 +14,28 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import java.sql.Connection;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Map;
 import java.util.UUID;
 
+import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * nexus-6u63y — {@code install_pings.source_hash} is the first 16 hex chars of
- * an HMAC-SHA256 digest of an install's source (nexus-5zv4j), which is exactly
- * the census's legacy 16-hex chunk-ref shape. Once the cloud got its hash key,
- * every populated row counted as legacy residue and {@code /v1/staging/finalize}
- * failed for every tenant. The column is an identity, not a chunk pointer, so
- * the census must not read it.
+ * nexus-6u63y — the census scans only RLS-enabled tables. {@code
+ * install_pings} is global (no RLS) and takes hex-shaped tokens from the
+ * unauthenticated {@code /v1/install-ping}: {@code source_hash} is a 16-hex
+ * HMAC prefix by design (nexus-5zv4j), and client_version/os/arch/python
+ * accept 16-hex too. That is exactly the census's legacy 16-hex chunk-ref
+ * shape, so scanning it let any anonymous caller (or the cloud's own hash
+ * key) fail every tenant's {@code /v1/staging/finalize}.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class ChashCensusInstallPingsTest {
 
-    /** Exactly the shape InstallPingHandler stores: 16 lowercase hex. */
-    private static final String SOURCE_HASH_16_HEX = "0123456789abcdef";
+    /** 16 lowercase hex: the census's legacy chunk-ref shape. */
+    private static final String HEX16 = "0123456789abcdef";
 
     private static final String TENANT = "census-install-pings-tenant";
 
@@ -62,28 +65,48 @@ class ChashCensusInstallPingsTest {
     }
 
     @Test
-    void populatedInstallPingsSourceHash_isNotLegacyResidue() {
-        new InstallPingRepository(svcDs, Clock.fixed(Instant.parse("2026-09-29T12:00:00Z"), ZoneOffset.UTC))
-            .record(new InstallPingRepository.Ping(UUID.randomUUID(), "7.67.0", "cloud",
-                "linux", "amd64", "3.12", SOURCE_HASH_16_HEX));
+    void globalInstallPings_hexShapedValuesInAnyColumn_areNotReported() {
+        var repo = new InstallPingRepository(svcDs,
+            Clock.fixed(Instant.parse("2026-09-29T12:00:00Z"), ZoneOffset.UTC));
+        repo.record(new InstallPingRepository.Ping(UUID.randomUUID(), "7.67.0", "cloud",
+            "linux", "amd64", "3.12", HEX16));
+        repo.record(new InstallPingRepository.Ping(UUID.randomUUID(), HEX16, "cloud",
+            HEX16, HEX16, HEX16, HEX16));
 
         Map<String, Integer> residue = scope.withTenant(TENANT, ChashCensus::scan);
 
         assertThat(residue)
-            .as("a 16-hex HMAC source_hash is an identity, not a chunk pointer (nexus-6u63y)")
-            .doesNotContainKey("install_pings.source_hash")
+            .as("a global non-RLS table must be out of the census scope (nexus-6u63y)")
             .isEmpty();
     }
 
     @Test
-    void installPingsExclusion_namesAColumnThatExists() {
-        // Non-vacuity: the exclusion must point at a real schema-discovered
-        // TEXT column, else the test above passes for the wrong reason.
+    void rlsTenantTable_hexShapedValue_isReported_positiveControl() {
+        // Non-vacuity for the test above: the same 16-hex shape in a text
+        // column of an RLS tenant table the census covers IS reported, so the
+        // empty result above comes from scoping, not from a blind scan.
+        scope.withTenant(TENANT, ctx -> ctx.insertInto(RELEVANCE_LOG)
+            .set(RELEVANCE_LOG.TENANT_ID, TENANT)
+            .set(RELEVANCE_LOG.QUERY, "q")
+            .set(RELEVANCE_LOG.CHUNK_ID, "a".repeat(64))   // canonical: chunk_id has a CHECK
+            .set(RELEVANCE_LOG.SESSION_ID, HEX16)          // unconstrained TEXT the census scans
+            .set(RELEVANCE_LOG.ACTION, "view")
+            .set(RELEVANCE_LOG.TIMESTAMP, OffsetDateTime.parse("2026-09-29T12:00:00Z"))
+            .execute());
+        try {
+            Map<String, Integer> residue = scope.withTenant(TENANT, ChashCensus::scan);
+            assertThat(residue).containsEntry("relevance_log.session_id", 1);
+        } finally {
+            scope.withTenant(TENANT, ctx -> ctx.deleteFrom(RELEVANCE_LOG)
+                .where(RELEVANCE_LOG.TENANT_ID.eq(TENANT)).execute());
+        }
+    }
+
+    @Test
+    void knownInventory_isStillDiscovered_afterRlsScoping() {
         scope.withTenant(TENANT, ctx -> {
             ChashCensus.assertDiscoversKnownInventory(ctx);
             return null;
         });
-        assertThat(ChashCensus.TEXT_EXCLUSIONS)
-            .anyMatch(e -> e.table().equals("install_pings") && e.column().equals("source_hash"));
     }
 }

@@ -30,7 +30,12 @@ import static dev.nexus.service.jooq.nexus.Tables.RELEVANCE_LOG;
  * data).
  *
  * <p>Three scans, all under the caller's {@link TenantScope} (RLS-scoped —
- * a migration verify sees exactly the tenant it migrated):
+ * a migration verify sees exactly the tenant it migrated). The column
+ * enumerations therefore cover ONLY tables with row-level security enabled
+ * ({@code pg_class.relrowsecurity}): a global, non-RLS table is not tenant
+ * data, and scanning it would let whoever can write it fail every tenant's
+ * finalize (nexus-6u63y: {@code install_pings} takes hex-shaped tokens from
+ * an unauthenticated endpoint):
  * <ol>
  *   <li>TEXT columns in schema {@code nexus}: count values shaped like a
  *       LEGACY chunk id (16- or 32-lowercase-hex, full-string match) —
@@ -114,16 +119,7 @@ public final class ChashCensus {
         new Exclusion("aspect_extraction_queue", "content", "free content"),
         new Exclusion("aspect_extraction_queue", "content_hash",
             "sha256 of source CONTENT (a document identity, not a chunk id) — "
-            + "legacy-width source hashes are historical facts, not pointers"),
-        // nexus-6u63y: install_pings is GLOBAL (no RLS), so this column is
-        // scanned in every tenant's finalize. source_hash is the first 16 hex
-        // chars of an HMAC-SHA256 install-source digest (InstallPingHandler,
-        // nexus-5zv4j) -- byte-for-byte the LEGACY_SHAPE 16-hex chunk ref, so
-        // once the cloud held a hash key every populated row read as residue
-        // and /v1/staging/finalize failed for every tenant.
-        new Exclusion("install_pings", "source_hash",
-            "HMAC-SHA256 digest prefix of an install source (16 hex) — an identity, "
-            + "not a chunk pointer"));
+            + "legacy-width source hashes are historical facts, not pointers"));
 
     // BYTEA_EXCLUSIONS' sole entry (chash_alias.old_bytes) LEFT the list at
     // nexus-lgdel.l1 along with the table (see TEXT_EXCLUSIONS' comment).
@@ -156,6 +152,8 @@ public final class ChashCensus {
     // fall back to string-concatenated SQL.
     private static final Table<?> INFO_COLUMNS = DSL.table(DSL.name("information_schema", "columns"));
     private static final Table<?> INFO_TABLES  = DSL.table(DSL.name("information_schema", "tables"));
+    private static final Table<?> PG_CLASS     = DSL.table(DSL.name("pg_catalog", "pg_class"));
+    private static final Table<?> PG_NAMESPACE = DSL.table(DSL.name("pg_catalog", "pg_namespace"));
 
     /** Enumerate schema-nexus columns of one udt type: {@code table.column}. */
     private static List<String[]> columns(DSLContext ctx, String udt) {
@@ -169,13 +167,33 @@ public final class ChashCensus {
         Field<String> tTable  = DSL.field(DSL.name("t", "table_name"), String.class);
         Field<String> tType   = DSL.field(DSL.name("t", "table_type"), String.class);
 
+        // nexus-6u63y: only tables with ROW LEVEL SECURITY enabled are in scope.
+        // The scan runs under one tenant's TenantScope, and RLS is what makes
+        // that a per-tenant read. A GLOBAL table (no RLS: install_pings,
+        // service_tokens, ...) is not tenant data, is not something a tenant's
+        // migration can have left residue in, and is writable by parties that
+        // are not the tenant (install_pings takes 16-hex tokens from an
+        // UNAUTHENTICATED endpoint) -- scanning it would let any of them fail
+        // every tenant's finalize. relrowsecurity, NOT "has a tenant_id
+        // column": service_tokens/session_tokens carry tenant_id and no RLS.
+        Table<?> pc = PG_CLASS.as("pc");
+        Table<?> pn = PG_NAMESPACE.as("pn");
+        Field<String> pcName = DSL.field(DSL.name("pc", "relname"), String.class);
+        Field<Object> pcNs = DSL.field(DSL.name("pc", "relnamespace"), Object.class);
+        Field<Boolean> pcRls = DSL.field(DSL.name("pc", "relrowsecurity"), Boolean.class);
+        Field<Object> pnOid = DSL.field(DSL.name("pn", "oid"), Object.class);
+        Field<String> pnName = DSL.field(DSL.name("pn", "nspname"), String.class);
+
         List<String[]> out = new ArrayList<>();
         ctx.select(cTable, cColumn)
             .from(c)
             .join(t).on(tSchema.eq(cSchema).and(tTable.eq(cTable)))
+            .join(pn).on(pnName.eq(cSchema))
+            .join(pc).on(pcNs.eq(pnOid).and(pcName.eq(cTable)))
             .where(cSchema.eq("nexus"))
             .and(cUdt.eq(udt))
             .and(tType.eq("BASE TABLE"))
+            .and(pcRls.isTrue())
             .orderBy(cTable, cColumn)
             .forEach(r -> out.add(new String[] {r.get(cTable), r.get(cColumn)}));
         return out;
