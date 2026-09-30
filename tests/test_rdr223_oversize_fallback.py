@@ -315,14 +315,16 @@ def test_a_chash_repeated_at_two_positions_keeps_the_first_occurrences_metadata(
 @pytest.mark.parametrize("cap", [64, 16, 7])
 def test_each_request_carries_the_chunks_the_old_upsert_page_did(cat, tmp_path, monkeypatch, cap) -> None:
     """For CCE collections (and onnx-local) the engine embeds one request's new chunks together
-    (voyage-context-3 contextual embedding is per request: ``CombinedWriteService`` hands a
+    (CCE contextual embedding is per request: ``CombinedWriteService`` hands a
     request's chunks to ``EmbedderRouter.embedForCollectionWithUsage`` in ONE call, exactly as
     ``PgVectorRepository.upsertChunksInternal`` does for one ``upsert-chunks`` page). So the
     embedding of a chunk changes only if the set of chunks sharing its request changes. The old
     fallback sent ``HttpVectorClient.upsert_chunks`` pages cut by ``_upsert_page_bounds(n, cap,
     None, None)`` (no byte budget for CCE or onnx-local); the writer must cut the same pages. (A
-    Voyage code collection also closed pages on a byte budget; the writer does not, and its
-    embedding is not contextual.)"""
+    code collection on the cloud code embedder also closed pages on a byte budget; the writer
+    does not, and its embedding is not contextual.)
+    This test drives a recording catalog and asserts page cuts only; it names no embedder
+    and runs in either mode."""
     from nexus.db.http_vector_client import _upsert_page_bounds
 
     _cap(monkeypatch, cap)
