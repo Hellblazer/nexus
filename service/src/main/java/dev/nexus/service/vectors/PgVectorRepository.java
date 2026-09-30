@@ -1251,6 +1251,8 @@ public final class PgVectorRepository {
             // cannot recover neighbors the ef-bounded traversal already pruned
             // (cross-tenant crowd-out; see PgSession.DEFAULT_EF_SEARCH_FLOOR).
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            PgSession.setHnswScanBudget(ctx);
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
@@ -1574,6 +1576,8 @@ public final class PgVectorRepository {
             // nexus-4ktfm: crowd-out headroom for the traversal itself (see
             // PgSession.DEFAULT_EF_SEARCH_FLOOR).
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            PgSession.setHnswScanBudget(ctx);
             org.jooq.Table<?> hnswFirstFn = switch (dim) {
                 case 384  -> TEXT_GATED_SEARCH_HNSW_FIRST_384.call(
                     queryVec, gateQueryText, colls, wherePlan.containment(), wherePlan.jsonPath(), nResults);
@@ -2558,6 +2562,8 @@ public final class PgVectorRepository {
             // nexus-4ktfm: crowd-out headroom — the combined-query SQL functions run
             // inside this same transaction, so the GUC governs their HNSW scans.
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            PgSession.setHnswScanBudget(ctx);
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
@@ -2595,6 +2601,8 @@ public final class PgVectorRepository {
             PgSession.setLocal(ctx, "hnsw.iterative_scan", "relaxed_order");
             // nexus-4ktfm: same crowd-out headroom as runCombinedQuery.
             PgSession.setHnswEfSearch(ctx, nResults);
+            // nexus-wbfpw.47: raise the iterative-scan budget so recall holds past 95% dead.
+            PgSession.setHnswScanBudget(ctx);
             // nexus-g17tf: bound the statement so an orphaned or pathological
             // scan cancels (57014) instead of pinning xmin for hours.
             PgSession.setSearchStatementTimeout(ctx);
