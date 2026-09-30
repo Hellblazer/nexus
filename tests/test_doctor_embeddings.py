@@ -29,6 +29,7 @@ from nexus.doctor_embeddings import (
     window_offsets,
 )
 from tests._catalog_fixture_ops import give_chunks_a_live_owner
+from tests._chunk_seed import seed_chunks_direct
 
 _CLEAN = "knowledge__f9duo-clean__bge-base-en-v15-768__v1"
 _DRIFT = "knowledge__f9duo-drift__bge-base-en-v15-768__v1"
@@ -47,8 +48,8 @@ def _ids(prefix: str, n: int) -> list[str]:
 
 def _seed_clean(t3) -> None:
     ids = _ids("a", len(_TEXTS))
-    t3.upsert_chunks_with_embeddings(
-        _CLEAN, ids=ids, documents=_TEXTS, embeddings=[],
+    seed_chunks_direct(
+        _CLEAN, ids=ids, documents=_TEXTS, embed=True,
         metadatas=[{"content_type": "prose", "title": "t"}] * len(_TEXTS),
     )
     # RDR-192 Step 5 (nexus-wbfpw.10): a raw upsert with no catalog manifest
@@ -58,16 +59,16 @@ def _seed_clean(t3) -> None:
 
 def _seed_drift(t3) -> None:
     """Every chunk's vector is the real embedding of the NEXT text, stored
-    through the same-model passthrough (``upsert_chunks(embeddings=...)``,
-    nexus-hxry2); ``upsert_chunks_with_embeddings`` would discard it and
-    embed server-side. Seeds the clean collection first, because the embed
+    verbatim by ``seed_chunks_direct(embeddings=...)`` (substrate SQL; it was
+    the same-model passthrough ``upsert_chunks(embeddings=...)``, nexus-hxry2,
+    before RDR-223 P3.1). Seeds the clean collection first, because the embed
     route resolves the model from a registered collection.
     """
     _seed_clean(t3)
     shifted = _TEXTS[1:] + _TEXTS[:1]
     wrong = t3.embed_for_collection(_CLEAN, shifted)
     ids = _ids("b", len(_TEXTS))
-    t3.upsert_chunks(
+    seed_chunks_direct(
         _DRIFT, ids=ids, documents=_TEXTS, embeddings=wrong,
         metadatas=[{"content_type": "prose", "title": "t"}] * len(_TEXTS),
     )

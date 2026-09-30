@@ -486,6 +486,31 @@ class CatalogHandlerAppendChunksTest {
         assertThat(ex.status).isEqualTo(503);
     }
 
+    @Test
+    void append_chunksOverTheCap_400NamingTheCap_beforeAnyEmbedOrTransaction_andAtTheCapIsAccepted() throws Exception {
+        registerDoc("aph.cap");
+        StringBuilder over = new StringBuilder();
+        StringBuilder at = new StringBuilder();
+        for (int i = 0; i < 301; i++) {
+            String piece = (i > 0 ? "," : "") + "{\"chash\":\"" + ch("aphcap-" + i) + "\",\"text\":\"t" + i + "\"}";
+            over.append(piece);
+            if (i < 300) at.append(piece);
+        }
+        int before = embeds.get();
+        CapturingExchange tooMany = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.cap\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],\"chunks\":[" + over + "]}");
+        handle(handler, tooMany);
+        assertThat(tooMany.status).isEqualTo(400);
+        assertThat(tooMany.bodyString()).contains("too many chunks (max 300)");
+        assertThat(embeds.get() - before).isZero();
+
+        CapturingExchange atCap = post("/v1/catalog/manifest/append",
+            "{\"doc_id\":\"aph.cap\",\"collection\":\"" + COLLECTION + "\",\"rows\":[],\"chunks\":[" + at + "]}");
+        handle(handler, atCap);
+        assertThat(atCap.status).isEqualTo(200);
+        assertThat(atCap.bodyString()).contains("\"chunks_unreferenced\":300");
+    }
+
     // ── client-supplied vectors (RDR-223 P1.5, bead nexus-z0o2p.6) ──────────────
 
     private static String vectorJson(int dim, double base) {

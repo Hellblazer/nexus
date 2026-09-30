@@ -69,9 +69,8 @@ class ChunksWriterLastWrittenAtScanTest {
             "reference-only upsert ON CONFLICT DO UPDATE: a client re-write of an existing chunk")),
         Map.entry("PgVectorRepository#batchUpdateMetadata", new Decision(Kind.REFRESH, 1,
             "have-vector and identical-text branches: the client re-indexed the chunk, metadata only")),
-        Map.entry("CatalogRepository#upsertManifestChunkVectors", new Decision(Kind.REFRESH, 2,
-            "combined write's chunk upserts ON CONFLICT DO UPDATE (overwrite, and the RDR-223 keep-stored-vector"
-                + " form for client-supplied vectors): both are a client re-write")),
+        Map.entry("CatalogRepository#upsertManifestChunkVectors", new Decision(Kind.REFRESH, 1,
+            "combined write's chunk upsert ON CONFLICT DO UPDATE: a client re-write")),
         Map.entry("PgVectorRepository#updateMetadataOneRow", new Decision(Kind.EXEMPT, 1,
             "update-metadata route (frecency, enrichment stamps): annotates, re-writes no content;"
                 + " refreshing would let a periodic stamp keep an unowned chunk alive forever")),

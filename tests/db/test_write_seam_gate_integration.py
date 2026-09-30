@@ -267,6 +267,65 @@ def _run_psql_in_container(pg_user: str, pg_db: str, sql: str) -> None:
         )
 
 
+def _psql_out_in_container(pg_user: str, pg_db: str, sql: str, *, stdin: str | None = None) -> str:
+    """Run SQL in the container as the superuser and return its stdout (-A -t)."""
+    args = ["docker", "exec", "-i", _CONTAINER_NAME, "psql", "-U", pg_user, "-d", pg_db,
+            "-v", "ON_ERROR_STOP=1", "-A", "-t"]
+    args += ["-f", "-"] if stdin is not None else ["-c", sql]
+    result = subprocess.run(args, input=stdin, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Container psql failed (rc={result.returncode}):\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+    return result.stdout.strip()
+
+
+def _seed_owned_chunks(
+    pg: dict, collection: str, ids: list[str], seed_text: str = "seed placeholder",
+    metadatas: list[dict] | None = None,
+) -> None:
+    """Give *ids* an existing, OWNED chunk row in *collection* (RDR-223 P3.1).
+
+    From Phase 3 the engine refuses a first write to upsert-chunks for a chash
+    with no live manifest row, so a test of that route's server-side behaviour
+    can no longer start from an empty collection. This builds the precondition
+    the route still accepts: the collection registered through the client (as
+    the route's own first write would), one chunk row per id inserted as the
+    container superuser with a stub text and a zero vector, and a live catalog
+    owner for them. The test then drives the route with
+    ``force_re_embed=True`` so the write takes the full embed + ``ON CONFLICT DO
+    UPDATE`` path rather than the metadata-only branch an existing chash gets.
+    """
+    from nexus.corpus import ensure_collection_registered
+    from tests._catalog_fixture_ops import give_chunks_a_live_owner
+
+    ensure_collection_registered(collection)
+    tenant = _psql_out_in_container(
+        pg["user"], pg["dbname"],
+        f"SELECT tenant_id FROM nexus.catalog_collections WHERE name = '{collection}'",
+    )
+    assert tenant, f"{collection!r} was not registered"
+    from tests._chunk_seed import chunks_insert_sql
+
+    metas = metadatas or [{} for _ in ids]
+    _psql_out_in_container(
+        pg["user"], pg["dbname"], "",
+        stdin=chunks_insert_sql(
+            tenant, collection, ids, [seed_text] * len(ids), metas, [[0.0] * 768 for _ in ids],
+        ),
+    )
+    give_chunks_a_live_owner(collection, ids)
+
+
+def _stored_texts(pg: dict, collection: str) -> list[str]:
+    out = _psql_out_in_container(
+        pg["user"], pg["dbname"],
+        f"SELECT chunk_text FROM nexus.chunks WHERE collection = '{collection}' ORDER BY chunk_text",
+    )
+    return out.splitlines()
+
+
 # ── Module-scoped service fixture ─────────────────────────────────────────────
 
 
@@ -335,6 +394,7 @@ def _make_chunks(n: int, prefix: str = "chunk") -> tuple[list[str], list[str]]:
 
 def test_over_300_record_upsert_round_trip(
     local_service: tuple[str, str],
+    pg_instance: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A single logical upsert_chunks call with >300 ids completes without error
@@ -371,8 +431,14 @@ def test_over_300_record_upsert_round_trip(
 
     assert len(all_ids) > 300, "precondition: must test with >300 ids"
 
+    # RDR-223 P3.1: the collection starts with the 350 rows owned (stub text), so
+    # the >300 write below is one the engine keeps accepting once ownerless
+    # writes are refused; force_re_embed sends every id down the embed + ON
+    # CONFLICT DO UPDATE path, which is the seam under test.
+    _seed_owned_chunks(pg_instance, _COLLECTION, all_ids)
+
     # Should not raise — the server must accept the full batch
-    client.upsert_chunks(_COLLECTION, all_ids, all_docs)
+    client.upsert_chunks(_COLLECTION, all_ids, all_docs, force_re_embed=True)
 
     # Verify round-trip: existing_ids must see ALL upserted chunks
     found = client.existing_ids(_COLLECTION, all_ids)
@@ -381,10 +447,14 @@ def test_over_300_record_upsert_round_trip(
         f"Missing {len(set(all_ids) - found)} of {n}. "
         "This is the signature-parity-not-behaviour-parity failure class."
     )
+    # Non-vacuity: the seed held a placeholder, so the write really replaced the
+    # text of all 350 rows in that one call.
+    assert _stored_texts(pg_instance, _COLLECTION) == sorted(all_docs)
 
 
 def test_duplicate_chash_dedup_collapse(
     local_service: tuple[str, str],
+    pg_instance: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Server-side dedup collapses duplicate chash ids within a single upsert call.
@@ -427,8 +497,12 @@ def test_duplicate_chash_dedup_collapse(
 
     coll = "knowledge__seam-gate-dedup2__bge-base-en-v15-768__v1"
 
+    # RDR-223 P3.1: start from 10 owned rows (see the >300 test); the duplicated
+    # batch below then takes the embed + ON CONFLICT path via force_re_embed.
+    _seed_owned_chunks(pg_instance, coll, unique_ids)
+
     # Server must not error on duplicate chash ids in one batch
-    client.upsert_chunks(coll, dup_ids, dup_docs)
+    client.upsert_chunks(coll, dup_ids, dup_docs, force_re_embed=True)
 
     # Stored count == unique chash count (server dedup collapsed duplicates)
     found = client.existing_ids(coll, dup_ids)
@@ -437,10 +511,14 @@ def test_duplicate_chash_dedup_collapse(
         f"found {len(found)}. "
         "PgVectorRepository.upsertChunksInternal HashSet dedup not working across wire."
     )
+    assert _stored_texts(pg_instance, coll) == sorted(unique_docs), (
+        "the 50-record batch must leave exactly the 10 unique rows, each rewritten"
+    )
 
 
 def test_on_conflict_idempotency(
     local_service: tuple[str, str],
+    pg_instance: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Re-upserting the same chash with updated metadata updates the row, not duplicates.
@@ -470,10 +548,11 @@ def test_on_conflict_idempotency(
     client = get_http_vector_client()
     coll = "knowledge__seam-gate-conflict__bge-base-en-v15-768__v1"
 
-    # First upsert
+    # First write: RDR-223 P3.1 seeds the 5 rows (owned, v1 metadata) instead of
+    # sending them through upsert-chunks, which refuses an ownerless first write.
     ids, docs = _make_chunks(5, prefix="conflict_gate")
     metas_v1 = [{"version": "v1", "index": i} for i in range(5)]
-    client.upsert_chunks(coll, ids, docs, metadatas=metas_v1)
+    _seed_owned_chunks(pg_instance, coll, ids, metadatas=metas_v1)
 
     # Confirm all 5 are present
     found_after_first = client.existing_ids(coll, ids)
@@ -490,12 +569,8 @@ def test_on_conflict_idempotency(
         "ON CONFLICT DO UPDATE produced a duplicate instead of updating the row."
     )
 
-    # Metadata refresh: the stored chunk must now carry v2 metadata. Give it a
-    # live owner first: since RDR-192 Step 5 (nexus-wbfpw.10) get_by_id returns
-    # only chunks with a live own-collection owner, and this test writes none.
-    from tests._catalog_fixture_ops import give_chunks_a_live_owner
-
-    give_chunks_a_live_owner(coll, ids)
+    # Metadata refresh: the stored chunk must now carry v2 metadata. The rows
+    # are owned (seeded above), so get_by_id (live(c)-gated) sees them.
     entry = client.get_by_id(coll, ids[0])
     assert entry is not None, "get_by_id returned None for a just-upserted chunk"
     # The content field carries the chunk text (flat T3Database shape)
@@ -517,6 +592,7 @@ def test_on_conflict_idempotency(
 
 def test_nul_bytes_sanitized_server_side(
     local_service: tuple[str, str],
+    pg_instance: dict,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A chunk containing NUL bytes is stored with the NULs stripped by the server.
@@ -564,18 +640,18 @@ def test_nul_bytes_sanitized_server_side(
     # sanitized text under this same id (the chash is not recomputed).
     chunk_id = _chunk_id(nul_text)
 
+    # RDR-223 P3.1: an owned placeholder row under that chash (the route refuses
+    # an ownerless first write); force_re_embed sends the NUL-bearing text down
+    # the insert path where stripNul runs, replacing the placeholder.
+    _seed_owned_chunks(pg_instance, coll, [chunk_id])
+
     # Must NOT raise: a raw NUL would crash a naive text bind; the server's
     # stripNul is what lets this round-trip succeed at all.
-    client.upsert_chunks(coll, [chunk_id], [nul_text])
+    client.upsert_chunks(coll, [chunk_id], [nul_text], force_re_embed=True)
 
     found = client.existing_ids(coll, [chunk_id])
     assert found == {chunk_id}, "NUL-bearing chunk was not stored under its chash"
 
-    # get_by_id returns only chunks with a live own-collection owner (RDR-192
-    # Step 5, nexus-wbfpw.10); this test writes none, so give it one.
-    from tests._catalog_fixture_ops import give_chunks_a_live_owner
-
-    give_chunks_a_live_owner(coll, [chunk_id])
     entry = client.get_by_id(coll, chunk_id)
     assert entry is not None, "get_by_id returned None for the NUL-sanitized chunk"
     stored = entry.get("content", "")

@@ -41,6 +41,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = [pytest.mark.integration]
 
@@ -104,12 +105,14 @@ def test_count_list_collections_and_reindex_existence_agree_on_mixed_dim_collect
         f"w84ho mixed-dim foreign-dim chunk {tenant}".encode()
     ).hexdigest()
 
-    # Own-dim row via the real application write path (server-side embeds at
-    # bge-768's dispatched dim). This ALSO registers nexus.catalog_collections
+    # Own-dim row at bge-768's dispatched dim. This ALSO registers nexus.catalog_collections
     # for _COLLECTION, satisfying the FK the foreign-dim raw insert below
     # relies on -- same ordering PgVectorRepositoryDimGuardTest.java uses.
-    client.upsert_chunks_with_embeddings(
-        _COLLECTION, ids=[own_chash], documents=[own_content], embeddings=[],
+    # RDR-223 P3.1: substrate SQL with the engine's real embedding (the
+    # engine refuses an ownerless upsert-chunks write from Phase 3 on); the
+    # helper registers the collection the way the route's first write did.
+    seed_chunks_direct(
+        _COLLECTION, ids=[own_chash], documents=[own_content], embed=True,
         metadatas=[{"title": "w84ho-own-dim", "chunk_text_hash": own_chash}],
     )
 

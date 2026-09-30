@@ -26,6 +26,9 @@ import logging
 import pytest
 import structlog
 
+from tests._catalog_fixture_ops import give_chunks_a_live_owner
+from tests._chunk_seed import seed_chunks_direct
+
 pytestmark = [pytest.mark.integration]
 
 #: bge-base-en-v15-768 dispatches to the 768-dim column server-side (matches
@@ -66,6 +69,28 @@ def test_data_token_manager_self_mint_round_trip_against_real_engine(
     collection = f"knowledge__wrwb7e2e-{tenant}__bge-base-en-v15-768__v1"
     ensure_collection_registered(collection)
 
+    # RDR-223 P3.1: the write below must be one the engine keeps accepting once
+    # ownerless writes are refused. So the chunk is seeded and OWNED here, while
+    # the static bearer is still valid (substrate SQL and the catalog writer do
+    # not use the self-minted token), and the write under test is an owned
+    # rewrite of it that changes its metadata: still a POST through the T3
+    # choke point in _request_once, still 401 without the self-minted token.
+    content = f"nexus-wrwb7 self-minted data-token round trip ({tenant})"
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    seed_chunks_direct(
+        collection, [chash], [content],
+        [{"title": "wrwb7-seed", "chunk_text_hash": chash}], embeddings=[[0.1] * _DIM],
+    )
+    give_chunks_a_live_owner(collection, [chash])
+
+    # The process-singleton vector client (if an earlier test left one) probes
+    # /version for the write's chunk cap using tenant "default", which this
+    # mint-locked credential cannot mint for. Drop it so the write below builds
+    # its cap decision without that probe, as it does when this test runs alone.
+    from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+
+    reset_http_vector_client_for_tests()
+
     # Deliberately break the static service_token so the round trip below
     # can ONLY succeed via the self-minted data token actually being
     # presented -- a silent fallback to the static token would 401 loudly,
@@ -80,8 +105,6 @@ def test_data_token_manager_self_mint_round_trip_against_real_engine(
         import nexus.db.http_vector_client as hvc
 
         client = hvc.HttpVectorClient(tenant=tenant)
-        content = f"nexus-wrwb7 self-minted data-token round trip ({tenant})"
-        chash = hashlib.sha256(content.encode()).hexdigest()
         embedding = [0.1] * _DIM
 
         # nexus-fryrd: the write path resolves the collection's catalog row
@@ -101,23 +124,17 @@ def test_data_token_manager_self_mint_round_trip_against_real_engine(
             )
             # Read: a second call through the SAME manager -- proves cache
             # reuse (residue discipline), not a re-mint per call.
-            # nexus-wbfpw.10 (RDR-192 Step 5 live(c), engine fc99baac9): this
-            # test proves the write was ACCEPTED (self-mint auth actually
-            # took effect), not a retrieval-relevance property, and the
-            # chunk is written with no catalog manifest owner -- so read
-            # back through the maintenance include_non_live=True escape
-            # hatch, which sees stored rows regardless of live(c) ownership,
-            # rather than registering an owner document this test has no
-            # other use for.
-            present = client.get_collection(collection).get(
-                ids=[chash], include=[], include_non_live=True,
-            )
+            # The chunk is owned (seeded above), so a live read sees it, and
+            # the rewritten title proves the POST landed rather than the seed
+            # merely being read back.
+            present = client.get_collection(collection).get(ids=[chash], include=["metadatas"])
 
         assert chash in (present.get("ids") or []), (
             "the engine accepted the write authenticated by the self-minted "
             "data token -- a fallback to the broken static service_token "
             "would have 401'd on the first call"
         )
+        assert present["metadatas"][0]["title"] == "wrwb7-e2e", "the rewrite landed"
 
         minted_events = [e for e in logs if e.get("event") == "data_token_minted"]
         failed_events = [e for e in logs if e.get("event") == "data_token_mint_failed"]
@@ -163,6 +180,25 @@ def test_mint_tenant_tenant_asymmetric_round_trip_succeeds(
     mint_locked_credential = issued["token"]
     assert mint_locked_credential
 
+    # RDR-223 P3.1: seed and own the chunk while the static bearer is valid, so the
+    # write under test below is an owned rewrite (see the sibling test above).
+    collection = f"knowledge__ssqk9asym-{tenant_a}__bge-base-en-v15-768__v1"
+    content = f"nexus-ssqk9 tenant-asymmetric round trip ({tenant_a})"
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    seed_chunks_direct(
+        collection, [chash], [content],
+        [{"title": "ssqk9-seed", "chunk_text_hash": chash}], embeddings=[[0.1] * _DIM],
+    )
+    give_chunks_a_live_owner(collection, [chash])
+
+    # The process-singleton vector client (if an earlier test left one) probes
+    # /version for the write's chunk cap using tenant "default", which this
+    # mint-locked credential cannot mint for. Drop it so the write below builds
+    # its cap decision without that probe, as it does when this test runs alone.
+    from nexus.db.http_vector_client import reset_http_vector_client_for_tests
+
+    reset_http_vector_client_for_tests()
+
     monkeypatch.setenv("NX_SERVICE_TOKEN", "deliberately-invalid-static-sentinel")
     monkeypatch.setenv("NX_MINT_TOKEN", mint_locked_credential)
     monkeypatch.setenv("NX_MINT_TENANT", tenant_a)
@@ -178,9 +214,6 @@ def test_mint_tenant_tenant_asymmetric_round_trip_succeeds(
         # what makes the mint body carry the CREDENTIAL's real bound
         # tenant instead.
         client = hvc.HttpVectorClient()
-        collection = f"knowledge__ssqk9asym-{tenant_a}__bge-base-en-v15-768__v1"
-        content = f"nexus-ssqk9 tenant-asymmetric round trip ({tenant_a})"
-        chash = hashlib.sha256(content.encode()).hexdigest()
         embedding = [0.1] * _DIM
 
         structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.INFO))
@@ -189,18 +222,14 @@ def test_mint_tenant_tenant_asymmetric_round_trip_succeeds(
                 collection, ids=[chash], documents=[content], embeddings=[embedding],
                 metadatas=[{"title": "ssqk9-asym", "chunk_text_hash": chash}],
             )
-            # nexus-wbfpw.10 (RDR-192 Step 5 live(c)): auth round trip, not a
-            # retrieval-relevance property -- see the sibling test above for
-            # why include_non_live=True is the faithful read-back here.
-            present = client.get_collection(collection).get(
-                ids=[chash], include=[], include_non_live=True,
-            )
+            present = client.get_collection(collection).get(ids=[chash], include=["metadatas"])
 
         assert chash in (present.get("ids") or []), (
             "mint_tenant must have overridden the caller's 'default' "
             "tenant in the mint body, matching the credential's own "
             "bound tenant -- otherwise this write 403s at mint time"
         )
+        assert present["metadatas"][0]["title"] == "ssqk9-asym", "the rewrite landed"
         minted_events = [e for e in logs if e.get("event") == "data_token_minted"]
         assert len(minted_events) == 1
         rendered = str(logs)

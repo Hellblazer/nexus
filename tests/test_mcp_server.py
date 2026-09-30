@@ -194,7 +194,7 @@ def t3():
 
     from nexus.corpus import _REGISTERED_COLLECTIONS, collection_registration_kwargs
     from nexus.db.local_ef import _MODEL_TOKENS, _TIER1_MODEL
-    from tests._catalog_fixture_ops import seed_manifest_chunks as _seed_manifest_chunks
+    import tests._catalog_fixture_ops as _cfo
 
     _real_put = db.put
     _seeded_collections: set[str] = set()
@@ -221,7 +221,9 @@ def t3():
                 _seeded_collections.add(col_name)
             chash = _hashlib.sha256(str(content).encode()).hexdigest()
             try:
-                _seed_manifest_chunks(col_name, [chash])
+                # Looked up at call time so a test whose manifest write is
+                # stubbed can turn the seed off (see the Greenfield test).
+                _cfo.seed_manifest_chunks(col_name, [chash])
             except Exception:  # noqa: BLE001 — best-effort seed; a real failure surfaces from the actual manifest write below, unmasked
                 pass
         return _real_put(*args, **kwargs)
@@ -412,10 +414,11 @@ class TestNexusHmxiRoundTripGrandfathering:
         landing a real write — the real substrate is always local/bge
         (see the module docstring's latent-mismatch note), so a genuine
         register_collection call naming voyage-context-3 would 422
-        against it. Fakes both catalog writes this flow reaches (the
-        seed's real chunk upsert, via the SAME ``_post`` stub pattern
-        tests/db/test_http_vector_client.py uses, and the manifest
-        write) so nothing here touches the real substrate; asserts the
+        against it. Fakes what the flow reaches (the catalog writer, the
+        manifest write, document registration) and turns the ``t3``
+        fixture's chunk seed off (it inserts a real ``nexus.chunks`` row,
+        which needs a registered collection the faked writer never
+        creates), so nothing here touches the real substrate; asserts the
         promoted name AND that the (fake) registrar was actually
         called with the voyage token, not just that the string
         happens to appear in the CLI's echo.
@@ -427,8 +430,7 @@ class TestNexusHmxiRoundTripGrandfathering:
             "nexus.catalog.factory.make_catalog_writer", lambda **kw: fake_writer,
         )
         monkeypatch.setattr(
-            "nexus.db.http_vector_client._post",
-            lambda path, body, **kw: {"upserted": len(body.get("ids", []))},
+            "tests._catalog_fixture_ops.seed_manifest_chunks", lambda *a, **kw: None,
         )
         monkeypatch.setattr(
             "nexus.catalog.store_hook.store_put_manifest_direct",
@@ -447,7 +449,6 @@ class TestNexusHmxiRoundTripGrandfathering:
             lambda *a, **kw: ("9.9.9", True),
         )
 
-        _seed_for_store_put("Greenfield content", "knowledge__greenfield")
         result = store_put(
             content="Greenfield content",
             collection="knowledge__greenfield",

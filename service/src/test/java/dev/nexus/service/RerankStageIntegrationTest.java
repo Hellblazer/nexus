@@ -165,19 +165,20 @@ class RerankStageIntegrationTest {
         // always-enforced FK now -- PgVectorRepository's stub-insert is retired.
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COL);
+
+            // Fixture rows: distances 0.0 / 0.2 / 0.4 → distance order C1, C2, C3.
+            // RDR-223 P3.1 (nexus-z0o2p.23): seeded with substrate SQL, not the
+            // upsert-chunks POST -- the engine refuses that route's ownerless writes
+            // from Phase 3 on, and these chunks have no owner until ownChunks below.
+            // The vectors are the same FakeEmbedder ones the route would have stored.
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, COL,
+                List.of(C1, C2, C3), List.of(DOC_NEAR, DOC_MID, DOC_FAR),
+                List.of(Map.of(), Map.of(), Map.of()), embedder);
         }
 
-        // Fixture rows: distances 0.0 / 0.2 / 0.4 → distance order C1, C2, C3.
-        Map<String, Object> up = postOk(svcVoyage, "/v1/vectors/upsert-chunks", Map.of(
-            "collection", COL,
-            "ids",        List.of(C1, C2, C3),
-            "documents",  List.of(DOC_NEAR, DOC_MID, DOC_FAR),
-            "metadatas",  List.of(Map.of(), Map.of(), Map.of())));
-        assertThat(((Number) up.get("upserted")).intValue()).isEqualTo(3);
-
         // RDR-192 Step 5 (nexus-wbfpw.10): search/hybrid-search now require a live
-        // own-collection manifest owner (live(c)) -- these chunks were written via the
-        // HTTP upsert-chunks path with no manifest row at all, so give them one.
+        // own-collection manifest owner (live(c)) -- these chunks have no manifest
+        // row at all, so give them one.
         new TenantScope(svcDs).withTenant(TENANT, ctx -> {
             PgContainerHelper.ownChunks(ctx, TENANT, COL, C1, C2, C3);
             return null;

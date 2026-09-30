@@ -69,6 +69,7 @@ from nexus.db.http_vector_client import VectorServiceError
 from nexus.errors import SearchEmbeddingProfileMismatchError
 from nexus.search_engine import search_cross_corpus
 from tests._catalog_fixture_ops import give_chunks_a_live_owner
+from tests._chunk_seed import seed_chunks_direct
 
 # EmbedderRouter.resolveEmbedderStrict's exact wording (see module
 # docstring) for a voyage-context-3-registered collection queried by an
@@ -205,13 +206,18 @@ def test_matched_pair_searches_normally(t3) -> None:
     model = _write_intent_embedding_model("knowledge")
     name = _unique("knowledge__vply6") + f"__{model}__v1"
     content = "the quick brown fox jumps over the lazy dog"
-    t3.put(collection=name, content=content, title="quick brown fox")
-    # RDR-192 Step 5 (nexus-wbfpw.10): search_cross_corpus's search() is a
-    # live-visibility gated read. t3.put() is called directly here, bypassing
-    # the MCP store_hook chain that normally registers a catalog document
-    # for a store_put write, so the chunk has no live owner in its own
-    # collection.
-    give_chunks_a_live_owner(name, [hashlib.sha256(content.encode()).hexdigest()])
+    chash = hashlib.sha256(content.encode()).hexdigest()
+    # Substrate SQL with the engine's real embedding, standing in for a bare
+    # t3.put(): the engine refuses an ownerless store-put from RDR-223 Phase 3
+    # on. The chunk is then given a live owner because search_cross_corpus's
+    # search() is a live-visibility gated read (RDR-192 Step 5, nexus-wbfpw.10)
+    # and this bypasses the MCP store_hook chain that registers a catalog
+    # document for a store_put write.
+    seed_chunks_direct(
+        name, [chash], [content], embed=True,
+        metadatas=[{"title": "quick brown fox", "chunk_text_hash": chash}],
+    )
+    give_chunks_a_live_owner(name, [chash])
 
     results = search_cross_corpus("quick brown fox", [name], n_results=5, t3=t3)
 

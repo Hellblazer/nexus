@@ -441,6 +441,11 @@ class TestHardKillBlastRadius:
         # guard's actual accept path must set the REAL env var itself.
         # This child targets the SAME throwaway test substrate the
         # parent's own writes already target, never production.
+        # The child seeds chunks with substrate SQL (tests/_chunk_seed.py) and
+        # must reach THIS substrate's Postgres, not boot its own.
+        from tests._chunk_seed import substrate_env
+
+        env.update(substrate_env())
         env["NX_ALLOW_PROD_WRITE"] = (
             "nexus-hg2dw hard-kill test subprocess — targets the shared "
             "pytest engine substrate via inherited NX_SERVICE_URL, never "

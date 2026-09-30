@@ -164,6 +164,41 @@ stamping. After **any** pull/rebase that touches `service/`, rebuild with
 client probe hard-rejects it). Symptom of forgetting: the entire suite errors
 instantly at setup (thousands of `E`s in seconds).
 
+## Seeding a chunk that has no owner (RDR-223 Phase 3)
+
+The engine refuses a write to `/v1/vectors/upsert-chunks`, `/store-put` and
+`/upsert-reference-only` whose chashes have no live manifest row in the
+collection. A test that needs such a chunk (an orphan on purpose: the RDR-192
+census, reaper and gc tests, the `nx store import` tests; or the chunk that must
+exist before its manifest row because `fk_catalog_chunks_chunk` wants it first)
+builds it with `tests/_chunk_seed.py::seed_chunks_direct`, never with
+`upsert_chunks`, `upsert_chunks_with_embeddings` or `put`. It INSERTs into
+`nexus.chunks` as `nexus_svc` with the tenant GUC set (FORCE RLS applies), after
+registering the collection through the client's own registration path. The
+embedding column follows the collection's REGISTERED model and a vector of
+another width is refused; duplicate ids collapse first-wins and a repeat write
+merges metadata, as the route does (`tests/test_chunk_seed.py` pins that parity
+against the route while the route still accepts ownerless writes). Default
+vector is zero; pass `embed=True` when the test searches, clusters or exports
+the chunk, or `embeddings=` for exact vectors. `seed_manifest_chunks` is built on
+it; `give_chunks_a_live_owner` then supplies the manifest row. A test that only
+needs SOME authenticated chunk write to keep working (auth, retry, transport)
+seeds and owns the chunk first and makes the write under test an owned rewrite.
+A subprocess that seeds gets the parent's Postgres from `substrate_env()`; `ensure_engine()` in a fresh
+interpreter would boot a second one. A test with its own hermetic Postgres
+(`tests/db/` gates that spawn a container or a private `initdb`) builds the same
+statement with `chunks_insert_sql` and runs it as that database's superuser.
+Java engine tests use `PgContainerHelper.insertChunks` (typed jOOQ), which is a
+looser twin, NOT the same contract: it runs as the connection's role (the
+superuser in the existing callers, so RLS does not apply), leaves an existing
+`(tenant, collection, chash)` alone (`ON CONFLICT DO NOTHING`, no text/vector
+replace, no metadata merge, no `retention` reset, no `last_written_at` restamp),
+and picks the embedding column from the vector's width rather than the
+collection's registered model. A Java test that re-seeds a chash must not rely on
+the conflict behavior. A test whose SUBJECT
+is the route itself (deadline mapping, embed errors, the `{"upserted": N}`
+envelope) cannot move; it asserts the refusal or pre-owns its chashes instead.
+
 ## A fresh test host: what it needs, and what the suite provisions itself
 
 The suite provisions its own PostgreSQL bundle and the engine's ONNX models
