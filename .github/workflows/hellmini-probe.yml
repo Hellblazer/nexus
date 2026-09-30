@@ -8,8 +8,10 @@
 #
 # Deliberately scoped to workflow_dispatch + push on a throwaway
 # 'runner-probe/**' branch, never pull_request or push to develop/main — this
-# runner is release-jobs-only (Sam's directive) and this probe itself must
-# not become a routine PR/push trigger.
+# runner takes release jobs (Sam's directive) plus, since 2026-09-30, the
+# Service CI Java job on owner pushes (service-ci.yml; nexus-f5i1m), never any
+# pull_request job, and this probe itself must not become a routine PR/push
+# trigger.
 name: hellmini-probe
 
 on:
