@@ -21,8 +21,8 @@ name: Local-service functional gate (nightly)
 # idempotent ensure-databases probe against the real ChromaCloud tenant" — but
 # tests/e2e/local-service-gate.sh contains ZERO chroma references, so the probe
 # had already gone and three live credentials were being injected into a nightly
-# run that could not consume them. The repo secrets themselves can be deleted;
-# nothing reads them.
+# run that could not consume them. The three repo secrets were deleted on
+# 2026-09-30 (Sam); nothing read them.
 #
 # Guard bounds: the script's built-in FLOOR/BUDGET were pinned on macOS
 # (446 passed / 31 skipped). This runner differs (CA-3 bundle present

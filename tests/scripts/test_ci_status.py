@@ -512,6 +512,115 @@ def test_the_policy_set_names_ci_and_not_service_ci() -> None:
     assert "Service CI" not in cs.PUSH_CANCELS_IN_PROGRESS
 
 
+# ── an expected job that never posted (nexus-vyg07) ─────────────────────────
+#
+# Service CI's Java job runs on hellmini-ci for a develop push. When that runner
+# is offline the job sits queued; its queued post expires at 6 h, and the only
+# post left for the commit is `service change detection` success. The fold saw
+# one green job and exit 0 on a commit whose engine suite never ran. A push run
+# of Service CI exists only when service/** changed, so on the develop topic the
+# Java job is always expected once the change detector has finished.
+
+CHANGES = "service change detection"
+SCI_RUN = 36800000001
+
+
+def _service_ci(*, java: list | None = None, run_row: str | None = None) -> list:
+    """The detector finished green at BASE+5 s; *java* posts follow, *run_row* is its conclusion."""
+    kw = {"workflow": "Service CI", "run": SCI_RUN}
+    posts = [_p(T(5), state="completed", conclusion="success", job=CHANGES, **kw)]
+    posts += [_p(T(sec), state=state, conclusion=concl, job=JAVA, **kw) for sec, state, concl in (java or [])]
+    if run_row:
+        posts.append(_p(T(6), state="completed", conclusion=run_row, job="", dims=RUN, **kw))
+    return posts
+
+
+def _at(seconds: float) -> datetime:
+    return BASE + timedelta(seconds=seconds)
+
+
+def _fold_expected(posts, *, now: datetime) -> list:
+    """The fold as main() runs it for the develop topic."""
+    return cs.fold(posts, SHA, expected_jobs=cs.EXPECTED_JOBS, now=now)
+
+
+def test_a_java_job_that_never_posted_reads_pending_not_green() -> None:
+    # Only the detector's completed post survives: what the board holds after
+    # the queued post expires. Without an expected-job list this reads green.
+    posts = _service_ci()
+    statuses = _fold_expected(posts, now=_at(60))
+    by_job = {s.job: s for s in statuses}
+    assert by_job[CHANGES].verdict == "green"
+    assert by_job[JAVA].verdict == "pending"
+    assert by_job[JAVA].state == "missing"
+    assert cs.exit_code(statuses) == cs.EXIT_PENDING
+
+
+def test_a_missing_java_job_reads_failed_once_old_enough_and_never_green_after_the_expiry() -> None:
+    posts = _service_ci()
+    grace = cs.MISSING_JOB_GRACE_S
+    assert cs.exit_code(_fold_expected(posts, now=_at(5 + grace - 1))) == cs.EXIT_PENDING
+    assert cs.exit_code(_fold_expected(posts, now=_at(5 + grace + 1))) == cs.EXIT_FAILED
+    # 6 h is when the queued and in_progress posts expire: still red, never green.
+    statuses = _fold_expected(posts, now=_at(6 * 3600 + 60))
+    assert cs.exit_code(statuses) == cs.EXIT_FAILED
+    assert {s.job: s.verdict for s in statuses}[JAVA] == "failed"
+
+
+@pytest.mark.parametrize("state", ["queued", "in_progress"])
+def test_a_posted_java_job_is_read_as_posted_not_as_missing(state: str) -> None:
+    statuses = _fold_expected(_service_ci(java=[(10, state, None)]), now=_at(6 * 3600))
+    assert {s.job: (s.verdict, s.state) for s in statuses}[JAVA] == ("pending", state)
+
+
+def test_a_completed_green_java_job_reads_green() -> None:
+    posts = _service_ci(java=[(10, "completed", "success")], run_row="success")
+    statuses = _fold_expected(posts, now=_at(6 * 3600))
+    assert {s.verdict for s in statuses} == {"green"}
+    assert cs.exit_code(statuses) == cs.EXIT_GREEN
+
+
+def test_a_failed_java_job_stays_failed_with_no_missing_row_added() -> None:
+    statuses = _fold_expected(_service_ci(java=[(10, "completed", "failure")]), now=_at(60))
+    assert sorted(s.job for s in statuses) == sorted([CHANGES, JAVA])
+    assert cs.exit_code(statuses) == cs.EXIT_FAILED
+
+
+def test_no_java_row_is_expected_before_the_detector_finished() -> None:
+    kw = {"workflow": "Service CI", "run": SCI_RUN}
+    posts = [_p(T(1), state="in_progress", job=CHANGES, **kw)]
+    statuses = _fold_expected(posts, now=_at(60))
+    assert [s.job for s in statuses] == [CHANGES]  # already pending on its own
+
+
+def test_a_cancelled_service_ci_run_adds_no_missing_row() -> None:
+    statuses = _fold_expected(_service_ci(run_row="cancelled"), now=_at(60))
+    assert JAVA not in {s.job for s in statuses}
+    assert cs.exit_code(statuses) == cs.EXIT_CANCELLED
+
+
+def test_a_workflow_with_no_expected_jobs_is_untouched() -> None:
+    posts = [_p(T(5), state="completed", conclusion="success", job="lint")]
+    assert [s.job for s in _fold_expected(posts, now=_at(6 * 3600))] == ["lint"]
+
+
+def test_the_expected_job_list_is_for_the_develop_topic_only(monkeypatch) -> None:
+    posts = _service_ci()
+    monkeypatch.setattr(cs, "read_posts", lambda topic: posts)
+    assert cs.main([SHA]) == cs.EXIT_FAILED  # develop topic, posts are hours old by the real clock
+    assert cs.main([SHA, "--topic", "nexus-feature-x"]) == cs.EXIT_GREEN
+
+
+def test_the_expected_java_job_name_matches_the_workflow() -> None:
+    import yaml
+
+    wf = yaml.safe_load((Path(__file__).resolve().parents[2] / ".github" / "workflows" / "service-ci.yml").read_text())
+    assert wf["name"] in cs.EXPECTED_JOBS
+    names = {j.get("name", k) for k, j in wf["jobs"].items()}
+    for expected, anchor in cs.EXPECTED_JOBS[wf["name"]].items():
+        assert expected in names and anchor in names
+
+
 # ── against the real engine ─────────────────────────────────────────────────
 
 

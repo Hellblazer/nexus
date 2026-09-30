@@ -83,6 +83,19 @@ Known misreadings, all of them:
 7. A ``cancelled`` job with no run post at all and no evidence that it started
    keeps ``cancelled``; the run post is a separate delivery and can be missing.
 
+An expected job that never posted (nexus-vyg07). A board fold only sees posts,
+and ``queued``/``in_progress`` posts expire at 6 h while ``completed`` posts last
+3 days. Service CI's Java job runs on ``hellmini-ci`` for a develop push; with
+that runner offline the job sits queued, its ``queued`` post expires, and the one
+post left for the commit is ``service change detection`` success: one green job,
+exit 0, for a commit whose engine suite never ran. ``EXPECTED_JOBS`` names, per
+workflow, the jobs that must have a row once an anchor job has completed green.
+A push run of Service CI exists only when ``service/**`` changed, so on the develop
+topic the Java job is always expected. When the row is missing the fold adds one
+with state ``missing``: ``pending`` for ``MISSING_JOB_GRACE_S`` after the anchor
+completed, ``failed`` after that. It adds nothing for a run whose own row says
+``cancelled``. For any other topic nothing is expected.
+
 Exit status: 0 when every job completed green, 1 when any job failed,
 2 when nothing failed but something is still pending, 3 when the topic has
 no post for the commit, 4 when nothing failed or is pending but something
@@ -124,6 +137,18 @@ PUSH_CANCELS_IN_PROGRESS: frozenset[str] = frozenset({
 #: runs: the likely supersedes trail by 0 to 7 s; the next run of the same
 #: workflow after any other cancelled run is 302 s or more away.
 SUPERSEDE_SKEW_S: int = 30
+#: Per workflow (the ``name:`` of the YAML), the jobs that must post once their ANCHOR
+#: job has completed green, as ``{expected job: anchor job}``. Applied to the develop
+#: topic only, where every run is a push run. ``tests/scripts/test_ci_status.py`` pins
+#: the names against ``.github/workflows/service-ci.yml``.
+EXPECTED_JOBS: dict[str, dict[str, str]] = {
+    "Service CI": {"Java tests + jOOQ codegen drift guard": "service change detection"},
+}
+#: How long an expected job may go without any post once its anchor completed. The job
+#: posts ``queued`` within seconds of the anchor finishing; a runner that is offline
+#: leaves that post standing until it expires at 6 h, so a row absent this long means
+#: the post was lost or has expired, and either way nothing proves the job ran.
+MISSING_JOB_GRACE_S: int = 1800
 #: Exit codes, by precedence: a genuine red outranks a wait, which outranks a supersede.
 EXIT_GREEN: int = 0
 EXIT_FAILED: int = 1
@@ -253,7 +278,8 @@ def _run_timed_out(
 
 
 def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str, *,
-         timeout_reading: bool = True) -> list[Status]:
+         timeout_reading: bool = True, expected_jobs: dict[str, dict[str, str]] | None = None,
+         now: datetime | None = None) -> list[Status]:
     """Latest state per (workflow, job, attempt) of each workflow's chosen run for *sha*.
 
     *posts* are ``(created_at, body, dims)``. GitHub can start two runs of
@@ -273,6 +299,10 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str, 
     GitHub's manual redelivery of an old ``queued`` event, after its tuple
     expired and was purged, lands as a NEW row with a later ``created_at``
     (RDR-220 gate round 2).
+
+    *expected_jobs* (``EXPECTED_JOBS`` shape, none by default) adds a ``missing``
+    row for each expected job with no post once its anchor job completed green;
+    *now* (the wall clock when None) dates it against ``MISSING_JOB_GRACE_S``.
     """
     # (state, conclusion, url, created_at) per key; a Status is built only
     # once its verdict is known, so no Status ever exists without one.
@@ -313,12 +343,38 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str, 
         for wf in {k[0] for k in current}:
             if _run_timed_out(wf, sha, chosen.get(wf), latest, newest_attempt, started, run_first):
                 run_conclusion[wf] = "timed_out"
-    return sorted(
-        (Status(wf, job, attempt, state, conclusion, url, created_at,
-                _verdict(state, conclusion, run_conclusion.get(wf)))
-         for (wf, job, attempt), (state, conclusion, url, created_at) in current.items()),
-        key=lambda s: (s.workflow, s.job != "", s.job),
-    )
+    statuses = [
+        Status(wf, job, attempt, state, conclusion, url, created_at,
+               _verdict(state, conclusion, run_conclusion.get(wf)))
+        for (wf, job, attempt), (state, conclusion, url, created_at) in current.items()
+    ]
+    statuses += _missing_expected(current, run_conclusion, expected_jobs or {}, now or datetime.now(timezone.utc))
+    return sorted(statuses, key=lambda s: (s.workflow, s.job != "", s.job))
+
+
+def _missing_expected(
+    current: dict[tuple[str, str, int], tuple[str, str, str, str]],
+    run_conclusion: dict[str, str],
+    expected_jobs: dict[str, dict[str, str]],
+    now: datetime,
+) -> list[Status]:
+    """A ``missing`` row per expected job with no post once its anchor completed green."""
+    out: list[Status] = []
+    for wf, jobs in expected_jobs.items():
+        if run_conclusion.get(wf) == "cancelled":
+            continue  # the run row already says why the job never posted
+        for job, anchor in jobs.items():
+            if any(k[0] == wf and k[1] == job for k in current):
+                continue
+            done = [(k, v) for k, v in current.items()
+                    if k[0] == wf and k[1] == anchor and v[0] == "completed" and v[1] in GREEN]
+            if not done:
+                continue  # the anchor is still pending or red: it speaks for the run
+            (_w, _j, attempt), (_st, _c, url, anchored_at) = done[0]
+            since = _when(anchored_at)
+            old = since is None or (now - since).total_seconds() > MISSING_JOB_GRACE_S
+            out.append(Status(wf, job, attempt, "missing", "", url, anchored_at, "failed" if old else "pending"))
+    return out
 
 
 def _chosen_runs(latest: dict[tuple[str, int | None, str, int], tuple[str, str, str, str]]) -> dict[str, int]:
@@ -409,7 +465,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="print the folded status as JSON")
     args = ap.parse_args(argv)
 
-    statuses = fold(read_posts(args.topic), args.sha, timeout_reading=args.topic == DEFAULT_TOPIC)
+    develop = args.topic == DEFAULT_TOPIC
+    statuses = fold(read_posts(args.topic), args.sha, timeout_reading=develop,
+                    expected_jobs=EXPECTED_JOBS if develop else None)
     code = exit_code(statuses)
     if args.json:
         print(json.dumps([s.__dict__ for s in statuses], indent=2))
