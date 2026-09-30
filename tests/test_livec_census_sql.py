@@ -25,7 +25,8 @@ from nexus.catalog.chunk_quarantine import now_stamp, quarantine_collection_name
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests._engine_substrate import ensure_engine, mint_test_tenant
 
-pytestmark = [pytest.mark.integration]
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
+# and CI's default selection must run this RDR-192 pin.
 
 _SQL_PATH = Path(__file__).resolve().parents[1] / "scripts" / "sql" / "livec_census.sql"
 
@@ -163,7 +164,6 @@ def test_livec_census_sql_file_exists() -> None:
     assert _SQL_PATH.is_file(), f"census script missing: {_SQL_PATH}"
 
 
-@pytest.mark.integration
 def test_livec_census_classifies_each_cause_and_scopes_by_tenant(
     t2_service_env: str, substrate_state: dict, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -220,7 +220,6 @@ def test_livec_census_classifies_each_cause_and_scopes_by_tenant(
     assert by_key_b[(coll_b, "no-manifest")] == 1
 
 
-@pytest.mark.integration
 def test_livec_census_catches_a_missing_tombstone_join(
     t2_service_env: str, substrate_state: dict, tmp_path: Path,
 ) -> None:
@@ -261,7 +260,6 @@ def test_livec_census_catches_a_missing_tombstone_join(
     )
 
 
-@pytest.mark.integration
 def test_livec_census_reports_quarantine_siblings_as_their_own_cause(
     t2_service_env: str, substrate_state: dict,
 ) -> None:
@@ -302,7 +300,6 @@ def test_livec_census_reports_quarantine_siblings_as_their_own_cause(
     assert by_key[(coll, "no-manifest")] == 0
 
 
-@pytest.mark.integration
 def test_livec_census_refuses_an_unset_or_empty_tenant(
     t2_service_env: str, substrate_state: dict,
 ) -> None:
@@ -317,7 +314,6 @@ def test_livec_census_refuses_an_unset_or_empty_tenant(
     assert "holds no chunks" in wrong.stderr
 
 
-@pytest.mark.integration
 def test_livec_census_manifest_probe_is_an_index_condition_under_rls(
     t2_service_env: str, substrate_state: dict,
 ) -> None:

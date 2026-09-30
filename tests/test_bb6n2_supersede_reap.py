@@ -25,8 +25,6 @@ trip, not something an in-memory double can stand in for.
 """
 from __future__ import annotations
 
-import pytest
-
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
 # and CI's default selection must run this RDR-192 pin.
 

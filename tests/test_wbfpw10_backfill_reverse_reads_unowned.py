@@ -11,9 +11,8 @@ from __future__ import annotations
 
 import hashlib
 
-import pytest
-
-pytestmark = [pytest.mark.integration]
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
+# and CI's default selection must run this RDR-192 pin.
 
 _COLLECTION = "knowledge__wbfpw10-backfill__bge-base-en-v15-768__v1"
 

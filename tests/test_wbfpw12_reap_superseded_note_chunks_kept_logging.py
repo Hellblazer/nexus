@@ -12,7 +12,7 @@ sweep with nothing to do.
 
 Pure unit tests, MagicMock reader — no engine substrate needed. Mirrors
 tests/test_superseded_vector_sweep.py's ``_cat`` helper shape rather than
-the real-engine integration suite in tests/test_bb6n2_supersede_reap.py,
+the real-engine suite in tests/test_bb6n2_supersede_reap.py,
 since only the logging behavior at each guard is under test here, not the
 guards' own correctness (already covered there and in
 tests/test_indexer_utils_live_note_chashes.py).

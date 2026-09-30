@@ -32,7 +32,6 @@ import hashlib
 import time
 from datetime import UTC, datetime
 
-import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main

@@ -143,7 +143,6 @@ def _seed_all_reachable_buckets(tenant: str, coll: str) -> dict[str, str]:
     }
 
 
-@pytest.mark.integration
 def test_census_reports_every_reachable_bucket_with_owner_and_exits_clean(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -175,7 +174,6 @@ def test_census_reports_every_reachable_bucket_with_owner_and_exits_clean(
     assert ids["manifested"] not in result.output
 
 
-@pytest.mark.integration
 def test_census_json_parses_and_matches_text_counts_plus_owners(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -217,7 +215,6 @@ def test_census_json_parses_and_matches_text_counts_plus_owners(
         assert f"{bucket}: {row['totals'][bucket]}" in text_result.output
 
 
-@pytest.mark.integration
 def test_census_require_zero_violation_exits_2(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -235,7 +232,6 @@ def test_census_require_zero_violation_exits_2(
     assert "no-owner" in result.output
 
 
-@pytest.mark.integration
 def test_census_json_with_require_zero_violation_stdout_still_parses(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -271,7 +267,6 @@ def test_census_json_with_require_zero_violation_stdout_still_parses(
     assert "violated" not in result.stdout.lower()
 
 
-@pytest.mark.integration
 def test_census_quarantine_collection_exits_engine_error_never_traceback(
     runner: CliRunner, t2_service_env,
 ) -> None:
@@ -293,7 +288,6 @@ def test_census_quarantine_collection_exits_engine_error_never_traceback(
     assert "quarantine-wbfpw5-census-probe" in result.output
 
 
-@pytest.mark.integration
 def test_census_all_on_a_tenant_with_no_collections_exits_3(
     runner: CliRunner, t2_service_env,
 ) -> None:

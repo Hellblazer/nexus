@@ -35,9 +35,8 @@ from __future__ import annotations
 import hashlib
 from unittest.mock import patch
 
-import pytest
-
-pytestmark = [pytest.mark.integration]
+# Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
+# and CI's default selection must run this RDR-192 pin.
 
 
 def _seed(cat, db, coll_name: str, owner: str, n_live: int, n_orphan: int):
