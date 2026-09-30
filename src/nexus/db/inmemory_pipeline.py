@@ -492,7 +492,7 @@ def make_in_memory_pipeline_db(
     """A real ``HttpPipelineDB`` wired to a fresh :class:`InMemoryPipelineEngine`.
 
     The client's ``in_memory`` flag is set: a PDF dry run accepts no other pipeline buffer
-    (``doc_indexer._require_throwaway_store``), because a buffer on the engine is shared with a
+    (``doc_indexer._require_throwaway_pipeline``), because a buffer on the engine is shared with a
     real run of the same file."""
     engine = InMemoryPipelineEngine(clock=clock)
     db = HttpPipelineDB(base_url="http://in-memory-pipeline", _token="in-memory")

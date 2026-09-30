@@ -133,26 +133,7 @@ def mock_t3() -> MagicMock:
     return m
 
 
-def _bound_the_polling(monkeypatch: pytest.MonkeyPatch, limit: int = 400) -> None:
-    """Turn a stage that polls forever into a failure. A run whose uploader waits for a count that
-    can never be reached has no exit; the pool's non-daemon threads would hang the whole pytest
-    process, so the poll sleep itself raises once it has been called *limit* times."""
-    import nexus.pipeline_stages as ps
-
-    calls = {"n": 0}
-    real = ps.time
-
-    class _BoundedTime:
-        def sleep(self, seconds: float) -> None:
-            calls["n"] += 1
-            if calls["n"] > limit:
-                raise AssertionError(f"a stage polled {limit} times without finishing: the run never ends")
-            real.sleep(seconds)
-
-        def __getattr__(self, name: str):
-            return getattr(real, name)
-
-    monkeypatch.setattr(ps, "time", _BoundedTime())
+from tests._bounded_polling import bound_the_polling as _bound_the_polling  # noqa: E402 — shared with the journeys
 
 
 def _pop_pages(db: HttpPipelineDB, h: str, n: int) -> None:
@@ -161,6 +142,30 @@ def _pop_pages(db: HttpPipelineDB, h: str, n: int) -> None:
         db.write_page(h, i, f"Page {i} content here.",
                       metadata={"page_number": i + 1, "text_length": 22})
     db.update_progress(h, total_pages=n, pages_extracted=n)
+
+
+def _pop_killed_upload(
+    db: HttpPipelineDB, h: str, n: int, flagged: int, *, counter: int | None = None,
+    embedded_rows: int | None = None,
+) -> None:
+    """What a process killed hard part way through an upload leaves: the pages and chunks the run
+    extracted and embedded, the chunks it had flagged uploaded, and a pipeline row marked failed
+    (the handler a survived failure runs never ran, the row stays until it goes stale). Extraction
+    is complete (``total_pages`` reached, metadata stored) and so is chunking (``chunks_embedded``
+    set). *embedded_rows* writes fewer chunk rows than ``chunks_created`` claims (a damaged
+    buffer)."""
+    db.create_pipeline(h, "/a.pdf", "docs__test")
+    for i in range(2):
+        db.write_page(h, i, f"Page {i} content.", metadata={"page_number": i + 1, "text_length": 15})
+    db.store_extraction_metadata(h, {"page_count": 2, "table_regions": [], "extraction_method": "docling"})
+    db.update_progress(h, total_pages=2, pages_extracted=2, chunks_created=n, chunks_embedded=n)
+    for i in range(n if embedded_rows is None else embedded_rows):
+        db.write_chunk(h, i, f"chunk {i} text", f"{h[:16]}_{i}",
+                       metadata={"page": 1, "content_hash": h}, embedding=_fake_embedding(i))
+    db.mark_uploaded(h, list(range(flagged)))
+    if counter:
+        db.update_progress(h, chunks_uploaded=counter)
+    db.mark_failed(h, error="killed")
 
 
 def _pop_chunks(db: HttpPipelineDB, h: str, n: int) -> None:
@@ -1043,7 +1048,11 @@ class TestPipelineIndexPdf:
         t3.get_or_create_collection.return_value = mock_col
         t3.update_chunks.side_effect = [Exception("quota exceeded"), None]
         calls: list[tuple] = []
-        monkeypatch.setattr("nexus.doc_indexer._stamp_finished_upload", lambda *a: calls.append(a))
+        # The buffer must still exist WHEN the stamp is sent: it goes after the stamp, never before
+        # (a stamp that fails, or a kill before it, needs the buffer to send only the stamp).
+        monkeypatch.setattr(
+            "nexus.doc_indexer._stamp_finished_upload",
+            lambda *a: calls.append((*a, db.get_pipeline_state("abc123") is not None)))
         # The document's fence as the earlier run left it: begun for this content, never stamped.
         # (The writer here is a recorder, so the real engine's fence was never begun.)
         monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("indexing", "abc123"))
@@ -1059,60 +1068,195 @@ class TestPipelineIndexPdf:
         assert calls == [], "the failed post-pass stamped nothing"
         assert _run() == 1
         assert len(writer.instances) == 1, "the retry had nothing to send and made no writer"
-        assert len(calls) == 1 and calls[0][1:] == ("abc123", 1)
+        assert len(calls) == 1 and calls[0][1:] == ("abc123", 1, True)
+        assert db.get_pipeline_state("abc123") is None, "the buffer goes once the stamp landed"
+
+    @pytest.mark.parametrize("refused", [False, True], ids=["transport-failure", "refusal"])
+    def test_a_failed_stamp_keeps_the_buffer_for_a_stamp_only_retry_and_a_refusal_discards_it(
+        self, db, mock_t3, writer, monkeypatch, refused,
+    ) -> None:
+        """The buffer is deleted only after the stamp landed. A stamp that fails for any reason
+        but a refusal leaves the pipeline row failed and the buffer in place, so the next run sends
+        the stamp alone. A REFUSAL (the engine says this buffer is not the document: row count or
+        chunk existence) discards the buffer: stamping it again would be refused for ever."""
+        from nexus.errors import IndexRunVerifyRefused
+
+        exc = (IndexRunVerifyRefused(doc_id="1.1.1", referenced=0, present=0, missing=0, chunk_count=1)
+               if refused else RuntimeError("stamp transport down"))
+
+        def _complete(self):
+            raise exc
+
+        monkeypatch.setattr(writer, "complete", _complete)
+        monkeypatch.setattr("nexus.doc_indexer._register_or_lookup_doc_id",
+                            lambda *a, with_created=False, **kw: ("1.1.1", False) if with_created else "1.1.1")
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(1, _er(1))
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {"page_number": 1}))
+            with pytest.raises(type(exc)):
+                pipeline_index_pdf(Path("/stamp.pdf"), "abc123", "docs__test", mock_t3,
+                                   db=db, embed_fn=_embed, corpus="test")
+
+        state = db.get_pipeline_state("abc123")
+        if refused:
+            assert state is None, "a refused buffer is discarded"
+        else:
+            assert state is not None and state["status"] == "failed", "kept, and resumable"
+            assert db.chunk_counts("abc123")[0] == 1
 
     @pytest.mark.parametrize("counter", [4, 0], ids=["counter-current", "counter-lagging"])
-    def test_a_resume_after_a_killed_upload_restarts_fresh_in_the_same_invocation(
+    def test_a_resume_after_a_killed_upload_resends_from_chunk_zero_without_extracting_or_embedding(
         self, db, mock_t3, writer, counter, monkeypatch,
     ) -> None:
         """An earlier process flagged 4 of 6 chunks uploaded and died with its writer's state. The
         resumed run must not send the other 2 alone (that would replace the manifest with a
-        fragment and sweep the head as superseded): it discards the buffer and re-runs the document
-        from scratch in this same invocation, with no failed run in between.
+        fragment and sweep the head as superseded). The pages and chunks it extracted and embedded
+        are still in the buffer, so it asks the engine to reset the upload flags and re-sends the
+        whole document from position 0 through a fresh writer: the extractor is NOT called again
+        and nothing is embedded again (RDR-223, decision D1).
 
         ``counter=0`` is the kill that lands after the flag and before the buffered progress counter
         flushed (the counter lags by up to a poll interval): the rows say 4 chunks went out, the
         counter says none. The decision reads the rows."""
         _bound_the_polling(monkeypatch)
-        _pop_chunks(db, "h1", 6)
-        db.mark_uploaded("h1", [0, 1, 2, 3])
-        if counter:
-            db.update_progress("h1", chunks_uploaded=counter)
-        db.mark_failed("h1", error="killed")
+        _pop_killed_upload(db, "h1", 6, 4, counter=counter)
         six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
+        embedded: list[int] = []
+
+        def _counting_embed(texts, model):
+            embedded.append(len(texts))
+            return _embed(texts, model)
 
         with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
-            ME.return_value.extract.side_effect = _fx(3)
+            ME.return_value.extract.side_effect = AssertionError("the PDF must not be extracted again")
             MC.return_value.chunk.return_value = six
             n = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
-                                   db=db, embed_fn=_embed, corpus="test")
+                                   db=db, embed_fn=_counting_embed, corpus="test")
 
         assert n == 6
+        ME.return_value.extract.assert_not_called()
+        assert embedded == [], "nothing is embedded again"
         (w,) = writer.instances
         assert sum(len(r) for r, _ in w.batches) == 6, "the whole document went through one writer"
         assert [r["position"] for rows, _ in w.batches for r in rows] == list(range(6)), \
             "never a tail alone: positions start at 0"
         assert db.get_pipeline_state("h1") is None, "the run finished and cleaned up its buffer"
 
-    def test_a_resume_of_a_dry_run_leaves_the_buffer_alone(self, db, throwaway_t3) -> None:
-        """A dry run writes no catalog and sends no request, so a partial buffer is no hazard to it
-        and it must not wipe a real run's extraction work."""
-        _pop_chunks(db, "h1", 6)
-        db.mark_uploaded("h1", [0, 1, 2, 3])
-        db.update_progress("h1", chunks_uploaded=4)
-        db.mark_failed("h1", error="killed")
+    def test_a_buffer_the_chunker_finished_but_damaged_is_cleared_and_extracted_again(
+        self, db, mock_t3, writer, monkeypatch,
+    ) -> None:
+        """The one case a reset cannot serve: the chunker says it created 6 chunks and the buffer
+        holds 4 embedded rows, so a chunk is missing. The buffer is cleared and the run starts
+        from scratch (extract, chunk, upload), which is the pre-D1 behaviour kept for exactly this
+        case."""
+        _bound_the_polling(monkeypatch)
+        _pop_killed_upload(db, "h1", 6, 2, counter=2, embedded_rows=4)
+        six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
         cleared: list[str] = []
         real_clear = db.clear_orphan_wal
-        db.clear_orphan_wal = lambda ch: (cleared.append(ch), real_clear(ch))  # type: ignore[method-assign]
+        db.clear_orphan_wal = lambda ch: (cleared.append(ch), real_clear(ch))[1]  # type: ignore[method-assign]
+
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(2)
+            MC.return_value.chunk.return_value = six
+            n = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+                                   db=db, embed_fn=_embed, corpus="test")
+
+        assert n == 6
+        assert cleared == ["h1"]
+        ME.return_value.extract.assert_called_once()
+        (w,) = writer.instances
+        assert [r["position"] for rows, _ in w.batches for r in rows] == list(range(6))
+
+    def test_a_dry_run_builds_its_own_buffer_and_sends_the_engine_nothing(
+        self, throwaway_t3, monkeypatch,
+    ) -> None:
+        """A dry run previews extraction and chunking and sends the engine nothing, so its buffer
+        is an in-memory one of its own (RDR-223). Two things follow and both are asserted: no
+        request of any kind goes to a pipeline client that is not the in-memory one, and a real
+        run's row for the same bytes (here another buffer standing for the engine's) is never
+        created, flagged, reset or deleted.
+
+        This replaces a test that called itself "leaves the buffer alone" and asserted only that
+        ``clear_orphan_wal`` was not called on a buffer the dry run was handed."""
+        from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
+
+        real_db = HttpPipelineDB
+        seen: list[tuple[bool, str]] = []
+        real_post, real_get = RefreshableHttpStoreMixin._post, RefreshableHttpStoreMixin._get
+
+        def _post(self, path, *a, **kw):
+            seen.append((bool(getattr(self, "in_memory", False)), path))
+            return real_post(self, path, *a, **kw)
+
+        def _get(self, path, *a, **kw):
+            seen.append((bool(getattr(self, "in_memory", False)), path))
+            return real_get(self, path, *a, **kw)
+
+        monkeypatch.setattr(RefreshableHttpStoreMixin, "_post", _post)
+        monkeypatch.setattr(RefreshableHttpStoreMixin, "_get", _get)
+        engine_db, engine = make_fake_engine_db()     # stands for the real engine's buffer
+        _pop_killed_upload(engine_db, "h1", 6, 4, counter=4)
+        before = engine.counts({"content_hash": "h1"}) if hasattr(engine, "counts") else None
+        seen.clear()
         six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
 
         with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
             ME.return_value.extract.side_effect = _fx(3)
             MC.return_value.chunk.return_value = six
-            pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", throwaway_t3,
-                               db=db, embed_fn=_embed, corpus="test", dry_run=True)
+            n = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", throwaway_t3,
+                                   embed_fn=_embed, corpus="test", dry_run=True)
 
-        assert cleared == []
+        assert n == 6
+        assert seen, "non-vacuity: the dry run used a pipeline buffer"
+        assert [p for in_memory, p in seen if not in_memory] == [], "the engine saw no pipeline request"
+        ME.return_value.extract.assert_called_once()   # it had no buffer of anyone else's to reuse
+        assert engine_db.chunk_counts("h1") == (6, 4), "the real run's flags were not touched"
+        assert engine_db.get_pipeline_state("h1")["status"] == "failed"
+        if before is not None:
+            assert engine.counts({"content_hash": "h1"}) == before
+        assert real_db is HttpPipelineDB
+
+    def test_a_dry_run_handed_the_engines_buffer_is_refused(self, mock_t3, throwaway_t3) -> None:
+        from nexus.errors import DryRunStoreError
+
+        engine_backed = HttpPipelineDB(base_url="http://engine.invalid", _token="t")
+        with pytest.raises(DryRunStoreError, match="in-memory pipeline buffer"):
+            pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", throwaway_t3,
+                               db=engine_backed, embed_fn=_embed, dry_run=True)
+
+    def test_a_reconcile_that_fails_hands_the_row_back_so_the_next_run_is_not_locked_out(
+        self, db, mock_t3, writer, monkeypatch,
+    ) -> None:
+        """``create_pipeline`` answered 'resuming', so the row is 'running'. A reconcile that dies
+        (the reset call here) must not leave it so: the next run would be refused with a 409 until
+        the heartbeat aged out. The row is handed back as failed with the buffer untouched, and the
+        next run resumes it."""
+        from nexus.db.http_pipeline_client import PipelineConflictRunning
+
+        _bound_the_polling(monkeypatch)
+        _pop_killed_upload(db, "h1", 6, 4, counter=4)
+        six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
+        real_reset = db.reset_uploaded
+        db.reset_uploaded = lambda ch: (_ for _ in ()).throw(RuntimeError("reset endpoint down"))  # type: ignore[method-assign]
+
+        def _run():
+            with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+                ME.return_value.extract.side_effect = _fx(2)
+                MC.return_value.chunk.return_value = six
+                return pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+                                          db=db, embed_fn=_embed, corpus="test")
+
+        with pytest.raises(RuntimeError, match="reset endpoint down"):
+            _run()
+        assert db.get_pipeline_state("h1")["status"] == "failed", "handed back, not left running"
+        assert db.chunk_counts("h1") == (6, 4), "the buffer is untouched"
+
+        db.reset_uploaded = real_reset  # type: ignore[method-assign]
+        try:
+            assert _run() == 6
+        except PipelineConflictRunning:  # pragma: no cover - the failure this test exists to catch
+            pytest.fail("the next run was locked out by the row the failed reconcile left running")
 
     def test_resume_from_partial(self, db, mock_t3) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")
@@ -1748,3 +1892,187 @@ class TestStreamingCatalogHookTitle:
                 fake_chunks=_tc(("c0", 0, {"page_number": 1, "chunk_type": "text"})),
                 pdf_path="/2512.11001.pdf")
         assert hook.call_args.kwargs["title"] == "Rethinking Query Optimization"
+
+
+
+class TestReconcileResumedRun:
+    """``_reconcile_resumed_run`` decides what a resumed run does with a buffer an earlier process
+    left: nothing ('fresh'), stamp only ('tail'), reset the upload flags and re-send from chunk 0
+    ('reset'), or discard a damaged buffer ('restarted'). The tail is the one outcome that skips
+    the upload, so it must prove the upload FINISHED."""
+
+    @pytest.fixture(autouse=True)
+    def _fence(self, monkeypatch):
+        self.fence = ("indexing", "h1")
+        monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: self.fence)
+
+    def _reconcile(self, db):
+        from nexus.pipeline_stages import _reconcile_resumed_run
+
+        return _reconcile_resumed_run(db, "1.1.1", "h1")
+
+    def test_a_buffer_with_no_upload_evidence_is_fresh(self, db) -> None:
+        _pop_killed_upload(db, "h1", 6, 0)
+        assert self._reconcile(db) == "fresh"
+        assert db.chunk_counts("h1") == (6, 0)
+
+    def test_a_finished_upload_under_its_own_fence_is_a_tail_and_its_flags_are_kept(self, db) -> None:
+        _pop_killed_upload(db, "h1", 6, 6, counter=6)
+        assert self._reconcile(db) == "tail"
+        assert db.chunk_counts("h1") == (6, 6)
+
+    def test_the_decision_counts_and_never_reads_the_unflagged_rows(self, db) -> None:
+        _pop_killed_upload(db, "h1", 6, 4, counter=4)
+
+        def _no_row_reads(*a, **kw):
+            raise AssertionError("the reconcile read chunk rows instead of counting them")
+
+        db.read_uploadable_chunks = _no_row_reads  # type: ignore[method-assign]
+        assert self._reconcile(db) == "reset"
+
+    @pytest.mark.parametrize("why", [
+        "chunker-still-running", "extraction-incomplete", "fence-for-other-bytes",
+        "fence-already-complete", "fence-failed", "no-fence",
+    ])
+    def test_anything_short_of_a_proven_finished_upload_is_reset_not_stamped(self, db, why) -> None:
+        """The pin on the tail invariant. The first two cases are the ones the flags alone cannot
+        distinguish: ``chunks_created`` equals the flagged count (so "every chunk is flagged" reads
+        true) while the buffer says the run was not finished: the chunker's final count was never
+        set (its progressive updates set ``chunks_created`` alone), or extraction had not reached
+        ``total_pages``. They go red if the tail is ever decided from the flags alone, which is
+        what holds today only because the uploader keeps its newest batch unflagged until the next
+        batch or ``finish`` sent it."""
+        if why == "chunker-still-running":
+            db.create_pipeline("h1", "/a.pdf", "docs__test")
+            for i in range(2):
+                db.write_page("h1", i, f"Page {i} content.", metadata={"page_number": i + 1, "text_length": 15})
+            db.update_progress("h1", total_pages=2, pages_extracted=2, chunks_created=6)
+            for i in range(6):
+                db.write_chunk("h1", i, f"chunk {i} text", f"h1_{i}", metadata={}, embedding=_fake_embedding(i))
+            db.mark_uploaded("h1", list(range(6)))
+            db.update_progress("h1", chunks_uploaded=6)
+            db.mark_failed("h1", error="killed")
+        else:
+            _pop_killed_upload(db, "h1", 6, 6, counter=6)
+            if why == "extraction-incomplete":
+                db.update_progress("h1", total_pages=3)
+            self.fence = {
+                "fence-for-other-bytes": ("indexing", "other-hash"),
+                "fence-already-complete": ("complete", "h1"),
+                "fence-failed": ("failed", "h1"),
+                "no-fence": (None, None),
+            }.get(why, self.fence)
+        assert self._reconcile(db) == "reset", why
+        assert db.chunk_counts("h1")[1] == 0, "the flags were put back"
+
+    def test_a_damaged_buffer_is_discarded(self, db) -> None:
+        _pop_killed_upload(db, "h1", 6, 2, counter=2, embedded_rows=4)
+        assert self._reconcile(db) == "restarted"
+        assert db.get_pipeline_state("h1")["chunks_uploaded"] == 0
+
+
+class TestDoneSignalsMeanSuccess:
+    """``extraction_done`` and ``chunking_done`` are read downstream as "no more pages" and "every
+    chunk is in the buffer", and the uploader's last request sweeps the previous version's chunks.
+    A stage that FAILED must not set them (RDR-223, nexus-z0o2p.11)."""
+
+    def test_a_failed_extraction_does_not_signal_done(self, db) -> None:
+        done = threading.Event()
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        with patch(_P_EXT) as ME:
+            ME.return_value.extract.side_effect = RuntimeError("extract boom")
+            with pytest.raises(RuntimeError, match="extract boom"):
+                extractor_loop(Path("/a.pdf"), "h1", db, threading.Event(), extraction_done=done)
+        assert not done.is_set()
+
+    def test_a_finished_extraction_signals_done(self, db) -> None:
+        done = threading.Event()
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        with patch(_P_EXT) as ME:
+            ME.return_value.extract.side_effect = _fx(2, _er(2))
+            extractor_loop(Path("/a.pdf"), "h1", db, threading.Event(), extraction_done=done)
+        assert done.is_set()
+
+    def test_a_failed_chunker_does_not_signal_done(self, db, done_event) -> None:
+        _pop_pages(db, "h1", 3)
+        chunking_done = threading.Event()
+
+        def _embed_boom(texts, model):
+            raise RuntimeError("embed boom")
+
+        with patch(_P_CHK) as MC:
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {}), ("chunk 1", 1, {}))
+            with pytest.raises(RuntimeError, match="embed boom"):
+                chunker_loop("h1", db, threading.Event(), embed_fn=_embed_boom,
+                             extraction_done=done_event, chunking_done=chunking_done)
+        assert not chunking_done.is_set()
+
+    def test_the_zero_chunk_refusal_does_not_signal_done(self, db, done_event) -> None:
+        _pop_pages(db, "h1", 3)
+        chunking_done = threading.Event()
+        with patch(_P_CHK) as MC:
+            MC.return_value.chunk.return_value = []
+            with pytest.raises(RuntimeError, match="zero chunks"):
+                chunker_loop("h1", db, threading.Event(), embed_fn=_embed, extraction_done=done_event,
+                             chunking_done=chunking_done, pdf_path="/a.pdf")
+        assert not chunking_done.is_set()
+
+    def test_a_finished_chunker_signals_done(self, db, done_event) -> None:
+        _pop_pages(db, "h1", 3)
+        chunking_done = threading.Event()
+        with patch(_P_CHK) as MC:
+            MC.return_value.chunk.return_value = _tc(("chunk 0", 0, {}), ("chunk 1", 1, {}))
+            chunker_loop("h1", db, threading.Event(), embed_fn=_embed, extraction_done=done_event,
+                         chunking_done=chunking_done)
+        assert chunking_done.is_set()
+
+    def test_a_chunker_that_found_no_text_and_finished_signals_done(self, db, done_event) -> None:
+        db.create_pipeline("h1", "/a.pdf", "docs__test")
+        chunking_done = threading.Event()
+        chunker_loop("h1", db, threading.Event(), embed_fn=_embed, extraction_done=done_event,
+                     chunking_done=chunking_done)
+        assert chunking_done.is_set()
+
+    def test_a_failed_extraction_never_releases_the_writers_last_request(
+        self, db, mock_t3, monkeypatch,
+    ) -> None:
+        """End to end through the orchestrator. The extractor delivers three pages and then fails.
+        The chunker writes every chunk but the last, the uploader starts its writer, and, were the
+        extractor's failure to read as "extraction finished", the chunker would write the final
+        chunk and signal done and the uploader would send the writer's LAST request, whose sweep
+        removes what the previous version owned and this one dropped, for a document that was never
+        fully extracted. The orchestrator's ``wait`` is slowed so the stages get the time a real
+        run's network calls give them before ``cancel`` is set."""
+        import nexus.pipeline_stages as stages
+
+        writer = install_streaming_writer(monkeypatch)
+        real_wait = stages.wait
+
+        def _slow_wait(fs, *a, **kw):
+            # The chunker polls a pending extraction every 0.5 s (``extraction_done.wait``), so the
+            # stages need more than one of those before ``cancel`` is set.
+            time.sleep(3.0)
+            return real_wait(fs, *a, **kw)
+
+        monkeypatch.setattr(stages, "wait", _slow_wait)
+        six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
+
+        def _extract_then_fail(pdf_path, *, extractor="auto", on_formula_oom="fail", on_page=None,
+                               allow_degraded=False):
+            # Pages arrive over time, as a real extraction delivers them, so the chunker sees new
+            # pages while extraction is still pending and chunks the stable prefix.
+            for i in range(3):
+                on_page(i, f"Page {i} content.", {"page_number": i + 1, "text_length": 15})
+                time.sleep(0.2)
+            raise RuntimeError("extract boom")
+
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _extract_then_fail
+            MC.return_value.chunk.return_value = six
+            with pytest.raises(RuntimeError, match="extract boom"):
+                pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+                                   db=db, embed_fn=_embed, corpus="test")
+
+        assert writer.instances, "non-vacuity: the uploader started its writer"
+        assert ("finish",) not in writer.events, "the writer's last request (and its sweep) was sent"
+        assert not any(w.finished for w in writer.instances)

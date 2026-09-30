@@ -2930,7 +2930,6 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         UnchunkableContentError,
         CatalogIdentityMissingError,
     )
-    from nexus.pipeline_stages import PartialUploadResumeError  # noqa: PLC0415 — deferred: pipeline_stages pulls in the extractors
 
     # Local wrapper: convert the typed credential/identity errors into a
     # Click exception so the CLI shows a friendly message + exits non-zero
@@ -2952,11 +2951,6 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # nexus-z0o2p.11 / .15 (RDR-223): registration returned no identity, so the chunks
             # have no owner to be written with and nothing was written. The message names the
             # cause and the remedy.
-            raise click.ClickException(str(e)) from e
-        except PartialUploadResumeError as e:
-            # RDR-223 invariant: the orchestrator discards a partially uploaded buffer before
-            # the uploader runs, so this is unreachable from index_pdf; map it anyway so a
-            # future path to it gets the message and a clean exit, not a traceback.
             raise click.ClickException(str(e)) from e
         except IndexingError as e:
             # nexus-w6wp0 review round (code-review-expert + substantive-critic,
