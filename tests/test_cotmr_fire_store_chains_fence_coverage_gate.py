@@ -63,15 +63,12 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
         ),
         fenced=True,
     ),
-    ("commands/memory.py", "promote_cmd"): _Coverage(
-        reason=(
-            "nx memory promote: _fence_begin called in this same function "
-            "before t3.put; manifest_complete rides the fire_store_chains "
-            "call at the tail, mirroring MCP core.py::store_put's F2 "
-            "pattern verbatim (nexus-cotmr)."
-        ),
-        fenced=True,
-    ),
+    # ("commands/memory.py", "promote_cmd") left this list at RDR-223 P2.7
+    # (nexus-z0o2p.17): promote no longer calls fire_store_chains. It writes its
+    # note through note_write.put_note (the fence begins there) and fires the
+    # chains itself without the manifest hook; test_vw594_fence_coverage_gate.py
+    # carries its cross-function entry and test_z0o2p17_promote_note_write.py
+    # the proof.
     ("exporter.py", "_fire_store_chains_grouped_by_doc"): _Coverage(
         reason=(
             "nx store import: KNOWN, NAMED residual gap (nexus-tafjk "

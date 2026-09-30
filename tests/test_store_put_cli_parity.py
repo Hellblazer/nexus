@@ -104,17 +104,22 @@ def _install_recording_registry(monkeypatch):
 
         def fire_batch(self, doc_ids, collection, contents, embeddings=None,
                        metadatas=None, *, catalog_doc_id="",
-                       manifest_complete=None, invoke=None):  # type: ignore[override]
+                       manifest_complete=None, skip_hooks=None,
+                       invoke=None):  # type: ignore[override]
             # nexus-cotmr: keep in sync with HookRegistry.fire_batch's real
             # signature (manifest_complete, nexus-5xn3k.4 RUNFENCE) — CLI
             # `nx store put` / `nx memory promote` now fence and pass this
             # through fire_store_chains -> fire_batch; an override missing
             # the parameter raises TypeError on every such call, not just
-            # the RUNFENCE-specific ones.
+            # the RUNFENCE-specific ones. RDR-223 P2.7 (nexus-z0o2p.17):
+            # `nx memory promote` calls fire_batch directly with
+            # ``skip_hooks`` (the one request already wrote the manifest),
+            # so the override must carry that parameter too.
             batch.append(list(doc_ids))
             super().fire_batch(doc_ids, collection, contents, embeddings,
                                metadatas, catalog_doc_id=catalog_doc_id,
-                               manifest_complete=manifest_complete, invoke=invoke)
+                               manifest_complete=manifest_complete,
+                               skip_hooks=skip_hooks, invoke=invoke)
 
         def fire_document(self, source_path, collection, content, *, doc_id="", invoke=None):  # type: ignore[override]
             doc.append(source_path)
@@ -180,7 +185,6 @@ class TestMemoryPromoteCli:
             project="proj-test", title="m-1", content="memory body",
             tags="", ttl=None,
         )
-        _seed_for_store_put("memory body", "knowledge__memory")
 
         # RDR-120 P6 follow-up (nexus-w6txl): ``memory promote`` (and
         # every other nx memory command) now routes through
@@ -426,9 +430,16 @@ class TestDriftGuard:
             "src/nexus/commands/store.py must call HookRegistry.fire_store_chains "
             "from put_cmd (nexus-9099 regression)"
         )
-        assert "fire_store_chains" in memory_py, (
-            "src/nexus/commands/memory.py must call HookRegistry.fire_store_chains "
-            "from promote (nexus-9099 regression)"
+        # RDR-223 P2.7 (nexus-z0o2p.17): promote fires the three chains itself
+        # (single, batch without the manifest hook, document) now that its one
+        # write request has already written the manifest, exactly as MCP
+        # store_put does, so it no longer goes through fire_store_chains.
+        assert all(
+            f"hooks.{chain}(" in memory_py
+            for chain in ("fire_single", "fire_batch", "fire_document")
+        ), (
+            "src/nexus/commands/memory.py must fire the single, batch and "
+            "document chains from promote (nexus-9099 regression)"
         )
         assert "fire_store_chains" in exporter_py, (
             "src/nexus/exporter.py must call HookRegistry.fire_store_chains "
