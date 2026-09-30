@@ -6450,7 +6450,7 @@ public final class CatalogRepository {
                                               List<String> sweepChashes) {
         List<String> toSweep = normalizeSweepChashes(sweepChashes);
         int chunksWritten = appendOneDocumentTx(tenant, docId, collection, rows, resolvedChunks,
-                writtenChashesOut, Set.of());
+                writtenChashesOut, Set.of(), null, null);
         // The append has COMMITTED (the transaction above returned). Only now does the deferred
         // sweep run, in its own transaction: it cannot share the append's, which holds the sweep
         // gate SHARED (see runSweepTransaction), and a rolled-back append must sweep nothing.
@@ -6468,13 +6468,20 @@ public final class CatalogRepository {
      *        count (the request's own shared-chash fan-out is not a race with another writer;
      *        see {@link #writeManifestMany}'s {@code requestWrittenChashes}). Empty for a
      *        single-document append.
+     * @param complete {@code {content_hash, chunk_count}} to stamp the document complete in this
+     *        same transaction, after its rows and the chunk_count fold, or {@code null} for none
+     *        ({@code write_many}'s {@code complete} semantics: the fail-closed verify, and a refusal
+     *        is reported through {@code completeRefusedOut}, never thrown)
+     * @param completeRefusedOut where a refused stamp is reported; {@code null} when {@code complete} is
      * @return the count of chunk rows written
      */
     private int appendOneDocumentTx(String tenant, String docId, String collection,
                                     List<Map<String, Object>> rows,
                                     Map<String, ResolvedChunk> resolvedChunks,
                                     List<String>[] writtenChashesOut,
-                                    Set<String> writtenThisRequest) {
+                                    Set<String> writtenThisRequest,
+                                    Map<String, Object> complete,
+                                    List<Map<String, Object>> completeRefusedOut) {
         requireNonBlank(collection, "collection");
         int[] chunksWritten = new int[1];
         tenantScope.withTenant(tenant, ctx -> {
@@ -6548,6 +6555,13 @@ public final class CatalogRepository {
                         "appendManifestChunks refused: document is tombstoned: " + docId);
                 }
             }
+            // RDR-223 fix round (bead nexus-z0o2p.19): the optional completion stamp, in the same
+            // transaction as the rows, exactly as writeManifestMany stamps. A refused verify is
+            // collected, not thrown: the rows just written are correct.
+            if (complete != null) {
+                stampCompleteIfVerified(ctx, tenant, docId, (String) complete.get("content_hash"),
+                        ((Number) complete.get("chunk_count")).intValue(), completeRefusedOut);
+            }
             return null;
         });
         return chunksWritten[0];
@@ -6583,6 +6597,7 @@ public final class CatalogRepository {
         List<String> failed = new ArrayList<>();
         List<Map<String, Object>> failedDetail = new ArrayList<>();
         List<Map<String, Object>> sweepDetail = new ArrayList<>();
+        List<Map<String, Object>> completeRefused = new ArrayList<>();
         Set<String> requestWrittenChashes = new HashSet<>();
         // The deferred sweeps of the documents that committed, run only after EVERY document has
         // been appended. A sweep fired straight after its own document's commit could delete a
@@ -6601,14 +6616,21 @@ public final class CatalogRepository {
             @SuppressWarnings("unchecked")
             List<String> sweepChashes = d.get("sweep_chashes") instanceof List<?> l
                 ? (List<String>) l : List.of();
+            @SuppressWarnings("unchecked")
+            Map<String, Object> docComplete = d.get("complete") instanceof Map<?, ?> m
+                ? (Map<String, Object>) m : null;
             List<String>[] written = new List[1];
+            // A refusal is held per document and added to the response only once the document's
+            // transaction has committed: a document that rolls back has no stamp to report.
+            List<Map<String, Object>> docRefused = new ArrayList<>();
             try {
                 if (docId == null || docId.isBlank()) {
                     throw new IllegalArgumentException("'doc_id' required");
                 }
                 List<String> toSweep = normalizeSweepChashes(sweepChashes);
                 int chunksWritten = appendOneDocumentTx(tenant, docId, collection, rows,
-                        resolvedChunks, written, requestWrittenChashes);
+                        resolvedChunks, written, requestWrittenChashes, docComplete, docRefused);
+                completeRefused.addAll(docRefused);
                 // Merged only now that this document's transaction has committed.
                 if (written[0] != null) requestWrittenChashes.addAll(written[0]);
                 okDocs++;
@@ -6665,6 +6687,11 @@ public final class CatalogRepository {
         out.put("swept", totalSwept);
         out.put("sweep_skipped", sweepSkipped);
         out.put("sweep_detail", sweepDetail);
+        // RDR-223 fix round (bead nexus-z0o2p.19): write_many's shape for the optional per-document
+        // `complete`. Always present (empty / 0 when no document asked for a stamp), and the scalar is
+        // the client's echo that this engine understood the field.
+        out.put("complete_refused", completeRefused);
+        out.put("complete_refused_count", completeRefused.size());
         out.put("results", results);
         return out;
     }
@@ -7052,8 +7079,23 @@ public final class CatalogRepository {
      * @return {@code {docs: <succeeded count>, failed_doc_ids: [...]}}
      */
     public Map<String, Object> beginIndexRunMany(String tenant, List<Map<String, Object>> docs, String collection) {
+        return beginIndexRunMany(tenant, docs, collection, false);
+    }
+
+    /**
+     * {@link #beginIndexRunMany(String, List, String)} that can also return each document's PRE-RUN
+     * manifest (RDR-223 fix round, bead nexus-z0o2p.19), as {@link #beginIndexRun(String, String,
+     * String, String, String, boolean)} does for one: with {@code snapshotManifest} true the result
+     * gains {@code snapshots: {doc_id: {prior_chashes, prior_count}}}, one entry per document whose
+     * begin succeeded (a failed one is in {@code failed_doc_ids} and has none). Each snapshot is
+     * read in the same transaction as that document's stamp. Without the flag no manifest is read
+     * and the response is unchanged.
+     */
+    public Map<String, Object> beginIndexRunMany(String tenant, List<Map<String, Object>> docs, String collection,
+                                                 boolean snapshotManifest) {
         int ok = 0;
         List<String> failed = new ArrayList<>();
+        Map<String, Object> snapshots = new LinkedHashMap<>();
         if (docs != null) {
             for (Map<String, Object> d : docs) {
                 String docId = s(d, "doc_id");
@@ -7063,7 +7105,9 @@ public final class CatalogRepository {
                     if (docId == null || docId.isBlank()) {
                         throw new IllegalArgumentException("'doc_id' required");
                     }
-                    beginIndexRun(tenant, docId, contentHash, runId, collection);
+                    Map<String, Object> snapshot =
+                        beginIndexRun(tenant, docId, contentHash, runId, collection, snapshotManifest);
+                    if (snapshotManifest && snapshot != null) snapshots.put(docId, snapshot);
                     ok++;
                 } catch (Exception e) {
                     log.warn("event=index_run_begin_many_doc_failed tenant={} doc_id={} error={}",
@@ -7075,6 +7119,7 @@ public final class CatalogRepository {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("docs", ok);
         result.put("failed_doc_ids", failed);
+        if (snapshotManifest) result.put("snapshots", snapshots);
         return result;
     }
 

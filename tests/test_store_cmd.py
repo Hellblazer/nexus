@@ -848,7 +848,7 @@ def test_store_import_heartbeat_ticks_during_a_slow_import(runner, tmp_path, mon
         result = runner.invoke(main, ["store", "import", str(dummy)])
 
     assert result.exit_code == 0, result.output
-    assert "[embed]" in result.output
+    assert "[import]" in result.output
     assert "still running" in result.output
     assert "elapsed)" in result.output
 
@@ -864,7 +864,7 @@ def test_store_import_heartbeat_silent_on_a_fast_import(runner, tmp_path):
         result = runner.invoke(main, ["store", "import", str(dummy)])
 
     assert result.exit_code == 0, result.output
-    assert "[embed]" not in result.output
+    assert "[import]" not in result.output
     assert "still running" not in result.output
 
 

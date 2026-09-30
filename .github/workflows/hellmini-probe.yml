@@ -8,8 +8,12 @@
 #
 # Deliberately scoped to workflow_dispatch + push on a throwaway
 # 'runner-probe/**' branch, never pull_request or push to develop/main — this
-# runner is release-jobs-only (Sam's directive) and this probe itself must
-# not become a routine PR/push trigger.
+# runner takes release jobs (Sam's directive). Since 2026-09-30 the Service CI
+# Java job (service-ci.yml; nexus-f5i1m) runs on a separate runner, label
+# `hellmini-ci` under its own macOS user, not on this one. No workflow here
+# routes a pull_request job to either (a routing rule, not a security
+# boundary; see service-ci.yml), and this probe itself must not become a
+# routine PR/push trigger.
 name: hellmini-probe
 
 on:
@@ -25,10 +29,13 @@ concurrency:
 jobs:
   probe:
     name: Probe hellmini runner
-    # Defense in depth (Sam, 2026-09-28): this repo is PUBLIC, and although a
-    # self-hosted runner only ever picks up jobs from workflows already on a
-    # ref pushable by a collaborator (never a fork PR), this job also refuses
-    # to run for anyone but the repo owner.
+    # Owner-only guard (Sam, 2026-09-28). This repo is PUBLIC. A workflow on a
+    # branch a collaborator can push may target a self-hosted runner, and a fork
+    # PR's workflow can too: what keeps an outside contributor off it is the
+    # repo's fork-PR approval policy, not this file. This `if:` only declines to
+    # run the probe for anyone but the repo owner. It is not a security
+    # boundary: a write collaborator could still target hellmini from their own
+    # workflow change. As of 2026-09-30 the repo has no write collaborators.
     if: github.actor == 'Hellblazer'
     runs-on: hellmini
     timeout-minutes: 20

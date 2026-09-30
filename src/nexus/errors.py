@@ -704,6 +704,27 @@ class ManifestAppendManyUnsupportedError(NexusError):
         )
 
 
+#: What to do about an engine that lacks a route or a field an RDR-223 client needs. One sentence,
+#: shared by every refusal of that kind so the wording cannot drift between them.
+ENGINE_OLDER_THAN_CLIENT_REMEDY = (
+    "The engine is older than this client. Upgrade the local engine (`nx upgrade`, then "
+    "`nx daemon service start`), or for a cloud target wait for the cloud engine deploy."
+)
+
+
+class EngineOlderThanClientError(RuntimeError):
+    """The engine answered a request without a field this client's protocol needs, which means it
+    predates the client (RDR-223, nexus-z0o2p.19). There is no old-engine fallback: the message names
+    the missing piece and :data:`ENGINE_OLDER_THAN_CLIENT_REMEDY`.
+
+    A ``RuntimeError`` so the ack-echo checks that raised one before keep their type. Raised AFTER the
+    request was sent, so the engine may already have acted on it (``begin-many`` stamps its documents
+    before the client sees there is no snapshot); a caller that fenced documents must mark them."""
+
+    def __init__(self, what: str) -> None:
+        super().__init__(f"{what}. {ENGINE_OLDER_THAN_CLIENT_REMEDY}")
+
+
 class BatchWriteFailedError(NexusError):
     """A request of a multi-batch combined write did not land, or the engine's answer cannot be
     trusted (RDR-223, ``nexus.catalog.multi_batch_write``).

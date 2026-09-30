@@ -775,6 +775,12 @@ class _ETATicker:
             )
             self._thread.start()
 
+    def reduce_total(self, count: int) -> None:
+        """Files announced to :meth:`start` that will never be recorded
+        (nexus-z0o2p.20: refused for want of a catalog document)."""
+        with self._lock:
+            self._total = max(self._total - count, 0)
+
     def start(self, total: int) -> None:
         # Review remediation (Reviewer A/S-4): refuse double-start. Two
         # threads would share ``_done`` + ``_lock`` and ``stop()`` only
@@ -1181,7 +1187,7 @@ def index_repo_cmd(
         # first; index_pdf_cmd / index_md_cmd are now the third and
         # fourth).
         from nexus.commands._helpers import reset_identity_drop_collectors  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
-        from nexus.mcp_infra import reset_ephemeral_registration_skips  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
+        from nexus.mcp_infra import is_identity_dropped_file, reset_ephemeral_registration_skips  # noqa: PLC0415 — deliberate function-local import (per-run failure collector reset)
         reset_identity_drop_collectors()
         # nexus-u8n4r: zero the worktree/tempdir registration-skip collector
         # so the end-of-run summary reflects only this run's refusals.
@@ -1196,6 +1202,10 @@ def index_repo_cmd(
         total = 0
         total_chunks = 0
         skipped_files = 0
+        # nexus-z0o2p.20: files that came back with zero chunks because an
+        # oversize fallback refused them for want of a catalog document. They
+        # are dropped, not "index fresh": the drop summary names them.
+        dropped_files = 0
         # nexus-s71lr: 5s (was 60s) — the bead's own reproduction ("a
         # 33-chunk file is 15 seconds of silence") falls entirely inside
         # the old 60s window, so this ticker never got a chance to fire
@@ -1251,12 +1261,28 @@ def index_repo_cmd(
             if count:
                 eta_ticker.restart_phase("rdr", count)
 
+        def on_refused(count: int) -> None:
+            # nexus-z0o2p.20: `count` of the files announced by on_start were
+            # refused for want of a catalog document and will not be
+            # dispatched; shrink the totals so the bar and the ETA end at 100%.
+            nonlocal total
+            if count <= 0:
+                return
+            total = max(total - count, 0)
+            if bar is not None:
+                bar.total = total
+                bar.refresh()
+            eta_ticker.reduce_total(count)
+
         def on_file(fpath: Path, chunks: int, elapsed: float) -> None:
-            nonlocal n, total_chunks, skipped_files
+            nonlocal n, total_chunks, skipped_files, dropped_files
             n += 1
             total_chunks += chunks
             if not chunks:
-                skipped_files += 1
+                if is_identity_dropped_file(fpath):
+                    dropped_files += 1
+                else:
+                    skipped_files += 1
             if n == 1:
                 # Heartbeat double-fire fix (T2 22168 follow-up): the FIRST
                 # genuine per-file completion is real "still alive"
@@ -1295,7 +1321,10 @@ def index_repo_cmd(
                     postfix["skip"] = skipped_files
                 bar.set_postfix(**postfix)
             if monitor or not sys.stdout.isatty():
-                lbl = f"{chunks} chunks" if chunks else "skipped"
+                lbl = f"{chunks} chunks" if chunks else (
+                    "not indexed (no catalog document)" if is_identity_dropped_file(fpath)
+                    else "skipped"
+                )
                 counter = f"rdr {n - rdr_base}/{rdr_total}" if rdr_total else f"{n}/{total}"
                 line = f"  [{counter}] {fpath.name} \u2014 {lbl}  ({elapsed:.1f}s)"
                 if bar is not None and sys.stdout.isatty():
@@ -1405,7 +1434,7 @@ def index_repo_cmd(
                 resolve_confirmed_write_failure_doc_ids,
             )
             nonlocal manifest_problems_detected, _confirmed_write_failure_doc_ids
-            indexed_files = n - skipped_files
+            indexed_files = n - skipped_files - dropped_files
             # nexus-wbfpw.29 round 3 (round 6: verified by reading the
             # catalog manifest back after the WHOLE run, self-heal
             # included, instead of trusting self-heal's own AT-HEAL-TIME
@@ -1546,7 +1575,7 @@ def index_repo_cmd(
             stats = index_repository(path, reg, frecency_only=frecency_only, force=force,
                                      force_re_embed=re_embed,
                                      since_head=since_head,
-                                     on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_file=on_file,
+                                     on_locked=on_locked, on_start=on_start, on_rdr_start=on_rdr_start, on_refused=on_refused, on_file=on_file,
                                      on_phase=on_phase,
                                      on_flush=on_flush_progress if monitor else None,
                                      on_stage_timers=on_stage_timers,
@@ -1810,6 +1839,19 @@ def index_repo_cmd(
                 f"not be durably recorded (nx index failures write failed) "
                 f"-- see the WARNING log line above. The exit-code decision "
                 f"above used the in-memory count instead.",
+                err=True,
+            )
+        # nexus-z0o2p.20: the durable record of the files this run dropped for want
+        # of a catalog document could not be written, so `nx index failures` and
+        # `nx doctor` cannot see them. The run's own summary above still names them
+        # and its exit code is unaffected (the drop collector fails the run).
+        if (stats or {}).get("identity_less_durable_write_failed", False):
+            click.echo(
+                f"WARNING: {(stats or {}).get('identity_less_dropped_files', 0)} "
+                f"dropped file(s) could not be durably recorded (nx index "
+                f"failures write failed) -- see the WARNING log line above. The "
+                f"files are named in the summary above; `nx doctor` will not "
+                f"report them.",
                 err=True,
             )
         # RDR-223 P2.4 round 3 (nexus-z0o2p.14): every failure below is RECORDED in
