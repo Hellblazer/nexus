@@ -2,13 +2,13 @@
 """nexus-wbfpw.11 (RDR-192 S5, client test): MVV (b) visibility half and
 MVV (c), against the real engine substrate.
 
-MVV (b): a store_put re-put whose same-call reap fails leaves the old chunk
-physically in T3 (``_reap_superseded_note_chunks`` is best-effort by design
-and swallows the delete error). Before S5 (nexus-wbfpw.10) raw ``search()``
-still returned that stranded chunk. Under live(c) it must return only the
-current note, while the old chunk stays countable: the manifest-less census
-lists it in the ``superseded`` bucket, which is what the RDR-192 reaper
-works from.
+MVV (b): a superseded chunk left physically in T3 with no live owner (once by a
+failed same-call client reap, ``_reap_superseded_note_chunks``; since RDR-223 P2.2
+store_put's engine sweep leaves none, so the test strands one with a write that has
+no sweep). Before S5 (nexus-wbfpw.10) raw ``search()`` still returned that stranded
+chunk. Under live(c) it must return only the current note, while the old chunk stays
+countable: the manifest-less census lists it in the ``superseded`` bucket, which is
+what the RDR-192 reaper works from.
 
 MVV (c): live(c) must not hide anything that has a live own-collection
 owner. Three write paths that produce one: a note that was never re-put
@@ -33,7 +33,6 @@ from nexus.aspect_readers import uri_for
 from nexus.catalog.factory import make_catalog_reader, make_catalog_writer
 from nexus.cli import main
 from nexus.corpus import t3_collection_name
-import nexus.db as nexus_db
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.exporter import export_collection
 from nexus.mcp.core import store_put
@@ -57,36 +56,13 @@ def _manifest_chashes(collection: str, title: str) -> tuple[str, set[str]]:
     return str(doc.tumbler), {r.chash for r in reader.get_manifest(str(doc.tumbler))}
 
 
-class _DeleteRaises:
-    """A T3 handle whose collection ``delete`` raises and records the ids it
-    was asked to delete; everything else goes to the real handle."""
-
-    def __init__(self, real, attempted: list[str]) -> None:
-        self._real = real
-        self._attempted = attempted
-
-    def get_collection(self, name: str):
-        return _CollectionDeleteRaises(self._real.get_collection(name), self._attempted)
-
-    def __getattr__(self, name: str):
-        return getattr(self._real, name)
+def _all_present(client, collection: str, chashes: list[str]) -> set[str]:
+    """Chunks physically stored, whether or not they have a live owner."""
+    return set(client.existing_ids(collection, chashes))
 
 
-class _CollectionDeleteRaises:
-    def __init__(self, real, attempted: list[str]) -> None:
-        self._real = real
-        self._attempted = attempted
-
-    def delete(self, *args, ids=None, **kwargs):
-        self._attempted.extend(ids or [])
-        raise RuntimeError("wbfpw.11 fault injection: reap delete failed")
-
-    def __getattr__(self, name: str):
-        return getattr(self._real, name)
-
-
-def test_reput_with_failed_reap_search_returns_only_the_current_note(
-    t2_service_env, monkeypatch,
+def test_a_stranded_superseded_chunk_is_hidden_from_search_and_counted(
+    t2_service_env,
 ):
     client = HttpVectorClient(tenant=t2_service_env)
     subject = "wbfpw11-reap-fail"
@@ -102,22 +78,26 @@ def test_reput_with_failed_reap_search_returns_only_the_current_note(
     (v1_chash,) = v1_chashes
     assert v1_chash in _search_ids(client, collection, v1), "control: v1 is searchable before the re-put"
 
-    # The reap imports make_t3 from nexus.db at call time, so this patch
-    # reaches its delete and nothing that goes through _get_t3.
-    attempted: list[str] = []
-    real_make_t3 = nexus_db.make_t3
-    monkeypatch.setattr(
-        nexus_db, "make_t3", lambda *a, **kw: _DeleteRaises(real_make_t3(*a, **kw), attempted),
-    )
-    with patch("nexus.mcp.core._get_t3", return_value=client):
-        result = store_put(content=v2, collection=subject, title=title)
-    monkeypatch.setattr(nexus_db, "make_t3", real_make_t3)
+    # RDR-223 P2.2 (nexus-z0o2p.12): store_put's supersede is swept by the engine in
+    # the same request, so there is no client reap left to fail and a store_put re-put
+    # strands nothing (pinned in tests/test_z0o2p12_note_write.py). What this test
+    # pins is unchanged: a chunk with no live owner is hidden and counted. Strand v1
+    # the way a write with no sweep does, such as the first batch of a multi-batch
+    # write: replace the manifest with `sweep` off.
+    v2_chash = hashlib.sha256(v2.encode()).hexdigest()
+    writer = make_catalog_writer(priority="interactive")
+    try:
+        writer.write_manifest_many(
+            [(tumbler, [{"chash": v2_chash, "position": 0}])],
+            collection=collection, sweep=False,
+            chunks=[{"chash": v2_chash, "text": v2,
+                     "metadata": {"indexed_at": datetime.now(UTC).isoformat()}}],
+        )
+    finally:
+        writer.close()
+    assert v1_chash in _all_present(client, collection, [v1_chash]), (
+        "control: the unswept v1 chunk is still physically there")
 
-    assert "Stored" in result, f"a failed reap must not fail the put: {result!r}"
-    assert v1_chash in attempted, (
-        "the reap never tried to delete v1, so the fault never fired and this "
-        f"test proves nothing: attempted={attempted!r}"
-    )
     tumbler2, v2_chashes = _manifest_chashes(collection, title)
     assert tumbler2 == tumbler, "a re-put under the same title reconciles onto one document"
     assert len(v2_chashes) == 1 and v1_chash not in v2_chashes, v2_chashes

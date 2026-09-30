@@ -16,6 +16,16 @@ docstring), so the indexer's ``mcp_infra._sweep_superseded_vectors``
 mechanism, which reaps this exact class for ``atomic_manifest_replace``
 callers that DO go through that chain, was never reachable from here.
 
+RDR-223 P2.2 (nexus-z0o2p.12): MCP ``store_put`` no longer runs that reap. Its
+note is one ``write_manifest_many`` request with ``sweep`` on, and the engine
+sweeps what the supersede dropped under the same NOT EXISTS guard. Each test
+runs against BOTH writers: ``split-write`` (the client reap in
+``store_put_manifest_direct``, still what ``nx store put``, ``nx memory promote``
+and the recovery import run until P2.6 to P2.8 migrate) and ``one-request``
+(``note_write.write_note``). The one-request rows are the evidence that the
+engine sweep covers what the client reap did; the split-write rows go when the
+last caller does.
+
 Real engine substrate (``t2_service_env``) is required, matching the
 sibling nexus-rnqbw suite this borrows its seeding shape from — the
 guard chain under test (``orphaned_chashes`` -> ``docs_for_chashes``,
@@ -24,6 +34,8 @@ guard chain under test (``orphaned_chashes`` -> ``docs_for_chashes``,
 trip, not something an in-memory double can stand in for.
 """
 from __future__ import annotations
+
+import pytest
 
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
 # and CI's default selection must run this RDR-192 pin.
@@ -41,14 +53,21 @@ def _chunk_present(client, chash: str) -> bool:
     return chash in (result.get("ids") or [])
 
 
-def _put_note(client, *, title: str, content: str) -> tuple[str, list[str]]:
-    """Real store_put-shaped write (single or split), mirroring the MCP
-    ``store_put`` tool's own call sequence: catalog reconcile, T3
-    chunk(s), then the direct manifest write under test. Returns
+@pytest.fixture(params=["split-write", "one-request"])
+def writer(request) -> str:
+    return request.param
+
+
+def _put_note(client, *, title: str, content: str, writer: str) -> tuple[str, list[str]]:
+    """Real store_put-shaped write (single or split): catalog reconcile, then
+    either the split write (T3 chunk(s), then the direct manifest write with
+    its client reap) or the one-request note writer. Returns
     ``(tumbler, chashes)``.
     """
+    from nexus.catalog.note_write import write_note
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
+        note_content_hash,
         note_manifest_metadata,
         note_pieces,
         store_put_manifest_direct,
@@ -60,6 +79,12 @@ def _put_note(client, *, title: str, content: str) -> tuple[str, list[str]]:
         title=title, doc_id=doc_id, collection_name=_COLLECTION,
     )
     chashes = [m["chunk_text_hash"] for m in manifest_metadatas]
+    if writer == "one-request":
+        write_note(
+            catalog_doc_id=tumbler, collection=_COLLECTION, pieces=pieces, title=title,
+            content_hash=note_content_hash(content, manifest_metadatas),
+        )
+        return tumbler, chashes
     for piece, chash, meta in zip(pieces, chashes, manifest_metadatas):
         client.upsert_chunks_with_embeddings(
             _COLLECTION,
@@ -72,7 +97,7 @@ def _put_note(client, *, title: str, content: str) -> tuple[str, list[str]]:
     return tumbler, chashes
 
 
-def test_supersede_reaps_the_old_chunk_in_the_same_call(t2_service_env):
+def test_supersede_reaps_the_old_chunk_in_the_same_call(t2_service_env, writer):
     """Re-putting the same (collection, title) with DIFFERENT content
     must delete the old, now-unreferenced chunk from T3 in the same
     call — not merely reconcile the catalog row onto the new chash and
@@ -83,13 +108,14 @@ def test_supersede_reaps_the_old_chunk_in_the_same_call(t2_service_env):
     client = hvc.HttpVectorClient(tenant=tenant)
     title = "bb6n2-note"
 
-    _tumbler, old_chashes = _put_note(client, title=title, content="version one of this note")
+    _tumbler, old_chashes = _put_note(client, title=title, content="version one of this note", writer=writer)
     assert len(old_chashes) == 1
     old_chash = old_chashes[0]
     assert _chunk_present(client, old_chash), "control: old chunk must exist after the first put"
 
     _tumbler2, new_chashes = _put_note(
         client, title=title, content="version TWO of this note, completely different text",
+        writer=writer,
     )
     assert new_chashes != old_chashes
 
@@ -103,7 +129,7 @@ def test_supersede_reaps_the_old_chunk_in_the_same_call(t2_service_env):
 
 
 def test_supersede_still_protects_a_chunk_genuinely_shared_with_a_live_document(
-    t2_service_env,
+    t2_service_env, writer,
 ):
     """Non-vacuity control: content-addressed sharing means identical
     chunk text is legitimately ONE T3 row referenced by several
@@ -119,7 +145,7 @@ def test_supersede_still_protects_a_chunk_genuinely_shared_with_a_live_document(
 
     shared_content = "bb6n2 shared-content fixture: one superseded note, one permanent twin"
 
-    _tumbler, old_chashes = _put_note(client, title="bb6n2-twin-note", content=shared_content)
+    _tumbler, old_chashes = _put_note(client, title="bb6n2-twin-note", content=shared_content, writer=writer)
     shared_chash = old_chashes[0]
     assert _chunk_present(client, shared_chash), "control: shared chunk must exist before supersede"
 
@@ -139,7 +165,10 @@ def test_supersede_still_protects_a_chunk_genuinely_shared_with_a_live_document(
     # Now supersede the FIRST note with different content — its own
     # manifest drops shared_chash, but the permanent twin's manifest
     # still references it.
-    _put_note(client, title="bb6n2-twin-note", content="bb6n2 superseding content, unrelated text")
+    _put_note(
+        client, title="bb6n2-twin-note", content="bb6n2 superseding content, unrelated text",
+        writer=writer,
+    )
 
     assert _chunk_present(client, shared_chash), (
         "a chunk another LIVE document's manifest still references must "

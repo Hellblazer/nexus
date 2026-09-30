@@ -138,15 +138,68 @@ def _seed_for_store_put(t3, content: str, collection: str = "fixture-subject") -
     seed_manifest_chunks(col_name, [chash])
 
 
-def _mcp_store_put_with(t3, content: str, title: str) -> str:
+def _mcp_store_put_with(
+    t3, content: str, title: str, *, write_error: Exception | None = None,
+) -> str:
+    """Run the MCP ``store_put`` tool with the post-store chains dead.
+
+    RDR-223 P2.2 (nexus-z0o2p.12): a note is written by ``write_note`` (one
+    ``write_manifest_many`` request), no longer by ``t3.put``, so *t3* only
+    resolves the collection. *write_error* makes that one request raise, the
+    successor of the old ``_FailingT3.put`` failure injection.
+    """
+    from contextlib import ExitStack
+
     from nexus.mcp.core import store_put
 
-    with patch("nexus.mcp.core._get_t3", return_value=t3), \
-         patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
-         patch("nexus.mcp.core._hooks.fire_batch", side_effect=_no_op), \
-         patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
-         patch("nexus.mcp.core._catalog_auto_link", return_value=0):
+    with ExitStack() as stack:
+        stack.enter_context(patch("nexus.mcp.core._get_t3", return_value=t3))
+        for name in ("fire_single", "fire_batch", "fire_document"):
+            stack.enter_context(patch(f"nexus.mcp.core._hooks.{name}", side_effect=_no_op))
+        stack.enter_context(patch("nexus.mcp.core._catalog_auto_link", return_value=0))
+        if write_error is not None:
+            stack.enter_context(patch(
+                "nexus.catalog.note_write.write_note", side_effect=write_error))
         return store_put(content=content, collection="fixture-subject", title=title)
+
+
+_WRITE_500 = RuntimeError("engine 500: write_manifest_many failed")
+
+
+def _legacy_failed_put(t3, content: str, title: str) -> str:
+    """The split-write sequence whose failure leg ``rollback_uncataloged_chunk_write``
+    exists for: register, ``put_note_pieces``, manifest write, rollback on a
+    confirmed failure.
+
+    RDR-223 P2.2 (nexus-z0o2p.12) moved MCP ``store_put`` off this sequence
+    onto one request, so it can no longer drive these tests. ``nx store put``,
+    ``nx memory promote`` and the recovery-bundle import (P2.6 to P2.8) still
+    run it, so the rollback's guards keep their tests here, driven by this
+    replica, until the Phase 2 gate deletes the function. The MCP behaviour
+    for the same scenarios is pinned in ``TestZ0o2p12McpFailedReput``.
+    """
+    from nexus.catalog import store_hook as sh
+    from nexus.corpus import t3_collection_name
+
+    col_name = t3_collection_name("fixture-subject", t3=t3, for_write=True)
+    pieces = sh.note_pieces(content, col_name)
+    first, metas = sh.note_manifest_metadata(pieces)
+    pre: dict[str, str] = {}
+    tumbler, minted = sh.catalog_store_hook_tracked(
+        title=title, doc_id=first, collection_name=col_name, pre_call_doc_id_out=pre)
+    doc_ids = sh.put_note_pieces(t3, col_name, pieces, title=title, catalog_doc_id=tumbler)
+    try:
+        sh.store_put_manifest_direct_with_recovery(
+            tumbler, metas, collection=col_name, repiece=lambda chash: None)
+    except Exception as exc:  # noqa: BLE001 — the confirmed-failure leg under test
+        reason = str(exc)
+        if minted:
+            sh.rollback_minted_catalog_entry(tumbler, original_error=reason)
+        outcome = sh.rollback_uncataloged_chunk_write(
+            t3, doc_ids, collection=col_name, catalog_doc_id=tumbler,
+            pre_call_doc_id=pre.get("doc_id", ""))
+        return f"Error: could not catalog content in {col_name}: {reason}. {sh.describe_rollback_outcome(outcome)}"
+    return f"Stored: {doc_ids[0]} -> {col_name}"
 
 
 # ── C2: ghost-register compensation (MCP) ────────────────────────────────────
@@ -158,6 +211,7 @@ class TestMcpGhostRegisterCompensation:
         row for the title (pre-fix: permanent ghost, content lost)."""
         result = _mcp_store_put_with(
             _FailingT3(), "ghost content one", "b6enc-ghost-mcp",
+            write_error=_WRITE_500,
         )
         assert result.startswith("Error"), result
         assert "engine 500" in result
@@ -180,7 +234,8 @@ class TestMcpGhostRegisterCompensation:
             meta={"doc_id": chash},
         )
 
-        result = _mcp_store_put_with(_FailingT3(), content, "b6enc-dedup-mcp")
+        result = _mcp_store_put_with(
+            _FailingT3(), content, "b6enc-dedup-mcp", write_error=_WRITE_500)
         assert result.startswith("Error"), result
         assert len(_catalog_rows(catalog_env, "b6enc-dedup-mcp")) == 1, (
             "pre-existing deduped row must survive the compensation"
@@ -211,7 +266,8 @@ class TestMcpGhostRegisterCompensation:
             meta={"doc_id": chash},
         )
 
-        result = _mcp_store_put_with(_FailingT3(), content, "b6enc-dedup-fence-mcp")
+        result = _mcp_store_put_with(
+            _FailingT3(), content, "b6enc-dedup-fence-mcp", write_error=_WRITE_500)
         assert result.startswith("Error"), result
         rows = documents_by_title("b6enc-dedup-fence-mcp")
         assert len(rows) == 1, "pre-existing deduped row must survive the compensation"
@@ -245,6 +301,7 @@ class TestMcpGhostRegisterCompensation:
         )
         result = _mcp_store_put_with(
             _FailingT3(), "mask check content", "b6enc-mask-mcp",
+            write_error=_WRITE_500,
         )
         assert result.startswith("Error"), result
         assert "engine 500" in result, (
@@ -317,6 +374,7 @@ class TestVfef0RaceLoserSkipsRollback:
         ):
             result = _mcp_store_put_with(
                 _FailingT3(), "race loser content", "b6enc-race-loser",
+                write_error=_WRITE_500,
             )
 
         assert result.startswith("Error"), result
@@ -339,57 +397,62 @@ class TestVfef0RaceLoserSkipsRollback:
 
 class TestMcpManifestFailLoud:
     def test_manifest_failure_rolls_back_and_returns_error(
-        self, catalog_env: Path, local_t3: T3Database,
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """RDR-192 Step 3a (nexus-wbfpw.28, superseding this file's old
-        'stored but NOT cataloged, content left in T3' contract — Sam's
-        ruling 2026-09-26: rollback, not a marker column). A failed
-        manifest write must delete the chunk it just wrote, not leave it
-        as a live, manifest-less T3 row."""
-        monkeypatch.setattr(
-            "nexus.catalog.store_hook.store_put_manifest_direct",
-            lambda *a, **k: (_ for _ in ()).throw(
-                RuntimeError("manifest write refused")
-            ),
-        )
+        """RDR-192 Step 3a (nexus-wbfpw.28; Sam's ruling 2026-09-26: rollback,
+        not a marker column), re-based on RDR-223 P2.2 (nexus-z0o2p.12).
+
+        The REAL engine refuses the note's request (a manifest row naming a
+        chunk that is not in the request). The request is one transaction, so
+        the refusal leaves no chunk behind to roll back: the successor of the
+        old 'delete the chunk t3.put wrote' assertion is 'the chunk is not
+        there at all'. The catalog row THIS call minted is still rolled back
+        (Decision 5), and the result is never a bare 'Stored:'."""
+        import nexus.db.http_vector_client as hvc
+        from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+        real = HttpCatalogClient.write_manifest_many
+
+        def _refused(self, docs, *a, **k):
+            doc, rows = docs[0]
+            return real(self, [(doc, [*rows, {"chash": "f" * 64, "position": len(rows)}])], *a, **k)
+
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", _refused)
+        content = "manifest fail content"
         result = _mcp_store_put_with(
-            local_t3, "manifest fail content", "b6enc-manifest-mcp",
+            local_t3, content, "b6enc-manifest-mcp",
         )
         assert result.startswith("Error"), result
-        assert "manifest write refused" in result
+        assert "could not catalog" in result
         assert "Stored:" not in result, (
             "a manifest failure must never produce a bare 'Stored:' result"
         )
-        # RDR-192 Step 3a: the chunk is rolled back, not left recoverable
-        # in T3 — a manifest-less current note is exactly the shape the
-        # census flags and a future reaper would remove anyway.
-        chash = hashlib.sha256(b"manifest fail content").hexdigest()
-        cols = [c["name"] for c in local_t3.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local_t3.get_by_id(cols[0], chash) is None, (
-            "a failed manifest write must roll back the chunk it just "
-            "wrote, not leave a manifest-less orphan in T3"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        col = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert set(client.existing_ids(col, [chash])) == set(), (
+            "the refused request must not have written the chunk: chunk and "
+            "owner row are one transaction"
         )
         # fix-round 1 Important (both reviewers): the catalog row THIS
-        # call minted must also be rolled back on a manifest failure,
-        # mirroring the sibling t3.put-failure branch (TestMcpGhost
-        # RegisterCompensation above) exactly — a ghost row (chunk_count=0,
-        # zero manifest, zero chunks) is not an acceptable residual.
+        # call minted must also be rolled back on a write failure (a ghost
+        # row — chunk_count=0, zero manifest, zero chunks — is not an
+        # acceptable residual).
         assert _catalog_rows(catalog_env, "b6enc-manifest-mcp") == [], (
-            "a failed manifest write must roll back the catalog row this "
+            "a failed write must roll back the catalog row this "
             "call minted, not leave a chunk_count=0 ghost behind"
         )
 
     def test_success_counts_align_without_fire_batch(
-        self, catalog_env: Path, local_t3: T3Database,
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database,
     ) -> None:
         """chunk_count == manifest count == 1 == T3 chunks, with every
-        fire_* chain dead — the manifest leg no longer rides the
-        swallowing hook chain (C3's exact silent-drift mechanism)."""
+        fire_* chain dead: the manifest is written by the one request, not
+        by any hook."""
+        import nexus.db.http_vector_client as hvc
+
         content = "healthy store_put content"
-        _seed_for_store_put(local_t3, content)
         result = _mcp_store_put_with(local_t3, content, "b6enc-healthy-mcp")
         assert result.startswith("Stored:"), result
 
@@ -397,13 +460,14 @@ class TestMcpManifestFailLoud:
         assert len(rows) == 1
         tumbler, chunk_count = rows[0]
         assert chunk_count == 1, (
-            f"chunk_count must be resynced to 1, got {chunk_count}"
+            f"chunk_count must be 1, got {chunk_count}"
         )
         manifest = _manifest_rows(catalog_env, tumbler)
         chash = hashlib.sha256(content.encode()).hexdigest()
         assert [r[0] for r in manifest] == [chash]
         stored_col = result.split("->")[-1].strip()
-        assert local_t3.get_by_id(stored_col, chash) is not None
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert set(client.existing_ids(stored_col, [chash])) == {chash}
 
 
 class TestStorePutManifestDirectUnit:
@@ -713,43 +777,38 @@ class TestWriterCloseGuard:
 
 
 class TestDirectPlusHookCoexistence:
-    def test_double_write_converges_with_live_fire_batch(
-        self, catalog_env: Path, local_t3: T3Database,
+    def test_the_batch_chain_runs_without_rewriting_the_manifest(
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database,
     ) -> None:
-        """End-to-end store_put with ``fire_batch`` LIVE (not mocked):
-        the direct ``store_put_manifest_direct`` write followed by the
-        best-effort ``manifest_write_batch_hook`` re-write must converge
-        — manifest rows are EXACTLY the expected set (no dupes, no
-        drops) and ``chunk_count`` is correct. Locks the production
-        sequential-double-write path every other test in this file mocks
-        away."""
+        """End-to-end store_put with ``fire_batch`` LIVE (not mocked).
+
+        RDR-223 P2.2 (nexus-z0o2p.12): the one request already wrote the
+        manifest and the completion stamp, so the batch chain runs with
+        ``manifest_write_batch_hook`` skipped (the flush-grain combined write
+        makes the same skip). The manifest is exactly the expected set, the
+        chunk count is right, and the hook is never called."""
         from nexus.mcp.core import store_put
 
         content = "coexistence double write content"
-        _seed_for_store_put(local_t3, content)
         with patch("nexus.mcp.core._get_t3", return_value=local_t3), \
              patch("nexus.mcp.core._hooks.fire_single", side_effect=_no_op), \
              patch("nexus.mcp.core._hooks.fire_document", side_effect=_no_op), \
-             patch("nexus.mcp.core._catalog_auto_link", return_value=0):
+             patch("nexus.mcp.core._catalog_auto_link", return_value=0), \
+             patch("nexus.mcp_infra.manifest_write_batch_hook") as manifest_hook:
             result = store_put(
                 content=content, collection="fixture-subject",
                 title="b6enc-coexist",
             )
         assert result.startswith("Stored:"), result
+        manifest_hook.assert_not_called()
 
         rows = _catalog_rows(catalog_env, "b6enc-coexist")
         assert len(rows) == 1
         tumbler, chunk_count = rows[0]
-        assert chunk_count == 1, (
-            f"chunk_count must converge to 1 after direct+hook writes, "
-            f"got {chunk_count}"
-        )
+        assert chunk_count == 1, f"chunk_count must be 1, got {chunk_count}"
         chash = hashlib.sha256(content.encode()).hexdigest()
         manifest = [r[0] for r in _manifest_rows(catalog_env, tumbler)]
-        assert manifest == [chash], (
-            f"manifest rows must be exactly the expected set after the "
-            f"double write, got {manifest}"
-        )
+        assert manifest == [chash], f"manifest rows must be exactly the expected set, got {manifest}"
 
 
 # ── C4: store_delete asymmetry ───────────────────────────────────────────────
@@ -758,7 +817,13 @@ class TestDirectPlusHookCoexistence:
 class TestStoreDeleteAsymmetry:
     def test_delete_removes_store_put_origin_catalog_row(
         self, catalog_env: Path, local_t3: T3Database,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # store_delete reads this fake T3; the note is routed there (RDR-223 P2.2,
+        # tests/_note_write_double.py) because the delete is the subject, not the write.
+        from tests._note_write_double import route_note_writes_to
+
+        route_note_writes_to(monkeypatch, local_t3)
         content = "delete me cleanly"
         _seed_for_store_put(local_t3, content)
         put_result = _mcp_store_put_with(local_t3, content, "b6enc-del")
@@ -829,10 +894,15 @@ class TestStoreDeleteAsymmetry:
 
 
 class TestWbfpw28McpCatalogRegistrationFailure:
-    def test_registration_failure_rolls_back_and_returns_error(
-        self, catalog_env: Path, local_t3: T3Database,
+    def test_registration_failure_writes_nothing_and_returns_error(
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        """RDR-223 P2.2: a note with no catalog document is not written at
+        all, so there is no chunk to roll back (it used to be written and
+        then deleted). The error is explicit and no row or chunk exists."""
+        import nexus.db.http_vector_client as hvc
+
         monkeypatch.setattr(
             "nexus.catalog.store_hook.catalog_store_hook_tracked",
             lambda *a, **k: ("", False),
@@ -846,12 +916,16 @@ class TestWbfpw28McpCatalogRegistrationFailure:
             "a failed registration must never leave a catalog row"
         )
         chash = hashlib.sha256(content.encode()).hexdigest()
-        cols = [c["name"] for c in local_t3.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local_t3.get_by_id(cols[0], chash) is None, (
-            "a failed registration must roll back the chunk t3.put just "
-            "wrote, not leave a no-owner orphan in T3"
+        col = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        try:
+            present = set(client.existing_ids(col, [chash]))
+        except hvc.VectorServiceError as exc:
+            assert "not registered" in str(exc), exc  # never written to: the collection does not exist
+            present = set()
+        assert present == set(), (
+            "a failed registration must not write the chunk: there is no "
+            "owner to write it with"
         )
 
 
@@ -952,23 +1026,22 @@ class TestWbfpw28PromoteCatalogRegistrationFailure:
 
 class TestWbfpw28ConcurrentIdenticalContentRace:
     """Plan-audit round 2 residual: identical chunk text collapses to ONE
-    T3 row (CLAUDE.md § catalog/T3 split), so the rollback's union guard
-    must never delete a chash a DIFFERENT, already-succeeded store still
-    depends on. Simulated sequentially (store A completes fully, THEN
-    store B — same content, forced registration failure — attempts and
-    rolls back), which is the deterministic shape a genuine concurrent
-    race collapses to once the winner's manifest has landed by the time
-    the loser's rollback runs."""
+    T3 row (CLAUDE.md § catalog/T3 split). A failed second store of the same
+    content must never take away the chunk a DIFFERENT, already-succeeded
+    store depends on. Simulated sequentially (store A completes fully, THEN
+    store B, same content, fails). Since RDR-223 P2.2 B writes nothing when it
+    fails, so the guarantee is structural; the test pins the observable."""
 
     def test_surviving_stores_chunk_is_not_deleted_by_the_failed_one(
-        self, catalog_env: Path, local_t3: T3Database,
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        import nexus.db.http_vector_client as hvc
+
         content = "wbfpw28 race shared identical content"
         chash = hashlib.sha256(content.encode()).hexdigest()
-        _seed_for_store_put(local_t3, content)
 
-        # Store A: succeeds fully — real registration, real manifest write.
+        # Store A: succeeds fully, real registration and the one real request.
         result_a = _mcp_store_put_with(local_t3, content, "wbfpw28-race-a")
         assert result_a.startswith("Stored:"), result_a
         rows_a = _catalog_rows(catalog_env, "wbfpw28-race-a")
@@ -977,9 +1050,7 @@ class TestWbfpw28ConcurrentIdenticalContentRace:
         assert chunk_count_a == 1
         assert [r[0] for r in _manifest_rows(catalog_env, tumbler_a)] == [chash]
 
-        # Store B: SAME content, DIFFERENT title, registration forced to
-        # fail — must roll back only if the chash is truly unreferenced.
-        # It is not: A's manifest already references it.
+        # Store B: SAME content, DIFFERENT title, registration forced to fail.
         monkeypatch.setattr(
             "nexus.catalog.store_hook.catalog_store_hook_tracked",
             lambda *a, **k: ("", False),
@@ -988,12 +1059,10 @@ class TestWbfpw28ConcurrentIdenticalContentRace:
         assert result_b.startswith("Error"), result_b
         assert _catalog_rows(catalog_env, "wbfpw28-race-b") == []
 
-        # A's chunk and manifest must both survive B's rollback attempt.
-        assert local_t3.get_by_id(
-            "knowledge__fixture-subject__bge-base-en-v15-768__v1", chash,
-        ) is not None, (
-            "the union guard must never delete a chash a different, "
-            "already-succeeded store's manifest still references"
+        col = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert set(client.existing_ids(col, [chash])) == {chash}, (
+            "a different, already-succeeded store's chunk must survive"
         )
         assert [r[0] for r in _manifest_rows(catalog_env, tumbler_a)] == [chash]
 
@@ -1177,11 +1246,11 @@ class TestWbfpw28ManifestVerifyUncertain:
         self, catalog_env: Path, local_t3: T3Database,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Caller-side branch (MCP store_put, representative — the other
-        three producers share the identical branch shape). When
-        store_put_manifest_direct raises ManifestVerifyUncertainError,
-        store_put must report the uncertainty, never claim "rolled
-        back", and never even ATTEMPT a rollback delete."""
+        """Caller-side branch (MCP store_put; kept by RDR-223 P2.2: an atomic
+        request can still time out with an unknown result). When the note
+        writer raises ManifestVerifyUncertainError, store_put must report the
+        uncertainty, never claim "rolled back", and never ATTEMPT a rollback
+        of the catalog row (it may hold a landed note) or a stamp restore."""
         from nexus.catalog.store_hook import ManifestVerifyUncertainError
 
         rollback_calls: list[tuple] = []
@@ -1189,44 +1258,34 @@ class TestWbfpw28ManifestVerifyUncertain:
         def _rollback_must_not_be_called(*a, **k):
             rollback_calls.append((a, k))
             raise AssertionError(
-                "rollback must never be attempted when the verify outcome "
-                "is uncertain"
+                "rollback must never be attempted when the outcome is uncertain"
             )
 
         monkeypatch.setattr(
-            "nexus.catalog.store_hook.store_put_manifest_direct",
-            lambda *a, **k: (_ for _ in ()).throw(
-                ManifestVerifyUncertainError("verify read failed: boom")
-            ),
+            "nexus.catalog.store_hook.rollback_minted_catalog_entry",
+            _rollback_must_not_be_called,
         )
         monkeypatch.setattr(
-            "nexus.catalog.store_hook.rollback_uncataloged_chunk_write",
+            "nexus.catalog.store_hook.restore_pre_call_stamp",
             _rollback_must_not_be_called,
         )
         content = "wbfpw28 verify uncertain content mcp"
-        result = _mcp_store_put_with(local_t3, content, "wbfpw28-uncertain-mcp")
+        result = _mcp_store_put_with(
+            local_t3, content, "wbfpw28-uncertain-mcp",
+            write_error=ManifestVerifyUncertainError("verify read failed: boom"),
+        )
 
         assert result.startswith("Error"), result
         assert "confirm" in result.lower(), result
-        # The message may honestly SAY "nothing was rolled back" (a true
-        # negative statement) — what it must never do is CLAIM the chunk
-        # WAS rolled back, a false positive since nothing was attempted.
         assert "the chunk was rolled back" not in result.lower(), (
-            "an uncertain verify outcome must never claim the chunk WAS "
-            "rolled back — it might not have been, and might not have "
-            f"needed to be: {result!r}"
+            "an uncertain outcome must never claim anything WAS rolled back: "
+            f"{result!r}"
         )
         assert rollback_calls == [], (
-            f"rollback must never be attempted on an uncertain verify "
-            f"outcome, got calls: {rollback_calls!r}"
+            f"no rollback may be attempted on an uncertain outcome, got: {rollback_calls!r}"
         )
-        chash = hashlib.sha256(content.encode()).hexdigest()
-        cols = [c["name"] for c in local_t3.list_collections()
-                if c["name"].startswith("knowledge__")]
-        assert cols, "expected the knowledge collection to exist in T3"
-        assert local_t3.get_by_id(cols[0], chash) is not None, (
-            "the chunk t3.put wrote must remain untouched when the "
-            "outcome is uncertain"
+        assert len(_catalog_rows(catalog_env, "wbfpw28-uncertain-mcp")) == 1, (
+            "the catalog row must survive an uncertain outcome"
         )
 
 
@@ -1940,6 +1999,174 @@ class TestWbfpw28PartialRepieceMessage:
 
 # ── nexus-k54nk (T2 critique-wbfpw2, Critical 2): rollback_uncataloged_ ─────
 # ── chunk_write had no live_note_chashes guard, unlike its two sibling ─────
+# ── RDR-223 P2.2 (nexus-z0o2p.12): the MCP path's failure legs, real engine ──
+
+
+@pytest.fixture
+def refused_write(monkeypatch: pytest.MonkeyPatch):
+    """Make the engine refuse the note's one request: add a manifest row that
+    names a chunk which is not in the request. The refusal is real (per-document
+    transaction rolled back), not a stub."""
+    from nexus.catalog.http_catalog_client import HttpCatalogClient
+
+    real = HttpCatalogClient.write_manifest_many
+
+    def _refused(self, docs, *a, **k):
+        doc, rows = docs[0]
+        return real(self, [(doc, [*rows, {"chash": "f" * 64, "position": len(rows)}])], *a, **k)
+
+    def arm():
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", _refused)
+
+    def disarm():
+        monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", real)
+
+    return type("Refused", (), {"arm": staticmethod(arm), "disarm": staticmethod(disarm)})
+
+
+def _present_in(client, collection: str, chashes: list[str]) -> set[str]:
+    """Chunks stored in *collection*; a collection that was never written to has none."""
+    import nexus.db.http_vector_client as hvc
+
+    try:
+        return set(client.existing_ids(collection, chashes))
+    except hvc.VectorServiceError as exc:
+        assert "not registered" in str(exc), exc
+        return set()
+
+
+class TestZ0o2p12McpFailedReput:
+    """The scenarios ``TestK54nkRollbackLiveNoteGuard`` drives through the old
+    split-write replica, on the MCP path as it is now: one request, so a
+    failure leaves nothing to delete and the previous version is untouched."""
+
+    _COLLECTION = "knowledge__fixture-subject__bge-base-en-v15-768__v1"
+
+    def test_a_failed_reput_leaves_the_old_note_whole_and_restores_the_stamp(
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database, refused_write,
+    ) -> None:
+        import nexus.db.http_vector_client as hvc
+
+        title = "z0o2p12-failed-reput"
+        old = "z0o2p12 failed reput -- original content"
+        new = "z0o2p12 failed reput -- replacement content"
+        old_chash = hashlib.sha256(old.encode()).hexdigest()
+        new_chash = hashlib.sha256(new.encode()).hexdigest()
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+
+        assert _mcp_store_put_with(local_t3, old, title).startswith("Stored:")
+        (tumbler, _count), = _catalog_rows(catalog_env, title)
+        refused_write.arm()
+
+        for attempt in (1, 2):  # the second is the retry the error text recommends
+            result = _mcp_store_put_with(local_t3, new, title)
+            assert result.startswith("Error"), result
+            assert "retry is safe" in result
+            assert _manifest_rows(catalog_env, tumbler) == [(old_chash,)], f"attempt {attempt}"
+            assert _present_in(client, self._COLLECTION, [old_chash, new_chash]) == {old_chash}
+            assert (documents_by_title(title)[0].meta or {}).get("doc_id") == old_chash, (
+                "the identity stamp catalog_store_hook_tracked put on the row must be put back")
+            assert len(_catalog_rows(catalog_env, title)) == 1
+
+        refused_write.disarm()
+        assert _mcp_store_put_with(local_t3, new, title).startswith("Stored:")
+        assert _manifest_rows(catalog_env, tumbler) == [(new_chash,)]
+        assert _present_in(client, self._COLLECTION, [old_chash, new_chash]) == {new_chash}, (
+            "the supersede sweeps the old chunk after the request commits")
+
+    def test_a_legacy_note_chunk_survives_a_colliding_failed_put(
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database, refused_write,
+    ) -> None:
+        """A manifest-less legacy note owns chash X by ``meta.doc_id`` alone. A failed put of
+        byte-identical content under another title writes nothing, so X is untouched."""
+        import nexus.db.http_vector_client as hvc
+        from tests._catalog_fixture_ops import seed_manifest_chunks
+
+        content = "z0o2p12 legacy note shared content"
+        chash = hashlib.sha256(content.encode()).hexdigest()
+        cat = ActiveCatalog()
+        owner = cat.register_owner("knowledge", "curator")
+        cat.register(owner, "z0o2p12-legacy-note", content_type="knowledge",
+                     physical_collection=self._COLLECTION, meta={"doc_id": chash})
+        seed_manifest_chunks(self._COLLECTION, [chash])
+        refused_write.arm()
+
+        result = _mcp_store_put_with(local_t3, content, "z0o2p12-colliding-put")
+        assert result.startswith("Error"), result
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert _present_in(client, self._COLLECTION, [chash]) == {chash}
+        assert _catalog_rows(catalog_env, "z0o2p12-colliding-put") == []
+
+    def test_a_split_note_that_fails_leaves_no_piece(
+        self, catalog_env: Path, t2_service_env: str, local_t3: T3Database, refused_write,
+    ) -> None:
+        """``put_note_pieces``' part-way compensation, on the MCP path: no piece of a failed
+        multi-piece note exists afterwards."""
+        import nexus.db.http_vector_client as hvc
+        from nexus.catalog import store_hook as sh
+
+        content = "z0o2p12 split note. " + ("filler sentence content number " * 300)
+        pieces = sh.note_pieces(content, self._COLLECTION)
+        assert len(pieces) > 1, "control: the fixture must split"
+        chashes = [hashlib.sha256(p.encode()).hexdigest() for p in pieces]
+        refused_write.arm()
+
+        result = _mcp_store_put_with(local_t3, content, "z0o2p12-split-fail")
+        assert result.startswith("Error"), result
+        client = hvc.HttpVectorClient(tenant=t2_service_env)
+        assert _present_in(client, self._COLLECTION, chashes) == set()
+        assert _catalog_rows(catalog_env, "z0o2p12-split-fail") == []
+
+    def test_the_fence_begins_before_the_write_and_completes_with_it(
+        self, catalog_env: Path, local_t3: T3Database,
+    ) -> None:
+        """Kept: ``_fence_begin`` still fires before the write, and the completion stamp rides the request."""
+        import nexus.doc_indexer as di
+
+        order: list[str] = []
+        real_begin = di._fence_begin
+
+        def spy_begin(doc_id, content_hash, collection):
+            order.append("begin")
+            return real_begin(doc_id, content_hash, collection)
+
+        with patch("nexus.doc_indexer._fence_begin", side_effect=spy_begin):
+            result = _mcp_store_put_with(local_t3, "z0o2p12 fenced content", "z0o2p12-fence")
+        assert result.startswith("Stored:"), result
+        assert order == ["begin"]
+        assert documents_by_title("z0o2p12-fence")[0].index_state == "complete"
+
+    def test_a_failed_write_stamps_the_fence_failed_and_rolls_back_the_minted_row(
+        self, catalog_env: Path, local_t3: T3Database, refused_write,
+    ) -> None:
+        """Kept: ``_fence_fail`` and ``rollback_minted_catalog_entry`` (Decision 5) still fire on a failed first put."""
+        refused_write.arm()
+        with patch("nexus.doc_indexer._fence_fail") as fail, \
+             patch("nexus.catalog.store_hook.rollback_minted_catalog_entry") as rollback:
+            result = _mcp_store_put_with(local_t3, "z0o2p12 first put fails", "z0o2p12-first-fail")
+        assert result.startswith("Error"), result
+        assert fail.call_count == 1
+        assert rollback.call_count == 1
+
+    def test_store_put_makes_no_store_put_call(
+        self, catalog_env: Path, local_t3: T3Database, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Acceptance: ``store_put`` makes no ``/store-put`` (nor ``/upsert-chunks``) call."""
+        import nexus.db.http_vector_client as hvc
+
+        paths: list[str] = []
+        real_post = hvc._post
+
+        def spy(path, *a, **k):
+            paths.append(path)
+            return real_post(path, *a, **k)
+
+        monkeypatch.setattr(hvc, "_post", spy)
+        result = _mcp_store_put_with(local_t3, "z0o2p12 no store-put", "z0o2p12-no-store-put")
+        assert result.startswith("Stored:"), result
+        assert not [p for p in paths if "store-put" in p or "upsert-chunks" in p], paths
+
+
 # ── orphaned_chashes callers ────────────────────────────────────────────────
 #
 # _sweep_superseded_vectors[_many] (mcp_infra.py) and _reap_superseded_note_
@@ -1988,7 +2215,7 @@ class TestK54nkRollbackLiveNoteGuard:
                 RuntimeError("manifest write refused")
             ),
         )
-        result = _mcp_store_put_with(local_t3, content, "k54nk-colliding-put")
+        result = _legacy_failed_put(local_t3, content, "k54nk-colliding-put")
         assert result.startswith("Error"), result
         assert "manifest write refused" in result
 
@@ -2023,7 +2250,7 @@ class TestK54nkRollbackLiveNoteGuard:
                 RuntimeError("catalog read boom")
             ),
         )
-        result = _mcp_store_put_with(local_t3, content, "k54nk-lookup-failure")
+        result = _legacy_failed_put(local_t3, content, "k54nk-lookup-failure")
         assert result.startswith("Error"), result
         assert "manifest write refused" in result
 
@@ -2225,7 +2452,7 @@ class TestK54nkRollbackLiveNoteGuard:
         when the document's current stamp is no longer the one this call
         wrote (a concurrent re-put landed a newer identity), and must
         restore when it still is. Both branches, same fixture shape."""
-        from nexus.catalog.store_hook import _restore_pre_call_stamp
+        from nexus.catalog.store_hook import restore_pre_call_stamp
 
         collection = self._COLLECTION
         old_chash = "a1" * 32
@@ -2243,8 +2470,8 @@ class TestK54nkRollbackLiveNoteGuard:
             physical_collection=collection, meta={"doc_id": ours_chash},
         ))
 
-        _restore_pre_call_stamp(raced, old_chash, ours_chash)
-        _restore_pre_call_stamp(still_ours, old_chash, ours_chash)
+        restore_pre_call_stamp(raced, old_chash, ours_chash)
+        restore_pre_call_stamp(still_ours, old_chash, ours_chash)
 
         assert (documents_by_title("k54nk-cas-declines")[0].meta or {}).get(
             "doc_id") == newer_chash, (
@@ -2310,7 +2537,7 @@ class TestK54nkRollbackLiveNoteGuard:
         )
 
         # First failed re-put: stamps NEW, then must roll it back.
-        result1 = _mcp_store_put_with(local_t3, new_content, title)
+        result1 = _legacy_failed_put(local_t3, new_content, title)
         assert result1.startswith("Error"), result1
         assert local_t3.get_by_id(collection, new_chash) is None, (
             "the first failed re-put's own chunk must be deleted"
@@ -2323,7 +2550,7 @@ class TestK54nkRollbackLiveNoteGuard:
 
         # SECOND, byte-identical retry -- the system's own recommended
         # recovery action -- also confirmed-fails.
-        result2 = _mcp_store_put_with(local_t3, new_content, title)
+        result2 = _legacy_failed_put(local_t3, new_content, title)
         assert result2.startswith("Error"), result2
 
         assert local_t3.get_by_id(collection, new_chash) is None, (
@@ -2391,7 +2618,7 @@ class TestK54nkRollbackLiveNoteGuard:
             ),
         )
 
-        result = _mcp_store_put_with(local_t3, content, title)
+        result = _legacy_failed_put(local_t3, content, title)
         assert result.startswith("Error"), result
 
         assert local_t3.get_by_id(collection, chash) is not None, (
@@ -2450,7 +2677,7 @@ class TestK54nkRollbackLiveNoteGuard:
             ),
         )
 
-        result = _mcp_store_put_with(local_t3, content, title)
+        result = _legacy_failed_put(local_t3, content, title)
         assert result.startswith("Error"), result
 
         assert local_t3.get_by_id(collection, chash) is not None, (

@@ -304,6 +304,12 @@ def put_note_pieces(t3: Any, collection: str, pieces: list[str], **put_kwargs: A
     """Write each piece with ``t3.put`` under the same title, tags and
     catalog document; returns the chunk ids in order.
 
+    RDR-223 P2.2 (nexus-z0o2p.12): MCP ``store_put`` no longer calls this; its
+    pieces are the ``chunks`` of one ``write_manifest_many`` request
+    (:func:`nexus.catalog.note_write.write_note`). The split-write producers
+    (``nx store put``, ``nx memory promote``, the recovery import) still do,
+    until P2.6 to P2.8.
+
     A one-piece note is the single ``t3.put`` it always was. For several
     pieces, a failure part-way would leave the pieces already written in T3
     with no manifest, searchable and unlinked, so this deletes the pieces
@@ -1719,7 +1725,7 @@ def describe_rollback_outcome(outcome: ChunkRollbackOutcome) -> str:
     return "Nothing needed to be rolled back."
 
 
-def _restore_pre_call_stamp(
+def restore_pre_call_stamp(
     catalog_doc_id: str, pre_call_doc_id: str, stamped_doc_id: str,
 ) -> None:
     """Undo :func:`catalog_store_hook_tracked`'s own pre-manifest-write
@@ -1818,10 +1824,15 @@ def rollback_uncataloged_chunk_write(
     :class:`ManifestVerifyUncertainError` — see
     :func:`store_put_manifest_direct`'s three-way-outcome docstring.
 
-    Shared by every store_put-shaped producer — MCP ``store_put``, CLI
-    ``nx store put``, ``nx memory promote``, and the recovery-bundle
-    importer (``catalog/recovery_bundle.py::_default_import_doc``) — so
-    the compensation lives in one place, not four. Call this AFTER
+    Shared by the split-write producers still on it: CLI ``nx store put``,
+    ``nx memory promote``, and the recovery-bundle importer
+    (``catalog/recovery_bundle.py::_default_import_doc``). MCP ``store_put``
+    left this set at RDR-223 P2.2 (nexus-z0o2p.12): it writes a note's pieces
+    and manifest in one request (:mod:`nexus.catalog.note_write`), so a chunk
+    can no longer land without its owner. The function, ``put_note_pieces``,
+    ``store_put_manifest_direct[_with_recovery]`` (with its nexus-bb6n2 reap) and
+    ``ChunkRollbackOutcome`` go when P2.6 to P2.8 move the last three callers
+    onto the note writer. Call this AFTER
     ``put_note_pieces``/``t3.put`` has already written *doc_ids* (the
     chash(es) of the piece(s) just stored), once the caller has decided
     the put failed: either :func:`catalog_store_hook_tracked` returned no
@@ -1910,7 +1921,7 @@ def rollback_uncataloged_chunk_write(
     STAMP RESTORE (nexus-k54nk fix-round 2, T2 ``nexus/review-k54nk-
     code-r2`` Significant 1): after deciding what to do about the T3
     chunk(s) (deleted, protected, or the delete itself failed), this
-    function also calls :func:`_restore_pre_call_stamp` to undo
+    function also calls :func:`restore_pre_call_stamp` to undo
     :func:`catalog_store_hook_tracked`'s own pre-manifest-write stamp on
     *catalog_doc_id*'s document — see that function's docstring for the
     dangling-reference hazard it closes and its compare-and-set contract.
@@ -1956,7 +1967,7 @@ def rollback_uncataloged_chunk_write(
     # nexus-k54nk fix-round 2: the FIRST piece's chash is the exact value
     # catalog_store_hook_tracked stamped onto catalog_doc_id's meta.doc_id
     # (note_manifest_metadata/single_chunk_manifest_metadata's return, and
-    # every producer's doc_ids[0] — see _restore_pre_call_stamp's own
+    # every producer's doc_ids[0] — see restore_pre_call_stamp's own
     # docstring). From the ORIGINAL *doc_ids* order, not the deduped/
     # sorted `ids` above — sorting can reorder a multi-piece note's chunks.
     stamped_doc_id = next((d for d in doc_ids if d), "")
@@ -2004,7 +2015,7 @@ def rollback_uncataloged_chunk_write(
     protected = tuple(sorted(set(ids) - set(orphaned)))
     attempted = tuple(sorted(orphaned))
     if not attempted:
-        _restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
+        restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
         return ChunkRollbackOutcome(requested=ids, protected=protected)
     try:
         result = t3.get_collection(collection).delete(ids=list(attempted))
@@ -2013,7 +2024,7 @@ def rollback_uncataloged_chunk_write(
             "store_put_rollback_chunk_delete_failed",
             collection=collection, chashes=len(attempted), exc_info=True,
         )
-        _restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
+        restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
         return ChunkRollbackOutcome(
             requested=ids, protected=protected, attempted=attempted,
             delete_error=str(exc),
@@ -2024,7 +2035,7 @@ def rollback_uncataloged_chunk_write(
         collection=collection, catalog_doc_id=catalog_doc_id,
         deleted=deleted_count, requested=len(attempted),
     )
-    _restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
+    restore_pre_call_stamp(catalog_doc_id, pre_call_doc_id, stamped_doc_id)
     return ChunkRollbackOutcome(
         requested=ids, protected=protected, attempted=attempted,
         deleted_count=deleted_count,

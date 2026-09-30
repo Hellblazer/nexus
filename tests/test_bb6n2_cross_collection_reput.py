@@ -46,6 +46,11 @@ one case where this dedup DOES still match (same collection) now also
 stamps physical_collection/source_uri defensively, same shape as the
 existing source_uri-reconcile branch.
 
+RDR-223 P2.2 (nexus-z0o2p.12): each test runs against both writers, the split
+write (``nx store put`` and friends until P2.6 to P2.8) and the one-request note
+writer MCP ``store_put`` uses now; the reconcile under test is
+``catalog_store_hook_tracked``'s, which both share.
+
 Real engine substrate (``t2_service_env``): the bug is a real
 ``docs_for_chashes``/``physical_collection`` round trip, not something
 an in-memory double reproduces.
@@ -67,11 +72,18 @@ _SPLIT_CONTENT = "bb6n2 cross-collection split fixture. " + ("filler sentence co
 _UNSPLIT_CONTENT = "bb6n2 cross-collection unsplit fixture, short content."
 
 
-def _put_note(client, *, collection: str, title: str, content: str):
+@pytest.fixture(params=["split-write", "one-request"])
+def writer(request) -> str:
+    return request.param
+
+
+def _put_note(client, *, collection: str, title: str, content: str, writer: str):
     """Real store_put-shaped write via the actual catalog reconcile +
-    manifest-write functions under test."""
+    the split write or the one-request note writer."""
+    from nexus.catalog.note_write import write_note
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
+        note_content_hash,
         note_manifest_metadata,
         note_pieces,
         store_put_manifest_direct,
@@ -83,6 +95,12 @@ def _put_note(client, *, collection: str, title: str, content: str):
         title=title, doc_id=doc_id, collection_name=collection,
     )
     chashes = [m["chunk_text_hash"] for m in manifest_metadatas]
+    if writer == "one-request":
+        write_note(
+            catalog_doc_id=tumbler, collection=collection, pieces=pieces, title=title,
+            content_hash=note_content_hash(content, manifest_metadatas),
+        )
+        return tumbler, created, len(pieces)
     for piece, chash, meta in zip(pieces, chashes, manifest_metadatas):
         client.upsert_chunks_with_embeddings(
             collection,
@@ -95,7 +113,7 @@ def _put_note(client, *, collection: str, title: str, content: str):
     return tumbler, created, len(pieces)
 
 
-def test_split_note_reput_into_a_new_collection_creates_a_new_document(t2_service_env):
+def test_split_note_reput_into_a_new_collection_creates_a_new_document(t2_service_env, writer):
     """The bug's own reproduction shape: an already-split (multi-chunk)
     note, re-put with IDENTICAL content into a DIFFERENT collection
     under the same title, must mint a new document in the new
@@ -110,13 +128,13 @@ def test_split_note_reput_into_a_new_collection_creates_a_new_document(t2_servic
     assert len(_SPLIT_CONTENT) > 1689, "control: fixture must actually split"
 
     old_tumbler, old_created, old_piece_count = _put_note(
-        client, collection=_OLD_COLLECTION, title=title, content=_SPLIT_CONTENT,
+        client, collection=_OLD_COLLECTION, title=title, content=_SPLIT_CONTENT, writer=writer,
     )
     assert old_created is True
     assert old_piece_count > 1, "control: the OLD note must genuinely be split (multi-chunk)"
 
     new_tumbler, new_created, new_piece_count = _put_note(
-        client, collection=_NEW_COLLECTION, title=title, content=_SPLIT_CONTENT,
+        client, collection=_NEW_COLLECTION, title=title, content=_SPLIT_CONTENT, writer=writer,
     )
 
     assert new_tumbler != old_tumbler, (
@@ -145,7 +163,7 @@ def test_split_note_reput_into_a_new_collection_creates_a_new_document(t2_servic
     )
 
 
-def test_unsplit_note_reput_into_a_new_collection_creates_a_new_document(t2_service_env):
+def test_unsplit_note_reput_into_a_new_collection_creates_a_new_document(t2_service_env, writer):
     """The SAME defect reproduced on an unsplit (single-chunk) note: with
     byte-identical content, its single whole-note chash collides
     catalog-wide too, so pre-fix this ALSO wrongly adopted the old
@@ -161,13 +179,13 @@ def test_unsplit_note_reput_into_a_new_collection_creates_a_new_document(t2_serv
     title = "bb6n2-cross-unsplit-note"
 
     old_tumbler, old_created, old_piece_count = _put_note(
-        client, collection=_OLD_COLLECTION, title=title, content=_UNSPLIT_CONTENT,
+        client, collection=_OLD_COLLECTION, title=title, content=_UNSPLIT_CONTENT, writer=writer,
     )
     assert old_created is True
     assert old_piece_count == 1, "control: the OLD note must genuinely be unsplit"
 
     new_tumbler, new_created, _new_piece_count = _put_note(
-        client, collection=_NEW_COLLECTION, title=title, content=_UNSPLIT_CONTENT,
+        client, collection=_NEW_COLLECTION, title=title, content=_UNSPLIT_CONTENT, writer=writer,
     )
 
     assert new_tumbler != old_tumbler
@@ -182,7 +200,7 @@ def test_unsplit_note_reput_into_a_new_collection_creates_a_new_document(t2_serv
     assert old_entry.chunk_count == old_piece_count
 
 
-def test_same_collection_chash_dedup_still_reconciles_and_stamps_source_uri(t2_service_env):
+def test_same_collection_chash_dedup_still_reconciles_and_stamps_source_uri(t2_service_env, writer):
     """Non-vacuity control: the collection-scoping fix must not break the
     legitimate SAME-collection chash dedup this lookup exists for --
     re-putting byte-identical content under the SAME collection and
@@ -196,12 +214,12 @@ def test_same_collection_chash_dedup_still_reconciles_and_stamps_source_uri(t2_s
     title = "bb6n2-same-collection-note"
 
     first_tumbler, first_created, _ = _put_note(
-        client, collection=_OLD_COLLECTION, title=title, content=_UNSPLIT_CONTENT,
+        client, collection=_OLD_COLLECTION, title=title, content=_UNSPLIT_CONTENT, writer=writer,
     )
     assert first_created is True
 
     second_tumbler, second_created, _ = _put_note(
-        client, collection=_OLD_COLLECTION, title=title, content=_UNSPLIT_CONTENT,
+        client, collection=_OLD_COLLECTION, title=title, content=_UNSPLIT_CONTENT, writer=writer,
     )
 
     assert second_tumbler == first_tumbler, (

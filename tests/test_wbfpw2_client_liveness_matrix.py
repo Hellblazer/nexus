@@ -95,18 +95,18 @@ def _search_visible(client, collection: str, chash: str, text: str) -> bool:
 
 
 def _put_note(client, *, collection: str, title: str, content: str) -> tuple[str, list[str]]:
-    """R7's write path: the store_put shape (a registered note whose
-    manifest names its chunks), mirroring ``test_bb6n2_supersede_reap.py::
-    _put_note``. Not the MCP tool's exact sequence: it writes chunks with
-    ``upsert_chunks_with_embeddings`` and the bare
-    ``store_put_manifest_direct`` rather than ``put_note_pieces`` and the
-    recovery wrapper; none of the five predicates read the difference.
-    Returns ``(tumbler, chashes)``."""
+    """R7's write path: a registered note whose manifest names its chunks,
+    written the way MCP ``store_put`` writes it now (RDR-223 P2.2,
+    nexus-z0o2p.12): the catalog reconcile, then one ``write_manifest_many``
+    request carrying the pieces and the manifest. The chunk metadata carries
+    ``indexed_at`` as ``HttpVectorClient.put`` stamped it, which is what
+    ``nx t3 gc``'s predicate 8 reads. Returns ``(tumbler, chashes)``."""
+    from nexus.catalog.note_write import write_note
     from nexus.catalog.store_hook import (
         catalog_store_hook_tracked,
+        note_content_hash,
         note_manifest_metadata,
         note_pieces,
-        store_put_manifest_direct,
     )
 
     pieces = note_pieces(content, collection)
@@ -114,17 +114,11 @@ def _put_note(client, *, collection: str, title: str, content: str) -> tuple[str
     tumbler, _created = catalog_store_hook_tracked(
         title=title, doc_id=doc_id, collection_name=collection,
     )
-    chashes = [m["chunk_text_hash"] for m in manifest_metadatas]
-    for piece, chash, meta in zip(pieces, chashes, manifest_metadatas):
-        client.upsert_chunks_with_embeddings(
-            collection, ids=[chash], documents=[piece], embeddings=[],
-            metadatas=[{
-                "title": title, "chunk_text_hash": chash, "doc_id": tumbler,
-                "indexed_at": datetime.now(UTC).isoformat(),
-            }],
-        )
-    store_put_manifest_direct(tumbler, manifest_metadatas, collection=collection)
-    return tumbler, chashes
+    write_note(
+        catalog_doc_id=tumbler, collection=collection, pieces=pieces, title=title,
+        content_hash=note_content_hash(content, manifest_metadatas),
+    )
+    return tumbler, [m["chunk_text_hash"] for m in manifest_metadatas]
 
 
 def _orphaned(reader, collection: str, chash: str) -> bool:
