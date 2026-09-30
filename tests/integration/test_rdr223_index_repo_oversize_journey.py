@@ -36,6 +36,7 @@ import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.chunk_batcher import ChunkBatcher
+from nexus.db.http_vector_client import HttpVectorClient
 from nexus.hook_registry import HookRegistry
 from nexus.index_context import IndexContext
 
@@ -54,11 +55,18 @@ class ClientDied(Exception):
     """The simulated death of the client process between two requests."""
 
 
-class _ForbiddenDb:
-    """``ctx.db`` of the fallback under test. The fallback writes through the combined writer;
-    any use of this object is the retired split write (``upsert-chunks`` then a manifest write)."""
+class _ForbiddenDb(HttpVectorClient):
+    """``ctx.db`` of the fallback under test: a service-backed T3 (an ``HttpVectorClient``, so the
+    fallback picks the writer path) that fails the test on any use. The fallback writes through the
+    combined writer; any use of this object is the retired split write (``upsert-chunks`` then a
+    manifest write)."""
 
-    def __getattr__(self, name: str):
+    def __init__(self) -> None:          # no client is built: nothing here may reach the engine
+        pass
+
+    def __getattribute__(self, name: str):
+        if name.startswith("__"):
+            return object.__getattribute__(self, name)
         raise AssertionError(
             f"the oversize fallback used ctx.db.{name}: chunks must be written by the combined "
             "writer, in the same request as their owner rows")
@@ -141,7 +149,7 @@ def _reader():
 
 def _manifest(doc_id: str) -> list[tuple]:
     return [
-        (r.position, r.chash, r.line_start, r.line_end, r.char_start, r.char_end)
+        (r.position, r.chash, r.line_start, r.line_end, r.char_start, r.char_end, r.chunk_index)
         for r in _reader().get_manifest(doc_id)
     ]
 
@@ -367,8 +375,10 @@ def test_full_run_equals_one_combined_write_of_the_file(env: _Env) -> None:
     assert [p for p, _, _ in data[1:]] == ["/manifest/append"] * (len(data) - 1)
     assert max(len(b.get("chunks") or []) for _, b, _ in data) <= _WRITER_CAP
     assert [p for p, _, _ in log][-1] == "/index-run/complete"
-    # No request but the writer's wrote anything: the manifest hook was excluded.
-    assert len([e for e in log if e[0] in ("/manifest/write_many", "/manifest/append")]) == len(data)
+    # No request but the writer's wrote anything: the registered manifest hook was excluded, so
+    # the only non-data requests are collection registration, the fence begins (the early one and the writer's) and the
+    # stamp.
+    assert {p for p, _, _ in log if p not in _DATA_PATHS} <= {"/index-run/begin", "/index-run/complete", "/collections/upsert"}
 
     ctl = env.control_write(rows, chunks)
     assert _manifest(env.doc_id) == _manifest(ctl) != []
@@ -381,7 +391,7 @@ def test_full_run_equals_one_combined_write_of_the_file(env: _Env) -> None:
     meta = {c["chash"]: c["metadata"] for c in chunks}
     expected = [
         (i, h, meta[h].get("line_start") or None, meta[h].get("line_end") or None,
-         meta[h].get("chunk_start_char") or None, meta[h].get("chunk_end_char") or None)
+         meta[h].get("chunk_start_char") or None, meta[h].get("chunk_end_char") or None, i)
         for i, h in enumerate(every)
     ]
     assert _manifest(env.doc_id) == expected
@@ -436,7 +446,8 @@ def test_client_death_after_the_first_request_leaves_no_ownerless_chunk(env: _En
     # The previous version's chunks are the accepted leftovers: the sweep is deferred, never early.
     left = set(old) - owners
     assert left and _present(env.collection, list(left)) == left
-    assert _index_state(env.doc_id) != "complete"                     # a rerun must not skip it
+    # The writer marked the fence failed (the exception ran its abort), so the next run redoes it.
+    assert _index_state(env.doc_id) == "failed"
 
 
 # ── unchanged re-index ────────────────────────────────────────────────────────

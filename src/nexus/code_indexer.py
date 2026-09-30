@@ -698,15 +698,15 @@ def index_code_file(ctx: IndexContext, file_path: Path) -> int:
     # present and refused it — writes its chunks together with their owner
     # rows through the multi-batch combined writer, so a client that dies
     # partway leaves no chunk without an owner (see nexus.oversize_write).
-    # Two topologies keep the old upsert, and both are outside what this
-    # bead moves: a file with no catalog identity has no owner row to write
-    # (counting and stopping those is nexus-z0o2p.20), and a context with no
-    # batcher holds a non-HTTP T3 (the in-memory test topology; _run_index
-    # builds the batcher for every HttpVectorClient, i.e. every real
-    # install) that the engine's combined write cannot reach.
-    _via_writer = ctx.batcher is not None and bool(catalog_doc_id)
+    # use_writer() picks the path by what the T3 is: a service-backed one
+    # (every real install) writes through the combined writer, and a file with
+    # no catalog identity (nexus-z0o2p.20 counts and stops those) or a
+    # non-service T3 (the in-memory test topology, which the engine's combined
+    # write cannot reach) keeps the old upsert.
+    from nexus.oversize_write import use_writer, write_oversize_file  # noqa: PLC0415 — deferred: rare oversize path
+
+    _via_writer = use_writer(ctx.db, ctx.batcher, catalog_doc_id)
     if _via_writer:
-        from nexus.oversize_write import write_oversize_file  # noqa: PLC0415 — deferred: rare oversize path
 
         with _stage("upload"):
             _log.debug("oversize_file_write", file=str(file_path), chunks=total_chunks)

@@ -338,20 +338,20 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     # rows through the multi-batch combined writer, so a client that dies
     # partway leaves no chunk without an owner. The writer cuts the file into
     # requests of per_collection_chunk_cap(collection) rows (64 for a CCE
-    # collection), the same pages the old upsert-chunks paging sent, and the
-    # engine embeds one request's new chunks in one call on both routes, so the
-    # set of chunks embedded together, and with it every contextual (CCE)
-    # embedding, is unchanged. nexus.oversize_write records how that was
-    # confirmed, and tests/test_rdr223_oversize_fallback.py pins it. Two
-    # topologies keep the old upsert, both outside what this bead moves: a file
-    # with no catalog identity has no owner row to write (counting and stopping
-    # those is nexus-z0o2p.20), and a context with no batcher holds a non-HTTP
-    # T3 (the in-memory test topology; _run_index builds the batcher for every
-    # HttpVectorClient, i.e. every real install) that the engine's combined
-    # write cannot reach.
-    _via_writer = ctx.batcher is not None and bool(catalog_doc_id)
+    # collection), the same pages the old upsert-chunks paging sent for CCE and
+    # onnx-local, and the engine embeds one request's new chunks in one call on
+    # both routes, so the set of chunks embedded together, and with it every
+    # contextual (CCE) embedding, is unchanged. nexus.oversize_write records how
+    # that was confirmed, and tests/test_rdr223_oversize_fallback.py pins it.
+    # use_writer() picks the path by what the T3 is: a service-backed one
+    # (every real install) writes through the combined writer, and a file with
+    # no catalog identity (nexus-z0o2p.20 counts and stops those) or a
+    # non-service T3 (the in-memory test topology, which the engine's combined
+    # write cannot reach) keeps the old upsert.
+    from nexus.oversize_write import use_writer, write_oversize_file  # noqa: PLC0415 — deferred: rare oversize path
+
+    _via_writer = use_writer(ctx.db, ctx.batcher, catalog_doc_id)
     if _via_writer:
-        from nexus.oversize_write import write_oversize_file  # noqa: PLC0415 — deferred: rare oversize path
 
         with _stage("upload"):
             write_oversize_file(

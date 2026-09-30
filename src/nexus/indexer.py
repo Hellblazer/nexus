@@ -2796,6 +2796,7 @@ _TRANSIENT_UPSERT_CODES = frozenset({429, 502, 503, 504})
 # fence_begin_failure_count (run_file_loop drives this concurrently).
 _transient_upsert_deferred_lock = threading.Lock()
 _transient_upsert_deferred_count = 0
+_transient_upsert_deferred_paths: list[str] = []
 
 
 def reset_transient_upsert_deferred_count() -> None:
@@ -2804,6 +2805,7 @@ def reset_transient_upsert_deferred_count() -> None:
     global _transient_upsert_deferred_count
     with _transient_upsert_deferred_lock:
         _transient_upsert_deferred_count = 0
+        _transient_upsert_deferred_paths.clear()
 
 
 def transient_upsert_deferred_count() -> int:
@@ -2812,10 +2814,19 @@ def transient_upsert_deferred_count() -> int:
         return _transient_upsert_deferred_count
 
 
-def _record_transient_upsert_deferred(n: int = 1) -> None:
+def transient_upsert_deferred_paths() -> list[str]:
+    """Snapshot of the files this run's transient-upsert deferrals named, in
+    the order they were deferred (the run summary lists them)."""
+    with _transient_upsert_deferred_lock:
+        return list(_transient_upsert_deferred_paths)
+
+
+def _record_transient_upsert_deferred(n: int = 1, *, path: str | None = None) -> None:
     global _transient_upsert_deferred_count
     with _transient_upsert_deferred_lock:
         _transient_upsert_deferred_count += n
+        if path is not None:
+            _transient_upsert_deferred_paths.append(path)
 
 
 def _contain_extraction_quality_gate(
@@ -2870,43 +2881,27 @@ def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
     other entry in ``_TRANSIENT_UPSERT_CODES``.
 
     RDR-223 P2.4 (nexus-z0o2p.14): the oversize fallbacks write through the
-    catalog's combined write, so the same transient conditions arrive as
-    ``httpx.HTTPStatusError`` (a status in ``_TRANSIENT_UPSERT_CODES``) and
-    ``CombinedWriteEmbedTimeoutError`` instead. Both defer the file exactly as
-    the vector-client errors above do.
+    catalog's combined write, whose transient outcomes (a 429/502/503/504,
+    the embed timeout, a connectivity error the writer's own retry could not
+    outlast) arrive as ``OversizeWriteDeferred``, raised by
+    ``nexus.oversize_write.write_oversize_file`` after the writer marked the
+    fence failed. Only that marker defers: an ``httpx.HTTPStatusError`` from
+    anywhere else in the per-file path (the doc-id resolver, a hook) is not a
+    write outcome and propagates. A deferred file is named in the run
+    summary and makes the command exit non-zero (``index_repo_cmd``).
     """
-    import httpx  # noqa: PLC0415 — deferred: only the failure arm needs the types
-
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — circular-dep avoidance: nexus.db.http_vector_client
-    from nexus.errors import CombinedWriteEmbedTimeoutError  # noqa: PLC0415 — circular-dep avoidance: nexus.errors
+    from nexus.oversize_write import OversizeWriteDeferred  # noqa: PLC0415 — deferred: rare failure arm
     from nexus.retry import VectorUpsertTimeoutError  # noqa: PLC0415 -- circular-dep avoidance: nexus.retry
 
     try:
         return fn()
-    except (VectorUpsertTimeoutError, CombinedWriteEmbedTimeoutError) as exc:
-        # RDR-223 P2.4 (nexus-z0o2p.14): an oversize file's chunks now ride the
-        # catalog's combined write, whose embed timeout
-        # (CombinedWriteEmbedTimeoutError) is the catalog-side twin of
-        # VectorUpsertTimeoutError: the same synchronous server-side embed,
-        # the same no-retry rule, so it defers the same way.
+    except (VectorUpsertTimeoutError, OversizeWriteDeferred) as exc:
         _log.warning(
             "index_file_transient_upsert_deferred",
             file=str(file), code="upsert-timeout", error=str(exc),
         )
-        _record_transient_upsert_deferred()
-        return 0
-    except httpx.HTTPStatusError as exc:
-        # The same gateway/pool/rate-limit statuses, as the catalog client
-        # raises them once its own bounded retry is spent (a 4xx or a
-        # non-transient 5xx is permanent and still raises).
-        code = exc.response.status_code if exc.response is not None else None
-        if code not in _TRANSIENT_UPSERT_CODES:
-            raise
-        _log.warning(
-            "index_file_transient_upsert_deferred",
-            file=str(file), code=code, error=str(exc),
-        )
-        _record_transient_upsert_deferred()
+        _record_transient_upsert_deferred(path=str(file))
         return 0
     except VectorServiceError as exc:
         if exc.code in _TRANSIENT_UPSERT_CODES:
@@ -2914,7 +2909,7 @@ def _contain_transient_upsert(fn: "Callable[[], int]", file: "Path") -> int:
                 "index_file_transient_upsert_deferred",
                 file=str(file), code=exc.code, error=str(exc),
             )
-            _record_transient_upsert_deferred()
+            _record_transient_upsert_deferred(path=str(file))
             return 0
         raise
 
@@ -3245,17 +3240,16 @@ def _index_pdf_file(
     # present and refused it — writes its chunks together with their owner
     # rows through the multi-batch combined writer, so a client that dies
     # partway leaves no chunk without an owner (see nexus.oversize_write).
-    # Two topologies keep the old upsert, both outside what this bead moves: a
-    # file with no catalog identity has no owner row to write (counting and
-    # stopping those is nexus-z0o2p.20), and a call with no batcher holds a
-    # non-HTTP T3 (the in-memory test topology; _run_index builds the batcher
-    # for every HttpVectorClient, i.e. every real install) that the engine's
-    # combined write cannot reach.
-    _via_writer = batcher is not None and bool(catalog_doc_id)
+    # use_writer() picks the path by what the T3 is: a service-backed one
+    # (every real install) writes through the combined writer, and a file with
+    # no catalog identity (nexus-z0o2p.20 counts and stops those) or a
+    # non-service T3 (the in-memory test topology, which the engine's combined
+    # write cannot reach) keeps the old upsert.
+    from nexus.oversize_write import use_writer, write_oversize_file  # noqa: PLC0415 — deferred: rare oversize path
+
+    _via_writer = use_writer(db, batcher, catalog_doc_id)
     with _stage("upload"):
         if _via_writer:
-            from nexus.oversize_write import write_oversize_file  # noqa: PLC0415 — deferred: rare oversize path
-
             write_oversize_file(
                 catalog_doc_id=catalog_doc_id, content_hash=content_hash_hex,
                 collection=collection_name, ids=ids, documents=documents,
@@ -6814,6 +6808,10 @@ def _run_index(
         # chunk_flush_failed_files to decide whether it is safe to
         # advance owners.head_hash after this run.
         "transient_upsert_deferred_files": transient_upsert_deferred_count(),
+        # The deferred files' paths, in deferral order: index_repo_cmd names
+        # them in the run summary and exits non-zero, so a deferral is never
+        # a silent clean run (RDR-223 P2.4 review).
+        "transient_upsert_deferred_paths": transient_upsert_deferred_paths(),
         # nexus-deyd5: files skipped this run because they could not be
         # extracted (nexus.errors.UnextractableContentError, caught by
         # run_file_loop). Deliberately NOT wired into a non-zero exit on

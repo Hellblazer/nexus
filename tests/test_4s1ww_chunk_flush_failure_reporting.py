@@ -317,6 +317,57 @@ def test_index_repo_chunk_flush_failed_key_absent_exit_zero(runner, repo_dir, mo
     assert result.exit_code == 0, result.output
 
 
+def test_index_repo_deferred_files_are_named_and_fail_the_run(runner, repo_dir, mock_reg):
+    """RDR-223 P2.4 review (nexus-z0o2p.14): a file deferred on a transient
+    write error wrote nothing this run. The summary must print the count and
+    the paths with the remedy, and the command must exit non-zero, as for
+    chunk_flush_failed_files; before, it was one structlog WARNING and rc=0."""
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3, "transient_upsert_deferred_files": 2,
+            "transient_upsert_deferred_paths": ["src/big.py", "docs/huge.md"],
+        },
+    )
+    assert result.exit_code != 0, result.output
+    assert "2" in result.stdout and "deferred" in result.stdout, result.stdout
+    assert "src/big.py" in result.stdout and "docs/huge.md" in result.stdout, result.stdout
+    assert "Re-run 'nx index repo' to retry" in result.stdout, result.stdout
+    assert "Done." in result.output          # the rest of the run still completed
+
+
+def test_index_repo_many_deferred_files_are_truncated_to_ten_paths(runner, repo_dir, mock_reg):
+    paths = [f"f{i}.py" for i in range(13)]
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"transient_upsert_deferred_files": 13,
+                      "transient_upsert_deferred_paths": paths},
+    )
+    assert result.exit_code != 0
+    assert "f9.py" in result.stdout and "f10.py" not in result.stdout, result.stdout
+    assert "and 3 more" in result.stdout, result.stdout
+
+
+def test_index_repo_deferred_and_chunk_flush_failures_both_print(runner, repo_dir, mock_reg):
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"chunk_flush_failed_files": 1, "transient_upsert_deferred_files": 1,
+                      "transient_upsert_deferred_paths": ["a.py"]},
+    )
+    assert result.exit_code != 0
+    assert "deferred" in result.stdout and "failed to flush" in result.stdout, result.stdout
+
+
+def test_index_repo_no_deferred_files_exit_zero(runner, repo_dir, mock_reg):
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"files_changed": 3, "transient_upsert_deferred_files": 0,
+                      "transient_upsert_deferred_paths": []},
+    )
+    assert result.exit_code == 0, result.output
+    assert "file(s) deferred" not in result.stdout
+
+
 # ── --monitor must not go silent during the flush drain (GH #1432 item 3) ──
 # The drain-phase markers already existed (nexus-uizok, 2026-07-08) for
 # progress; these tests are specifically about FAILURE visibility, which
@@ -423,7 +474,9 @@ def test_run_index_reports_transient_upsert_deferred_files_in_stats(tmp_path, mo
     ):
         stats = _run_index(repo, _reg())
     assert stats["transient_upsert_deferred_files"] == 1
+    assert [Path(p).name for p in stats["transient_upsert_deferred_paths"]] == ["hello.py"]
 
     with _service_mode_patches(db), patch("nexus.chunk_batcher.ChunkBatcher", _batcher_factory):
         stats = _run_index(repo, _reg())
     assert stats["transient_upsert_deferred_files"] == 0
+    assert stats["transient_upsert_deferred_paths"] == []

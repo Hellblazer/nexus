@@ -1870,6 +1870,26 @@ def index_repo_cmd(
         # above: one file's chunks permanently missing is the same
         # severity class as all of them, just smaller in count — not
         # gated on "every file failed."
+        # RDR-223 P2.4 review (nexus-z0o2p.14): a file deferred on a transient
+        # write error (_contain_transient_upsert) wrote nothing this run, and
+        # used to leave one structlog WARNING and rc=0 — a clean-looking run
+        # that had not indexed it. Same channel-and-shape precedent as
+        # chunk_flush_failed_files below (stdout click.echo() Warning, then a
+        # non-zero exit): print the count and the paths, name the remedy, and
+        # fail the run after the rest of it completed. Printed before the
+        # chunk-flush block so a run with both shows both lines.
+        transient_upsert_deferred_files = (stats or {}).get("transient_upsert_deferred_files", 0)
+        if transient_upsert_deferred_files:
+            _deferred_paths = list((stats or {}).get("transient_upsert_deferred_paths") or [])
+            _shown = _deferred_paths[:10]
+            _more = len(_deferred_paths) - len(_shown)
+            click.echo(
+                f"Warning: {transient_upsert_deferred_files}/{n} file(s) deferred on a "
+                f"transient write error (nothing was indexed for them this run): "
+                + (", ".join(_shown) if _shown else "paths not recorded")
+                + (f" and {_more} more" if _more > 0 else "")
+                + ". Re-run 'nx index repo' to retry."
+            )
         chunk_flush_failed_files = (stats or {}).get("chunk_flush_failed_files", 0)
         if chunk_flush_failed_files:
             click.echo(
@@ -1884,6 +1904,13 @@ def index_repo_cmd(
                 f"{chunk_flush_failed_files} file(s) failed to flush chunk "
                 f"uploads this run (nexus-4s1ww) — see the WARNING line "
                 f"above."
+            )
+
+        if transient_upsert_deferred_files:
+            raise click.ClickException(
+                f"{transient_upsert_deferred_files} file(s) deferred on a transient write "
+                f"error this run (nexus-z0o2p.14) — see the WARNING line above. Re-run "
+                f"'nx index repo' to retry."
             )
 
         # nexus-7lw6a: taxonomy_assign_batch_failed (an HTTP 500 or other
