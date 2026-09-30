@@ -154,6 +154,23 @@ jobs:
     # and cancel-in-progress above are unchanged (a pending push run is still
     # replaced by a newer one; a started run is never cancelled by a push).
     #
+    # CONTAINER CLEANUP. There is deliberately no end-of-job container sweep:
+    # hellmini's colima daemon is shared with hand-run and agent-run engine
+    # suites (scripts/mvnw-leased.sh), and any sweep by label or creation time
+    # would remove THEIR containers mid-suite. Testcontainers' Ryuk is the
+    # reaper: it is enabled here (the TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE
+    # step above is what lets it mount the socket on colima), one Ryuk starts
+    # per Maven JVM and reaps that JVM's containers when its connection drops,
+    # including on a hard kill at the job timeout. Probe run 36770360357 started
+    # Ryuk in both Maven invocations and left no container behind.
+    #
+    # KNOWN LIMITATION: no lease is shared between this job and hand-run suites.
+    # mvnw-leased.sh serializes builders through a lock in the git common dir of
+    # the clone it runs from, and this job runs from the runner's own checkout,
+    # so the two never see each other's lock. A push job and a hand-run suite
+    # can overlap on the same colima VM (4 CPUs / 8 GB at 2026-09-30) and slow
+    # or destabilize each other. Colima's settings are not changed here.
+    #
     # COST DISCIPLINE. "macOS/premium runners only where the artifact requires
     # the platform" (AGENTS.md § CI Cost Discipline) is about BILLED runners.
     # hellmini is owned hardware billed at nothing per minute, and the job moves
@@ -219,8 +236,6 @@ jobs:
             echo "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock" >> "$GITHUB_ENV"
           fi
           docker info --format 'docker daemon: arch={{.Architecture}} cpus={{.NCPU}} mem={{.MemTotal}}'
-          # Stamp for the leftover-container sweep at the end of the job.
-          date -u +%Y-%m-%dT%H:%M:%SZ > "$RUNNER_TEMP/job-start.stamp"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -374,41 +389,6 @@ jobs:
       - name: Slowest test classes (diagnostic, never fails)
         if: always()
         run: python3 scripts/surefire_slowest.py service/target/surefire-reports --top 25
-
-      # Self-hosted only: Docker state outlives a job on hellmini, unlike a
-      # GitHub-hosted VM. Testcontainers' Ryuk normally reaps every container
-      # when the test JVM exits, but a timeout or cancel can kill the JVM
-      # before Ryuk finishes, and a leaked Postgres container holds RAM in the
-      # 4 GB colima VM for the next job. Sweep containers Testcontainers
-      # labelled that were CREATED AFTER this job started (the stamp above),
-      # so nothing older is touched. A Testcontainers run on hellmini that
-      # OVERLAPS this job's window (a dev suite started by hand) would be
-      # swept too if its containers are still up when this step runs.
-      - name: Remove leftover Testcontainers containers (self-hosted)
-        if: always() && runner.environment == 'self-hosted'
-        shell: bash
-        run: |
-          set -uo pipefail
-          stamp_file="$RUNNER_TEMP/job-start.stamp"
-          [ -f "$stamp_file" ] || { echo "no start stamp; skipping sweep"; exit 0; }
-          # Give Ryuk its reconnection grace to finish first.
-          sleep 15
-          start="$(cat "$stamp_file")"
-          leftovers=""
-          for id in $(docker ps -aq --filter label=org.testcontainers=true); do
-            # .Created is RFC 3339 UTC, so it compares as a string.
-            created="$(docker inspect --format '{{.Created}}' "$id" 2>/dev/null || true)"
-            if [[ -n "$created" && "$created" > "$start" ]]; then
-              leftovers="$leftovers $id"
-            fi
-          done
-          if [ -n "$leftovers" ]; then
-            echo "::warning::removing leftover Testcontainers containers:$leftovers"
-            # shellcheck disable=SC2086
-            docker rm -f -v $leftovers || true
-          else
-            echo "no leftover Testcontainers containers."
-          fi
 
   # 2026-07-06 CI-cost pass: the native-image-build-and-smoke job that lived
   # here was removed — every service/** push was building the native image
