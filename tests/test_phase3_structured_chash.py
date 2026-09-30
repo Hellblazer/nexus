@@ -59,11 +59,16 @@ def t2_path():
 
 
 @pytest.fixture()
-def t3():
+def t3(monkeypatch):
     client = make_vector_test_client()
     ef = MiniLMDirectEmbeddingFunction()
     db = T3Database(_client=client, _ef_override=ef)
     _inject_t3(db)
+    # RDR-223 P2.2 (nexus-z0o2p.12): store_put's note write is one request to the
+    # engine; these tests read the note back from this fake T3, so it is routed here.
+    from tests._note_write_double import route_note_writes_to
+
+    route_note_writes_to(monkeypatch, db)
     return db
 
 

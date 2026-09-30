@@ -1,0 +1,822 @@
+---
+title: "Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client"
+id: RDR-224
+type: Architecture
+status: draft
+priority: high
+author: Sam
+reviewed-by: self
+created: 2026-09-30
+accepted_date:
+related_issues: [nexus-f9bgu, nexus-ijue9, nexus-lhr6a, nexus-vwfc0, nexus-efk2h, nexus-jevq5, nexus-zz2w7]
+related_rdrs: [RDR-218, RDR-157, RDR-161, RDR-197]
+---
+
+# RDR-224: Native Windows Support: Windows x64 Engine, PostgreSQL Bundle and Client
+
+> Revise during planning; lock at implementation.
+> If wrong, abandon code and iterate RDR.
+> Prose: see REGISTER.md beside this template.
+
+Drafted 2026-09-30 against develop `8889bd50d`. No product code changed.
+
+**Provenance.** On 2026-09-18 Sam ruled Windows support to be WSL2 only, and
+RDR-218 (accepted 2026-09-22) designed a pre-built WSL2 appliance around that
+ruling. WSL2 is the Windows Subsystem for Linux, version 2: a real Linux
+kernel in a lightweight virtual machine on Windows. On 2026-09-29 Sam asked to
+reconsider native Windows binaries, a spike on a Windows 11 workstation
+(qwentescence) built and ran every native piece, and on 2026-09-30 Sam decided:
+native Windows replaces the WSL2 direction. This record carries that decision
+and the plan. It supersedes RDR-218's direction; see § Relationship to Prior
+RDRs for what of RDR-218 survives.
+
+## Problem Statement
+
+nexus runs on Linux and macOS. On Windows, today, nothing runs natively: there
+is no Windows build of the engine (the Java service, compiled to a single
+native executable, that owns storage and embeddings), no Windows build of the
+PostgreSQL bundle the engine stores its data in, and a Python client whose
+process management assumes a POSIX operating system. RDR-218 answered this by
+running the Linux artifacts inside WSL2. That answer puts a virtual-machine
+boundary between Claude Code, which runs natively on Windows, and nexus, which
+would run inside the VM. Three of RDR-218's six gaps exist only because of that
+boundary (the client cannot discover the service across it, the engine's
+loopback bind is invisible across it, and the VM stops when idle), and two
+residues no design removes follow from the VM model (host sleep freezes the
+guest clock; VM teardown is an unclean PostgreSQL shutdown). Native Windows
+artifacts remove the boundary instead of bridging it.
+
+The gaps below are what stands between today and a native Windows install
+that works as well as the macOS one.
+
+### Enumerated gaps to close
+
+#### Gap 1: No Windows engine binary
+
+The engine release matrix (`.github/workflows/engine-service-release.yml`) builds
+linux-amd64, linux-arm64 and mac-arm64 only. Its binary-compatibility step fails
+on any other architecture by design (`FAIL: unhandled arch ... no ABI floor
+check defined`). There is no `windows-x64` leg, no Windows smoke, and no
+Windows code-signing step.
+
+#### Gap 2: No Windows PostgreSQL + pgvector bundle
+
+The engine needs PostgreSQL 17 with the pgvector extension (vector similarity
+search) and pg_trgm (trigram text matching). `scripts/build_pg_bundle.sh`
+builds that bundle from source with autoconf and make, and makes it
+relocatable (runnable from any directory) with `install_name_tool` on macOS and
+`patchelf` on Linux. None of that runs on Windows. The client's platform
+choke point refuses Windows outright (`src/nexus/db/pg_bundle.py`,
+`current_platform_tag()`, which raises "Windows is a release N+1 follow-on").
+
+#### Gap 3: The Python supervisor is POSIX-only
+
+The client starts, finds, health-checks and stops the engine and PostgreSQL
+through a supervisor in `src/nexus/daemon/`. It assumes POSIX throughout:
+
+- it keys the service's identity on `os.getuid()`, which does not exist on
+  Windows, so the supervisor fails before it starts anything;
+- it probes liveness with `os.kill(pid, 0)`, which on Windows sends a Ctrl+C
+  event instead of probing;
+- it stops processes with SIGTERM and process-group kills, which on Windows
+  terminate immediately with no cleanup;
+- it identifies processes through `ps` and `/proc`;
+- it registers autostart only through launchd and systemd, and refuses other
+  platforms (`src/nexus/commands/daemon.py`);
+- it names binaries without `.exe` and injects `LD_LIBRARY_PATH`, which
+  Windows ignores.
+
+#### Gap 4: The engine has no graceful stop on Windows
+
+On Linux and macOS the supervisor stops the engine with SIGTERM, and the
+engine's shutdown hooks run. That matters: the ORT init gate
+(`OrtInitGate`, nexus-o5xyx) exists because killing the engine during ONNX
+Runtime initialisation crashed it, and it works by catching the signal. On
+Windows, Python's `os.kill(pid, SIGTERM)` is `TerminateProcess`: no signal
+reaches the engine, no shutdown hook runs, and PostgreSQL connections close
+uncleanly.
+
+#### Gap 5: The plugin and desktop surface refuse or break on Windows
+
+Three existing problems, each already filed, block a native Windows install:
+
+- conexus hooks launched as `python3` do not fire on stock Windows, where no
+  `python3` is on PATH (nexus-efk2h, recorded as an accepted trade-off on
+  2026-09-24);
+- `os.execv`/`os.execvp` on Windows spawns a child and exits the parent, which
+  breaks `mcpb/src/bootstrap.py`'s promise that the MCP server's stdio lands on
+  the server process;
+- the desktop bundle's `mcpb/manifest.json` lists only darwin and linux in
+  `compatibility.platforms`.
+
+#### Gap 6: Everything we would ship for Windows is unsigned
+
+Everything nexus would ship for Windows is unsigned today: the engine, the
+whole PostgreSQL bundle, and four third-party DLLs the engine extracts at
+runtime (§ Research Findings). Microsoft documents that Smart App Control (a
+Windows 11 feature) checks every executable and DLL the operating system loads
+and blocks unsigned code that has no cloud reputation, with no override.
+We could not reproduce that: on two clean Windows 11 installs with Smart App
+Control on, nothing unsigned was blocked, including a program downloaded by a
+browser (§ Key Discoveries). The exposure is therefore documented but
+unmeasured, not disproven: other builds and physical hardware were not tested. Enterprise application-control
+policies (WDAC, AppLocker) need a trusted signature or an administrator
+allowlist regardless. Signing is the only mitigation for all of these.
+
+#### Gap 7: No gate on real Windows hardware
+
+RDR-218's Gap 6 carries over unchanged: declaring Windows supported obliges a
+check that runs on Windows. GitHub's hosted Windows runners can build and run a
+native binary, which the WSL2 design could not rely on (nested virtualisation),
+but a real-session check (a Claude Code Agent dispatch followed by
+`tests/e2e/post-publish-dispatch-check.sh`) still needs a real Windows box.
+
+## Relationship to Prior RDRs
+
+Searched: the RDR index for "windows", "WSL", "native-image", "distribution",
+"PG bundle", "relocatable".
+
+| Prior RDR | Relationship | What it means for this one |
+| --- | --- | --- |
+| RDR-218 (Windows via a WSL2 appliance) | Superseded | Its direction is replaced. Its rationale was Sam's 2026-09-18 WSL2-only ruling; that ruling is withdrawn (2026-09-30). Its Gaps 1-3 (discovery, bind, idle shutdown across the WSL boundary) dissolve; its Gap 4 (plugin hangs), Gap 5 (desktop bundle) and Gap 6 (a gate on real hardware) carry over here as Gaps 5 and 7. Disposition of its epic's beads is in § Implementation Plan, Phase 0. |
+| RDR-157 (end-user distribution) | Origin | Deferred Windows to "release N+1" (bead nexus-f9bgu). Its Strategy B (build PostgreSQL and pgvector from source rather than repackaging a third-party build) is the proven default and this record keeps it. |
+| RDR-161 (native-only local install) | Origin | Defined the native-binary install path (`nx install-binary`, cosign-verified assets) this record extends to Windows; also deferred Windows to nexus-f9bgu. |
+| RDR-197 (plugin-only release channel) | Adjacent | Plugin-surface fixes for Gap 5 (hooks) can ship through the plugin channel without a client release. |
+
+## Context
+
+### Background
+
+The 09-18 research of record (T3 `research-windows-executable-2026-09-18`,
+parts 1 and 2) did not find native Windows impossible. It recommended WSL2
+documentation as the cheap first step and a native spike as step 2: a GraalVM
+native-image build on Windows, then PostgreSQL and pgvector with meson and
+nmake. The WSL2-only ruling came first; the spike never ran. It ran on
+2026-09-29 (§ Research Findings) and every native piece worked.
+
+### Technical Environment
+
+- Engine: Java, compiled with Oracle GraalVM 25.0.3 native-image (the CI pin),
+  Maven, jOOQ, Liquibase, HikariCP, pgjdbc. Embeddings through ONNX Runtime
+  1.20.0 and DJL HuggingFace tokenizers 0.30.0, both loaded through JNI (Java
+  Native Interface) from native libraries embedded in the binary.
+- PostgreSQL 17.5, pgvector 0.8.2, pg_trgm (version pins in the release
+  workflow).
+- Client: Python 3.12+, `uv`, the `conexus` wheel; plugin hooks run by Claude
+  Code.
+- Windows target: Windows 10/11 x64. Windows on ARM is out of scope: GraalVM
+  native-image has no windows-aarch64 target and onnxruntime ships no
+  Windows-ARM64 native library (09-18 research).
+- Build host available: qwentescence (Windows 11 Pro, Ryzen AI MAX+ 395, 64 GB),
+  now provisioned with Visual Studio Build Tools 2022 17.14 (MSVC x64 and the
+  Windows 11 SDK 10.0.26100), Strawberry Perl, win_flex_bison, meson and ninja.
+
+## Research Findings
+
+### Investigation
+
+A spike on qwentescence, 2026-09-29, against develop `7980de41f`, recorded on
+bead nexus-f9bgu. Scripts are in `D:\spike` on that host. A read-only
+portability audit of the repository the same day covered the engine, the PG
+bundle, the Python client, the plugin, and the release workflow.
+
+#### Dependency Source Verification
+
+| Dependency | Source Searched? | Key Findings |
+| --- | --- | --- |
+| GraalVM native-image 25.0.3 (Windows) | Spike | Builds the engine with MSVC; no source changes needed. |
+| onnxruntime 1.20.0 jar | Yes (jar listing) | Ships `win-x64/onnxruntime.dll`, `onnxruntime4j_jni.dll`, and a 290 MB `onnxruntime.pdb` (debug symbols). |
+| DJL tokenizers 0.30.0 jar | Yes (jar listing) | Ships `win-x86_64/cpu/tokenizers.dll` plus MinGW runtime DLLs (`libstdc++-6`, `libgcc_s_seh-1`, `libwinpthread-1`). |
+| PostgreSQL 17.5 meson build | Spike | Builds with MSVC; installs under `include/postgresql` and `lib/postgresql` when the prefix lacks "postgres". |
+| pgvector 0.8.2 `Makefile.win` | Yes + Spike | Assumes a flat layout (`$(PGROOT)\include\server`); works when given `pg_config`'s directories. |
+| win_flex_bison (winget) | Spike | Its `Links` shim cannot find bison's data directory; parallel runs race on shared temp files. |
+
+### Key Discoveries
+
+- **Verified** — The engine compiles to `nexus-service.exe` with GraalVM
+  native-image on Windows in about 80 seconds (peak RSS 12.5 GB), with the
+  jOOQ sources generated on a Docker host, unchanged from the other platforms.
+- **Verified** — With the nexus-lhr6a size fix (on develop, `32f6987b2`) the exe
+  is 143 MB. Before the fix it was 803 MB, because every native library was
+  embedded twice and the 290 MB `.pdb` was embedded too.
+- **Verified** — The exe imports `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll` and
+  the Universal CRT (`api-ms-win-crt-*`); everything else it imports ships with
+  Windows (`dumpbin /dependents`).
+- **Verified** — PostgreSQL 17.5 builds with meson and MSVC using the Linux
+  bundle's lean options (no ICU, zlib, readline or OpenSSL), and pgvector 0.8.2
+  builds as `vector.dll`. Three build-script requirements came out of it: put
+  win_flex_bison's real package directory on PATH, generate the grammar and
+  scanner files (20 targets) one at a time before the parallel build, and pass
+  pgvector's `Makefile.win` the directories from `pg_config`.
+- **Verified** — The bundle is relocatable: copied to a new directory with the
+  build prefix removed, `initdb` ran, `CREATE EXTENSION vector` (0.8.2) and
+  `pg_trgm` (1.6) worked, and an HNSW index query returned rows. Windows loads
+  DLLs from the executable's own directory, so no equivalent of rpath patching
+  was needed.
+- **Verified** — The native exe boots against that relocated bundle, reports
+  healthy in about 3 seconds, applies all 491 Liquibase changesets, and returns
+  a 768-dimension bge embedding through the Windows ONNX Runtime and tokenizer
+  libraries.
+- **Verified** — `pg_ctl` must be run with its output redirected to a file
+  (through `cmd`), not a pipe: it hands the pipe to the postgres process it
+  starts, and a reader waiting for the pipe to close waits forever.
+- **Verified** — A backslash in a pom `<buildArg>` broke a resource exclude on
+  the Windows build (`.*[.]pdb` excluded, `.*\.pdb` did not). The mechanism is
+  not established; the pom now forbids backslashes in build args (nexus-vwfc0).
+- **Documented** (source reading, audit) — The engine does not manage
+  PostgreSQL itself (it connects over JDBC), uses no Unix sockets, no POSIX
+  file permissions and no process spawning. Its only Windows gap is shutdown
+  (Gap 4). `OrtInitGate` installs TERM, INT and HUP handlers; HUP throws on
+  Windows and is caught, so startup is safe (observed in the spike's log).
+- **Documented** (source reading, audit) — The client already has Windows
+  groundwork: `_locking.py` falls back to `msvcrt`, `util/win_job.py` wraps
+  Windows Job Objects (so child processes die with their parent),
+  `util/process_group.py` and `bounded_subprocess.py` branch on Windows.
+- **Documented** (09-18 research) — The conexus dependency closure has Windows
+  wheels, bare and `[local]` (bead nexus-ijue9.18, closed).
+- **Verified** (spike, 2026-09-30) — The VC++ runtime can ship app-local, but
+  the set is four DLLs: `vcruntime140.dll`, `vcruntime140_1.dll`,
+  `msvcp140.dll` and `msvcp140_1.dll`. With all four beside
+  `nexus-service.exe`, the running engine loaded every one from its own
+  directory (read from the live process's module list). With only the two
+  `vcruntime` DLLs beside it, `MSVCP140.dll` and `MSVCP140_1.dll` still loaded
+  from `System32`: the exe does not import them, the native libraries embedded
+  in it (ONNX Runtime) do, so a dependency check of the exe alone misses them.
+  `ucrtbase.dll` and `msvcp_win.dll` load from `System32` and ship with
+  Windows 10 and later. T2 `224-research-4`.
+- **Verified** (spike, 2026-09-30, clean VM) — On a fresh Windows 11 25H2
+  install with no VC++ redistributable (Hyper-V VM `sac-test` on
+  qwentescence), `nexus-service.exe` with the four app-local DLLs starts and
+  reaches its own configuration check. The PG bundle as built does NOT run
+  there: `postgres.exe` and `initdb.exe` exit `0xC0000135` (DLL not found).
+  With the same four DLLs copied into the bundle's `bin` they run. The bundle
+  worked on qwentescence only because Visual Studio is installed there. T2
+  `224-research-13`.
+- **Verified** (spike, 2026-09-30) — A file downloaded with Python's `urllib`,
+  which is how `nx install-binary` downloads (`binary_install.py`), carries no
+  Mark of the Web (the `Zone.Identifier` alternate data stream a browser
+  writes). A 25 MB installer fetched from python.org had only its default data
+  stream; a positive control with the stream written by hand was detected by
+  the same check. T2 `224-research-5`.
+- **Documented** — SmartScreen's reputation check applies to files that carry
+  the Mark of the Web; a file without it is not screened by SmartScreen
+  (Defender antivirus still scans it). T2 `224-research-6`.
+- **Documented** — Smart App Control is a different mechanism and the no-Mark
+  exemption does not reach it. It checks every executable and every DLL the
+  loader loads, downloaded or not, and blocks unsigned code without cloud
+  reputation, with no user override. A signature chaining to Microsoft's
+  trusted root program, from an ordinary (OV) certificate, satisfies it. It
+  starts in evaluation mode, Windows switches it to enforcement on devices it
+  judges good candidates, and it switches itself off on detected developer
+  and managed devices, so ordinary consumers are the exposed population; since
+  April 2026 it can be turned back on after being turned off. T2
+  `224-research-10`.
+- **Verified** (spike) — What is signed today: nothing we build. Unsigned:
+  `nexus-service.exe`; the PG bundle's `postgres.exe`, `initdb.exe`,
+  `pg_ctl.exe`, `vector.dll`, `pg_trgm.dll`; the DJL tokenizer DLLs extracted
+  at runtime to `%USERPROFILE%\.djl.ai\tokenizers\...` (`tokenizers.dll` and
+  the MinGW `libstdc++-6.dll`, `libgcc_s_seh-1.dll`, `libwinpthread-1.dll`);
+  the uv-managed `python.exe`. Signed by Microsoft: the ONNX Runtime DLLs
+  extracted at runtime and the VC++ runtime DLLs. T2 `224-research-7`.
+- **Verified** (spike) — Smart App Control is off on qwentescence, so no spike
+  on that host says anything about how it treats our binaries. T2
+  `224-research-8`.
+- **Verified** (spike, 2026-09-30) — Smart App Control did not block any
+  unsigned binary in our tests. On a clean Windows 11 Pro install (build
+  26300, Microsoft's consumer ISO, Hyper-V VM `sac-pro`) Sam turned it On in
+  Windows Security; code integrity then logged the enforcing policy
+  (`VerifiedAndReputableDesktop`) as activated and user-mode enforcement went
+  from audit to enforced. After that, launched by double-click from the
+  desktop, all of these ran: a byte-tampered `whoami.exe` carrying a Mark of
+  the Web, the same file without the mark, the unsigned `psql.exe`, and the
+  unsigned `nexus-service.exe`. With the guest's network disabled, so that no
+  cloud verdict was possible, fresh-hash unsigned copies also ran, marked and
+  unmarked. No code-integrity block or reputation events were logged. An
+  earlier run on the Enterprise Evaluation edition (build 26200, Smart App
+  Control forced On through the registry) gave the same outcome. This
+  contradicts the documented behaviour for these configurations. A real
+  browser download was then tested in the same VM: a new unsigned program
+  (104 KB, never seen before) downloaded by Edge, which wrote a genuine Mark of
+  the Web on it (`ZoneId=3`), ran when double-clicked, again with no
+  code-integrity events. Not tested: physical hardware, other builds, a
+  download from a public internet host over https, and signed binaries. T2
+  `224-research-14`, `224-research-15`, `224-research-16`.
+- **Verified** (spike) — ONNX Runtime's Java loader extracts its DLLs into a new
+  `%TEMP%\onnxruntime-java<random>` directory on every engine start and never
+  removes it (5 left behind after 5 starts). T2 `224-research-9`.
+- **Documented** — Signing options in 2026: Microsoft Artifact Signing
+  (formerly Trusted Signing; organizations in the US, Canada, EU and UK,
+  individuals in the US and Canada; 9.99 USD a month; a GitHub Action;
+  identity validation takes days to weeks and cannot be hurried); an OV
+  certificate (about 129 USD a year, with the private key in a hardware or
+  cloud HSM, which CA rules have required since June 2023, so no key file in
+  CI secrets); SignPath Foundation (free for OSI-licensed open source built in
+  CI). An EV certificate no longer buys instant SmartScreen reputation. T2
+  `224-research-11`.
+- **Assumed** — Enterprise policies (WDAC, AppLocker) need a trusted signature
+  or an administrator allowlist; Defender's machine-learning checks may flag
+  an unsigned native binary that extracts DLLs. Neither is tested. T2
+  `224-research-12`.
+
+### Critical Assumptions
+
+- [x] The engine builds as a Windows native executable with no source changes —
+  **Status**: Verified — **Method**: Spike
+- [x] ONNX Runtime and the DJL tokenizer load and run in the Windows native
+  image — **Status**: Verified — **Method**: Spike (bge embed, 768 dims)
+- [x] PostgreSQL 17.5 + pgvector 0.8.2 build with MSVC into a relocatable
+  bundle that the engine migrates cleanly — **Status**: Verified —
+  **Method**: Spike
+- [x] The VC++ runtime can ship app-local beside `nexus-service.exe`, so users
+  need no separate redistributable install — **Status**: Verified, revised —
+  **Method**: Spike. The app-local set is four DLLs, not two (see Key
+  Discoveries): two are loaded by the embedded native libraries, not by the
+  exe. Confirmed on a clean Windows 11 VM with no redistributable installed.
+  The PG bundle needs the same four DLLs in its `bin` (it fails with DLL not
+  found without them). Microsoft's redistribution terms for app-local
+  deployment are still to be confirmed (§ New Dependencies).
+- [x] A binary fetched by `nx install-binary` carries no Mark of the Web, so
+  SmartScreen does not screen it — **Status**: Verified — **Method**: Spike
+  (no `Zone.Identifier` on a `urllib` download; positive control detected)
+  plus Documented. This does NOT make signing optional: Smart App Control
+  ignores the Mark of the Web (Gap 6). An earlier revision of this record drew
+  that wrong conclusion; see Revision History.
+- [ ] Signing every PE file we ship (our exe, the PG bundle, and the
+  third-party DLLs, signed before they are embedded) makes nexus run on a
+  Windows 11 machine with Smart App Control enforcing, and the signed
+  GraalVM exe still runs — **Status**: Unverified — **Method**: Spike, which
+  needs a real certificate from a trusted root (a self-signed certificate
+  proves only that signing does not break the exe) and a test machine with
+  Smart App Control on. This cannot be verified as stated, because unsigned
+  binaries were not blocked in the first place on either clean install we
+  tried (Key Discoveries): there is no failing case for signing to fix. What
+  remains checkable once a certificate exists is that signing does not break
+  the GraalVM exe or the embedded-library extraction.
+- [ ] An authenticated loopback HTTP shutdown request can replace SIGTERM for
+  a graceful engine stop, including during ONNX Runtime initialisation —
+  **Status**: Unverified — **Method**: Spike (the o5xyx window probe, on
+  Windows, driven by the new request instead of a signal).
+- [ ] Claude Code on native Windows runs the conexus plugin's hooks once they
+  are launched by something present on stock Windows (`uv run` or the `py`
+  launcher, per nexus-efk2h's proposed fix) — **Status**: Unverified —
+  **Method**: Spike in a native Windows Claude Code session.
+
+## Proposed Solution
+
+### Approach
+
+Ship three native Windows x64 artifacts through the existing release
+machinery, and port the client's process management so they run under it:
+
+1. **Engine**: a `windows-x64` leg in `engine-service-release.yml`, built with
+   GraalVM on Windows, smoked against the Windows PG bundle, and published and
+   cosign-signed like the other legs.
+2. **PostgreSQL bundle**: a Windows build path (meson + MSVC for PostgreSQL,
+   `Makefile.win` for pgvector) producing `nexus-pg-windows-x64`, cached on
+   exact inputs like the other bundles.
+3. **Client**: `nx install-binary` and the supervisor learn Windows: platform
+   tag, `.exe` names, identity, liveness, stop, and autostart.
+
+Plus the Windows-only engine change (a graceful stop request) and the plugin
+fixes RDR-218 already identified.
+
+### Technical Design
+
+**Engine stop channel (Gap 4).** Add an authenticated, loopback-only request
+that begins the same shutdown the SIGTERM handler begins today, so
+`OrtInitGate` and the shutdown hooks behave identically. The supervisor uses
+it on Windows; POSIX keeps signals. The request is authorised by the engine's
+existing boot bearer token, never by an anonymous caller.
+
+**Windows PG bundle (Gap 2).** A build script separate from
+`build_pg_bundle.sh`, because the toolchain shares nothing with autoconf. It
+runs meson with the Linux bundle's options, generates grammar and scanner
+targets serially before the parallel build, builds pgvector against
+`pg_config`'s reported directories, and installs to a prefix. Relocation needs
+no patching; the relocation smoke (build prefix removed, `initdb`, extensions,
+an HNSW query) is the gate, as on the other platforms. The smoke must run on a
+machine without Visual Studio or the VC++ redistributable, or it passes on
+DLLs the user will not have: that is how the missing runtime went unseen on
+the build host.
+
+**Supervisor port (Gap 3).** Each POSIX assumption gets a Windows branch in the
+shared primitive (`src/nexus/daemon/service_registry.py` and the conformance
+suite, per the daemon-lifecycle hot rule), never one tier's copy:
+
+| POSIX assumption | Windows replacement |
+| --- | --- |
+| `os.getuid()` scoping | the user's SID or login name, one derivation used everywhere |
+| `os.kill(pid, 0)` liveness | `OpenProcess` + exit-code query (ctypes), or psutil if added as a Windows-only dependency |
+| SIGTERM / `killpg` stop | the engine's stop request; PostgreSQL via `pg_ctl stop -m fast`; Job Objects as the backstop |
+| `ps` / `/proc` identity | process creation time + image path via the Win32 API |
+| launchd / systemd autostart | a per-user Task Scheduler task at logon |
+| `.exe`-less names, `LD_LIBRARY_PATH` | platform-derived executable names; no library-path injection |
+| `chmod 0o600` token files | an owner-only ACL, or a documented limitation if deferred |
+
+**VC++ runtime.** The `windows-x64` release asset ships the four app-local
+DLLs (`vcruntime140.dll`, `vcruntime140_1.dll`, `msvcp140.dll`,
+`msvcp140_1.dll`) beside the exe, the PG bundle ships the same four in its
+`bin` directory, and the release leg's dependency check runs
+`dumpbin /dependents` on the exe AND on every native library it embeds, since
+the embedded libraries bring in DLLs the exe does not import.
+
+**Signing (Gap 6).** Every PE file (Windows executable or DLL) we ship is
+Authenticode-signed with an RFC 3161 timestamp, so the signature outlives the
+certificate: the engine exe, every PG bundle executable and extension DLL, and
+the unsigned third-party DLLs the engine embeds. Signing the exe does not
+cover the DLLs it loads, because Smart App Control checks each file. The
+third-party DLLs are signed BEFORE the native build embeds them, since the
+runtime extracts exactly the bytes that were embedded; that means the build
+takes the DJL tokenizer DLLs from a signed copy rather than straight from the
+DJL jar, and the embedded-resources checker must see that copy as the single
+origin. The ONNX Runtime and VC++ runtime DLLs are already Microsoft-signed and
+ship as they are. The signing route is a Phase 0 decision (Artifact Signing,
+SignPath Foundation, or an OV certificate with a cloud HSM); whichever it is,
+signing runs in the release leg and the key never sits in a CI secret file.
+
+**Runtime extraction hygiene.** ONNX Runtime's per-start temp directories
+(Key Discoveries) need a fixed extraction path or a cleanup, so a long-running
+install does not accumulate them.
+
+**Release build host (Gap 1, Gap 7).** Two options, decided in Phase 0:
+GitHub's hosted `windows-latest` (inside the existing trust model, billed at
+twice the Linux rate), or qwentescence as a self-hosted runner for
+tag-triggered release jobs only, on the same footing as hellmini (AGENTS.md §
+Engine-service release).
+
+### Existing Infrastructure Audit
+
+| Proposed Component | Existing Module | Decision |
+| --- | --- | --- |
+| Windows native build | `service/pom.xml` `native-libs-windows` profile | Reuse: already selects `win-x64` / `win-x86_64` libraries. |
+| Embedded-resource guard | `scripts/check_native_embedded_resources.py` (nexus-vwfc0) | Extend: a `windows-x64` platform mapping; release-leg coverage is nexus-zz2w7. |
+| Windows PG bundle | `scripts/build_pg_bundle.sh` | Replace for Windows only: separate script, same outputs and cache key shape. |
+| Platform tag | `src/nexus/db/pg_bundle.py` `current_platform_tag()` | Extend: add `windows-x64`. |
+| Process containment | `src/nexus/util/win_job.py` | Reuse. |
+| File locking | `src/nexus/_locking.py` | Reuse (already msvcrt-aware). |
+| Autostart | `src/nexus/daemon/installer.py` | Extend: a Task Scheduler implementation beside launchd/systemd. |
+| Binary install | `src/nexus/daemon/binary_install.py` | Extend: Windows asset names; cosign verification unchanged. |
+
+### Decision Rationale
+
+The WSL2 appliance was chosen because native Windows looked expensive and
+uncertain. The spike removed the uncertainty for the two expensive parts (the
+engine and the PostgreSQL bundle): both work, the engine with no source
+changes. What remains is ordinary porting in the client, and the client has
+Windows groundwork already. Native also removes the costs the appliance could
+not: the VM boundary, the per-boot keep-alive, the clock freeze on host sleep,
+WAL recovery as the normal startup path, a 1.5 GB image as a fourth artifact
+class, and a dependency on WSL behaviour Microsoft does not contract.
+
+## Alternatives Considered
+
+### Alternative 1: Continue RDR-218's WSL2 appliance
+
+**Description**: Ship the pre-built WSL2 image RDR-218 designed.
+
+**Pros**:
+
+- Reuses the Linux artifacts unchanged; no new platform target.
+- Several of its beads are done (fixed port, IPv4 bind, image size decision).
+
+**Cons**:
+
+- Keeps the VM boundary and everything built to bridge it (discovery,
+  keep-alive, volume attach, the handoff file).
+- Host sleep freezes the guest clock; VM teardown makes WAL recovery the normal
+  start; WSL behaviour is Microsoft's implementation detail, not a contract.
+- A fourth artifact class of 1.5 GB or more.
+
+**Reason for rejection**: Sam's decision, 2026-09-30, after the spike showed the
+native pieces work.
+
+### Alternative 2: A JVM engine with a bundled JRE on Windows
+
+**Description**: Ship the JAR and a JRE instead of a native executable (the
+sanctioned `NEXUS_SERVICE_JAR` run path, RDR-218 Alternative 3).
+
+**Pros**:
+
+- Avoids native-image on Windows entirely.
+
+**Cons**:
+
+- Larger download, slower start, a second engine shape to support on one
+  platform.
+
+**Reason for rejection**: native-image works on Windows (Verified), so the
+reason to avoid it is gone.
+
+### Briefly Rejected
+
+- **Cloud mode as the Windows answer**: closed by RDR-218 Alternative 1
+  (no self-serve token issuance); unchanged.
+- **Windows on ARM**: no GraalVM native-image target and no onnxruntime
+  Windows-ARM64 library; revisit when upstream ships them.
+- **A third-party Windows PostgreSQL build (EDB, zonky)**: RDR-157 showed zonky
+  lacks `pg_config` and headers to build pgvector against, and Strategy B
+  (from source) is the proven path.
+
+## Trade-offs
+
+### Consequences
+
+- Positive: Windows users get the same install shape as macOS: `nx
+  install-binary` fetches a verified binary and PG bundle, and the supervisor
+  runs them.
+- Positive: RDR-218's WSL-boundary gaps disappear rather than being bridged.
+- Negative: a fourth native build leg and a fourth PG bundle on every engine
+  tag (release cost, and a Windows build host to keep healthy).
+- Negative: a supervisor with Windows branches in its lifecycle primitive,
+  which the daemon conformance suite must cover on Windows.
+- Negative: the engine gains a network-reachable shutdown request (loopback,
+  authenticated).
+
+### Risks and Mitigations
+
+- **Risk**: Smart App Control, or an enterprise application-control policy,
+  blocks unsigned code on some user machines. Documented by Microsoft; not
+  reproduced in our tests on two clean Windows 11 installs.
+  **Mitigation**: sign every shipped PE file (Gap 6). Because the block could
+  not be reproduced, signing is not shown to be a precondition for a working
+  install; whether it gates declaring Windows supported is a Phase 0
+  decision.
+- **Risk**: the signing identity takes weeks to validate and is on the
+  critical path.
+  **Mitigation**: choose the route and start validation in Phase 0.
+- **Risk**: a new publisher still sees SmartScreen's "unrecognized" warning on
+  browser downloads until reputation accrues (EV no longer helps).
+  **Mitigation**: the supported path (`nx install-binary`) writes no Mark of
+  the Web, so SmartScreen does not screen it; keep the publisher identity
+  stable across releases so reputation accumulates.
+- **Risk**: enterprise application-control policies block nexus regardless.
+  **Mitigation**: document the publisher to allowlist; not otherwise
+  solvable.
+- **Risk**: VC++ runtime missing on user machines.
+  **Mitigation**: the four app-local DLLs in the release asset (Critical
+  Assumption 4, verified), with a dependency check that covers the embedded
+  native libraries, since those import two of the four.
+- **Risk**: the Windows build host is a persistent machine inside the release
+  trust boundary (if qwentescence is chosen).
+  **Mitigation**: the hellmini precedent: tag-triggered jobs only, never
+  pull-request jobs, stated in AGENTS.md.
+- **Risk**: the supervisor port regresses POSIX behaviour.
+  **Mitigation**: the port lands in the shared primitive behind the existing
+  conformance suite, which keeps running on Linux and macOS.
+
+### Failure Modes
+
+- The engine exe does not start: the supervisor reports the child's exit code
+  and stderr, as on POSIX; a missing VC++ runtime shows as a loader error
+  naming the DLL.
+- PostgreSQL fails to start: `pg_ctl`'s log file (never a pipe) carries the
+  reason.
+- A stop request fails or times out: the supervisor falls back to the Job
+  Object, which kills the process tree; the event is logged so an unclean stop
+  is visible, not silent.
+
+## Implementation Plan
+
+### Prerequisites
+
+- [ ] The remaining Critical Assumptions verified: the stop request (after it
+  is built) and hooks in a native Windows Claude Code session
+- [ ] The Phase 0 signing decision recorded; if signing gates the first
+  release, the route chosen and its identity validation complete
+- [ ] Phase 0 decisions recorded
+
+### Minimum Viable Validation
+
+On a clean Windows 11 x64 machine with no developer tools: `nx install-binary`
+fetches the published `windows-x64` engine and PG bundle, the supervisor starts
+both, a store-then-search round trip returns the stored text, and a stop leaves
+no engine or postgres process behind and no WAL recovery on the next start.
+
+### Phase 0: Decisions and RDR-218 disposition
+
+#### Step 0.1: Release build host
+
+Record the choice between GitHub `windows-latest` and qwentescence as a
+self-hosted, tag-only runner.
+
+#### Step 0.2: Signing route
+
+Decide whether signing gates the first supported Windows release or follows
+it: the documented Smart App Control block was not reproduced (Key
+Discoveries), so an unsigned install is measured to work on the machines we
+tested, and signing protects against configurations we could not test and
+against enterprise policies. Either way, choose the route: Microsoft Artifact Signing (if
+Sam, as an individual in the US or Canada, or a nexus organization in a
+supported country qualifies), SignPath Foundation (if its open-source terms
+fit), or an OV certificate held in a cloud HSM. Start identity validation
+immediately after choosing: it takes days to weeks and cannot be hurried, so
+it is on the critical path of Phase 5.
+
+#### Step 0.3: RDR-218 beads
+
+Flip RDR-218 to `superseded` with `nx rdr set-status 218 superseded` (it writes
+the supersedes edge). Close its appliance-only beads with this record as the
+reason: ijue9.4, .5, .6, .8, .11, .13, .14, .15, .17, .19, .22, .23, .24, .31.
+Re-parent to this record's epic the beads that carry over: ijue9.2 (dispatch
+check from native Claude Code), ijue9.16 (the real-hardware gate), ijue9.20
+(desktop bundle platform gate and `execvp`), ijue9.21 (desktop install path),
+and nexus-efk2h, nexus-jevq5.
+
+### Phase 1: Engine
+
+#### Step 1: Graceful stop request (Gap 4)
+
+Add the authenticated loopback shutdown request; prove it with the o5xyx
+window probe on Windows.
+
+#### Step 2: Windows release leg (Gap 1, Gap 6)
+
+Add `windows-x64` to the native matrix: build, a Windows binary-dependency
+check (only the VC++ runtime and system DLLs may be imported), the
+embedded-resources check, a smoke against the Windows PG bundle, cosign
+signing, and the four app-local VC++ runtime DLLs in the asset. The
+dependency check covers the embedded native libraries as well as the exe.
+Authenticode-sign the DJL tokenizer DLLs before the native build and the exe
+after it, and add a check that fails the leg if any shipped PE file lacks a
+valid signature (`Get-AuthenticodeSignature` / `signtool verify /pa`).
+
+### Phase 2: PostgreSQL bundle (Gap 2)
+
+#### Step 1: Windows bundle build script and relocation smoke
+
+As § Technical Design; cached on exact inputs (version pins plus the script's
+hash), per CI Cost Discipline. Every executable and DLL in the bundle is
+Authenticode-signed before it is packaged.
+
+#### Step 2: Release and cache-seed legs
+
+Add `windows-x64` to the PG-bundle release matrix and to
+`pg-bundle-cache-seed.yml`.
+
+### Phase 3: Client (Gap 3)
+
+#### Step 1: Platform tag and binary install
+
+`current_platform_tag()` returns `windows-x64`; `nx install-binary` fetches the
+Windows assets.
+
+#### Step 2: Supervisor port
+
+The table in § Technical Design, in the shared primitive, with the conformance
+suite extended to Windows.
+
+#### Step 3: Autostart
+
+A Task Scheduler implementation in `installer.py`.
+
+### Phase 4: Plugin and desktop (Gap 5)
+
+Close nexus-efk2h (hook launcher), ijue9.20 (manifest platform gate and
+`execvp`), then ijue9.21 (desktop install path).
+
+### Phase 5: Gate (Gap 7)
+
+The real-hardware release-battery leg (ijue9.16, rewritten for native):
+install, store/search round trip, clean stop, and a real Agent dispatch
+followed by `post-publish-dispatch-check.sh`, with a max-skip assert so an
+absent host fails rather than passes.
+
+### Day 2 Operations
+
+| Resource | List | Info | Delete | Verify | Backup |
+| --- | --- | --- | --- | --- | --- |
+| Windows engine + PG bundle assets | In scope (release) | In scope | N/A (immutable tags) | In scope (cosign) | N/A |
+| Autostart task | In scope (`nx daemon`) | In scope | In scope (uninstall) | In scope (`nx doctor`) | N/A |
+| Windows build host (if self-hosted) | Deferred | Deferred | N/A | In scope (probe workflow) | N/A |
+
+### New Dependencies
+
+- Build-time only: Visual Studio Build Tools 2022 (MSVC, Windows SDK),
+  Strawberry Perl, win_flex_bison, meson, ninja on the Windows build host.
+- Runtime: the VC++ runtime DLLs, redistributable under Microsoft's license
+  (app-local deployment permitted; confirm terms before shipping).
+- Possibly psutil as a Windows-only client dependency (Phase 3 decides).
+
+## Test Plan
+
+- **Scenario**: Windows release leg builds the engine — **Verify**: dependency
+  check allows only VC++ runtime and system DLLs; embedded-resources check
+  passes with one origin per native library.
+- **Scenario**: Windows PG bundle relocation — **Verify**: build prefix
+  removed, `initdb`, `CREATE EXTENSION vector` and `pg_trgm`, HNSW query rows.
+- **Scenario**: stop during ONNX Runtime initialisation on Windows — **Verify**:
+  no crash dump; the engine logs a clean shutdown (the o5xyx window probe).
+- **Scenario**: clean Windows VM without the VC++ redistributable — **Verify**:
+  the engine starts from the release asset.
+- **Scenario**: supervisor conformance suite on Windows — **Verify**: the same
+  lifecycle assertions pass as on Linux and macOS.
+- **Scenario**: native Windows Claude Code session — **Verify**: hooks fire; an
+  Agent dispatch passes `post-publish-dispatch-check.sh`.
+- **Scenario**: Windows 11 machine with Smart App Control enforcing, fresh
+  `nx install-binary` — **Verify**: the engine, PostgreSQL and the extracted
+  DLLs all load; no CodeIntegrity block events (IDs 3076/3077) in the event
+  log.
+- **Scenario**: release leg with one shipped DLL left unsigned — **Verify**: the
+  signature check fails the leg.
+
+## Validation
+
+### Testing Strategy
+
+The Minimum Viable Validation is the acceptance proof. The Windows release leg
+and the real-hardware battery leg are the recurring proofs.
+
+### Performance Expectations
+
+Measured on qwentescence: native build about 80 s; exe 143 MB; health in about
+3 s after start. No further targets.
+
+## Finalization Gate
+
+### Contradiction Check
+
+No contradictions found between research findings, design principles, and
+proposed solution.
+
+### Assumption Verification
+
+Critical Assumptions 1-5 are verified by spikes (4 revised: four app-local
+DLLs, not two, and the PG bundle needs them as well; 5 verified for
+SmartScreen). The stop request and hooks assumptions are unverified and are
+Prerequisites. The signed-binaries assumption cannot be verified as written,
+because unsigned binaries were not blocked in our tests.
+
+#### API Verification
+
+| API Call | Library | Verification |
+| --- | --- | --- |
+| native-image build on Windows | GraalVM 25.0.3 | Spike |
+| `CREATE EXTENSION vector` on the Windows bundle | pgvector 0.8.2 | Spike |
+| `OpenProcess` / exit-code liveness | Win32 API | Docs Only (Phase 3 verifies) |
+| Task Scheduler per-user logon task | Windows | Docs Only (Phase 3 verifies) |
+
+### Scope Verification
+
+The Minimum Viable Validation is in scope and is Phase 5's first run.
+
+### Cross-Cutting Concerns
+
+- **Versioning**: the Windows assets ride the existing engine tag
+  (`engine-service-vX.Y.Z`); no new version surface.
+- **Build tool compatibility**: MSVC via Build Tools 2022; native-image does not
+  cross-compile, so a Windows host is required.
+- **Licensing**: VC++ runtime redistribution terms for app-local deployment of
+  the four DLLs to confirm.
+- **Deployment model**: `nx install-binary`, as on macOS and Linux.
+- **IDE compatibility**: N/A.
+- **Incremental adoption**: Windows stays unsupported until Phase 5's gate
+  passes; phases land on develop without declaring support.
+- **Secret/credential lifecycle**: an Authenticode signing identity is
+  required. Its key lives in a hardware or cloud HSM (Artifact Signing, or an
+  OV certificate's cloud HSM, or SignPath's), never as a key file in CI
+  secrets; renewal and revocation follow the chosen provider.
+- **Memory management**: native-image build needs about 12.5 GB peak on the
+  build host.
+
+### Proportionality
+
+Right-sized for an Architecture record that replaces an accepted direction.
+
+## References
+
+- Spike record: bead nexus-f9bgu comment, 2026-09-29.
+- Size fix: nexus-lhr6a (`32f6987b2`), guards nexus-vwfc0 (`29653410b`),
+  follow-ups nexus-zz2w7.
+- Research of record: T3 `research-windows-executable-2026-09-18` (1/2, 2/2);
+  T2 `nexus/windows-support-research-of-record-2026-09-18`.
+- RDR-218 (`docs/rdr/rdr-218-windows-platform-support.md`), RDR-157, RDR-161.
+- Source: `service/pom.xml` (`native-libs-windows`), `src/nexus/db/pg_bundle.py`,
+  `src/nexus/daemon/`, `src/nexus/commands/daemon.py`, `mcpb/manifest.json`,
+  `mcpb/src/bootstrap.py`, `.github/workflows/engine-service-release.yml`.
+
+## Revision History
+
+- 2026-09-30: created (draft).
+- 2026-09-30: research round 1: Critical Assumptions 4 (revised to four
+  app-local DLLs) and 5 verified by spikes on qwentescence; T2
+  `224-research-1` through `-6`.
+- 2026-09-30: research round 2 (signing). CORRECTION: round 1 concluded that
+  Authenticode signing was deferrable because `nx install-binary` downloads
+  carry no Mark of the Web. That holds for SmartScreen only. Smart App
+  Control checks every executable and DLL regardless of the mark and blocks
+  unsigned code, so signing is required: added Gap 6 (old Gap 6 is now Gap
+  7), the signing design, Phase 0 Step 0.2's route choice, the signing
+  checks, and a new unverified assumption. T2 `224-research-7` through
+  `-12`; T3 `research-rdr-224-windows-signing-2026-09-30`.
+- 2026-09-30: research round 3 (clean VM). The app-local runtime is confirmed
+  on a clean install; the PG bundle needs the runtime DLLs too; the first
+  Smart App Control test was inconclusive (no block ever produced). T2
+  `224-research-13`, `-14`.
+- 2026-09-30: research round 4 (Smart App Control on a consumer edition).
+  Replaced the inconclusive result: with Smart App Control turned On through
+  Windows Security on a clean Windows 11 Pro install, no unsigned binary was
+  blocked, from the desktop or offline with fresh hashes. Gap 6 reworded from
+  "blocks unsigned code" to what is measured versus documented; signing
+  changed from a proven precondition to a Phase 0 decision. T2
+  `224-research-15`. A follow-up browser download (Edge, real Mark of the Web)
+  of a new unsigned program also ran: T2 `224-research-16`.

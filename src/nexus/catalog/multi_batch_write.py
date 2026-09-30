@@ -52,6 +52,13 @@ replaced the manifest with batches 1..k) and are absent from the rerun, but NOT 
 before the crash, which the crashed run's batch 1 already dropped from the manifest and the rerun's
 snapshot therefore no longer contains.
 
+One request, one body of code: :func:`write_one_request` (the ``write_manifest_many`` for one document
+and the judgement of its answer: failed document, chunks dropped as unreferenced, a refused stamp,
+the dropped-list checks, the retry) and :func:`complete_document` (the stamp, retried) are module
+functions. This writer's single-request and multi-request paths call them, and so does the note
+writer (:mod:`nexus.catalog.note_write`), which sends one request per note and adds only what a
+note needs on top: settling a request that died in flight from the manifest.
+
 Batches are buffered one deep: whether a batch is the first of several, the only one, or the last
 is not known until the next batch arrives or :meth:`finish` is called. ``finish(allow_empty=True)``
 with no batch at all writes an EMPTY manifest (``write_manifest_many`` with no rows, sweep on,
@@ -108,13 +115,191 @@ from nexus.errors import BatchWriteFailedError, IndexRunVerifyRefused
 
 __all__ = [
     "BatchWriteFailedError",
+    "DocumentFailedError",
     "DocumentWriteResult",
     "MultiBatchDocumentWriter",
+    "OneRequestResult",
     "RepeatedPositionError",
+    "complete_document",
+    "first_chunk_per_chash",
+    "retrying",
     "write_document",
+    "write_one_request",
 ]
 
 _log = structlog.get_logger(__name__)
+
+
+# ── the one-request primitives ───────────────────────────────────────────────
+#
+# One ``write_manifest_many`` for one document, and the completion stamp, judged once. The writer's
+# single-request path and the note writer (:mod:`nexus.catalog.note_write`) both call these, so the
+# checks on the engine's answer cannot drift between them: the failed-document check, the
+# unreferenced-chunk check, the refused-stamp mapping, the dropped-list validation and the retry.
+
+
+class DocumentFailedError(BatchWriteFailedError):
+    """The engine answered a write with the document in ``failed_doc_ids``: its per-document
+    transaction rolled back, so none of the request landed. A subclass of
+    :class:`BatchWriteFailedError` so the writer's callers see one type; the note writer tells it
+    apart because "the engine said no" is a confirmed failure while any other bad answer is not."""
+
+
+def retrying(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Call a request with nexus.retry's bounded retry: connectivity errors, and a rate-limit
+    answer paces the shared brake. A ``CombinedWriteEmbedTimeoutError`` has no transport error in
+    its chain, so it is not retried (a retry would start an uncancelled duplicate embed)."""
+    from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
+    return _manifest_write_with_retry(fn, *args, **kwargs)
+
+
+def first_chunk_per_chash(chunks: Sequence[dict]) -> dict[str, dict]:
+    """``{chash: chunk}``, FIRST occurrence wins. A document that repeats a chunk's text under
+    different metadata writes one chunk, and the old ``upsert`` and the ChunkBatcher both keep the
+    first; a last-wins dict here would silently change which metadata a repeated chunk carries."""
+    out: dict[str, dict] = {}
+    for c in chunks:
+        out.setdefault(c["chash"], c)
+    return out
+
+
+def check_unreferenced(resp: dict, *, doc_id: str, batch: int, required: bool) -> None:
+    """The engine counts payload chunks no row of the request referenced and drops them (neither
+    embedded nor inserted). The writer sends only referenced chunks, so any count is content that
+    silently did not land. ``append`` and ``append_many`` always report it; a response without it
+    there is an engine that does not know the check, not a zero."""
+    if "chunks_unreferenced" not in resp:
+        if required:
+            raise BatchWriteFailedError(
+                doc_id=doc_id, batch=batch,
+                reason="the append response carried no 'chunks_unreferenced'; "
+                       "the engine cannot say whether every chunk was written")
+        return
+    n = int(resp["chunks_unreferenced"] or 0)
+    if n:
+        raise BatchWriteFailedError(
+            doc_id=doc_id, batch=batch,
+            reason=f"the engine dropped {n} chunk(s) as referenced by no row of the request")
+
+
+@dataclass
+class OneRequestResult:
+    """The judged answer to one :func:`write_one_request`.
+
+    ``dropped`` / ``dropped_count`` are the chashes the write dropped from the document's previous
+    manifest (the list the sweep ran on) and their number; ``dropped_unknown`` is True when the
+    engine could not read the previous manifest. ``completed`` is True when the completion stamp
+    was asked for and not refused.
+    """
+
+    resp: dict
+    chunks_written: int = 0
+    embed_embedded: int = 0
+    embed_skipped: int = 0
+    chunks_deduped: int = 0
+    swept: int = 0
+    sweep_skipped: int = 0
+    dropped: list[str] | None = None
+    dropped_count: int | None = None
+    dropped_unknown: bool = False
+    completed: bool = False
+
+
+def write_one_request(
+    cat: Any,
+    *,
+    doc_id: str,
+    collection: str,
+    rows: list[dict],
+    chunks: list[dict],
+    content_hash: str | None = None,
+    sweep: bool = True,
+    embedding_model: str | None = None,
+    force_re_embed: bool = False,
+    batch: int = 1,
+    dropped: str = "required",
+) -> OneRequestResult:
+    """Send ONE ``write_manifest_many`` for *doc_id* and judge the answer.
+
+    Raises :class:`DocumentFailedError` when the engine names the document in ``failed_doc_ids``,
+    :class:`BatchWriteFailedError` when the answer cannot be trusted (chunks dropped as
+    unreferenced; in ``dropped="required"`` mode a missing or inconsistent drop list), and
+    :class:`~nexus.errors.IndexRunVerifyRefused` when the engine refused the completion stamp (the
+    rows and chunks committed). Anything the request itself raises propagates unchanged.
+
+    *content_hash* rides the same request as the completion stamp. *dropped* is ``"required"`` (the
+    response must carry a ``dropped_chashes`` and ``dropped_count`` entry for the document that agree,
+    or a ``dropped_unknown`` marker) or ``"optional"`` (take the list if the response has one).
+    """
+    chunks = list(first_chunk_per_chash(chunks).values())
+    resp = retrying(
+        cat.write_manifest_many,
+        [(doc_id, rows)], complete={doc_id: content_hash} if content_hash is not None else None,
+        sweep=sweep, chunks=chunks or None, collection=collection,
+        force_re_embed=force_re_embed, embedding_model=embedding_model)
+    resp = resp if isinstance(resp, dict) else {}
+    if doc_id in (resp.get("failed_doc_ids") or ()):
+        raise DocumentFailedError(
+            doc_id=doc_id, batch=batch, reason="the engine reported the document in failed_doc_ids")
+    out = OneRequestResult(
+        resp=resp,
+        chunks_written=int(resp.get("chunks_written") or 0),
+        embed_embedded=int(resp.get("embed_embedded") or 0),
+        embed_skipped=int(resp.get("embed_skipped") or 0),
+        chunks_deduped=int(resp.get("chunks_deduped") or 0),
+        swept=int(resp.get("swept") or 0),
+        sweep_skipped=int(resp.get("sweep_skipped") or 0),
+    )
+    check_unreferenced(resp, doc_id=doc_id, batch=batch, required=False)
+    for refused in resp.get("complete_refused") or ():
+        if refused.get("doc_id") == doc_id:
+            referenced = int(refused.get("referenced") or 0)
+            missing = int(refused.get("missing") or 0)
+            raise IndexRunVerifyRefused(
+                doc_id=doc_id, referenced=referenced, present=referenced - missing,
+                missing=missing, chunk_count=int(refused.get("chunk_count") or 0))
+    out.completed = content_hash is not None
+    dropped_map = resp.get("dropped_chashes")
+    if doc_id in (resp.get("dropped_unknown") or ()):
+        out.dropped_unknown = True
+    elif dropped == "optional":
+        if isinstance(dropped_map, dict) and isinstance(dropped_map.get(doc_id), list):
+            out.dropped = [str(c) for c in dropped_map[doc_id]]
+    else:
+        counts = resp.get("dropped_count")
+        if (not isinstance(dropped_map, dict) or doc_id not in dropped_map
+                or not isinstance(counts, dict) or doc_id not in counts):
+            raise BatchWriteFailedError(
+                doc_id=doc_id, batch=batch,
+                reason="the write_many response carried neither dropped_chashes and "
+                       "dropped_count entries nor a dropped_unknown marker for the document")
+        listed = list(dropped_map[doc_id] or ())
+        if int(counts[doc_id]) != len(listed):
+            raise BatchWriteFailedError(
+                doc_id=doc_id, batch=batch,
+                reason=f"dropped_count says {counts[doc_id]} but dropped_chashes "
+                       f"lists {len(listed)}; the list is truncated or corrupt")
+        out.dropped = listed
+        out.dropped_count = len(listed)
+    return out
+
+
+def complete_document(
+    cat: Any, *, doc_id: str, content_hash: str, manifest_rows: int, batch: int = 1,
+) -> None:
+    """Ask the engine to stamp *doc_id* complete (retried like every idempotent request).
+
+    *manifest_rows* is the row count the engine verifies against ``count(*)`` over the manifest:
+    positions written, not distinct chashes (a chash used at two positions counts twice). Raises
+    :class:`~nexus.errors.IndexRunVerifyRefused` when the engine refuses, and
+    :class:`BatchWriteFailedError` when it has no index-run fence route (the document was NOT
+    stamped)."""
+    done = retrying(cat.complete_index_run, doc_id, content_hash, manifest_rows)
+    if done is None:
+        raise BatchWriteFailedError(
+            doc_id=doc_id, batch=batch,
+            reason="complete_index_run answered 404: the engine has no index-run fence route, "
+                   "so the document was NOT stamped")
 
 
 class RepeatedPositionError(ValueError):
@@ -342,16 +527,13 @@ class MultiBatchDocumentWriter:
                     f"MultiBatchDocumentWriter.add_batch: chunks[{i}] (chash "
                     f"{str(c.get('chash'))[:12]}...) is referenced by no row of this batch; "
                     "it would be written without an owner")
-        return rows_l, {c["chash"]: c for c in chunks_l}
+        return rows_l, first_chunk_per_chash(chunks_l)
 
     # ── requests ──────────────────────────────────────────────────────────────
 
     def _retrying(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        """Call a request with nexus.retry's bounded retry: connectivity errors, and a rate-limit
-        answer paces the shared brake. A ``CombinedWriteEmbedTimeoutError`` has no transport error
-        in its chain, so it is not retried (a retry would start an uncancelled duplicate embed)."""
-        from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
-        return _manifest_write_with_retry(fn, *args, **kwargs)
+        """:func:`retrying`, for the requests this class sends itself."""
+        return retrying(fn, *args, **kwargs)
 
     def _note_refusal(self) -> None:
         """The engine refused the completion stamp: record it for the record-level summary and
@@ -419,86 +601,55 @@ class MultiBatchDocumentWriter:
         r.chunks_deduped += int(resp.get("chunks_deduped") or 0)
 
     def _check_unreferenced(self, resp: dict, batch: int, *, required: bool) -> None:
-        """The engine counts payload chunks no row of the request referenced and drops them
-        (neither embedded nor inserted). The writer sends only referenced chunks, so any count is
-        content that silently did not land. ``append`` and ``append_many`` always report it; a
-        response without it there is an engine that does not know the check, not a zero."""
-        if "chunks_unreferenced" not in resp:
-            if required:
-                raise self._fail(batch, "the append response carried no 'chunks_unreferenced'; "
-                                        "the engine cannot say whether every chunk was written")
-            return
-        n = int(resp["chunks_unreferenced"] or 0)
-        if n:
-            raise self._fail(
-                batch, f"the engine dropped {n} chunk(s) as referenced by no row of the request")
+        check_unreferenced(resp, doc_id=self._doc_id, batch=batch, required=required)
 
     def _write_many(
-        self, rows: list[dict], chunks: list[dict], *, sweep: bool, complete: dict | None,
-    ) -> dict:
-        resp = self._retrying(
-            self._cat.write_manifest_many,
-            [(self._doc_id, rows)], complete=complete, sweep=sweep, chunks=chunks or None,
-            collection=self._collection, force_re_embed=self._force_re_embed,
-            embedding_model=self._embedding_model)
-        resp = resp if isinstance(resp, dict) else {}
-        if self._doc_id in (resp.get("failed_doc_ids") or ()):
-            raise self._fail(self._sent + 1, "the engine reported the document in failed_doc_ids")
-        self._account(resp)
-        self._check_unreferenced(resp, self._sent + 1, required=False)
-        return resp
+        self, rows: list[dict], chunks: list[dict], *, sweep: bool, content_hash: str | None,
+        dropped: str,
+    ) -> OneRequestResult:
+        out = write_one_request(
+            self._cat, doc_id=self._doc_id, collection=self._collection, rows=rows, chunks=chunks,
+            content_hash=content_hash, sweep=sweep, embedding_model=self._embedding_model,
+            force_re_embed=self._force_re_embed, batch=self._sent + 1, dropped=dropped)
+        self._account(out.resp)
+        return out
 
     def _send_only_request(self, rows: list[dict], chunks: list[dict]) -> None:
-        complete = {self._doc_id: self._content_hash} if self._content_hash is not None else None
-        resp = self._write_many(rows, chunks, sweep=True, complete=complete)
-        for refused in resp.get("complete_refused") or ():
-            if refused.get("doc_id") == self._doc_id:
-                referenced = int(refused.get("referenced") or 0)
-                missing = int(refused.get("missing") or 0)
-                self._note_refusal()
-                raise IndexRunVerifyRefused(
-                    doc_id=self._doc_id, referenced=referenced,
-                    present=referenced - missing, missing=missing,
-                    chunk_count=int(refused.get("chunk_count") or 0))
-        self._result.swept += int(resp.get("swept") or 0)
-        self._result.sweep_skipped += int(resp.get("sweep_skipped") or 0)
-        self._result.completed = complete is not None
+        try:
+            out = self._write_many(
+                rows, chunks, sweep=True, content_hash=self._content_hash,
+                dropped="optional" if self._prior is not None else "required")
+        except IndexRunVerifyRefused:
+            self._note_refusal()
+            raise
+        self._result.swept += out.swept
+        self._result.sweep_skipped += out.sweep_skipped
+        self._result.completed = out.completed
         # The drop list the sweep ran on, for callers that report it (nexus-wbfpw.25).
         if self._prior is not None:
             # Fenced: the snapshot (union this response's own list) minus what the run wrote,
             # correct even when the transport resent the write_many.
-            own = resp.get("dropped_chashes")
-            if isinstance(own, dict) and isinstance(own.get(self._doc_id), list):
-                self._batch1_dropped = [str(c) for c in own[self._doc_id]]
+            if out.dropped is not None:
+                self._batch1_dropped = out.dropped
             dropped = self._sweep_list()
             self._result.dropped = dropped
             self._result.dropped_count = len(dropped)
             return
-        if self._doc_id in (resp.get("dropped_unknown") or ()):
+        if out.dropped_unknown:
             self._result.dropped_unknown = True
             return
-        dropped_map, counts = resp.get("dropped_chashes"), resp.get("dropped_count")
-        if (not isinstance(dropped_map, dict) or self._doc_id not in dropped_map
-                or not isinstance(counts, dict) or self._doc_id not in counts):
-            raise self._fail(1, "the write_many response carried neither dropped_chashes and "
-                                "dropped_count entries nor a dropped_unknown marker for the document")
-        dropped = list(dropped_map[self._doc_id] or ())
-        if int(counts[self._doc_id]) != len(dropped):
-            raise self._fail(1, f"dropped_count says {counts[self._doc_id]} but dropped_chashes "
-                                f"lists {len(dropped)}; the list is truncated or corrupt")
-        self._result.dropped = dropped
-        self._result.dropped_count = len(dropped)
+        self._result.dropped = out.dropped
+        self._result.dropped_count = out.dropped_count
 
     def _send_first_of_many(self, rows: list[dict], chunks: list[dict]) -> None:
         # Sweep OFF and no `complete`. The response's dropped_chashes is NOT the source of the
         # deferred sweep (the begin snapshot is): a resent first batch reads the manifest its
         # first attempt already replaced.
-        resp = self._write_many(rows, chunks, sweep=False, complete=None)
+        out = self._write_many(rows, chunks, sweep=False, content_hash=None, dropped="optional")
         # A hedge for a concurrent writer that changed the manifest between the snapshot and this
         # write; on a resend it is empty, which is why it is never the source.
-        dropped_map = resp.get("dropped_chashes")
-        if isinstance(dropped_map, dict) and isinstance(dropped_map.get(self._doc_id), list):
-            self._batch1_dropped = [str(c) for c in dropped_map[self._doc_id]]
+        if out.dropped is not None:
+            self._batch1_dropped = out.dropped
 
     def _sweep_list(self) -> list[str]:
         """The pre-run snapshot, then anything batch 1's own response added, minus every chash
@@ -541,15 +692,12 @@ class MultiBatchDocumentWriter:
             # The engine compares this with count(*) over the manifest ROWS. Positions are unique
             # in a run, so that is the number of positions written, not the distinct chashes.
             try:
-                done = self._retrying(
-                    self._cat.complete_index_run, self._doc_id, self._content_hash,
-                    len(self._positions))
+                complete_document(
+                    self._cat, doc_id=self._doc_id, content_hash=self._content_hash,
+                    manifest_rows=len(self._positions), batch=n)
             except IndexRunVerifyRefused:
                 self._note_refusal()
                 raise
-            if done is None:
-                raise self._fail(n, "complete_index_run answered 404: the engine has no "
-                                    "index-run fence route, so the document was NOT stamped")
             self._result.completed = True
 
 
