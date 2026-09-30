@@ -40,6 +40,7 @@ from unittest.mock import patch
 import pytest
 
 from tests.conftest import fake_credentials
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = [pytest.mark.integration]
 
@@ -482,7 +483,6 @@ def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled(
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.catalog.manifest_heal import heal_manifest_gaps
     from nexus.db import make_t3
-    from nexus.db.http_vector_client import HttpVectorClient
 
     collection = "docs__wbfpw29-short-heal-gate__bge-base-en-v15-768__v1"
     content_hash = "ee" * 32
@@ -501,11 +501,11 @@ def test_heal_manifest_gaps_genuinely_short_rebuild_is_reconciled(
             chunk_count=2, meta={"content_hash": content_hash},
         ))
 
-    HttpVectorClient().upsert_chunks_with_embeddings(
-        collection_name=collection,
+    seed_chunks_direct(
+        collection,
         ids=[chash],
         documents=["nexus-wbfpw29 short-heal gate content -- only one real chunk"],
-        embeddings=[[]],
+        embed=True,
         metadatas=[{
             "content_hash": content_hash,
             "chunk_text_hash": chash,
@@ -566,7 +566,6 @@ def test_manifest_write_failure_verdict_reads_the_manifest_back(
     from nexus.catalog.factory import make_catalog_reader
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.cli import main
-    from nexus.db.http_vector_client import HttpVectorClient
     from nexus.repo_identity import _repo_identity
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -596,11 +595,11 @@ def test_manifest_write_failure_verdict_reads_the_manifest_back(
             chunk_count=2, meta={"content_hash": content_hash},
         ))
 
-    HttpVectorClient().upsert_chunks_with_embeddings(
-        collection_name=collection,
+    seed_chunks_direct(
+        collection,
         ids=[chash],
         documents=["nexus-wbfpw29 short-heal e2e gate content -- one real chunk"],
-        embeddings=[[]],
+        embed=True,
         metadatas=[{
             "content_hash": content_hash,
             "chunk_text_hash": chash,
@@ -752,7 +751,6 @@ def test_reconcile_is_the_remedy_the_warning_actually_names(
     from nexus.catalog.factory import make_catalog_reader
     from nexus.catalog.http_catalog_client import HttpCatalogClient
     from nexus.cli import main
-    from nexus.db.http_vector_client import HttpVectorClient
 
     collection = "docs__wbfpw29-reconcile-gate__bge-base-en-v15-768__v1"
     content_hash = "aa" * 32
@@ -771,11 +769,11 @@ def test_reconcile_is_the_remedy_the_warning_actually_names(
     # The chunk genuinely lands in T3 -- this is what a manifest-hook
     # failure alone would otherwise leave stranded: content present,
     # searchable, but with no document_chunks row linking it back.
-    HttpVectorClient().upsert_chunks_with_embeddings(
-        collection_name=collection,
+    seed_chunks_direct(
+        collection,
         ids=[chash],
         documents=["nexus-wbfpw29 reconcile gate content"],
-        embeddings=[[]],  # server-embeds
+        embed=True,
         metadatas=[{
             "content_hash": content_hash,
             "chunk_text_hash": chash,

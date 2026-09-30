@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 
+from tests._chunk_seed import seed_chunks_direct
+
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
 # and CI's default selection must run this RDR-192 pin.
 
@@ -19,7 +21,9 @@ _COLLECTION = "knowledge__wbfpw10-backfill__bge-base-en-v15-768__v1"
 
 def _unowned_chunk(client, content: str, meta: dict) -> str:
     chash = hashlib.sha256(content.encode()).hexdigest()
-    client.upsert_chunks(_COLLECTION, [chash], [content], metadatas=[meta])
+    # Substrate SQL: the engine refuses an ownerless upsert-chunks write from
+    # RDR-223 Phase 3 on, and an unowned chunk is this test's subject.
+    seed_chunks_direct(_COLLECTION, [chash], [content], metadatas=[meta])
     assert chash in client.existing_ids(_COLLECTION, [chash])
     return chash
 

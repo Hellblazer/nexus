@@ -28,8 +28,11 @@ against a throwaway ``pgvector/pgvector:pg17`` Docker container, with the
 service's application pool bound to ``nexus_svc`` (NOSUPERUSER NOBYPASSRLS —
 production-like FORCE RLS, not the migration/superuser pool), and drives the
 entire write -> read arc through PUBLIC API methods only
-(``HttpCatalogClient.register`` / ``.write_manifest`` / ``.link``,
-``HttpVectorClient.upsert_chunks``). No raw SQL is used for any assertion in
+(``HttpCatalogClient.register`` / ``.write_manifest`` / ``.link``). The
+chunk each manifest names must exist first (``fk_catalog_chunks_chunk``); since
+RDR-223 P3.1 it is inserted with substrate SQL (the ``seed_chunks`` fixture)
+because the engine refuses an ownerless ``upsert-chunks`` write from Phase 3 on.
+No raw SQL is used for any assertion in
 this module — the fixtures' role-provisioning psql call is the sole SQL
 touch-point, copied verbatim from ``test_write_seam_gate_integration.py``
 because Liquibase's ``grants-nexus-svc.xml`` changeset (runAlways=true)
@@ -283,6 +286,20 @@ def pg_instance():
     subprocess.run(["docker", "rm", "-f", _CONTAINER_NAME], capture_output=True)
 
 
+def _psql_out(pg_user: str, pg_db: str, sql: str, *, stdin: str | None = None) -> str:
+    """Run SQL in the container as the superuser; return stdout (-A -t)."""
+    args = ["docker", "exec", "-i", _CONTAINER_NAME, "psql", "-U", pg_user, "-d", pg_db,
+            "-v", "ON_ERROR_STOP=1", "-A", "-t"]
+    args += ["-f", "-"] if stdin is not None else ["-c", sql]
+    result = subprocess.run(args, input=stdin, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Container psql failed (rc={result.returncode}):\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}"
+        )
+    return result.stdout.strip()
+
+
 def _run_psql_in_container(pg_user: str, pg_db: str, sql: str) -> None:
     """Execute SQL inside the running container as the superuser.
 
@@ -362,6 +379,37 @@ def local_service(pg_instance: dict):
 
 
 @pytest.fixture
+def seed_chunks(pg_instance: dict, vec_client):
+    """Insert chunks (real engine embeddings, no manifest row) into the gate's PG.
+
+    RDR-223 P3.1: replaces ``vec_client.upsert_chunks`` as the chunk-before-
+    manifest precondition. The collection is registered through the client, the
+    vectors come from the engine's own ``/v1/vectors/embed``, and the rows go
+    in as the container superuser via :func:`tests._chunk_seed.chunks_insert_sql`.
+    """
+    from nexus.corpus import ensure_collection_registered
+    from tests._chunk_seed import chunks_insert_sql
+
+    def _seed(ids, texts, metas=None):
+        ensure_collection_registered(_COLLECTION)
+        tenant = _psql_out(
+            pg_instance["user"], pg_instance["dbname"],
+            f"SELECT tenant_id FROM nexus.catalog_collections WHERE name = '{_COLLECTION}'",
+        )
+        assert tenant, f"{_COLLECTION!r} was not registered"
+        vectors = vec_client.embed_for_collection(_COLLECTION, list(texts))
+        _psql_out(
+            pg_instance["user"], pg_instance["dbname"], "",
+            stdin=chunks_insert_sql(
+                tenant, _COLLECTION, list(ids), list(texts),
+                list(metas) if metas else [{} for _ in ids], vectors,
+            ),
+        )
+
+    return _seed
+
+
+@pytest.fixture
 def cat_client(local_service: tuple[str, str]):
     """HttpCatalogClient bound to the live local_service, closed on teardown."""
     from nexus.catalog.http_catalog_client import HttpCatalogClient
@@ -404,7 +452,7 @@ _COLLECTION = "knowledge__cq-tripwire__bge-base-en-v15-768__v1"
 
 
 def test_metadata_scoped_visible_after_public_api_write(
-    cat_client, vec_client
+    cat_client, vec_client, seed_chunks
 ) -> None:
     """Register -> upsert -> write_manifest -> search_metadata_scoped, all
     through public API methods, must make the chunk combined-query-visible.
@@ -435,12 +483,7 @@ def test_metadata_scoped_visible_after_public_api_write(
         source_uri="file:///cq-tripwire/docA.md",
     )
 
-    vec_client.upsert_chunks(
-        _COLLECTION,
-        [chash],
-        [text],
-        metadatas=[{"kind": "cq-tripwire"}],
-    )
+    seed_chunks([chash], [text], [{"kind": "cq-tripwire"}])
 
     cat_client.write_manifest(
         str(t),
@@ -486,7 +529,7 @@ def test_metadata_scoped_visible_after_public_api_write(
 
 
 def test_manifest_rewrite_keeps_combined_query_visibility(
-    cat_client, vec_client
+    cat_client, vec_client, seed_chunks
 ) -> None:
     """The x6kdz core regression test: a repeat ``write_manifest`` REPLACE
     pass over the same document must NOT wipe combined-query visibility.
@@ -524,7 +567,7 @@ def test_manifest_rewrite_keeps_combined_query_visibility(
         source_uri="file:///cq-tripwire/doc-rewrite.md",
     )
 
-    vec_client.upsert_chunks(_COLLECTION, ids, texts)
+    seed_chunks(ids, texts)
 
     manifest_rows = [
         {"position": i, "chash": ids[i], "line_start": i * 10 + 1, "line_end": i * 10 + 10}
@@ -570,7 +613,7 @@ def test_manifest_rewrite_keeps_combined_query_visibility(
     )
 
 
-def test_graph_hop_visible_through_link(cat_client, vec_client) -> None:
+def test_graph_hop_visible_through_link(cat_client, vec_client, seed_chunks) -> None:
     """Register doc A + doc B, link A -> B, then search_graph_hop from seed A
     must surface doc B — proving the catalog link graph and combined-query
     hop traversal compose correctly through the public API.
@@ -609,10 +652,8 @@ def test_graph_hop_visible_through_link(cat_client, vec_client) -> None:
         source_uri="file:///cq-tripwire/hop-b.md",
     )
 
-    vec_client.upsert_chunks(_COLLECTION, [chash_a], [text_a])
-    vec_client.upsert_chunks(
-        _COLLECTION, [chash_b], [text_b], metadatas=[{"kind": "cq-tripwire-hop"}]
-    )
+    seed_chunks([chash_a], [text_a])
+    seed_chunks([chash_b], [text_b], [{"kind": "cq-tripwire-hop"}])
 
     cat_client.write_manifest(
         str(doc_a),
@@ -670,7 +711,7 @@ def test_graph_hop_visible_through_link(cat_client, vec_client) -> None:
     )
 
 
-def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> None:
+def test_append_and_import_seams_stamp_collection(cat_client, vec_client, seed_chunks) -> None:
     """The other two public write seams the x6kdz fix touched must ALSO
     stamp ``document_chunks.collection`` (substantive-critic finding 2,
     2026-07-09): ``appendManifestChunks`` (via
@@ -725,7 +766,7 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> Non
         physical_collection=_COLLECTION,
         source_uri="file:///cq-tripwire/doc-append.md",
     )
-    vec_client.upsert_chunks(_COLLECTION, [chash_app], [text_app])
+    seed_chunks([chash_app], [text_app])
 
     append_rows = [
         {"position": 0, "chash": chash_app, "line_start": 1, "line_end": 10}
@@ -773,7 +814,7 @@ def test_append_and_import_seams_stamp_collection(cat_client, vec_client) -> Non
         physical_collection=_COLLECTION,
         source_uri="file:///cq-tripwire/doc-import.md",
     )
-    vec_client.upsert_chunks(_COLLECTION, [chash_imp], [text_imp])
+    seed_chunks([chash_imp], [text_imp])
 
     import_rows = [
         {"position": 0, "chash": chash_imp, "line_start": 1, "line_end": 10}

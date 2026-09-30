@@ -22,7 +22,7 @@ import pytest
 def route_note_writes_to(monkeypatch: pytest.MonkeyPatch, t3: Any) -> None:
     """Make ``store_put``'s note write land in *t3* (a fake) plus the real engine catalog."""
     from nexus.catalog import note_write, store_hook
-    from tests._catalog_fixture_ops import seed_manifest_chunks
+    from tests import _catalog_fixture_ops
 
     def _write_note(
         *, catalog_doc_id, collection, pieces, content_hash=None, title="", tags="", category="",
@@ -35,7 +35,8 @@ def route_note_writes_to(monkeypatch: pytest.MonkeyPatch, t3: Any) -> None:
         )
         _first, metadatas = store_hook.note_manifest_metadata(list(pieces))
         # The engine's owner-row foreign key needs a real chunk row for each chash.
-        seed_manifest_chunks(collection, ids)
+        # Looked up at call time: a test may replace it (the greenfield promotion test does).
+        _catalog_fixture_ops.seed_manifest_chunks(collection, ids)
         store_hook.store_put_manifest_direct(catalog_doc_id, metadatas, collection=collection)
         return note_write.NoteWriteResult(
             catalog_doc_id=catalog_doc_id, collection=collection, chunk_ids=list(ids),

@@ -36,6 +36,7 @@ from nexus.corpus import t3_collection_name
 from nexus.db.http_vector_client import HttpVectorClient
 from nexus.exporter import export_collection
 from nexus.mcp.core import store_put
+from tests._chunk_seed import seed_chunks_direct
 
 
 def _search_ids(client, collection: str, text: str) -> list[str]:
@@ -175,8 +176,11 @@ def test_chunks_with_a_live_owner_stay_visible_on_every_write_path(t2_service_en
         physical_collection=src, source_uri=source_uri,
     ))
     chash = hashlib.sha256(text.encode()).hexdigest()
-    client.upsert_chunks_with_embeddings(
-        src, ids=[chash], documents=[text], embeddings=[],
+    # Substrate SQL with the engine's real embedding (the chunk must stay
+    # searchable): the engine refuses an ownerless upsert-chunks write from
+    # RDR-223 Phase 3 on, and the manifest write below needs the chunk first.
+    seed_chunks_direct(
+        src, ids=[chash], documents=[text], embed=True,
         metadatas=[{"title": title, "chunk_text_hash": chash, "indexed_at": datetime.now(UTC).isoformat()}],
     )
     writer.write_manifest(src_doc, [{"chash": chash, "position": 0}], collection=src)

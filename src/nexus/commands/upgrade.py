@@ -263,9 +263,11 @@ def _run_ladder(
     """RDR-185 P0.4: walk the upgrade ladder (or report it, on --dry-run).
 
     Dry-run truth: the pending report comes from each rung's READ-ONLY
-    ``detect()`` — the completion ledger is never even opened, zero writes
-    (the ``resolve_pending_steps`` consumption pattern above at the T2
-    layer). A failed rung raises ``ClickException`` — no silent fallbacks
+    ``detect()`` — this function never opens the completion ledger and
+    performs zero writes (the ``resolve_pending_steps`` consumption pattern
+    above at the T2 layer). A rung's own ``detect()`` may still READ the
+    ledger: ``rdr192-manifest-backfill`` does, to skip its census once the
+    completion is on file. A failed rung raises ``ClickException`` — no silent fallbacks
     for correctness problems; ``--auto`` invocations are swallowed by
     ``upgrade()``'s existing auto-mode handler, not here.
 

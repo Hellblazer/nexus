@@ -141,6 +141,11 @@ _FLOCK_ALLOWED_MODULES = frozenset({
     # sentinel file beside the JSON/YAML it protects, no lease, no
     # heartbeat, no generation fencing, no daemon-scope election.
     "config.py",
+    # RDR-192 manifest-backfill rung's converge lock (nexus-wbfpw.41): a
+    # non-blocking critical section so concurrent session-start `nx upgrade
+    # --auto` runs do not stack backfills on one tenant. A holder that loses
+    # the race defers; no lease, no heartbeat, no daemon-scope election.
+    "upgrade_ladder/rungs/rdr192_manifest_backfill.py",
 })
 
 

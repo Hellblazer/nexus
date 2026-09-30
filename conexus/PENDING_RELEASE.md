@@ -47,4 +47,4 @@ ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
-_Empty. The entries deferred here (nexus-nmzsg, nexus-qxyqz, nexus-0r5l8) shipped with the 7.67.0 client release, together with nexus-2lf1v's sn reads-only auto-approve._
+- nexus-wbfpw.41: `conexus/skills/upgrade/SKILL.md` drops two sentences the new `rdr192-manifest-backfill` ladder rung made false ("never opens the completion store", "neither needs a service token") and adds a short section on that rung and its deferred failure mode. Deferred because the bead also touches `src/` (the rung itself), which a plugin cut refuses deterministically; the skill text describes behaviour that ships with the client release.

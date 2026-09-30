@@ -457,7 +457,7 @@ def test_finish_with_no_batch_clears_the_old_manifest_and_stamps_complete(tmp_pa
 
     with MultiBatchDocumentWriter(cat, doc_id=doc, collection=_COLLECTION,
                                   content_hash="hash-empty") as w:
-        res = w.finish()
+        res = w.finish(allow_empty=True)
     assert _manifest(doc) == []
     assert res.completed and res.dropped_count == 3
     assert _present(_COLLECTION, _chashes(old)) == set()
@@ -479,3 +479,33 @@ def test_the_context_manager_marks_the_run_failed_when_the_caller_raises(tmp_pat
     # Batch 1 was sent (the second add_batch showed it was not the last); the run is failed, not
     # left "indexing" and not the old "complete".
     assert _index_state(doc) == "failed"
+
+
+# ── a crash, then a rerun with different content ──────────────────────────────
+
+
+def test_a_rerun_after_a_crash_sweeps_the_crashed_runs_chunks_but_not_the_original_tail(tmp_path) -> None:
+    """v1 completes. v2 dies after its first batch: the manifest is now v2's batch 1 and v1's
+    chunks that v2 dropped are ownerless (the deferred sweep never ran). v3, different content,
+    reruns: its snapshot is v2's batch 1, so those chunks are swept. v1's tail is NOT in that
+    snapshot (v2's first batch already dropped it from the manifest), so it stays until
+    `nx t3 gc` (the RDR-192 reaper, nexus-2x9xa, covers knowledge__ only)."""
+    cat = _writer_proxy()
+    doc = _register(tmp_path, "crash-rerun")
+    v1 = _batches("crash-v1", [2, 2])
+    write_document(cat, v1, doc_id=doc, collection=_COLLECTION, content_hash="hash-v1")
+    v2 = _batches("crash-v2", [2, 2])
+    with _traffic(die_after=1):
+        with pytest.raises(ClientDied):
+            _write_and_die_without_cleanup(cat, v2, doc_id=doc, content_hash="hash-v2")
+    v2_batch1 = _chashes(v2)[:2]
+    assert {c for _, c in _manifest(doc)} == set(v2_batch1)          # non-vacuity: v2 batch 1 landed
+
+    v3 = _batches("crash-v3", [2, 2])
+    res = write_document(cat, v3, doc_id=doc, collection=_COLLECTION, content_hash="hash-v3")
+
+    assert res.dropped == v2_batch1 and res.swept == 2
+    assert _present(_COLLECTION, v2_batch1) == set()                  # the crashed run's chunks: swept
+    assert _present(_COLLECTION, _chashes(v1)) == set(_chashes(v1))   # the original tail: left over
+    assert [c for _, c in _manifest(doc)] == _chashes(v3)
+    assert _index_state(doc) == "complete"

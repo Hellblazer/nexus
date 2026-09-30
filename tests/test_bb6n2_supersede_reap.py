@@ -72,6 +72,7 @@ def _put_note(client, *, title: str, content: str, writer: str) -> tuple[str, li
         note_pieces,
         store_put_manifest_direct,
     )
+    from tests._chunk_seed import seed_chunks_direct
 
     pieces = note_pieces(content, _COLLECTION)
     doc_id, manifest_metadatas = note_manifest_metadata(pieces)
@@ -86,11 +87,12 @@ def _put_note(client, *, title: str, content: str, writer: str) -> tuple[str, li
         )
         return tumbler, chashes
     for piece, chash, meta in zip(pieces, chashes, manifest_metadatas):
-        client.upsert_chunks_with_embeddings(
+        # Substrate SQL for the chunk-before-manifest window: the engine
+        # refuses an ownerless upsert-chunks write from RDR-223 Phase 3 on.
+        seed_chunks_direct(
             _COLLECTION,
             ids=[chash],
             documents=[piece],
-            embeddings=[],
             metadatas=[{"title": title, "chunk_text_hash": chash, "doc_id": tumbler}],
         )
     store_put_manifest_direct(tumbler, manifest_metadatas, collection=_COLLECTION)

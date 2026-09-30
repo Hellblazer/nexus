@@ -31,6 +31,8 @@ from __future__ import annotations
 import hashlib
 from datetime import UTC, datetime, timedelta
 
+from tests._chunk_seed import seed_chunks_direct
+
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
 # and CI's default selection must run this RDR-192 pin.
 
@@ -74,11 +76,10 @@ def _seed_ttl_lapsed_note(client, cat, content: str, title: str) -> str:
     # order production's real hook already follows (upsert_chunks, THEN the
     # post-store manifest hook) has to hold here too, not just be produced
     # in some order that happened to work before the FK existed.
-    client.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         _COLLECTION,
         ids=[chash],
         documents=[content],
-        embeddings=[],
         metadatas=[{
             "title": title,
             "ttl_days": 1,
@@ -241,11 +242,10 @@ def test_expire_does_not_reap_a_twin_owned_by_a_different_collection(t2_service_
     # deliberately, so resolve_knowledge_doc_for_chash's global lookup finds
     # exactly one (WRONG) candidate instead of tripping the ambiguous-chash
     # no-op the test above relies on.
-    client.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         _COLLECTION,
         ids=[chash],
         documents=[content],
-        embeddings=[],
         metadatas=[{
             "title": "o8dil5-h7nax-uncataloged-ttl-note",
             "ttl_days": 1,
@@ -268,11 +268,10 @@ def test_expire_does_not_reap_a_twin_owned_by_a_different_collection(t2_service_
     # below. Same content/chash, a second physical copy under the twin's
     # own collection -- exactly what a real cross-collection duplicate
     # would have indexed.
-    client.upsert_chunks_with_embeddings(
+    seed_chunks_direct(
         other_collection,
         ids=[chash],
         documents=[content],
-        embeddings=[],
         metadatas=[{"title": twin_title, "chunk_text_hash": chash}],
     )
     cat.append_manifest_chunks(
@@ -326,8 +325,8 @@ def test_expire_reclaims_a_cataloged_note_whose_twin_lives_in_another_collection
         owner, twin_title, content_type="knowledge",
         physical_collection=other_collection, meta={"doc_id": chash},
     )
-    client.upsert_chunks_with_embeddings(
-        other_collection, ids=[chash], documents=[content], embeddings=[],
+    seed_chunks_direct(
+        other_collection, ids=[chash], documents=[content],
         metadatas=[{"title": twin_title, "chunk_text_hash": chash}],
     )
     cat.append_manifest_chunks(

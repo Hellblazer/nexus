@@ -296,30 +296,42 @@ def test_nx_search_knowledge_corpus(runner):
 
 # ── Code search: voyage-code-3 ──────────────────────────────────────────────
 
-def _register_live_owner(collection: str, title: str, content: str) -> str:
-    """Give the single chunk written for ``content`` a live catalog owner.
+def _write_owned_note(collection: str, title: str, content: str, metadata: dict) -> str:
+    """Write the single chunk for ``content`` TOGETHER with a live catalog owner.
 
     RDR-192 Step 5 live(c) (nexus-q0nwd; engine fc99baac9, nexus-wbfpw.10):
     every content read returns only chunks that a ``catalog_document_chunks``
     manifest row ties to a live ``catalog_documents`` row in the same
-    collection. A raw ``upsert_chunks_with_embeddings`` or ``T3Database.put``
-    stores the chunk but registers no owner (real ``store_put`` and indexing
-    do, through the catalog hook), so a search over it returns nothing. This
-    registers the owner the way those paths do; the tests below keep proving
-    the embedding/search property, not the write.
+    collection. RDR-223 P3.1: the engine refuses (from Phase 3) a chunk write
+    that carries no owner, so this uses the combined route the indexer's
+    ChunkBatcher flush uses (``write_manifest_many`` with ``chunks=``): the
+    chunk, embedded server-side, and its manifest row land in one transaction.
+    The tests below keep proving the embedding/search property, not the write.
     """
-    from nexus.catalog.store_hook import (
-        catalog_store_hook_tracked,
-        single_chunk_manifest_metadata,
-        store_put_manifest_direct,
-    )
+    from datetime import UTC, datetime
 
-    chash, metadatas = single_chunk_manifest_metadata(content)
+    from nexus.catalog.factory import make_catalog_writer
+    from nexus.catalog.store_hook import catalog_store_hook_tracked, single_chunk_manifest_metadata
+
+    chash, _metadatas = single_chunk_manifest_metadata(content)
     owner, _created = catalog_store_hook_tracked(
         title=title, doc_id=chash, collection_name=collection,
     )
     assert owner, f"catalog owner registration must succeed for {collection!r}"
-    store_put_manifest_direct(owner, metadatas, collection=collection)
+    writer = make_catalog_writer()
+    try:
+        writer.write_manifest_many(
+            [(owner, [{"chash": chash, "position": 0}])],
+            collection=collection,
+            sweep=True,
+            chunks=[{
+                "chash": chash, "text": content,
+                "metadata": {**metadata, "chunk_text_hash": chash,
+                             "indexed_at": datetime.now(UTC).isoformat()},
+            }],
+        )
+    finally:
+        writer.close()
     return chash
 
 
@@ -328,12 +340,9 @@ def _register_live_owner(collection: str, title: str, content: str) -> str:
 @requires_t3
 @requires_voyage_key
 def test_voyage_code3_index_and_query():
-    import voyageai
-    from nexus.config import get_credential
     from nexus.corpus import index_model_for_collection
     from nexus.db import make_t3
 
-    voyage_key = get_credential("voyage_api_key")
     uid = uuid.uuid4().hex[:8]
     # RDR-103 strict naming: the direct upsert API (unlike the CLI store-put
     # path) does no name synthesis — the service 400s non-conformant names.
@@ -348,8 +357,6 @@ def test_voyage_code3_index_and_query():
         f"        raise ValueError('unknown user')\n"
         f"    return generate_jwt_token(username, password)\n"
     )
-    voyage = voyageai.Client(api_key=voyage_key)
-    embeddings = voyage.embed(texts=[code], model="voyage-code-3", input_type="document").embeddings
 
     # RDR-108: chunk ids are content hashes — the service CHECKs length == 32
     # (sqlstate 23514 on anything else).
@@ -357,13 +364,11 @@ def test_voyage_code3_index_and_query():
 
     db = make_t3()
     try:
-        db.upsert_chunks_with_embeddings(
-            collection_name=collection, ids=[chunk_id(code)], documents=[code],
-            embeddings=embeddings,
-            metadatas=[{"title": f"auth_{uid}.py:1-6", "tags": "py", "category": "code",
-                        "embedding_model": "voyage-code-3", "expires_at": "", "ttl_days": 0}],
-        )
-        assert _register_live_owner(collection, f"auth_{uid}.py", code) == chunk_id(code)
+        assert _write_owned_note(
+            collection, f"auth_{uid}.py", code,
+            {"title": f"auth_{uid}.py:1-6", "tags": "py", "category": "code",
+             "embedding_model": "voyage-code-3", "expires_at": "", "ttl_days": 0},
+        ) == chunk_id(code)
         results = db.search(query=f"user authentication JWT {uid}",
                             collection_names=[collection], n_results=3)
         assert results and any(uid in r.get("content", "") for r in results)
@@ -433,13 +438,14 @@ def test_t3_put_embedding_model_in_search_metadata():
     content = f"Provenance test document {uid}"
     db = make_t3()
     try:
-        doc_id = db.put(collection=collection,
-                        content=content,
-                        title=f"{uid}-provenance.md", ttl_days=1)
+        # db.put would store the chunk with no owner, which the engine refuses
+        # from RDR-223 Phase 3; write chunk and owner together (live(c)).
+        doc_id = _write_owned_note(
+            collection, f"{uid}-provenance.md", content,
+            {"title": f"{uid}-provenance.md", "ttl_days": 1,
+             "embedding_model": "voyage-context-3"},
+        )
         assert doc_id
-        # db.put stores the chunk only; the catalog hook that registers its
-        # owner lives in the store_put callers, so do it here (live(c)).
-        assert _register_live_owner(collection, f"{uid}-provenance.md", content) == doc_id
         results = db.search(query=f"provenance test {uid}",
                             collection_names=[collection], n_results=5)
         assert results

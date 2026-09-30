@@ -1140,6 +1140,10 @@ public final class CatalogHandler implements HttpHandler {
                 return;
             }
             List<Map<String, Object>> chunks = parseChunks(rawChunks);
+            if (chunks.size() > MAX_CHUNKS_PER_APPEND) {
+                HttpUtil.send(exchange, 400, "{\"error\":\"too many chunks (max "
+                    + MAX_CHUNKS_PER_APPEND + ")\"}"); return;
+            }
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
             var combined = combinedWriteService.appendCombined(
                 tenant, collection, docId, rows, chunks, forceReEmbed, sweepChashes,
@@ -1167,8 +1171,13 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
     }
 
-    /** Most {@code chunks} one {@code append_many} request carries (the 300-record write cap). */
-    private static final int MAX_APPEND_MANY_CHUNKS = 300;
+    /**
+     * Most {@code chunks} one {@code append} or {@code append_many} request carries (the 300-record
+     * write cap). {@code write_many} is deliberately NOT capped: the released client sends it with
+     * up to {@code NX_ONNX_LOCAL_UPSERT_CHUNK_CAP} chunks, which has no upper bound. Both append
+     * routes are new, so no released client can be refused.
+     */
+    private static final int MAX_CHUNKS_PER_APPEND = 300;
 
     /**
      * POST /v1/catalog/manifest/append_many (RDR-223 P1.4, bead nexus-z0o2p.5).
@@ -1179,7 +1188,7 @@ public final class CatalogHandler implements HttpHandler {
      * POSITION) in its own transaction, together with the chunk rows its own rows reference
      * (from the request-level {@code chunks}), and its {@code sweep_chashes} are swept after
      * its own commit. A failing document rolls back alone. Caps: {@value #MAX_BATCH_DOC_IDS}
-     * docs, {@value #MAX_APPEND_MANY_CHUNKS} chunks, {@link
+     * docs, {@value #MAX_CHUNKS_PER_APPEND} chunks, {@link
      * CatalogRepository#MAX_SWEEP_CHASHES_PER_APPEND} {@code sweep_chashes} per document.
      * Response: {@code {docs, rows, failed_doc_ids, failed, chunks_written, swept,
      * sweep_skipped, sweep_detail, results}} plus, when {@code chunks} was sent,
@@ -1231,9 +1240,9 @@ public final class CatalogHandler implements HttpHandler {
                 return;
             }
             chunks = parseChunks(rawChunks);
-            if (chunks.size() > MAX_APPEND_MANY_CHUNKS) {
+            if (chunks.size() > MAX_CHUNKS_PER_APPEND) {
                 HttpUtil.send(exchange, 400, "{\"error\":\"too many chunks (max "
-                    + MAX_APPEND_MANY_CHUNKS + ")\"}"); return;
+                    + MAX_CHUNKS_PER_APPEND + ")\"}"); return;
             }
         }
         if (chunks == null) {

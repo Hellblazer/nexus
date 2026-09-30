@@ -960,6 +960,7 @@ def backfill_manifest_cmd(
     total_reverse_discovered = 0
     total_cross_collection_forward_owner_skipped = 0
     total_reverse_multi_piece_skipped = 0
+    total_chunk_count_mismatch_skipped = 0
     skipped_taxonomy = 0
     errors: list[str] = []
     docs_processed_overall = 0
@@ -1067,12 +1068,21 @@ def backfill_manifest_cmd(
             if result.docs_reverse_multi_piece_skipped
             else ""
         )
+        # nexus-wbfpw.41: forward-path documents whose matched chunks cannot
+        # be one manifest (duplicate positions, or a count that differs from
+        # the registered chunk_count under --only-gapped) -- never silent.
+        chunk_count_mismatch_part = (
+            f" ({result.docs_skipped_chunk_count_mismatch} skipped: "
+            f"chunk_count_mismatch)"
+            if result.docs_skipped_chunk_count_mismatch
+            else ""
+        )
         print(
             f"[{idx}/{total}] {coll_name}: processed {result.docs_processed} "
             f"doc(s), {verb} {result.chunks_would_write if dry_run else result.chunks_written} chunk manifest row(s)"
             f"{skipped_part}{zero_chunks_part}{phase3_no_index_part}"
             f"{has_manifest_part}{chash_divergent_part}{fk_409_part}{reverse_part}"
-            f"{cross_collection_part}{reverse_multi_piece_part}",
+            f"{cross_collection_part}{reverse_multi_piece_part}{chunk_count_mismatch_part}",
             file=sys.stderr,
         )
 
@@ -1127,6 +1137,12 @@ def backfill_manifest_cmd(
                 if result.docs_reverse_multi_piece_skipped
                 else ""
             )
+            + (
+                f" ({result.docs_skipped_chunk_count_mismatch} skipped: "
+                f"more matched chunks than the document's chunk count, or two at one position)"
+                if result.docs_skipped_chunk_count_mismatch
+                else ""
+            )
         )
 
         total_docs += result.docs_processed
@@ -1142,6 +1158,7 @@ def backfill_manifest_cmd(
             result.docs_cross_collection_forward_owner_skipped
         )
         total_reverse_multi_piece_skipped += result.docs_reverse_multi_piece_skipped
+        total_chunk_count_mismatch_skipped += result.docs_skipped_chunk_count_mismatch
         docs_processed_overall += result.docs_processed
 
         # SIG-6: periodic progress every _PROGRESS_INTERVAL docs.
@@ -1185,6 +1202,7 @@ def backfill_manifest_cmd(
                 + result.docs_skipped_zero_chunks
                 + result.docs_cross_collection_forward_owner_skipped
                 + result.docs_reverse_multi_piece_skipped
+                + result.docs_skipped_chunk_count_mismatch
             )
             if residual > 0:
                 state[coll_name] = [
@@ -1194,6 +1212,7 @@ def backfill_manifest_cmd(
                     f"zero_chunks={result.docs_skipped_zero_chunks}",
                     f"cross_collection_forward_owner={result.docs_cross_collection_forward_owner_skipped}",
                     f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}",
+                    f"chunk_count_mismatch={result.docs_skipped_chunk_count_mismatch}",
                 ]
                 click.echo(
                     f"  {coll_name}: NOT marked done -- {residual} doc(s) "
@@ -1202,7 +1221,8 @@ def backfill_manifest_cmd(
                     f"zero_chunks={result.docs_skipped_zero_chunks}, "
                     f"cross_collection_forward_owner="
                     f"{result.docs_cross_collection_forward_owner_skipped}, "
-                    f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}); "
+                    f"reverse_multi_piece={result.docs_reverse_multi_piece_skipped}, "
+                    f"chunk_count_mismatch={result.docs_skipped_chunk_count_mismatch}); "
                     f"a future --resume will reprocess this collection"
                 )
             else:
@@ -1267,6 +1287,12 @@ def backfill_manifest_cmd(
         if total_reverse_multi_piece_skipped
         else ""
     )
+    chunk_count_mismatch_part = (
+        f", {total_chunk_count_mismatch_skipped} doc(s) skipped "
+        f"(chunk count mismatch)"
+        if total_chunk_count_mismatch_skipped
+        else ""
+    )
     click.echo(
         f"\nSummary: processed {total_docs} doc(s), "
         f"{verb} {total_chunks} manifest row(s)"
@@ -1279,6 +1305,7 @@ def backfill_manifest_cmd(
         + reverse_discovered_part
         + cross_collection_forward_owner_part
         + reverse_multi_piece_part
+        + chunk_count_mismatch_part
         + (f", skipped {skipped_taxonomy} taxonomy collection(s)" if skipped_taxonomy else "")
         + (f", {len(errors)} error(s)" if errors else "")
     )
@@ -1600,11 +1627,39 @@ def _census_one_collection(client, collection: str) -> dict:
     }
 
 
-def _render_census_text(result: dict) -> None:
+def _legacy_owner_titles(results: list[dict]) -> dict[str, str]:
+    """Titles of the owner documents of every legacy-unmanifested chunk,
+    keyed by tumbler, in ONE batched catalog read (nexus-wbfpw.41). Those
+    chunks are hidden from ``nx store get`` and search, so the owner's title
+    is the only thing an operator has to recognise the note by and to re-put
+    it under. Best-effort: a catalog that cannot answer just prints no titles."""
+    tumblers = sorted({
+        owner_tumbler
+        for result in results
+        for chash in result["chashes"].get("legacy-unmanifested", [])
+        if (owner_tumbler := (result["owners"].get(chash) or {}).get("owner_tumbler"))
+    })
+    if not tumblers:
+        return {}
+    try:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — command-local import deferred to avoid CLI startup cost (nexus.catalog.factory)
+
+        reader = make_catalog_reader()
+        if reader is None:
+            return {}
+        return {t: entry.title for t, entry in reader.resolve_many(tumblers).items() if entry.title}
+    except Exception as exc:  # noqa: BLE001 — titles are a convenience; the census itself must still print
+        _log.debug("census_owner_titles_unavailable", error=str(exc))
+        return {}
+
+
+def _render_census_text(result: dict, titles: dict[str, str] | None = None) -> None:
     """Print one collection's census in text form, naming each item's
     owner tumbler and path (forward, reverse, or none) so an operator can
     see which document keeps a chunk live and whether the reverse
-    tie-break chose it (nexus-wbfpw.5 acceptance criteria)."""
+    tie-break chose it (nexus-wbfpw.5 acceptance criteria). A
+    legacy-unmanifested row also carries its owner document's title when
+    ``titles`` has it (nexus-wbfpw.41)."""
     click.echo(f"{result['collection']}:")
     owners = result["owners"]
     for bucket in _CENSUS_BUCKETS:
@@ -1614,7 +1669,9 @@ def _render_census_text(result: dict) -> None:
             owner = owners.get(chash) or {}
             tumbler = owner.get("owner_tumbler") or "-"
             path = owner.get("owner_path") or "none"
-            click.echo(f"    {chash}  owner={tumbler} ({path})")
+            title = (titles or {}).get(tumbler) if bucket == "legacy-unmanifested" else None
+            title_part = f'  title="{title}"' if title else ""
+            click.echo(f"    {chash}  owner={tumbler} ({path}){title_part}")
     click.echo(f"  total: {result['scope_chunk_total']}")
 
 
@@ -1686,8 +1743,9 @@ def _finish_census(
             "exit_code": exit_code,
         }, indent=2))
     else:
+        titles = _legacy_owner_titles(results)
         for result in results:
-            _render_census_text(result)
+            _render_census_text(result, titles)
 
     if zero_violations:
         # Always stderr (review round 1 CRITICAL finding): this line used

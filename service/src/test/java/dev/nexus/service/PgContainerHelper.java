@@ -744,6 +744,85 @@ public final class PgContainerHelper {
            .execute();
     }
 
+    private static final com.fasterxml.jackson.databind.ObjectMapper CHUNK_METADATA_MAPPER =
+        new com.fasterxml.jackson.databind.ObjectMapper();
+
+    /**
+     * Seed {@code nexus.chunks} rows with NO manifest row, through generated jOOQ DSL
+     * rather than the write routes (RDR-223 P3.1, nexus-z0o2p.23). From Phase 3 the
+     * engine refuses an ownerless write on {@code /v1/vectors/upsert-chunks},
+     * {@code /store-put} and {@code /upsert-reference-only}, so a test that needs a
+     * chunk before its owner exists (the manifest FK wants the chunk first) or an
+     * orphan on purpose builds it here. The Python twin is {@code tests/_chunk_seed.py}.
+     *
+     * <p>Unlike {@link #insertChunk384} this carries the text, the metadata and the
+     * caller's real vectors, so it can stand in for an {@code upsert-chunks} POST for a
+     * FIRST write. It is deliberately looser than the Python twin
+     * ({@code tests/_chunk_seed.py}), not the same contract:
+     * <ul>
+     *   <li>it runs as whatever role {@code ctx} carries (the superuser in the existing
+     *       callers, so RLS does not apply) and sets no tenant GUC;</li>
+     *   <li>a repeat of an existing {@code (tenant, collection, chash)} is left alone
+     *       ({@code ON CONFLICT DO NOTHING}): no text or vector replace, no metadata merge,
+     *       no {@code retention} reset, no {@code last_written_at} restamp, where the route
+     *       and the Python twin all do those;</li>
+     *   <li>the embedding column follows the vector's width (384, 768 or 1024), not the
+     *       collection's registered model, so a mismatch is not refused.</li>
+     * </ul>
+     * The collection must already be registered ({@link #insertCollection}); the caller
+     * pairs this with {@link #ownChunks} when the test wants the chunks live.
+     *
+     * @param ctx        a {@link DSLContext} over a role that may INSERT into {@code nexus.chunks}
+     *                   for {@code tenant} (the superuser used by the other seeds here, or the
+     *                   service role inside a {@code TenantScope.withTenant})
+     * @param chashHex   64-lowercase-hex chashes, one per chunk
+     * @param texts      chunk texts, aligned with {@code chashHex}
+     * @param embeddings vectors, aligned with {@code chashHex}, all one width
+     * @param metadatas  per-chunk metadata maps, aligned with {@code chashHex}
+     */
+    public static void insertChunks(DSLContext ctx, String tenant, String collection,
+                                    java.util.List<String> chashHex, java.util.List<String> texts,
+                                    java.util.List<float[]> embeddings,
+                                    java.util.List<Map<String, Object>> metadatas) {
+        int n = chashHex.size();
+        if (texts.size() != n || embeddings.size() != n || metadatas.size() != n) {
+            throw new IllegalArgumentException("insertChunks: ids/texts/embeddings/metadatas must align ("
+                + n + "/" + texts.size() + "/" + embeddings.size() + "/" + metadatas.size() + ")");
+        }
+        for (int i = 0; i < n; i++) {
+            byte[] chash = dev.nexus.service.db.Chash.fromHex(chashHex.get(i)).toBytes();
+            float[] v = embeddings.get(i);
+            org.jooq.JSONB meta;
+            try {
+                meta = org.jooq.JSONB.jsonb(CHUNK_METADATA_MAPPER.writeValueAsString(metadatas.get(i)));
+            } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+                throw new IllegalArgumentException("insertChunks: metadata is not JSON-serialisable", e);
+            }
+            var col = switch (v.length) {
+                case 384 -> CHUNKS.EMBEDDING_384;
+                case 768 -> CHUNKS.EMBEDDING_768;
+                case 1024 -> CHUNKS.EMBEDDING_1024;
+                default -> throw new IllegalArgumentException("insertChunks: no embedding column of width " + v.length);
+            };
+            ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                           col, CHUNKS.METADATA)
+               .values(tenant, collection, chash, texts.get(i), Vector.of(v), meta)
+               .onConflictDoNothing()
+               .execute();
+        }
+    }
+
+    /**
+     * {@link #insertChunks} with the vectors taken from {@code embedder}, the way the
+     * {@code upsert-chunks} route computes them server-side.
+     */
+    public static void insertChunks(DSLContext ctx, String tenant, String collection,
+                                    java.util.List<String> chashHex, java.util.List<String> texts,
+                                    java.util.List<Map<String, Object>> metadatas,
+                                    dev.nexus.service.vectors.Embedder embedder) {
+        insertChunks(ctx, tenant, collection, chashHex, texts, embedder.embed(texts), metadatas);
+    }
+
     /**
      * Allowlist of GUC names {@link #setTenant} may stamp — the same two names {@link
      * TenantScope#PERMITTED_GUCS} enforces (that field is package-private inside {@code

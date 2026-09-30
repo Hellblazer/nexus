@@ -42,6 +42,7 @@ from nexus.catalog.tumbler import Tumbler
 from nexus.db.t3 import T3Database
 from tests.conftest import make_vector_test_client
 from tests._catalog_fixture_ops import ActiveCatalog, documents_by_title
+from tests._chunk_seed import seed_chunks_direct
 
 
 @pytest.fixture
@@ -1359,8 +1360,8 @@ class TestWbfpw28GenuineInterleavedRace:
 
         # B writes the chunk first — the exact state put_note_pieces
         # would have left it in before reaching the rollback path.
-        client.upsert_chunks_with_embeddings(
-            collection, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            collection, ids=[chash], documents=[content],
             metadatas=[{"title": "wbfpw28-interleave-b", "chunk_text_hash": chash}],
         )
 
@@ -1383,8 +1384,8 @@ class TestWbfpw28GenuineInterleavedRace:
             tumbler_a, _created = catalog_store_hook_tracked(
                 title="wbfpw28-interleave-a", doc_id=chash, collection_name=collection,
             )
-            client.upsert_chunks_with_embeddings(
-                collection, ids=[chash], documents=[content], embeddings=[],
+            seed_chunks_direct(
+                collection, ids=[chash], documents=[content],
                 metadatas=[{"title": "wbfpw28-interleave-a", "chunk_text_hash": chash}],
             )
             store_put_manifest_direct(tumbler_a, manifest_metadatas, collection=collection)
@@ -1780,8 +1781,8 @@ class TestWbfpw28OppositeOrderingRecovery:
         # A's own chunk write + registration happen for real first —
         # exactly put_note_pieces's ordering (t3.put before the manifest
         # write).
-        client.upsert_chunks_with_embeddings(
-            collection, ids=[chash], documents=[content], embeddings=[],
+        seed_chunks_direct(
+            collection, ids=[chash], documents=[content],
             metadatas=[{"title": "wbfpw28-opposite-a", "chunk_text_hash": chash}],
         )
         tumbler_a, _created = catalog_store_hook_tracked(
@@ -1816,8 +1817,8 @@ class TestWbfpw28OppositeOrderingRecovery:
 
         def _repiece(missing_chash: str) -> None:
             repieced.append(missing_chash)
-            client.upsert_chunks_with_embeddings(
-                collection, ids=[missing_chash], documents=[content], embeddings=[],
+            seed_chunks_direct(
+                collection, ids=[missing_chash], documents=[content],
                 metadatas=[{"title": "wbfpw28-opposite-a", "chunk_text_hash": missing_chash}],
             )
 

@@ -148,10 +148,11 @@ def test_registry_allows_synthetic_names_with_no_canonical_edges() -> None:
     assert len(registry) == 2
 
 
-def test_default_registry_is_empty() -> None:
-    """The production registry post-nexus-lgdel.l1: rung-less. RDR-180's
-    chash-rekey rung (the ladder's last surviving data rung, RDR-155 P4b
-    D-D) retired with the legacy-identity era it existed to converge
-    installs out of."""
+def test_default_registry_is_exactly_the_canonical_rung_order() -> None:
+    """The production registry: rung-less after nexus-lgdel.l1 (RDR-180's
+    chash-rekey rung retired with the legacy-identity era it existed to
+    converge installs out of), then the RDR-192 census and legacy-unmanifested
+    backfill (nexus-wbfpw.41). The registry walks RUNG_ORDER, no more and no
+    fewer."""
     registry = default_registry()
-    assert [r.name for r in registry] == list(RUNG_ORDER) == []
+    assert [r.name for r in registry] == list(RUNG_ORDER) == ["rdr192-manifest-backfill"]

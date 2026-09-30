@@ -377,6 +377,11 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
     # gained them.
     "SourceUriNotFoundError",
     "SourceUriCollectionMismatchError",
+    # RDR-223 (nexus-z0o2p.10): MultiBatchDocumentWriter raises it when one document's
+    # combined write fails or the engine's answer cannot be trusted. The writer runs once per
+    # document inside the per-record loops (nx dt index, index_markdown/index_pdf), so one
+    # document's failed write must fail that record only.
+    "BatchWriteFailedError",
 })
 
 #: Command-level: every OTHER NexusError subclass, with a specific,
@@ -387,6 +392,15 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
 #: tripwire; the fix is a deliberate classification decision, not a
 #: blanket exemption.
 _COMMAND_LEVEL_REASONS: dict[str, str] = {
+    "ManifestAppendManyUnsupportedError": (
+        "RDR-223 (nexus-z0o2p.10): raised by HttpCatalogClient.append_manifest_many on a "
+        "404 -- the ENGINE has no /manifest/append_many route. That is a property of the "
+        "whole engine, not of one record: every later record would hit the same 404, so "
+        "the batch must stop and report an engine that cannot take the write (there is "
+        "deliberately no per-document fallback that would orphan chunks). Its only "
+        "caller is the .nxexp import, a command-level operation, not a per-record "
+        "ingest loop in dt.py or index.py."
+    ),
     "SearchEmbeddingProfileMismatchError": (
         "Read path only (nexus-vply6): raised by search_engine."
         "search_cross_corpus and built by nexus.errors."

@@ -35,9 +35,11 @@ one no-ops.
 - `nx doctor` — reports pending rungs read-only, plus era debt (legacy chunk
   ids) on installs that have not migrated yet.
 - `nx upgrade --dry-run` — reports what would run, from each rung's read-only
-  detect. Changes nothing and never opens the completion store.
+  detect. Writes nothing. A rung's detect may read the completion ledger, so
+  these need a reachable engine and its token to be exact; without one they
+  report the rung as pending and say why.
 
-Both are safe to run unprompted. Neither needs a service token.
+Both are safe to run unprompted.
 
 ## The three genuine decisions
 
@@ -56,6 +58,26 @@ choose; never answer on their behalf:
    Surface the block; let the user decide.
 
 Everything else is automatic.
+
+## The RDR-192 backfill rung and its failure mode
+
+`rdr192-manifest-backfill` censuses every collection for legacy notes that
+have a catalog document but no manifest row (the engine hides them from search
+since RDR-192) and backfills them. It records completion, per tenant, only after
+a fresh census reads zero; the engine's reaper refuses to run on a tenant
+without that record; that refusal is complete only for a tenant with no earlier
+record (an older record still stands, and the reaper's own in-engine census is
+what covers that case). When some note cannot be backfilled the rung DEFERS
+instead of failing: `nx upgrade` finishes its other steps, exits 0, prints which
+collection and what to do, and `nx doctor` keeps showing the rung as pending.
+No verb heals a skipped note, and its text is hidden from `nx store get`, so the
+remedy needs the user's own copy: re-put it with `nx store put` under the same
+title into the collection named in the message (`nx t3 census-manifest-less
+--collection <c>` lists the owner titles). A residual is not re-examined for 24
+hours or until the package version changes (`NX_RDR192_BACKFILL_RETRY=1` retries
+now); a backfill that errors is retried at the next session start. Do not "fix"
+a deferred rung by recording the completion by hand; the record is what tells
+the reaper the census read zero.
 
 ## When a user is blocked on legacy chunk ids
 

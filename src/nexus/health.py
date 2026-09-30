@@ -6570,8 +6570,11 @@ def _check_pending_rungs() -> list[HealthResult]:
     """RDR-185 P0.4 (nexus-n7u38.4): read-only upgrade-ladder surface.
 
     Reports pending ladder rungs from each rung's READ-ONLY ``detect()`` —
-    zero writes, zero work, the completion store is never opened (the
-    ``resolve_pending_steps`` dry-run-truth precedent). Pending rungs are a
+    zero writes, zero work (the ``resolve_pending_steps`` dry-run-truth
+    precedent). A rung's ``detect()`` may READ the completion ledger or other
+    engine state (``rdr192-manifest-backfill`` reads its record and the
+    residual note), so this row needs a reachable engine to be exact; an
+    unreachable one degrades to a pending row that says why. Pending rungs are a
     soft warning with `nx upgrade` (the single trigger) as the remedy.
     Crash-proof: any failure ABOVE the per-rung loop (deferred imports,
     ``default_registry()`` construction) degrades to a SOFT WARNING, never a
