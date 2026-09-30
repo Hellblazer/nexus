@@ -377,6 +377,96 @@ class SuppliedVectorsTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void aMixedRequestUnderARace_keepsTheWinnersVectorForTheSuppliedChashOnly() throws Exception {
+        for (var e : routes().entrySet()) {
+            Fx f = fixture("mixrace");
+            String withV = ch("mixrace-v-" + e.getKey()), without = ch("mixrace-w-" + e.getKey());
+            String textV = "mixrace v " + e.getKey(), textW = "mixrace w " + e.getKey();
+            String otherDoc = freshDoc("mixrace-other", f.collection());
+            float[] supplied = vec(61);
+            float[] winnerV = new CountingFakeEmbedder().embed(List.of(textV)).get(0);
+
+            var slow = new dev.nexus.service.db.CombinedWriteService(tenantScope, repo,
+                new dev.nexus.service.vectors.EmbedderRouter(embedder, "document"));
+            var winner = new dev.nexus.service.db.CombinedWriteService(tenantScope, repo,
+                new dev.nexus.service.vectors.EmbedderRouter(embedder, "document"));
+            slow.setAfterNeedEmbedResolvedHookForTests(() ->
+                winner.writeManyCombined(TENANT, f.collection(),
+                    List.of(chunk(withV, textV), chunk(without, textW)),
+                    List.of(doc(otherDoc, List.of(row(0, withV), row(1, without)))), null, false, false));
+
+            List<Map<String, Object>> chunks = List.of(
+                vchunk(withV, textV, supplied), chunk(without, textW));
+            List<Map<String, Object>> rows = List.of(row(0, withV), row(1, without));
+            switch (e.getKey()) {
+                case "write_many" -> slow.writeManyCombined(TENANT, f.collection(), chunks,
+                    List.of(doc(f.docId(), rows)), null, false, false, MODEL);
+                case "append" -> slow.appendCombined(TENANT, f.collection(), f.docId(), rows, chunks,
+                    false, null, MODEL);
+                default -> slow.appendManyCombined(TENANT, f.collection(),
+                    List.of(doc(f.docId(), rows)), chunks, false, MODEL);
+            }
+
+            assertThat(storedVector(f.collection(), withV))
+                .as("%s: the supplied chash keeps the racing writer's vector", e.getKey())
+                .containsExactly(winnerV);
+            assertThat(chunkExists(f.collection(), without)).as(e.getKey()).isTrue();
+            assertThat(manifestChashes(f.docId())).as(e.getKey()).containsExactlyInAnyOrder(withV, without);
+        }
+    }
+
+    /**
+     * Two writers send the SAME brand-new chashes classified opposite ways: writer A supplies a
+     * vector for X (keep-stored) and embeds Y (overwrite); writer B does the reverse. Split into an
+     * overwrite statement and a keep statement, A would insert Y then X and B X then Y and each
+     * would wait on the other's uncommitted insert (40P01). One insert in one chash order cannot.
+     * A barrier after the existence partition starts both per-document transactions together.
+     */
+    @Test
+    void twoWritersClassifyingTheSameNewChashesOppositeWays_doNotDeadlock() throws Exception {
+        Fx f = fixture("dead");
+        String docA = f.docId(), docB = freshDoc("dead-b", f.collection());
+        var writerA = new dev.nexus.service.db.CombinedWriteService(tenantScope, repo,
+            new dev.nexus.service.vectors.EmbedderRouter(embedder, "document"));
+        var writerB = new dev.nexus.service.db.CombinedWriteService(tenantScope, repo,
+            new dev.nexus.service.vectors.EmbedderRouter(embedder, "document"));
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            for (int i = 0; i < 60; i++) {
+                String x = ch("dead-x-" + i), y = ch("dead-y-" + i);
+                var barrier = new java.util.concurrent.CyclicBarrier(2);
+                Runnable await = () -> {
+                    try {
+                        barrier.await(20, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (Exception ex) {
+                        throw new RuntimeException(ex);
+                    }
+                };
+                writerA.setAfterNeedEmbedResolvedHookForTests(await);
+                writerB.setAfterNeedEmbedResolvedHookForTests(await);
+                int n = i;
+                var fa = pool.submit(() -> writerA.writeManyCombined(TENANT, f.collection(),
+                    List.of(vchunk(x, "dead x " + n, vec(70 + n)), chunk(y, "dead y " + n)),
+                    List.of(doc(docA, List.of(row(2 * n, x), row(2 * n + 1, y)))), null, false, false, MODEL));
+                var fb = pool.submit(() -> writerB.writeManyCombined(TENANT, f.collection(),
+                    List.of(vchunk(y, "dead y " + n, vec(170 + n)), chunk(x, "dead x " + n)),
+                    List.of(doc(docB, List.of(row(2 * n, y), row(2 * n + 1, x)))), null, false, false, MODEL));
+                var ra = fa.get(60, java.util.concurrent.TimeUnit.SECONDS).response();
+                var rb = fb.get(60, java.util.concurrent.TimeUnit.SECONDS).response();
+                assertThat(ra.get("failed_doc_ids")).as("iteration %d: writer A's document committed", i).isEqualTo(List.of());
+                assertThat(rb.get("failed_doc_ids")).as("iteration %d: writer B's document committed (a"
+                    + " deadlock victim lands here as a failed document)", i).isEqualTo(List.of());
+                assertThat(chunkExists(f.collection(), x)).isTrue();
+                assertThat(chunkExists(f.collection(), y)).isTrue();
+            }
+        } finally {
+            writerA.setAfterNeedEmbedResolvedHookForTests(null);
+            writerB.setAfterNeedEmbedResolvedHookForTests(null);
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void aMismatchIsCountedOnlyOnceTheWriteHasCommitted() throws Exception {
         Fx f = fixture("commit");
         String c = ch("commit-c");
@@ -393,10 +483,41 @@ class SuppliedVectorsTest extends AtomicWriteTestBase {
         assertThat(SuppliedVectorMismatchActivity.total() - before)
             .as("a failed write that the client will retry must not be counted").isZero();
 
-        Fx g = fixture("commit2");
-        svc.appendCombined(TENANT, g.collection(), g.docId(), List.of(row(0, ch("commit2-x"))),
-            List.of(chunk(ch("commit2-x"), "x")), false);   // unrelated success: still nothing counted
-        assertThat(SuppliedVectorMismatchActivity.total() - before).isZero();
+        // Positive control: the SAME differing vector, appended to a live document, is counted once.
+        var ok = svc.appendCombined(TENANT, f.collection(), freshDoc("commit-live", f.collection()),
+            List.of(row(0, c)), List.of(vchunk(c, "commit text", different)), false, null, MODEL).response();
+        assertThat(ok).containsEntry("vector_mismatches", 1);
+        assertThat(SuppliedVectorMismatchActivity.total() - before).isEqualTo(1L);
+    }
+
+    @Test
+    void inAMultiDocumentWrite_aDocumentThatFailedInPlaceContributesNoMismatch() throws Exception {
+        for (String route : List.of("write_many", "append_many")) {
+            Fx f = fixture("multi");
+            String cOk = ch("multi-ok-" + route), cBad = ch("multi-bad-" + route);
+            float[] storedOk = vec(81), storedBad = vec(82);
+            seedWithVector(f, cOk, "ok text", storedOk);
+            seedWithVector(f, cBad, "bad text", storedBad);
+            String okDoc = freshDoc("multi-okdoc", f.collection());
+            long before = SuppliedVectorMismatchActivity.total();
+            List<Map<String, Object>> chunks = List.of(vchunk(cOk, "ok text", vec(83)), vchunk(cBad, "bad text", vec(84)));
+            List<Map<String, Object>> docs = List.of(
+                doc(okDoc, List.of(row(0, cOk))), doc("aw.multi-missing", List.of(row(0, cBad))));
+
+            var response = route.equals("write_many")
+                ? svc.writeManyCombined(TENANT, f.collection(), chunks, docs, null, false, false, MODEL).response()
+                : svc.appendManyCombined(TENANT, f.collection(), docs, chunks, false, MODEL).response();
+
+            assertThat(response.get("failed_doc_ids")).as(route).isEqualTo(List.of("aw.multi-missing"));
+            assertThat(response).as(route).containsEntry("vector_mismatches", 1);
+            assertThat(SuppliedVectorMismatchActivity.total() - before)
+                .as("%s: only the chash a committed document references is counted", route).isEqualTo(1L);
+        }
+    }
+
+    private void seedWithVector(Fx f, String chash, String text, float[] vector) {
+        svc.writeManyCombined(TENANT, f.collection(), List.of(vchunk(chash, text, vector)),
+            List.of(doc(freshDoc("seedv", f.collection()), List.of(row(0, chash)))), null, false, false, MODEL);
     }
 
     @Test

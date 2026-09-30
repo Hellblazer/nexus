@@ -4761,6 +4761,18 @@ public final class CatalogRepository {
      */
     private volatile java.util.function.Consumer<String> beforeReadHookForTests;
 
+    /**
+     * Test-only seam (RDR-223 fix round): invoked with the append transaction's own context right
+     * after the chunk upsert, inside the still-open transaction, so a test can prove the chunk row
+     * EXISTED before a later statement failed and rolled it back. Null (a no-op) in production.
+     */
+    private volatile java.util.function.Consumer<DSLContext> afterChunkUpsertHookForTests;
+
+    /** Test-only: install (or clear with {@code null}) the after-chunk-upsert hook. */
+    public void setAfterChunkUpsertHookForTests(java.util.function.Consumer<DSLContext> hook) {
+        this.afterChunkUpsertHookForTests = hook;
+    }
+
     /** Test-only: install (or clear with {@code null}) the previous-manifest read hook. */
     public void setBeforeReadHookForTests(java.util.function.Consumer<String> hook) {
         this.beforeReadHookForTests = hook;
@@ -5306,25 +5318,23 @@ public final class CatalogRepository {
             }
         }
 
-        // RDR-223 P1.5 fix round: chunks carrying a client-supplied vector written WITHOUT
-        // force_re_embed are inserted with ON CONFLICT keeping the stored text and vector (only
-        // the metadata is refreshed); every other chunk keeps the full overwrite. Two statements
-        // only when a request mixes both kinds.
-        List<String> overwriteChashes = new ArrayList<>();
+        // RDR-223 P1.5: ONE multi-row insert, rows in the one global chash order (nexus-ps9wb), so
+        // no two writers can take row locks in opposite orders whatever mix of chunk kinds each
+        // sends. Chunks carrying a client-supplied vector written WITHOUT force_re_embed
+        // (ResolvedChunk#keepStoredOnConflict) must not replace what a racing writer stored between
+        // the existence partition and here: for those chashes ON CONFLICT keeps the stored text and
+        // vector (a CASE on the target row's own chash), while every row still refreshes metadata
+        // and the reapable grace anchor.
         List<String> keepChashes = new ArrayList<>();
         for (String c : toWrite) {
-            (resolved.get(c).keepStoredOnConflict() ? keepChashes : overwriteChashes).add(c);
+            if (resolved.get(c).keepStoredOnConflict()) keepChashes.add(c);
         }
-        if (!overwriteChashes.isEmpty() && !keepChashes.isEmpty()) {
-            // Two statements would take row locks in two passes; take them all first, in the one
-            // global chash order (nexus-ps9wb), so a writer that classifies the same chashes the
-            // other way round cannot deadlock against this one.
-            ctx.select(ch.chash()).from(ch.table())
-               .where(ch.tenantId().eq(tenant).and(ch.collection().eq(collection))
-                      .and(ch.chash().in(toWrite)))
-               .orderBy(ch.chash())
-               .forUpdate()
-               .fetch();
+        var insert = ctx.insertInto(ch.table(),
+                ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
+        for (String c : toWrite) {
+            ResolvedChunk rc = resolved.get(c);
+            insert = insert.values(tenant, collection, c, rc.text(),
+                    Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
         }
         long raced = 0;
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #1): a bounded sample
@@ -5340,19 +5350,14 @@ public final class CatalogRepository {
         // RDR-222 Phase 0 (bead nexus-ulrjq, M-a): same (xmax = 0) RETURNING idiom as
         // PgVectorRepository.upsertChunksInternal's final INSERT — see that call
         // site's comment for the RawSqlGateTest rationale.
-        List<org.jooq.Record2<String, Boolean>> returned = new ArrayList<>();
-        if (!overwriteChashes.isEmpty()) {
-            var insert = ctx.insertInto(ch.table(),
-                    ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
-            for (String c : overwriteChashes) {
-                ResolvedChunk rc = resolved.get(c);
-                insert = insert.values(tenant, collection, c, rc.text(),
-                        Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
-            }
-            returned.addAll(insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
+        Field<String> textSet = keepChashes.isEmpty() ? DSL.excluded(ch.chunkText())
+            : DSL.when(ch.chash().in(keepChashes), ch.chunkText()).else_(DSL.excluded(ch.chunkText()));
+        Field<Vector> embeddingSet = keepChashes.isEmpty() ? DSL.excluded(ch.embedding())
+            : DSL.when(ch.chash().in(keepChashes), ch.embedding()).else_(DSL.excluded(ch.embedding()));
+        var returned = insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
               .doUpdate()
-              .set(ch.chunkText(), DSL.excluded(ch.chunkText()))
-              .set(ch.embedding(), DSL.excluded(ch.embedding()))
+              .set(ch.chunkText(), textSet)
+              .set(ch.embedding(), embeddingSet)
               .set(ch.metadata(),  DSL.excluded(ch.metadata()))
               // nexus-wbfpw.43: the combined write's chunk upsert re-writes an existing
               // chunk (changed text, or a writer that raced this one), so it restarts
@@ -5362,26 +5367,7 @@ public final class CatalogRepository {
               .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
               .returningResult(ch.chash(), DSL.field(
                   DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
-              .fetch());
-        }
-        if (!keepChashes.isEmpty()) {
-            var insert = ctx.insertInto(ch.table(),
-                    ch.tenantId(), ch.collection(), ch.chash(), ch.chunkText(), ch.embedding(), ch.metadata());
-            for (String c : keepChashes) {
-                ResolvedChunk rc = resolved.get(c);
-                insert = insert.values(tenant, collection, c, rc.text(),
-                        Vector.of(rc.embedding()), JSONB.jsonb(rc.metadataJson()));
-            }
-            returned.addAll(insert.onConflict(ch.tenantId(), ch.collection(), ch.chash())
-              .doUpdate()
-              // The chash exists: keep the stored text and vector, refresh the metadata like
-              // the metadata-only refresh does (RDR-223 P1.5, R-14 cell 4).
-              .set(ch.metadata(),  DSL.excluded(ch.metadata()))
-              .set(ch.lastWrittenAt(), DimTables.lastWrittenNow())
-              .returningResult(ch.chash(), DSL.field(
-                  DSL.field(DSL.name("xmax"), SQLDataType.INTEGER).eq(0)))
-              .fetch());
-        }
+              .fetch();
         for (var r : returned) {
             if (!Boolean.TRUE.equals(r.value2()) && originalAbsentChashes.contains(r.value1())) {
                 raced++;
@@ -6494,6 +6480,8 @@ public final class CatalogRepository {
             if (resolvedChunks != null) {
                 chunksWritten[0] = upsertManifestChunkVectors(ctx, tenant, collection, rows,
                         resolvedChunks, writtenThisRequest, writtenChashesOut);
+                java.util.function.Consumer<DSLContext> hook = afterChunkUpsertHookForTests;
+                if (hook != null) hook.accept(ctx);
             }
             if (!rows.isEmpty()) {
                 stampIndexedAt(ctx, tenant, docId);
