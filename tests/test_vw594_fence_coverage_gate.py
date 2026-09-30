@@ -400,9 +400,7 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
         ("doc_indexer.py", "index_pdf"),
         ("indexer.py", "_fire_deferred_hooks"),
         ("indexer.py", "_fire_flush_grain_hooks"),
-        ("mcp/core.py", "store_put"),
         ("pipeline_stages.py", "_flag"),
-        ("pipeline_stages.py", "uploader_loop"),
     ], (
         "cross-function allowlist entries changed — this is the escape "
         f"hatch from AST proof, keep it to the documented minimum: {cross}"
@@ -693,7 +691,7 @@ def test_owner_write_entries_are_exactly_the_rdr223_cross_function_entries() -> 
         ("indexer.py", "_fire_deferred_hooks"), ("indexer.py", "_fire_flush_grain_hooks"),
         # the note writer's entry (RDR-223 P2.2): proved by its own test above, not an owner-write
         # caller of the PDF/document kind this list checks
-        ("mcp/core.py", "store_put")}
+        ("catalog/note_write.py", "fire_note_chains")}
 
 
 def test_owner_write_leg_kill_control_flags_a_fire_batch_ahead_of_the_write() -> None:

@@ -246,11 +246,12 @@ def test_fenced_allowlist_entries_are_proven() -> None:
 
 def test_the_fence_predicate_separates_a_fencing_function_from_one_that_does_not() -> None:
     """The predicate the fenced-entry proof applies, exercised on real functions: a function that
-    begins the fence (``doc_indexer.py::_index_pdf_incremental``) passes, both known callers (which
+    begins the fence (``prose_indexer.py::index_prose_file``; the PDF paths no longer call
+    ``_fence_begin`` themselves, their writer sends the begin) passes, both known callers (which
     do not) fail, and a name that is nowhere fails too. KILL CONTROL: making the predicate return
     a constant turns this RED, so the proof above cannot silently become a pass-all."""
     trees: dict[str, ast.Module] = {}
-    assert _function_calls_fence_begin(_tree_for("doc_indexer.py", trees), "_index_pdf_incremental")
+    assert _function_calls_fence_begin(_tree_for("prose_indexer.py", trees), "index_prose_file")
     for rel_path, function in _KNOWN_CALLERS:
         assert not _function_calls_fence_begin(_tree_for(rel_path, trees), function), (rel_path, function)
     assert not _function_calls_fence_begin(_tree_for("doc_indexer.py", trees), "no_such_function")
