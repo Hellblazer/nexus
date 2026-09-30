@@ -354,6 +354,24 @@ def validate(metadata: dict[str, Any]) -> None:
 # ── Factory ─────────────────────────────────────────────────────────────────
 
 
+#: Content type a chunk written straight to a collection (a note, ``HttpVectorClient.put``) is stamped
+#: with, by collection prefix. The ONE copy: ``put``, ``T3Database.put`` and the note writer share it.
+_PREFIX_CONTENT_TYPES: tuple[tuple[str, str], ...] = (
+    ("code__", "code"),
+    ("docs__", "prose"),
+    ("rdr__", "markdown"),
+    ("knowledge__", "prose"),
+)
+
+
+def chunk_content_type_for_collection(collection: str) -> str:
+    """The chunk ``content_type`` for *collection*'s prefix; anything unlisted is ``prose``."""
+    for prefix, content_type in _PREFIX_CONTENT_TYPES:
+        if collection.startswith(prefix):
+            return content_type
+    return "prose"
+
+
 def make_chunk_metadata(
     *,
     content_type: str,

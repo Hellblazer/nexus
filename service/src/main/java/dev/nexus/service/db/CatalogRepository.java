@@ -5621,6 +5621,20 @@ public final class CatalogRepository {
                     // (chunk_count folds inside writeManifestRows — nexus-b6enc
                     // F5 unified the fold for the single-doc and batch paths.)
                     tenantScope.withTenant(tenant, ctx -> {
+                        // RDR-223 P2.2 fix round (nexus-z0o2p.12): take the document's write
+                        // locks BEFORE reading its previous manifest, in writeManifestRows's own
+                        // order (document exists, sweep gate SHARED, index-run lock). Both locks
+                        // are transaction-scoped and re-entrant, so writeManifestRows taking them
+                        // again below costs nothing. Before this the read ran first: two
+                        // concurrent replacers of one document both read the same previous
+                        // manifest M0, so neither one's dropped list named the other's chunks
+                        // and the loser's chunks stayed in T3 with no owner. Now the second
+                        // replacer waits here for the first to commit, then reads the
+                        // first's manifest and drops (and, with sweep on, sweeps) its chunks.
+                        requireNonBlank(collection, "collection");
+                        requireDocumentExists(ctx, tenant, docId);
+                        acquireSweepGateShared(ctx, tenant, collection);
+                        acquireIndexRunLock(ctx, tenant, docId);
                         // nexus-eslkl: the sweep's "before" read MUST happen before
                         // writeManifestRows deletes doc_id's current rows below —
                         // it is the only way to learn which chashes THIS write drops.
@@ -8549,9 +8563,12 @@ public final class CatalogRepository {
      * same time, consistent and wrong. That is not theoretical: {@code gc_audit} landed
      * 2026-07-30 and this list, written the next day, omitted it. The gate is
      * {@code tests/catalog/test_collection_scoped_tables_schema_parity.py}, which asks
-     * {@code information_schema} directly. It lives in pytest because {@code service-ci} is
-     * NOT a required check on develop or main (nexus-hq9na) — a Java test of this invariant
-     * would be advisory at merge, which for this defect class is no gate at all (nexus-20890).
+     * {@code information_schema} directly. It lives in pytest because, when it was written,
+     * {@code service-ci} was NOT a required check on develop or main (nexus-hq9na) — a Java
+     * test of this invariant would have been advisory at merge, which for this defect class is
+     * no gate at all (nexus-20890). The Java job is a required check on both branches now
+     * (verified 2026-09-30, nexus-rjk2a); the gate stays in pytest, which rides
+     * {@code pytest-gate}, also required.
      *
      * <p>Tables deliberately NOT here, each documented with a reason in that gate's
      * {@code _DOCUMENTED_EXCLUSIONS}: {@code pdf_pipeline} (transient work queue) and

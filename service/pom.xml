@@ -314,15 +314,27 @@
                          not: every class had reported and the fork simply never
                          exited, so no per-request timeout could have caught it.
                          This covers both mechanisms.
-                         1800s is derived rather than guessed. The CI Java job
-                         measured 11m08s, 12m49s and 13m28s across three consecutive
-                         runs on 2026-09-12, and that is the WHOLE job including
-                         codegen and the integration group, so a single fork is
-                         strictly less. 30 minutes leaves better than 2x headroom
-                         while bounding a hang at 30 minutes instead of unbounded.
-                         Raise it if a legitimate fork ever approaches it; do not
-                         remove it. -->
-                    <forkedProcessTimeoutInSeconds>1800</forkedProcessTimeoutInSeconds>
+                         Surefire documents this parameter as "kill the forked test
+                         process after a certain number of seconds" (0 = never).
+                         It bounds the fork JVM's lifetime, and with reuseForks=true
+                         the docs have that JVM execute the classes assigned to it,
+                         so with forkCount=1 (CI pins it) one bound covers the WHOLE
+                         main-suite run, not one class; with forkCount above 1 each
+                         fork is bounded separately. The docs do not spell out the
+                         per-class case; this is read from the two parameters. The
+                         CI integration-group step is a second, separate mvn
+                         invocation under this same setting (no profile change), so
+                         it gets its own fork and its own 2700s.
+                         2700s (45 min) is about 2x the measured MAIN-step maximum:
+                         22.1 min on 2026-09-30 (15.0 to 22.1 min over 14 runs in
+                         30 hours; the step varies 5.5 min between trees that differ
+                         only in non-test files, so runner variance is real). The
+                         earlier 1800s was derived on 2026-09-12 from an 11 to 13.5
+                         minute whole job (2945 tests); the suite is 3,800+ tests now
+                         and that basis is history. Re-derive by the same rule (about
+                         2x the measured main-step maximum) when the maximum moves;
+                         do not remove the bound. -->
+                    <forkedProcessTimeoutInSeconds>2700</forkedProcessTimeoutInSeconds>
                     <!-- nexus-1hj1d: deliberately NO rerunFailingTestsCount.
                          A blanket rerun retries EVERY failing test, so a racy
                          PRODUCT bug would be retried into a green run — the
