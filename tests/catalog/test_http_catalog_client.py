@@ -204,6 +204,10 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
     last_begin_index_run_many_body: dict[str, Any] = {}
     last_complete_index_run_body: dict[str, Any] = {}
     last_fail_index_run_body: dict[str, Any] = {}
+    #: RDR-223 P2.0 (nexus-z0o2p.10): last bodies POSTed to /manifest/append and
+    #: /manifest/append_many.
+    last_manifest_append_body: dict[str, Any] = {}
+    last_manifest_append_many_body: dict[str, Any] = {}
 
     #: nexus-cw262: last bodies POSTed to /owners/deactivate, /owners/reactivate.
     last_owner_deactivate_body: dict[str, Any] = {}
@@ -234,6 +238,8 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         cls.last_begin_index_run_many_body = {}
         cls.last_complete_index_run_body = {}
         cls.last_fail_index_run_body = {}
+        cls.last_manifest_append_body = {}
+        cls.last_manifest_append_many_body = {}
         cls.last_owner_deactivate_body = {}
         cls.last_owner_reactivate_body = {}
         cls.last_owners_by_type_body = {}
@@ -699,7 +705,37 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
         elif op == "/manifest/write":
             self._send_json({"ok": True, "count": len(body.get("rows", []))})
         elif op == "/manifest/append":
-            self._send_json({"ok": True, "count": len(body.get("rows", []))})
+            FakeCatalogHandler.last_manifest_append_body = body
+            # Mirrors CatalogHandler.handleManifestAppend's three response shapes (RDR-223 P1.1
+            # and P1.3): plain {ok,count}; with `chunks` the combined-write counters; with
+            # `sweep_chashes` the sweep fields.
+            resp = {"ok": True, "count": len(body.get("rows", []))}
+            if body.get("chunks") is not None:
+                resp.update(chunks_written=len(body["chunks"]), chunks_deduped=0,
+                            chunks_unreferenced=0, embed_skipped=0,
+                            embed_embedded=len(body["chunks"]))
+                if any(c.get("embedding") is not None for c in body["chunks"]):
+                    resp.update(vectors_supplied=len(body["chunks"]), vector_mismatches=0)
+            if body.get("sweep_chashes"):
+                resp.update(swept=len(body["sweep_chashes"]), sweep_skipped=0, sweep_detail={})
+            self._send_json(resp)
+        elif op == "/manifest/append_many":
+            # Mirrors CatalogHandler.handleManifestAppendMany (RDR-223 P1.4): per-document
+            # `results` in request order, the aggregate counters beside them.
+            FakeCatalogHandler.last_manifest_append_many_body = body
+            docs = body.get("docs") or []
+            chunks = body.get("chunks")
+            results = [{"doc_id": d["doc_id"], "ok": True, "count": len(d.get("rows", [])),
+                        "chunks_written": 0} for d in docs]
+            resp = {"docs": len(docs), "rows": sum(r["count"] for r in results),
+                    "failed_doc_ids": [], "failed": [],
+                    "chunks_written": len(chunks or []),
+                    "swept": sum(len(d.get("sweep_chashes") or []) for d in docs),
+                    "sweep_skipped": 0, "sweep_detail": [], "results": results}
+            if chunks is not None:
+                resp.update(chunks_deduped=0, chunks_unreferenced=0, embed_skipped=0,
+                            embed_embedded=len(chunks))
+            self._send_json(resp)
         elif op == "/manifest/purge":
             self._send_json({"deleted": 1})
         elif op == "/manifest/get_many":
@@ -949,6 +985,58 @@ def client(fake_server: str):
         _token="test_tok",
     ) as c:
         yield c
+
+
+class TestRdr223AppendRoundTrip:
+    """RDR-223 P2.0 (nexus-z0o2p.10): the append routes through the real client stack (transport,
+    auth, JSON) against the live fake, which mirrors CatalogHandler's response shapes."""
+
+    _A = "a" * 64
+    _B = "b" * 64
+
+    @pytest.fixture(autouse=True)
+    def _no_registration(self, monkeypatch) -> None:
+        import nexus.corpus as corpus
+
+        monkeypatch.setattr(corpus, "ensure_collection_registered", lambda *a, **k: None)
+
+    def test_append_with_chunks_and_sweep_round_trips(self, client: HttpCatalogClient) -> None:
+        out = client.append_manifest_chunks(
+            "1.1.1", [{"chash": self._A, "position": 3}], collection="docs__c__m__v1",
+            chunk_payload=[{"chash": self._A, "text": "t", "metadata": {}}],
+            sweep_chashes=[self._B])
+        sent = FakeCatalogHandler.last_manifest_append_body
+        assert sent["rows"] == [{"chash": self._A, "position": 3}]
+        assert sent["chunks"][0]["chash"] == self._A and sent["sweep_chashes"] == [self._B]
+        assert out["chunks_written"] == 1 and out["swept"] == 1
+
+    def test_plain_append_still_answers_ok_count(self, client: HttpCatalogClient) -> None:
+        out = client.append_manifest_chunks(
+            "1.1.1", [{"chash": self._A, "position": 0}], collection="docs__c__m__v1")
+        assert out == {"ok": True, "count": 1}
+
+    def test_append_many_round_trips(self, client: HttpCatalogClient) -> None:
+        out = client.append_manifest_many(
+            [("1.1.1", [{"chash": self._A, "position": 0}]),
+             ("1.1.2", [{"chash": self._B, "position": 0}])],
+            chunks=[{"chash": self._A, "text": "a", "metadata": {}},
+                    {"chash": self._B, "text": "b", "metadata": {}}],
+            sweep_chashes={"1.1.2": [self._A]}, collection="docs__c__m__v1")
+        sent = FakeCatalogHandler.last_manifest_append_many_body
+        assert [d["doc_id"] for d in sent["docs"]] == ["1.1.1", "1.1.2"]
+        assert sent["docs"][1]["sweep_chashes"] == [self._A]
+        assert [r["doc_id"] for r in out["results"]] == ["1.1.1", "1.1.2"]
+        assert out["chunks_written"] == 2 and out["failed_doc_ids"] == []
+
+    def test_supplied_vectors_round_trip_with_the_acknowledgement(
+        self, client: HttpCatalogClient,
+    ) -> None:
+        out = client.append_manifest_chunks(
+            "1.1.1", [{"chash": self._A, "position": 0}], collection="docs__c__m__v1",
+            chunk_payload=[{"chash": self._A, "text": "t", "metadata": {}, "embedding": [0.5]}],
+            embedding_model="m")
+        assert FakeCatalogHandler.last_manifest_append_body["embedding_model"] == "m"
+        assert out["vectors_supplied"] == 1
 
 
 class TestHttpCatalogClientRoundTrip:

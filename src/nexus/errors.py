@@ -666,6 +666,27 @@ class CombinedWriteEmbedTimeoutError(NexusError):
         )
 
 
+class ManifestAppendManyUnsupportedError(NexusError):
+    """The engine has no ``POST /v1/catalog/manifest/append_many`` route (RDR-223 P1.4).
+
+    An engine older than the route answers 404. There is deliberately NO fallback to a per-document
+    ``append_manifest_chunks`` loop: the multi-document append exists so a chunk and its owner row
+    land in one transaction per document, and the per-document form of the split write is exactly the
+    orphan-producing shape RDR-223 closes. The caller reports that this engine cannot take the write
+    and stops.
+    """
+
+    def __init__(self, *, collection: str, doc_count: int) -> None:
+        self.collection = collection
+        self.doc_count = doc_count
+        super().__init__(
+            f"the engine has no /v1/catalog/manifest/append_many route (collection "
+            f"{collection!r}, {doc_count} document(s)): it predates RDR-223. Upgrade the "
+            f"engine service; there is no per-document fallback, because that path can leave "
+            f"chunks without an owner."
+        )
+
+
 # SystemicExtractionFailureError DELETED (nexus-deyd5 round 3, coordinator
 # directive, 2026-08-21). Round 2 added this type for run_file_loop to
 # raise on a systemic-skip breach; a code-review HIGH finding traced that
