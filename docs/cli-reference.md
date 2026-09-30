@@ -2240,12 +2240,12 @@ A note whose text is too large for the collection's embedding model's token wind
 | Outcome | What the message says |
 |---------|-----------------------|
 | Stored | `Stored: <id>  →  <collection>`, plus `(N chunks, split to the embedding model's token window)` for a split note |
-| The client refused before sending (a stale embedding profile, a missing Voyage key, a retired collection name) | The refusal's own remedy first, then `Nothing was sent to the engine and nothing changed; run the command again once that is fixed.` It never says "retry is safe": a retry fails the same way until you act |
-| The engine could not be reached | `could not store '<title>' in <collection>: <reason>. The engine could not be reached, so nothing was sent and nothing changed; retry once it is running.` |
+| The client refused before writing (a stale embedding profile, a missing Voyage key, a retired collection name) | The refusal's own remedy first, then `The note was not written and its chunks and manifest are unchanged; run the command again once that is fixed. If the note was stored before, its index state may read 'failed' until a write succeeds.` It never says "retry is safe": a retry fails the same way until you act |
+| The engine could not be reached | `could not store '<title>' in <collection>: <reason>. The engine could not be reached, so the note was not written and its chunks and manifest are unchanged; retry once it is running. If the note was stored before, its index state may read 'failed' until a write succeeds.` |
 | The engine refused the request | `could not store '<title>' in <collection>: <reason>. The note was not stored ... no chunk was left behind and any earlier version of the note is unchanged (chunks whose text was already stored may have had their metadata refreshed); retry is safe.` The metadata sentence appears only here |
-| The request died in flight, or its outcome could not be read back | `could not confirm that '<title>' landed ...`. Nothing was rolled back and the write may already have succeeded; check with `nx store list` before retrying (a retry is an idempotent re-write either way) |
+| The request died in flight, or its outcome could not be read back | `could not confirm that '<title>' landed ...`. Nothing was rolled back and the write may already have succeeded; check with `nx store list` before retrying (a retry is an idempotent re-write either way); a caller with no check command says `look for the note in the store` |
 | The engine accepted the write and refused to stamp the document complete (new) | `wrote <id> to <collection> and the engine accepted the write, but it refused to stamp the document complete (<engine's reason>). The document stays 'indexing'. Nothing was rolled back; a retry is an idempotent re-write.` |
-| The write landed and the response did not stamp it complete | `wrote <id> to <collection>, but the document was not stamped complete (...)`. Nothing was rolled back |
+| The write landed and the response did not stamp it complete | `wrote <id> to <collection>, but the document was not stamped complete.` Nothing was rolled back |
 | The note could not be cataloged | `could not catalog '<title>' in <collection>: catalog registration failed: <cause>. Nothing was written` |
 
 **`list` flags:**

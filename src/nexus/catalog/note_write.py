@@ -477,6 +477,36 @@ def _refusal_of(errors: Sequence[BaseException]) -> str:
     return REFUSED_UNREACHABLE
 
 
+def is_anticipated_failure(exc: BaseException) -> bool:
+    """True when *exc*'s chain holds a failure this code expects from the engine, the network or
+    the client's own pre-send checks: an httpx error, an embed timeout, a batch the engine answered
+    badly or refused, a refused stamp, or one of :func:`_client_side_refusals`. The warning for such a
+    failure carries no traceback (the CLI prints it to the terminal and the outcome is worded for the
+    operator). A chain of none of these is a bug or an unknown (a ``TypeError`` from signature drift
+    settles as "in flight" like any unrecognised exception), so its warning keeps the stack and a
+    production fault stays diagnosable."""
+    known = (
+        httpx.HTTPError, CombinedWriteEmbedTimeoutError, BatchWriteFailedError, IndexRunVerifyRefused,
+        StampRefusedError, _UnstampedError, *_client_side_refusals(),
+    )
+    seen: set[int] = set()
+    pending: list[BaseException] = [exc]
+    while pending:
+        cur = pending.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, known):
+            return True
+        pending.extend(n for n in (cur.__cause__, cur.__context__) if n is not None)
+    return False
+
+
+def _stack_unless_anticipated(exc: BaseException) -> dict[str, bool]:
+    """``{"exc_info": True}`` for a failure nothing here expects, else no keyword at all."""
+    return {} if is_anticipated_failure(exc) else {"exc_info": True}
+
+
 def _cause_chain(exc: BaseException) -> str:
     """The exception classes of *exc*'s whole cause/context chain, outermost first, for a log line
     that no longer carries a traceback (``ConnectError <- EmbeddingProfileMismatchError``)."""
@@ -667,7 +697,9 @@ def put_note(
             error_out=cause)
     except Exception as exc:  # noqa: BLE001 — boundary catch; failure surfaced via log.warning and the NO_CATALOG outcome
         cause["error"] = f"{type(exc).__name__}: {exc}"
-        _log.warning("catalog_store_hook_failed", doc_id=first_chash, collection=collection, exc_info=True)
+        _log.warning(
+            "catalog_store_hook_failed", doc_id=first_chash, collection=collection,
+            **_stack_unless_anticipated(exc))
     if not out.catalog_doc_id:
         # catalog_store_hook_tracked swallows every exception into ("", False) and hands the cause back
         # through error_out: a caller that only said "catalog registration failed" left the operator
@@ -700,12 +732,14 @@ def put_note(
         out.status, out.reason = UNCERTAIN, str(exc)
         out.unstamped = isinstance(exc, _UnstampedError)
         _fence_fail(doc, out.reason)
-        # No exc_info, like the NOT_LANDED line below: the CLI prints these warnings to the
-        # operator's terminal and the caller words the outcome itself. The cause chain keeps what
-        # the traceback carried for a reader of the log.
+        # No traceback for an anticipated failure, like the NOT_LANDED line below: the CLI prints
+        # these warnings to the operator's terminal and the caller words the outcome itself. The
+        # cause chain keeps what the traceback carried for a reader of the log. A failure nothing
+        # here expects (a TypeError settled as "in flight") keeps its stack.
         _log.warning(
             "store_put_manifest_verify_uncertain", doc_id=out.doc_id, catalog_doc_id=doc,
-            collection=collection, error=out.reason[:300], cause_chain=_cause_chain(exc))
+            collection=collection, error=out.reason[:300], cause_chain=_cause_chain(exc),
+            **_stack_unless_anticipated(exc))
         return out
     except NoteWriteError as exc:
         out.status, out.reason, out.refusal = NOT_LANDED, exc.reason, exc.refusal
@@ -741,6 +775,12 @@ def _sentence(text: str) -> str:
     return text if text.endswith((".", "!", "?")) else text + "."
 
 
+#: What put_note's own bookkeeping can leave even when no chunk or manifest row changed: it began the
+#: index-run fence before the refused write and failed it after, so a note that was complete before a
+#: re-put reads ``failed`` until a write succeeds (the content itself is untouched and readable).
+_FAILED_STATE = " If the note was stored before, its index state may read 'failed' until a write succeeds."
+
+
 def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -> str | None:
     """The one wording of a note write that did not store, or ``None`` when it stored.
 
@@ -757,12 +797,15 @@ def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -
     ====================================  ============================================================
     NO_CATALOG                            could not catalog, nothing written, and the cause
     NOT_LANDED, refused by the client     the client's own reason FIRST (it carries the remedy), then
-                                          that nothing was sent and nothing changed, and to run it
-                                          again once fixed. Never "retry is safe" (a retry fails the
-                                          same way until the operator acts), "no chunk was left
-                                          behind" or "could not catalog"
-    NOT_LANDED, connection never made     could not store; the engine could not be reached, nothing was
-                                          sent and nothing changed; retry once it is running
+                                          that the note was not written and its chunks and manifest are
+                                          unchanged, and to run it again once fixed, and that a note
+                                          stored before may read index state 'failed' until a write
+                                          succeeds. Never "retry is safe" (a retry fails the same way
+                                          until the operator acts), "no chunk was left behind" or
+                                          "could not catalog"
+    NOT_LANDED, connection never made     could not store; the engine could not be reached, the note was
+                                          not written and its chunks and manifest are unchanged (same
+                                          index-state sentence); retry once it is running
     NOT_LANDED, refused by the engine     could not store; not stored, no chunk left behind, earlier
                                           version unchanged, metadata-refresh qualifier, retry is safe
     UNCERTAIN, in flight                  could not confirm it landed; nothing rolled back; may already
@@ -788,12 +831,13 @@ def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -
     if outcome.status == NOT_LANDED:
         if outcome.refusal == REFUSED_BY_CLIENT:
             return (
-                f"{_sentence(reason)} Nothing was sent to the engine and nothing changed; run the "
-                "command again once that is fixed.")
+                f"{_sentence(reason)} The note was not written and its chunks and manifest are "
+                f"unchanged; run the command again once that is fixed.{_FAILED_STATE}")
         if outcome.refusal == REFUSED_UNREACHABLE:
             return (
                 f"could not store {subject} in {col}: {reason}. The engine could not be reached, so "
-                "nothing was sent and nothing changed; retry once it is running.")
+                f"the note was not written and its chunks and manifest are unchanged; retry once it is "
+                f"running.{_FAILED_STATE}")
         return (
             f"could not store {subject} in {col}: {reason}. The note was not stored: its chunks and "
             "its catalog entry go in one request, so no chunk was left behind and any earlier version "
@@ -807,9 +851,9 @@ def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -
                 "Nothing was rolled back; a retry is an idempotent re-write.")
         if outcome.unstamped:
             return (
-                f"wrote {doc_id} to {col}, but the document was not stamped complete ({reason}). "
+                f"wrote {doc_id} to {col}, but the document was not stamped complete. "
                 "Nothing was rolled back; a retry is an idempotent re-write.")
-        look = f"check with {check}" if check else "check"
+        look = f"check with {check}" if check else "look for the note in the store"
         return (
             f"could not confirm that {subject} landed in {col}: {reason}. Nothing was rolled back: the "
             f"write may already have succeeded; {look} before retrying (a retry is an idempotent "

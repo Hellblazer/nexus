@@ -111,7 +111,7 @@ class TestClassifyClientSideRefusals:
     ])
     def test_an_in_flight_node_beats_a_registration_node_in_either_order(self, name, in_flight):
         """A dropped request followed by a refused re-registration (or the reverse) is one request that
-        may have reached the engine. The registration node must not turn it into 'nothing was sent'."""
+        may have reached the engine. The registration node must not turn it into 'unsent'."""
         refusal = _client_refusals()[name]
         assert _classify(_chained(in_flight(), refusal)) == "in-flight"
         assert _classify(_chained(refusal, in_flight())) == "in-flight"
@@ -226,6 +226,45 @@ class TestOutcomeLogLines:
         assert "RemoteProtocolError" in event["cause_chain"]
         assert "ConnectError" in event["cause_chain"]
 
+    def test_an_uncertain_outcome_from_an_unexpected_exception_keeps_its_stack(self, engine):
+        """A TypeError from signature drift settles as 'in flight' like any unrecognised exception.
+        Its warning must stay diagnosable in production (MCP store_put), so it keeps the traceback
+        while the same outcome from a transport error does not."""
+        with patch("nexus.catalog.note_write.write_one_request", side_effect=TypeError("unexpected kwarg")), \
+                capture_logs() as logs:
+            out = put_note(content="z0o2p landing log bug", collection=_COLLECTION, title="z0o2p-landing-log-bug")
+        assert out.status == UNCERTAIN
+        (event,) = self._events(logs, "store_put_manifest_verify_uncertain")
+        assert event["exc_info"] is True
+        assert "TypeError" in event["cause_chain"]
+
+    @pytest.mark.parametrize("exc,expect_stack", [
+        pytest.param(lambda: RuntimeError("catalog bug"), True, id="unexpected"),
+        pytest.param(lambda: httpx.ConnectError("refused"), False, id="transport"),
+        pytest.param(lambda: _status_error(503), False, id="engine-5xx"),
+    ])
+    def test_a_registration_failure_keeps_its_stack_only_when_unexpected(self, exc, expect_stack, engine):
+        """The NO_CATALOG path logs from catalog_store_hook_tracked, which swallows the exception."""
+        with patch("nexus.catalog.factory.make_catalog_reader", side_effect=exc()), capture_logs() as logs:
+            out = put_note(content="z0o2p landing log reg", collection=_COLLECTION, title="z0o2p-landing-log-reg")
+        assert out.status == NO_CATALOG
+        (event,) = self._events(logs, "catalog_store_hook_failed")
+        assert bool(event.get("exc_info")) is expect_stack
+
+    @pytest.mark.parametrize("exc,expect_stack", [
+        pytest.param(lambda: TypeError("drift"), True, id="unexpected"),
+        pytest.param(lambda: httpx.ConnectError("refused"), False, id="transport"),
+    ])
+    def test_a_registration_that_raises_out_of_the_hook_keeps_its_stack_only_when_unexpected(
+        self, exc, expect_stack, engine,
+    ):
+        with patch("nexus.catalog.store_hook.catalog_store_hook_tracked", side_effect=exc()), \
+                capture_logs() as logs:
+            out = put_note(content="z0o2p landing log raise", collection=_COLLECTION, title="z0o2p-landing-log-raise")
+        assert out.status == NO_CATALOG
+        (event,) = self._events(logs, "catalog_store_hook_failed")
+        assert bool(event.get("exc_info")) is expect_stack
+
     def test_a_stamp_refusal_warning_has_no_traceback_either(self, engine):
         with patch("nexus.catalog.note_write.write_note", side_effect=nw.StampRefusedError("refused", detail="409")), \
                 capture_logs() as logs:
@@ -279,20 +318,22 @@ _TABLE = [
         ["could not store notes.md in " + _COLLECTION, "failed_doc_ids", "The note was not stored",
          "no chunk was left behind", "any earlier version of the note is unchanged",
          "chunks whose text was already stored may have had their metadata refreshed", "retry is safe"],
-        ["could not catalog", "Nothing was sent"],
+        ["could not catalog", "not written and its chunks and manifest are unchanged", "index state"],
         id="not-landed-engine"),
     pytest.param(
         _outcome(NOT_LANDED, reason="connection refused", refusal="unreachable"),
         ["could not store notes.md in " + _COLLECTION, "connection refused", "could not be reached",
-         "nothing was sent and nothing changed", "retry once it is running"],
+         "the note was not written and its chunks and manifest are unchanged", "retry once it is running",
+         "its index state may read 'failed' until a write succeeds"],
         ["metadata refreshed", "no chunk was left behind", "could not catalog"],
         id="not-landed-unreachable"),
     pytest.param(
         _outcome(NOT_LANDED, reason="collection 'knowledge__old__v1' was superseded by 'knowledge__new__v2', so "
                                     "a write to it is refused. Write to 'knowledge__new__v2' instead.",
                  refusal="client"),
-        ["Write to 'knowledge__new__v2' instead.", "Nothing was sent to the engine and nothing changed",
-         "run the command again once that is fixed"],
+        ["Write to 'knowledge__new__v2' instead.",
+         "The note was not written and its chunks and manifest are unchanged",
+         "run the command again once that is fixed", "its index state may read 'failed' until a write succeeds"],
         ["retry is safe", "no chunk was left behind", "could not catalog", "metadata refreshed",
          "could not store"],
         id="not-landed-client-refusal"),
@@ -310,8 +351,7 @@ _TABLE = [
         id="uncertain-stamp-refused"),
     pytest.param(
         _outcome(UNCERTAIN, reason="note 1.2.3 in c landed but was not stamped complete", unstamped=True),
-        ["wrote " + _chash("alpha"), "was not stamped complete", "Nothing was rolled back",
-         "idempotent re-write"],
+        ["wrote " + _chash("alpha"), "Nothing was rolled back", "idempotent re-write"],
         ["Stored", "could not confirm", "catalog manifest landed", "may already have succeeded"],
         id="uncertain-landed-but-unstamped"),
 ]
@@ -350,6 +390,28 @@ class TestFailureMessageTable:
         for refusal, expected in (("engine", True), ("client", False), ("unreachable", False)):
             msg = failure_message(_outcome(NOT_LANDED, reason="r", refusal=refusal), subject="s")
             assert (qualifier in msg) is expected, (refusal, msg)
+
+    def test_an_uncertain_message_without_a_check_hint_still_names_something_to_do(self):
+        msg = failure_message(_outcome(UNCERTAIN, reason="r"), subject="s")
+        assert "look for the note in the store before retrying" in msg
+        assert "check before" not in msg
+
+    def test_the_unstamped_message_says_it_once(self):
+        msg = failure_message(
+            _outcome(UNCERTAIN, reason="note 1.2.3 in c landed but was not stamped complete", unstamped=True),
+            subject="s")
+        assert msg.count("stamped complete") == 1, msg
+
+    def test_the_client_and_unreachable_rows_claim_only_what_is_true(self):
+        """put_note has already registered the catalog document and begun, then failed, the index-run
+        fence before it reports the refusal, and a re-put of a complete note leaves it reading
+        'failed'. Neither row may say that nothing was sent or that nothing changed."""
+        for refusal in ("client", "unreachable"):
+            msg = failure_message(_outcome(NOT_LANDED, reason="r", refusal=refusal), subject="s")
+            assert "chunks and manifest are unchanged" in msg, msg
+            assert "index state may read 'failed'" in msg, msg
+            for false_claim in ("nothing was sent", "Nothing was sent", "nothing changed"):
+                assert false_claim not in msg, (refusal, msg)
 
     def test_the_check_hint_is_the_surfaces_own(self):
         msg = failure_message(_outcome(UNCERTAIN, reason="r"), subject="s", check="store_get")
@@ -492,7 +554,7 @@ class TestMcpStorePut:
 
         assert result.startswith("Error: store_put: "), result
         assert str(refusal) in result
-        assert "Nothing was sent to the engine" in result
+        assert "The note was not written and its chunks and manifest are unchanged" in result
         for wrong in ("may already have succeeded", "retry is safe", "no chunk was left behind", "could not catalog"):
             assert wrong not in result, (wrong, result)
         assert "Stored" not in result

@@ -1206,7 +1206,11 @@ def catalog_store_hook_tracked(
         # nexus-ou4tb: the "" return is indistinguishable from "no tumbler
         # assigned", so at DEBUG this was a silent non-registration. WARNING +
         # audit row so nx doctor can say how many documents are affected.
-        _log.warning("catalog_store_hook_failed", exc_info=True)
+        # An anticipated failure (the catalog service down, a refused registration) prints no
+        # traceback; anything else keeps its stack (see note_write.is_anticipated_failure).
+        from nexus.catalog.note_write import _stack_unless_anticipated  # noqa: PLC0415 — deferred: note_write imports this module
+
+        _log.warning("catalog_store_hook_failed", **_stack_unless_anticipated(exc))
         if error_out is not None:
             error_out["error"] = f"{type(exc).__name__}: {exc}"
         from nexus.hook_registry import record_catalog_hook_failure  # noqa: PLC0415 — deferred, avoids an import cycle

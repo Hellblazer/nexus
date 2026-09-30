@@ -330,7 +330,7 @@ class TestEveryOutcomeLeavesTheT2EntryToTheOutcome:
         result = _promote(t2, local_t3, row_id, "--remove")
         assert result.exit_code == 1, result.output
         assert _error(result).startswith("Error: " + remedy[:40]), result.output
-        assert "Nothing was sent to the engine and nothing changed" in result.output
+        assert "The note was not written and its chunks and manifest are unchanged" in result.output
         assert "The T2 entry was left in place, even with --remove." in result.output
         for wrong in ("retry is safe", "no chunk was left behind", "could not catalog", "may already have succeeded"):
             assert wrong not in result.output, (wrong, result.output)

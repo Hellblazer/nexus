@@ -315,9 +315,9 @@ class TestClientDeath:
         assert result.exit_code != 0, result.output
         assert "Stored:" not in result.output
         assert "may already have succeeded" not in result.output, result.output
-        # A client-side refusal leads with its own remedy and says nothing was sent. It is not "retry
+        # A client-side refusal leads with its own remedy and says the note was not written. It is not "retry
         # is safe" (a retry fails the same way until the operator acts) and not "could not catalog".
-        assert "Nothing was sent to the engine and nothing changed" in result.output, result.output
+        assert "The note was not written and its chunks and manifest are unchanged" in result.output, result.output
         for wrong in ("retry is safe", "no chunk was left behind", "could not catalog"):
             assert wrong not in result.output, (wrong, result.output)
         chashes = [_chash(p) for p in note_pieces(content, col)]
@@ -354,7 +354,7 @@ class TestOutcomeMessages:
             id="not-landed-engine"),
         pytest.param(
             _outcome(NOT_LANDED, reason="Set a key with `nx config set voyage_api_key`.", refusal="client"),
-            ["Set a key with `nx config set voyage_api_key`.", "Nothing was sent to the engine"],
+            ["Set a key with `nx config set voyage_api_key`.", "The note was not written and its chunks and manifest are unchanged"],
             ["Stored:", "retry is safe", "no chunk was left behind", "could not catalog", "metadata refreshed"],
             id="not-landed-client"),
         pytest.param(
@@ -512,7 +512,7 @@ class TestARealEngineRefusalLeavesTheOldManifest:
         assert "could not store" in second.output and "failed_doc_ids" in second.output, second.output
         assert "The note was not stored" in second.output
         assert "metadata refreshed" in second.output, "the engine received the request, so the qualifier can be true"
-        assert "Nothing was sent to the engine" not in second.output
+        assert "The note was not written and its chunks and manifest are unchanged" not in second.output
         assert _manifest(doc) == old_manifest, "the engine's refusal must leave the old manifest as it was"
         assert _present(vec, old_chashes, col) == set(old_chashes)
         assert _present(vec, new_chashes, col) == set()

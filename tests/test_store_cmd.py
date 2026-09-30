@@ -297,7 +297,7 @@ def test_store_put_profile_refusal_is_a_clean_click_error(runner, mock_store, tm
     # nothing was sent; it never says "retry is safe" (a retry fails the same way until the
     # operator acts) or "could not catalog <source>" (the refusal has nothing to do with cataloging).
     assert result.output.rstrip().splitlines()[-1].startswith("Error: " + str(refusal)[:40]), result.output
-    assert "Nothing was sent to the engine and nothing changed" in result.output
+    assert "The note was not written and its chunks and manifest are unchanged" in result.output
     for wrong in ("may already have succeeded", "retry is safe", "no chunk was left behind",
                   "could not catalog"):
         assert wrong not in result.output, (wrong, result.output)

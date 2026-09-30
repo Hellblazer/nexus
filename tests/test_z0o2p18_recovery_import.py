@@ -396,7 +396,7 @@ def test_a_client_side_refusal_is_a_failed_note_that_leads_with_its_remedy(t3, t
     assert (summary.docs_imported, summary.docs_failed, summary.docs_uncertain) == (0, 1, 0)
     error = summary.doc_failures[0]["error"]
     assert error.startswith(remedy), error
-    assert "Nothing was sent to the engine and nothing changed" in error
+    assert "The note was not written and its chunks and manifest are unchanged" in error
     assert "retry is safe" not in error and "could not" not in error
     assert _docs("z0o2p18-keyless", _target(t3)) == []
 
