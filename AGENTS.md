@@ -399,21 +399,45 @@ things to avoid carefully; they are impossible.
    (a job past its time limit, for one) and reads `failed`, so rerun it.
    But GitHub also cancels the RUN when the timed-out job was its only real
    job (Service CI's Java job, twice on 2026-09-30, nexus-rjk2a), so the
-   run post cannot tell a timeout from a supersede; the board history can.
-   A job with an `in_progress` post before its `cancelled` post ran, and
-   reads `failed` (exit 1, its whole run with it) unless a run of the same
-   workflow for a different commit posted its first post between 180 s
-   before and 15 s after the cancellation (`SUPERSEDE_WINDOW_S`,
-   `CLOCK_SKEW_S`; a newer push cancelling an in-progress CI run was
-   measured 60 to 92 s ahead). A `cancelled` job that never started was
-   cancelled while pending and keeps reading `cancelled`. Two known
-   misreadings: a timeout within the window of an unrelated newer push
-   reads `cancelled` (the old reading), and a run cancelled by hand while
-   it ran reads `failed`. The rule needs the job's `in_progress` post to
-   still be on the board. A `cancelled` job whose run has no post at all,
-   and which never started, reads `cancelled` and exits 4, because the
-   fold cannot tell which it was: the run post is a separate delivery and
-   can be missing, so read the rows.
+   run post cannot tell a timeout from a supersede. The fold decides per
+   workflow, on the develop topic only (any other topic keeps the run-post
+   rule above). Service CI's `cancel-in-progress` is true for
+   `pull_request` only, so a newer push never cancels a started Service CI
+   run (it cancels a PENDING one, which has no job posts): a cancelled job
+   in a Service CI run that started reads `failed`, with its run, and no
+   clock is involved. A workflow whose push runs DO cancel in progress
+   (`PUSH_CANCELS_IN_PROGRESS` in `scripts/ci_status.py`: CI, CI commit
+   coverage audit, hellmini-probe, mac-signing-rehearsal,
+   pg-bundle-cache-seed, plugin drift ledger, plugin release; the lint test
+   `tests/scripts/test_ci_status_policy_lint.py` derives the set from the
+   workflow YAMLs and fails on disagreement) reads `cancelled` when a newer
+   run of that workflow exists (higher run id, other commit, first retained
+   post no later than the run's EARLIEST cancel post plus 30 s), and
+   `failed` when none does. No lower bound: a newer push cancels the old
+   run when it arrives, however long the runner then takes (0 to 92 s
+   measured, about 300 s allowed). "Started" means persistent evidence:
+   a cancelled job with an `in_progress` post, or another job of the same
+   run and attempt that completed with a conclusion other than `cancelled`
+   (Service CI's `service change detection`). Completed posts last three
+   days; `queued` and `in_progress` posts last six hours, so the reading
+   does not depend on them for Service CI. A run whose only cancelled row
+   is the RUN row, or whose cancelled jobs show no sign of having started,
+   was cancelled while pending and reads `cancelled`. Known misreadings,
+   all of them: (1) an in-set timeout within 30 s before an unrelated newer
+   push reads `cancelled`; (2) a run cancelled by hand after it started
+   reads `failed`, unless an in-set newer run began before the cancel;
+   (3) in-set, a newer run whose earliest retained post is `completed`
+   (its `queued` post expired) has an unknown start and counts as
+   excusing the cancel, so an in-set timeout older than six hours can read
+   `cancelled`; (4) a newer run dated by an `in_progress` post because its
+   `queued` post expired is dated later than it began; (5) a rerun attempt
+   cancelled when a newer run already exists reads `cancelled`, in-set;
+   (6) an in-set run cancelled while its jobs were still queued, with one
+   sibling job already complete, reads `failed` when no newer run is found,
+   because a sibling's completion shows the run started, not that the
+   cancelled job did; (7) a cancelled job with no run post and no sign it
+   started reads `cancelled` and exits 4, because the run post is a
+   separate delivery and can be missing.
    Subscribe once per session with
    `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
    delivery starts at the subscribe time, and the posts of one wait

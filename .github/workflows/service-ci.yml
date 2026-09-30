@@ -128,17 +128,25 @@ jobs:
     # integration step 11m30s). Runner variance is real: two trees differing
     # only in non-test files differed by 5.5 min in the suite step.
     #
-    # 60 = the surefire fork bound (45 min, service/pom.xml) + the measured
-    # integration-step maximum (11.5 min) + setup, rounded up. That is a
-    # STOPGAP sized from one afternoon of data, not a derived steady-state
-    # bound: the per-class timing step at the end of this job exists to replace
-    # it with one once a few runs of per-class data are in.
-    #
-    # What catches a HANG is the fork bound, not this line: a wedged suite fork
-    # dies at 45 min and fails the step with a surefire timeout message. This
-    # line only bounds the job as a whole (steps other than the forks, and the
-    # two forks together). It is a REQUIRED check on main and develop, so a
-    # timeout here blocks a merge.
+    # How the three bounds interact (the job bound is not a sum of the others):
+    #   - suite step: surefire kills a wedged fork at 45 min
+    #     (forkedProcessTimeoutInSeconds, service/pom.xml) and the step fails.
+    #     The integration step is then skipped, so a killed suite never adds
+    #     the integration time to the job. Setup before the suite is a few
+    #     minutes, so the job ends at about 50 min with a surefire timeout
+    #     message, before the 60-minute line below.
+    #   - integration step: it starts after a normal suite (about 22 min) and
+    #     has its own 45-minute fork bound, which would fire at about 70 min
+    #     into the job. The 60-minute job line fires first, about 35 min into
+    #     that step. So an integration-step hang is caught by THIS line, not
+    #     by the fork bound.
+    #   - 60 sits above the longest job measured (34m06s) with room for the
+    #     suite step to grow toward its fork bound, and above 45 min + setup so
+    #     that a wedged suite fork gets surefire's own message.
+    # It is a STOPGAP sized from one afternoon of data, not a derived
+    # steady-state bound: the per-class timing step at the end of this job
+    # exists to replace it with one once a few runs of per-class data are in.
+    # This is a REQUIRED check on main and develop, so a timeout blocks a merge.
     timeout-minutes: 60
 
     steps:

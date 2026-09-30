@@ -31,21 +31,57 @@ audit of a superseded commit reads conclusions, not verdicts). A
 job with no run post reads ``cancelled``, since the fold cannot tell which
 it was; the run post is a separate delivery and can be missing.
 
-GitHub also gives a job that hit its time limit the conclusion ``cancelled``,
-and cancels the run with it when that job was the run's only real one
-(nexus-rjk2a: Service CI's Java job, measured 2026-09-30, twice), so the
-run-post rule above cannot separate a timeout from a supersede. The board
-history can. A job that has an ``in_progress`` post before its ``cancelled``
-post ran; it reads ``failed`` unless a run of the same workflow for a
-different commit posted its first post within ``SUPERSEDE_WINDOW_S`` before
-the cancellation (a newer push cancelling an in-progress run, measured 60 to
-92 s ahead) or up to ``CLOCK_SKEW_S`` after it. A cancelled job that never
-started is a pending run cancelled, and keeps reading ``cancelled``. This
-reading can be wrong in two ways, both stated: a timeout that lands within
-the window of an unrelated newer push reads ``cancelled`` (as it did before),
-and a run someone cancelled by hand while it ran reads ``failed``. It needs
-the ``in_progress`` post to still be on the board; without it (posts expire)
-the older reading stands.
+A job that hit its time limit is the exception (nexus-rjk2a). GitHub gives it
+the conclusion ``cancelled`` too, and cancels the run with it when that job was
+the run's only real one (Service CI's Java job, twice on 2026-09-30), so the
+run-post rule above reads a timeout as a supersede. The fold separates them
+per WORKFLOW, because what can cancel a run that has started depends on the
+workflow's ``concurrency`` block:
+
+* A workflow NOT in ``PUSH_CANCELS_IN_PROGRESS`` (Service CI: its
+  ``cancel-in-progress`` is true for ``pull_request`` only) never has a started
+  push run cancelled by a newer push. Its pending runs are cancelled by a
+  newer push, but a pending run has no job posts. So a cancelled job in a run
+  that started is a time limit or a manual cancel, and the run reads
+  ``failed``. No clock is involved.
+* A workflow IN the set (CI, and the others the lint test derives from the
+  YAMLs) does cancel a started run when a newer push arrives. The run reads
+  ``cancelled`` (superseded) when a run of the same workflow for another
+  commit and a HIGHER run id has its first retained post no later than the
+  run's earliest cancel post plus ``SUPERSEDE_SKEW_S``. There is no lower
+  bound: a newer push cancels the old run when it arrives, however long the
+  cancellation then takes (measured 0 to 92 s, GitHub allows about 300 s).
+  Otherwise the run reads ``failed``.
+
+"Started" uses posts that persist (completed posts last 3 days, ``queued`` and
+``in_progress`` posts only 6 h): the cancelled job has an ``in_progress`` post,
+or another job of the same run and attempt completed with a conclusion other
+than ``cancelled``. A run with only a cancelled RUN row, or whose jobs all
+cancelled with no such evidence, was cancelled while pending and reads
+``cancelled``.
+
+The policy holds for the develop topic only (push runs). For any other topic
+the fold keeps the run-post rule above and reclassifies nothing.
+
+Known misreadings, all of them:
+
+1. A timeout of an in-set workflow's run that lands within ``SUPERSEDE_SKEW_S``
+   before an unrelated newer push reads ``cancelled``.
+2. A run cancelled by hand after it started reads ``failed``, in and out of
+   the set, unless a newer run of an in-set workflow began before the cancel.
+3. In-set, a newer run whose ``queued`` post has expired (6 h) and whose
+   earliest retained post is ``completed`` has an unknown start; it is treated
+   as excusing the cancel, so an in-set timeout older than 6 h can read
+   ``cancelled``. Out-of-set workflows do not depend on it.
+4. A newer run whose earliest retained post is ``in_progress`` (its ``queued``
+   post expired) is dated by that post, which can be later than its real start.
+5. A rerun attempt cancelled after a newer run already exists reads
+   ``cancelled`` (in-set), because the newer run's first post precedes it.
+6. An in-set run cancelled while pending, with a sibling job that completed,
+   reads ``failed`` unless a newer run is found: a sibling's completion says
+   the run started, not that the cancelled job did.
+7. A ``cancelled`` job with no run post at all and no evidence that it started
+   keeps ``cancelled``; the run post is a separate delivery and can be missing.
 
 Exit status: 0 when every job completed green, 1 when any job failed,
 2 when nothing failed but something is still pending, 3 when the topic has
@@ -61,7 +97,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable
 
 DEFAULT_TOPIC: str = "nexus-develop"
@@ -69,13 +105,25 @@ DEFAULT_TOPIC: str = "nexus-develop"
 GREEN: frozenset[str] = frozenset({"success", "skipped", "neutral"})
 _STATE_RANK: dict[str, int] = {"queued": 0, "in_progress": 1, "completed": 2}
 _PAGE: int = 200
-#: How long before a job's ``cancelled`` post a newer run of its workflow may have
-#: appeared for the cancellation to count as that run superseding it. Measured
-#: 2026-09-30 on run 36733252313: 60 to 92 s (the runner takes a while to stop).
-SUPERSEDE_WINDOW_S: int = 180
-#: Board deliveries can reorder by seconds; a newer run's first post this far AFTER
-#: the cancel post still counts as its cause.
-CLOCK_SKEW_S: int = 15
+#: Workflows (the ``name:`` of the YAML, which is the ``workflow`` field of a post)
+#: whose PUSH runs are cancelled in progress by a newer push: the ``push`` trigger
+#: is present and ``concurrency.cancel-in-progress`` evaluates true for a push
+#: event. ``tests/scripts/test_ci_status_policy_lint.py`` derives this set from
+#: ``.github/workflows/*.yml`` and fails when the two disagree.
+PUSH_CANCELS_IN_PROGRESS: frozenset[str] = frozenset({
+    "CI",
+    "CI commit coverage audit (nexus-of2x8)",
+    "hellmini-probe",
+    "mac-signing-rehearsal",
+    "pg-bundle-cache-seed",
+    "plugin drift ledger",
+    "plugin release",
+})
+#: A newer run's first retained post may trail the cancel post it caused by this
+#: much (board deliveries reorder). Measured 2026-09-30 over 45 in-set cancelled
+#: runs: the likely supersedes trail by 0 to 7 s; the next run of the same
+#: workflow after any other cancelled run is 302 s or more away.
+SUPERSEDE_SKEW_S: int = 30
 #: Exit codes, by precedence: a genuine red outranks a wait, which outranks a supersede.
 EXIT_GREEN: int = 0
 EXIT_FAILED: int = 1
@@ -147,33 +195,65 @@ def _when(ts: str) -> datetime | None:
         return None
 
 
-def _superseded_by_newer_run(
-    cancelled_at: str, workflow: str, sha: str, own_first: str | None,
-    run_first: dict[tuple[str, int], tuple[str, str]],
-) -> bool:
-    """True when a run of *workflow* for another commit began just before *cancelled_at*.
+@dataclass(frozen=True)
+class _RunStart:
+    """A run's earliest retained post: when, in which state, for which commit."""
+    at: datetime
+    state: str
+    sha: str
 
-    *run_first* maps (workflow, run) to that run's earliest post and its sha.
-    A run that began before this run's own first post is not newer. An
-    unparseable cancel time answers True: the caller then keeps the older
-    ``cancelled`` reading rather than call a run failed on a time it cannot read.
+
+def _superseded_by_newer_run(
+    cancelled_at: datetime, workflow: str, sha: str, own_run: int | None,
+    run_first: dict[tuple[str, int], _RunStart],
+) -> bool:
+    """True when a newer run of *workflow* for another commit explains a cancel.
+
+    Newer means a HIGHER run id: a rerun or a redelivered post of an older
+    run keeps its old id and cannot pose as newer, however late its post is.
+    When *own_run* is None the id cannot be compared and any other commit's
+    run qualifies. A newer run explains the cancel when its first retained
+    post is no later than *cancelled_at* plus ``SUPERSEDE_SKEW_S``, or when
+    that post is ``completed`` (its ``queued`` and ``in_progress`` posts have
+    expired, so its start cannot be placed and the older reading stands).
     """
-    cancelled = _when(cancelled_at)
-    own = _when(own_first) if own_first else None
-    if cancelled is None:
-        return True
-    for (wf, _run), (first_at, first_sha) in run_first.items():
-        if wf != workflow or first_sha == sha:
+    latest_start = cancelled_at + timedelta(seconds=SUPERSEDE_SKEW_S)
+    for (wf, rid), start in run_first.items():
+        if wf != workflow or start.sha == sha or (own_run is not None and rid <= own_run):
             continue
-        first = _when(first_at)
-        if first is None or (own is not None and first < own):
-            continue
-        if -CLOCK_SKEW_S <= (cancelled - first).total_seconds() <= SUPERSEDE_WINDOW_S:
+        if start.state == "completed" or start.at <= latest_start:
             return True
     return False
 
 
-def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) -> list[Status]:
+def _run_timed_out(
+    wf: str, sha: str, chosen_run: int | None,
+    latest: dict[tuple[str, int | None, str, int], tuple[str, str, str, str]],
+    newest_attempt: dict[tuple[str, str], int],
+    started: set[tuple[str, int | None, str, int]],
+    run_first: dict[tuple[str, int], _RunStart],
+) -> bool:
+    """True when the chosen run of *wf* was cancelled for want of anything superseding it."""
+    rows = [(k, v) for k, v in latest.items()
+            if k[0] == wf and (k[1] is None or k[1] == chosen_run) and k[3] == newest_attempt.get((wf, k[2]))]
+    cancelled = [(k, v) for k, v in rows if v[0] == "completed" and v[1] == "cancelled"]
+    jobs = [k for k, _v in cancelled if k[2]]
+    if not jobs:
+        return False  # only the run row: cancelled while pending
+    ran = any(k in started for k in jobs) or any(
+        k[2] and v[0] == "completed" and v[1] not in ("", "cancelled") for k, v in rows)
+    if not ran:
+        return False
+    if wf not in PUSH_CANCELS_IN_PROGRESS:
+        return True
+    times = [_when(v[3]) for _k, v in cancelled]
+    if any(t is None for t in times):
+        return False  # a time we cannot read: keep the older reading
+    return not _superseded_by_newer_run(min(times), wf, sha, chosen_run, run_first)  # type: ignore[type-var]
+
+
+def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str, *,
+         timeout_reading: bool = True) -> list[Status]:
     """Latest state per (workflow, job, attempt) of each workflow's chosen run for *sha*.
 
     *posts* are ``(created_at, body, dims)``. GitHub can start two runs of
@@ -198,17 +278,17 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
     # once its verdict is known, so no Status ever exists without one.
     latest: dict[tuple[str, int | None, str, int], tuple[str, str, str, str]] = {}
     started: set[tuple[str, int | None, str, int]] = set()
-    run_first: dict[tuple[str, int], tuple[str, str]] = {}
+    run_first: dict[tuple[str, int], _RunStart] = {}
     for created_at, body, dims in posts:
         if dims.get("from") != "github":
             continue
         state = str(body.get("state", ""))
         if state not in _STATE_RANK:
             continue
-        if (rid := _run_id(body)) is not None:
+        if (rid := _run_id(body)) is not None and (at := _when(created_at)) is not None:
             rk = (str(body.get("workflow", "")), rid)
-            if rk not in run_first or created_at < run_first[rk][0]:
-                run_first[rk] = (created_at, str(body.get("sha", "")))
+            if rk not in run_first or at < run_first[rk].at:
+                run_first[rk] = _RunStart(at, state, str(body.get("sha", "")))
         if body.get("sha") != sha:
             continue
         key = (str(body.get("workflow", "")), _run_id(body), str(body.get("job", "")),
@@ -229,18 +309,10 @@ def fold(posts: Iterable[tuple[str, dict[str, Any], dict[str, str]]], sha: str) 
         newest_attempt[(wf, job)] = max(attempt, newest_attempt.get((wf, job), 0))
     current = {k: v for k, v in in_run.items() if k[2] == newest_attempt[(k[0], k[1])]}
     run_conclusion = {wf: v[1] for (wf, job, _a), v in current.items() if job == "" and v[0] == "completed"}
-    # A job that ran and was then cancelled with no newer run of its workflow to
-    # blame hit its time limit (or was cancelled by hand): the run was not superseded.
-    for (wf, run, job, attempt), (state, conclusion, _url, cancelled_at) in latest.items():
-        if not (job and state == "completed" and conclusion == "cancelled"):
-            continue
-        if attempt != newest_attempt.get((wf, job)) or not (run is None or run == chosen.get(wf)):
-            continue
-        if (wf, run, job, attempt) not in started:
-            continue  # cancelled while pending: a supersede or a manual cancel, not a limit
-        own_first = run_first[(wf, run)][0] if run is not None else None
-        if not _superseded_by_newer_run(cancelled_at, wf, sha, own_first, run_first):
-            run_conclusion[wf] = "timed_out"
+    if timeout_reading:
+        for wf in {k[0] for k in current}:
+            if _run_timed_out(wf, sha, chosen.get(wf), latest, newest_attempt, started, run_first):
+                run_conclusion[wf] = "timed_out"
     return sorted(
         (Status(wf, job, attempt, state, conclusion, url, created_at,
                 _verdict(state, conclusion, run_conclusion.get(wf)))
@@ -337,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="print the folded status as JSON")
     args = ap.parse_args(argv)
 
-    statuses = fold(read_posts(args.topic), args.sha)
+    statuses = fold(read_posts(args.topic), args.sha, timeout_reading=args.topic == DEFAULT_TOPIC)
     code = exit_code(statuses)
     if args.json:
         print(json.dumps([s.__dict__ for s in statuses], indent=2))

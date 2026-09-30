@@ -68,3 +68,20 @@ def test_malformed_report_is_skipped_not_fatal(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "dev.nexus.Good" in out
     assert "unreadable" in out
+
+
+def test_a_non_numeric_time_is_skipped_not_fatal(tmp_path, capsys):
+    _suite(tmp_path, "dev.nexus.Good", "5")
+    _suite(tmp_path, "dev.nexus.Abc", "abc")
+    assert _mod.main([str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "dev.nexus.Good" in out
+    assert "unreadable report skipped: TEST-dev.nexus.Abc.xml" in out
+    assert "1 classes" in out
+
+
+def test_a_non_numeric_tests_count_is_skipped_not_fatal(tmp_path, capsys):
+    (tmp_path / "TEST-dev.nexus.Bad.xml").write_text(
+        '<testsuite name="dev.nexus.Bad" time="3" tests="x"/>', encoding="utf-8")
+    assert _mod.main([str(tmp_path)]) == 0
+    assert "no readable surefire reports" in capsys.readouterr().out
