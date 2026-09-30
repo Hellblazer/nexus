@@ -468,9 +468,9 @@ def _cross_process_lock() -> Iterator[bool]:
     primitive (:mod:`nexus._locking`) on a ``<name>.lock`` file beside the
     other config-dir locks; a holder that dies releases it with its fd."""
     from nexus._locking import lock_fd, unlock_fd  # noqa: PLC0415 — deferred; keeps cold CLI start cheap
-    from nexus.config import nexus_config_dir  # noqa: PLC0415 — deferred; same reason
+    import nexus.config as _config  # noqa: PLC0415 — deferred; same reason. Module attribute, never a by-value import (nexus-78blw)
 
-    directory = nexus_config_dir()
+    directory = _config.nexus_config_dir()
     directory.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(directory / "rdr192_manifest_backfill.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
     try:
