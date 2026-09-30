@@ -2589,11 +2589,13 @@ def _apply_combined_write_response(
 
 
 # nexus-4pj54: a REPLACE whose batch is not PROVABLY the whole document
-# (a streaming multi-batch upload's first batch legitimately carries
-# position 0 -- the position-0 gate above -- without being complete; see
-# doc_indexer.py's ``_index_pdf_incremental`` and pipeline_stages.py's
-# ``uploader_loop``, neither of which ever populates ``manifest_complete``
-# for the same reason) must not sweep its dropped chashes immediately --
+# (a multi-batch upload's first batch legitimately carries position 0 --
+# the position-0 gate above -- without being complete. The two PDF producers
+# that used to land here, doc_indexer.py's ``_index_pdf_incremental`` and
+# pipeline_stages.py's ``uploader_loop``, now write through the multi-batch
+# writer (RDR-223, nexus-z0o2p.11/.15), which sweeps after its last request
+# and never reaches this hook; the reasoning stands for any producer that
+# still does) must not sweep its dropped chashes immediately --
 # they may be rows a LATER batch in the same run is about to re-append.
 # Measured (T2 nexus/swept-count-streaming-reindex-2026-09-25): a 66-chunk
 # PDF re-index reported "swept 64" against 2 truly superseded chashes; 62
@@ -3166,13 +3168,11 @@ def _manifest_write_loop(cat, by_doc, collection: str, *, reader,
             # continuation slice, and replacing would DELETE its
             # earlier rows (silent manifest corruption). The flush-grain
             # producer (ChunkBatcher) is file-atomic so position 0 is
-            # always present there; the streaming PDF pipeline
-            # (pipeline_stages.uploader_loop) and doc_indexer's
-            # ``_index_pdf_incremental`` ALSO land here with position 0
-            # in their FIRST batch even though that batch is NOT the
-            # whole document (nexus-4pj54 correction — this comment
-            # previously assumed only a file-atomic producer could reach
-            # this branch). The CATALOG replace below is still correct
+            # always present there. A multi-batch producer that lands here
+            # carries position 0 in its FIRST batch even though that batch
+            # is NOT the whole document (nexus-4pj54 correction). The PDF
+            # producers that did so no longer reach this hook: they write
+            # through the multi-batch writer (RDR-223). The CATALOG replace below is still correct
             # for a partial-first-batch producer (later batches append
             # onto it); what is NOT safe for one is treating the replace
             # as proof of completeness for the T3 SWEEP, which is why that

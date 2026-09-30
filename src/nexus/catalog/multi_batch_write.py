@@ -101,7 +101,12 @@ most once, and a caller that already failed the fence itself calls :meth:`mark_f
 ``with`` block does not fail it again.
 
 ONE WRITER PER DOCUMENT AT A TIME, and a writer is not thread-safe: there is no lock, on the
-document or in the writer. Two writers on one document interleave their manifests.
+document or in the writer. Two writers on one document interleave their manifests. The fence is a
+record of intent, not a lock, and it begins with the writer's FIRST request, which for a streaming
+caller is after extraction and the first chunk batch: what keeps two runs of one document apart is
+the caller's own claim (the streaming pipeline's row is refused while another run's heartbeat is
+fresh), not the catalog fence. No chunk is written outside the fence: the begin precedes the first
+data request.
 """
 from __future__ import annotations
 
