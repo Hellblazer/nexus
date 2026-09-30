@@ -178,6 +178,98 @@ public final class CombinedWriteService {
     public CombinedWriteResult writeManyCombined(String tenant, String collection,
             List<Map<String, Object>> chunks, List<Map<String, Object>> docs,
             Map<String, String> complete, boolean sweep, boolean forceReEmbed) {
+        ResolvedBatch batch = resolveChunks(tenant, collection, chunks, forceReEmbed);
+
+        // Phase 3: dispatch — every actual WRITE happens inside this call,
+        // one per-doc transaction at a time.
+        Map<String, Object> response =
+            catalogRepo.writeManifestMany(tenant, docs, collection, complete, sweep, batch.resolved());
+        // nexus-acvi7: merge the embed-partition counts into the SAME
+        // response envelope `chunks_written` already rides — this is the
+        // right seam (CatalogRepository.writeManifestMany's map, built at
+        // CatalogRepository.java ~:4297-4326, knows nothing about the
+        // embed phase; only CombinedWriteService does) rather than a
+        // parallel channel. Additive keys: a 7.5.0 client
+        // (http_catalog_client.py's write_manifest_many) reads only
+        // named keys out of this map and silently ignores unknown ones,
+        // so this is backward compatible with every client in the field
+        // (verified: `out = {failed_doc_ids, complete_refused, ...}` is
+        // built by explicit key extraction, never `dict(result)`).
+        // Always present on this path (writeManyCombined is ONLY invoked
+        // by CatalogHandler when the request actually carried `chunks` —
+        // see CatalogHandler.handleManifestWriteMany's `rawChunks != null`
+        // branch — so these three counts are never misleadingly absent
+        // the way `chunks_written` is on the non-combined path).
+        response.put("chunks_deduped", batch.deduped());
+        response.put("embed_skipped", batch.skipped());
+        response.put("embed_embedded", batch.embedded());
+        return new CombinedWriteResult(response, batch.tokens());
+    }
+
+    /**
+     * RDR-223 P1.1 (bead nexus-z0o2p.2) — append WITH chunks: resolves {@code chunks}
+     * through the SAME dedupe / existence-partition (RDR-181) / embed phases {@link
+     * #writeManyCombined} runs (outside any transaction), then hands the resolved
+     * tuples to {@link CatalogRepository#appendManifestChunks(String, String, String,
+     * List, Map, List[])}, which inserts them in the append's own transaction after
+     * the index-run lock. The raced-embed counter (RDR-222) counts on this path
+     * because it shares the partition and the repository's chunk upsert.
+     *
+     * <p>Only chunks the request's own {@code rows} reference are resolved: an
+     * unreferenced chunk would be embedded for nothing (the repository inserts only
+     * referenced chashes) and its metadata-only refresh would touch a chunk the
+     * request does not own. The document is checked BEFORE the embed, so an unknown
+     * {@code doc_id} costs no embedder call; the in-transaction check stays
+     * authoritative.
+     *
+     * @param rows manifest rows to upsert by position (may be empty)
+     * @param chunks the request's {@code chunks} array, each {@code {chash, text, metadata}}
+     * @return {@code {ok, count, chunks_written, chunks_deduped, embed_skipped,
+     *         embed_embedded}} plus the embed token usage
+     */
+    public CombinedWriteResult appendCombined(String tenant, String collection, String docId,
+            List<Map<String, Object>> rows, List<Map<String, Object>> chunks, boolean forceReEmbed) {
+        if (docId == null || docId.isBlank()) {
+            throw new IllegalArgumentException("'doc_id' required");
+        }
+        catalogRepo.requireDocumentRegistered(tenant, docId);
+
+        java.util.Set<String> referenced = new HashSet<>();
+        for (Map<String, Object> r : rows) {
+            Object c = r.get("chash");
+            if (c instanceof String s) referenced.add(s);
+        }
+        List<Map<String, Object>> relevant = new ArrayList<>();
+        for (Map<String, Object> c : chunks != null ? chunks : List.<Map<String, Object>>of()) {
+            // A non-string chash is kept so resolveChunks rejects it loudly.
+            if (!(c.get("chash") instanceof String s) || referenced.contains(s)) relevant.add(c);
+        }
+
+        ResolvedBatch batch = resolveChunks(tenant, collection, relevant, forceReEmbed);
+        int written = catalogRepo.appendManifestChunks(
+            tenant, docId, collection, rows, batch.resolved(), null);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("ok", true);
+        response.put("count", rows.size());
+        response.put("chunks_written", written);
+        response.put("chunks_deduped", batch.deduped());
+        response.put("embed_skipped", batch.skipped());
+        response.put("embed_embedded", batch.embedded());
+        return new CombinedWriteResult(response, batch.tokens());
+    }
+
+    /** Output of the dedupe / existence-partition / embed phases. */
+    private record ResolvedBatch(Map<String, CatalogRepository.ResolvedChunk> resolved,
+                                 int deduped, int skipped, int embedded, long tokens) {}
+
+    /**
+     * Phases 1-2b, shared by {@link #writeManyCombined} and {@link #appendCombined}:
+     * dedupe by chash, existence-partition (with the metadata-only refresh), and
+     * embed the rest, all OUTSIDE any manifest transaction.
+     */
+    private ResolvedBatch resolveChunks(String tenant, String collection,
+            List<Map<String, Object>> chunks, boolean forceReEmbed) {
         if (collection == null || collection.isBlank()) {
             throw new IllegalArgumentException("'collection' is required and must be non-blank");
         }
@@ -403,30 +495,8 @@ public final class CombinedWriteService {
                     originalAbsentIdx.contains(idx)));
         }
 
-        // Phase 3: dispatch — every actual WRITE happens inside this call,
-        // one per-doc transaction at a time.
-        Map<String, Object> response =
-            catalogRepo.writeManifestMany(tenant, docs, collection, complete, sweep, resolved);
-        // nexus-acvi7: merge the embed-partition counts into the SAME
-        // response envelope `chunks_written` already rides — this is the
-        // right seam (CatalogRepository.writeManifestMany's map, built at
-        // CatalogRepository.java ~:4297-4326, knows nothing about the
-        // embed phase; only CombinedWriteService does) rather than a
-        // parallel channel. Additive keys: a 7.5.0 client
-        // (http_catalog_client.py's write_manifest_many) reads only
-        // named keys out of this map and silently ignores unknown ones,
-        // so this is backward compatible with every client in the field
-        // (verified: `out = {failed_doc_ids, complete_refused, ...}` is
-        // built by explicit key extraction, never `dict(result)`).
-        // Always present on this path (writeManyCombined is ONLY invoked
-        // by CatalogHandler when the request actually carried `chunks` —
-        // see CatalogHandler.handleManifestWriteMany's `rawChunks != null`
-        // branch — so these three counts are never misleadingly absent
-        // the way `chunks_written` is on the non-combined path).
-        response.put("chunks_deduped", dedupChashes.size());
-        response.put("embed_skipped", skippedCount);
-        response.put("embed_embedded", embeddedCount);
-        return new CombinedWriteResult(response, embedResult.tokens());
+        return new ResolvedBatch(resolved, dedupChashes.size(), skippedCount, embeddedCount,
+            embedResult.tokens());
     }
 
     /**

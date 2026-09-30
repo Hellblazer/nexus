@@ -1101,7 +1101,21 @@ public final class CatalogHandler implements HttpHandler {
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
     }
 
-    /** POST /v1/catalog/manifest/append */
+    /**
+     * POST /v1/catalog/manifest/append
+     *
+     * <p>RDR-223 P1.1 (bead nexus-z0o2p.2): optional {@code "chunks": [{"chash",
+     * "text", "metadata"}, ...]}, the same element shape as {@code write_many}'s.
+     * When present, the chunk rows the appended {@code rows} reference land in the
+     * SAME transaction as those rows (via {@link dev.nexus.service.db.CombinedWriteService#appendCombined}),
+     * embedded under the RDR-181 existence partition. The response then also carries
+     * {@code chunks_written}, {@code chunks_deduped}, {@code embed_skipped} and
+     * {@code embed_embedded}; the presence of {@code chunks_written} is a client's
+     * only runtime signal that this engine understood {@code chunks} (an old engine
+     * silently drops the unknown field). Optional {@code "force_re_embed"} mirrors
+     * {@code write_many}. 503 when no {@code CombinedWriteService} is wired. Absent
+     * {@code chunks} is byte-for-byte the pre-RDR-223 path and response.
+     */
     private void handleManifestAppend(HttpExchange exchange, String tenant, String method) throws IOException {
         if (!"POST".equals(method)) { HttpUtil.send(exchange, 405, "{\"error\":\"method not allowed\"}"); return; }
         Map<String, Object> body = readBody(exchange);
@@ -1113,8 +1127,56 @@ public final class CatalogHandler implements HttpHandler {
         if (collection == null) return;
         List<Map<String, Object>> rows = strictRows(body.get("rows"));
         requireCanonicalChashes(rows);
+        Object rawChunks = body.get("chunks");
+        if (rawChunks != null) {
+            if (combinedWriteService == null) {
+                HttpUtil.send(exchange, 503, "{\"error\":\"combined write not configured"
+                    + " (no CombinedWriteService)\"}");
+                return;
+            }
+            List<Map<String, Object>> chunks = parseChunks(rawChunks);
+            boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
+            var combined = combinedWriteService.appendCombined(
+                tenant, collection, docId, rows, chunks, forceReEmbed);
+            if (combined.tokens() > 0) {
+                exchange.getResponseHeaders().set(
+                    VectorHandler.USAGE_TOKENS_HEADER, Long.toString(combined.tokens()));
+            }
+            HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(combined.response()));
+            return;
+        }
         repo.appendManifestChunks(tenant, docId, collection, rows);
         HttpUtil.send(exchange, 200, "{\"ok\":true,\"count\":" + rows.size() + "}");
+    }
+
+    /**
+     * Validates and normalizes a combined-write {@code chunks} payload (RDR-223:
+     * shared by {@code write_many} and {@code append}): a list of objects, each
+     * with a canonical 64-hex {@code chash} and a string {@code text}. Throws
+     * {@link IllegalArgumentException} (mapped to 400 by the dispatcher) naming the
+     * offending element.
+     */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> parseChunks(Object rawChunks) {
+        if (!(rawChunks instanceof List<?> cl)) {
+            throw new IllegalArgumentException("'chunks' must be a list");
+        }
+        List<Map<String, Object>> chunks = new ArrayList<>(cl.size());
+        for (int i = 0; i < cl.size(); i++) {
+            if (!(cl.get(i) instanceof Map)) {
+                throw new IllegalArgumentException("chunks[" + i + "]: every element must be an object");
+            }
+            Map<String, Object> chunk = new LinkedHashMap<>((Map<String, Object>) cl.get(i));
+            if (!(chunk.get("chash") instanceof String chashStr)) {
+                throw new IllegalArgumentException("chunks[" + i + "]: 'chash' required (string)");
+            }
+            chunk.put("chash", dev.nexus.service.db.Chash.requireCanonical(chashStr, "chunks[" + i + "]"));
+            if (!(chunk.get("text") instanceof String)) {
+                throw new IllegalArgumentException("chunks[" + i + "]: 'text' required (string)");
+            }
+            chunks.add(chunk);
+        }
+        return chunks;
     }
 
     /**
@@ -1233,34 +1295,8 @@ public final class CatalogHandler implements HttpHandler {
                     + " (no CombinedWriteService)\"}");
                 return;
             }
-            if (!(rawChunks instanceof List<?> cl)) {
-                HttpUtil.send(exchange, 400, "{\"error\":\"'chunks' must be a list\"}"); return;
-            }
             // 'collection' already validated above (required unconditionally).
-            List<Map<String, Object>> chunks = new ArrayList<>(cl.size());
-            for (int i = 0; i < cl.size(); i++) {
-                if (!(cl.get(i) instanceof Map)) {
-                    HttpUtil.send(exchange, 400,
-                        "{\"error\":\"chunks[" + i + "]: every element must be an object\"}"); return;
-                }
-                Map<String, Object> chunk = new LinkedHashMap<>((Map<String, Object>) cl.get(i));
-                Object chashObj = chunk.get("chash");
-                if (!(chashObj instanceof String chashStr)) {
-                    HttpUtil.send(exchange, 400,
-                        "{\"error\":\"chunks[" + i + "]: 'chash' required (string)\"}"); return;
-                }
-                try {
-                    chunk.put("chash", dev.nexus.service.db.Chash.requireCanonical(chashStr, "chunks[" + i + "]"));
-                } catch (IllegalArgumentException e) {
-                    HttpUtil.send(exchange, 400,
-                        "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}"); return;
-                }
-                if (!(chunk.get("text") instanceof String)) {
-                    HttpUtil.send(exchange, 400,
-                        "{\"error\":\"chunks[" + i + "]: 'text' required (string)\"}"); return;
-                }
-                chunks.add(chunk);
-            }
+            List<Map<String, Object>> chunks = parseChunks(rawChunks);
             boolean forceReEmbed = Boolean.TRUE.equals(body.get("force_re_embed"));
             var combined = combinedWriteService.writeManyCombined(
                 tenant, collection, chunks, docs, complete, sweep, forceReEmbed);

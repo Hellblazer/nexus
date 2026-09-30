@@ -6229,7 +6229,39 @@ public final class CatalogRepository {
      *                   stamps it verbatim; it never infers one.
      */
     public void appendManifestChunks(String tenant, String docId, String collection, List<Map<String, Object>> rows) {
+        appendManifestChunks(tenant, docId, collection, rows, null, null);
+    }
+
+    /**
+     * RDR-223 P1.1 (bead nexus-z0o2p.2) — append WITH chunks: the chunk VECTOR
+     * rows the appended manifest rows reference land in {@code nexus.chunks} in
+     * THIS SAME transaction, so an append can never leave a chunk without an
+     * owner row. Same lock order as {@link #writeManifestRows} (document check,
+     * sweep gate SHARED, index-run lock, THEN the chunk upsert, THEN the rows —
+     * RDR-223 F-2/F-3): no new lock and no new ordering.
+     *
+     * <p>{@code resolvedChunks} MUST already be fully resolved (embedded,
+     * NUL-sanitized, existence-partitioned per RDR-181) by {@code
+     * CombinedWriteService}, entirely OUTSIDE any transaction, exactly as for
+     * {@link #writeManifestMany(String, List, String, Map, boolean, Map)}. Only
+     * chashes this request's own {@code rows} reference are inserted; a row
+     * chash absent from {@code resolvedChunks} must already exist or the whole
+     * append fails loud and rolls back. {@code null} means "no chunks" —
+     * byte-for-byte the pre-RDR-223 behaviour.
+     *
+     * @param resolvedChunks pre-resolved {@code chash -> ResolvedChunk}, or {@code null}
+     * @param writtenChashesOut optional single-cell output: the chashes this call
+     *        wrote to {@code nexus.chunks}, set inside the transaction, so a caller
+     *        reads it only after this method returns normally. Untouched when
+     *        {@code resolvedChunks} is null.
+     * @return the count of chunk rows actually written (0 when {@code resolvedChunks} is null)
+     */
+    public int appendManifestChunks(String tenant, String docId, String collection,
+                                    List<Map<String, Object>> rows,
+                                    Map<String, ResolvedChunk> resolvedChunks,
+                                    List<String>[] writtenChashesOut) {
         requireNonBlank(collection, "collection");
+        int[] chunksWritten = new int[1];
         tenantScope.withTenant(tenant, ctx -> {
             // Case-1 duty only (RDR-191): does docId exist at all? A ghost
             // document is no longer a special case -- its rows are stamped
@@ -6245,6 +6277,17 @@ public final class CatalogRepository {
             // acquireIndexRunLock's javadoc) — this was the one mutation path
             // left outside the lock when it landed.
             acquireIndexRunLock(ctx, tenant, docId);
+            // RDR-223 P1.1: the chunk-vector UPSERT runs AFTER the index-run
+            // lock and BEFORE the manifest rows, in this same transaction --
+            // writeManifestRows' order exactly (RDR-223 F-2). The raced-embed
+            // counter (RDR-222) counts here too: upsertManifestChunkVectors
+            // reads ResolvedChunk#originalAbsent. writtenThisRequest is empty:
+            // an append is one document, so no sibling doc of this request
+            // could explain an ON CONFLICT.
+            if (resolvedChunks != null) {
+                chunksWritten[0] = upsertManifestChunkVectors(ctx, tenant, collection, rows,
+                        resolvedChunks, Set.of(), writtenChashesOut);
+            }
             if (!rows.isEmpty()) {
                 stampIndexedAt(ctx, tenant, docId);
             }
@@ -6281,6 +6324,21 @@ public final class CatalogRepository {
                         "appendManifestChunks refused: document is tombstoned: " + docId);
                 }
             }
+            return null;
+        });
+        return chunksWritten[0];
+    }
+
+    /**
+     * RDR-223 P1.1 (bead nexus-z0o2p.2): fail with {@link DocumentNotFoundException}
+     * when {@code docId} has no {@code catalog_documents} row, in its own short
+     * transaction. A cheap PRE-check for a caller that would otherwise embed
+     * before the authoritative in-transaction check inside {@link
+     * #appendManifestChunks}; it spares the embed, it does not replace that check.
+     */
+    public void requireDocumentRegistered(String tenant, String docId) {
+        tenantScope.withTenant(tenant, ctx -> {
+            requireDocumentExists(ctx, tenant, docId);
             return null;
         });
     }
