@@ -90,7 +90,15 @@ import structlog
 
 from nexus.catalog.http_catalog_client import MANIFEST_APPEND_SWEEP_CHASHES_CAP
 from nexus.db.limits import QUOTAS
-from nexus.errors import IndexRunVerifyRefused, NexusError
+from nexus.errors import BatchWriteFailedError, IndexRunVerifyRefused
+
+__all__ = [
+    "BatchWriteFailedError",
+    "DocumentWriteResult",
+    "MultiBatchDocumentWriter",
+    "RepeatedPositionError",
+    "write_document",
+]
 
 _log = structlog.get_logger(__name__)
 
@@ -102,19 +110,6 @@ class RepeatedPositionError(ValueError):
     ``sweep_chashes`` (the drop list is computed from the pre-run manifest, not this run's earlier
     batches), so the writer refuses the batch before sending it.
     """
-
-
-class BatchWriteFailedError(NexusError):
-    """A batch of a multi-batch write did not land, or the engine's answer cannot be trusted.
-
-    Attributes: ``doc_id``, ``batch`` (1-based index of the request or step that failed).
-    """
-
-    def __init__(self, *, doc_id: str, batch: int, reason: str) -> None:
-        self.doc_id = doc_id
-        self.batch = batch
-        self.reason = reason
-        super().__init__(f"multi-batch write of {doc_id!r} failed at batch {batch}: {reason}")
 
 
 @dataclass
