@@ -2892,6 +2892,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         UnchunkableContentError,
         CatalogIdentityMissingError,
     )
+    from nexus.pipeline_stages import PartialUploadResumeError  # noqa: PLC0415 — deferred: pipeline_stages pulls in the extractors
 
     # Local wrapper: convert the typed credential/identity errors into a
     # Click exception so the CLI shows a friendly message + exits non-zero
@@ -2926,9 +2927,14 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # IndexRunVerifyRefused, which needs _index_run_refused_
             # message's dedicated reformatting of its raw field dump).
             raise click.ClickException(str(e)) from e
+        except PartialUploadResumeError as e:
+            # RDR-223 invariant: the orchestrator discards a partially uploaded buffer before
+            # the uploader runs, so this is unreachable from index_pdf; map it anyway so a
+            # future path to it gets the message and a clean exit, not a traceback.
+            raise click.ClickException(str(e)) from e
         except IndexingError as e:
-            # nexus-w6wp0 review round (code-review-expert + substantive-
-            # critic, 2026-08-05): index_pdf's streaming return_metadata
+            # nexus-w6wp0 review round (code-review-expert + substantive-critic,
+            # 2026-08-05): index_pdf's streaming return_metadata
             # path can raise IndexingError (chunks written but the
             # metadata query found none) -- same nexus-2fyb translation
             # convention as the other typed errors above, so this new

@@ -127,6 +127,28 @@ def mock_t3() -> MagicMock:
     return m
 
 
+def _bound_the_polling(monkeypatch: pytest.MonkeyPatch, limit: int = 400) -> None:
+    """Turn a stage that polls forever into a failure. A run whose uploader waits for a count that
+    can never be reached has no exit; the pool's non-daemon threads would hang the whole pytest
+    process, so the poll sleep itself raises once it has been called *limit* times."""
+    import nexus.pipeline_stages as ps
+
+    calls = {"n": 0}
+    real = ps.time
+
+    class _BoundedTime:
+        def sleep(self, seconds: float) -> None:
+            calls["n"] += 1
+            if calls["n"] > limit:
+                raise AssertionError(f"a stage polled {limit} times without finishing: the run never ends")
+            real.sleep(seconds)
+
+        def __getattr__(self, name: str):
+            return getattr(real, name)
+
+    monkeypatch.setattr(ps, "time", _BoundedTime())
+
+
 def _pop_pages(db: HttpPipelineDB, h: str, n: int) -> None:
     db.create_pipeline(h, "/a.pdf", "docs__test")
     for i in range(n):
@@ -600,19 +622,27 @@ class TestUploaderLoop:
         s = db.get_pipeline_state("h1")
         assert s["chunks_uploaded"] == 6 and s["status"] == "completed"
 
-    def test_a_resume_that_finds_chunks_an_earlier_process_sent_and_more_to_send_fails(self, db, writer) -> None:
-        """nexus-6m9zy.1 (#3) was a crash-resume that added its uploads to the persisted count. With
-        one writer per document that resume is unsafe: the writer's state (the pre-run manifest
-        snapshot, the positions written) died with the process, and sending only the remaining
-        chunks would replace the manifest with that tail and sweep the head as superseded."""
+    @pytest.mark.parametrize("counter", [4, 0], ids=["counter-current", "counter-lagging"])
+    def test_a_writer_less_uploader_whose_first_chunk_is_not_the_first_refuses(
+        self, db, writer, counter, monkeypatch,
+    ) -> None:
+        """Internal invariant. nexus-6m9zy.1 (#3) was a crash-resume that added its uploads to the
+        persisted count. With one writer per document that resume is unsafe: the writer's state (the
+        pre-run manifest snapshot, the positions written) died with the process, and sending only
+        the remaining chunks would replace the manifest with that tail and sweep the head as
+        superseded. The orchestrator discards such a buffer before it gets here; an uploader that is
+        handed one anyway refuses to send. It reads the first chunk it would send, not the counter
+        (the counter is buffered and lags)."""
         from nexus.pipeline_stages import PartialUploadResumeError
 
+        _bound_the_polling(monkeypatch)
         _pop_chunks(db, "h1", 6)
         db.mark_uploaded("h1", [0, 1, 2, 3])  # run 1 uploaded 4 of 6, then died
-        db.update_progress("h1", chunks_uploaded=4)
+        if counter:
+            db.update_progress("h1", chunks_uploaded=counter)
         cd = threading.Event()
         cd.set()
-        with pytest.raises(PartialUploadResumeError, match="4 chunk"):
+        with pytest.raises(PartialUploadResumeError, match=r"chunk #4"):
             self._up(db, chunking_done=cd)
         assert writer.instances == [], "nothing was sent"
 
@@ -1003,6 +1033,9 @@ class TestPipelineIndexPdf:
         calls: list[tuple] = []
         monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: calls.append(("begin", a)))
         monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: calls.append(("complete", a)))
+        # The document's fence as the earlier run left it: begun for this content, never stamped.
+        # (The writer here is a recorder, so the real engine's fence was never begun.)
+        monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("indexing", "abc123"))
 
         def _run() -> int:
             with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
@@ -1018,38 +1051,58 @@ class TestPipelineIndexPdf:
         assert [c[0] for c in calls] == ["begin", "complete"]
         assert calls[1][1][1:] == ("abc123", 1)
 
-    def test_a_resume_after_a_killed_upload_clears_the_buffer_and_the_next_run_is_fresh(
-        self, db, mock_t3, writer,
+    @pytest.mark.parametrize("counter", [4, 0], ids=["counter-current", "counter-lagging"])
+    def test_a_resume_after_a_killed_upload_restarts_fresh_in_the_same_invocation(
+        self, db, mock_t3, writer, counter, monkeypatch,
     ) -> None:
         """An earlier process flagged 4 of 6 chunks uploaded and died with its writer's state. The
         resumed run must not send the other 2 alone (that would replace the manifest with a
-        fragment): it fails loud, clears the buffer, and the next run starts the document afresh."""
-        from nexus.pipeline_stages import PartialUploadResumeError
+        fragment and sweep the head as superseded): it discards the buffer and re-runs the document
+        from scratch in this same invocation, with no failed run in between.
 
+        ``counter=0`` is the kill that lands after the flag and before the buffered progress counter
+        flushed (the counter lags by up to a poll interval): the rows say 4 chunks went out, the
+        counter says none. The decision reads the rows."""
+        _bound_the_polling(monkeypatch)
+        _pop_chunks(db, "h1", 6)
+        db.mark_uploaded("h1", [0, 1, 2, 3])
+        if counter:
+            db.update_progress("h1", chunks_uploaded=counter)
+        db.mark_failed("h1", error="killed")
+        six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
+
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(3)
+            MC.return_value.chunk.return_value = six
+            n = pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+                                   db=db, embed_fn=_embed, corpus="test")
+
+        assert n == 6
+        (w,) = writer.instances
+        assert sum(len(r) for r, _ in w.batches) == 6, "the whole document went through one writer"
+        assert [r["position"] for rows, _ in w.batches for r in rows] == list(range(6)), \
+            "never a tail alone: positions start at 0"
+        assert db.get_pipeline_state("h1") is None, "the run finished and cleaned up its buffer"
+
+    def test_a_resume_of_a_dry_run_leaves_the_buffer_alone(self, db, mock_t3) -> None:
+        """A dry run writes no catalog and sends no request, so a partial buffer is no hazard to it
+        and it must not wipe a real run's extraction work."""
         _pop_chunks(db, "h1", 6)
         db.mark_uploaded("h1", [0, 1, 2, 3])
         db.update_progress("h1", chunks_uploaded=4)
         db.mark_failed("h1", error="killed")
+        cleared: list[str] = []
+        real_clear = db.clear_orphan_wal
+        db.clear_orphan_wal = lambda ch: (cleared.append(ch), real_clear(ch))  # type: ignore[method-assign]
         six = _tc(*[(f"chunk {i} text", i, {"page_number": 1}) for i in range(6)])
 
-        def _run() -> int:
-            with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
-                ME.return_value.extract.side_effect = _fx(3)
-                MC.return_value.chunk.return_value = six
-                return pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
-                                          db=db, embed_fn=_embed, corpus="test")
+        with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
+            ME.return_value.extract.side_effect = _fx(3)
+            MC.return_value.chunk.return_value = six
+            pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+                               db=db, embed_fn=_embed, corpus="test", dry_run=True)
 
-        with pytest.raises(PartialUploadResumeError):
-            _run()
-        assert writer.instances == [], "nothing was sent"
-        state = db.get_pipeline_state("h1")
-        assert state["status"] == "failed" and state["chunks_uploaded"] == 0
-        assert db.read_ready_chunks("h1") == [], "the buffer was cleared"
-
-        assert _run() == 6
-        (w,) = writer.instances
-        assert sum(len(r) for r, _ in w.batches) == 6, "the whole document went through one writer"
-        assert [r["position"] for rows, _ in w.batches for r in rows] == list(range(6))
+        assert cleared == []
 
     def test_resume_from_partial(self, db, mock_t3) -> None:
         db.create_pipeline("h1", "/a.pdf", "docs__test")

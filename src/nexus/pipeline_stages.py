@@ -508,15 +508,16 @@ def chunker_loop(
 
 
 class PartialUploadResumeError(RuntimeError):
-    """A resumed streaming run found chunks an earlier process had already sent, and more to send.
+    """An uploader with no writer was handed a buffer whose first chunk to send is not chunk 0.
 
-    The multi-batch writer keeps its state (the pre-run manifest snapshot, the positions and
-    chashes it wrote) in the process that runs it. A process killed part way through the upload
-    took that state with it; a resumed run that sent only the remaining chunks would replace the
-    document's manifest with that tail and sweep the head as superseded, and the completion
-    check would pass on the tail's row count. So the run fails instead, and the failure handler
-    clears the buffer: the next run starts the document afresh (the engine skips re-embedding
-    chunks it already holds).
+    An internal invariant, not a state the orchestrator lets a run reach. The multi-batch writer
+    keeps its state (the pre-run manifest snapshot, the positions and chashes it wrote) in the
+    process that runs it. A process killed part way through the upload took that state with it; a
+    writer started on the remaining chunks alone would replace the document's manifest with that
+    tail and sweep the head as superseded, and the completion check would pass on the tail's row
+    count. :func:`pipeline_index_pdf` therefore discards such a buffer before the stages start
+    (:func:`_reconcile_resumed_run`) and re-runs the document from scratch; an uploader that is
+    handed one anyway refuses to send.
     """
 
 
@@ -600,8 +601,9 @@ def uploader_loop(
 
     The writer holds the newest batch back until it knows whether it is the last, so a chunk is
     flagged uploaded in the buffer only once its request was sent, one batch behind. A chunk's
-    post-store hooks fire at the same point. A resumed run that finds chunks an earlier process
-    flagged and more to send fails with :class:`PartialUploadResumeError` (see there).
+    post-store hooks fire at the same point. A buffer whose first chunk to send is not chunk 0 (an
+    earlier process flagged the head and died) is refused with :class:`PartialUploadResumeError`;
+    the orchestrator never hands one over (see there).
 
     *catalog_doc_id* is the document that owns the chunks; without one (and not *dry_run*) the
     run cannot write and raises ``CatalogIdentityMissingError``.
@@ -710,13 +712,16 @@ def uploader_loop(
                     if not catalog_doc_id:
                         from nexus.doc_indexer import _raise_identity_missing  # noqa: PLC0415 - deferred to avoid circular import at module load
                         _raise_identity_missing(f"PDF {content_hash[:12]}", collection, None)
-                    if persisted_uploaded and run.writer is None:
+                    if run.writer is None and batch_rows[0]["chunk_index"] > 0:
+                        # Read from the rows, not the progress counter: the counter is buffered
+                        # and lags the flags by up to a poll interval.
                         raise PartialUploadResumeError(
-                            f"{persisted_uploaded} chunk(s) of this PDF were uploaded by an earlier "
-                            "run that did not finish, and its write state is gone with that "
-                            "process; sending only the rest would replace the document's manifest "
-                            "with a fragment. The run's buffer is cleared: run the index again to "
-                            "start the document afresh (chunks the engine already holds are not "
+                            f"the first chunk left to send is chunk #{batch_rows[0]['chunk_index']}, "
+                            "so an earlier process already sent the chunks before it and its write "
+                            "state is gone with that process; sending only the rest would replace "
+                            "the document's manifest with a fragment and sweep the head as "
+                            "superseded. The orchestrator discards such a buffer and re-runs the "
+                            "document from scratch (chunks the engine already holds are not "
                             "re-embedded)."
                         )
                     if run.writer is None:
@@ -1128,6 +1133,65 @@ def _mark_failed_and_reset_wal(db: HttpPipelineDB, content_hash: str, first_exc:
     return False
 
 
+def _reconcile_resumed_run(db: HttpPipelineDB, doc_id: str, content_hash: str) -> str:
+    """Decide what a RESUMED run does with the buffer an earlier process left (RDR-223).
+
+    Returns ``"fresh"`` when the buffer holds no upload evidence, ``"tail"`` when the earlier
+    process sent every chunk and only the completion stamp is left, and ``"restarted"`` when it
+    discarded the buffer and the run continues as a new one.
+
+    The multi-batch writer's state lives in the process that ran it, so a resume cannot continue an
+    upload that was under way: sending the remaining chunks alone would replace the document's
+    manifest with that tail and sweep the head. Evidence of an upload is a chunk row flagged
+    uploaded, or a progress counter above zero. Both are read, because the counter is buffered
+    and lags the flags by up to a poll interval, and a kill inside that window leaves flagged rows
+    and a counter of zero.
+
+    The one resume that keeps its buffer is the finished upload: every chunk flagged, the chunker
+    done, and the document's index-run fence still ``indexing`` for THIS content hash, which is
+    what a run leaves that sent its last request and never stamped (a failed post-pass, a kill
+    before the stamp). That is a stamp to send, not an upload to redo. The fence check is what
+    keeps a stale buffer from stamping over another version's manifest: if the document was
+    indexed at other bytes since (the fence carries their hash), the manifest is not this
+    buffer's and the document is re-run.
+    """
+    state = db.get_pipeline_state(content_hash) or {}
+    counter = int(state.get("chunks_uploaded") or 0)
+    embedded = db.count_embedded_chunks(content_hash)
+    unsent = len(db.read_uploadable_chunks(content_hash))
+    flagged = embedded - unsent
+    if not flagged and not counter:
+        return "fresh"
+    created = state.get("chunks_created")
+    if created is not None and unsent == 0 and flagged == created:
+        from nexus.doc_indexer import _index_fence_state  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        fence_state, fence_hash = _index_fence_state(doc_id)
+        if fence_state == "indexing" and fence_hash == content_hash:
+            if counter != created:
+                db.update_progress(content_hash, chunks_uploaded=created)
+            _log.info(
+                "pipeline_resume_finished_upload_kept",
+                content_hash=content_hash, chunks=created,
+                reason="every chunk was sent and the fence is still indexing for this content; "
+                       "only the completion stamp is left",
+            )
+            return "tail"
+        why = (f"every chunk was sent but the document's fence reads state={fence_state!r} "
+               f"hash={'other' if fence_hash != content_hash else 'this'}: the manifest may not be "
+               "this buffer's")
+    else:
+        why = "an earlier process sent part of the document and its write state is gone"
+    db.clear_orphan_wal(content_hash)
+    _log.warning(
+        "pipeline_resume_partial_upload_discarded",
+        content_hash=content_hash, flagged_rows=flagged, unsent_rows=unsent, counter=counter,
+        reason=why + "; the buffer is discarded and the document runs again from scratch "
+                     "(chunks the engine already holds are not re-embedded)",
+    )
+    return "restarted"
+
+
 def pipeline_index_pdf(
     pdf_path: Path,
     content_hash: str,
@@ -1342,6 +1406,11 @@ def pipeline_index_pdf(
                 "embeds via Voyage. Set NX_STORAGE_BACKEND_VECTORS=service "
                 "(the default) or unset it."
             )
+
+    # A resumed row may carry an upload an earlier process died in the middle of; see
+    # _reconcile_resumed_run. A dry run sends nothing to an engine, so it leaves the buffer alone.
+    if result == "resuming" and not dry_run:
+        _reconcile_resumed_run(db, doc_id, content_hash)
 
     # RDR-223: the index-run fence begins inside the writer, as its first request, so no chunk
     # lands before it (the old explicit begin sat here). The writer stays open until the tail
