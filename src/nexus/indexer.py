@@ -5714,6 +5714,16 @@ def _run_index(
             )
             from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module, avoid import cost on the no-op path)
 
+            # RDR-223 P2.4 (nexus-z0o2p.14) / .13: the combined write REPLACES a
+            # stored chunk's metadata unless asked to merge, where the upsert-chunks
+            # call this path replaced merged it — so a normal-size PDF re-index
+            # wiped the bib_* another writer set (nx enrich bib). Ask for the merge
+            # mode with the keys this writer owns and dropped from a row, exactly as
+            # the oversize fallbacks and _index_document do: enrichment survives, a
+            # dropped owned key is cleared.
+            from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
+            _merge_delete_keys = rewrite_delete_keys([c["metadata"] for c in chunks_payload])
+
             cat = get_catalog_writer()
             try:
                 # Bounded backoff against a flapping connection, matching
@@ -5733,6 +5743,8 @@ def _run_index(
                     chunks=chunks_payload,
                     collection=collection,
                     force_re_embed=force_re_embed,
+                    metadata_merge=True,
+                    metadata_delete_keys=_merge_delete_keys,
                 )
             finally:
                 _close = getattr(cat, "close", None)

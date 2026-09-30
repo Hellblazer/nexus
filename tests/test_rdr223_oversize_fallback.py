@@ -237,6 +237,12 @@ def test_every_fallback_writes_through_the_writer_and_never_touches_the_db(
     rows = [r for _, b in data for r in b["rows"]]
     assert [r["position"] for r in rows] == list(range(n))
     assert [r["chunk_index"] for r in rows] == list(range(n))    # position, as on the batcher path
+    # Every request asks for the metadata merge (the old upsert's semantics), naming the keys this
+    # writer owns and dropped, and never the enrichment keys.
+    keys = [b["metadata_delete_keys"] for _, b in data]
+    assert all(b["metadata_merge"] is True for _, b in data)
+    assert keys[0] and all(k == keys[0] for k in keys)
+    assert not any(k.startswith("bib_") for k in keys[0])
     assert fired == [n]                                          # the file's hooks fire once
     assert manifest_hook_calls == []                             # and the manifest hook is skipped
 

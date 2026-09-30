@@ -493,3 +493,47 @@ def test_reindexing_an_edited_file_sweeps_only_what_the_edit_dropped(env: _Env) 
     swept_at = [i for i, (_, _, r) in enumerate(_data(second)) if int(r.get("swept") or 0)]
     assert swept_at == [len(_data(second)) - 1]
     assert _index_state(env.doc_id) == "complete"
+
+
+# ── metadata: the write merges, like the old upsert did ───────────────────────
+
+
+def _stored_metadata(collection: str, chashes: list[str]) -> dict[str, dict]:
+    got = HttpVectorClient().get_collection(collection).get(ids=chashes, include=["metadatas"])
+    assert len(got["ids"]) == len(chashes), "every chunk is stored"
+    return dict(zip(got["ids"], got["metadatas"]))
+
+
+@pytest.mark.parametrize("re_embed", [False, True], ids=["force", "force-re-embed"])
+def test_forced_reindex_keeps_enrichment_and_clears_an_owned_key_the_write_dropped(
+    env: _Env, re_embed: bool,
+) -> None:
+    """The combined write REPLACES stored chunk metadata unless asked to merge; the upsert-chunks
+    call the oversize fallbacks replaced MERGED it. So a ``bib_year`` that ``nx enrich bib`` set on
+    an oversize file's chunks (a PDF's, in practice) must survive a forced re-index, and a stale
+    value of a key the indexer owns and no longer sends must be cleared. With ``--re-embed`` the
+    same holds through the engine's insert branch."""
+    env.write_file()
+    env.register()
+    first = env.run()
+    every = _chashes_sent(first)
+
+    HttpVectorClient().update_chunks(
+        env.collection, every, [{"bib_year": 2020, "quality_gate_overridden": True} for _ in every])
+    before = _stored_metadata(env.collection, every)
+    assert all(m["bib_year"] == 2020 and m["quality_gate_overridden"] is True for m in before.values())
+
+    again = env.run(force_re_embed=re_embed)
+
+    after = _stored_metadata(env.collection, every)
+    assert all(m.get("bib_year") == 2020 for m in after.values()), "enrichment survived"
+    assert all("quality_gate_overridden" not in m for m in after.values()), \
+        "an owned key the write dropped is cleared"
+    sent = [b for _, b, _ in _data(again) if b.get("chunks")]
+    assert sent and all(b["metadata_merge"] is True for b in sent)
+    assert all("quality_gate_overridden" in b["metadata_delete_keys"] for b in sent)
+    assert all("bib_year" not in b["metadata_delete_keys"] for b in sent)
+    if re_embed:
+        assert _embedded(again) == len(every), "--re-embed really re-embeds"
+    else:
+        assert _embedded(again) == 0

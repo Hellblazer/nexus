@@ -1706,45 +1706,6 @@ def _register_before_read(db: Any, collection_name: str) -> None:
     ensure_collection_registered(collection_name, registrar=registrar)
 
 
-class _MetadataMergingCatalog:
-    """A catalog writer that sends the combined routes' metadata merge mode (RDR-223,
-    nexus-z0o2p.13) on every chunk-carrying request, and keeps the engine's per-document
-    sweep outcomes.
-
-    The multi-batch writer owns the request sequence and knows nothing of metadata modes, so this
-    wrapper adds ``metadata_merge=True`` and the caller's ``metadata_delete_keys`` to its
-    ``write_manifest_many`` / ``append_manifest_chunks`` calls, and records each response's
-    ``sweep_detail`` entries that errored (the writer's result carries only their count). Every
-    other attribute is the wrapped writer's.
-    """
-
-    def __init__(self, cat: Any, delete_keys: list[str]) -> None:
-        self._cat = cat
-        self._delete_keys = list(delete_keys)
-        #: ``[{doc_id, reason}, ...]``: sweeps the engine reported as errored, with its reason.
-        self.sweep_errors: list[dict] = []
-
-    def _note(self, resp: Any) -> Any:
-        if isinstance(resp, dict):
-            for d in resp.get("sweep_detail") or ():
-                if isinstance(d, dict) and d.get("errored"):
-                    self.sweep_errors.append(
-                        {"doc_id": str(d.get("doc_id", "")),
-                         "reason": str(d.get("reason") or "sweep_failed")})
-        return resp
-
-    def write_manifest_many(self, *args: Any, **kwargs: Any) -> Any:
-        return self._note(self._cat.write_manifest_many(
-            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
-
-    def append_manifest_chunks(self, *args: Any, **kwargs: Any) -> Any:
-        return self._note(self._cat.append_manifest_chunks(
-            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._cat, name)
-
-
 def _write_chunks_with_owner_rows(
     collection_name: str,
     doc_id: str,
@@ -1780,11 +1741,8 @@ def _write_chunks_with_owner_rows(
     """
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
     from nexus.catalog.multi_batch_write import write_document  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
-    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-        _manifest_chunk_rows,
-        _record_superseded_swept,
-        _record_superseded_sweep_skip,
-    )
+    from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: shared with the oversize fallbacks (nexus-z0o2p.14)
+    from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
     from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     rows = _manifest_chunk_rows(list(enumerate(metadatas)))
@@ -1795,7 +1753,7 @@ def _write_chunks_with_owner_rows(
         for chash, text, meta in zip(ids, documents, metadatas)
     ]
     raw_cat = make_catalog_writer()
-    cat = _MetadataMergingCatalog(raw_cat, rewrite_delete_keys(metadatas))
+    cat = MetadataMergingCatalog(raw_cat, collection_name, rewrite_delete_keys(metadatas))
     try:
         result = write_document(
             cat, [(rows, chunks)], doc_id=doc_id, collection=collection_name,
@@ -1805,12 +1763,9 @@ def _write_chunks_with_owner_rows(
         close = getattr(raw_cat, "close", None)
         if close is not None:
             close()
-    _record_superseded_swept(result.swept)
-    for err in cat.sweep_errors:
-        _record_superseded_sweep_skip(err["doc_id"] or doc_id, collection_name, err["reason"])
-    if result.sweep_skipped > len(cat.sweep_errors):
-        # The engine counted skips it gave no reason for (or an older shape without detail).
-        _record_superseded_sweep_skip(doc_id, collection_name, "sweep_failed")
+    # The wrapper recorded each response's swept count and reasoned sweep skips; a skip the engine
+    # counted without a reason (an older shape without detail) is recorded here.
+    cat.account_unexplained_skips(doc_id, result.sweep_skipped)
     # No dropped_unknown branch: this caller always passes content_hash, so the writer is fenced and
     # takes the drop list from the begin snapshot, never from the write_many response.
     return result

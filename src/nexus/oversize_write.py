@@ -32,12 +32,12 @@ the writer cuts by count only, as the ChunkBatcher's flush already does. That em
 split there. A chunk whose chash a previous request of the run carried is not sent again, exactly as
 the engine's existence partition would have skipped it on the later page.
 
-What a re-index writes. The combined write REPLACES a stored chunk's metadata where the old
-``upsert-chunks`` merged it, so a key another writer set on the chunk (``bib_*`` from
-``nx enrich bib``) does not survive a re-index of an oversize file. The ChunkBatcher path that
-writes every file that fits one batch already behaves that way. Code and prose chunks carry no such
-key; a PDF chunk can. The engine's ``metadata_merge`` option (nexus-z0o2p.13, not merged yet) is the
-fix for it, and this module is the one place to send it from.
+What a re-index writes. The catalog writer is wrapped in
+:class:`~nexus.catalog.metadata_merging_catalog.MetadataMergingCatalog`, which sends the engine's
+``metadata_merge`` mode with ``rewrite_delete_keys(metadatas)`` on every chunk-carrying request: the
+old ``upsert-chunks`` semantics. A key another writer set on a stored chunk (``bib_*`` from
+``nx enrich bib``) survives a re-index, and a key this writer owns and dropped from a row is
+cleared. The same wrapper carries the run summary's sweep accounting.
 """
 from __future__ import annotations
 
@@ -92,38 +92,6 @@ def use_writer(db: object, batcher: object, catalog_doc_id: str) -> bool:
     return bool(catalog_doc_id)
 
 
-class _SweepAccountingCat:
-    """Delegates to the catalog writer and records each write response's sweep accounting for the
-    run summary, as ``manifest_write_batch_hook`` did on the old path: the rows swept, and every
-    sweep the engine skipped (with its reason), so a skipped sweep is never silent."""
-
-    def __init__(self, cat, collection: str) -> None:
-        self._cat = cat
-        self._collection = collection
-
-    def __getattr__(self, name: str):
-        return getattr(self._cat, name)
-
-    def write_manifest_many(self, *args, **kwargs):
-        return self._note(self._cat.write_manifest_many(*args, **kwargs))
-
-    def append_manifest_chunks(self, *args, **kwargs):
-        return self._note(self._cat.append_manifest_chunks(*args, **kwargs))
-
-    def _note(self, resp):
-        if not isinstance(resp, dict):
-            return resp
-        from nexus.mcp_infra import _record_superseded_sweep_skip, _record_superseded_swept  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
-
-        _record_superseded_swept(int(resp.get("swept") or 0))
-        for outcome in resp.get("sweep_detail") or []:
-            if isinstance(outcome, dict) and outcome.get("errored"):
-                _record_superseded_sweep_skip(
-                    str(outcome.get("doc_id", "")), self._collection,
-                    str(outcome.get("reason") or "sweep_failed"))
-        return resp
-
-
 def write_oversize_file(
     *,
     catalog_doc_id: str,
@@ -144,8 +112,10 @@ def write_oversize_file(
     as it was when the manifest hook swallowed it. Any other failure marks the fence ``failed``
     and propagates.
     """
+    from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: rare oversize path
     from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
     from nexus.mcp_infra import _manifest_chunk_rows, get_catalog_writer  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
+    from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     rows = _manifest_chunk_rows([(i, {**m, "chunk_index": i}) for i, m in enumerate(metadatas)])
     # First occurrence wins for a chash repeated at several positions, as the old upsert
@@ -159,13 +129,16 @@ def write_oversize_file(
         seen.add(cid)
         chunks.append({"chash": cid, "text": text, "metadata": meta})
     cat = get_catalog_writer()
+    merging = MetadataMergingCatalog(cat, collection, rewrite_delete_keys(metadatas))
     try:
         with MultiBatchDocumentWriter(
-            _SweepAccountingCat(cat, collection), doc_id=catalog_doc_id, collection=collection,
+            merging, doc_id=catalog_doc_id, collection=collection,
             content_hash=content_hash, force_re_embed=force_re_embed,
         ) as writer:
             writer.add_batch(rows, chunks)
-            return writer.finish()
+            result = writer.finish()
+        merging.account_unexplained_skips(catalog_doc_id, result.sweep_skipped)
+        return result
     except IndexRunVerifyRefused:
         _log.warning(
             "oversize_write_complete_refused", doc_id=catalog_doc_id, collection=collection)
