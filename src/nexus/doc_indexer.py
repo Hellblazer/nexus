@@ -690,6 +690,44 @@ def _fence_complete(doc_id: str, content_hash: str, chunk_count: int) -> None:
     sweep_deferred_superseded_vectors(doc_id)
 
 
+def _stamp_finished_upload(doc_id: str, content_hash: str, chunk_count: int) -> None:
+    """The completion stamp of a streaming run that has nothing left to send (RDR-223).
+
+    A retry whose earlier process sent every chunk and never stamped it has no writer to stamp
+    through. This is that stamp, and it is FAIL-CLOSED where :func:`_fence_complete` is not: an
+    answer of ``None`` (an engine with no fence route: the document was NOT stamped) and a
+    transport failure are errors, and the caller's fence is left ``indexing``, so the run never
+    returns success over an unstamped document. A refusal is recorded for the run summary and
+    raised, as the writer's own stamp does. *chunk_count* is the manifest ROW count.
+
+    The caller has already established that the manifest is the buffer's own (the fence reads
+    ``indexing`` for *content_hash*, see ``pipeline_stages._reconcile_resumed_run``); the engine
+    verifies that every row's chunk exists and that the row count matches.
+    """
+    from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
+    from nexus.errors import BatchWriteFailedError, IndexRunVerifyRefused  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+    from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
+
+    w = None
+    try:
+        w = make_catalog_writer()
+        done = _manifest_write_with_retry(w.complete_index_run, doc_id, content_hash, chunk_count)
+    except IndexRunVerifyRefused:
+        from nexus.mcp_infra import _record_complete_refusal  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+
+        _record_complete_refusal(doc_id)
+        raise
+    finally:
+        close = getattr(w, "close", None)
+        if close is not None:
+            close()
+    if done is None:
+        raise BatchWriteFailedError(
+            doc_id=doc_id, batch=0,
+            reason="complete_index_run answered 404: the engine has no index-run fence route, so "
+                   "the document was NOT stamped complete")
+
+
 def _repo_owner_document_for(reader, abs_path):
     """An existing catalog Document for *abs_path* under its REPO owner, if any.
 

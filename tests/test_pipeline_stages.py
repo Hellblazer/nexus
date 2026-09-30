@@ -1023,7 +1023,9 @@ class TestPipelineIndexPdf:
         self, db, writer, monkeypatch,
     ) -> None:
         """The retry of a run whose post-pass failed finds every chunk already flagged uploaded: no
-        writer runs, and the orchestrator begins a fence for the run and stamps it, verified."""
+        writer runs, and the orchestrator stamps the run through the fail-closed helper (see
+        ``tests/test_rdr223_pdf_resume_tail.py`` for what that helper does on a missing route or a
+        transport failure)."""
         mock_col = MagicMock()
         mock_col.get.return_value = {"ids": ["abc123_0"], "metadatas": [
             {"page_number": 1, "chunk_type": "text", "content_hash": "abc123"}]}
@@ -1031,8 +1033,7 @@ class TestPipelineIndexPdf:
         t3.get_or_create_collection.return_value = mock_col
         t3.update_chunks.side_effect = [Exception("quota exceeded"), None]
         calls: list[tuple] = []
-        monkeypatch.setattr("nexus.doc_indexer._fence_begin", lambda *a, **k: calls.append(("begin", a)))
-        monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: calls.append(("complete", a)))
+        monkeypatch.setattr("nexus.doc_indexer._stamp_finished_upload", lambda *a: calls.append(a))
         # The document's fence as the earlier run left it: begun for this content, never stamped.
         # (The writer here is a recorder, so the real engine's fence was never begun.)
         monkeypatch.setattr("nexus.doc_indexer._index_fence_state", lambda doc_id: ("indexing", "abc123"))
@@ -1048,8 +1049,7 @@ class TestPipelineIndexPdf:
         assert calls == [], "the failed post-pass stamped nothing"
         assert _run() == 1
         assert len(writer.instances) == 1, "the retry had nothing to send and made no writer"
-        assert [c[0] for c in calls] == ["begin", "complete"]
-        assert calls[1][1][1:] == ("abc123", 1)
+        assert len(calls) == 1 and calls[0][1:] == ("abc123", 1)
 
     @pytest.mark.parametrize("counter", [4, 0], ids=["counter-current", "counter-lagging"])
     def test_a_resume_after_a_killed_upload_restarts_fresh_in_the_same_invocation(

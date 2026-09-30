@@ -1409,8 +1409,9 @@ def pipeline_index_pdf(
 
     # A resumed row may carry an upload an earlier process died in the middle of; see
     # _reconcile_resumed_run. A dry run sends nothing to an engine, so it leaves the buffer alone.
+    resumed_tail = False
     if result == "resuming" and not dry_run:
-        _reconcile_resumed_run(db, doc_id, content_hash)
+        resumed_tail = _reconcile_resumed_run(db, doc_id, content_hash) == "tail"
 
     # RDR-223: the index-run fence begins inside the writer, as its first request, so no chunk
     # lands before it (the old explicit begin sat here). The writer stays open until the tail
@@ -1696,7 +1697,7 @@ def pipeline_index_pdf(
         # returning. Gated on doc_id per the no-catalog ingest contract
         # (nexus-uxg4u: and explicitly on dry_run).
         if doc_id and not dry_run:
-            from nexus.doc_indexer import _fence_complete, _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
+            from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
             if total_chunks == 0:
                 # MUST: zero extraction is a FAILURE, never /complete(0) — a
                 # zero-chunk run would trivially satisfy the fail-closed gate
@@ -1710,13 +1711,20 @@ def pipeline_index_pdf(
                     # the post-passes above have run, so the document is whole. A refusal
                     # propagates, as the explicit stamp's did; the writer recorded it.
                     run.writer.complete()
-                else:
+                elif resumed_tail:
                     # Every chunk was written by an earlier process (a retry of a run whose
-                    # post-pass failed: nothing was left to upload, so no writer ran). Begin a
-                    # fence for this run and stamp it, verified by the engine as before.
-                    from nexus.doc_indexer import _fence_begin  # noqa: PLC0415 - deferred to avoid circular import at module load
-                    _fence_begin(doc_id, content_hash, collection)
-                    _fence_complete(doc_id, content_hash, total_chunks)
+                    # post-pass failed, or that died before its stamp: nothing was left to
+                    # upload, so no writer ran) and the document's fence proved the manifest is
+                    # that run's (_reconcile_resumed_run). Stamp it, fail-closed: an unstamped
+                    # answer or a transport failure raises and the fence stays 'indexing'.
+                    from nexus.doc_indexer import _stamp_finished_upload  # noqa: PLC0415 - deferred to avoid circular import at module load
+                    _stamp_finished_upload(doc_id, content_hash, total_chunks)
+                else:
+                    raise RuntimeError(
+                        f"pipeline_index_pdf: {total_chunks} chunk(s) are uploaded for "
+                        f"{content_hash[:12]} but no writer finished and the buffer is not a "
+                        "finished upload; refusing to stamp the document complete"
+                    )
             else:
                 _log.warning(
                     "index_run_complete_skipped_post_pass_failed",
