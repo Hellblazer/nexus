@@ -1588,6 +1588,29 @@ def _raise_identity_missing(
     )
 
 
+def _require_throwaway_store(t3: Any, entry: str) -> None:
+    """Refuse a dry run whose store is not a throwaway in-memory one (RDR-223).
+
+    A dry run puts chunks in a store with no owner row and no catalog write. That is safe only
+    because the store is discarded with the process: the engine's client takes the same
+    ownerless ``upsert-chunks`` request as a real write, and the engine refuses those. The check
+    is on the store itself, not on the one CLI call site that builds a good one, so a direct
+    ``index_pdf(dry_run=True)`` that resolves the engine's client (no ``t3``) is refused, before
+    anything registers a collection or reads through it. A ``T3Database`` over an
+    :class:`~nexus.db.inmemory_vector_store.InMemoryVectorClient` is the only store that passes.
+    """
+    from nexus.db.inmemory_vector_store import InMemoryVectorClient  # noqa: PLC0415 - deferred: test-substrate module, needed only on a dry run
+    from nexus.errors import DryRunStoreError  # noqa: PLC0415 - circular-dep avoidance (nexus.errors)
+
+    if not isinstance(getattr(t3, "_client", None), InMemoryVectorClient):
+        raise DryRunStoreError(
+            f"{entry}: a dry run needs an explicit throwaway in-memory store "
+            f"(make_t3(_client=InMemoryVectorClient())), got {type(t3).__name__}. The dry run "
+            "writes chunks with no owner row and touches no catalog, which is safe only in a "
+            "store discarded with the process; nothing was read from or written to it."
+        )
+
+
 def _preview_upsert(
     t3: Any, collection_name: str, ids: list[str], documents: list[str], embeddings: list,
     metadatas: list[dict], *, force_re_embed: bool = False,
@@ -1597,7 +1620,10 @@ def _preview_upsert(
     A dry run (``nx index pdf --dry-run``) previews extraction and chunking into an in-memory
     store and touches no catalog, so there is no owner row to write and no engine to write
     to. This is the one place a PDF path still upserts chunks without an owner, and the store it
-    writes to is discarded with the process."""
+    writes to is discarded with the process; :func:`_require_throwaway_store` makes that a
+    property of the code rather than of its callers, here as the last line of defence and at the
+    top of every dry-run entry."""
+    _require_throwaway_store(t3, "_preview_upsert")
     t3.upsert_chunks_with_embeddings(
         collection_name, ids, documents, embeddings, metadatas, force_re_embed=force_re_embed)
 
@@ -2038,6 +2064,8 @@ def _index_pdf_incremental(
     """
     from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
 
+    if dry_run:
+        _require_throwaway_store(t3, "_index_pdf_incremental")
     target_model = prepared[0][2]["embedding_model"] if prepared else "voyage-context-3"
     total = len(prepared)
 
@@ -2561,6 +2589,10 @@ def index_pdf(
     """
     from functools import partial  # noqa: PLC0415 — deliberate deferred import: branch-local / startup-cost avoidance
 
+    if dry_run:
+        # Before anything resolves or registers on the store: with no t3 the engine's client is
+        # resolved below, and a dry run through it is an ownerless write.
+        _require_throwaway_store(t3, "index_pdf")
     _empty_meta = {"chunks": 0, "pages": [], "title": "", "author": "", "page_count": 0, "pages_with_text": []}
     # nexus-i0cwh: filled by whichever extraction path runs; surfaced in the
     # return_metadata dict so callers can check page coverage.

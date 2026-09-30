@@ -17,7 +17,7 @@ from nexus.pdf_chunker import TextChunk
 from nexus.pdf_extractor import ExtractionResult
 from nexus.db.t3 import T3Database
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineConflictRunning
-from tests._owner_write_double import install_streaming_writer
+from tests._owner_write_double import install_streaming_writer, throwaway_t3 as _make_throwaway_t3
 from tests.pipeline_fake_engine import make_fake_engine_db
 from nexus.pipeline_stages import (
     _enrich_metadata_from_extraction,
@@ -117,6 +117,12 @@ def done_event() -> threading.Event:
     e = threading.Event()
     e.set()
     return e
+
+
+@pytest.fixture()
+def throwaway_t3():
+    """A dry run's store: in-memory, the only kind a PDF dry run accepts (RDR-223)."""
+    return _make_throwaway_t3()
 
 
 @pytest.fixture()
@@ -753,12 +759,16 @@ class TestUploaderLoop:
             self._up(db, catalog_doc_id="")
         assert writer.instances == []
 
-    def test_a_dry_run_puts_the_chunks_in_the_throwaway_store_and_writes_no_catalog(self, db, writer) -> None:
+    def test_a_dry_run_puts_the_chunks_in_the_throwaway_store_and_writes_no_catalog(
+        self, db, writer, throwaway_t3,
+    ) -> None:
         _pop_chunks(db, "h1", 3)
-        t3 = MagicMock()
+        t3 = throwaway_t3
+        spy = MagicMock(wraps=t3.upsert_chunks_with_embeddings)
+        t3.upsert_chunks_with_embeddings = spy
         self._up(db, t3=t3, dry_run=True, catalog_doc_id="")
-        t3.upsert_chunks_with_embeddings.assert_called_once()
-        assert len(t3.upsert_chunks_with_embeddings.call_args[0][1]) == 3
+        spy.assert_called_once()
+        assert len(spy.call_args[0][1]) == 3
         assert writer.instances == []
         assert db.get_pipeline_state("h1")["chunks_uploaded"] == 3
 
@@ -1084,7 +1094,7 @@ class TestPipelineIndexPdf:
             "never a tail alone: positions start at 0"
         assert db.get_pipeline_state("h1") is None, "the run finished and cleaned up its buffer"
 
-    def test_a_resume_of_a_dry_run_leaves_the_buffer_alone(self, db, mock_t3) -> None:
+    def test_a_resume_of_a_dry_run_leaves_the_buffer_alone(self, db, throwaway_t3) -> None:
         """A dry run writes no catalog and sends no request, so a partial buffer is no hazard to it
         and it must not wipe a real run's extraction work."""
         _pop_chunks(db, "h1", 6)
@@ -1099,7 +1109,7 @@ class TestPipelineIndexPdf:
         with patch(_P_EXT) as ME, patch(_P_CHK) as MC:
             ME.return_value.extract.side_effect = _fx(3)
             MC.return_value.chunk.return_value = six
-            pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", mock_t3,
+            pipeline_index_pdf(Path("/a.pdf"), "h1", "docs__test", throwaway_t3,
                                db=db, embed_fn=_embed, corpus="test", dry_run=True)
 
         assert cleared == []
@@ -1471,7 +1481,7 @@ class TestPipelineIndexPdfDryRun:
     fence refusal (IndexRunVerifyRefused, claimed_chunk_count=84) came
     through when called via doc_indexer.index_pdf."""
 
-    def test_dry_run_never_registers_or_touches_catalog(self, db, mock_t3) -> None:
+    def test_dry_run_never_registers_or_touches_catalog(self, db, throwaway_t3) -> None:
         fc = _tc(("chunk 0", 0, {"page_number": 1, "chunk_type": "text"}))
         fr = _er(1)
         with patch(_P_EXT) as ME, patch(_P_CHK) as MC, \
@@ -1484,7 +1494,7 @@ class TestPipelineIndexPdfDryRun:
             MC.return_value.chunk.return_value = fc
             total = pipeline_index_pdf(
                 Path("/dry-run.pdf"), "dryrun123", "docs__test",
-                mock_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
+                throwaway_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
             )
         assert total == 1
         mock_register.assert_not_called()
@@ -1494,7 +1504,7 @@ class TestPipelineIndexPdfDryRun:
         mock_hook.assert_not_called()
 
     def test_dry_run_with_default_hooks_uploader_loop_fires_zero_hooks(
-        self, db, mock_t3,
+        self, db, throwaway_t3,
     ) -> None:
         """nexus-uxg4u round 2 (Critical, both reviewers): uploader_loop
         (Stage 3, spawned via pool.submit) fires hooks.fire_batch/
@@ -1515,7 +1525,7 @@ class TestPipelineIndexPdfDryRun:
             MC.return_value.chunk.return_value = fc
             total = pipeline_index_pdf(
                 Path("/dry-run-hooks.pdf"), "dryrunhooks123", "docs__test",
-                mock_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
+                throwaway_t3, db=db, embed_fn=_embed, corpus="test", dry_run=True,
                 hooks=None,
             )
         assert total == 1

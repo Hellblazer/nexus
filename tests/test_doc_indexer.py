@@ -304,6 +304,14 @@ def empty_col():
 
 
 @pytest.fixture
+def throwaway_t3():
+    """A dry run's store: in-memory, the only kind a PDF dry run accepts (RDR-223)."""
+    from tests._owner_write_double import throwaway_t3 as _make
+
+    return _make()
+
+
+@pytest.fixture
 def mock_t3(empty_col):
     t3 = MagicMock()
     t3.get_or_create_collection.return_value = empty_col
@@ -499,7 +507,7 @@ class TestIndexPdfUnchunkableGuard:
 
 class TestIndexPdfDryRunNeverTouchesCatalog:
     def test_dry_run_never_calls_register_or_lookup_doc_id(
-        self, sample_pdf, mock_t3,
+        self, sample_pdf, throwaway_t3,
     ):
         """A recorded catalog fake proves ZERO catalog calls on dry_run —
         not just an empty end state — while the preview still reports a
@@ -511,13 +519,13 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
         with patch("nexus.doc_indexer._register_or_lookup_doc_id") as mock_register:
             with pdf_extract_patches_ctx():
                 result = index_pdf(
-                    sample_pdf, corpus="uxg4u-dry-run", t3=mock_t3,
+                    sample_pdf, corpus="uxg4u-dry-run", t3=throwaway_t3,
                     embed_fn=_fake_embed, hooks=HookRegistry(), dry_run=True,
                 )
         mock_register.assert_not_called()
         assert result == 1  # the real chunk from pdf_extract_patches_ctx()
 
-    def test_dry_run_never_calls_catalog_pdf_hook(self, sample_pdf, mock_t3):
+    def test_dry_run_never_calls_catalog_pdf_hook(self, sample_pdf, throwaway_t3):
         """The batch-path catalog hook (``_catalog_pdf_hook``) writes
         unconditionally regardless of doc_id -- it needs its own gate,
         not just an empty doc_id, and this proves that gate holds."""
@@ -527,13 +535,13 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
         with patch("nexus.pipeline_stages._catalog_pdf_hook") as mock_hook:
             with pdf_extract_patches_ctx():
                 index_pdf(
-                    sample_pdf, corpus="uxg4u-dry-run-hook", t3=mock_t3,
+                    sample_pdf, corpus="uxg4u-dry-run-hook", t3=throwaway_t3,
                     embed_fn=_fake_embed, hooks=HookRegistry(), dry_run=True,
                 )
         mock_hook.assert_not_called()
 
     def test_dry_run_real_engine_leaves_doc_count_unchanged(
-        self, sample_pdf, mock_t3,
+        self, sample_pdf, throwaway_t3,
     ):
         """End-to-end against the REAL local test engine (autouse T2
         substrate, see ``_no_propagating_fence_complete``'s docstring) --
@@ -545,7 +553,7 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
         before = count_documents()
         with pdf_extract_patches_ctx():
             result = index_pdf(
-                sample_pdf, corpus="uxg4u-dry-run-engine", t3=mock_t3,
+                sample_pdf, corpus="uxg4u-dry-run-engine", t3=throwaway_t3,
                 embed_fn=_fake_embed, hooks=HookRegistry(), dry_run=True,
             )
         assert result == 1
@@ -553,7 +561,7 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
         assert documents_by_file_path(str(sample_pdf.resolve())) == []
 
     def test_dry_run_with_default_hooks_fires_zero_hooks(
-        self, sample_pdf, mock_t3,
+        self, sample_pdf, throwaway_t3,
     ):
         """nexus-uxg4u round 2 (Critical, both reviewers): today's
         safety is the CLI's own convention of passing an empty
@@ -571,7 +579,7 @@ class TestIndexPdfDryRunNeverTouchesCatalog:
                 patch("nexus.aspect_worker.aspect_extraction_enqueue_hook") as mock_aspect:
             with pdf_extract_patches_ctx():
                 result = index_pdf(
-                    sample_pdf, corpus="uxg4u-dry-run-default-hooks", t3=mock_t3,
+                    sample_pdf, corpus="uxg4u-dry-run-default-hooks", t3=throwaway_t3,
                     embed_fn=_fake_embed, dry_run=True,  # hooks=None (default)
                 )
         assert result == 1
@@ -2617,10 +2625,11 @@ def test_index_pdf_incremental_dry_run_puts_the_chunks_in_the_throwaway_store(in
     into the caller's throwaway store, batch by batch, and the writer is never used."""
     from nexus.doc_indexer import _INCREMENTAL_BATCH_SIZE
     n = incr_setup.threshold + 10
-    mock_col = MagicMock()
-    mock_col.get.return_value = {"ids": [], "metadatas": []}
-    t3 = MagicMock()
-    t3.get_or_create_collection.return_value = mock_col
+    from tests._owner_write_double import throwaway_t3 as _make_throwaway
+
+    t3 = _make_throwaway()
+    spy = MagicMock(wraps=t3.upsert_chunks_with_embeddings)
+    t3.upsert_chunks_with_embeddings = spy
     with patch("nexus.doc_indexer.PDFExtractor") as ext_cls, patch("nexus.doc_indexer.PDFChunker") as chk_cls:
         ext_cls.return_value.extract.return_value = MagicMock(
             text="x" * 5000,
@@ -2631,7 +2640,7 @@ def test_index_pdf_incremental_dry_run_puts_the_chunks_in_the_throwaway_store(in
                            dry_run=True, streaming="never")
     assert result == n
     assert incr_setup.owner_write.calls == []
-    sizes = [len(c.args[1]) for c in t3.upsert_chunks_with_embeddings.call_args_list]
+    sizes = [len(c.args[1]) for c in spy.call_args_list]
     assert sum(sizes) == n and max(sizes) <= _INCREMENTAL_BATCH_SIZE
 
 

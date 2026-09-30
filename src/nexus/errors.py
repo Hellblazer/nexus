@@ -406,6 +406,17 @@ class SourceUriCollectionMismatchError(NexusError):
     """
 
 
+class DryRunStoreError(NexusError):
+    """A PDF dry run was handed a store that is not a throwaway in-memory one (RDR-223).
+
+    A dry run previews extraction and chunking into a store that is discarded with the process and
+    touches no catalog, so its chunks have no owner row. That is safe only for such a store: the
+    engine's client would take the same ownerless ``upsert-chunks`` request as a real write, and the
+    engine refuses those. Every dry-run entry checks before it touches the store, and
+    ``_preview_upsert`` checks again before it writes.
+    """
+
+
 class UnchunkableContentError(NexusError):
     """A file passed directly to the doc_indexer family (``nx index
     md``/``pdf``/``rdr``) is zero-byte or decodes as binary content, so

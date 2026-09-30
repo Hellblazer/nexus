@@ -175,3 +175,18 @@ def install_streaming_writer(monkeypatch: Any, *, forward_to: Any = None) -> typ
 
     Recorder.restore_real_writer = staticmethod(restore_real_writer)  # type: ignore[attr-defined]
     return Recorder
+
+
+# ── the dry run's throwaway store (RDR-223) ───────────────────────────────────────────────────
+
+
+def throwaway_t3() -> Any:
+    """The store ``nx index pdf --dry-run`` builds: a ``T3Database`` over an in-memory client, which
+    is the only store a PDF dry run accepts (``doc_indexer._require_throwaway_store``). Embedding is
+    refused, as in the CLI: a preview embeds nothing."""
+    from unittest.mock import MagicMock
+
+    from nexus.db import make_t3
+    from nexus.db.inmemory_vector_store import InMemoryVectorClient
+
+    return make_t3(_client=InMemoryVectorClient(), _ef_override=MagicMock())

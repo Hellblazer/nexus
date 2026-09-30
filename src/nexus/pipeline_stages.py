@@ -1303,6 +1303,10 @@ def pipeline_index_pdf(
 
     Returns total chunks indexed.
     """
+    if dry_run:
+        from nexus.doc_indexer import _require_throwaway_store  # noqa: PLC0415 - deferred to avoid circular import at module load
+
+        _require_throwaway_store(t3, "pipeline_index_pdf")
     if db is None:
         # Unconditional — no local/service mode dispatch (resolves the
         # bead's backend-selection question): post-RDR-155-P4a the
