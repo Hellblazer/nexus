@@ -5,8 +5,8 @@
 Context (substantive-critic diagnosis, T1 3fe5e91c; nexus-hb10j
 adjudication): nexus-hb10j was the THIRD occurrence of the same
 wrapper-gap class -- a per-record ingest loop's narrow except tuple lets
-a newly-introduced NexusError subclass (ChunkLandingUnverifiedError,
-IndexRunVerifyRefused) propagate uncaught and abort the WHOLE batch
+a newly-introduced NexusError subclass (IndexRunVerifyRefused,
+ChunkLandingUnverifiedError until RDR-223 deleted it) propagate uncaught and abort the WHOLE batch
 instead of just the offending record. Prior occurrences: nexus-9800y
 (dt.py file-backed branch), the tp8yk-era commands/index.py sites,
 nexus-hb10j (dt.py --dt-content branch). Root-cause-after-3-patches: the
@@ -343,7 +343,7 @@ def _nexus_error_subclass_names(errors_file: pathlib.Path = ERRORS_FILE) -> set[
 #: tuple can assert the two independently-maintained lists agree --
 #: catching drift in EITHER direction.
 _RECORD_LEVEL: frozenset[str] = frozenset({
-    "ChunkLandingUnverifiedError", "IndexRunVerifyRefused",
+    "IndexRunVerifyRefused",
     # nexus-wi1uv (occurrence 5 of the wrapper-gap class, caught by this
     # tripwire pre-merge): fires from PDFExtractor.extract() deep inside
     # index_pdf -> _pdf_chunks, reachable from dt.py's nx dt index
@@ -398,6 +398,13 @@ _RECORD_LEVEL: frozenset[str] = frozenset({
 #: tripwire; the fix is a deliberate classification decision, not a
 #: blanket exemption.
 _COMMAND_LEVEL_REASONS: dict[str, str] = {
+    "DryRunStoreError": (
+        "RDR-223 (nexus-z0o2p.11/.15): raised by doc_indexer._require_throwaway_store when a PDF "
+        "dry run is handed a store that is not a throwaway in-memory one. Only `nx index pdf "
+        "--dry-run` passes dry_run=True, it builds the in-memory store itself, and it refuses "
+        "--dry-run with --dir; no dt.py or index.py batch loop runs a dry run, so no per-record "
+        "body can raise it. It is a programming error in a direct caller, not a property of a record."
+    ),
     "ManifestAppendManyUnsupportedError": (
         "RDR-223 (nexus-z0o2p.10): raised by HttpCatalogClient.append_manifest_many on a "
         "404 -- the ENGINE has no /manifest/append_many route. That is a property of the "
@@ -828,12 +835,12 @@ def test_kill_control_new_subclass_is_discovered_by_scanner(
     fixture = tmp_path / "errors_fixture.py"
     fixture.write_text(
         "class NexusError(Exception):\n    pass\n\n"
-        "class ChunkLandingUnverifiedError(NexusError):\n    pass\n\n"
+        "class IndexRunVerifyRefused(NexusError):\n    pass\n\n"
         "class BrandNewError(NexusError):\n    pass\n\n"
         "class IndirectError(BrandNewError):\n    pass\n"
     )
     names = _nexus_error_subclass_names(fixture)
-    assert names == {"ChunkLandingUnverifiedError", "BrandNewError", "IndirectError"}
+    assert names == {"IndexRunVerifyRefused", "BrandNewError", "IndirectError"}
 
     # And the completeness check itself would flag the unclassified pair:
     classified = _RECORD_LEVEL | set(_COMMAND_LEVEL_REASONS)

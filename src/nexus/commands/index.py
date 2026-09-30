@@ -2881,7 +2881,6 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
     from nexus.corpus import t3_collection_name  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
     from nexus.doc_indexer import index_pdf as _index_pdf_raw  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
-        ChunkLandingUnverifiedError,
         CredentialsMissingError,
         ExtractionQualityError,
         IndexingError,
@@ -2914,18 +2913,6 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # nexus-z0o2p.11 / .15 (RDR-223): registration returned no identity, so the chunks
             # have no owner to be written with and nothing was written. The message names the
             # cause and the remedy.
-            raise click.ClickException(str(e)) from e
-        except ChunkLandingUnverifiedError as e:
-            # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04):
-            # this raise already exits non-zero via Click's default
-            # unhandled-exception path, but as a raw traceback rather
-            # than the exception's own actionable message — the
-            # nexus-2fyb convention this wrapper exists for. The
-            # exception's __init__ already builds a clean, human-
-            # readable message (collection + count + remedy), so
-            # str(e) alone is sufficient here (unlike
-            # IndexRunVerifyRefused, which needs _index_run_refused_
-            # message's dedicated reformatting of its raw field dump).
             raise click.ClickException(str(e)) from e
         except PartialUploadResumeError as e:
             # RDR-223 invariant: the orchestrator discards a partially uploaded buffer before
@@ -3474,7 +3461,6 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
     )
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — deliberate function-local import (heavy doc_indexer dep deferred; startup-cost)
     from nexus.errors import (  # noqa: PLC0415 — deliberate function-local import (deferred to command invocation)
-        ChunkLandingUnverifiedError,
         CredentialsMissingError,
         IndexRunVerifyRefused,
         EphemeralPathRefusedError,
@@ -3570,11 +3556,6 @@ def index_md_cmd(path: Path, corpus: str, collection: str | None, force: bool, r
         # traceback instead of the clean, actionable wording every other
         # CLI surface renders for the identical exception.
         raise click.ClickException(_index_run_refused_message(exc, target_collection=collection or "", corpus=corpus)) from exc
-    except ChunkLandingUnverifiedError as exc:
-        # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04): see
-        # the identical rationale on index_pdf_cmd's wrapper. The
-        # exception's own message is already clean and actionable.
-        raise click.ClickException(str(exc)) from exc
 
     # nexus-7f5qj: see the identical ordering rationale on index_pdf_cmd —
     # checked right after the write, before the rest of this run's

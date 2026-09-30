@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 _log = structlog.get_logger(__name__)
 
-from nexus.checkpoint import CHECKPOINT_DIR, delete_checkpoint
+from nexus.checkpoint import delete_checkpoint
 from nexus.corpus import ensure_collection_registered, index_model_for_collection
 from nexus.db import make_t3
 from nexus.embed_window import window_for_model

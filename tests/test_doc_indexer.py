@@ -2467,15 +2467,6 @@ def incr_setup(sample_pdf, monkeypatch, cloud_mode, owner_write):
     set_credentials(monkeypatch)
     ckpt_dir = sample_pdf.parent / "ckpt"
     monkeypatch.setattr("nexus.checkpoint.CHECKPOINT_DIR", ckpt_dir)
-    monkeypatch.setattr("nexus.doc_indexer.CHECKPOINT_DIR", ckpt_dir)
-    # nexus-5xn3k.4 review follow-up: _index_pdf_incremental now brackets a
-    # real _fence_complete call. This fixture's t3 is a MagicMock — no
-    # chunk ever lands in the real (test-scoped) engine's T3 — so the
-    # fence's genuine verify-then-stamp would correctly (but irrelevantly
-    # for these tests, which only assert chunk/checkpoint bookkeeping)
-    # refuse completion. Same stub as test_pipeline_stages.py's
-    # _stub_fence_complete / test_pdf_subsystem.py's per-test monkeypatch.
-    monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
 
     _rec = owner_write
 
@@ -2549,17 +2540,30 @@ def test_index_pdf_incremental_force_without_re_embed_forwards_false(incr_setup)
     assert [c["force_re_embed"] for c in incr_setup.owner_write.calls] == [False]
 
 
+def _leave_old_checkpoint(incr_setup, *, chunks_upserted: int, total_chunks: int) -> None:
+    """Write the file an older client left for the document (the writer that produced it is gone:
+    RDR-223 removed ``write_checkpoint``; ``delete_checkpoint`` and the doctor scan remain)."""
+    import json
+
+    from nexus.checkpoint import checkpoint_path
+
+    path = checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "pdf": str(incr_setup.path), "collection": "docs__test__voyage-context-3__v1",
+        "content_hash": incr_setup.content_hash, "chunks_upserted": chunks_upserted,
+        "total_chunks": total_chunks, "embedding_model": "voyage-context-3",
+        "timestamp": "2026-01-01T00:00:00+00:00",
+    }))
+
+
 def test_index_pdf_incremental_does_not_resume_from_a_checkpoint(incr_setup):
     """RDR-223: the writer keeps no state across processes, so a run has no resume point (a resumed
     write would replace the manifest with only the tail it sends). Every run sends the whole
     document, and the checkpoint an older client left is dropped."""
-    from nexus.checkpoint import CheckpointData, checkpoint_path, write_checkpoint
+    from nexus.checkpoint import checkpoint_path
     n = incr_setup.threshold + 50
-    write_checkpoint(CheckpointData(
-        pdf=str(incr_setup.path), collection="docs__test__voyage-context-3__v1",
-        content_hash=incr_setup.content_hash, chunks_upserted=64,
-        total_chunks=n, embedding_model="voyage-context-3",
-    ))
+    _leave_old_checkpoint(incr_setup, chunks_upserted=64, total_chunks=n)
     assert checkpoint_path(incr_setup.content_hash, "docs__test__voyage-context-3__v1").exists()
     result, _ = incr_setup.run(n)
     assert result == n
@@ -2632,13 +2636,9 @@ def test_index_pdf_incremental_writes_no_checkpoint(incr_setup):
 
 
 def test_index_pdf_incremental_stale_checkpoint_deleted(incr_setup):
-    from nexus.checkpoint import CheckpointData, checkpoint_path, write_checkpoint
+    from nexus.checkpoint import checkpoint_path
     n = incr_setup.threshold + 10
-    write_checkpoint(CheckpointData(
-        pdf=str(incr_setup.path), collection="docs__test__voyage-context-3__v1",
-        content_hash=incr_setup.content_hash, chunks_upserted=50,
-        total_chunks=200, embedding_model="voyage-context-3",
-    ))
+    _leave_old_checkpoint(incr_setup, chunks_upserted=50, total_chunks=200)
     result, _ = incr_setup.run(n)
     assert result == n
     (call,) = incr_setup.owner_write.calls

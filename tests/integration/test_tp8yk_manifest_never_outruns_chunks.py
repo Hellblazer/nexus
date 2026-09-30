@@ -4,7 +4,8 @@
 RDR-223 (nexus-z0o2p.15) retired the rest of this file. Its scenarios 1 to 3 injected a stale
 ``existing_ids`` probe and an engine that answered ``update_chunks`` with ``missing=None``
 into ``doc_indexer._upsert_skip_reembed`` and asserted that no manifest row was committed for a
-batch that never landed (``ChunkLandingUnverifiedError``). Both the function and the
+batch that never landed (``ChunkLandingUnverifiedError``, since deleted: nothing raised it once the
+function was gone). Both the function and the
 manifest-after-chunks ordering it guarded are gone: every PDF path writes a chunk together with its
 owner row in ONE request, so a manifest row for an unlanded chunk cannot exist, and the
 fault-injection seam no longer sits on the path. The atomic write's own properties (a killed
