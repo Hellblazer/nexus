@@ -430,12 +430,12 @@ def test_forced_reindex_keeps_enrichment_and_clears_the_owned_keys_the_document_
 
 def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
     """Read each chunk's stored metadata back and compare it to what the previous path
-    (``_upsert_skip_reembed`` into a control collection) stored for the same chunk; only the
+    (a plain ``upsert_chunks_with_embeddings`` into a control collection, the call the removed
+    ``_upsert_skip_reembed`` made) stored for the same chunk; only the
     write time differs."""
     from datetime import UTC, datetime
 
     from nexus.corpus import index_model_for_collection
-    from nexus.doc_indexer import _upsert_skip_reembed
     from nexus.metadata_schema import rewrite_delete_keys
 
     lines = _lines("meta", 6)
@@ -448,10 +448,11 @@ def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
         datetime.now(UTC).isoformat(), "z0o2p13-meta")
     # The same chunks, through the old path, into a control collection.
     metas = [dict(m) for _, _, m in prepared]
-    _upsert_skip_reembed(
-        hvc.HttpVectorClient(), _CONTROL_COLLECTION, [p[0] for p in prepared],
-        [p[1] for p in prepared], [[] for _ in prepared], metas)
-    assert rewrite_delete_keys(metas)   # non-vacuity: the old path did name owned keys
+    delete_keys = rewrite_delete_keys(metas)
+    assert delete_keys   # non-vacuity: the old path did name owned keys
+    hvc.HttpVectorClient().upsert_chunks_with_embeddings(
+        _CONTROL_COLLECTION, [p[0] for p in prepared], [p[1] for p in prepared],
+        [[] for _ in prepared], metas, delete_keys=delete_keys)
 
     new = _stored_metadata(_COLLECTION, every)
     # The old path stored the chunks with no owner row, which live(c) hides.

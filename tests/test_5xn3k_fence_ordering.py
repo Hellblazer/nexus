@@ -39,10 +39,13 @@ class _RecordingFenceWriter:
     """Catalog-writer double recording fence calls into a shared sequence."""
 
     def __init__(self, seq: list, *, complete_result: object = None,
-                 complete_raises: BaseException | None = None) -> None:
+                 complete_raises: BaseException | None = None,
+                 write_raises: BaseException | None = None) -> None:
         self._seq = seq
         self._complete_result = complete_result
         self._complete_raises = complete_raises
+        self._write_raises = write_raises
+        self.append_calls: list[dict] = []
         self.begin_calls: list[dict] = []
         self.complete_calls: list[dict] = []
         self.fail_calls: list[dict] = []
@@ -82,10 +85,25 @@ class _RecordingFenceWriter:
             "metadata_merge": metadata_merge, "metadata_delete_keys": metadata_delete_keys,
         })
         self._seq.append(("write", docs[0][0]))
+        if self._write_raises is not None:
+            raise self._write_raises
         doc = docs[0][0]
         return {"chunks_written": len(chunks or []), "failed_doc_ids": [],
                 "complete_refused": [], "complete_refused_count": 0,
                 "dropped_chashes": {doc: []}, "dropped_count": {doc: 0}}
+
+    def append_manifest_chunks(self, doc_id, rows, *, collection, chunk_payload=None,
+                               sweep_chashes=None, force_re_embed=False, embedding_model=None,
+                               metadata_merge=False, metadata_delete_keys=None):
+        """A later request of a multi-request document: chunks and rows together."""
+        self.append_calls.append({
+            "doc_id": doc_id, "rows": rows, "chunk_payload": chunk_payload,
+            "sweep_chashes": sweep_chashes, "metadata_merge": metadata_merge,
+        })
+        self._seq.append(("write", doc_id))
+        if self._write_raises is not None:
+            raise self._write_raises
+        return {"chunks_written": len(chunk_payload or []), "chunks_unreferenced": 0}
 
     def close(self):
         self.closed = True
@@ -309,12 +327,11 @@ def test_index_document_fresh_skip_never_registers(tmp_path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# _index_pdf_incremental: begin / fail / complete bracketing
-# (code-review-expert HIGH follow-up, 2026-08-02 — this path was entirely
-# unfenced). Multi-batch: fire_batch fires once PER INCREMENT, so completion
-# is an explicit _fence_complete call at the tail with the run's total chunk
-# count, never a manifest_complete ride (that ride is only sound for
-# genuinely single-flush callers like _index_document).
+# _index_pdf_incremental: the fence and the write (RDR-223, nexus-z0o2p.15). The
+# document is ONE write of its chunks with their owner rows: the fence begins
+# inside the writer's first request, every later request appends chunks and rows
+# together, and the completion stamp follows the last one. The batch hooks fire
+# after the write (they read stored chunks) and never include the manifest hook.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _INCR_DOC_ID = "1.5.99"
@@ -323,15 +340,15 @@ _INCR_DOC_ID = "1.5.99"
 def _incr_prepared(n: int, content_hash: str = CONTENT_HASH,
                    target_model: str = TARGET_MODEL) -> list[tuple[str, str, dict]]:
     return [
-        (f"{content_hash[:16]}_{i}", f"chunk {i} text",
+        (f"{i:064x}", f"chunk {i} text",
          {"content_hash": content_hash, "embedding_model": target_model,
-          "chunk_text_hash": f"{i:064d}"[-64:], "content_type": "pdf"})
+          "chunk_text_hash": f"{i:064x}", "content_type": "pdf"})
         for i in range(n)
     ]
 
 
 def _drive_incremental(tmp_path: Path, seq: list, fence: _RecordingFenceWriter, *,
-                       n: int = 130, upsert_raises: bool = False):
+                       n: int = 130):
     from nexus.doc_indexer import _index_pdf_incremental
 
     f = tmp_path / "big.pdf"
@@ -339,57 +356,77 @@ def _drive_incremental(tmp_path: Path, seq: list, fence: _RecordingFenceWriter, 
     hooks = _RecordingHooks(seq)
     prepared = _incr_prepared(n)
     t3 = _T3(seq)
-    if upsert_raises:
-        def _raising_upsert(collection, ids, documents, embeddings, metadatas, **kw):
-            seq.append(("upsert", collection))
-            raise RuntimeError("incremental upsert exploded")
-        t3.upsert_chunks_with_embeddings = _raising_upsert
 
     with patch("nexus.catalog.factory.make_catalog_writer", return_value=fence):
         total = _index_pdf_incremental(
             f, "testowner", prepared, CONTENT_HASH, COLLECTION, t3,
             embed_fn=_embed, hooks=hooks, doc_id=_INCR_DOC_ID,
         )
-    return total, hooks
+    return total, hooks, t3
 
 
-def test_incremental_begin_before_first_upsert_complete_after_last_manifest(tmp_path) -> None:
+def test_incremental_begin_before_first_write_complete_after_last_write(tmp_path) -> None:
     """n=130 forces TWO batches (_INCREMENTAL_BATCH_SIZE=128) so this pins
     the multi-batch shape, not a degenerate single-batch coincidence."""
     seq: list = []
     fence = _RecordingFenceWriter(seq, complete_result={
         "referenced": 130, "present": 130, "missing": 0, "flagged": 0,
     })
-    total, hooks = _drive_incremental(tmp_path, seq, fence, n=130)
+    total, hooks, t3 = _drive_incremental(tmp_path, seq, fence, n=130)
 
     assert total == 130
     ops = [op for op, *_ in seq]
-    assert ops.count("manifest_batch") == 2, seq
-    assert "upsert" in ops
-    assert ops.index("begin") < ops.index("upsert"), seq
-    last_manifest = max(i for i, op in enumerate(ops) if op == "manifest_batch")
-    assert ops.index("complete") > last_manifest, seq
+    assert "upsert" not in ops, "no separate chunk upload: the chunks ride the writes"
+    assert ops.index("begin") < ops.index("write"), seq
+    last_write = max(i for i, op in enumerate(ops) if op == "write")
+    assert ops.index("complete") > last_write, seq
+    assert len(fence.write_calls) == 1 and fence.append_calls, \
+        "the first request replaces the manifest, the rest append"
+    assert fence.write_calls[0]["sweep"] is False and not fence.write_calls[0]["complete"]
     assert fence.complete_calls[0]["chunk_count"] == 130
     # hash-once MUST: begin and complete carry the SAME content_hash.
     assert fence.begin_calls[0]["content_hash"] == CONTENT_HASH
     assert fence.complete_calls[0]["content_hash"] == CONTENT_HASH
-    # every fire_batch call used the manifest ride NOT present (multi-batch).
+    # The batch hooks fire once per batch, after the write; the manifest hook is left out.
+    assert ops.count("manifest_batch") == 2, seq
+    assert ops.index("manifest_batch") > ops.index("complete"), seq
+    assert hooks.dropped_batch_hooks, "the manifest hook must be dropped (the writer wrote the manifest)"
     assert all(c["manifest_complete"] is None for c in hooks.batch_calls)
 
 
 def test_incremental_failure_fails_fence_and_propagates(tmp_path) -> None:
     seq: list = []
-    fence = _RecordingFenceWriter(seq)
-    with pytest.raises(RuntimeError, match="incremental upsert exploded"):
-        _drive_incremental(tmp_path, seq, fence, n=130, upsert_raises=True)
+    fence = _RecordingFenceWriter(seq, write_raises=RuntimeError("incremental write exploded"))
+    with pytest.raises(RuntimeError, match="incremental write exploded"):
+        _drive_incremental(tmp_path, seq, fence, n=130)
     assert fence.fail_calls, "fail_index_run never fired on incremental failure"
     assert fence.fail_calls[0]["doc_id"] == _INCR_DOC_ID
-    assert "incremental upsert exploded" in fence.fail_calls[0]["error"]
+    assert "incremental write exploded" in fence.fail_calls[0]["error"]
     assert fence.complete_calls == []
 
 
+def test_incremental_no_catalog_identity_fails_the_run_and_writes_nothing(tmp_path) -> None:
+    from nexus.doc_indexer import _index_pdf_incremental
+    from nexus.errors import CatalogIdentityMissingError
+
+    seq: list = []
+    fence = _RecordingFenceWriter(seq)
+    f = tmp_path / "big.pdf"
+    f.write_bytes(b"%PDF-fake")
+    with patch("nexus.catalog.factory.make_catalog_writer", return_value=fence), \
+            patch("nexus.doc_indexer._register_or_lookup_doc_id", return_value=""):
+        with pytest.raises(CatalogIdentityMissingError):
+            _index_pdf_incremental(
+                f, "testowner", _incr_prepared(130), CONTENT_HASH, COLLECTION, _T3(seq),
+                embed_fn=_embed, hooks=_RecordingHooks(seq), doc_id="",
+            )
+    assert seq == [], f"a run with no owner wrote something: {seq}"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# pipeline_index_pdf: begin / complete / fail bracketing
+# pipeline_index_pdf: begin / complete / fail bracketing. The fence begins inside
+# the document's writer (its first request); the stamp is the orchestrator's,
+# after the post-passes and the document-grain hook.
 # ─────────────────────────────────────────────────────────────────────────────
 
 _P_EXT = "nexus.pipeline_stages.PDFExtractor"
@@ -397,8 +434,7 @@ _P_CHK = "nexus.pipeline_stages.PDFChunker"
 
 
 def _run_pipeline(db, seq: list, fence: _RecordingFenceWriter, *, pages: int = 2,
-                  chunks: list | None = None, upsert_raises: bool = False,
-                  content_hash: str = CONTENT_HASH):
+                  chunks: list | None = None, content_hash: str = CONTENT_HASH):
     from nexus.db.t3 import T3Database  # noqa: F401 — autospec target
     from nexus.pipeline_stages import pipeline_index_pdf
     from tests.test_pipeline_stages import _er, _fx, _tc
@@ -407,15 +443,6 @@ def _run_pipeline(db, seq: list, fence: _RecordingFenceWriter, *, pages: int = 2
     mock_col.get.return_value = {"ids": [], "metadatas": []}
     t3 = MagicMock()
     t3.get_or_create_collection.return_value = mock_col
-
-    def _upsert(*a, **k):
-        if upsert_raises:
-            raise RuntimeError("upload exploded")
-        seq.append(("upsert",))
-
-    t3.upsert_chunks_with_embeddings.side_effect = _upsert
-    # uploader_loop upserts through col in some shapes; record both.
-    mock_col.upsert.side_effect = _upsert
 
     result = _er(pages)
     fake_chunks = chunks if chunks is not None else _tc(
@@ -445,7 +472,7 @@ def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nexus.pipeline_stages._POLL_INTERVAL", 0.01)
 
 
-def test_pipeline_begin_before_first_upsert_complete_after_last_manifest(db) -> None:
+def test_pipeline_begin_before_first_write_complete_after_last_manifest(db) -> None:
     seq: list = []
     fence = _RecordingFenceWriter(seq, complete_result={
         "referenced": 2, "present": 2, "missing": 0, "flagged": 0,
@@ -455,14 +482,16 @@ def test_pipeline_begin_before_first_upsert_complete_after_last_manifest(db) -> 
     assert total > 0
     ops = [op for op, *_ in seq]
     assert "begin" in ops and "complete" in ops
-    assert "upsert" in ops
-    assert ops.index("begin") < ops.index("upsert"), seq
+    assert "write" in ops
+    assert ops.index("begin") < ops.index("write"), seq
     last_manifest = max(i for i, op in enumerate(ops) if op == "manifest_batch")
     assert ops.index("complete") > last_manifest, seq
     # complete follows the document-grain hook too — the per-doc hook may
     # rewrite the manifest at the tail, and the stamp must postdate it.
     assert ops.index("complete") > ops.index("fire_document"), seq
     assert fence.complete_calls[0]["chunk_count"] == total
+    # The write that carried the chunks is not the stamp: the stamp is deferred to the tail.
+    assert all(not c["complete"] for c in fence.write_calls)
 
 
 def test_pipeline_hash_once_between_begin_and_complete(db) -> None:
@@ -475,9 +504,9 @@ def test_pipeline_hash_once_between_begin_and_complete(db) -> None:
 
 def test_pipeline_failure_fails_fence_and_propagates_first_exc(db) -> None:
     seq: list = []
-    fence = _RecordingFenceWriter(seq)
+    fence = _RecordingFenceWriter(seq, write_raises=RuntimeError("upload exploded"))
     with pytest.raises(RuntimeError, match="upload exploded"):
-        _run_pipeline(db, seq, fence, upsert_raises=True)
+        _run_pipeline(db, seq, fence)
     assert fence.fail_calls, "fail_index_run never fired on pipeline failure"
     assert fence.fail_calls[0]["doc_id"] == DOC_ID
     assert "upload exploded" in fence.fail_calls[0]["error"]
@@ -509,13 +538,16 @@ def test_pipeline_verify_refused_propagates(db) -> None:
         _run_pipeline(db, seq, fence)
 
 
-def test_pipeline_none_sentinel_is_not_success_and_not_fatal(db) -> None:
-    """complete_index_run -> None (pre-fence engine): the run's own success
-    is unaffected, but nothing may claim the fence was stamped."""
+def test_pipeline_none_sentinel_is_a_failure_not_a_silent_success(db) -> None:
+    """complete_index_run -> None (an engine with no fence route): the writer refuses to call the
+    document stamped (RDR-223 Phase 1 ships in one engine cut, so this is a broken deploy, not a
+    supported mode), so the run fails loudly instead of reporting a document nobody stamped."""
+    from nexus.catalog.multi_batch_write import BatchWriteFailedError
+
     seq: list = []
     fence = _RecordingFenceWriter(seq, complete_result=None)
-    total, _ = _run_pipeline(db, seq, fence)
-    assert total > 0  # indexing itself unaffected
+    with pytest.raises(BatchWriteFailedError, match="NOT stamped"):
+        _run_pipeline(db, seq, fence)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

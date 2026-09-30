@@ -72,6 +72,18 @@ def _stub_fence_complete(monkeypatch):
     monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
 
 
+@pytest.fixture(autouse=True)
+def _owner_writes(monkeypatch, local_t3):
+    """RDR-223: the PDF paths write a document's chunks and owner rows to the REAL engine in one
+    request, while this file's subject is extraction, chunking and local search over its in-memory
+    T3. Recorders stand in for both writes and put the chunks into ``local_t3``; the writes
+    themselves are pinned against the real engine in tests/integration/test_rdr223_pdf_journey.py."""
+    from tests import _owner_write_double
+
+    _owner_write_double.install(monkeypatch).forward_to(local_t3)
+    _owner_write_double.install_streaming_writer(monkeypatch, forward_to=local_t3)
+
+
 def _local_embed(chunks, model, api_key="", input_type="document", timeout=120.0, on_progress=None):
     """Local embed stub: wraps ONNX MiniLM-L6-v2 — no API keys needed.
 

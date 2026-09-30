@@ -497,7 +497,8 @@ class ChunkLandingUnverifiedError(NexusError):
     """A metadata-only chunk update returned ``missing=None`` — the engine's
     response omitted the "missing" field, so the client cannot tell whether
     any of the updated ids were a stale-positive probe miss (nexus-tp8yk D1,
-    design memo §1 P1: ``_upsert_skip_reembed`` used to treat this as "no
+    design memo §1 P1: ``_upsert_skip_reembed`` (removed at RDR-223, nexus-z0o2p.15,
+    when every indexer moved to one atomic chunk+owner write) used to treat this as "no
     reroute" and proceed silently, letting the caller's manifest hook write
     rows for chunks that were never confirmed present in T3).
 
@@ -781,8 +782,9 @@ class BatchWriteFailedError(NexusError):
 #:     remember to go check four call sites for.
 #:
 #: doc_indexer's per-record ingest paths (index_pdf / index_markdown) are
-#: the origin of the first two members: ChunkLandingUnverifiedError fires
-#: from ``_upsert_skip_reembed`` before any manifest row is committed;
+#: the origin of the first two members: ChunkLandingUnverifiedError fired
+#: from ``_upsert_skip_reembed`` (removed at RDR-223; nothing raises it now) before any
+#: manifest row was committed;
 #: IndexRunVerifyRefused fires from the RUNFENCE completion-verify gate.
 #: ExtractionQualityError (nexus-wi1uv occurrence 5 of this exact class,
 #: caught by this tripwire before it shipped) fires from

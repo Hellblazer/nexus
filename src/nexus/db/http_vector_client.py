@@ -4268,9 +4268,10 @@ class HttpVectorClient:
         frecency-only reindex path, ``pipeline_stages.py``, ``indexer.py``,
         and ``doc_indexer.py``'s repair reroute below) gets the anomaly
         signal for free, not just the one caller that happens to act on it.
-        ``doc_indexer._upsert_skip_reembed`` additionally logs its own
-        ``update_chunks_missing_rerouted`` when it re-routes — that is the
-        separate CALLER-SIDE repair log, not a duplicate of this one.
+        (``doc_indexer._upsert_skip_reembed``, which used to re-route a stale
+        positive through a full upsert and log ``update_chunks_missing_rerouted``,
+        was removed at RDR-223: every indexer writes chunks with their owner rows
+        in one request now.)
 
         Division of labor (nexus-5xn3k.5 vs .4): this method — and its one
         reroute caller — repairs a STALE-POSITIVE PROBE miss: the id was

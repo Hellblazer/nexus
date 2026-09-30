@@ -1292,8 +1292,8 @@ def index_cmd(
             # / _index_pdf_incremental -> _fence_complete) can propagate
             # IndexRunVerifyRefused by contract (the fail-loud completion
             # verify); index_pdf/index_markdown raise ChunkLandingUnverifiedError
-            # from _upsert_skip_reembed when a stale-positive existing_ids
-            # probe meets an engine response that omits "missing" (cannot
+            # from the removed _upsert_skip_reembed (RDR-223, nexus-z0o2p.15) when a stale-positive
+            # existing_ids probe met an engine response that omits "missing" (cannot
             # tell whether the batch landed) — BEFORE any manifest row is
             # committed. Pre-fix either fell through the narrow except tuple
             # entirely, escaping the loop and aborting the WHOLE `nx dt

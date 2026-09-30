@@ -93,28 +93,36 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
     ),
     ("doc_indexer.py", "_index_pdf_incremental"): _Coverage(
         reason=(
-            "producer 2 (nx index pdf, >128 chunks, incremental path): "
-            "_fence_begin called in this same function (nexus-5xn3k.3)."
+            "producer 2 (nx index pdf, >128 chunks, incremental path): the "
+            "fence begin is the first request of the combined writer "
+            "(_write_chunks_with_owner_rows -> MultiBatchDocumentWriter."
+            "_begin_fence), called before this function's fire_batch — "
+            "cross-function by RDR-223 design (nexus-z0o2p.15). Ordering "
+            "is pinned by tests/integration/test_rdr223_pdf_journey.py "
+            "(begin precedes the first write request)."
         ),
-        same_function=True,
+        same_function=False,
     ),
     ("doc_indexer.py", "index_pdf"): _Coverage(
         reason=(
             "producer 3 (nx index pdf, <=128 chunks, small-doc inline "
-            "path): _fence_begin called in this same function "
-            "(nexus-5xn3k.3)."
+            "path): the fence begin is the first request of the combined "
+            "writer, called before this function's fire_batch — "
+            "cross-function by RDR-223 design (nexus-z0o2p.15). Ordering "
+            "is pinned by tests/integration/test_rdr223_pdf_journey.py."
         ),
-        same_function=True,
+        same_function=False,
     ),
-    ("pipeline_stages.py", "uploader_loop"): _Coverage(
+    ("pipeline_stages.py", "_flag"): _Coverage(
         reason=(
-            "producer 4 (nx index pdf, streaming threshold): fence begin "
-            "is stamped by the SIBLING stage function pipeline_index_pdf "
-            "in the same module, before uploader_loop's thread starts "
-            "consuming the upload queue — cross-function by the streaming "
-            "pipeline's stage-split architecture (extractor/chunker/"
-            "embedder/uploader running as separate stage functions), not "
-            "same-function (nexus-5xn3k.3)."
+            "producer 4 (nx index pdf, streaming threshold): uploader_loop's "
+            "nested _flag helper fires the batch hooks. The fence "
+            "begin is the first request of the document's multi-batch "
+            "writer (UploadRun.open_writer -> MultiBatchDocumentWriter), "
+            "which uploader_loop feeds and whose sent batches are the only "
+            "ones fire_batch is called for — cross-function by the "
+            "writer's design (RDR-223, nexus-z0o2p.11). Ordering is pinned "
+            "by tests/integration/test_rdr223_pdf_journey.py."
         ),
         same_function=False,
     ),
@@ -354,16 +362,19 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
     """Exactly the two ChunkBatcher flush-grain closures use cross-function
     coverage (their begin fires from a sibling on_batch_begin callback,
     not inline) — plus the pre-existing streaming-pipeline stage split, plus
-    ``_index_document`` since RDR-223 (nexus-z0o2p.13), whose begin is the
-    first request of the combined chunk+owner writer it calls.
+    ``_index_document`` since RDR-223 (nexus-z0o2p.13), and the two
+    non-streaming PDF paths (nexus-z0o2p.15), whose begin is the
+    first request of the combined chunk+owner writer they call.
     Pins the count so a future author cannot quietly reclassify a
     same-function site as cross-function to dodge the AST proof above."""
     cross = sorted(k for k, cov in _ALLOWLIST.items() if not cov.same_function)
     assert cross == [
         ("doc_indexer.py", "_index_document"),
+        ("doc_indexer.py", "_index_pdf_incremental"),
+        ("doc_indexer.py", "index_pdf"),
         ("indexer.py", "_fire_deferred_hooks"),
         ("indexer.py", "_fire_flush_grain_hooks"),
-        ("pipeline_stages.py", "uploader_loop"),
+        ("pipeline_stages.py", "_flag"),
     ], (
         "cross-function allowlist entries changed — this is the escape "
         f"hatch from AST proof, keep it to the documented minimum: {cross}"

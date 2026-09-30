@@ -581,55 +581,22 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
     extractor_result.text = fake_extracted_text
     extractor_result.metadata = fake_extraction_metadata
 
-    # Pin the destination collection name so the test does not have to
-    # discover it via ``list_collections`` (the EphemeralClient shares
-    # process state across fixtures, so ``list_collections`` returns
-    # collections from earlier tests in the same session). Neutral model
-    # token on purpose (RDR-109 mode lint): embed_fn=_local_embed below
-    # supplies the real model string; this is just a conformant-shaped
-    # NAME, no embedder or credential path is exercised.
-    pinned_collection = "docs__dupdocs__model-ctx__v1"
+    # RDR-223 (nexus-z0o2p.15): index_pdf writes the chunks and the manifest rows to the REAL engine
+    # in one request, so the collection is one the engine registers (its tier-1 embedder's token)
+    # and the T3 side is read back from the engine, not a fake in-memory client.
+    from nexus.db.http_vector_client import HttpVectorClient
 
-    # nexus-dbzxb (RDR-191 Phase 5 Python collateral): local_t3 is a fake
-    # in-memory T3 client (see the comment on the RUNFENCE stub above),
-    # but index_pdf's manifest write goes through the REAL engine catalog
-    # unconditionally. fk_catalog_chunks_chunk now requires a matching
-    # real nexus.chunks row per manifest chash; wrap the ONE write choke
-    # point (_write_batch — see _do_index's identical trick above) so the
-    # real ids this pipeline computes are also seeded into the real
-    # engine.
-    from tests._catalog_fixture_ops import seed_manifest_chunks
-
-    _orig_write_batch = local_t3._write_batch
-
-    def _seeding_write_batch(col, collection_name, ids, documents, metadatas,
-                              embeddings=None, **kwargs):
-        _orig_write_batch(col, collection_name, ids, documents, metadatas,
-                           embeddings, **kwargs)
-        seed_manifest_chunks(collection_name, ids)
-
-    monkeypatch.setattr(local_t3, "_write_batch", _seeding_write_batch)
+    pinned_collection = "docs__dupdocs__bge-base-en-v15-768__v1"
 
     with patch("nexus.doc_indexer.PDFExtractor") as ext_cls, patch(
         "nexus.doc_indexer.PDFChunker"
-    ) as chunker_cls, patch("nexus.doc_indexer._fence_complete"):
-        # nexus-tp8yk D2a: index_pdf's small-doc branch now calls the
-        # PROPAGATING _fence_complete explicitly. local_t3 is an
-        # InMemoryVectorClient double — chunks never reach the REAL
-        # engine's T3 the catalog's fail-closed /complete verify checks
-        # against (only the manifest, via the real catalog registration
-        # this test intentionally does NOT mock, actually lands there).
-        # Unstubbed this refuses with a real IndexRunVerifyRefused; this
-        # test proves T3-side dedup + manifest-position recording, not
-        # RUNFENCE completion (owned by test_5xn3k_fence_ordering.py /
-        # tests/db/test_5xn3k_runfence_gate.py) — stub the fence like
-        # every other decoupled-substrate test in the suite.
+    ) as chunker_cls:
         ext_cls.return_value.extract.return_value = extractor_result
         chunker_cls.return_value.chunk.return_value = [chunk_one, chunk_two]
         result = index_pdf(
             pdf_path,
             corpus="dupdocs",
-            t3=local_t3,
+            t3=HttpVectorClient(),
             collection_name=pinned_collection,
             embed_fn=_local_embed,
             force=True,
@@ -644,11 +611,8 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
     # T3 must collapse to one row at the shared chash (RDR-180: the full digest).
     expected_chash = _hl.sha256(duplicate_text.encode()).hexdigest()
     expected_id = expected_chash
-    docs_col = local_t3.get_collection(pinned_collection)
-    res = docs_col.get(include=["metadatas"])
-    assert res["ids"] == [expected_id], (
-        "expected exactly one T3 row at the shared chash; "
-        f"got ids={res['ids']!r}"
+    assert set(HttpVectorClient().existing_ids(pinned_collection, [expected_id])) == {expected_id}, (
+        "expected exactly one T3 row at the shared chash"
     )
 
     # Manifest contract: the catalog Document for this PDF must carry
@@ -666,6 +630,7 @@ def test_pdf_indexer_handles_duplicate_chunks_within_document(
         "both manifest rows must point at the shared chash; "
         f"got {[r.chash for r in manifest]!r}"
     )
+    assert rows[0].index_state == "complete"
 
 
 # ── (2c) docs__: a byte-identical file at a second path (nexus-o19i0) ─────
