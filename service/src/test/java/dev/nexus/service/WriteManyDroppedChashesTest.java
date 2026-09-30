@@ -209,4 +209,72 @@ class WriteManyDroppedChashesTest extends AtomicWriteTestBase {
         assertThat(dropped(result)).containsExactly(Map.entry(f.docId(), List.<String>of()));
         assertThat(embedder.calls.get() - embedsBefore).as("nothing changed, nothing re-embedded").isZero();
     }
+
+    /**
+     * RDR-223 P2.2 fix round (nexus-z0o2p.12). Two connections replace one document with different
+     * content at the same time. The first is parked INSIDE its previous-manifest read; the second
+     * starts while it is parked. The read now runs under the document's write locks, so the second
+     * waits for the first to commit and then reads ITS manifest: the second's dropped list names the
+     * first's chunk and its sweep removes it. Before the fix the second read the same empty manifest
+     * without waiting, so neither list named the other's chunk and one writer's chunk was left in T3
+     * with no owner.
+     */
+    @Test
+    void twoConcurrentReplacers_theSecondSeesTheFirstsManifest_soNoLoserChunkIsLeftOwnerless() throws Exception {
+        Fx f = fixture("race");
+        String x = ch("race-x"), y = ch("race-y");
+        var firstInRead = new java.util.concurrent.CountDownLatch(1);
+        var releaseFirst = new java.util.concurrent.CountDownLatch(1);
+        var firstSeen = new java.util.concurrent.atomic.AtomicBoolean(false);
+        var errors = new java.util.concurrent.ConcurrentLinkedQueue<Throwable>();
+        var responses = new java.util.concurrent.ConcurrentHashMap<String, Map<String, Object>>();
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            repo.setBeforeReadHookForTests(docId -> {
+                if (docId.equals(f.docId()) && firstSeen.compareAndSet(false, true)) {
+                    firstInRead.countDown();
+                    try {
+                        releaseFirst.await(30, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            });
+            var first = pool.submit(() -> {
+                try {
+                    responses.put("first", svc.writeManyCombined(TENANT, f.collection(),
+                        List.of(chunk(x, "race x")), List.of(doc(f.docId(), List.of(row(0, x)))),
+                        null, true, false).response());
+                } catch (Throwable t) {
+                    errors.add(t);
+                }
+            });
+            assertThat(firstInRead.await(30, java.util.concurrent.TimeUnit.SECONDS))
+                .as("the first replacer reached its previous-manifest read").isTrue();
+            var second = pool.submit(() -> {
+                try {
+                    responses.put("second", svc.writeManyCombined(TENANT, f.collection(),
+                        List.of(chunk(y, "race y")), List.of(doc(f.docId(), List.of(row(0, y)))),
+                        null, true, false).response());
+                } catch (Throwable t) {
+                    errors.add(t);
+                }
+            });
+            Thread.sleep(500);   // the second is now parked on the lock (before the fix: already done)
+            releaseFirst.countDown();
+            first.get(60, java.util.concurrent.TimeUnit.SECONDS);
+            second.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } finally {
+            repo.setBeforeReadHookForTests(null);
+            pool.shutdownNow();
+        }
+
+        assertThat(errors).isEmpty();
+        assertThat(manifestChashes(f.docId())).as("the second replacer's version is the document").containsExactly(y);
+        assertThat(dropped(responses.get("second")))
+            .as("the second replacer read the first's manifest, so its dropped list names x")
+            .containsExactly(Map.entry(f.docId(), List.of(x)));
+        assertThat(chunkExists(f.collection(), x)).as("the first's chunk is swept, not left ownerless").isFalse();
+        assertThat(chunkExists(f.collection(), y)).isTrue();
+    }
 }

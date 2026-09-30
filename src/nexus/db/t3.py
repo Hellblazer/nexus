@@ -900,17 +900,9 @@ class T3Database:
 
         # Derive content_type from the collection prefix so the factory
         # can stamp it through normalize().
-        prefix_to_ct = {
-            "code__": "code",
-            "docs__": "prose",
-            "rdr__": "markdown",
-            "knowledge__": "prose",
-        }
-        content_type = "prose"
-        for prefix, ct in prefix_to_ct.items():
-            if collection.startswith(prefix):
-                content_type = ct
-                break
+        from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
+
+        content_type = chunk_content_type_for_collection(collection)
 
         # RDR-101 Phase 5c dropped store_type, corpus, git_meta. Title
         # kept (find_ids_by_title is load-bearing for nx store delete

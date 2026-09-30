@@ -269,6 +269,15 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
     assert catalog_writer.write_manifest_many.call_count == 1
     kwargs = catalog_writer.write_manifest_many.call_args.kwargs
     assert kwargs["force_re_embed"] is True
+    # RDR-223 P2.4: the flush asks for the metadata merge mode (the replaced upsert-chunks call
+    # merged), so a normal-size file's re-index keeps another writer's bib_* enrichment; the
+    # delete list names owned keys the rows dropped (this fixture's row carries none of them).
+    from nexus.metadata_schema import rewrite_delete_keys
+
+    assert kwargs["metadata_merge"] is True
+    assert kwargs["metadata_delete_keys"] == rewrite_delete_keys([{"m": 1}])
+    assert kwargs["metadata_delete_keys"] and not any(
+        k.startswith("bib_") for k in kwargs["metadata_delete_keys"])
 
 
 def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkeypatch):

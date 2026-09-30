@@ -544,7 +544,7 @@ class UploadRun:
         self.cat: Any = None
         self.finished = False          # every chunk landed: the writer's finish() returned
         self._raw_cat: Any = None
-        #: Called just before each chunk-carrying request (see ``_MetadataMergingCatalog``).
+        #: Called just before each chunk-carrying request (see ``MetadataMergingCatalog``).
         self._on_request = on_request
 
     def open_writer(
@@ -552,13 +552,13 @@ class UploadRun:
         defer_completion: bool,
     ) -> Any:
         from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
-        from nexus.doc_indexer import _MetadataMergingCatalog  # noqa: PLC0415 — deferred: doc_indexer imports this module lazily
+        from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: shared with the other RDR-223 writers
 
         self._raw_cat = _make_upload_catalog()
         # The streaming stub's metadata is deliberately partial (the post-pass fills title, author
         # and extraction method), so the write MERGES it into what is stored and names no keys to
         # delete: replacing would strip the ``bib_*`` enrichment a forced re-index must keep.
-        self.cat = _MetadataMergingCatalog(self._raw_cat, [], on_request=self._on_request)
+        self.cat = MetadataMergingCatalog(self._raw_cat, collection, [], on_request=self._on_request)
         self.writer = MultiBatchDocumentWriter(
             self.cat, doc_id=doc_id, collection=collection, content_hash=content_hash,
             force_re_embed=force_re_embed, defer_completion=defer_completion)
@@ -676,11 +676,9 @@ def uploader_loop(
         nonlocal held
         if held is None or run.writer is None or run.finished:
             return
-        from nexus.doc_indexer import _account_write_result  # noqa: PLC0415 - deferred to avoid circular import at module load
-
         result = run.writer.finish()
         run.finished = True
-        _account_write_result(result, run.cat.sweep_errors, catalog_doc_id, collection)
+        run.cat.account_unexplained_skips(catalog_doc_id, result.sweep_skipped)
         _flag(held)
         held = None
 

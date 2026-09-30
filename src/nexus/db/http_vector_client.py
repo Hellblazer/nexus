@@ -3028,17 +3028,9 @@ class HttpVectorClient:
 
         # Derive content_type from collection prefix — mirrors T3Database.put
         # at t3.py:860-870 exactly.
-        prefix_to_ct = {
-            "code__": "code",
-            "docs__": "prose",
-            "rdr__": "markdown",
-            "knowledge__": "prose",
-        }
-        content_type = "prose"
-        for prefix, ct in prefix_to_ct.items():
-            if collection.startswith(prefix):
-                content_type = ct
-                break
+        from nexus.metadata_schema import chunk_content_type_for_collection  # noqa: PLC0415 — circular-dep avoidance (metadata_schema)
+
+        content_type = chunk_content_type_for_collection(collection)
 
         metadata = make_chunk_metadata(
             content_type=content_type,

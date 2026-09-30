@@ -715,13 +715,15 @@ def _stamp_finished_upload(doc_id: str, content_hash: str, chunk_count: int) -> 
     verifies that every row's chunk exists and that the row count matches.
     """
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
-    from nexus.errors import BatchWriteFailedError, IndexRunVerifyRefused  # noqa: PLC0415 — deferred import: avoids import cycle at module load
-    from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
+    from nexus.catalog.multi_batch_write import complete_document  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
+    from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — deferred import: avoids import cycle at module load
 
     w = None
     try:
         w = make_catalog_writer()
-        done = _manifest_write_with_retry(w.complete_index_run, doc_id, content_hash, chunk_count)
+        # The shared stamp: retried like every idempotent request, and a 404 (an engine with no
+        # fence route) is a BatchWriteFailedError, the document was NOT stamped.
+        complete_document(w, doc_id=doc_id, content_hash=content_hash, manifest_rows=chunk_count, batch=0)
     except IndexRunVerifyRefused:
         from nexus.mcp_infra import _record_complete_refusal  # noqa: PLC0415 — deferred import: avoids import cycle at module load
 
@@ -731,11 +733,6 @@ def _stamp_finished_upload(doc_id: str, content_hash: str, chunk_count: int) -> 
         close = getattr(w, "close", None)
         if close is not None:
             close()
-    if done is None:
-        raise BatchWriteFailedError(
-            doc_id=doc_id, batch=0,
-            reason="complete_index_run answered 404: the engine has no index-run fence route, so "
-                   "the document was NOT stamped complete")
 
 
 def _repo_owner_document_for(reader, abs_path):
@@ -1433,54 +1430,6 @@ def _register_before_read(db: Any, collection_name: str) -> None:
     ensure_collection_registered(collection_name, registrar=registrar)
 
 
-class _MetadataMergingCatalog:
-    """A catalog writer that sends the combined routes' metadata merge mode (RDR-223,
-    nexus-z0o2p.13) on every chunk-carrying request, and keeps the engine's per-document
-    sweep outcomes.
-
-    The multi-batch writer owns the request sequence and knows nothing of metadata modes, so this
-    wrapper adds ``metadata_merge=True`` and the caller's ``metadata_delete_keys`` to its
-    ``write_manifest_many`` / ``append_manifest_chunks`` calls, and records each response's
-    ``sweep_detail`` entries that errored (the writer's result carries only their count). Every
-    other attribute is the wrapped writer's.
-    """
-
-    def __init__(
-        self, cat: Any, delete_keys: list[str], on_request: "Callable[[], None] | None" = None,
-    ) -> None:
-        self._cat = cat
-        self._delete_keys = list(delete_keys)
-        #: Called just BEFORE each chunk-carrying request is sent, so a caller can tell that the
-        #: writer has begun writing (a request that fails after this point may still have landed).
-        self._on_request = on_request
-        #: ``[{doc_id, reason}, ...]``: sweeps the engine reported as errored, with its reason.
-        self.sweep_errors: list[dict] = []
-
-    def _note(self, resp: Any) -> Any:
-        if isinstance(resp, dict):
-            for d in resp.get("sweep_detail") or ():
-                if isinstance(d, dict) and d.get("errored"):
-                    self.sweep_errors.append(
-                        {"doc_id": str(d.get("doc_id", "")),
-                         "reason": str(d.get("reason") or "sweep_failed")})
-        return resp
-
-    def write_manifest_many(self, *args: Any, **kwargs: Any) -> Any:
-        if self._on_request is not None:
-            self._on_request()
-        return self._note(self._cat.write_manifest_many(
-            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
-
-    def append_manifest_chunks(self, *args: Any, **kwargs: Any) -> Any:
-        if self._on_request is not None:
-            self._on_request()
-        return self._note(self._cat.append_manifest_chunks(
-            *args, metadata_merge=True, metadata_delete_keys=self._delete_keys, **kwargs))
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._cat, name)
-
-
 def _write_chunks_with_owner_rows(
     collection_name: str,
     doc_id: str,
@@ -1530,6 +1479,7 @@ def _write_chunks_with_owner_rows(
     """
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
     from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
+    from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: shared with the oversize fallbacks (nexus-z0o2p.14)
     from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
     from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
@@ -1543,7 +1493,8 @@ def _write_chunks_with_owner_rows(
     total = len(ids)
     size = batch_size if 0 < batch_size < total else max(total, 1)
     raw_cat = make_catalog_writer()
-    cat = _MetadataMergingCatalog(raw_cat, rewrite_delete_keys(metadatas), on_request=on_request)
+    cat = MetadataMergingCatalog(
+        raw_cat, collection_name, rewrite_delete_keys(metadatas), on_request=on_request)
     try:
         with MultiBatchDocumentWriter(
             cat, doc_id=doc_id, collection=collection_name, content_hash=content_hash,
@@ -1558,7 +1509,11 @@ def _write_chunks_with_owner_rows(
         close = getattr(raw_cat, "close", None)
         if close is not None:
             close()
-    _account_write_result(result, cat.sweep_errors, doc_id, collection_name)
+    # The wrapper recorded each response's swept count and reasoned sweep skips; a skip the engine
+    # counted without a reason (an older shape without detail) is recorded here.
+    cat.account_unexplained_skips(doc_id, result.sweep_skipped)
+    # No dropped_unknown branch: this caller always passes content_hash, so the writer is fenced and
+    # takes the drop list from the begin snapshot, never from the write_many response.
     if on_progress is not None:
         # After the stamp (it rides finish()): the document is complete, so a progress display
         # that raises must not reach the caller's failure handling, which would mark it failed.
@@ -1567,28 +1522,6 @@ def _write_chunks_with_owner_rows(
         except Exception:  # noqa: BLE001 — boundary catch: a progress callback is display only, and the write is already stamped
             _log.warning("write_progress_callback_failed_after_stamp", doc_id=doc_id, exc_info=True)
     return result
-
-
-def _account_write_result(
-    result: "DocumentWriteResult", sweep_errors: list[dict], doc_id: str, collection_name: str,
-) -> None:
-    """Feed a finished write's sweep outcome to the run summary's collectors: the chunks it swept,
-    and every sweep the engine skipped, with the engine's own reason when it gave one
-    (nexus-39upx: a skipped sweep is never silent). *sweep_errors* is
-    :attr:`_MetadataMergingCatalog.sweep_errors`."""
-    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-        _record_superseded_swept,
-        _record_superseded_sweep_skip,
-    )
-
-    _record_superseded_swept(result.swept)
-    for err in sweep_errors:
-        _record_superseded_sweep_skip(err["doc_id"] or doc_id, collection_name, err["reason"])
-    if result.sweep_skipped > len(sweep_errors):
-        # The engine counted skips it gave no reason for (or an older shape without detail).
-        _record_superseded_sweep_skip(doc_id, collection_name, "sweep_failed")
-    # No dropped_unknown branch: every caller passes content_hash, so the writer is fenced and takes
-    # the drop list from the begin snapshot, never from the write_many response.
 
 
 def _raise_identity_missing(

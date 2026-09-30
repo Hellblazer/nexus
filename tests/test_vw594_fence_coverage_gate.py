@@ -160,17 +160,23 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
     ),
     ("code_indexer.py", "index_code_file"): _Coverage(
         reason=(
-            "producer 5 (nx index repo, code, legacy per-file fallback "
-            "when the ChunkBatcher rejects the file or is absent): "
-            "_fence_begin called in this same function (nexus-vw594 F1)."
+            "producer 5 (nx index repo, code, per-file path for a file the "
+            "ChunkBatcher rejected as oversize, a file with no catalog "
+            "identity, or a non-service T3): _fence_begin called in this same "
+            "function (nexus-vw594 F1); the oversize leg writes through "
+            "MultiBatchDocumentWriter, whose own fence begin re-affirms it "
+            "(nexus-z0o2p.14)."
         ),
         same_function=True,
     ),
     ("prose_indexer.py", "index_prose_file"): _Coverage(
         reason=(
-            "producer 6 (nx index repo, prose/rdr, legacy per-file "
-            "fallback): _fence_begin called in this same function "
-            "(nexus-vw594 F1)."
+            "producer 6 (nx index repo, prose/rdr, per-file path for a file "
+            "the ChunkBatcher rejected as oversize, a file with no catalog "
+            "identity, or a non-service T3): _fence_begin called in this same "
+            "function (nexus-vw594 F1); the oversize leg writes through "
+            "MultiBatchDocumentWriter, whose own fence begin re-affirms it "
+            "(nexus-z0o2p.14)."
         ),
         same_function=True,
     ),
@@ -199,19 +205,29 @@ _ALLOWLIST: dict[tuple[str, str], _Coverage] = {
     ),
     ("indexer.py", "_index_pdf_file"): _Coverage(
         reason=(
-            "producer 9 (nx index repo, PDF path, legacy per-file "
-            "fallback): _fence_begin called in this same function "
-            "(nexus-vw594 F1)."
+            "producer 9 (nx index repo, PDF path, per-file path for a file "
+            "the ChunkBatcher rejected as oversize, a file with no catalog "
+            "identity, or a non-service T3): _fence_begin called in this same "
+            "function (nexus-vw594 F1); the oversize leg writes through "
+            "MultiBatchDocumentWriter, whose own fence begin re-affirms it "
+            "(nexus-z0o2p.14)."
         ),
         same_function=True,
     ),
     ("mcp/core.py", "store_put"): _Coverage(
         reason=(
-            "producer 10 (MCP store_put / nx store put): _fence_begin "
-            "called in this same function before t3.put; manifest_complete "
-            "rides the existing fire_batch call (nexus-vw594 F2)."
+            "producer 10 (MCP store_put): the fence begins in "
+            "nexus.catalog.note_write.put_note, which store_put calls "
+            "before it fires the batch chain (RDR-223 P2.2, "
+            "nexus-z0o2p.12); the completion stamp rides the note's one "
+            "write_manifest_many request, and the batch chain skips "
+            "manifest_write_batch_hook. Cross-function: put_note is the "
+            "one function every note producer calls; "
+            "test_store_put_fence_begins_in_put_note_before_the_write below proves "
+            "store_put calls put_note and put_note calls _fence_begin before "
+            "write_note."
         ),
-        same_function=True,
+        same_function=False,
     ),
 }
 
@@ -380,7 +396,11 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
     non-streaming PDF paths (nexus-z0o2p.15), whose begin is the
     first request of the combined chunk+owner writer they call.
     Pins the count so a future author cannot quietly reclassify a
-    same-function site as cross-function to dodge the AST proof above."""
+    same-function site as cross-function to dodge the AST proof above.
+
+    ``mcp/core.py::store_put`` joined them at RDR-223 P2.2 (nexus-z0o2p.12):
+    its fence begins in ``note_write.put_note``, the one function every note
+    producer calls. That claim is proven below, not asserted."""
     cross = sorted(k for k, cov in _ALLOWLIST.items() if not cov.same_function)
     assert cross == [
         ("doc_indexer.py", "_index_document"),
@@ -388,11 +408,38 @@ def test_cross_function_entries_are_the_documented_minimum() -> None:
         ("doc_indexer.py", "index_pdf"),
         ("indexer.py", "_fire_deferred_hooks"),
         ("indexer.py", "_fire_flush_grain_hooks"),
+        ("mcp/core.py", "store_put"),
         ("pipeline_stages.py", "_flag"),
     ], (
         "cross-function allowlist entries changed — this is the escape "
         f"hatch from AST proof, keep it to the documented minimum: {cross}"
     )
+
+
+def test_store_put_fence_begins_in_put_note_before_the_write() -> None:
+    """The proof behind ``store_put``'s cross-function entry: ``store_put`` calls
+    ``put_note``, and ``put_note`` calls ``_fence_begin`` before it calls
+    ``write_note`` (RDR-223 P2.2, nexus-z0o2p.12)."""
+    core = ast.parse((SRC_ROOT / "mcp" / "core.py").read_text())
+    store_put = next(
+        n for n in ast.walk(core)
+        if isinstance(n, ast.FunctionDef) and n.name == "store_put")
+    assert any(
+        isinstance(c, ast.Call) and isinstance(c.func, ast.Name) and c.func.id == "put_note"
+        for c in ast.walk(store_put)), "store_put must write its note through note_write.put_note"
+
+    note_write = ast.parse((SRC_ROOT / "catalog" / "note_write.py").read_text())
+    put_note = next(
+        n for n in ast.walk(note_write)
+        if isinstance(n, ast.FunctionDef) and n.name == "put_note")
+    calls = sorted(
+        (c.lineno, c.func.id) for c in ast.walk(put_note)
+        if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+        and c.func.id in (_FENCE_BEGIN_HELPERS | {"write_note"}))
+    names = [name for _line, name in calls]
+    assert "_fence_begin" in names and "write_note" in names, names
+    assert names.index("_fence_begin") < names.index("write_note"), (
+        f"put_note must begin the fence before it writes: {calls}")
 
 
 # ── RDR-223 (nexus-z0o2p.10): the multi-batch writer's fence leg ──────────────
