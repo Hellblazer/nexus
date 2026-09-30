@@ -1167,6 +1167,59 @@ def test_a_first_request_that_failed_in_a_way_that_leaves_its_outcome_open_keeps
     assert _index_state(minted[0][0]) == "failed"
 
 
+@contextmanager
+def _committed_then_lost(second: Callable[[], BaseException]) -> Iterator[None]:
+    """Inside ``_traffic``: every chunk-carrying catalog request COMMITS on the engine, its response
+    is reset (``ReadError``), and the refreshable client's single retry, made inside its ``except``
+    block, fails with *second()*. Only the second error propagates, with the first as its
+    ``__context__``: the shape a supervisor restart mid-``write_many`` produces."""
+    wrapped = HttpCatalogClient._post
+
+    def lost(self, path, body=None, **kw):
+        if path not in _CATALOG_DATA_PATHS:
+            return wrapped(self, path, body, **kw)
+        wrapped(self, path, body, **kw)
+        try:
+            raise httpx.ReadError("connection reset after the commit")
+        except httpx.ReadError:
+            raise second()
+
+    HttpCatalogClient._post = lost  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        HttpCatalogClient._post = wrapped  # type: ignore[method-assign]
+
+
+@_THREE_PATHS
+@pytest.mark.parametrize("retry_error", ["connect-error", "401"])
+def test_a_request_that_committed_and_whose_retry_failed_cleanly_keeps_the_fresh_document(
+    tmp_path, fake_pdf, minted, streaming, size, retry_error,
+) -> None:
+    """The engine commits the writer's first request, the response is reset, and the client's one
+    retry is refused (a connect error while the service restarts, or a 401). Only the retry's error
+    reaches the writer; judged alone it reads "wrote nothing", so the rollback deletes a document
+    whose chunks (with owner rows) are stored and leaves them ownerless. The document is kept."""
+    marker = f"committed-lost-{retry_error}-{streaming}-{size}"
+    lines = _multi_lines(marker) if size == "multi" else _lines(marker, 12)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+    make = {"connect-error": lambda: httpx.ConnectError("refused on the retry"),
+            "401": lambda: _status_error(401)("retry refused")}[retry_error]
+
+    with _traffic():
+        with _committed_then_lost(make):
+            with pytest.raises((httpx.HTTPStatusError, httpx.ConnectError)):
+                _index(path, marker, streaming=streaming)
+
+    assert minted[0][1] is True, "non-vacuity: this call minted the document"
+    doc_id = minted[0][0]
+    assert {d for d, _ in minted} == {doc_id}, "one document"
+    assert _reader().resolve(doc_id) is not None, "the document is kept"
+    assert _manifest(doc_id), "with the manifest the committed request wrote"
+    assert _present(_COLLECTION, [_sha(x) for x in lines]), "and its chunks"
+
+
 # ── a refused completion stamp ───────────────────────────────────────────────────────────
 
 

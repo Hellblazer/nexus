@@ -43,7 +43,8 @@ import java.util.Map;
  *   GET  /v1/pipeline/chunks             ?REF&uploadable=0|1&limit= → {chunks: [...]}
  *   POST /v1/pipeline/mark_uploaded      {REF, chunk_indices: [...]} → {updated}
  *   POST /v1/pipeline/reset_uploaded     {REF} → {reset}  (flags back to "not uploaded"; pages,
- *                                         chunks and embeddings kept; run_epoch-checked)
+ *                                         chunks and embeddings kept; REF must carry run_epoch,
+ *                                         400 without it)
  *   GET  /v1/pipeline/counts             ?REF → {embedded_chunks, uploaded_chunks, pipelines}
  *   POST /v1/pipeline/clear_wal          {REF}   (pages+chunks only; audit row survives)
  *   POST /v1/pipeline/delete             {REF} → {deleted: bool}
@@ -317,7 +318,13 @@ public final class PipelineHandler implements HttpHandler {
     private void handleResetUploaded(HttpExchange exchange, String tenant, String method) throws IOException {
         if (wrongMethod(exchange, method, "POST")) return;
         Map<String, Object> body = readBody(exchange);
-        int reset = repo.resetUploaded(tenant, refFromBody(body));
+        PipelineRef ref = refFromBody(body);
+        // Unlike the older write routes this one has no pre-fence client to accommodate, so the
+        // epoch is required: a caller that names only the run could flip a live run's flags.
+        if (ref.runEpoch() == null) {
+            throw new IllegalArgumentException("'run_epoch' is required");
+        }
+        int reset = repo.resetUploaded(tenant, ref);
         HttpUtil.send(exchange, 200, "{\"reset\":" + reset + "}");
     }
 

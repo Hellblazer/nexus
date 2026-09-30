@@ -118,3 +118,71 @@ def test_a_request_with_a_surviving_document_is_reported_even_if_another_failed(
 def test_no_hook_is_no_problem() -> None:
     cat = MetadataMergingCatalog(_Inner(result={}), "docs__c", [])
     cat.write_manifest_many([("1.1.1", [])], collection="docs__c")
+
+
+# ── a retry's failure carries the first attempt's as its context ────────────────────────────
+
+
+def _lost_then(second: BaseException) -> BaseException:
+    """What ``RefreshableHttpStoreMixin._send`` raises when attempt 1 was reset after the engine
+    committed and its one retry, made inside the ``except`` block, failed too: only the SECOND error
+    propagates, with the first as its ``__context__``."""
+    try:
+        raise httpx.ReadError("connection reset after the commit")
+    except httpx.ReadError:
+        try:
+            raise second
+        except BaseException as out:
+            return out
+
+
+_RETRY_SECOND_ERRORS = {
+    "connect-error": lambda: httpx.ConnectError("connection refused on the retry"),
+    "connect-timeout": lambda: httpx.ConnectTimeout("connect timed out on the retry"),
+    "401": lambda: _status(401),
+    "409": lambda: _status(409),
+}
+
+
+@pytest.mark.parametrize("which", ["write_manifest_many", "append_manifest_chunks"])
+@pytest.mark.parametrize("name", sorted(_RETRY_SECOND_ERRORS))
+def test_a_retry_that_failed_cleanly_after_a_dropped_first_attempt_is_reported_as_possibly_written(
+    name, which,
+) -> None:
+    """The first attempt may have committed (its response was reset); the retry's clean refusal says
+    nothing about it. Judging the outermost exception alone reads "wrote nothing", and a caller that
+    rolls back a fresh registration on that reading deletes a document whose chunks landed."""
+    exc = _lost_then(_RETRY_SECOND_ERRORS[name]())
+    assert isinstance(exc.__context__, httpx.ReadError), "non-vacuity: the chain holds attempt 1"
+    seen: list[str] = []
+    cat = MetadataMergingCatalog(_Inner(raises=exc), "docs__c", [], on_request=lambda: seen.append("r"))
+    args = ([("1.1.1", [])],) if which == "write_manifest_many" else ("1.1.1", [])
+    with pytest.raises(type(exc)):
+        getattr(cat, which)(*args, collection="docs__c")
+    assert seen == ["r"], name
+
+
+def test_a_chain_of_clean_refusals_only_is_still_not_reported() -> None:
+    """The control: a 401 whose retry was refused to connect wrote nothing on either attempt."""
+    try:
+        raise _status(401)
+    except httpx.HTTPStatusError:
+        try:
+            raise httpx.ConnectError("refused")
+        except httpx.ConnectError as out:
+            exc = out
+    seen: list[str] = []
+    cat = MetadataMergingCatalog(_Inner(raises=exc), "docs__c", [], on_request=lambda: seen.append("r"))
+    with pytest.raises(httpx.ConnectError):
+        cat.write_manifest_many([("1.1.1", [])], collection="docs__c")
+    assert seen == []
+
+
+def test_a_cause_link_is_followed_as_well_as_a_context_link() -> None:
+    exc = httpx.ConnectError("refused")
+    exc.__cause__ = httpx.ReadError("reset")
+    seen: list[str] = []
+    cat = MetadataMergingCatalog(_Inner(raises=exc), "docs__c", [], on_request=lambda: seen.append("r"))
+    with pytest.raises(httpx.ConnectError):
+        cat.write_manifest_many([("1.1.1", [])], collection="docs__c")
+    assert seen == ["r"]

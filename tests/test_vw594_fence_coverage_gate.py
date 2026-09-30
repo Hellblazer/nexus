@@ -734,9 +734,21 @@ _STAMP_LAST_ENTRIES: tuple[tuple[str, str], ...] = (
     ("doc_indexer.py", "_index_pdf_incremental"),
     ("doc_indexer.py", "index_pdf"),
 )
+#: Per function: (number of ``.complete()`` sites, number of owner-write calls). A deleted stamp, or
+#: a write that dropped ``defer_completion=True`` (so the writer stamps with the write), leaves the
+#: ordering check below satisfied by whichever site remains; the counts and the keyword check close
+#: that. ``index_pdf`` holds two stamps: its own (small path) and the one it sends for the
+#: incremental path after that path's ``fire_document``.
+_STAMP_LAST_SITES: dict[str, tuple[int, int]] = {
+    "_index_document": (1, 1),
+    "_index_pdf_incremental": (1, 1),
+    "index_pdf": (2, 1),
+}
 
 
-def _stamp_last_problems(tree: ast.Module, function: str) -> list[str]:
+def _stamp_last_problems(
+    tree: ast.Module, function: str, sites: tuple[int, int] | None = None,
+) -> list[str]:
     defs = [n for n in ast.walk(tree)
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == function]
     if not defs:
@@ -746,8 +758,23 @@ def _stamp_last_problems(tree: ast.Module, function: str) -> list[str]:
         completes = [c for c in ast.walk(fn)
                      if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
                      and c.func.attr == "complete"]
+        writes = [c for c in ast.walk(fn)
+                  if isinstance(c, ast.Call) and _call_name(c) == "_write_chunks_with_owner_rows"]
         if not completes:
             problems.append(f"{function}() never sends a deferred completion stamp")
+        if sites is not None:
+            if len(completes) != sites[0]:
+                problems.append(f"{function}() has {len(completes)} complete() site(s), expected {sites[0]}")
+            if len(writes) != sites[1]:
+                problems.append(
+                    f"{function}() has {len(writes)} _write_chunks_with_owner_rows call(s), expected {sites[1]}")
+        for w in writes:
+            deferred = [k for k in w.keywords if k.arg == "defer_completion"]
+            if not (len(deferred) == 1 and isinstance(deferred[0].value, ast.Constant)
+                    and deferred[0].value.value is True):
+                problems.append(
+                    f"{function}(): _write_chunks_with_owner_rows at line {w.lineno} does not pass "
+                    "defer_completion=True, so the write stamps the document itself, ahead of the hooks")
         for c in completes:
             tries = [t for t in ast.walk(fn) if isinstance(t, ast.Try)
                      and any(x is c for stmt in t.body for x in ast.walk(stmt))]
@@ -776,7 +803,7 @@ def test_every_non_streaming_path_stamps_complete_after_its_hooks() -> None:
     problems: list[str] = []
     for rel, function in _STAMP_LAST_ENTRIES:
         tree = ast.parse((SRC_ROOT / rel).read_text(encoding="utf-8"), filename=rel)
-        problems += [f"{rel}: {p}" for p in _stamp_last_problems(tree, function)]
+        problems += [f"{rel}: {p}" for p in _stamp_last_problems(tree, function, _STAMP_LAST_SITES[function])]
     assert not problems, (
         "RDR-223 D2: a non-streaming writer path no longer stamps the document complete after its "
         "post-store hooks, so a kill in a hook would leave a complete document whose hooks never "
@@ -790,3 +817,45 @@ def test_stamp_last_leg_kill_control_flags_a_stamp_ahead_of_a_hook() -> None:
     assert _stamp_last_problems(ast.parse(good), "f") == []
     assert _stamp_last_problems(ast.parse(early), "f")
     assert _stamp_last_problems(ast.parse(none), "f")
+
+
+def test_stamp_last_leg_kill_control_flags_a_dropped_stamp_and_a_dropped_defer() -> None:
+    two = (
+        "def f():\n    try:\n        a = _write_chunks_with_owner_rows(x, defer_completion=True)\n"
+        "        hooks.fire_document(d)\n        a.complete()\n    finally:\n        pass\n"
+        "    try:\n        hooks.fire_document(d)\n        b.complete()\n    finally:\n        pass\n")
+    one_stamp_gone = two.replace("        b.complete()\n", "        pass\n")
+    no_defer = two.replace("(x, defer_completion=True)", "(x)")
+    false_defer = two.replace("defer_completion=True", "defer_completion=False")
+    assert _stamp_last_problems(ast.parse(two), "f", (2, 1)) == []
+    assert _stamp_last_problems(ast.parse(one_stamp_gone), "f", (2, 1))
+    assert _stamp_last_problems(ast.parse(no_defer), "f", (2, 1))
+    assert _stamp_last_problems(ast.parse(false_defer), "f", (2, 1))
+
+
+def _mutate_in_function(text: str, function: str, old: str, new: str) -> str:
+    """*text* with the first *old* inside *function*'s own lines replaced by *new*; asserts it was there."""
+    fn = next(n for n in ast.walk(ast.parse(text))
+              if isinstance(n, ast.FunctionDef) and n.name == function)
+    lines = text.splitlines(keepends=True)
+    body = "".join(lines[fn.lineno - 1:fn.end_lineno])
+    assert old in body, f"non-vacuity: {old!r} is not in {function}()"
+    mutated = body.replace(old, new, 1)
+    return "".join(lines[:fn.lineno - 1]) + mutated + "".join(lines[fn.end_lineno:])
+
+
+def test_stamp_last_leg_is_red_when_the_real_index_pdf_loses_a_stamp_or_a_defer() -> None:
+    """M2 of the z0o2p.11/.15 review: deleting one of index_pdf's two stamps, or dropping
+    ``defer_completion=True`` from its small-path write, stayed green. Mutate the real source and
+    require red; the unmutated source is the green control."""
+    text = (SRC_ROOT / "doc_indexer.py").read_text(encoding="utf-8")
+    sites = _STAMP_LAST_SITES["index_pdf"]
+    assert _stamp_last_problems(ast.parse(text), "index_pdf", sites) == []
+    for label, old, new in (
+        ("incremental-path stamp deleted", "_pending.complete()", "pass"),
+        ("small-path stamp deleted", "            pending.complete()", "            pass"),
+        ("small-path defer dropped", "defer_completion=True,", ""),
+    ):
+        mutated = _mutate_in_function(text, "index_pdf", old, new)
+        assert mutated != text, label
+        assert _stamp_last_problems(ast.parse(mutated), "index_pdf", sites), label

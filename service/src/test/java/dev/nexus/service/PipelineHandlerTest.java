@@ -726,7 +726,7 @@ class PipelineHandlerTest {
         assertThat(uploadableById(id)).as("before: only chunk 2 is left to send").hasSize(1);
         assertThat(uploadedCountById(id)).isEqualTo(2);
 
-        var r = post("/v1/pipeline/reset_uploaded", TOKEN, TENANT, "{\"pipeline_id\":" + id + "}");
+        var r = writeFenced("reset_uploaded", id, 0, "");
         assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
         assertThat(mapper.readValue(r.body(), MAP_T).get("reset")).as("rows whose flag was set").isEqualTo(2);
 
@@ -741,7 +741,7 @@ class PipelineHandlerTest {
         assertThat(state.get("chunks_created")).isEqualTo(3);
         assertThat(state.get("chunks_embedded")).isEqualTo(3);
 
-        var again = post("/v1/pipeline/reset_uploaded", TOKEN, TENANT, "{\"pipeline_id\":" + id + "}");
+        var again = writeFenced("reset_uploaded", id, 0, "");
         assertThat(mapper.readValue(again.body(), MAP_T).get("reset")).as("idempotent").isEqualTo(0);
     }
 
@@ -764,17 +764,41 @@ class PipelineHandlerTest {
 
     @Test
     void resetUploaded_unknownRun_resetsNothing_neverCreatesOne() throws Exception {
+        String hash = "r3-" + "0".repeat(28);
+        int before = pipelineCount();
         var r = post("/v1/pipeline/reset_uploaded", TOKEN, TENANT,
-            "{\"content_hash\":\"r3-" + "0".repeat(28) + "\"}");
+            "{\"content_hash\":\"" + hash + "\",\"run_epoch\":0}");
         assertThat(r.statusCode()).isEqualTo(200);
         assertThat(mapper.readValue(r.body(), MAP_T).get("reset")).isEqualTo(0);
+        assertThat(pipelineCount()).as("the reset created no row").isEqualTo(before);
+    }
+
+    private int pipelineCount() throws Exception {
+        var r = get("/v1/pipeline/counts", TOKEN, TENANT);
+        return ((Number) mapper.readValue(r.body(), MAP_T).get("pipelines")).intValue();
+    }
+
+    @Test
+    void resetUploaded_withoutARunEpoch_isRefused400_andFlipsNothing() throws Exception {
+        String hash = "r6-" + "0".repeat(28);
+        long id = runWithThreeChunksTwoFlagged(hash, "/tmp/r6.pdf");
+
+        var byId = post("/v1/pipeline/reset_uploaded", TOKEN, TENANT, "{\"pipeline_id\":" + id + "}");
+        assertThat(byId.statusCode()).as(byId.body()).isEqualTo(400);
+        assertThat(byId.body()).contains("run_epoch");
+        var byHash = post("/v1/pipeline/reset_uploaded", TOKEN, TENANT, "{\"content_hash\":\"" + hash + "\"}");
+        assertThat(byHash.statusCode()).as(byHash.body()).isEqualTo(400);
+
+        assertThat(uploadedCountById(id)).as("an unfenced caller reset nothing").isEqualTo(2);
+        assertThat(stateById(id).get("chunks_uploaded")).isEqualTo(2);
     }
 
     @Test
     void resetUploaded_otherTenantsRun_isInvisible() throws Exception {
         String hash = "r4-" + "0".repeat(28);
         long id = runWithThreeChunksTwoFlagged(hash, "/tmp/r4.pdf");
-        var r = post("/v1/pipeline/reset_uploaded", OTHER_TOKEN, OTHER_TENANT, "{\"pipeline_id\":" + id + "}");
+        var r = post("/v1/pipeline/reset_uploaded", OTHER_TOKEN, OTHER_TENANT,
+            "{\"pipeline_id\":" + id + ",\"run_epoch\":0}");
         assertThat(r.statusCode()).isEqualTo(200);
         assertThat(mapper.readValue(r.body(), MAP_T).get("reset")).as("RLS hides the row").isEqualTo(0);
         assertThat(uploadedCountById(id)).as("the owner's flags are untouched").isEqualTo(2);
