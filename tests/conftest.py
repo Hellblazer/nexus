@@ -1519,7 +1519,7 @@ _MANDATORY_PIN_PROPERTY = "nx_mandatory_pin_marked"
 # WHY: test_mode_declarations_are_explicit.py's census reads
 # request.session.items to scan every collected test for an undeclared
 # voyage-mode reference. CI's real PR-gating `test` job runs
-# `pytest tests/ --splits 4 --group N` (pytest-split); pytest_split/
+# `pytest tests/ --splits 6 --group N` (pytest-split); pytest_split/
 # plugin.py:168 does `items[:] = group.selected` inside its OWN
 # pytest_collection_modifyitems -- the identical session.items-mutation
 # mechanism `-m`/`-k` deselection uses (the same mechanism nexus-8x4le's

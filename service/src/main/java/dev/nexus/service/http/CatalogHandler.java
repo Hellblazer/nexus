@@ -1226,6 +1226,8 @@ public final class CatalogHandler implements HttpHandler {
                 doc.put("doc_id", docId);
                 doc.put("rows", rows);
                 doc.put("sweep_chashes", parseSweepChashes(in.get("sweep_chashes")));
+                Map<String, Object> complete = parseDocComplete(in.get("complete"));
+                if (complete != null) doc.put("complete", complete);
                 docs.add(doc);
             } catch (IllegalArgumentException e) {
                 throw new IllegalArgumentException("docs[" + d + "]." + e.getMessage());
@@ -1315,6 +1317,33 @@ public final class CatalogHandler implements HttpHandler {
             throw new IllegalArgumentException("'embedding_model' must be a string");
         }
         return model;
+    }
+
+    /**
+     * Validates one {@code append_many} document's optional {@code complete} (RDR-223 fix round,
+     * bead nexus-z0o2p.19): {@code {content_hash: non-blank string, chunk_count: integer >= 0}},
+     * the pair {@code write_many}'s {@code complete} map carries (there the row count is the
+     * request's rows, which for a replace is the whole manifest; an append sees only a part of the
+     * manifest, so the caller states the manifest ROW count it expects). Absent or null is no stamp.
+     * Throws {@link IllegalArgumentException} (mapped to 400) naming the problem.
+     */
+    private static Map<String, Object> parseDocComplete(Object raw) {
+        if (raw == null) return null;
+        if (!(raw instanceof Map<?, ?> m)) {
+            throw new IllegalArgumentException("'complete' must be an object {content_hash, chunk_count}");
+        }
+        if (!(m.get("content_hash") instanceof String hash) || hash.isBlank()) {
+            throw new IllegalArgumentException("complete.content_hash required (non-blank string)");
+        }
+        Object count = m.get("chunk_count");
+        if (!(count instanceof Integer || count instanceof Long || count instanceof Short)
+                || ((Number) count).longValue() < 0 || ((Number) count).longValue() > Integer.MAX_VALUE) {
+            throw new IllegalArgumentException("complete.chunk_count required (integer >= 0)");
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("content_hash", hash);
+        out.put("chunk_count", ((Number) count).intValue());
+        return out;
     }
 
     /**
@@ -3131,7 +3160,9 @@ public final class CatalogHandler implements HttpHandler {
                 + MAX_BATCH_DOC_IDS + ")\"}"); return;
         }
         String collection = (String) body.get("collection");
-        var result = repo.beginIndexRunMany(tenant, docs, collection);
+        // RDR-223 fix round (nexus-z0o2p.19): optional, like /index-run/begin's snapshot_manifest.
+        boolean snapshotManifest = Boolean.TRUE.equals(body.get("snapshot_manifest"));
+        var result = repo.beginIndexRunMany(tenant, docs, collection, snapshotManifest);
         HttpUtil.send(exchange, 200, MAPPER.writeValueAsString(result));
     }
 

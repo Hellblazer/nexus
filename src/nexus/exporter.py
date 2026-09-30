@@ -21,13 +21,16 @@ Without it, an imported chunk has no catalog document or manifest row at
 all: since RDR-192 Step 5 (nexus-wbfpw.10) a content read returns only
 chunks with a live owner, so a manifest-less imported chunk is invisible
 to search once its liveness grace window lapses, and the RDR-192 reaper
-deletes it outright. ``import_collection`` registers (or finds) the
-catalog document per distinct owner identity in the file and writes its
-manifest explicitly, once, after every one of its chunks has been upserted
--- see that function's docstring for why a per-upsert-batch manifest write
-cannot be trusted for a document spanning more than one 300-chunk batch.
-A document that already owns chunks keeps its manifest (nexus-wbfpw.40):
-the file's chunks it does not own stay unowned and are reported.
+deletes it outright.
+
+RDR-223 (nexus-z0o2p.19): ``import_collection`` registers (or finds) the
+catalog document per distinct owner identity in the file as each page of
+records arrives, and writes every chunk together with its owner row through
+the catalog manifest routes (see :class:`_OwnerImport` and
+``nexus.catalog.multi_document_write``), carrying the exported vector, so a
+chunk is never stored ownerless and the engine embeds nothing. A document
+that already owns chunks keeps its manifest (nexus-wbfpw.40): the file's
+chunks for it are left out of the import and reported.
 """
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ import gzip
 import hashlib
 import json
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -55,6 +59,7 @@ from nexus.db.local_ef import _MODEL_DIMS as _LOCAL_RAW_MODEL_DIMS
 from nexus.db.local_ef import _MODEL_TOKENS as _LOCAL_MODEL_TOKENS
 from nexus.db.t3 import _BYPASS_SCHEMA_PREFIXES  # noqa: PLC0415 — same cross-module reuse pattern as commands/catalog_cmds/doctor.py
 from nexus.errors import (
+    BatchWriteFailedError,
     EmbeddingDimensionMismatch,
     EmbeddingModelMismatch,
     FormatVersionError,
@@ -575,29 +580,26 @@ def _resolve_import_owner_tumbler(collection_name: str, reader: Any, writer: Any
     return writer.register_owner("knowledge", "curator")
 
 
-def _accumulate_owner_group(
+def _locate_owner_group(
     owner_groups: dict[str, dict],
     owner_meta: Any,
-    chash: str,
     *,
     fallback_source_uri: str,
     fallback_title: str,
     fallback_content_type: str,
     target_collection: str,
-) -> None:
-    """Assign *chash* to the owner-manifest group it belongs to
-    (nexus-wbfpw.31), accumulated across the WHOLE import file rather
-    than per upsert-batch.
+) -> tuple[dict, int]:
+    """Find (or open) the owner group a record belongs to and return it with the record's
+    position (nexus-wbfpw.31), accumulated across the WHOLE import file rather than per
+    upsert-batch.
 
-    A document's chunks can span several 300-record upsert batches, and
+    A document's chunks can span several 300-record pages, and
     ``manifest_write_batch_hook``'s own per-batch position enumeration
     (``int(m.get("chunk_index", i))`` where ``i`` is the LOCAL index
-    within that one hook call) restarts at 0 on every batch/group -- see
-    that function's docstring. Grouping every chash for one owner
-    identity here, across every batch, and writing ONE
-    ``write_manifest`` (a replace, not an append) after the whole file
-    has streamed is the only way to get correct positions for a
-    multi-batch document; see ``import_collection``'s own docstring.
+    within that one hook call) restarts at 0 on every batch/group. Grouping
+    every record for one owner identity here, across every page, is what
+    gives a multi-page document correct positions; see ``import_collection``'s
+    own docstring.
 
     Two identity sources, in order:
 
@@ -621,8 +623,8 @@ def _accumulate_owner_group(
     An explicit ``position`` from *owner_meta* is honored verbatim
     (preserving the chunk's original manifest order); its absence (the
     fallback path, or a legacy owner record with no position) falls back
-    to this group's own running count -- stable file-order enumeration,
-    exactly like :func:`_fire_store_chains_grouped_by_doc`'s legacy path.
+    to this group's own running count (``group["seen"]``) -- stable
+    file-order enumeration, exactly like the legacy path.
     """
     position: int | None = None
     if isinstance(owner_meta, dict) and (owner_meta.get("source_uri") or owner_meta.get("title")):
@@ -641,59 +643,46 @@ def _accumulate_owner_group(
 
     group = owner_groups.setdefault(
         source_uri,
-        {"source_uri": source_uri, "title": title, "content_type": content_type, "rows": []},
+        {"key": source_uri, "source_uri": source_uri, "title": title, "content_type": content_type, "seen": 0},
     )
     if position is None:
-        position = len(group["rows"])
-    group["rows"].append((position, chash))
+        position = group["seen"]
+    group["seen"] += 1
+    return group, position
 
 
-def _accumulate_legacy_group(
+def _locate_legacy_group(
     owner_groups: dict[str, dict],
     meta: dict,
-    chash: str,
     *,
     file_source_uri: str,
     fallback_content_type: str,
-) -> None:
-    """Assign a legacy record (one carrying ``meta.doc_id``) to its owner
-    group (nexus-wbfpw.31, legacy leg). The per-batch manifest hook alone
-    cannot be trusted for these: it fires only for records actually
-    upserted (so ``--skip-existing`` leaves them manifest-less), its
-    positions restart per batch, and the named document is often
-    tombstoned or absent in the target. The group records the original
-    doc_id; :func:`_resolve_owner_document` keeps that document when it is
-    live in the target collection and otherwise registers a new one at
-    ``<file source_uri>#<doc_id>``, one per original document.
+) -> tuple[dict, int]:
+    """Find (or open) the owner group of a legacy record (one carrying ``meta.doc_id``,
+    nexus-wbfpw.31 legacy leg) and return it with the record's position. The per-batch manifest
+    hook alone cannot be trusted for these: it fires only for records actually upserted (so
+    ``--skip-existing`` leaves them manifest-less), its positions restart per batch, and the named
+    document is often tombstoned or absent in the target. The group records the original doc_id;
+    :func:`_resolve_owner_document` keeps that document when it is live in the target collection
+    and otherwise registers a new one at ``<file source_uri>#<doc_id>``, one per original
+    document.
     """
     doc_id = str(meta["doc_id"])
     group = owner_groups.setdefault(
         f"legacy:{doc_id}",
         {
+            "key": f"legacy:{doc_id}",
             "source_uri": f"{file_source_uri}#{doc_id}",
             "title": meta.get("title") or doc_id,
             "content_type": fallback_content_type,
             "legacy_doc_id": doc_id,
-            "rows": [],
+            "seen": 0,
         },
     )
     raw = meta.get("chunk_index")
-    position = raw if isinstance(raw, int) and not isinstance(raw, bool) else len(group["rows"])
-    group["rows"].append((position, chash))
-
-
-def _manifest_rows(rows: list[tuple[int, str]]) -> list[dict]:
-    """Manifest rows for one owner group, ordered by recorded position
-    (nexus-wbfpw.31). Positions are the manifest's primary key per
-    document, so if a hand-made or mixed-vintage file gives two chunks
-    the same position, keep the order and renumber from 0 rather than
-    let ``write_manifest`` fail on the key.
-    """
-    ordered = sorted(enumerate(rows), key=lambda ir: (ir[1][0], ir[0]))
-    positions = [pos for _, (pos, _) in ordered]
-    if len(set(positions)) != len(positions):
-        return [{"chash": chash, "position": i} for i, (_, (_, chash)) in enumerate(ordered)]
-    return [{"chash": chash, "position": pos} for _, (pos, chash) in ordered]
+    position = raw if isinstance(raw, int) and not isinstance(raw, bool) else group["seen"]
+    group["seen"] += 1
+    return group, position
 
 
 def _resolve_owner_document(
@@ -701,12 +690,10 @@ def _resolve_owner_document(
     live_legacy: dict[str, Any] | None = None,
 ) -> str:
     """Find or register the catalog document one owner group belongs to
-    in *collection_name* (nexus-wbfpw.31) and return its tumbler. The
-    manifest is written by the caller, once per DOCUMENT with every
-    group's rows merged, because ``write_manifest`` replaces all of a
-    document's rows: two groups resolving to one document (a live
-    document holding both owner-tagged and legacy doc_id chunks) would
-    otherwise clobber each other.
+    in *collection_name* (nexus-wbfpw.31) and return its tumbler. Two
+    groups can resolve to one document (a live document holding both
+    owner-tagged and legacy doc_id chunks), so the caller keys everything
+    it writes on the returned tumbler, never on the group.
 
     ``source_uri`` is unique across the tenant, so a document can own
     live chunks in only one collection. When the export's document still
@@ -741,6 +728,463 @@ def _resolve_owner_document(
     ))
 
 
+@dataclass
+class _PageRec:
+    """One export record on its way to a combined write: the chunk and the owner group (and
+    position) it belongs to."""
+
+    rec_id: str
+    doc: str
+    meta: dict
+    emb: list[float]
+    group: dict
+    position: int
+
+
+def _file_sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _prepass_groups(
+    input_path: Path,
+    *,
+    fallback_source_uri: str,
+    fallback_title: str,
+    fallback_content_type: str,
+    target_collection: str,
+) -> dict[str, dict]:
+    """Read the file once and return its owner groups with their record counts (``seen``) and
+    highest position (``maxpos``), never the records: memory is one small dict per group. The
+    import needs both before it writes anything. A document's LAST PAGE is the one that brings its
+    received rows up to its count, which is when it is swept and stamped; and a row that claims a
+    position already taken goes past the document's highest one, which only a whole-file scan can
+    name. Grouping is the import's own (:func:`_locate_owner_group`,
+    :func:`_locate_legacy_group`), so the keys and counts agree with the pass that writes."""
+    groups: dict[str, dict] = {}
+    with open(input_path, "rb") as f:
+        f.readline()  # header
+        with gzip.GzipFile(fileobj=f, mode="rb") as gz:
+            unpacker = msgpack.Unpacker(gz, raw=False, max_buffer_size=10 * 1024 * 1024)
+            for record in unpacker:
+                meta = record["metadata"]
+                if meta.get("doc_id") and not record.get("owner"):
+                    group, position = _locate_legacy_group(
+                        groups, meta, file_source_uri=fallback_source_uri,
+                        fallback_content_type=fallback_content_type)
+                else:
+                    group, position = _locate_owner_group(
+                        groups, record.get("owner"), fallback_source_uri=fallback_source_uri,
+                        fallback_title=fallback_title, fallback_content_type=fallback_content_type,
+                        target_collection=target_collection)
+                group["maxpos"] = max(group.get("maxpos", -1), position)
+    return groups
+
+
+def _wire_embedding_model(
+    db: Any, collection_name: str, effective_model: str, *, name_carries_model: bool,
+) -> str:
+    """The ``embedding_model`` an import request names: the model the engine will compare it with.
+
+    The engine refuses a request whose ``embedding_model`` is not the model the collection is
+    REGISTERED with. A conformant four-segment name carries its model, and the gate in
+    :func:`import_collection` already proved *effective_model* equals it, so that is what is sent. A
+    legacy two-segment name carries none: the export header holds the prefix-based guess (a Voyage
+    model), which in a local install is not what the collection is registered with (the local
+    embedder), so sending it would be refused on the first request. For such a name send the model
+    the collection has, or, when it has no row yet, the one its registration will derive (the write
+    path's own derivation, :func:`nexus.corpus.collection_registration_kwargs`). The engine still
+    checks every vector's dimension against the collection's."""
+    if name_carries_model:
+        return effective_model
+    resolver = getattr(db, "_resolve_collection_row", None)
+    row = resolver(collection_name) if callable(resolver) else None
+    model = (row or {}).get("embedding_model")
+    if model:
+        return str(model)
+    from nexus.corpus import collection_registration_kwargs  # noqa: PLC0415 — deferred to avoid import cycle
+    return collection_registration_kwargs(collection_name)["embedding_model"]
+
+
+class _OwnerImport:
+    """The service-backed leg of :func:`import_collection` (RDR-223, nexus-z0o2p.19): every chunk is
+    written together with its owner row, through the catalog manifest routes, carrying the
+    exported vector. See ``import_collection``'s docstring for the whole contract.
+
+    A page of records arrives; each record's owner group is resolved to a catalog document (found
+    or registered), then a document met for the first time is one of
+
+    * KEPT: it already owns chunks in this collection, so the import never replaces or extends its
+      manifest (nexus-wbfpw.40, Sam 2026-09-29) and the file's chunks for it are skipped and counted;
+    * RESUMED: it is ``indexing`` or ``failed`` and its ``index_content_hash`` is THIS file's sha256,
+      so it is the leftover of an earlier run of this same file that died (Sam 2026-09-30). It is
+      finished with the APPEND form (same file, same positions: an upsert by position drops nothing,
+      needs no sweep, and leaves no chunk of the dead run ownerless while the rerun catches up). A
+      document in any other state, or with another hash, that owns chunks stays kept;
+    * WRITTEN: it owns nothing here, so its first request is a replace and later pages append.
+
+    Groups are resolved to documents once, in :meth:`plan`, so a document reached through several
+    groups is finished once with their combined count. Decisions are made with one batched
+    ``get_manifests`` per page (plus one ``resolve_many`` for the documents that own chunks). A
+    kept document's chash sets are dropped as soon as all its records have been seen. The written
+    documents' rows and chunks go out through
+    :class:`~nexus.catalog.multi_document_write.MultiDocumentImportWriter`, which sweeps and stamps
+    each document on its own last page; :meth:`plan` supplies every document's record count from a
+    prepass (:func:`_prepass_groups`), which is how the last page is known. A crash therefore costs
+    only the documents still open, and each of those resumes on the next run.
+
+    Every payload chunk is written with ``force_re_embed`` so the exported vector replaces a stored
+    one, including a chash another live document shares (Sam 2026-09-30): the engine counts the
+    differing ones (``vector_mismatches``, reported in the import summary). A record whose chunk the
+    target already holds under ``--skip-existing`` is sent without a payload, so its stored vector
+    stays. ``metadata_merge`` keeps the keys another document's enrichment set on a shared chunk.
+    """
+
+    def __init__(
+        self,
+        *,
+        db: Any,
+        collection_name: str,
+        hooks: "HookRegistry",
+        embedding_model: str,
+        file_hash: str,
+        skip_existing: bool,
+    ) -> None:
+        self.db = db
+        self.collection_name = collection_name
+        self.hooks = hooks
+        self.embedding_model = embedding_model
+        self.file_hash = file_hash
+        self.skip_existing = skip_existing
+        #: owner groups met so far by the writing pass (rows are never kept: the import streams)
+        self.groups: dict[str, dict] = {}
+        self.imported_count = 0
+        self.skipped_count = 0
+        self.vector_mismatches = 0
+        self.unowned_count = 0                    # kept documents' records left out of the import
+        self._kept_owned = 0                      # kept documents' records the document already owns
+        self._left_out: dict[str, tuple[int, str | None]] = {}   # kept tumbler -> (records left out, index_state)
+        #: ``(label, reason)``: a group that failed to resolve carries its source URI, a document
+        #: that failed to write or stamp carries its tumbler; the label says which.
+        self.failures: list[tuple[str, str]] = []
+        self._state: dict[str, str] = {}          # document tumbler -> "write" | "resume" | "kept" | "failed"
+        self._kept: dict[str, dict[str, Any]] = {}        # tumbler -> chash sets, counts, index_state
+        self._doc_of: dict[str, str] = {}                 # group key -> the document it resolved to
+        self._doc_figures: dict[str, tuple[int, int]] = {}   # tumbler -> (records, highest position)
+        self._group_failed: set[str] = set()              # group keys that did not resolve (reported)
+        self._live_legacy: dict[str, Any] = {}
+        self._reader: Any = None
+        self._writer: Any = None
+        self._import_writer: Any = None
+        self._owner_tumbler: Tumbler | None = None
+
+    # ── lifecycle ─────────────────────────────────────────────────────────────
+
+    def _ensure(self) -> None:
+        if self._import_writer is not None:
+            return
+        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle
+        from nexus.catalog.multi_document_write import MultiDocumentImportWriter  # noqa: PLC0415 — deferred to avoid import cycle
+        self._reader = make_catalog_reader()
+        self._writer = make_catalog_writer(priority="interactive")
+        self._import_writer = MultiDocumentImportWriter(
+            self._writer, collection=self.collection_name, content_hash=self.file_hash,
+            embedding_model=self.embedding_model, force_re_embed=True, metadata_merge=True,
+        )
+
+    def close(self) -> None:
+        _close = getattr(self._writer, "close", None)
+        if callable(_close):
+            _close()
+
+    def abort(self, error: str) -> None:
+        if self._import_writer is not None:
+            self._import_writer.abort(error)
+
+    def progress(self) -> tuple[int, int]:
+        """``(documents stamped complete, documents begun)``."""
+        return self._import_writer.progress() if self._import_writer is not None else (0, 0)
+
+    # ── prepass ───────────────────────────────────────────────────────────────
+
+    def plan(self, pre: dict[str, dict]) -> None:
+        """Resolve every owner group of the prepass to its catalog document (found or registered) and
+        fix each DOCUMENT's record count and highest position. Several groups can resolve to one
+        document (a live document holding both owner-tagged and legacy ``doc_id`` records; two legacy
+        ids aliased to one document; a literal ``nxexp://<target>/<uri>`` identity beside the original
+        that was copied to it): the document's figures are the sums, so it is finished once, when ALL
+        of its records have arrived. Resolving here, before anything is written or stamped, is what
+        lets the totals be complete; the writing pass reads the answers back by group key."""
+        self._ensure()
+        legacy_ids = [g["legacy_doc_id"] for g in pre.values() if g.get("legacy_doc_id")]
+        if legacy_ids:
+            self._live_legacy = {
+                doc_id: entry for doc_id, entry in self._reader.resolve_many(legacy_ids).items()
+                if entry.physical_collection == self.collection_name
+            }
+        if pre and self._owner_tumbler is None:
+            self._owner_tumbler = _resolve_import_owner_tumbler(
+                self.collection_name, self._reader, self._writer)
+        for key, g in pre.items():
+            # One group's failure must not strand every later group: record it, carry on, report all
+            # at the end.
+            try:
+                doc = _resolve_owner_document(
+                    g, self.collection_name, self._owner_tumbler, self._reader, self._writer,
+                    self._live_legacy,
+                )
+            except Exception as exc:  # noqa: BLE001 — collected and re-raised at the end as one NexusError
+                _log.warning(
+                    "import_owner_group_failed",
+                    collection=self.collection_name, source_uri=g["source_uri"], error=str(exc),
+                )
+                self._group_failed.add(key)
+                self.failures.append((f"source {g['source_uri']}", str(exc)))
+                continue
+            self._doc_of[key] = doc
+            total, top = self._doc_figures.get(doc, (0, -1))
+            self._doc_figures[doc] = (total + g["seen"], max(top, g.get("maxpos", -1)))
+
+    # ── one page ──────────────────────────────────────────────────────────────
+
+    def flush(self, page: list[_PageRec]) -> None:
+        """Resolve, decide and write one page of records."""
+        if not page:
+            return
+        self._ensure()
+        self._resolve_groups(page)
+        first_group: dict[str, dict] = {}
+        for r in page:
+            doc = r.group.get("doc_id")
+            if doc and doc not in self._state:
+                first_group.setdefault(doc, r.group)
+        self._decide(first_group)
+
+        writer = self._import_writer
+        rows_by_doc: dict[str, list[dict]] = {}
+        recs_by_doc: dict[str, list[_PageRec]] = {}
+        for r in page:
+            doc = r.group.get("doc_id")
+            if not doc:
+                continue                      # its group failed to resolve; already reported
+            state = self._state.get(doc)
+            if state == "kept":
+                k = self._kept[doc]
+                k["file"].add(r.rec_id)
+                k["seen"] += 1
+                self.skipped_count += 1
+                if k["seen"] >= k["total"]:
+                    self._settle_kept(doc)
+                continue
+            if state not in ("write", "resume") or writer.failure(doc) is not None:
+                continue
+            rows_by_doc.setdefault(doc, []).append(
+                {"chash": r.rec_id, "position": writer.claim_position(doc, r.position)})
+            recs_by_doc.setdefault(doc, []).append(r)
+        if not rows_by_doc:
+            return
+
+        already = self._existing_ids([r.rec_id for recs in recs_by_doc.values() for r in recs])
+        chunks: dict[str, dict] = {}
+        for recs in recs_by_doc.values():
+            for r in recs:
+                if r.rec_id not in already and r.rec_id not in chunks:
+                    chunks[r.rec_id] = {
+                        "chash": r.rec_id, "text": r.doc, "metadata": r.meta, "embedding": r.emb,
+                    }
+        result = writer.write_page(rows_by_doc, chunks)
+        self.vector_mismatches += result.vector_mismatches
+        sent_ids: list[str] = []
+        sent_docs: list[str] = []
+        sent_embs: list[list[float]] = []
+        sent_metas: list[dict] = []
+        for doc in result.written:
+            for r in recs_by_doc[doc]:
+                if r.rec_id in already:
+                    self.skipped_count += 1
+                    continue
+                self.imported_count += 1
+                sent_ids.append(r.rec_id)
+                sent_docs.append(r.doc)
+                sent_embs.append(r.emb)
+                sent_metas.append(r.meta)
+        if sent_ids:
+            _fire_store_chains_grouped_by_doc(
+                sent_ids, self.collection_name, sent_docs, sent_embs, sent_metas, self.hooks,
+            )
+        _log.debug(
+            "import_page_written", documents=len(result.written), finished=len(result.finished),
+            failed=len(result.failed), chunks=len(sent_ids), total_so_far=self.imported_count,
+        )
+
+    def _existing_ids(self, ids: list[str]) -> set[str]:
+        """Records whose chunk the target already holds (``--skip-existing``): their rows are still
+        written (a stored but ownerless chunk needs its owner) but their payload is not sent."""
+        if not self.skip_existing or not ids:
+            return set()
+        # nexus-ou4tb: existing_ids raises rather than reading as "nothing exists". Isolate to THIS
+        # page: an unreadable probe means we cannot prove these ids are duplicates, so send them
+        # (the write is idempotent) rather than losing the whole import's progress.
+        try:
+            return set(self.db.existing_ids(self.collection_name, ids))
+        except Exception:  # noqa: BLE001 — per-page isolation; import continues, duplicates are idempotent
+            _log.warning(
+                "skip_existing_probe_failed_importing_batch",
+                collection=self.collection_name, batch=len(ids), exc_info=True,
+            )
+            return set()
+
+    def _resolve_groups(self, page: list[_PageRec]) -> None:
+        """Attach each record's group to the document :meth:`plan` resolved it to."""
+        for r in page:
+            g = r.group
+            if g.get("doc_id") or g.get("failed"):
+                continue
+            key = g["key"]
+            if key in self._group_failed:
+                g["failed"] = True                # reported by plan()
+            elif key in self._doc_of:
+                g["doc_id"] = self._doc_of[key]
+            else:
+                # The prepass and the writing pass read the same file with the same grouping, so this
+                # is unreachable; refusing beats writing a document whose total nobody counted.
+                raise NexusError(
+                    f"Import of {self.collection_name!r}: owner group {g.get('source_uri')!r} appeared "
+                    "in the file after the counting pass did not see it; the file changed while it "
+                    "was being imported. Nothing further was written; run the import again.")
+
+    def _decide(self, first_group: dict[str, dict]) -> None:
+        """Keep, resume or write each document met for the first time (one batched manifest read)."""
+        if not first_group:
+            return
+        new_docs = list(first_group)
+        try:
+            manifests = self._reader.get_manifests(new_docs)
+        except Exception as exc:  # noqa: BLE001 — cannot prove the documents are empty: do not write them
+            _log.warning(
+                "import_owner_manifest_read_failed",
+                collection=self.collection_name, docs=len(new_docs), error=str(exc),
+            )
+            for d in new_docs:
+                self._state[d] = "failed"
+                self.failures.append((f"document {d}", f"its manifest could not be read: {exc}"))
+            return
+        existing = {
+            d: {
+                # Rows stamped with another collection (None only from a pre-field engine) do not
+                # make this collection's manifest non-empty.
+                r.chash for r in manifests.get(d, [])
+                if r.collection in (None, self.collection_name)
+            }
+            for d in new_docs
+        }
+        occupied = [d for d in new_docs if existing[d]]
+        resumable: set[str] = set()
+        entries: dict[str, Any] = {}
+        if occupied:
+            try:
+                entries = self._reader.resolve_many(occupied)
+            except Exception as exc:  # noqa: BLE001 — cannot tell an interrupted run of this import from a current document
+                _log.warning(
+                    "import_owner_state_read_failed",
+                    collection=self.collection_name, docs=len(occupied), error=str(exc),
+                )
+                for d in occupied:
+                    self._state[d] = "failed"
+                    self.failures.append((f"document {d}", f"its index state could not be read: {exc}"))
+            for d in occupied:
+                e = entries.get(d)
+                if (d not in self._state and e is not None and e.index_state in ("indexing", "failed")
+                        and e.index_content_hash == self.file_hash):
+                    resumable.add(d)
+        for d in new_docs:
+            if d in self._state:
+                continue
+            total, max_position = self._doc_figures[d]
+            if existing[d] and d not in resumable:
+                # nexus-wbfpw.40 (Sam, 2026-09-29: keep existing): a live document that already
+                # owns chunks is current truth. A replace would delete every row it has (an older
+                # export imported over a re-put note hid the correction), an append would
+                # resurrect a superseded version. Leave its manifest alone AND leave the file's
+                # chunks for it out: since RDR-223 a chunk is only ever written with an owner row.
+                self._state[d] = "kept"
+                entry = entries.get(d)
+                self._kept[d] = {
+                    "existing": existing[d], "file": set(), "seen": 0, "total": total,
+                    "index_state": getattr(entry, "index_state", None),
+                }
+                continue
+            self._import_writer.register_document(
+                d, total_rows=total, max_position=max_position, resume=d in resumable)
+            self._state[d] = "resume" if d in resumable else "write"
+
+    # ── end of stream ─────────────────────────────────────────────────────────
+
+    def _settle_kept(self, doc: str) -> None:
+        """A kept document's records have all been seen: count what it already owns and what the
+        file's chunks for it leave out, then drop the two chash sets (they are needed for that count
+        and for nothing else)."""
+        k = self._kept[doc]
+        if k.get("settled"):
+            return
+        file_chashes = k["file"]
+        kept = len(file_chashes & k["existing"])
+        left_out = len(file_chashes) - kept
+        self._kept_owned += kept
+        self.unowned_count += left_out
+        if left_out:
+            self._left_out[doc] = (left_out, k["index_state"])
+            _log.warning(
+                "import_owner_kept_existing_manifest",
+                collection=self.collection_name, doc=doc, index_state=k["index_state"],
+                file_chunks=len(file_chashes), left_out=left_out,
+            )
+        file_chashes.clear()
+        k["existing"].clear()
+        k["settled"] = True
+
+    def finish(self) -> dict[str, Any]:
+        """Collect the run's verdict and summarise. Returns ``owned_count``, ``unowned_count``,
+        ``unowned_documents`` (each ``{tumbler, title, index_state, left_out}``) and
+        ``sweep_skipped``; failures are in :attr:`failures`. Every document was swept and stamped on
+        its own last page, so nothing is sent here."""
+        sweep_skipped = 0
+        owned_count = 0
+        if self._import_writer is not None:
+            done = self._import_writer.finish()
+            for d, reason in done.failed.items():
+                self.failures.append((f"document {d}", reason))
+            owned_count += self._import_writer.rows_landed
+            sweep_skipped = self._import_writer.sweep_skipped
+        for doc in self._kept:
+            self._settle_kept(doc)            # a document whose records did not all arrive
+        owned_count += self._kept_owned
+        unowned_tumblers = list(self._left_out)
+        unowned_documents: list[dict[str, Any]] = []
+        if unowned_tumblers:
+            # The remedy nx store import prints is `nx store delete --title`, so name each
+            # document by its CURRENT title. title None: the lookup failed; "": the document has none.
+            try:
+                found = self._reader.resolve_many(unowned_tumblers)
+                titles = {t: getattr(found.get(t), "title", "") or "" for t in unowned_tumblers}
+            except Exception:  # noqa: BLE001 — naming is best-effort; the counts above stand
+                titles = {t: None for t in unowned_tumblers}
+            unowned_documents = [
+                {"tumbler": t, "title": titles[t], "index_state": self._left_out[t][1],
+                 "left_out": self._left_out[t][0]}
+                for t in unowned_tumblers
+            ]
+        return {
+            "owned_count": owned_count,
+            "unowned_count": self.unowned_count,
+            "unowned_documents": unowned_documents,
+            "sweep_skipped": sweep_skipped,
+        }
+
+
 def import_collection(
     db: "T3Database | HttpVectorClient",
     input_path: Path,
@@ -771,44 +1215,71 @@ def import_collection(
         D2). Pre-migration exports can carry a wrong header label; this
         lets the caller supply the true model instead of trusting it.
     skip_existing:
-        If True, records whose id already exists in the target collection
-        are skipped rather than overwritten (GH #1370 D3). Useful for
-        resuming a partially-completed import.
+        If True, no text or vector is sent for a record whose chunk the
+        target collection already holds (GH #1370 D3): the stored chunk and
+        vector stay, and the record still gets its owner row. Without it every
+        record is written with the file's vector, which replaces a stored one.
 
     Returns
     -------
     dict with keys: collection_name, imported_count, skipped_count,
     rehashed_count, owned_count, unowned_count, unowned_documents,
-    elapsed_seconds.
-    ``owned_count`` (nexus-wbfpw.31) is the number of the file's chunks
-    that end the import owned by their document. ``unowned_count``
-    (nexus-wbfpw.40) is the number left unowned because their document
+    vector_mismatches, elapsed_seconds.
+    ``imported_count`` is the number of records written with their chunk;
+    ``skipped_count`` those not written: already stored (``skip_existing``:
+    their owner row is still written), or belonging to a document that keeps
+    its current manifest (below). ``owned_count`` (nexus-wbfpw.31) is the
+    number of the file's chunks that end the import owned by their document.
+    ``unowned_count`` (nexus-wbfpw.40, meaning changed by RDR-223) is the
+    number of the file's chunks LEFT OUT of the import because their document
     already existed with a manifest that does not name them: an existing
-    document's manifest is never replaced by an import.
-    ``unowned_documents`` lists those documents as ``{"tumbler", "title"}``.
+    document's manifest is never replaced or extended by an import, and a
+    chunk is never written without an owner row, so these are not stored.
+    ``unowned_documents`` lists those documents as ``{"tumbler", "title",
+    "index_state", "left_out"}`` (``index_state`` tells a document another run
+    left unfinished from a finished one). ``sweep_skipped`` counts documents
+    whose replaced chunks the engine's fail-open sweep did not delete.
+    ``vector_mismatches`` is the number of stored vectors that differed from
+    the file's and were replaced by it (0 when the target held none).
 
-    Every record is grouped by owner identity as it streams: a legacy
-    record carrying ``meta.doc_id`` by that doc_id
-    (:func:`_accumulate_legacy_group`), every other record by its export-
-    time ``owner`` or the file fallback (:func:`_accumulate_owner_group`),
-    and — once every batch has been flushed — each group's
-    document is registered (or reconciled onto an existing one) and its
-    manifest is written EXPLICITLY, once, with the group's full,
-    correctly-ordered row list (:func:`_resolve_import_owner_tumbler`
-    picks the owner). This is deliberately NOT routed through
+    Against the engine (RDR-223, nexus-z0o2p.19) the file is read three times:
+    hashed (the fence's content hash), then a counting pass that keeps the
+    records and the highest position of each owner group and nothing else
+    (:func:`_prepass_groups`), then the writing pass, page by page. Every owner
+    group is resolved to its document BEFORE the first page, so a document
+    several groups resolve to is counted once, with the sum. Each page's records are grouped by owner identity -- a legacy
+    record carrying ``meta.doc_id`` by that doc_id (:func:`_locate_legacy_group`),
+    every other record by its export-time ``owner`` or the file fallback
+    (:func:`_locate_owner_group`) -- and each group is resolved to a catalog
+    document, found or registered (:func:`_resolve_owner_document`;
+    :func:`_resolve_import_owner_tumbler` picks the owner). A document met for
+    the first time is KEPT (it already owns chunks in the collection: never
+    replaced or extended), RESUMED (this same file left it ``indexing`` or
+    ``failed``: finished with the append form) or WRITTEN: a first page that
+    replaces its manifest and later pages that append. Every request carries
+    the page's chunks with their exported vectors, written with
+    ``force_re_embed`` so the file's vector replaces a stored one
+    (``vector_mismatches`` counts the ones that differed) and with metadata
+    merged, plus the export's explicit positions, so the embedder is not called.
+    A document's last page, known from the prepass, also carries its deferred
+    sweep and its completion stamp, so each document reads ``complete`` as
+    soon as it is whole. This is deliberately NOT routed through
     ``manifest_write_batch_hook`` (the per-batch hook every OTHER T3 write
-    path uses): that hook's position numbering is local to one
-    ``fire_store_chains`` call and restarts at 0 per batch, which is
-    wrong the moment a document's chunks span more than one 300-record
-    upsert batch (exactly the shape RDR-192 Step 5 needs this fix to
-    close for a large import). The import fires its store chains without
-    that hook at all (nexus-wbfpw.40): for legacy records it used to
-    replace a live document's manifest batch by batch. The explicit write
-    is skipped for a document that already owns chunks (Sam, 2026-09-29:
-    keep existing), so an import never hides a document's current chunks.
+    path uses): its position numbering is local to one ``fire_store_chains``
+    call and restarts at 0 per batch. The import fires its store chains
+    without that hook at all (nexus-wbfpw.40). See :class:`_OwnerImport` and
+    ``nexus.catalog.multi_document_write``. A non-service handle keeps the
+    plain upsert; ``taxonomy__*`` and ``quarantine-*`` targets on the service
+    path are refused with :class:`NexusError` before anything is written.
 
     Raises
     ------
+    NexusError:
+        For a ``taxonomy__*`` or ``quarantine-*`` target (service path), and at the
+        end if any document could not be finished (every chunk stored has its
+        owner row; the failure names ``source <URI>`` for a group that could not
+        be registered and ``document <tumbler>`` for one that failed writing or
+        stamping).
     FormatVersionError:
         If the export file's format_version exceeds MAX_SUPPORTED_FORMAT_VERSION.
     EmbeddingModelMismatch:
@@ -854,6 +1325,17 @@ def import_collection(
             "The file may be corrupt or was produced by an incompatible version."
         )
     collection_name: str = target_collection or source_collection
+    bypass_schema = collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
+    if _owners_apply(db) and bypass_schema:
+        # Their ids are not chunk hashes and they have no catalog documents, so no chunk of theirs
+        # can be written with an owner row, and the engine refuses an ownerless write. Say so now,
+        # before anything is read or written, rather than fail halfway (or embed the text and drop
+        # the exported vectors, which is all the plain upsert could do).
+        raise NexusError(
+            f"Importing into {collection_name!r} is not supported: its ids are not chunk hashes and "
+            "it has no catalog documents, and the engine writes a chunk only together with an owner "
+            "row. Nothing was written."
+        )
     try:
         export_model: str = header["embedding_model"]
     except KeyError:
@@ -900,10 +1382,8 @@ def import_collection(
     # unconditionally would block that pre-existing, unaffected
     # workflow; scope it to the cases where GH #1370 D2 actually bites
     # (migrating into a properly self-declaring conformant collection).
-    enforce_dims_check: bool = (
-        assume_model is not None
-        or embedding_model_for_collection_name(collection_name) is not None
-    )
+    name_carries_model: bool = embedding_model_for_collection_name(collection_name) is not None
+    enforce_dims_check: bool = assume_model is not None or name_carries_model
 
     # Stream records from gzip-compressed msgpack body and upsert in batches.
     # Single file open: read header, then gzip body from the same handle
@@ -919,14 +1399,37 @@ def import_collection(
     embeddings: list[list[float]] = []
     metadatas: list[dict] = []
 
-    # nexus-wbfpw.31: owner-manifest grouping, accumulated across the
-    # WHOLE file (see _accumulate_owner_group / this function's own
-    # docstring for why a per-batch write cannot be trusted). Identity
-    # for a record with no ``owner`` field and no legacy ``meta.doc_id``
-    # is one document per IMPORT FILE, keyed by a source_uri derived from
-    # the target collection and the input file's name -- stable across
-    # repeated imports of the same file.
-    owner_groups: dict[str, dict] = {}
+    # RDR-223 (nexus-z0o2p.19): against the engine, every chunk is written together
+    # with its owner row through the catalog manifest routes, carrying the exported
+    # vector, so nothing is ever stored ownerless and the embedder is not called.
+    # A handle that keeps its chunks outside the engine (the InMemoryVectorClient
+    # unit-test substrate: the manifest's chunk FK cannot reference them) and the
+    # bypass-schema collections (``taxonomy__*``: ids that are not chashes, no
+    # catalog documents) keep the plain upsert -- production never takes either.
+    owner_import: _OwnerImport | None = None
+    if _owners_apply(db):
+        # No per-collection embed cap here: that cap (64 for a CCE collection) bounds the engine's
+        # EMBEDDING latency inside one request, and an import carries every vector, so it embeds
+        # nothing. The bound is the combined-write request's own (300 chunks).
+        from nexus.catalog.http_catalog_client import MANIFEST_APPEND_MANY_MAX_CHUNKS  # noqa: PLC0415 — deferred to avoid import cycle
+        page_size = min(page_size, MANIFEST_APPEND_MANY_MAX_CHUNKS)
+        owner_import = _OwnerImport(
+            db=db, collection_name=collection_name, hooks=hooks,
+            embedding_model=_wire_embedding_model(
+                db, collection_name, effective_model, name_carries_model=name_carries_model),
+            file_hash=_file_sha256(input_path), skip_existing=skip_existing,
+        )
+    else:
+        # A non-service handle (the InMemoryVectorClient unit-test substrate).
+        _log.info("import_owners_skipped_non_service_handle", collection=collection_name)
+    page: list[_PageRec] = []
+
+    # nexus-wbfpw.31: owner identity, resolved across the WHOLE file (see
+    # _locate_owner_group / this function's own docstring for why a per-batch
+    # write cannot be trusted). Identity for a record with no ``owner`` field
+    # and no legacy ``meta.doc_id`` is one document per IMPORT FILE, keyed by a
+    # source_uri derived from the target collection and the input file's name
+    # -- stable across repeated imports of the same file.
     file_fallback_source_uri = f"nxexp://{collection_name}/{input_path.name}"
     file_fallback_title = input_path.name
     default_content_type: str = header.get("database_type") or "knowledge"
@@ -936,7 +1439,7 @@ def import_collection(
     # import. Bypass-schema collections (``taxonomy__*``) use their own
     # programmatic id scheme (not content-derived) and must NOT be
     # rehashed -- that would break their intentional stable identifiers.
-    rehash_ids = not collection_name.startswith(_BYPASS_SCHEMA_PREFIXES)
+    rehash_ids = not bypass_schema
 
     # CLI review: infer the expected embedding byte-size from the first
     # record and reject any subsequent record whose embedding doesn't
@@ -980,250 +1483,179 @@ def import_collection(
             len(batch_ids) - len(keep),
         )
 
-    with open(input_path, "rb") as f:
-        f.readline()  # skip header (already parsed above)
-        with gzip.GzipFile(fileobj=f, mode="rb") as gz:
-            unpacker = msgpack.Unpacker(gz, raw=False, max_buffer_size=10 * 1024 * 1024)
-            for record in unpacker:
-                rec_id: str = record["id"]
-                # Vector-only entries (e.g. ``taxonomy__centroids``) round-trip
-                # ``document=None``. Coerce to empty string so the downstream
-                # write path's byte-length checks don't trip on ``None.encode()``
-                # (nexus-fxc1).
-                doc: str = record["document"] or ""
-                meta: dict = dict(record["metadata"])
-                emb_bytes: bytes = record["embedding"]
-
-                if expected_emb_bytes is None:
-                    if len(emb_bytes) == 0 or len(emb_bytes) % 4 != 0:
-                        raise FormatVersionError(
-                            f"Export file {input_path!r} has a malformed "
-                            f"embedding for record {rec_id!r}: "
-                            f"{len(emb_bytes)} bytes is not a multiple of 4 "
-                            "(float32). File may be corrupt."
-                        )
-                    expected_emb_bytes = len(emb_bytes)
-
-                    # GH #1370 D2: sanity-check the declared model's dims
-                    # against the actual first-record vector (scope: see
-                    # ``enforce_dims_check`` above). Unknown models (not
-                    # in _MODEL_DIMENSIONS) skip silently -- can't
-                    # validate what we don't have a table entry for.
-                    if enforce_dims_check:
-                        actual_dims = expected_emb_bytes // 4
-                        declared_dims = _MODEL_DIMENSIONS.get(effective_model)
-                        if declared_dims is not None and declared_dims != actual_dims:
-                            raise EmbeddingDimensionMismatch(
-                                declared_model=effective_model,
-                                declared_dims=declared_dims,
-                                actual_dims=actual_dims,
-                                collection=collection_name,
-                                assumed=assume_model is not None,
-                            )
-                elif len(emb_bytes) != expected_emb_bytes:
-                    raise FormatVersionError(
-                        f"Export file {input_path!r} contains an embedding "
-                        f"of {len(emb_bytes)} bytes for record {rec_id!r}, "
-                        f"expected {expected_emb_bytes} bytes (same as the "
-                        "first record). File may be truncated or corrupt."
-                    )
-
-                if rehash_ids and len(rec_id) != _CHASH_LEN:
-                    new_id, full_hash = _rehash_nonconformant_id(rec_id, doc)
-                    if "chunk_text_hash" in meta:
-                        meta["chunk_text_hash"] = full_hash
-                    rec_id = new_id
-                    rehashed_count += 1
-
-                if remaps and "source_path" in meta:
-                    meta["source_path"] = _apply_remap(meta["source_path"], remaps)
-
-                emb: list[float] = np.frombuffer(emb_bytes, dtype=np.float32).tolist()
-
-                ids.append(rec_id)
-                documents.append(doc)
-                embeddings.append(emb)
-                metadatas.append(meta)
-
-                # nexus-wbfpw.31: group every record for the explicit
-                # end-of-import manifest write. Uses the FINAL (possibly
-                # rehashed) rec_id -- the id that will actually be written
-                # to T3. Unconditional (before --skip-existing filtering
-                # below), so a duplicate dropped at flush time is owned
-                # exactly as it would be without the flag -- which, for a
-                # document that already owns chunks, means not at all
-                # (nexus-wbfpw.40: an import never replaces its manifest).
-                # An export-time ``owner`` is the chunk's current owner; a
-                # ``meta.doc_id`` beside it is stale pre-RDR-108 metadata.
-                if meta.get("doc_id") and not record.get("owner"):
-                    _accumulate_legacy_group(
-                        owner_groups, meta, rec_id,
-                        file_source_uri=file_fallback_source_uri,
-                        fallback_content_type=default_content_type,
-                    )
-                else:
-                    _accumulate_owner_group(
-                        owner_groups, record.get("owner"), rec_id,
-                        fallback_source_uri=file_fallback_source_uri,
-                        fallback_title=file_fallback_title,
-                        fallback_content_type=default_content_type,
-                        target_collection=collection_name,
-                    )
-
-                # Flush batch when page_size reached.
-                if len(ids) >= page_size:
-                    f_ids, f_docs, f_embs, f_metas, skipped = _filter_existing(
-                        ids, documents, embeddings, metadatas,
-                    )
-                    skipped_count += skipped
-                    if f_ids:
-                        _upsert_with_hint(
-                            db, collection_name, f_ids, f_docs, f_embs, f_metas, hooks,
-                        )
-                    imported_count += len(f_ids)
-                    _log.debug("import_batch_written", count=len(f_ids), total_so_far=imported_count)
-                    ids, documents, embeddings, metadatas = [], [], [], []
-
-    # Flush remaining records.
-    if ids:
-        f_ids, f_docs, f_embs, f_metas, skipped = _filter_existing(
-            ids, documents, embeddings, metadatas,
-        )
-        skipped_count += skipped
-        if f_ids:
-            _upsert_with_hint(db, collection_name, f_ids, f_docs, f_embs, f_metas, hooks)
-        imported_count += len(f_ids)
-
-    # nexus-wbfpw.31: register (or reconcile onto) one document per owner
-    # group and write its manifest EXPLICITLY, once, now that every batch
-    # has been upserted -- see this function's docstring for why this
-    # cannot be the per-batch manifest_write_batch_hook.
     owned_count = 0
     unowned_count = 0
-    unowned_documents: list[dict[str, str]] = []
-    unowned_tumblers: list[str] = []
-    if owner_groups and not _owners_apply(db):
-        # A non-service handle (the InMemoryVectorClient unit-test
-        # substrate) holds its chunks outside the engine, so the catalog
-        # manifest cannot reference them (the manifest's chunk FK refuses
-        # it). Capability, not configuration: production never takes this.
-        _log.info(
-            "import_owners_skipped_non_service_handle",
-            collection=collection_name, document_groups=len(owner_groups),
-        )
-        owner_groups = {}
-    if owner_groups:
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred to avoid import cycle
-        reader = make_catalog_reader()
-        writer = make_catalog_writer(priority="interactive")
-        failures: list[tuple[str, str]] = []
-        try:
-            owner_tumbler = _resolve_import_owner_tumbler(collection_name, reader, writer)
-            legacy_ids = [g["legacy_doc_id"] for g in owner_groups.values() if g.get("legacy_doc_id")]
-            live_legacy = {
-                doc_id: entry
-                for doc_id, entry in (reader.resolve_many(legacy_ids) if legacy_ids else {}).items()
-                if entry.physical_collection == collection_name
-            }
-            # One group's failure must not strand every later group
-            # manifest-less: record it, carry on, report all at the end.
-            rows_by_doc: dict[str, list[tuple[int, str]]] = {}
-            for group in owner_groups.values():
-                try:
-                    doc = _resolve_owner_document(
-                        group, collection_name, owner_tumbler, reader, writer, live_legacy,
-                    )
-                except Exception as exc:  # noqa: BLE001 — collected and re-raised below as one NexusError
-                    _log.warning(
-                        "import_owner_group_failed",
-                        collection=collection_name,
-                        source_uri=group["source_uri"],
-                        error=str(exc),
-                    )
-                    failures.append((group["source_uri"], str(exc)))
-                    continue
-                rows_by_doc.setdefault(doc, []).extend(group["rows"])
-            for doc, doc_rows in rows_by_doc.items():
-                rows = _manifest_rows(doc_rows)
-                # nexus-wbfpw.40 (Sam, 2026-09-29: keep existing): a live
-                # document that already owns chunks is current truth. The
-                # manifest write replaces every row the document has, so
-                # writing the file's rows over it hid its current chunks
-                # (an older export imported over a re-put note hid the
-                # correction). Leave its manifest alone; the file's chunks
-                # it does not own stay unowned, and are counted.
-                try:
-                    # Rows stamped with another collection (None only from a
-                    # pre-field engine) do not make this collection's
-                    # manifest non-empty.
-                    existing = {
-                        r.chash for r in reader.get_manifest(doc)
-                        if r.collection in (None, collection_name)
-                    }
-                except Exception as exc:  # noqa: BLE001 — cannot prove the document is empty: do not overwrite it
-                    _log.warning(
-                        "import_owner_manifest_read_failed",
-                        collection=collection_name, doc=doc, error=str(exc),
-                    )
-                    failures.append((doc, str(exc)))
-                    continue
-                if existing:
-                    file_chashes = {r["chash"] for r in rows}
-                    kept = len(file_chashes & existing)
-                    owned_count += kept
-                    unowned_count += len(file_chashes) - kept
-                    if kept < len(file_chashes):
-                        unowned_tumblers.append(doc)
-                        _log.warning(
-                            "import_owner_kept_existing_manifest",
-                            collection=collection_name, doc=doc,
-                            file_chunks=len(file_chashes), left_unowned=len(file_chashes) - kept,
+    vector_mismatches = 0
+    sweep_skipped = 0
+    failures: list[tuple[str, str]] = []
+    unowned_documents: list[dict[str, Any]] = []
+    try:
+        if owner_import is not None:
+            # A first read of the file, for counts only: each document's record count says which
+            # page is its last (when it is swept and stamped), and its highest position says where
+            # a colliding row goes. See _prepass_groups.
+            owner_import.plan(_prepass_groups(
+                input_path, fallback_source_uri=file_fallback_source_uri,
+                fallback_title=file_fallback_title, fallback_content_type=default_content_type,
+                target_collection=collection_name))
+        with open(input_path, "rb") as f:
+            f.readline()  # skip header (already parsed above)
+            with gzip.GzipFile(fileobj=f, mode="rb") as gz:
+                unpacker = msgpack.Unpacker(gz, raw=False, max_buffer_size=10 * 1024 * 1024)
+                for record in unpacker:
+                    rec_id: str = record["id"]
+                    # Vector-only entries (e.g. ``taxonomy__centroids``) round-trip
+                    # ``document=None``. Coerce to empty string so the downstream
+                    # write path's byte-length checks don't trip on ``None.encode()``
+                    # (nexus-fxc1).
+                    doc: str = record["document"] or ""
+                    meta: dict = dict(record["metadata"])
+                    emb_bytes: bytes = record["embedding"]
+
+                    if expected_emb_bytes is None:
+                        if len(emb_bytes) == 0 or len(emb_bytes) % 4 != 0:
+                            raise FormatVersionError(
+                                f"Export file {input_path!r} has a malformed "
+                                f"embedding for record {rec_id!r}: "
+                                f"{len(emb_bytes)} bytes is not a multiple of 4 "
+                                "(float32). File may be corrupt."
+                            )
+                        expected_emb_bytes = len(emb_bytes)
+
+                        # GH #1370 D2: sanity-check the declared model's dims
+                        # against the actual first-record vector (scope: see
+                        # ``enforce_dims_check`` above). Unknown models (not
+                        # in _MODEL_DIMENSIONS) skip silently -- can't
+                        # validate what we don't have a table entry for.
+                        if enforce_dims_check:
+                            actual_dims = expected_emb_bytes // 4
+                            declared_dims = _MODEL_DIMENSIONS.get(effective_model)
+                            if declared_dims is not None and declared_dims != actual_dims:
+                                raise EmbeddingDimensionMismatch(
+                                    declared_model=effective_model,
+                                    declared_dims=declared_dims,
+                                    actual_dims=actual_dims,
+                                    collection=collection_name,
+                                    assumed=assume_model is not None,
+                                )
+                    elif len(emb_bytes) != expected_emb_bytes:
+                        raise FormatVersionError(
+                            f"Export file {input_path!r} contains an embedding "
+                            f"of {len(emb_bytes)} bytes for record {rec_id!r}, "
+                            f"expected {expected_emb_bytes} bytes (same as the "
+                            "first record). File may be truncated or corrupt."
                         )
-                    continue
-                try:
-                    writer.write_manifest(doc, rows, collection=collection_name)
-                except Exception as exc:  # noqa: BLE001 — collected and re-raised below as one NexusError
-                    _log.warning(
-                        "import_owner_manifest_failed",
-                        collection=collection_name, doc=doc, error=str(exc),
-                    )
-                    failures.append((doc, str(exc)))
-                    continue
-                owned_count += len(rows)
-            if unowned_tumblers:
-                # The remedy nx store import prints is `nx store delete
-                # --title`, so name each document by its CURRENT title.
-                # title None: the lookup failed; "": the document has none.
-                try:
-                    found = reader.resolve_many(unowned_tumblers)
-                    unowned_documents = [
-                        {"tumbler": t, "title": getattr(found.get(t), "title", "") or ""}
-                        for t in unowned_tumblers
-                    ]
-                except Exception:  # noqa: BLE001 — naming is best-effort; the counts above stand
-                    unowned_documents = [{"tumbler": t, "title": None} for t in unowned_tumblers]
-        finally:
-            _close = getattr(writer, "close", None)
-            if callable(_close):
-                _close()
-        _log.info(
-            "import_owners_reconciled",
-            collection=collection_name,
-            document_groups=len(owner_groups),
-            owned_count=owned_count,
-            unowned_count=unowned_count,
-            failed_groups=len(failures),
-        )
-        if failures:
-            shown = "; ".join(f"{uri}: {err}" for uri, err in failures[:5])
-            more = f" (and {len(failures) - 5} more)" if len(failures) > 5 else ""
-            raise NexusError(
-                f"Import stored every chunk in {collection_name!r}, but "
-                f"{len(failures)} of {len(owner_groups)} owner documents could "
-                f"not be registered, so their chunks have no catalog owner and "
-                f"are not searchable: {shown}{more}. Re-running the same import "
-                f"is safe (document lookup and manifest writes are idempotent)."
+
+                    if rehash_ids and len(rec_id) != _CHASH_LEN:
+                        new_id, full_hash = _rehash_nonconformant_id(rec_id, doc)
+                        if "chunk_text_hash" in meta:
+                            meta["chunk_text_hash"] = full_hash
+                        rec_id = new_id
+                        rehashed_count += 1
+
+                    if remaps and "source_path" in meta:
+                        meta["source_path"] = _apply_remap(meta["source_path"], remaps)
+
+                    emb: list[float] = np.frombuffer(emb_bytes, dtype=np.float32).tolist()
+
+                    if owner_import is not None:
+                        # nexus-wbfpw.31: locate the record's owner group and position now,
+                        # across the WHOLE file. Uses the FINAL (possibly rehashed) rec_id --
+                        # the id that will actually be written to T3. An export-time ``owner``
+                        # is the chunk's current owner; a ``meta.doc_id`` beside it is stale
+                        # pre-RDR-108 metadata.
+                        if meta.get("doc_id") and not record.get("owner"):
+                            group, position = _locate_legacy_group(
+                                owner_import.groups, meta,
+                                file_source_uri=file_fallback_source_uri,
+                                fallback_content_type=default_content_type,
+                            )
+                        else:
+                            group, position = _locate_owner_group(
+                                owner_import.groups, record.get("owner"),
+                                fallback_source_uri=file_fallback_source_uri,
+                                fallback_title=file_fallback_title,
+                                fallback_content_type=default_content_type,
+                                target_collection=collection_name,
+                            )
+                        page.append(_PageRec(rec_id, doc, meta, emb, group, position))
+                        if len(page) >= page_size:
+                            owner_import.flush(page)
+                            page = []
+                        continue
+
+                    ids.append(rec_id)
+                    documents.append(doc)
+                    embeddings.append(emb)
+                    metadatas.append(meta)
+
+                    # Flush batch when page_size reached.
+                    if len(ids) >= page_size:
+                        f_ids, f_docs, f_embs, f_metas, skipped = _filter_existing(
+                            ids, documents, embeddings, metadatas,
+                        )
+                        skipped_count += skipped
+                        if f_ids:
+                            _upsert_with_hint(
+                                db, collection_name, f_ids, f_docs, f_embs, f_metas, hooks,
+                            )
+                        imported_count += len(f_ids)
+                        _log.debug("import_batch_written", count=len(f_ids), total_so_far=imported_count)
+                        ids, documents, embeddings, metadatas = [], [], [], []
+
+        # Flush remaining records.
+        if owner_import is not None:
+            owner_import.flush(page)
+            summary = owner_import.finish()
+            imported_count = owner_import.imported_count
+            skipped_count = owner_import.skipped_count
+            owned_count = summary["owned_count"]
+            unowned_count = summary["unowned_count"]
+            unowned_documents = summary["unowned_documents"]
+            sweep_skipped = summary["sweep_skipped"]
+            vector_mismatches = owner_import.vector_mismatches
+            failures = owner_import.failures
+            _log.info(
+                "import_owners_reconciled",
+                collection=collection_name,
+                document_groups=len(owner_import.groups),
+                owned_count=owned_count,
+                unowned_count=unowned_count,
+                vector_mismatches=vector_mismatches,
+                sweep_skipped=sweep_skipped,
+                failures=len(failures),
             )
+        elif ids:
+            f_ids, f_docs, f_embs, f_metas, skipped = _filter_existing(
+                ids, documents, embeddings, metadatas,
+            )
+            skipped_count += skipped
+            if f_ids:
+                _upsert_with_hint(db, collection_name, f_ids, f_docs, f_embs, f_metas, hooks)
+            imported_count += len(f_ids)
+    except BaseException as exc:
+        if owner_import is not None:
+            stamped, begun = owner_import.progress()
+            _log.warning(
+                "import_aborted", collection=collection_name, documents_complete=stamped,
+                documents_begun=begun, error=f"{type(exc).__name__}: {exc}")
+            owner_import.abort(f"{type(exc).__name__}: {exc}")
+        raise
+    finally:
+        if owner_import is not None:
+            owner_import.close()
+
+    if failures:
+        assert owner_import is not None          # only the owner leg collects failures
+        shown = "; ".join(f"{label}: {err}" for label, err in failures[:5])
+        more = f" (and {len(failures) - 5} more)" if len(failures) > 5 else ""
+        raise NexusError(
+            f"Import of {collection_name!r} could not finish {len(failures)} of "
+            f"{len(owner_import.groups)} owner documents: {shown}{more}. Every chunk that was stored "
+            "has its owner row (none is stored ownerless). A document left unfinished stays "
+            "indexing, and running the same import again finishes it; a document whose completion "
+            "stamp was refused needs a look at the engine log."
+        )
 
     elapsed = time.monotonic() - t0
 
@@ -1251,5 +1683,7 @@ def import_collection(
         "owned_count": owned_count,
         "unowned_count": unowned_count,
         "unowned_documents": unowned_documents,
+        "vector_mismatches": vector_mismatches,
+        "sweep_skipped": sweep_skipped,
         "elapsed_seconds": round(elapsed, 2),
     }

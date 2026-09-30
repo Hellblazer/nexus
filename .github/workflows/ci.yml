@@ -407,7 +407,7 @@ jobs:
           if-no-files-found: error
 
   test:
-    name: pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/4)
+    name: pytest (Python ${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
     # nexus-eqxxh: the engine-substrate tests need the shaded jar. One build,
     # shared by every matrix leg (see the service-jar job's cost note).
@@ -484,11 +484,29 @@ jobs:
     # which measured 17:05 locally versus 13:33 for the since-deleted SQLite
     # arm and 25-30m on the runners — 3.12 was cancelled at 30m18s under the
     # old cap.
-    timeout-minutes: 25
+    #
+    # nexus-qzxzh: 25m -> 35m. The suite outgrew the n0ful estimate: on
+    # 2026-09-30 passing shards took 18-22m of job time and two of three
+    # develop runs lost one shard to the 25m cap with no failing test
+    # (b6af1878c shard 4 was cancelled at 93% after 24m of tests). The
+    # durations file had been refreshed the day before (3130s recorded,
+    # ~13m per shard), so this is runner speed (~1.6-1.9x the recorded
+    # times), not stale balance. Revisit with a fifth shard if job times
+    # pass 30m.
+    #
+    # nexus-qzxzh (Sam, 2026-09-30): 4 -> 6 shards. The 35m ceiling kept the
+    # tail shard alive but did not fix it: the split balances RECORDED
+    # durations, and the recorded file misses the substrate/engine setup the
+    # runners pay, which clusters in the collection-order tail (the
+    # top-level tests/test_*.py files), so the last shard ran 19-25m while
+    # shard 1 ran 14-16m. Six legs cut every leg's test time by a third at the
+    # cost of ~2m fixed setup per extra leg (billed on actual runtime). The
+    # 35m ceiling stays as headroom, not a budget.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6]
         # 3.13 RUNS ONLY AT THE MERGE BOUNDARY (Hal, 2026-07-28). i711w deleted
         # the SQLite arm, so every pytest leg now costs the engine arm's ~33.5
         # min; paying that twice on interior PRs bought little. `pytest (Python
@@ -686,7 +704,7 @@ jobs:
         # failure now means the artifacts are wrong and retrying cannot help.
         run: uv run python scripts/ci_warm_docling.py
 
-      - name: Run tests (shard ${{ matrix.shard }}/4)
+      - name: Run tests (shard ${{ matrix.shard }}/6)
         # nexus-n0ful: pytest-split partitions the SAME collection every leg
         # sees (addopts' `-m 'not integration and not slow'` applies
         # uniformly) into 4 duration-balanced groups, keyed off the committed
@@ -707,7 +725,7 @@ jobs:
         run: |
           set -euo pipefail
           uv run pytest tests/ -q --durations=25 \
-            --splits 4 --group ${{ matrix.shard }} \
+            --splits 6 --group ${{ matrix.shard }} \
             --durations-path=.test_durations.json | tee shard-output.txt
 
       # nexus-lemv5: per-shard executed-count floor — the same backstop the
@@ -718,7 +736,8 @@ jobs:
       # Floor 1500/shard against ~3290/shard actual (13150 default-selected
       # / 4, measured 2026-08-18): generous headroom for corpus shrinkage
       # and split imbalance, structurally impossible for a near-zero shard
-      # to pass.
+      # to pass. Re-measured for the 6-way split (nexus-qzxzh, 2026-09-30):
+      # 3471-5298 collected per shard, so 1500 still holds with headroom.
       - name: Executed-count floor (nexus-lemv5 — a shard that skipped its corpus must not report green)
         run: uv run python scripts/check_lint_leg_non_vacuity.py shard-output.txt --floor 1500 --label "test shard ${{ matrix.shard }}"
 
@@ -848,7 +867,7 @@ jobs:
     # reads request.session.items — the collected-and-selected test list —
     # to scan the WHOLE default-loop corpus for undeclared voyage-mode
     # references. CI's real PR-gating `test` job above runs
-    # `pytest tests/ --splits 4 --group N` (pytest-split);
+    # `pytest tests/ --splits 6 --group N` (pytest-split);
     # pytest_split/plugin.py:168 does `items[:] = group.selected` inside
     # its own pytest_collection_modifyitems — the IDENTICAL session.items-
     # mutation mechanism `-m`/`-k` deselection uses (the same mechanism

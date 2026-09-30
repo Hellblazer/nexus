@@ -2303,30 +2303,82 @@ The count line is omitted when K is 0. Exit is non-zero only when X was not remo
 | `-c` / `--collection NAME` | Override target collection name (default: from export header). Resolved as every store verb resolves `-c`: a bare subject or a legacy two-segment name that has no existing collection becomes the conformant name for this install's model, and an existing legacy collection keeps its name unless its conformant counterpart also exists, which wins (nexus-8o7ae, nexus-sis0m.5) |
 | `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
 | `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
-| `--skip-existing` | Skip records whose id already exists in the target collection, instead of overwriting. Useful for resuming a partial import |
+| `--skip-existing` | Do not send the text or vector of a record whose chunk the target collection already holds: the stored chunk and vector stay, and the record still gets its owner row. Without it every record is written with the file's vector, which replaces a stored one |
 
 Non-conformant legacy chunk ids (16- or 32-char pre-migration ids that fail
 the service backend's `chash` length constraint) are re-hashed to full 64-char
 content-derived ids automatically (RDR-180); the CLI reports how many were
 re-hashed.
 
-**Owner registration:** after every chunk batch is written, `import` finds or
-registers a catalog document per owner group and writes its manifest
-(nexus-wbfpw.31), so an imported chunk stays visible under RDR-192 Step 5's
-live(c) read predicate — a chunk with no manifest row in its own collection
-is otherwise invisible to search and get.
+**Owner registration:** `import` writes every chunk together with its owner row
+(RDR-223, nexus-z0o2p.19), so a chunk is never stored without a catalog
+document that owns it. Since RDR-192 Step 5 a chunk with no manifest row in
+its own collection is invisible to search and get (the live(c) read
+predicate), and the reaper deletes it after its grace window. The client needs
+an engine that carries the RDR-223 routes (`append_many` with `complete`, the
+`begin-many` manifest snapshot, supplied vectors). Against an older engine the
+import stops before it has stored a chunk, says "the engine is older than this
+client", and names the fix: upgrade the local engine (`nx upgrade`, then
+`nx daemon service start`), or wait for the cloud engine deploy. There is no
+fallback to the old write. An older engine's `begin-many` has already marked
+the documents of its first page `indexing` by the time the client sees it has
+no snapshot; the failed import marks them `failed`, and a rerun resumes
+`indexing` and `failed` documents alike.
 
-- Chunks are grouped by owner identity — the export's `owner` record field
-  (`source_uri`, `title`, `content_type`, `position`) — across the whole
-  file, and each group's document is found or registered once every batch
-  has upserted, not per batch: the per-batch manifest hook restarts position
-  numbering at each 300-chunk batch and would corrupt a multi-batch
-  document's manifest.
+- The file is read three times: once to hash it (the hash is the fence's content
+  hash, and how a rerun recognizes its own dead run), once to count the records
+  of each owner group (the export's `owner` record field: `source_uri`, `title`,
+  `content_type`, `position`; memory holds the counts, never the records), then
+  to write. The counts say which page is a document's last.
+- Between the count and the first page every owner group is resolved to its
+  catalog document, found or registered. A document is counted once however
+  many groups resolve to it (a live document holding both owner-tagged and
+  legacy records, two legacy ids aliased to one document, a literal
+  `nxexp://<target>/<uri>` identity beside the original that was copied to it):
+  its count is the sum of theirs, so it is finished once, when all of its
+  records have arrived.
+- Pages hold up to 300 records (the combined-write request cap). The
+  per-collection embed cap (64 for a CCE collection) does not apply: it bounds
+  the engine's embedding time, and an import embeds nothing.
+- Each page goes to the engine through the catalog manifest routes with the
+  exported vectors: a document's first request replaces its manifest
+  (`write_many`) and every later request appends to it (`append_many`), each
+  carrying the page's chunks. A document written in a SINGLE request (its first
+  page is its last) is written with the sweep on and its stamp in that same
+  request; every other first request has the sweep off and no stamp. The engine
+  embeds nothing; the model and dimension are checked against the collection,
+  and an engine that embeds anyway fails the import. For a legacy two-segment
+  target the request names the model the collection is registered with (the
+  export header holds only a prefix-based guess, which in a local install is
+  not the local model); the dimension check still applies.
+- **Every payload chunk is written with the file's vector**, replacing the
+  stored one when the collection already holds the chunk, including a chunk
+  another live document shares (Sam, 2026-09-30). The engine counts the stored
+  vectors that differed, and the command reports the count. Metadata is
+  merged, not replaced, so keys another document's enrichment set on a shared
+  chunk survive.
+- A document is fenced (`index_state` `indexing`) before its first page. On
+  its own last page the same request carries its deferred sweep (what the
+  replace dropped from its previous manifest, from the snapshot the fence
+  returns) and its completion stamp (content hash and manifest row count,
+  verified by the engine), so a finished document reads `complete` while the
+  import is still running, and `nx t3 gc` and `nx doctor` see it as done. A
+  crash costs only the documents still open. A run that survives a failure marks
+  the fences of at most 50 of them `failed` (there is no batch route; each is one
+  request) and leaves the rest `indexing`, and the next run of the same file
+  resumes both alike. The fence is not a lock: two writers on one document (an
+  import beside an `nx index` of the same file, two imports of different files
+  that share a document) are not supported. Their stamps are still verified, so a
+  manifest the other writer changed no longer has the row count this run landed,
+  the engine refuses the stamp, and the document is reported and stays
+  `indexing`.
+- A document whose superseded chunks the engine could not sweep (its sweep fails
+  open) is complete, and the summary counts these documents; the old chunks stay
+  stored, owned by no document, until `nx t3 gc` removes them.
 - Importing into a collection other than the one the documents live in
   (`-c`/`--collection`) COPIES rather than moves: the source collection's
   documents are left untouched and stay live, and the target gets its own
-  documents under `nxexp://<target>/<original source_uri>`. Re-importing the
-  same file finds that qualified document again, so the copy is idempotent.
+  documents under `nxexp://<target>/<original source_uri>`.
 - A legacy record carrying `meta.doc_id` (a pre-RDR-108 export with no
   `owner` field) keeps that document when it is still live in the target
   collection, and otherwise gets a new one scoped to the file
@@ -2334,24 +2386,41 @@ is otherwise invisible to search and get.
 - A record with no owner at all (an older export predating this field, or a
   live-but-unmanifested chunk the export could not resolve) is grouped under
   one document per import file, keyed by the target collection and file name.
-- An import never replaces the manifest of a document that already owns
-  chunks (nexus-wbfpw.40). That document's current chunk list is what search
-  shows; an older export imported over a re-put note would otherwise hide the
-  correction. The file's chunks such a document does not own stay unowned:
-  not searchable, and in a `knowledge__` collection removable by the RDR-192
-  reaper after its grace window. The command reports how many and names up
-  to 5 documents. To restore a document from the file instead, delete it
-  first, then import.
-- `--skip-existing` does not change ownership: grouping happens before
-  duplicate filtering, so a chunk dropped as an existing duplicate is owned
-  exactly as it would be without the flag.
+- Two records of one document that claim one position keep both chunks: the
+  later one goes past the document's highest position, so no legitimate
+  record moves.
+- **Keep-existing, and its one exception.** An import never replaces or
+  extends the manifest of a document that already owns chunks (nexus-wbfpw.40).
+  That document's current chunk list is what search shows; an older export
+  imported over a re-put note would otherwise hide the correction. The file's
+  chunks for such a document are left out of the import altogether (counted
+  as skipped, and never stored ownerless). The command reports how many chunks
+  were left out and names up to 5 documents. To restore a document from the
+  file instead, delete it first, then import. A kept document another run left
+  `indexing` or `failed` (another export, or an index run) is reported as
+  unfinished, not as one "with a different chunk list", with the same remedy. The exception (Sam,
+  2026-09-30): a document left `indexing` or `failed` whose recorded content
+  hash equals THIS file's hash is the leftover of an earlier run of this same
+  file that died. A rerun finishes it, with the append form (same file, same
+  positions: each row is an upsert by position, so nothing is dropped and no
+  chunk of the dead run is left without an owner while the rerun catches up).
+  A document with another hash, or in any other state (`complete` included),
+  stays kept.
+- `--skip-existing` does not change ownership: a record whose chunk is already
+  stored is sent without its text and vector, so the stored vector stays, and
+  its owner row is still written; a chunk stored earlier without an owner
+  gains one.
 - An owner with no title (an export whose document had none) keeps its
   source URI as the registered document's title.
-- If an owner document or its manifest fails to write, the rest of the
-  import still completes; the command then fails, naming every failed
-  source URI (capped at 5, with a count of the rest) and noting that
-  re-running the same import is safe — document lookup and manifest writes
-  are idempotent.
+- `taxonomy__*` and `quarantine-*` targets are refused before anything is
+  written: their ids are not chunk hashes and they have no catalog documents,
+  so no chunk of theirs can be written with an owner row.
+- If a document cannot be registered, written, swept or stamped, the rest of
+  the import still completes; the command then fails, naming up to 5 of them
+  (`source <URI>` for a group that could not be registered, `document
+  <tumbler>` for one that failed while writing or stamping; a count of the
+  rest). Running the same command again finishes the documents it left
+  unfinished.
 
 **Restoring a pre-migration (Chroma-era) backup:**
 
@@ -2364,11 +2433,11 @@ nx store import old-backup.nxexp --assume-model bge-base-en-v15-768
 ```
 
 ```
-nx store import partial-backup.nxexp
-# Error: ... Hint: this looks like a chunk-id constraint conflict --
-# a non-conformant legacy chunk id or a duplicate key. If you're
-# re-running a partial import, retry with --skip-existing.
-nx store import partial-backup.nxexp --skip-existing
+nx store import big-backup.nxexp
+# interrupted (^C, a dropped connection, a killed process)
+nx store import big-backup.nxexp
+# finishes the documents the first run left open; documents it completed are
+# kept as they are
 ```
 
 ---
