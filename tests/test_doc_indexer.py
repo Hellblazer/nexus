@@ -780,7 +780,7 @@ class TestIndexPdfFreshMintRollback:
                         sample_pdf, corpus="z0o2p-rollback", t3=mock_t3, embed_fn=_fake_embed,
                         hooks=HookRegistry(), streaming="never",
                     )
-        mock_fail.assert_called_once()
+        mock_fail.assert_called_once_with(minted_doc_id, "request 2 failed", heal=False)
         assert rollback_calls == ([] if request_sent else [minted_doc_id])
 
     def test_worktree_skip_then_fallback_mint_rolls_back_on_fence_refusal(

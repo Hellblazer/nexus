@@ -532,10 +532,18 @@ def _fence_begin_many(pairs: list[tuple[str, str]], collection: str) -> None:
             close()
 
 
-def _fence_fail(doc_id: str, error: str) -> None:
+def _fence_fail(doc_id: str, error: str, *, heal: bool = True) -> None:
     """Advisory: stamp ``index_state='failed'``. Never raises — the caller's
     own exception (the reason this is being called) must always propagate
     unmasked.
+
+    *heal* False skips the manifest rebuild below. The PDF paths pass it (RDR-223): their
+    writer replaces the manifest with its first request and every chunk it sends carries an
+    owner row, so a failed PDF run has no ownerless stored chunk to give an owner, and the
+    rebuild's premise (no manifest yet) is false for it: on a failed RE-index the entry keeps
+    the previous version's ``chunk_count`` while the manifest holds the new run's partial rows,
+    which reads as a gap, and the rebuild would replace the manifest with a fragment rebuilt
+    from chunks found by the OLD content hash.
 
     Also discards any superseded-vector sweep ``_manifest_write_loop``
     deferred for *doc_id* (nexus-4pj54): a failed run's manifest is not
@@ -557,7 +565,8 @@ def _fence_fail(doc_id: str, error: str) -> None:
         close = getattr(w, "close", None)
         if close is not None:
             close()
-    _heal_failed_document(doc_id)
+    if heal:
+        _heal_failed_document(doc_id)
 
 
 def _heal_failed_document(doc_id: str) -> None:
@@ -585,7 +594,8 @@ def _heal_failed_document(doc_id: str) -> None:
 
     Stopgap until RDR-223 writes chunks and owner rows in one request
     (nexus-z0o2p.13/.14 and siblings); when those land this has nothing to
-    heal and can be retired.
+    heal and can be retired. The PDF paths have landed and no longer call it
+    (``_fence_fail(..., heal=False)``).
 
     Never raises: it runs inside a failure path whose own exception must
     propagate unmasked.
@@ -1544,13 +1554,18 @@ def _write_chunks_with_owner_rows(
                 if on_progress is not None and start > 0:
                     on_progress(start, total)
             result = w.finish()
-        if on_progress is not None:
-            on_progress(total, total)
     finally:
         close = getattr(raw_cat, "close", None)
         if close is not None:
             close()
     _account_write_result(result, cat.sweep_errors, doc_id, collection_name)
+    if on_progress is not None:
+        # After the stamp (it rides finish()): the document is complete, so a progress display
+        # that raises must not reach the caller's failure handling, which would mark it failed.
+        try:
+            on_progress(total, total)
+        except Exception:  # noqa: BLE001 — boundary catch: a progress callback is display only, and the write is already stamped
+            _log.warning("write_progress_callback_failed_after_stamp", doc_id=doc_id, exc_info=True)
     return result
 
 
@@ -2232,9 +2247,9 @@ def _index_pdf_incremental(
         # _fence_fail never raises, so the original exception always
         # propagates unmasked (nexus-5xn3k.4 review follow-up). Over-work,
         # never under-work: every request the writer sent before the failure
-        # carried its chunks' owner rows.
+        # carried its chunks' owner rows, so there is nothing to heal.
         if _catalog_doc_id_for_batch:
-            _fence_fail(_catalog_doc_id_for_batch, str(exc))
+            _fence_fail(_catalog_doc_id_for_batch, str(exc), heal=False)
         raise
 
     # nexus-tbkk1: stale-chunk prune via _identity_where's source_path
@@ -3279,7 +3294,7 @@ def index_pdf(
         # _fence_fail never raises, so the original exception always
         # propagates unmasked.
         if _catalog_doc_id_for_batch:
-            _fence_fail(_catalog_doc_id_for_batch, str(exc))
+            _fence_fail(_catalog_doc_id_for_batch, str(exc), heal=False)
         # nexus-uxg4u round 2 (substantive-critic ship-blocker): this
         # except path re-raises DIRECTLY out of index_pdf -- unlike the
         # streaming/incremental branches (each a separate function

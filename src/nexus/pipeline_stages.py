@@ -1551,7 +1551,7 @@ def pipeline_index_pdf(
             # for the same defense-in-depth reason as the fence-begin gate).
             if doc_id and not dry_run and not fenced:
                 from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
-                _fence_fail(doc_id, str(first_exc))
+                _fence_fail(doc_id, str(first_exc), heal=False)
             elif doc_id and fenced:
                 # nexus-4pj54: the fenced path skips _fence_fail, which is where
                 # a failed run's deferred superseded-vector sweep is discarded.
@@ -1717,7 +1717,7 @@ def pipeline_index_pdf(
                 # (referenced=0 == chunk_count=0) and stamp 'complete' on a
                 # silently-failed extraction. No content-free exception exists
                 # for PDFs.
-                _fence_fail(doc_id, "zero chunks extracted")
+                _fence_fail(doc_id, "zero chunks extracted", heal=False)
             elif post_pass_ok:
                 if run.writer is not None and run.finished:
                     # The writer sent every request and left the run 'indexing' (defer_completion):
