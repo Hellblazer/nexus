@@ -495,8 +495,9 @@ def make_in_memory_pipeline_db(
     (``doc_indexer._require_throwaway_pipeline``), because a buffer on the engine is shared with a
     real run of the same file."""
     engine = InMemoryPipelineEngine(clock=clock)
-    db = HttpPipelineDB(base_url="http://in-memory-pipeline", _token="in-memory")
-    db._client = httpx.Client(transport=httpx.MockTransport(engine.handler))
+    db = HttpPipelineDB(
+        base_url="http://in-memory-pipeline", _token="in-memory",
+        client=httpx.Client(transport=httpx.MockTransport(engine.handler)))
     db._clock = engine.clock  # one clock on both sides (deterministic staleness)
     db.in_memory = True
     return db, engine
