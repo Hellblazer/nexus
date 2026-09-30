@@ -1242,6 +1242,14 @@ class RawSqlGateTest {
         // test (production code never sets this GUC, so its value is read directly to
         // report it, per the coordinator's explicit request).
         Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersMsz9iScaleIntegrationTest.java", 5),
+        // RDR-192 live(c) recall, extended (beads nexus-wbfpw.44/.45/.46): 2 raw-JDBC sites.
+        // rawRows(String, Object...) is the one raw read -- the exact oracle
+        // (ORDER BY (distance) + 0, so HNSW cannot serve it), its EXPLAIN and the live-count
+        // pin; the same OPERATOR(nexus.<=>)/set-returning-function-in-EXISTS reason as the
+        // sibling entries above. The production statement itself goes through the generated
+        // plain_search_<dim> function table, not raw SQL. The second site is the opt-in
+        // REINDEX (maintenance syntax with no jOOQ form).
+        Map.entry("dev/nexus/service/vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java", 2),
         Map.entry("dev/nexus/service/vectors/ManifestLessCensusNotesGuardIndexPlanShapeTest.java", 5),
         Map.entry("dev/nexus/service/vectors/PgVectorEmbedSkipIntegrationTest.java", 3),
         Map.entry("dev/nexus/service/vectors/PgVectorMetadataBatchParityTest.java", 4),
@@ -1637,7 +1645,10 @@ class RawSqlGateTest {
     // nexus-brxnp fix round: 977 -> 979 (+2: CatalogGcAuditProducersTest.java
     // 8 -> 10, insertManifestRowBypassingFk's two ALTER TABLE execute() calls
     // -- see that entry's own comment).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 979;
+    // nexus-wbfpw.44/.45/.46: 979 -> 981 (+2: new test file
+    // vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java at 2 -- see that entry's own
+    // comment).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 981;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
