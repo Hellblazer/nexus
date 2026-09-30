@@ -5290,6 +5290,7 @@ def _run_index(
     from nexus.corpus import (  # noqa: PLC0415  — circular-dep avoidance (nexus.corpus)
         collection_registration_kwargs,
         ensure_collection_registered,
+        refuse_if_superseded,
     )
     from nexus.db.http_vector_client import is_vector_service_mode as _reg_service_mode  # noqa: PLC0415  — circular-dep avoidance (nexus.db.http_vector_client)
 
@@ -5298,6 +5299,27 @@ def _run_index(
                       docs_collection if have_docs_files else None,
                       rdr_col_name):
             if _name is not None:
+                # nexus-wwuzp: this registration passes explicit kwargs, so its
+                # upsert clears ``superseded_by``. After a failed Phase-4
+                # migration (``phase4_migration_failed``) the name here can be
+                # a legacy name an earlier run already retired; read first and
+                # stop loudly rather than silently un-retiring it. Chosen over
+                # a legacy-shape read-first because the hazard is this caller's
+                # own stale name, whatever its shape, and every other explicit
+                # registrar (reindex, backfill) registers on purpose.
+                refuse_if_superseded(
+                    _name,
+                    remedy=(
+                        "The repo's registry still names the collection it was "
+                        "renamed away from (a Phase-4 migration or `nx collection "
+                        "rename` retired it), so the run stops rather than "
+                        "un-retire it. Re-run `nx index repo <repo>`: the migration "
+                        "retries on each run and moves the repo onto {successor!r}. "
+                        "If it stops here again, `nx catalog doctor "
+                        "--collections-drift` reports the retired name and `nx "
+                        "collection info {successor}` shows where the data lives."
+                    ),
+                )
                 _reg_kwargs = collection_registration_kwargs(_name)
                 _reg_kwargs["embedding_model"] = index_model_for_collection(_name)
                 ensure_collection_registered(_name, kwargs=_reg_kwargs)

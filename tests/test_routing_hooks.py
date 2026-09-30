@@ -253,6 +253,71 @@ def test_allow_envelope_is_reserved_and_unaffected_by_the_pass_helper():
 
 
 # ---------------------------------------------------------------------------
+# ask -- a real PreToolUse decision (nexus-nmzsg)
+# ---------------------------------------------------------------------------
+
+PLUGIN_LIB_PATH = (
+    PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / "_lib.py"
+)
+
+
+def _load_plugin_lib():
+    """The plugin-resident copy credential_print_guard.py still imports."""
+    spec = importlib.util.spec_from_file_location("nx_plugin_routing_lib", PLUGIN_LIB_PATH)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("loader", [_load_lib, _load_plugin_lib], ids=["wheel", "plugin"])
+def test_ask_envelope_shape(loader):
+    """``ask`` forces a permission prompt even in auto mode (the classifier
+    can still deny but cannot approve silently); the reason is what the USER
+    reads in that prompt. Shape per the Claude Code hooks docs."""
+    lib = loader()
+    env = json.loads(lib.ask_envelope("cannot verify this close"))
+    assert env == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+            "permissionDecisionReason": "cannot verify this close",
+        }
+    }
+
+
+@pytest.mark.parametrize("loader", [_load_lib, _load_plugin_lib], ids=["wheel", "plugin"])
+def test_ask_envelope_carries_optional_model_context(loader):
+    lib = loader()
+    env = json.loads(lib.ask_envelope("why", context="for the model"))
+    assert env["hookSpecificOutput"]["additionalContext"] == "for the model"
+    assert env["hookSpecificOutput"]["permissionDecision"] == "ask"
+
+
+@pytest.mark.parametrize("loader", [_load_lib, _load_plugin_lib], ids=["wheel", "plugin"])
+def test_ask_envelope_blank_reason_does_not_crash_or_go_empty(loader):
+    """A prompt with no reason is worse than none: it must never be blank."""
+    lib = loader()
+    for raw in ("", "   ", "\n"):
+        env = json.loads(lib.ask_envelope(raw))
+        assert env["hookSpecificOutput"]["permissionDecisionReason"].strip()
+
+
+def test_ask_exits_zero_with_json():
+    proc = _run_stub("_lib.ask('needs a human')")
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert payload["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert payload["hookSpecificOutput"]["permissionDecisionReason"] == "needs a human"
+
+
+def test_ask_result_is_the_ask_envelope_as_a_verb_result():
+    lib = _load_lib()
+    result = lib.ask_result("needs a human", context="ctx")
+    assert result.stdout == lib.ask_envelope("needs a human", context="ctx")
+
+
+# ---------------------------------------------------------------------------
 # allow() / deny() emit JSON to stdout and exit 0
 # ---------------------------------------------------------------------------
 

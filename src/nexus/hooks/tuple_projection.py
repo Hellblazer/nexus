@@ -126,17 +126,12 @@ def _project(verb: str, payload: dict) -> None:
     # A dropped harness-internal stop is its own event: logging it as ok read
     # as "the report was posted" and sent a gate diagnosis after a tuple-id
     # collision that did not exist (nexus-uzntx follow-up).
-    # Every outcome but a write is its own event (critique of 9601b5df6).
-    # SKIPPED stays at info: a box with no data-token lease skips every
-    # projection by design, and the fresh-install MVV fails on an
-    # unexpected warning; the reason is in the per-session projection log.
-    result = outcome.get("result")
-    event = {
-        tuple_ledger_project.DROPPED_ORPHAN: "tuple_projection_dropped_orphan",
-        tuple_ledger_project.IGNORED: "tuple_projection_ignored",
-        tuple_ledger_project.SKIPPED: "tuple_projection_skipped",
-    }.get(result, "tuple_projection_ok")
-    _emit("info", event, verb=verb)
+    # Every outcome is its own event, at the level tuple_ledger_project
+    # assigns it: SKIPPED (no lease, by design) stays info because the
+    # fresh-install MVV fails on an unexpected warning; FAILED is the one
+    # warning (nexus-8he82). The reason is in the per-session projection log.
+    level, event = tuple_ledger_project.outcome_event(outcome.get("result"))
+    _emit(level, event, verb=verb)
 
 
 def _spawn(verb: str, payload: dict | None) -> HookResult:

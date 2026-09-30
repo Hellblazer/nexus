@@ -292,7 +292,6 @@ is wired through the shim, which skips it with a notice instead.
 | `SessionStart` (matcher `startup`) | `hooks/scripts/nx_hook_shim.py mcp-connect-wait` | Wait, bounded (15s) and fail-open, for this session's `nx-mcp` to publish its connect marker before turn 1 can outrun the connection; on timeout, says tool-tier hooks will be skipped (RDR-215, nexus-veh77) |
 | `SessionEnd` | `nx-session-end-launcher` | Flush session-end bookkeeping (memory, beads, scratch) via a detached grandchild |
 | `UserPromptSubmit` | `hooks/scripts/mailbox_drain.py` | Claim, ack and render this session's RDR-205 mailbox rows; the unconditional delivery floor beneath the channel |
-| `UserPromptSubmit` | `hooks/scripts/nx_hook_shim.py mcp-connect-check` | Warn once per episode when this session's `nx-mcp` connect marker names a pid that is no longer alive (mid-session disconnect detector, nexus-veh77) |
 | `SubagentStart` | `hooks/scripts/nx_hook_shim.py subagent-start-tuple` | Project the RDR-205 ledger START tuple, as a sibling of the main hook so its failure does not take the projection with it; command tier since nexus-egm7p, for the same MCP-disconnect hazard nexus-5l8i8 fixed for the RDR-184 writers |
 | `SubagentStop` | `hooks/scripts/nx_hook_shim.py subagent-stop-tuple` | Project the RDR-205 ledger REPORT tuple, same sibling shape; command tier since nexus-egm7p |
 | `PostCompact` | `hook_post_compact` | Re-prime context (memory, beads, scratch) after `/compact` |

@@ -295,6 +295,20 @@ class TestScanTranscriptTail:
         declared, _ = hook._scan_transcript_tail(transcript, 0)
         assert declared == {"nexus-z": True}
 
+    def test_a_sibling_id_is_not_declared_and_a_mixed_close_keeps_both(self, tmp_path):
+        """nexus-t0dt8: the scoped harvester reaches this backstop too. A
+        sibling grep's session name is not a declared close; a second
+        close in a form the scoper cannot read keeps both ids."""
+        transcript = _write_transcript(
+            tmp_path, "2026-09-24T10:00:00Z",
+            bash_commands=(
+                "bd close nexus-x && git worktree list | grep nexus-18",
+                "bd close nexus-y && sudo bd close nexus-w",
+            ),
+        )
+        declared, _ = hook._scan_transcript_tail(transcript, 0)
+        assert declared == {"nexus-x": False, "nexus-y": False, "nexus-w": False}
+
     def test_non_close_bd_commands_are_ignored(self, tmp_path):
         transcript = _write_transcript(
             tmp_path, "2026-09-24T10:00:00Z",

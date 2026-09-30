@@ -192,10 +192,60 @@ class VectorHandlerDeadlineMappingTest {
         }
     }
 
+    @Test
+    void aShutdownRefusalMaps503_notTheIllegalState422() throws Exception {
+        // nexus-o5xyx.3: the ORT gate refuses a run once process exit has begun. The
+        // exception extends IllegalStateException, whose arm answers 422, which the
+        // client does not retry; the refusal must reach the wire as a retryable 503.
+        ThrowingEmbedder.override = new dev.nexus.service.vectors.OrtInitGate.ShutdownInProgressException(
+            "refusing to start native model init 'bge768-run': shutdown in progress");
+        try {
+            var resp = post("/v1/vectors/upsert-chunks", Map.of(
+                "collection", COLLECTION,
+                "ids",        List.of(Chash.ofText("rdln-c3").toHex()),
+                "documents",  List.of("chunk refused because the engine is exiting"),
+                "metadatas",  List.of(Map.of())));
+            assertThat(resp.statusCode())
+                .as("shutdown refusal must be 503, not 422 (body: %s)", resp.body())
+                .isEqualTo(503);
+            @SuppressWarnings("unchecked")
+            Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
+            assertThat((String) body.get("error")).contains("shutdown in progress");
+        } finally {
+            ThrowingEmbedder.override = null;
+        }
+    }
+
+    @Test
+    void everyEmbeddingHandlerMapsAShutdownRefusalTo503AheadOfItsGenericArms() throws Exception {
+        // nexus-o5xyx.3 review: write_many (CatalogHandler, via CombinedWriteService) and
+        // embed_fill (StagingHandler) embed too. Static pin, as for the 429/deadline arms
+        // (VectorHandlerUpstreamRateLimitedTest's proportionality argument); the live-HTTP
+        // proof of the shape is the VectorHandler test above.
+        String arm = "catch (dev.nexus.service.vectors.OrtInitGate.ShutdownInProgressException";
+        for (String handler : List.of("VectorHandler", "CatalogHandler", "StagingHandler")) {
+            String src = java.nio.file.Files.readString(java.nio.file.Path.of(
+                "src", "main", "java", "dev", "nexus", "service", "http", handler + ".java"));
+            int armIdx = src.indexOf(arm);
+            assertThat(armIdx).as("%s must catch ShutdownInProgressException", handler).isPositive();
+            assertThat(src.substring(armIdx, Math.min(src.length(), armIdx + 700)))
+                .as("%s's arm must answer 503", handler).contains("503");
+            int genericIdx = src.indexOf("catch (Exception e)", armIdx);
+            assertThat(genericIdx).as("%s: arm ahead of the generic 500 arm", handler).isGreaterThan(armIdx);
+            int iseIdx = src.indexOf("catch (IllegalStateException");
+            if (iseIdx >= 0) {
+                assertThat(armIdx).as("%s: arm ahead of the IllegalStateException arm it would fall into", handler)
+                    .isLessThan(iseIdx);
+            }
+        }
+    }
+
     /** Always throws the typed exception, simulating an expired write-path deadline. */
     private static final class ThrowingEmbedder implements Embedder {
         static volatile RequestDeadlineExceededException.Outcome outcome =
             RequestDeadlineExceededException.Outcome.ABORTED;
+        /** When set, thrown instead of the deadline exception. */
+        static volatile RuntimeException override;
 
         @Override
         public String modelToken() {
@@ -212,7 +262,9 @@ class VectorHandlerDeadlineMappingTest {
             throw simulated();
         }
 
-        private static RequestDeadlineExceededException simulated() {
+        private static RuntimeException simulated() {
+            RuntimeException o = override;
+            if (o != null) return o;
             return new RequestDeadlineExceededException(
                 "rdln-simulated-deadline-exceeded: write-path deadline elapsed mid-embed",
                 SIMULATED_RETRY_AFTER_SECONDS, outcome);

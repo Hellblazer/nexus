@@ -608,6 +608,100 @@ jobs:
                 echo "FAIL: binary requires macOS $minos > supported floor $ceiling" >&2
                 exit 1
               fi
+
+              # nexus-cd8b7 (follow-up to nexus-280ei): the outer Mach-O
+              # executable above isn't the whole ABI surface. onnxruntime
+              # and djl-tokenizers each ship their own osx-aarch64 .dylib,
+              # embedded as native-image RESOURCES (-H:IncludeResources in
+              # native-libs-mac's buildArgs, service/pom.xml) and
+              # System.load()'d/dlopen'd at runtime — never touched by
+              # -H:NativeLinkerOption/-H:CCompilerOption, which govern only
+              # the linker step that produces the OUTER binary checked
+              # above. Measured 2026-09-29: djl-tokenizers 0.30.0's
+              # libtokenizers.dylib already sits at minos 14.0 — zero
+              # headroom — while onnxruntime 1.20.0's dylibs sit at 13.3. A
+              # routine dependency bump could silently push either past the
+              # ceiling while the outer-binary check above stays green.
+              #
+              # Source: the resolved Maven jars in the local repository, not any
+              # native-image build-staging directory. GraalVM extracts
+              # embedded resources internally at image-build time and
+              # leaves no stable on-disk staging dir to re-read afterward;
+              # the m2 jars are guaranteed present immediately after
+              # `package` just resolved them (same maven session, same
+              # runner — see the "Build native image" step above), and
+              # their bytes are exactly what -H:IncludeResources pulled the
+              # dylibs from, so re-reading the resolved dependency jar is
+              # the more reliable source of the two, not a proxy for one.
+              # Ask Maven, not the file system: the versions come from the
+              # effective model (a property moved to a parent or BOM still
+              # resolves; a commented-out line does not match), and the
+              # local repository from settings, since a runner can relocate
+              # it with MAVEN_OPTS=-Dmaven.repo.local=... (hellmini does; the
+              # hardcoded ~/.m2 path failed engine-service-v0.1.141's
+              # mac-arm64 leg there, nexus-zwn92). The plugin is pinned so a
+              # publish path never floats with Central.
+              mvn_eval() {
+                (cd service && ./mvnw -q org.apache.maven.plugins:maven-help-plugin:3.5.2:evaluate \
+                  -Dexpression="$1" -DforceStdout)
+              }
+              onnx_version=$(mvn_eval onnxruntime.version)
+              djl_version=$(mvn_eval djl.tokenizers.version)
+              m2_repo=$(mvn_eval settings.localRepository)
+              case "$onnx_version$djl_version" in
+                ''|*'null object'*|*[[:space:]]*)
+                  echo "FAIL: could not resolve onnxruntime.version/djl.tokenizers.version from service/pom.xml (got '$onnx_version' / '$djl_version') — cannot locate the embedded dylibs to check" >&2
+                  exit 1 ;;
+              esac
+              if [ -z "$m2_repo" ] || [ ! -d "$m2_repo" ]; then
+                echo "FAIL: could not resolve Maven's local repository (got '$m2_repo')" >&2
+                exit 1
+              fi
+              echo "ABI floor: local repository $m2_repo; onnxruntime $onnx_version, djl tokenizers $djl_version"
+              onnx_jar="$m2_repo/com/microsoft/onnxruntime/onnxruntime/$onnx_version/onnxruntime-$onnx_version.jar"
+              djl_jar="$m2_repo/ai/djl/huggingface/tokenizers/$djl_version/tokenizers-$djl_version.jar"
+              for jar in "$onnx_jar" "$djl_jar"; do
+                if [ ! -f "$jar" ]; then
+                  echo "FAIL: resolved dependency jar missing at $jar — can't check its embedded dylibs" >&2
+                  exit 1
+                fi
+              done
+              dylib_dir="$RUNNER_TEMP/abi-floor-dylibs"
+              rm -rf "$dylib_dir"
+              mkdir -p "$dylib_dir/onnx" "$dylib_dir/djl"
+              # -x excludes the .dSYM debug-symbol dirs onnxruntime bundles
+              # alongside each dylib — same exclusion native-libs-mac's own
+              # -H:ExcludeResources applies at embed time. djl-tokenizers
+              # 0.30.0 ships none today (verified), but carrying the same
+              # exclusion on both lines means a future djl release that
+              # starts bundling .dSYM dirs doesn't silently start feeding
+              # debug-symbol companions into the minos loop below.
+              unzip -q -o "$onnx_jar" "ai/onnxruntime/native/osx-aarch64/*.dylib" -x "*.dSYM/*" -d "$dylib_dir/onnx"
+              unzip -q -o "$djl_jar" "native/lib/osx-aarch64/*.dylib" -x "*.dSYM/*" -d "$dylib_dir/djl"
+              dylib_count=0
+              while IFS= read -r -d '' dylib; do
+                dylib_count=$((dylib_count + 1))
+                dylib_minos=$(otool -l "$dylib" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; f=0}')
+                if [ -z "$dylib_minos" ]; then
+                  echo "FAIL: could not read LC_BUILD_VERSION minos from $dylib — the ABI probe produced nothing" >&2
+                  exit 1
+                fi
+                echo "embedded dylib $(basename "$dylib"): minos $dylib_minos"
+                if [ "$(printf '%s\n%s\n' "$dylib_minos" "$ceiling" | sort -V | tail -1)" != "$ceiling" ]; then
+                  echo "FAIL: embedded dylib $dylib requires macOS $dylib_minos > supported floor $ceiling" >&2
+                  exit 1
+                fi
+              done < <(find "$dylib_dir" -name '*.dylib' -print0)
+              # Vacuity guard (nexus-moht0 doctrine): a check that finds
+              # nothing to examine is a FAILURE, not a silent pass — an
+              # unzip pattern that stopped matching (a jar layout change, a
+              # wrong version path) must not read as "all embedded dylibs
+              # are within floor".
+              if [ "$dylib_count" -eq 0 ]; then
+                echo "FAIL: zero embedded dylibs found under $dylib_dir — vacuous ABI-floor assertion, refusing to treat that as a pass" >&2
+                exit 1
+              fi
+              echo "checked $dylib_count embedded onnxruntime/djl-tokenizers dylib(s) against ceiling $ceiling"
               ;;
             *)
               echo "FAIL: unhandled arch '${{ matrix.target.arch }}' — no ABI floor check defined" >&2
@@ -696,13 +790,17 @@ jobs:
   # verifies for the native binary, so one identity-regexp covers both artifacts.
   #
   # mac-arm64 targets hellmini (nexus-yd9po), same fallback input as build-publish
-  # above. KNOWN GAP as of this wiring: scripts/build_pg_bundle.sh's Darwin path
-  # runs `brew install -q flex bison` on a cache miss, and hellmini's Homebrew
-  # prefix (/opt/homebrew) is owned by an admin account, not writable by the
-  # ghrunner service user — that install fails until the host is fixed (chown/
-  # chmod granting ghrunner write access, or pre-installing flex+bison as an
-  # admin and running the build with SKIP_PREREQS=1). Confirmed via the
-  # hellmini-probe.yml dispatch, not yet fixed host-side.
+  # above. HISTORY, FIXED: scripts/build_pg_bundle.sh's Darwin path used to run
+  # an unconditional `brew install -q flex bison` on a cache miss, and
+  # hellmini's Homebrew prefix (/opt/homebrew) is owned by an admin account, not
+  # writable by the ghrunner service user, so the install failed (confirmed via
+  # the hellmini-probe.yml dispatch). Fixed by 97d8ec39c: the Darwin branch now
+  # installs flex+bison only when `brew list --formula` says they are missing
+  # (ghrunner can read the admin-installed keg, so the check short-circuits past
+  # the install it cannot perform) and always exports the keg-only PATH. The
+  # host owner installed flex+bison once as an admin. A cache-miss seed run on
+  # hellmini (pg-bundle-cache-seed run 36491497942, 2026-09-28) then compiled PG
+  # + pgvector and passed. SKIP_PREREQS now gates only the Linux branch.
   build-publish-pg-bundle:
     name: Build + sign + publish PG bundle (${{ matrix.target.arch }})
     runs-on: ${{ matrix.target.runner }}
@@ -769,7 +867,13 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v5
         with:
           path: bundle
-          key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
+          # nexus-cd8b7: macfloor${{ env.MACOSX_DEPLOYMENT_TARGET }} folds the
+          # MACOSX_DEPLOYMENT_TARGET pin above into the key — keep this line
+          # BYTE-IDENTICAL to pg-bundle-cache-seed.yml's save key (see that
+          # workflow's header), or a future divergence restores nothing here
+          # (graceful cache miss, not silent corruption) rather than the
+          # inverse (a stale-floor bundle restoring with no signal).
+          key: pg-bundle-${{ matrix.target.arch }}-${{ matrix.target.runner }}-pg${{ env.PG_VERSION }}-pgvector${{ env.PGVECTOR_VERSION }}-img-${{ matrix.target.image || 'native' }}-macfloor${{ env.MACOSX_DEPLOYMENT_TARGET }}-${{ hashFiles('scripts/build_pg_bundle.sh') }}
 
       - name: Build PG + pgvector bundle (cache miss only)
         if: steps.pg-bundle-cache.outputs.cache-hit != 'true'

@@ -320,6 +320,14 @@ def _has_residue_token(subject: str) -> bool:
     return any(t in TEST_RESIDUE_TOKENS for t in _subject_tokens(subject))
 
 
+def _name_owner_segment(name: str) -> str:
+    """The owner segment *name* spells, or ``""``. Goes through
+    :func:`collection_attributes` with a blank row, the one place this module
+    parses a name (RDR-204 census), so the audit reports a placeholder by name
+    without adding a second parse site. Never a routing decision."""
+    return collection_attributes({"name": name}).owner_id
+
+
 def run_checks(
     facts: Iterable[CollectionFacts],
     *,
@@ -402,7 +410,11 @@ def run_checks(
                                f"subject {a.owner_id!r} names where the content came from, "
                                "not what it is about",
                                "file by subject; record the source as a tag"))
-        if a.content_type in ("docs", "code", "rdr") and a.owner_id == "default":
+        # nexus-6pbwx: the engine now rewrites a repo collection's owner_id to its
+        # documents' owner segment ("default" -> "1-14" for the estate's
+        # docs__default), so the row's owner no longer says "default". The NAME still
+        # does, and this is a placeholder the audit reports by name, so key on either.
+        if a.content_type in ("docs", "code", "rdr") and "default" in (a.owner_id, _name_owner_segment(f.name)):
             out.append(Finding(f.name, "default-corpus", "warn",
                                "the 'default' corpus is a placeholder owner",
                                "route these documents to a knowledge subject "

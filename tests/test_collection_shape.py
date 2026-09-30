@@ -179,6 +179,20 @@ class TestRule1Subjects:
         f = run_checks(_facts([_filled(name)], [_stats(name, 168)], {name: 9}), write_model_for=_cloud_write_model)
         assert _checks(f, "default-corpus")
 
+    def test_docs_default_corpus_is_flagged_after_the_owner_was_repaired(self) -> None:
+        """nexus-6pbwx: the engine rewrites the row's owner_id to the documents' owner
+        segment (default -> 1-14), so the finding has to key on the name too."""
+        name = "docs__default__voyage-context-3__v1"
+        row = {**_filled(name), "owner_id": "1-14"}
+        f = run_checks(_facts([row], [_stats(name, 168)], {name: 9}), write_model_for=_cloud_write_model)
+        assert _checks(f, "default-corpus")
+
+    def test_a_repaired_repo_owner_that_is_not_default_is_not_flagged(self) -> None:
+        name = "code__arcaneum-2ad2825c__voyage-code-3__v1"
+        row = {**_filled(name), "owner_id": "1-15"}
+        f = run_checks(_facts([row], [_stats(name, 900)], {name: 60}), write_model_for=_cloud_write_model)
+        assert not _checks(f, "default-corpus")
+
     def test_real_subject_is_not_flagged(self) -> None:
         name = "knowledge__distributed-systems__voyage-context-3__v1"
         f = run_checks(_facts([_filled(name)], [_stats(name, 2101)], {name: 60}), write_model_for=_cloud_write_model)

@@ -96,6 +96,7 @@ from nexus._locking import lock_file, unlock_file
 from tests.db._service_fixture import (
     SERVICE_ROLES_SQL,
     jar_freshness_skip_reason,
+    jvm_error_file_arg,
     pg_bin_dir,
     build_in_progress_reason,
     build_lease_wait_seconds,
@@ -109,6 +110,13 @@ _JAR = _REPO_ROOT / "service" / "target" / "nexus-service-1.0-SNAPSHOT.jar"
 
 _BEARER = "t2-substrate-session-bearer"
 _DBNAME = "nexus_t2_substrate"
+
+
+def engine_argv(java: str) -> list[str]:
+    """The substrate engine's argv. One owner, so the hs_err redirect cannot be
+    dropped from the launch without a test noticing."""
+    return [java, "-Duser.timezone=UTC", jvm_error_file_arg(), "-jar", str(_JAR)]
+
 
 _lock = threading.Lock()
 _state: dict | None = None
@@ -956,7 +964,7 @@ def _boot() -> dict:
     svc_log_path = os.path.join(pgdata, "engine.log")
     svc_log = open(svc_log_path, "wb")  # noqa: SIM115 — lifetime spans the pytest session, closed with the process
     svc = subprocess.Popen(
-        [java, "-Duser.timezone=UTC", "-jar", str(_JAR)], env=env,
+        engine_argv(java), env=env,
         stdout=svc_log, stderr=subprocess.STDOUT,
         preexec_fn=os.setsid,
     )
@@ -998,6 +1006,9 @@ def _boot() -> dict:
         "pg_port": pg_port,
         "pg_user": pg_user,
         "pg_dbname": _DBNAME,
+        # The provisioned ONNX model dir (None when the posture needs none), so a
+        # test that spawns its own engine can hand it the same models (nexus-o5xyx.2).
+        "onnx_root": str(onnx_root) if onnx_root is not None else None,
         "svc": svc,
     }
     atexit.register(_teardown)

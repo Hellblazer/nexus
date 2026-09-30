@@ -77,6 +77,17 @@ Decision envelope shape (PreToolUse):
             "additionalContext": "..."   # only when allow carries advisory text
         }}
 
+    ask (nexus-nmzsg) — hand the decision to the user. Claude Code shows a
+    permission prompt carrying the reason, in auto mode too: the classifier
+    can still deny but cannot approve silently. For a rule that cannot tell
+    whether a command is safe and must not leave that to the classifier;
+    NOT the same as warn, which lets the classifier approve silently:
+        {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+            "permissionDecisionReason": "<what the USER reads in the prompt>"
+        }}
+
     deny (see ``deny_envelope`` — the reason rides in two audience-specific
     fields, with ``reason`` kept for legacy compatibility):
         {"hookSpecificOutput": {
@@ -214,6 +225,35 @@ def deny_envelope(reason: str, summary: str | None = None) -> str:
     )
 
 
+def ask_envelope(reason: str, context: str = "") -> str:
+    """Return an ask envelope as a JSON string (nexus-nmzsg).
+
+    ``ask`` hands the decision to the USER: Claude Code shows a permission
+    prompt carrying *reason*, and it does so in auto mode too -- the
+    classifier can still deny the call but cannot approve it silently
+    (documented hook behaviour; on a mixed set of hook decisions the
+    precedence is deny > defer > ask > allow). That is the one decision for a
+    rule that cannot tell whether a command is safe and must not let the
+    classifier settle it either. It is NOT a softer ``warn``: a warn
+    (:func:`pass_envelope` with context) leaves the ordinary permission flow
+    in charge, which in auto mode means a silent approval.
+
+    *reason* rides in ``permissionDecisionReason``, which the prompt shows
+    the user; the model does not read it. Text the MODEL needs goes in
+    *context* (``additionalContext``). A blank *reason* is replaced rather
+    than emitted, since a prompt that says nothing is worse than none.
+    """
+    reason = reason.strip() or "(no reason provided)"
+    payload: dict[str, Any] = {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "ask",
+        "permissionDecisionReason": reason,
+    }
+    if context:
+        payload["additionalContext"] = context
+    return json.dumps({"hookSpecificOutput": payload})
+
+
 def warn_envelope(message: str) -> str:
     """Semantic alias for ``pass_envelope`` that signals advisory intent.
 
@@ -267,6 +307,13 @@ def deny(reason: str, summary: str | None = None) -> None:
     feedback). See :func:`deny_envelope`.
     """
     sys.stdout.write(deny_envelope(reason, summary) + "\n")
+    sys.stdout.flush()
+    sys.exit(0)
+
+
+def ask(reason: str, context: str = "") -> None:
+    """Emit ask envelope to stdout and ``exit 0`` -- see :func:`ask_envelope`."""
+    sys.stdout.write(ask_envelope(reason, context) + "\n")
     sys.stdout.flush()
     sys.exit(0)
 
@@ -855,6 +902,11 @@ def allow_result(context: str = "") -> HookResult:
 def deny_result(reason: str, *, summary: str = "") -> HookResult:
     """A deny envelope as a verb result."""
     return HookResult(stdout=deny_envelope(reason, summary=summary))
+
+
+def ask_result(reason: str, context: str = "") -> HookResult:
+    """An ask envelope as a verb result (nexus-nmzsg); see :func:`ask_envelope`."""
+    return HookResult(stdout=ask_envelope(reason, context))
 
 
 def warn_result(context: str = "") -> HookResult:

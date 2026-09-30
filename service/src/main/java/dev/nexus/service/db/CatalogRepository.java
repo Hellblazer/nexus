@@ -7245,6 +7245,20 @@ public final class CatalogRepository {
      * refused the same way, naming the ROW's value as authoritative instead
      * of the profile's.
      *
+     * <p>An existing row's {@code owner_id} is kept too (nexus-7tys2): the client
+     * sends the owner segment of the collection's NAME on every first write in a
+     * process, and letting that replace an owner somebody registered turned a
+     * real owner into a slug. Only a row whose {@code owner_id} is its own tenant id
+     * (the placeholder hygiene-002-1 branch D stamps) takes the incoming value.
+     *
+     * <p>That SET arm is not the last word for a {@code code}/{@code docs}/{@code rdr}
+     * collection (nexus-6pbwx, {@code catalog-044-collection-owner-from-documents.xml}):
+     * a BEFORE trigger on {@code catalog_collections} replaces an owner that is not
+     * tumbler-shaped, or that names a curator, with the owner segment of the collection's
+     * live documents, and an AFTER trigger on {@code catalog_documents} does the same when
+     * a document lands. So the value this method returns for such a collection can differ
+     * from the one written here; a knowledge collection is never touched.
+     *
      * <p>A NEW row's {@code lifecycle_state} is {@code quarantine} when
      * either the request's {@code content_type} or {@code name} starts with
      * {@code quarantine-}, else {@code live} (bead nexus-ft04v.8 NOTES: the
@@ -7278,7 +7292,7 @@ public final class CatalogRepository {
                     "registering collection '" + name + "' requires content_type; none was supplied");
             }
 
-            var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL)
+            var existingRow = ctx.select(CATALOG_COLLECTIONS.EMBEDDING_MODEL, CATALOG_COLLECTIONS.OWNER_ID)
                     .from(CATALOG_COLLECTIONS)
                     .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
                     .and(CATALOG_COLLECTIONS.NAME.eq(name))
@@ -7290,6 +7304,18 @@ public final class CatalogRepository {
 
             if (existingRow != null) {
                 String existingModel = existingRow.value1();
+                // nexus-7tys2: the SET arm below keeps this owner_id; say so when the
+                // caller sent a different one (a name-derived segment, in practice).
+                // nexus-6pbwx: for code/docs/rdr the catalog-044 triggers may then replace
+                // the kept value with the documents' owner segment; this line reports the
+                // SET arm's decision only.
+                String existingOwner = existingRow.value2();
+                String incomingOwner = s(coll, "owner_id");
+                if (existingOwner != null && !existingOwner.isEmpty()
+                        && !existingOwner.equals(tenant) && !existingOwner.equals(incomingOwner)) {
+                    log.debug("event=collection_upsert_owner_kept tenant={} name={} kept={} ignored={}",
+                              tenant, name, existingOwner, incomingOwner);
+                }
                 if (requestedModel != null && !requestedModel.isBlank()
                         && !requestedModel.equals(existingModel)) {
                     throw new EmbeddingProfileConflictException(
@@ -7385,7 +7411,24 @@ public final class CatalogRepository {
                .onConflict(CATALOG_COLLECTIONS.TENANT_ID, CATALOG_COLLECTIONS.NAME)
                .doUpdate()
                .set(CATALOG_COLLECTIONS.CONTENT_TYPE,         DSL.excluded(CATALOG_COLLECTIONS.CONTENT_TYPE))
-               .set(CATALOG_COLLECTIONS.OWNER_ID,             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
+               // nexus-7tys2: a registered owner_id is never replaced by a later
+               // registration. The client registers a collection before its first
+               // chunk write in every process (ensure_collection_registered) and sends
+               // the owner segment it parses out of the NAME -- a slug, not an owner.
+               // The engine does not parse names (RDR-204), so it cannot tell that
+               // value from a deliberate one; a value already on the row is the one
+               // somebody registered, and it stands. The one exception is the
+               // placeholder itself: hygiene-002-1 branch D stamps a row it cannot
+               // classify with owner_id = the row's own tenant_id (the fingerprint
+               // hygiene-004 keys on), and a re-registration still repairs that.
+               // Keyed on the value, not on lifecycle_state: branches A and C mark
+               // rows 'disputed' while they hold a real name segment, and 'disputed'
+               // never clears, so keying on it left those rows last-writer-wins.
+               // rename writes its own owner through its own upsert.
+               .set(CATALOG_COLLECTIONS.OWNER_ID,
+                    DSL.when(CATALOG_COLLECTIONS.OWNER_ID.eq(CATALOG_COLLECTIONS.TENANT_ID),
+                             DSL.excluded(CATALOG_COLLECTIONS.OWNER_ID))
+                       .otherwise(CATALOG_COLLECTIONS.OWNER_ID))
                // RDR-204 1a: embedding_model/model_version/dimension/lifecycle_state are
                // deliberately ABSENT from this SET list — an existing row is never
                // re-pointed by the profile (or by a same-name re-registration naming its
@@ -7918,7 +7961,24 @@ public final class CatalogRepository {
                               // CatalogRepositoryTest's "a quarantine sibling never
                               // wins a tuple", not this predicate.
                               .and(CATALOG_COLLECTIONS.LIFECYCLE_STATE.ne("quarantine")))
-                       .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.desc())
+                       // nexus-6pbwx: catalog-044 gives a legacy slug-named repo collection the
+                       // documents' owner segment, so it can now share a (content_type, owner_id,
+                       // embedding_model) tuple with the conformant collection of the same owner.
+                       // At equal version the tie goes to the lexically LOWER name (NAME ASC, it was
+                       // DESC): the conformant name carries the hyphenated tumbler segment right after
+                       // the content_type prefix, and a digit sorts below the letter a slug starts
+                       // with, so the conformant collection wins. That is an ordering, not a parse of
+                       // the name (RDR-204, CollectionParseGateTest), and it is the reason the census
+                       // stays at zero here. Quarantine and grandfathered rows are filtered above, so
+                       // no other pair of rows can tie. Version still dominates: a slug at v2 beats a
+                       // conformant v1. CatalogRepositoryTest pins both; do not flip this back.
+                       // The ordering is a PROXY: a slug that starts with '0' sorts below a
+                       // conformant '1-..' segment and wins the tie (a test documents it). That
+                       // changes only WHICH of two same-version names is returned: the only consumers of
+                       // /collections/for_tuple, HttpCatalogClient.collection_for and
+                       // _tuple_registered, read the returned name's model_version (or only its
+                       // existence) and re-render the collection name from owner_id themselves.
+                       .orderBy(COL_VERSION_NUM.desc(), CATALOG_COLLECTIONS.NAME.asc())
                        .limit(1).fetchOne();
             return r != null ? collRow(r.value1(), r.value2(), r.value3(), r.value4(), r.value5(),
                                         r.value6(), r.value7(), r.value8(), r.value9(), r.value10()) : null;
@@ -8442,6 +8502,12 @@ public final class CatalogRepository {
             // name (see the 6-arg renameCollection); absent, they are X's. Copying X's
             // unconditionally left a renamed knowledge collection carrying X's subject as its
             // owner. embedding_model, dimension and the rest stay X's.
+            // nexus-6pbwx: for code/docs/rdr, a name-derived value that is a slug or a curator's
+            // segment is replaced. The insert below fires catalog-044's BEFORE trigger (Y has no
+            // documents yet, so nothing changes), and the documents re-home step further down
+            // fires its AFTER trigger, which replaces THAT kind of owner (not tumbler-shaped, or a
+            // curator's) with the documents'. A tumbler-shaped repo owner written here stands, and
+            // a knowledge collection is outside the rule and keeps exactly what is written here.
             Field<String> newContentType = newContentTypeOrNull != null
                 ? DSL.val(newContentTypeOrNull, CATALOG_COLLECTIONS.CONTENT_TYPE)
                 : CATALOG_COLLECTIONS.CONTENT_TYPE;

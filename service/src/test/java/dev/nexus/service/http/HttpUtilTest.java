@@ -134,6 +134,29 @@ class HttpUtilTest {
         assertThat(ex.bodyString()).contains("\"sqlstate\":\"23502\"");
     }
 
+    // ── sendTypedDbError: unregistered collection carries a reason code (nexus-bgvnx) ──
+
+    @Test
+    void sendTypedDbError_unregisteredCollection_422CarriesAStableReasonCode() throws Exception {
+        CapturingExchange ex = new CapturingExchange();
+        Throwable wrapped = new RuntimeException("jOOQ DataAccessException",
+            new dev.nexus.service.db.UnregisteredCollectionException("t1", "knowledge__ghost"));
+
+        boolean handled = HttpUtil.sendTypedDbError(ex, wrapped, log, "test_handler", "op=/x");
+
+        assertThat(handled).isTrue();
+        assertThat(ex.status).isEqualTo(422);
+        assertThat(ex.bodyString())
+            .as("a machine-readable reason, so a client need not match the prose")
+            .contains("\"reason\":\"unregistered_collection\"")
+            .as("the typed fields the client already reads stay")
+            .contains("\"collection\":\"knowledge__ghost\"")
+            .contains("\"tenant\":\"t1\"");
+        assertThat(ex.bodyString())
+            .as("the wording stays: an older client's retry (nexus-f5wwx) matches it")
+            .contains("is not registered");
+    }
+
     @Test
     void sendTypedDbError_neitherClass_fallsThroughFalse() throws Exception {
         CapturingExchange ex = new CapturingExchange();

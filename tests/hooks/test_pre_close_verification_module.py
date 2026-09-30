@@ -67,6 +67,7 @@ class TestTheDenyTextIsACarriedContract:
             "Run the marker write as a SEPARATE tool call",
             "Run the stacked reviewers (code-review-expert + substantive-critic)",
             "The marker MUST name both reviewers; naming one (or neither) is refused",
+            "It must also name each exact bead id, .N suffix included",
             "the marker is reserved to the gate-owning session",
             "it is not yours to reach for",
         ],
@@ -92,13 +93,13 @@ class TestTheHarvesterFixes:
         """Ours, created by the worktree convention: a command that
         changes directory before closing harvested the directory names."""
         ids = gate._bead_ids(f"cd /Users/x/git/nexus-wt/nexus-01 && {CLOSE} nexus-q02nx.17")
-        assert ids == ["nexus-q02nx"], ids
+        assert ids == ["nexus-q02nx.17"], ids
 
     def test_a_peer_worktree_path_is_not_a_close_target(self):
         """The dangerous instance: this path yields a token that IS
         bead-shaped, so the refusal reads as a real gate failure."""
         ids = gate._bead_ids(f"cd /Users/x/git/nexus-wt/nexus-c3 && {CLOSE} nexus-q02nx.17")
-        assert ids == ["nexus-q02nx"], ids
+        assert ids == ["nexus-q02nx.17"], ids
 
     def test_an_id_in_a_short_reason_flag_is_not_a_close_target(self):
         """PRE-EXISTING and unrelated to worktrees: -r is bd's real short
@@ -106,11 +107,11 @@ class TestTheHarvesterFixes:
         id mentioned in a close reason became a target. Taken from
         `bd close --help`, not guessed."""
         ids = gate._bead_ids(f'{CLOSE} nexus-q02nx.17 -r "supersedes nexus-zzzzz"')
-        assert ids == ["nexus-q02nx"], ids
+        assert ids == ["nexus-q02nx.17"], ids
 
     def test_an_id_in_a_reason_file_path_is_not_a_close_target(self):
         ids = gate._bead_ids(f"{CLOSE} nexus-q02nx.17 --reason-file nexus-93.txt")
-        assert ids == ["nexus-q02nx"], ids
+        assert ids == ["nexus-q02nx.17"], ids
 
     def test_real_targets_still_survive_both_fixes(self):
         """The fixes must not make the harvester find NOTHING — that
@@ -119,6 +120,125 @@ class TestTheHarvesterFixes:
         assert gate._bead_ids(f"{CLOSE} nexus-aaaaa nexus-bbbbb") == [
             "nexus-aaaaa", "nexus-bbbbb",
         ]
+
+
+class TestHarvestIsScopedToTheCloseSegment:
+    """nexus-t0dt8: ids come from the close's own arguments, not from
+    sibling commands. Both collisions below blocked real closes on
+    2026-09-29; the session name ``nexus-18`` is bead-shaped."""
+
+    def test_a_bead_named_by_a_sibling_bd_comment_is_not_a_close_target(self):
+        command = f'bd comment nexus-aaaaa "measured" && {CLOSE} nexus-bbbbb'
+        assert gate._bead_ids(command) == ["nexus-bbbbb"]
+
+    def test_a_session_name_in_a_trailing_grep_is_not_a_close_target(self):
+        command = f"{CLOSE} nexus-aaaaa && git worktree list | grep nexus-18"
+        assert gate._bead_ids(command) == ["nexus-aaaaa"]
+
+    def test_a_sibling_on_an_earlier_line_is_not_a_close_target(self):
+        command = "echo nexus-18" + chr(10) + f"{CLOSE} nexus-aaaaa"
+        assert gate._bead_ids(command) == ["nexus-aaaaa"]
+
+    def test_every_close_segment_contributes(self):
+        command = f"{CLOSE} nexus-aaaaa; echo nexus-18; {UPDATE} nexus-bbbbb --status closed"
+        assert gate._bead_ids(command) == ["nexus-aaaaa", "nexus-bbbbb"]
+
+    def test_flags_before_the_ids_are_skipped(self):
+        command = f'{CLOSE} --reason "done, see nexus-zzzzz" nexus-aaaaa --json'
+        assert gate._bead_ids(command) == ["nexus-aaaaa"]
+
+    def test_a_close_with_no_literal_id_falls_back_to_the_whole_command(self):
+        """Fails closed: scoping that finds nothing must not become an
+        INDETERMINATE allow while a literal id sits elsewhere."""
+        command = 'ID=nexus-aaaaa; ' + CLOSE + ' "$ID"'
+        assert gate._bead_ids(command) == ["nexus-aaaaa"]
+
+    def test_batch_stdin_closes_still_fall_back_to_the_whole_command(self):
+        command = "printf 'close nexus-aaaaa reason\\n' | " + BATCH
+        assert gate._bead_ids(command) == ["nexus-aaaaa"]
+
+    @pytest.mark.parametrize(
+        "second",
+        [
+            "printf 'close nexus-bbbbb reason\\n' | " + BATCH,
+            BATCH + " <<'EOF'" + chr(10) + "close nexus-bbbbb reason" + chr(10) + "EOF",
+            'echo \'{"id":"nexus-bbbbb","status":"closed"}\' | ' + IMPORT + " -",
+            "bd sql \"UPDATE issues SET status='closed' WHERE id='nexus-bbbbb'\"",
+            "(" + CLOSE + " nexus-bbbbb)",
+            "bd -q close nexus-bbbbb",
+            "env X=1 " + CLOSE + " nexus-bbbbb",
+            "sudo " + CLOSE + " nexus-bbbbb",
+            "time " + CLOSE + " nexus-bbbbb",
+            "echo nexus-bbbbb | xargs " + CLOSE,
+            "sh -c '" + CLOSE + " nexus-bbbbb'",
+            "ID=nexus-bbbbb; " + CLOSE + ' "$ID"',
+            CLOSE + " $(echo nexus-bbbbb)",
+            "bd dolt sql \"UPDATE issues SET status='closed' WHERE id='nexus-bbbbb'\"",
+        ],
+    )
+    @pytest.mark.parametrize("order", ["literal_first", "literal_last"])
+    def test_a_close_the_scoper_cannot_read_keeps_every_id(self, second, order):
+        """Review ship-blocker: a literal close mixed with a close in any
+        other form must not narrow to the literal's id, or the other bead
+        closes unchecked. Scoping is all or nothing."""
+        literal = f"{CLOSE} nexus-aaaaa"
+        parts = [literal, second] if order == "literal_first" else [second, literal]
+        command = chr(10).join(parts)
+        ids = gate._bead_ids(command)
+        assert "nexus-aaaaa" in ids and "nexus-bbbbb" in ids, (command, ids)
+
+    def test_a_wrapper_close_is_not_seen_alone_or_beside_a_literal_close(self):
+        """The recorded limit (see _close_segment_ids): a close through a
+        wrapper name is invisible to this gate, alone as it always was,
+        and now also beside a literal close, whose id alone is checked."""
+        wrapper = "scripts/close-bead.sh nexus-ccccc"
+        assert gate._bd_verbs(wrapper)["has_close_or_done"] is False
+        assert gate._bead_ids(f"{CLOSE} nexus-aaaaa; {wrapper}") == ["nexus-aaaaa"]
+
+    @pytest.mark.parametrize(
+        "sibling",
+        [
+            "bd comment nexus-18 'noted'",
+            "bd show nexus-18",
+            UPDATE + " nexus-18 --priority 1",
+            "bd ready",
+        ],
+    )
+    def test_plain_non_closing_bd_siblings_still_narrow(self, sibling):
+        command = f"{sibling} && {CLOSE} nexus-aaaaa"
+        assert gate._bead_ids(command) == ["nexus-aaaaa"], command
+
+
+class TestUnreadableCloseDoesNotBorrowSiblingIds:
+    """nexus-nmzsg: a close segment whose own id is unreadable is not
+    completed with ids from sibling segments that cannot define it."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'bd show nexus-xxxxx; ' + CLOSE + ' "$ID"',
+            "bd comment nexus-xxxxx 'n' && " + CLOSE + " $(cat f)",
+            UPDATE + " nexus-xxxxx --priority 1; " + CLOSE + ' "$ID"',
+        ],
+    )
+    def test_plain_non_closing_bd_siblings_contribute_nothing(self, command):
+        assert gate._bead_ids(command) == [], command
+
+    @pytest.mark.parametrize(
+        "command, expected",
+        [
+            ('ID=nexus-aaaaa; ' + CLOSE + ' "$ID"', ["nexus-aaaaa"]),
+            ("for b in nexus-aaaaa nexus-bbbbb; do " + CLOSE + " $b; done",
+             ["nexus-aaaaa", "nexus-bbbbb"]),
+            (CLOSE + " $(echo nexus-aaaaa)", ["nexus-aaaaa"]),
+            ('bd show nexus-xxxxx; ID=nexus-aaaaa; ' + CLOSE + ' "$ID"', ["nexus-aaaaa"]),
+        ],
+    )
+    def test_a_sibling_that_defines_the_variable_still_does(self, command, expected):
+        assert gate._bead_ids(command) == expected, command
+
+    def test_segment_scoping_for_a_readable_close_is_untouched(self):
+        assert gate._bead_ids("bd show nexus-xxxxx && " + CLOSE + " nexus-aaaaa") == ["nexus-aaaaa"]
 
 
 class TestNexus2b24oTransitionNotVerb:
@@ -756,7 +876,7 @@ class TestTheTwoFlagTablesCannotDrift:
             f'{CLOSE} nexus-q02nx.17 --reason-file nexus-93.txt "unterminated',
             f'{CLOSE} nexus-q02nx.17 -r "unterminated supersedes nexus-zzzzz',
         ):
-            assert "nexus-q02nx" in gate._bead_ids(command), command
+            assert "nexus-q02nx.17" in gate._bead_ids(command), command
 
     @pytest.mark.parametrize("flag", sorted(gate._VALUE_FLAGS))
     def test_every_value_flag_is_blanked_on_the_fallback_path(self, flag: str) -> None:
@@ -772,7 +892,7 @@ class TestTheTwoFlagTablesCannotDrift:
             f"{flag} is in _VALUE_FLAGS but its value was still harvested on the "
             f"malformed-quoting fallback path; got {ids}"
         )
-        assert "nexus-q02nx" in ids, (
+        assert "nexus-q02nx.17" in ids, (
             f"blanking {flag} also blinded the harvester to the real target; "
             f"finding nothing routes to INDETERMINATE, which ALLOWS"
         )
@@ -895,3 +1015,32 @@ class TestTheStampBudgetIsSharedNotIndependent:
             ["nexus-aaa", "nexus-bbb", "nexus-ccc"], "passed", "test"
         )
         assert calls == [], f"bd was invoked despite an exhausted budget: {calls}"
+
+
+class TestQhsklChildIds:
+    """nexus-qhskl: child ids keep their suffix on every extraction path."""
+
+    def test_a_close_names_the_child_not_its_parent(self) -> None:
+        assert gate._bead_ids("bd " + "close nexus-qhs01.3") == ["nexus-qhs01.3"]
+
+    def test_two_children_stay_distinct(self) -> None:
+        assert gate._bead_ids("bd " + "close nexus-qhs01.1 nexus-qhs01.2") == ["nexus-qhs01.1", "nexus-qhs01.2"]
+
+    def test_the_whole_command_fallback_keeps_the_suffix(self) -> None:
+        # $ID forces the fallback scan; the literal child must survive it whole.
+        ids = gate._bead_ids('ID=nexus-qhs01.4; bd ' + 'close "$ID" nexus-qhs01.5')
+        assert "nexus-qhs01.4" in ids and "nexus-qhs01.5" in ids
+        assert "nexus-qhs01" not in ids
+
+    def test_a_batch_update_closing_a_child_is_a_close(self) -> None:
+        cmd = "printf 'update nexus-qhs01.3 status=closed\\n' | bd batch"
+        assert gate._bd_verbs(cmd)["has_close_or_done"] is True
+        assert gate._bead_ids(cmd) == ["nexus-qhs01.3"]
+
+    def test_an_import_closing_a_child_is_a_close(self) -> None:
+        cmd = """echo '{"id":"nexus-qhs01.3","status":"closed"}' | bd import -"""
+        assert gate._bd_verbs(cmd)["has_close_or_done"] is True
+        assert gate._bead_ids(cmd) == ["nexus-qhs01.3"]
+
+    def test_a_grandchild_keeps_both_suffixes(self) -> None:
+        assert gate._bead_ids("bd " + "close nexus-qhs01.1.2") == ["nexus-qhs01.1.2"]

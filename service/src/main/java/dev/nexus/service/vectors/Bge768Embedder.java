@@ -6,6 +6,7 @@ import ai.djl.huggingface.tokenizers.Encoding;
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -246,12 +247,20 @@ public final class Bge768Embedder implements Embedder {
             log.warn("event=bge_model_size_check_failed path={} error={}", modelPath, e.getMessage());
         }
 
-        this.ortEnv = OrtEnvironment.getEnvironment();
+        // nexus-o5xyx.1: from the first ORT touch (getEnvironment creates ORT's logging
+        // manager) until the session and tokenizer are built, process exit must wait —
+        // a SIGTERM here otherwise tears the logging manager down under a live
+        // InferenceSession::Initialize and the JVM SEGVs. Throws ShutdownInProgressException
+        // (deliberately outside the catch below) if exit has already begun.
+        OrtInitGate.Scope initScope = OrtInitGate.process().enter("bge768");
 
         OrtSession          sess = null;
         HuggingFaceTokenizer tok  = null;
         // SessionOptions is AutoCloseable; it holds no state once createSession returns.
+        // getEnvironment() is the first statement INSIDE the try so the scope is closed by
+        // the finally below on every path; nothing runs between enter() and the try.
         try (var sessionOpts = new OrtSession.SessionOptions()) {
+            this.ortEnv = OrtEnvironment.getEnvironment();
             // nexus-00wsf: the intra-op width of this SHARED session comes from one
             // resolver (OnnxThreadPolicy: ORT's own default unless an operator overrides);
             // concurrency is bounded by LocalOnnxAdmission, never by this number.
@@ -279,6 +288,8 @@ public final class Bge768Embedder implements Embedder {
             if (tok != null)  { try { tok.close();  } catch (Exception ignored) {} }
             if (sess != null) { try { sess.close(); } catch (Exception ignored) {} }
             throw new RuntimeException("Failed to initialise Bge768Embedder: " + e.getMessage(), e);
+        } finally {
+            initScope.close();
         }
     }
 
@@ -295,6 +306,9 @@ public final class Bge768Embedder implements Embedder {
         } catch (RequestDeadlineExceededException e) {
             // nexus-8hdg9 phase 3: rethrown UNWRAPPED so VectorHandler's typed 503 +
             // Retry-After arm sees it rather than the generic 500 arm.
+            throw e;
+        } catch (OrtInitGate.ShutdownInProgressException e) {
+            // nexus-o5xyx.3: unwrapped, so VectorHandler answers a retryable 503.
             throw e;
         } catch (Exception e) {
             throw new RuntimeException("Bge768Embedder.embed failed: " + e.getMessage(), e);
@@ -433,7 +447,8 @@ public final class Bge768Embedder implements Embedder {
             // work remains -- a request whose last sub-batch just completed is never
             // aborted after doing all its work. The admission permit is released by
             // AdmissionControlledEmbedder's finally; the session.run() that just returned
-            // is the granularity floor (a native ONNX call cannot be interrupted).
+            // is the granularity floor (the deadline never interrupts a run; only
+            // shutdown does, through GatedRun's terminate flag, nexus-o5xyx.3).
             if (start < n && RequestDeadlineProbe.expired(deadlineNanos, nowNanos)) {
                 long elapsedMs = (nowNanos - callStartNanos) / 1_000_000L;
                 long pastDeadlineMs = (nowNanos - deadlineNanos) / 1_000_000L;
@@ -481,37 +496,45 @@ public final class Bge768Embedder implements Embedder {
 
         long[] shape = {batchSize, maxLen};
 
-        OnnxTensor inputIdsTensor      = null;
-        OnnxTensor attentionMaskTensor = null;
-        OnnxTensor tokenTypeIdsTensor  = null;
-        try {
-            inputIdsTensor      = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(inputIdsFlat), shape);
-            attentionMaskTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(attentionMaskFlat), shape);
+        // nexus-o5xyx.3: inference logs through ORT's logging manager too (ExecuteKernel's
+        // Capture), so the run sits in the OrtInitGate from tensor creation to tensor
+        // release and shutdown cancels it (see GatedRun). Throws ShutdownInProgressException
+        // once exit has begun, so a multi-sub-batch request stops at the next sub-batch.
+        try (GatedRun run = GatedRun.open("bge768-run")) {
+            OnnxTensor inputIdsTensor      = null;
+            OnnxTensor attentionMaskTensor = null;
+            OnnxTensor tokenTypeIdsTensor  = null;
+            try {
+                inputIdsTensor      = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(inputIdsFlat), shape);
+                attentionMaskTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(attentionMaskFlat), shape);
 
-            Map<String, OnnxTensor> inputs = new HashMap<>();
-            inputs.put("input_ids", inputIdsTensor);
-            inputs.put("attention_mask", attentionMaskTensor);
-            if (wantsTokenTypeIds) {
-                long[] tokenTypeIdsFlat = new long[batchSize * maxLen]; // all zeros
-                tokenTypeIdsTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(tokenTypeIdsFlat), shape);
-                inputs.put("token_type_ids", tokenTypeIdsTensor);
-            }
-
-            onnxInvocationCount.incrementAndGet();
-            try (OrtSession.Result result = session.run(inputs)) {
-                // Output 0 = last_hidden_state shape [batch, seq, 768]
-                float[][][] hiddenState = (float[][][]) result.get(0).getValue();
-
-                List<float[]> embeddings = new ArrayList<>(batchSize);
-                for (int i = 0; i < batchSize; i++) {
-                    embeddings.add(clsPoolNormalize(hiddenState[i]));
+                Map<String, OnnxTensor> inputs = new HashMap<>();
+                inputs.put("input_ids", inputIdsTensor);
+                inputs.put("attention_mask", attentionMaskTensor);
+                if (wantsTokenTypeIds) {
+                    long[] tokenTypeIdsFlat = new long[batchSize * maxLen]; // all zeros
+                    tokenTypeIdsTensor = OnnxTensor.createTensor(ortEnv, LongBuffer.wrap(tokenTypeIdsFlat), shape);
+                    inputs.put("token_type_ids", tokenTypeIdsTensor);
                 }
-                return embeddings;
+
+                onnxInvocationCount.incrementAndGet();
+                try (OrtSession.Result result = session.run(inputs, run.options())) {
+                    // Output 0 = last_hidden_state shape [batch, seq, 768]
+                    float[][][] hiddenState = (float[][][]) result.get(0).getValue();
+
+                    List<float[]> embeddings = new ArrayList<>(batchSize);
+                    for (int i = 0; i < batchSize; i++) {
+                        embeddings.add(clsPoolNormalize(hiddenState[i]));
+                    }
+                    return embeddings;
+                } catch (OrtException e) {
+                    throw run.cancelledOr(e);
+                }
+            } finally {
+                if (inputIdsTensor != null)      inputIdsTensor.close();
+                if (attentionMaskTensor != null) attentionMaskTensor.close();
+                if (tokenTypeIdsTensor != null)  tokenTypeIdsTensor.close();
             }
-        } finally {
-            if (inputIdsTensor != null)      inputIdsTensor.close();
-            if (attentionMaskTensor != null) attentionMaskTensor.close();
-            if (tokenTypeIdsTensor != null)  tokenTypeIdsTensor.close();
         }
     }
 

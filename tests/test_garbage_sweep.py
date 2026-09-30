@@ -260,3 +260,79 @@ class TestReclaimUsesTheReadHandleForReads:
         writer = _WriteOnlyProxy(_FakeCatalog(_LINKS, _TRASH))
         with pytest.raises(AttributeError):
             reclaim_catalog_garbage(writer)
+
+
+class TestConnectMarkerAndCheckStateSweep:
+    """nexus-qxyqz: ``mcp_connect_marker.*`` (a SIGKILLed server never
+    clears its own) and ``mcp_connect_check_state.*`` (the retired connect
+    check's per-session state, which nothing writes any more) are registered
+    litter classes, day-scale like ``mint_lock``."""
+
+    @staticmethod
+    def _marker(path: Path, pid: int, *, age_days: float) -> Path:
+        import json
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": pid, "published_at": 1.0, "expires_at": 2.0}))
+        stamp = NOW - age_days * DAY
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def test_an_old_marker_naming_a_dead_pid_goes(self, tmp_path: Path) -> None:
+        from nexus.garbage import CONNECT_MARKER_MAX_AGE_DAYS
+
+        dead = self._marker(
+            tmp_path / "mcp_connect_marker.sess-dead", 999_999_999,
+            age_days=CONNECT_MARKER_MAX_AGE_DAYS + 1,
+        )
+        report = sweep_local_garbage(tmp_path, now=NOW)
+        assert not dead.exists()
+        assert report.removed == {"connect_marker": [dead.name]}
+
+    def test_a_marker_naming_a_live_pid_is_never_swept_whatever_its_age(
+        self, tmp_path: Path,
+    ) -> None:
+        live = self._marker(tmp_path / "mcp_connect_marker.sess-live", os.getpid(), age_days=400)
+        assert sweep_local_garbage(tmp_path, now=NOW).removed_count == 0
+        assert live.exists()
+
+    def test_a_marker_younger_than_the_age_is_kept_even_with_a_dead_pid(
+        self, tmp_path: Path,
+    ) -> None:
+        from nexus.garbage import CONNECT_MARKER_MAX_AGE_DAYS
+
+        young = self._marker(
+            tmp_path / "mcp_connect_marker.sess-young", 999_999_999,
+            age_days=CONNECT_MARKER_MAX_AGE_DAYS - 0.5,
+        )
+        assert sweep_local_garbage(tmp_path, now=NOW).removed_count == 0
+        assert young.exists()
+
+    def test_a_malformed_old_marker_and_an_old_tmp_leftover_go(self, tmp_path: Path) -> None:
+        from nexus.garbage import CONNECT_MARKER_MAX_AGE_DAYS
+
+        bad = _touch(
+            tmp_path / "mcp_connect_marker.sess-bad", age_days=CONNECT_MARKER_MAX_AGE_DAYS + 1,
+        )
+        tmp = _touch(
+            tmp_path / "mcp_connect_marker.sess-x.123.abcd.tmp",
+            age_days=CONNECT_MARKER_MAX_AGE_DAYS + 1,
+        )
+        report = sweep_local_garbage(tmp_path, now=NOW)
+        assert not bad.exists() and not tmp.exists()
+        assert sorted(report.removed["connect_marker"]) == sorted([bad.name, tmp.name])
+
+    def test_old_connect_check_state_goes_and_young_stays(self, tmp_path: Path) -> None:
+        from nexus.garbage import CONNECT_CHECK_STATE_MAX_AGE_DAYS
+
+        old = _touch(
+            tmp_path / "mcp_connect_check_state.sess-a",
+            age_days=CONNECT_CHECK_STATE_MAX_AGE_DAYS + 1,
+        )
+        young = _touch(
+            tmp_path / "mcp_connect_check_state.sess-b",
+            age_days=CONNECT_CHECK_STATE_MAX_AGE_DAYS - 0.5,
+        )
+        report = sweep_local_garbage(tmp_path, now=NOW)
+        assert not old.exists() and young.exists()
+        assert report.removed == {"connect_check_state": [old.name]}

@@ -31,6 +31,19 @@
       ]
     },
     {
+      "type": "ai.onnxruntime.OrtException",
+      "jniAccessible": true,
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": [
+            "int",
+            "java.lang.String"
+          ]
+        }
+      ]
+    },
+    {
       "type": "ai.onnxruntime.TensorInfo",
       "jniAccessible": true,
       "methods": [

@@ -88,6 +88,15 @@ export NX_ALLOW_PROD_WRITE="cloud-client-path-gate: deliberate post-deploy MVV w
 #      SchemaViolation and the same claimant can still ack plainly. WRITES
 #      two requests and one reply into fresh mailbox/ccpg-* addresses.
 #
+#   I  descending tuple read through the edge (nexus-kp5q3): an rd with
+#      order=desc must come back with the engine's "order":"desc" and
+#      "limit" echo. The echo is the client's only capability signal, so an
+#      edge that strips or rewrites the JSON, or an engine deployed without
+#      the read, turns `nx tuple rd --newest` back into oldest-first paging
+#      that exits 3 past --max-rows, with no error anywhere else. Read-only:
+#      one non-mutating rd on a fresh probe subspace. A missing echo FAILS
+#      this leg; it is never skipped.
+#
 # Applicability: requires a CLOUD-mode box (service_url is a non-loopback
 # https endpoint). On a local-mode box this gate REFUSES (exit 2) rather
 # than skip-passing — a vacuous pass here would be exactly the blindness
@@ -116,17 +125,18 @@ _fail() { echo "CLOUD CLIENT-PATH GATE FAILED: $*" >&2; exit 1; }
 # side — a heredoc that dies mid-leg still counts as a leg that failed to
 # complete, never a leg that quietly did not run.
 #
-# EXPECTED_LEGS=7 (dated 2026-09-13; [B] redefined 2026-09-28): [A] /version,
+# EXPECTED_LEGS=8 (dated 2026-09-13; [B] redefined 2026-09-28; [I] added 2026-09-29): [A] /version,
 # [B] edge auth contract (unauthenticated /health refused, data token
 # accepted on /v1), [C+D] client probe heredoc (one shell-side entry for the
 # combined python leg), [E] T2 write body carrying shell-substitution text
 # (nexus-cmzib WAF passthrough), [F] RDR-205 tuple-space CA 3 through the
 # edge (nexus-em75s.15), [G] ledger tuple projector hook drive (nexus-g2lln
 # pre-tag proof, nexus-cbo4a), [H] RDR-206 renew and ack-with-reply through
-# the edge (nexus-zjzt1, 2026-09-13). Editing the battery means updating this
+# the edge (nexus-zjzt1, 2026-09-13), [I] descending tuple read echo through
+# the edge (nexus-kp5q3, 2026-09-29). Editing the battery means updating this
 # constant in the same diff.
 LEGS_RAN=0
-EXPECTED_LEGS=7
+EXPECTED_LEGS=8
 _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 
 # Every python whose STDOUT is captured below configures cli logging first:
@@ -713,6 +723,42 @@ except Exception as exc:
     bad = True
 
 sys.exit(1 if bad else 0)
+PY
+
+# ── Leg I: descending tuple read through the edge (nexus-kp5q3) ──────────
+# `nx tuple rd --newest` asks for order=desc and trusts only a response that
+# echoes "order":"desc" and the "limit" it ran with. Nothing else notices if
+# that echo is lost between the engine and the client: the CLI just pages
+# oldest-first again. So this leg asserts the echo itself, on a probe subspace
+# with no rows (the engine echoes regardless of rows; nothing is written).
+_leg_enter I "descending tuple read echo (order=desc, limit) through the edge (nexus-kp5q3)"
+uv run python - <<'PY' || _leg_fail "I: descending tuple read probe failed (see above)"
+import sys
+import time
+import uuid
+
+from nexus.db.t2.http_tuple_store import DescendingReadUnsupportedError, HttpTupleStore
+
+store = HttpTupleStore()
+addr = f"ccpg-desc-{int(time.time())}-{uuid.uuid4().hex[:6]}"
+try:
+    read = store.rd_newest(f"mailbox/{addr}", {"to": addr}, n=1)
+except DescendingReadUnsupportedError as exc:
+    print(f"  VIOLATION [I]: the descending read came back without its echo ({exc}) -- "
+          "the engine predates order=desc or the edge stripped order/limit from the "
+          "response; `nx tuple rd --newest` silently reverts to oldest-first paging",
+          file=sys.stderr)
+    sys.exit(1)
+except Exception as exc:
+    print(f"  VIOLATION [I]: descending tuple read raised {exc!r}", file=sys.stderr)
+    sys.exit(1)
+finally:
+    store.close()
+if read.rows != [] or read.limit != 1:
+    print(f"  VIOLATION [I]: expected an empty page with limit 1 on a fresh probe "
+          f"subspace, got rows={read.rows!r} limit={read.limit!r}", file=sys.stderr)
+    sys.exit(1)
+print("  ok [I]: descending rd echoed order=desc and limit=1 through the edge")
 PY
 
 if [ "$LEGS_RAN" -ne "$EXPECTED_LEGS" ]; then

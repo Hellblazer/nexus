@@ -55,6 +55,21 @@ def _isolate_state_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
 
 
+@pytest.fixture(autouse=True)
+def _keep_projection_threads_out_of_the_real_hook_log(monkeypatch):
+    """``run_start``/``run_stop`` detach a daemon thread that logs its outcome
+    through the module's real ``_emit``, which writes the developer's real
+    ``~/.config/nexus/logs/hook.log``. A failed projection logs at warning
+    (nexus-8he82), so a test that hands these entries an odd payload leaks a
+    warning there. Silence ``_emit``, and join the threads BEFORE the patch is
+    undone: a thread that outlives its test emits for real."""
+    monkeypatch.setattr(proj, "_emit", lambda *_a, **_kw: None)
+    yield
+    for thread in threading.enumerate():
+        if thread.name.startswith("tuple-projection") and thread is not threading.current_thread():
+            thread.join(timeout=5)
+
+
 def _settle(predicate, timeout: float = 5.0) -> bool:
     """Wait on a daemon thread's side effect. Nothing joins these
     threads by design, so a test that reads their effect must poll."""
@@ -240,6 +255,154 @@ class TestTheProjectionCall:
         monkeypatch.setattr(proj, "_emit", lambda _lvl, ev, **_kw: emitted.append(ev))
         proj._project("report", {"session_id": "s-none"})
         assert emitted == ["tuple_projection_ignored"]
+
+
+def _no_lease(monkeypatch) -> None:
+    """A box with no endpoint or data-token lease, made explicitly: the ambient
+    box differs between a laptop run and a substrate-backed one."""
+    def _unresolvable(_config_dir):
+        raise tuple_ledger_project._Skip("no service endpoint resolvable")
+
+    monkeypatch.setattr(tuple_ledger_project, "_resolve_endpoint_and_token", _unresolvable)
+
+
+class TestSkippedByDesignVersusFailed:
+    """nexus-8he82: SKIPPED covered a box with no lease (by design, and the
+    fresh-install MVV fails on an unexpected warning, so it stays info) and
+    real failures alike. A refused POST, a bad payload and a crash are
+    FAILED and log at warning."""
+
+    _START = {"session_id": "s-fail", "agent_id": "a-fail", "agent_type": "Explore"}
+
+    def _emitted(self, monkeypatch) -> list[tuple]:
+        emitted: list[tuple] = []
+        monkeypatch.setattr(proj, "_emit", lambda lvl, ev, **kw: emitted.append((lvl, ev)))
+        return emitted
+
+    def test_a_refused_post_is_a_failure_at_warning(self, monkeypatch):
+        monkeypatch.setattr(
+            tuple_ledger_project, "_resolve_endpoint_and_token",
+            lambda _dir: ("http://127.0.0.1:1", "tok", False),
+        )
+
+        def _refused(*_a, **_kw):
+            raise tuple_ledger_project._Skip("engine returned HTTP 503 posting to x")
+
+        monkeypatch.setattr(tuple_ledger_project, "_post_via_urllib", _refused)
+        emitted = self._emitted(monkeypatch)
+        proj._project("start", dict(self._START))
+        assert emitted == [("warning", "tuple_projection_write_failed")]
+
+    def test_a_transport_failure_is_a_failure_at_warning(self, monkeypatch):
+        monkeypatch.setattr(
+            tuple_ledger_project, "_resolve_endpoint_and_token",
+            lambda _dir: ("http://127.0.0.1:1", "tok", False),
+        )
+
+        def _down(*_a, **_kw):
+            raise tuple_ledger_project._Skip("transport failure posting to x: refused")
+
+        monkeypatch.setattr(tuple_ledger_project, "_post_via_urllib", _down)
+        emitted = self._emitted(monkeypatch)
+        proj._project("start", dict(self._START))
+        assert emitted == [("warning", "tuple_projection_write_failed")]
+
+    def test_an_incomplete_payload_is_a_failure_at_warning(self, monkeypatch):
+        emitted = self._emitted(monkeypatch)
+        proj._project("start", {"session_id": "s-fail", "agent_id": "a-fail"})
+        assert emitted == [("warning", "tuple_projection_write_failed")]
+
+    def test_an_unexpected_crash_is_a_failure_at_warning(self, monkeypatch):
+        def _boom(_dir):
+            raise RuntimeError("a bug, not a missing lease")
+
+        monkeypatch.setattr(tuple_ledger_project, "_resolve_endpoint_and_token", _boom)
+        emitted = self._emitted(monkeypatch)
+        proj._project("start", dict(self._START))
+        assert emitted == [("warning", "tuple_projection_write_failed")]
+
+    def test_a_missing_lease_stays_info(self, monkeypatch):
+        """The by-design case: resolution raises _Skip. The resolver is patched
+        rather than left to the ambient box, because a substrate-backed run
+        (hellmini) has a live endpoint and lease and would POST instead."""
+        _no_lease(monkeypatch)
+        emitted = self._emitted(monkeypatch)
+        proj._project("start", dict(self._START))
+        assert emitted == [("info", "tuple_projection_skipped")]
+
+    def test_a_successful_post_is_posted_and_info(self, monkeypatch):
+        monkeypatch.setattr(
+            tuple_ledger_project, "_resolve_endpoint_and_token",
+            lambda _dir: ("http://127.0.0.1:1", "tok", False),
+        )
+        monkeypatch.setattr(tuple_ledger_project, "_post_via_urllib", lambda *_a, **_kw: None)
+        emitted = self._emitted(monkeypatch)
+        proj._project("start", dict(self._START))
+        assert emitted == [("info", "tuple_projection_ok")]
+
+
+class TestProjectReturnsTheOutcome:
+    """The outcome itself, not only its log line: project() is the value the
+    command tier reads."""
+
+    _START = {"session_id": "s-out", "agent_id": "a-out", "agent_type": "Explore"}
+
+    def test_the_five_outcomes_are_distinct(self):
+        values = {
+            tuple_ledger_project.POSTED, tuple_ledger_project.DROPPED_ORPHAN,
+            tuple_ledger_project.IGNORED, tuple_ledger_project.SKIPPED,
+            tuple_ledger_project.FAILED,
+        }
+        assert len(values) == 5
+
+    def test_no_lease_is_skipped(self, monkeypatch):
+        _no_lease(monkeypatch)
+        assert tuple_ledger_project.project("start", dict(self._START)) == tuple_ledger_project.SKIPPED
+
+    def test_a_refused_post_is_failed(self, monkeypatch):
+        monkeypatch.setattr(
+            tuple_ledger_project, "_resolve_endpoint_and_token",
+            lambda _dir: ("http://127.0.0.1:1", "tok", False),
+        )
+
+        def _refused(*_a, **_kw):
+            raise tuple_ledger_project._Skip("engine returned HTTP 500 posting to x")
+
+        monkeypatch.setattr(tuple_ledger_project, "_post_via_urllib", _refused)
+        assert tuple_ledger_project.project("start", dict(self._START)) == tuple_ledger_project.FAILED
+
+    def test_schema_fallback_exhaustion_is_failed(self, monkeypatch):
+        """A report whose retry with legacy dims is refused too."""
+        monkeypatch.setattr(
+            tuple_ledger_project, "_resolve_endpoint_and_token",
+            lambda _dir: ("http://127.0.0.1:1", "tok", False),
+        )
+
+        def _schema(*_a, **_kw):
+            raise tuple_ledger_project._SchemaViolation("engine returned HTTP 400 posting to x")
+
+        monkeypatch.setattr(tuple_ledger_project, "_post_via_urllib", _schema)
+        monkeypatch.setattr(
+            tuple_ledger_project, "_extract_verify_dims", lambda _p: {"verify": "present"}
+        )
+        payload = {**self._START, "agent_transcript_path": "/nonexistent/t.jsonl"}
+        assert tuple_ledger_project.project("report", payload) == tuple_ledger_project.FAILED
+
+    def test_incomplete_and_oversized_payloads_are_failed(self):
+        assert (
+            tuple_ledger_project.project("start", {"session_id": "s-out", "agent_id": "a"})
+            == tuple_ledger_project.FAILED
+        )
+        oversized = {**self._START, "agent_id": "a" * 5000}
+        assert tuple_ledger_project.project("start", oversized) == tuple_ledger_project.FAILED
+
+    def test_a_write_is_posted(self, monkeypatch):
+        monkeypatch.setattr(
+            tuple_ledger_project, "_resolve_endpoint_and_token",
+            lambda _dir: ("http://127.0.0.1:1", "tok", False),
+        )
+        monkeypatch.setattr(tuple_ledger_project, "_post_via_urllib", lambda *_a, **_kw: None)
+        assert tuple_ledger_project.project("start", dict(self._START)) == tuple_ledger_project.POSTED
 
 
 # ── Mock /v1/tuples/out engine (mirrors tests/hooks/test_tuple_ledger_project.py) ──

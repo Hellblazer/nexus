@@ -62,6 +62,7 @@ No direct-mode fallback — a service/PG outage is always fatal for callers.
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import re
 import shutil
@@ -93,6 +94,7 @@ from nexus.db.onnx_model_root import ENV_MODEL_DIR, service_onnx_models_root
 from nexus.db.service_bge_model import service_bge_engine_dir_mismatch
 from nexus.db.service_crossencoder_model import service_crossencoder_engine_dir_mismatch
 from nexus.util.process_group import KILL_SIGNAL
+from nexus.daemon.appliance_handoff import HANDOFF_FILE_ENV
 from nexus.daemon.service_registry import (
     DEFAULT_HEARTBEAT_INTERVAL,
     DEFAULT_STOP_ELECTION_BUDGET,
@@ -527,6 +529,36 @@ def _ipv4_only_disabled(env_value: str | None) -> bool:
     )
 
 
+#: How many ``hs_err_<pid>.log`` JVM crash reports the logs directory keeps
+#: (nexus-o5xyx.2). Each is ~100 KB and a crash-looping service writes one per
+#: start, so the newest few are kept and the rest are reaped at each launch.
+_HS_ERR_KEEP = 5
+
+
+def _reap_old_hs_err(logs_dir: Path, keep: int = _HS_ERR_KEEP) -> list[Path]:
+    """Delete all but the newest *keep* ``hs_err_*.log`` files in *logs_dir*.
+
+    Best-effort by design: a reap failure must never stop a service from starting,
+    and a missing directory simply has nothing to reap. Returns the deleted paths.
+    """
+    try:
+        found = sorted(
+            logs_dir.glob("hs_err_*.log"),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return []
+    reaped: list[Path] = []
+    for old in found[max(keep, 0):]:
+        try:
+            old.unlink()
+            reaped.append(old)
+        except OSError:
+            continue
+    return reaped
+
+
 def _resolve_java_executable() -> str:
     """Return the ``java`` launcher for the JAR path, or fail loud with a remedy.
 
@@ -691,6 +723,107 @@ def _allocate_free_port(host: str = _SERVICE_HOST) -> int:
     sock.bind((host, 0))
     port: int = sock.getsockname()[1]
     sock.close()
+    return port
+
+
+#: RDR-218 appliance-only fixed port (nexus-ijue9.29). The WSL2 appliance's unit
+#: sets it through /etc/nexus/appliance.env so Windows reaches the engine at one
+#: known port through the WSL relay. Unset (local Linux and macOS), the supervisor
+#: allocates an ephemeral port exactly as before. Record: T2
+#: nexus/rdr-218-appliance-endpoint-handoff-decision section 2.
+FIXED_PORT_ENV: str = "NX_SERVICE_FIXED_PORT"
+
+#: The appliance's port (record section 1: IANA-unassigned, below Linux's
+#: ephemeral range and the Kubernetes NodePort range, clear of Windows' excluded
+#: ranges). The supervisor never applies it by itself; ijue9.5's env-file test
+#: asserts equality with it instead of retyping the literal.
+APPLIANCE_DEFAULT_PORT: int = 29517
+
+#: nexus-ijue9.29 review round: the appliance's token-admin calls run on the
+#: heartbeat thread, so each is bounded well under the 15 s lease TTL, and a
+#: failed projection is retried from heartbeats at most once per backoff.
+_APPLIANCE_ADMIN_TIMEOUT_S: float = 5.0
+_APPLIANCE_RETRY_BACKOFF_S: float = 60.0
+
+_FIXED_PORT_REMEDY: str = (
+    f"if the holder is a leftover nexus-service of this appliance, stop it "
+    f"(`nx daemon service stop`); otherwise change {FIXED_PORT_ENV} in "
+    f"/etc/nexus/appliance.env and restart the unit"
+)
+
+
+def _parse_fixed_port(raw: str | None) -> int | None:
+    """Return the fixed port from *raw*, ``None`` when unset or empty.
+
+    Raises StorageServiceStartError for anything but an integer in 1024..65535.
+    """
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip()
+    # ASCII digits only, no sign, no leading zero, no underscores: int() alone
+    # accepts "+29517", "29_517" and non-ASCII digits.
+    canonical = value.isascii() and value.isdigit() and not value.startswith("0")
+    port = int(value) if canonical else None
+    if port is None or not 1024 <= port <= 65535:
+        raise StorageServiceStartError(
+            f"{FIXED_PORT_ENV}={raw!r} is not a port: it must be an integer in "
+            f"1024..65535. Remedy: {_FIXED_PORT_REMEDY}."
+        )
+    return port
+
+
+def _port_holder(port: int) -> str | None:
+    """Best effort: the process listening on *port* per ``ss -ltnp``, else None.
+
+    ``ss`` is resolved to an absolute path first (a bare name makes CPython fork
+    instead of posix_spawn); absent (macOS), there is simply no holder to name.
+    """
+    ss = shutil.which("ss")
+    if ss is None:
+        return None
+    from nexus.bounded_subprocess import run_bounded  # noqa: PLC0415 — collision path only
+
+    try:
+        out = run_bounded([ss, "-ltnp", f"sport = :{port}"], timeout=2).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    users = re.search(r'users:\(\((.*?)\)\)', out)
+    return users.group(1) if users else None
+
+
+def _claim_fixed_port(port: int, host: str = _SERVICE_HOST) -> int:
+    """Probe-bind *port* on *host* and release it, or fail loudly.
+
+    An early DIAGNOSTIC, not a reservation: the engine binds only after its
+    Liquibase walk (minutes on a first boot), and a port lost in between makes
+    the engine's own bind fail, which readiness reports loudly. The probe exists
+    so the common collision is named, with its holder and remedy, before spawn.
+
+    SO_REUSEADDR, unlike :func:`_allocate_free_port`: the engine's JDK HttpServer
+    binds with it, so TIME_WAIT sockets left on this fixed port by the previous
+    engine's closed connections must not read as a collision (they would, for
+    ~60 s after every engine death, with no holder to name). A live LISTEN socket
+    on the same address still conflicts on Linux and BSD. There is NO fallback to
+    an ephemeral port: a moved port is unreachable from Windows (RDR-218 Gap 1).
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+    except OSError as exc:
+        if exc.errno != errno.EADDRINUSE:
+            raise StorageServiceStartError(
+                f"cannot bind {FIXED_PORT_ENV} port {port} on {host}: {exc}. "
+                f"Remedy: {_FIXED_PORT_REMEDY}."
+            ) from exc
+        holder = _port_holder(port)
+        held_by = f" (held by {holder})" if holder else ""
+        raise StorageServiceStartError(
+            f"{FIXED_PORT_ENV} port {port} on {host} is already in use{held_by}; "
+            f"refusing to start on another port. Remedy: {_FIXED_PORT_REMEDY}."
+        ) from exc
+    finally:
+        sock.close()
     return port
 
 
@@ -932,6 +1065,9 @@ class StorageServiceSupervisor:
         # restarts because it is persisted, not because it is a function of the
         # credentials. Clients re-read it from the lease endpoint after restart.
         self._service_token: str = self._resolve_service_token()
+        # nexus-ijue9.29: validated here so a bad appliance setting fails before
+        # anything starts; None on every non-appliance install.
+        self._fixed_port: int | None = _parse_fixed_port(os.environ.get(FIXED_PORT_ENV))
 
     def _resolve_service_token(self) -> str:
         """Return the persistent NX_SERVICE_TOKEN (the bound root token).
@@ -994,7 +1130,11 @@ class StorageServiceSupervisor:
         launch artifact. Configuration reaches the service ENTIRELY via the
         environment below.
         """
-        port = _allocate_free_port()
+        port = (
+            _claim_fixed_port(self._fixed_port)
+            if self._fixed_port is not None
+            else _allocate_free_port()
+        )
         env = dict(os.environ)
         # Credentials from pg_credentials
         # INVARIANT (nexus-hzhgl round 3 review Significant-1): self._creds
@@ -1184,8 +1324,19 @@ class StorageServiceSupervisor:
         # JVM launch: the runnable artifact follows as `-jar <jar>` (after any
         # -Xmx, which the JVM requires before -jar). Native: argv[0] is already
         # the binary.
+        # nexus-o5xyx.2: a crashing JVM writes hs_err_pid<N>.log into ITS cwd
+        # unless told otherwise, and the supervisor's cwd is wherever the user
+        # ran `nx` from. Point it at the same logs directory the child's
+        # stdout/stderr already go to (open_child_log_or_devnull below), so a
+        # crash report sits beside the log that names it. JVM-only: a native
+        # image has no hs_err and takes no -XX:ErrorFile, so the native launch
+        # is left alone. %p is expanded by the JVM to its own pid.
         if self._launch_kind == "jar":
-            argv += ["-jar", str(self._binary_path)]
+            argv += [
+                f"-XX:ErrorFile={self._config_dir / 'logs' / 'hs_err_%p.log'}",
+                "-jar",
+                str(self._binary_path),
+            ]
         artifact = str(self._binary_path)
         # nexus-ovbr7: route both streams to one file so interleaved output keeps
         # its order; O_APPEND means a respawn never truncates the previous
@@ -1194,6 +1345,10 @@ class StorageServiceSupervisor:
         from nexus.logging_setup import open_child_log_or_devnull  # noqa: PLC0415 — deferred import — platform/heavy dep loaded only on the path that needs it
 
         svc_log = open_child_log_or_devnull(self._svc_log_name, self._config_dir)
+        if self._launch_kind == "jar":
+            # nexus-o5xyx.2: keep the newest few JVM crash reports, drop the rest,
+            # alongside the log rotation above. The JVM writes the new one there.
+            _reap_old_hs_err(self._config_dir / "logs")
         # nexus-8vp0i: capture the readiness log-tailer's starting offset NOW
         # — after any open-time rotation (open_child_log_or_devnull), before
         # this process writes a single byte. Without this a respawn's tailer
@@ -1767,6 +1922,107 @@ class StorageServiceSupervisor:
             generation=record.generation,
             port=port,
         )
+        self._project_appliance_handoff(port, force=True)
+
+    def _project_appliance_handoff(self, port: int, *, force: bool = False) -> None:
+        """RDR-218 (nexus-ijue9.29): project the endpoint for the Windows client.
+
+        Only when ``NX_APPLIANCE_HANDOFF_FILE`` is set (the appliance unit sets
+        it); otherwise nothing is issued or written. Called from ``_publish``
+        (``force``, after /health) and after every healthy heartbeat, so a
+        transient failure converges and a deleted file comes back; each call is
+        a no-op when nothing changed. After a failure, heartbeat calls wait
+        :data:`_APPLIANCE_RETRY_BACKOFF_S` so a persistent fault costs one
+        attempt a minute, not one a second. The file carries a ``mint-locked``
+        credential, never the root bearer (Sam's O1); the credential's policy
+        lives in :class:`nexus.daemon.appliance_handoff.ApplianceProjector`.
+        Any failure is logged and swallowed: the service itself is healthy.
+        """
+        target = os.environ.get(HANDOFF_FILE_ENV, "").strip()
+        if not target:
+            return
+        mono = getattr(self, "_monotonic", time.monotonic)
+        retry_at = getattr(self, "_appliance_retry_at", None)
+        if not force and retry_at is not None and mono() < retry_at:
+            return
+        try:
+            projector = getattr(self, "_appliance_projector", None)
+            if projector is None:
+                projector = self._build_appliance_projector(Path(target), port)
+                self._appliance_projector = projector
+            written = projector.project(port)
+        except Exception as exc:  # noqa: BLE001 — the service is healthy; report, never die
+            self._appliance_retry_at = mono() + _APPLIANCE_RETRY_BACKOFF_S
+            _log.warning(
+                "appliance_handoff_not_written",
+                path=target,
+                errno=getattr(exc, "errno", None),
+                error=str(exc),
+                retry_in_s=_APPLIANCE_RETRY_BACKOFF_S,
+            )
+            return
+        self._appliance_retry_at = None
+        if written:
+            _log.info("appliance_handoff_projected", path=target, port=port)
+
+    def _build_appliance_projector(self, target: Path, port: int) -> Any:
+        """The projector for this supervisor lifetime, wired to the engine on *port*.
+
+        The admin calls use a plain client with a short timeout
+        (:data:`_APPLIANCE_ADMIN_TIMEOUT_S`), not HttpTokenStore (30 s plus a
+        lease rebind): they run on the heartbeat thread, and a stalled call must
+        not outlast the 15 s lease TTL.
+        """
+        import httpx  # noqa: PLC0415 — appliance-only path
+
+        from nexus.daemon.appliance_handoff import (  # noqa: PLC0415 — appliance-only path
+            MINT_CREDENTIAL_LABEL,
+            ROOT_TENANT,
+            ApplianceProjector,
+        )
+
+        if getattr(self, "_fixed_port", None) is None:
+            _log.warning(
+                "appliance_handoff_without_fixed_port",
+                msg=f"{HANDOFF_FILE_ENV} is set but {FIXED_PORT_ENV} is not: the "
+                "handoff will carry an ephemeral port the WSL relay does not forward",
+            )
+        base_url = f"http://{_SERVICE_HOST}:{port}"
+        headers = {"Authorization": f"Bearer {self._service_token}", "X-Nexus-Tenant": ROOT_TENANT}
+
+        def _post(path: str, body: dict[str, Any]) -> dict[str, Any]:
+            # trust_env=False: the root bearer goes to the loopback engine only,
+            # never through an HTTP(S)_PROXY in the unit's environment.
+            with httpx.Client(
+                base_url=base_url, headers=headers, timeout=_APPLIANCE_ADMIN_TIMEOUT_S,
+                trust_env=False,
+            ) as client:
+                resp = client.post(path, json=body)
+            if resp.status_code >= 400:
+                # The engine's own reason, never the request (which carries the bearer).
+                raise RuntimeError(f"POST {path} -> {resp.status_code}: {resp.text[:300]}")
+            return resp.json()
+
+        def _issue() -> dict[str, Any]:
+            return _post("/v1/service-tokens/issue", {
+                "tenant": ROOT_TENANT, "label": MINT_CREDENTIAL_LABEL, "scope": "mint-locked",
+            })
+
+        def _revoke(token_hash: str) -> object:
+            return _post("/v1/service-tokens/revoke", {"selector": token_hash})
+
+        def _list_rows() -> list[dict[str, Any]]:
+            return _post("/v1/service-tokens/list", {"tenant": ROOT_TENANT}).get("tokens", [])
+
+        return ApplianceProjector(
+            config_dir=self._config_dir,
+            target=target,
+            issue=_issue,
+            revoke=_revoke,
+            list_rows=_list_rows,
+            log=_log,
+            clock=getattr(self, "_monotonic", time.monotonic),
+        )
 
     def _stop_service(self) -> None:
         """Send SIGTERM (escalating to SIGKILL) to the service process group,
@@ -1896,6 +2152,18 @@ class StorageServiceSupervisor:
             # silently skipping a needed call, so both sides of the branch
             # are pinned, not just the happy path.
             ep = existing.endpoint
+            fixed = getattr(self, "_fixed_port", None)
+            if fixed is not None and ep.get("port") != fixed:
+                # nexus-ijue9.29: a supervisor started without the appliance env
+                # (an `nx` spawn inside the distro) owns the engine on another
+                # port. Adopting it would leave Windows pointed at nothing and
+                # this unit exiting 0, never restarted.
+                raise StorageServiceStartError(
+                    f"a storage service is already running on port {ep.get('port')}, "
+                    f"but {FIXED_PORT_ENV}={fixed}: it was started without the "
+                    f"appliance environment. Stop it (`nx daemon service stop`) and "
+                    f"restart the unit."
+                )
             _raise_or_warn_on_artifact_mismatch(self._config_dir, ep)
             _log.info(
                 "storage_service_already_running",
@@ -2129,7 +2397,7 @@ class StorageServiceSupervisor:
         mono = getattr(self, "_monotonic", time.monotonic)
         started = mono()
         try:
-            return self._heartbeat_once_untimed(phases)
+            result = self._heartbeat_once_untimed(phases)
         finally:
             elapsed = mono() - started
             ttl = ttl_for_tier(_REGISTRY_TIER)
@@ -2150,6 +2418,12 @@ class StorageServiceSupervisor:
                     ttl_s=ttl,
                     phases_s={k: round(v, 3) for k, v in phases.items()},
                 )
+        # nexus-ijue9.29: after a fully healthy tick, and outside its timing,
+        # bring the appliance handoff back in line (a no-op everywhere else, and
+        # on an appliance whenever nothing changed).
+        if result == (True, True) and getattr(self, "_proc", None) is not None:
+            self._project_appliance_handoff(self._service_port)
+        return result
 
     def _timed(self, phases: dict[str, float], name: str, fn: Callable[[], Any]) -> Any:
         mono = getattr(self, "_monotonic", time.monotonic)
@@ -2220,6 +2494,12 @@ class StorageServiceSupervisor:
             # nexus-ovbr7: the returncode is the single cheapest diagnostic a
             # dead service process leaves behind (137=SIGKILL/oom, 143=SIGTERM,
             # 1=error) — record it, plus where the process's own output went.
+            # nexus-o5xyx.2: a JVM launch that crashed left its report at
+            # logs/hs_err_<pid>.log (-XX:ErrorFile, see _spawn_service); name it
+            # so the operator does not have to know where to look. Only present
+            # when the file exists: a native launch or a clean exit leaves none.
+            _hs_err = self._config_dir / "logs" / f"hs_err_{self._proc.pid}.log"
+            _hs_err_field = {"hs_err": str(_hs_err)} if _hs_err.exists() else {}
             _log.warning(
                 "storage_service_exit_detected",
                 pid=self._proc.pid,
@@ -2227,6 +2507,7 @@ class StorageServiceSupervisor:
                 service_log=str(
                     self._config_dir / "logs" / f"{self._svc_log_name}.log"
                 ),
+                **_hs_err_field,
             )
             return False, False  # process exited; signal the run loop to exit
 

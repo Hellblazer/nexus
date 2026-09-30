@@ -81,5 +81,6 @@ def run(payload: dict | None) -> HookResult:
     fresh data-token lease, transport failure) is logged to its own
     per-session log file rather than surfaced here.
     """
-    tuple_ledger_project.project("start", payload)
+    outcome = tuple_ledger_project.project("start", payload)
+    tuple_ledger_project.log_command_tier_outcome("start", outcome)
     return HookResult()

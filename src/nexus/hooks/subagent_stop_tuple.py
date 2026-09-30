@@ -65,6 +65,31 @@ subagent stop normally and costs only the row. The RDR-184 ``.expectations`` TSV
 :mod:`nexus.hooks.subagent_stop` on the same event, stays the authoritative
 record of whether an agent reported, including for
 ``scripts/check_agent_verify_claims.py``.
+
+**What a harness-internal stop costs, and why it still spawns (nexus-zfxo3,
+measured 2026-09-29, dev Mac, median of 10, Claude Code 2.1.284).** The
+orphan case (no ``agent_type``, no transcript) is ~95% of SubagentStop
+events. Through the shim it costs 65 ms for ``subagent-stop`` and 74 ms for
+``subagent-stop-tuple``, against 23 ms for a bare ``python3 -c pass``: about
+140 ms of process time per event, run in parallel. The verbs themselves add
+only 17 ms and 24 ms over a bare interpreter start; the shim adds about 25 ms
+more to each. Two ways to avoid the spawn were checked and neither was taken:
+
+* A SubagentStop ``matcher`` does filter on agent type (Claude Code docs, and
+  a headless probe: ``""``, ``".+"`` and ``"^.+$"`` all fired for a real
+  ``general-purpose`` agent). What could not be observed is how the harness
+  matches ``.+`` against an EMPTY agent type. The harness-internal stops do
+  not occur in a ``claude -p`` run, so no headless test reaches them. And a
+  matcher would also drop a real agent whose payload lacks ``agent_type``,
+  the case nexus-0zsmg made this projection tolerate.
+* Merging the two verbs into one saves one shim and one ``nx-hook`` start,
+  about 48 ms of CPU per orphan (one interpreter start, 23 ms, plus one shim,
+  about 25 ms; ~9 s an hour at the observed ~186 events an hour), and gives up the sibling independence
+  :mod:`nexus.hooks.tuple_projection` records as deliberate, plus a new verb
+  every older CLI must tolerate through the release-floor shim.
+
+Revisit the matcher only with an interactive-session probe that captures a
+real orphan stop under a ``.+`` matcher.
 """
 from __future__ import annotations
 
@@ -83,5 +108,6 @@ def run(payload: dict | None) -> HookResult:
     extraction. Always returns a silent, exit-0 result; see
     :mod:`nexus.hooks.subagent_start_tuple` for why.
     """
-    tuple_ledger_project.project("report", payload)
+    outcome = tuple_ledger_project.project("report", payload)
+    tuple_ledger_project.log_command_tier_outcome("report", outcome)
     return HookResult()

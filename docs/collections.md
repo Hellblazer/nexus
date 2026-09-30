@@ -108,6 +108,21 @@ nexus-ft04v.26. `src/nexus/corpus.py`'s `_COLLECTION_NAME_RE` stays a
 separate, whole-string ChromaDB shape check with no owner-segment
 concept; it is not the parser these two functions use.
 
+The `owner_id` column is not the name's owner segment for a repo
+collection (nexus-6pbwx). For `code`, `docs` and `rdr` collections the
+engine sets it to the owner segment of the tumbler prefix of the catalog
+documents that live in the collection, hyphenated (`1-15`, what
+`owner_segment_for_tumbler` gives), replacing a name-derived slug
+(`arcaneum-2ad2825c`) when the first document lands. A collection with no
+documents keeps the value it was registered with, and an owner that is
+already tumbler-shaped is a first registration that stands, unless it is the
+segment of a curator-type owner (an import into an empty collection files its
+documents under the knowledge curator; a repo document that arrives later
+replaces that provisional owner). A `knowledge`
+collection is different: its owner is its subject, whatever tumbler its
+documents live under. `catalog-044-collection-owner-from-documents.xml`
+carries the rule (two triggers) and a one-off repair of existing rows.
+
 ## Rule 4: a collection holds many documents
 
 A collection is meant to hold dozens to thousands of documents. A

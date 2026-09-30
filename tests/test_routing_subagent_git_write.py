@@ -1911,3 +1911,356 @@ class TestNexus3c92mRound9ChainedExpansions:
             label="chained ${a} 100KB->1MB",
             large_bytes=len(chain_1m),
         )
+
+
+# ── nexus-0r5l8: `git` counts only as the git COMMAND, not as a path/word ────
+#
+# Before this, ANY `\bgit\b` in the command text opened the primary rule's
+# verb scan: `nexus-git-policy.py`, `.git/`, `~/git/nexus`, `git-workflow.md`
+# and `git.py` each armed the guard, so `cat nexus-git-policy.py | grep reset`
+# denied. Sam ruled (2026-09-29, option A) that `git` must be the git command.
+# The shipped rule is a TOKEN rule, not a position analysis: `git` arms the
+# scan only when a whole path-ish token's basename is `git` (or `git-<word>`,
+# the dispatch spelling). A `git` anywhere as its own token still arms it, in
+# any position, because text like `printf 'git checkout f' | sh` puts the
+# command in argument position and only a shell parser could tell them apart.
+
+_GUARD_CACHE: dict[str, object] = {}
+
+
+def _guard_module(path: pathlib.Path = HOOK_SCRIPT, name: str = "_nx0r5l8_guard"):
+    if name not in _GUARD_CACHE:
+        spec = importlib.util.spec_from_file_location(name, str(path))
+        guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(guard)
+        _GUARD_CACHE[name] = guard
+    return _GUARD_CACHE[name]
+
+
+def _denies(cmd: str, cwd: pathlib.Path) -> bool:
+    result = _guard_module().body(_bash(cmd, cwd=str(cwd)))
+    return bool(result.stdout) and '"permissionDecision": "deny"' in result.stdout
+
+
+#: Path or word substrings that contain `git` but are not the git command.
+_GIT_SUBSTRING_NOT_THE_COMMAND = [
+    "grep -n add .github/workflows/ci.yml",
+    "ls .github && echo commit",
+    "grep -rn checkout ~/git/nexus/.github/workflows",
+    "cat conexus/hooks/nexus-git-policy.py | grep reset",
+    "ls /Users/x/git/nexus-git-policy.py && echo reset",
+    "ls .git && echo commit",
+    "ls -la ~/git/nexus/.git/hooks && echo commit",
+    "cd ~/git/nexus && grep -n add x",
+    "cat docs/git-workflow.md | grep commit",
+    "cat .gitignore | grep add",
+    "grep digit x | grep add",
+    "python git.py add",
+    "ls nexus-git-policy.py file${i}.txt",
+]
+
+#: `git` as a real command in every position the ruling names, plus the
+#: wrapper and path spellings.
+_REAL_GIT_COMMANDS = [
+    "git checkout -- f",
+    "cd .github && git checkout -- f",
+    "ls nexus-git-policy.py && git checkout -- f",
+    "ls .git; git add x",
+    "/usr/bin/git checkout f",
+    "./git add x",
+    "../bin/git commit -m x",
+    "FOO=1 git commit -m x",
+    "A=1 B=2 git reset --hard",
+    "env GIT_DIR=x git commit -m x",
+    "command git add x",
+    "exec git reset --hard",
+    "xargs git rm",
+    "nice git commit -m x",
+    "time git checkout f",
+    "sudo git add x",
+    "(git add x)",
+    "true || git add x",
+    "echo hi | git add x",
+    "echo $(git add x)",
+    "echo `git add x`",
+    "if true; then git add f; fi",
+    "for f in a; do git rm $f; done",
+    "cd d\ngit add f",
+    "{ git checkout -- f; }",
+    "git -C dir checkout f",
+    "git -c user.name=x commit -m m",
+    "git --no-pager stash",
+    "git-checkout -- f",
+    "/usr/lib/git-core/git-add x",
+    "git.exe checkout -- f",
+    "$(command -v git) reset --hard",
+    "${GITBIN:-git} checkout -- f",
+    # Windows/WSL and wrapper spellings, and the sanctioned push wrapper
+    # (a subagent must not run it in the shared tree).
+    "git.cmd checkout -- f",
+    "git.bat reset --hard",
+    "git.com add x",
+    "git.sh reset --hard",
+    "git-lfs.exe checkout -- f",
+    "git-add.exe x",
+    "git-{add,x}",
+    "scripts/git-push-develop.sh abc123",
+    "NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh abc123",
+    # Accepted false positive: a directory literally named git, trailing
+    # slash included.
+    "ls ~/git/ && echo add",
+    "cd ~/git && echo add",
+]
+
+#: Found by the nexus-0r5l8 fix-round reviews: the first cut let each of
+#: these execute git while allowing.
+_REVIEW_FOUND_BYPASSES = [
+    # F1: a bare `git-` must arm (git-core/git-add is a symlink to git).
+    "p=/Library/Developer/CommandLineTools/usr/libexec/git-core/git-; ${p}add f",
+    "p=/usr/libexec/git-core/git-; ${p}reset --hard",
+    # F2: `%`, `+`, `#` are not token characters, and a trailing `/` does
+    # not hide the basename.
+    "printf 'git%s checkout f\\n' '' | sh",
+    "echo x | sed 's/x/git/;s/$/ checkout f/' | sh",
+    "echo 'git+ checkout f' | sh",
+    # `~` is not a token character: text the shell builds can strip it.
+    "x=git~; ${x%~} checkout f",
+    "printf 'git~ checkout f' | tr -d '~' | sh",
+    "echo 'git# checkout f' | sh",
+    "echo 'git% checkout f' | sh",
+    "echo 's/x/git/ checkout f' | sh",
+]
+
+#: Every shape the module docstring catalogues as a bypass of an earlier
+#: round, restated with a real `git`. Each must still deny.
+_CATALOGUED_BYPASSES = [
+    'git com"mit" -m msg',                                # quote stripping
+    "git che\\ckout -- f",                                # backslash escape
+    "g\\it checkout -- f",
+    "git ch${x:-e}ckout -- f",                            # ${x} default splice
+    "g${x:-i}t checkout -- f",
+    "g$(echo i)t checkout -- f",                          # $(...) splice
+    "git ch$(cmd)ckout -- f",                             # subsequence rule
+    "g$'\\151't checkout -- f",                           # ANSI-C
+    "g${a}${b}i${c}${d}t checkout -- t3.py",              # chained expansions
+    "bash <<< 'git checkout -- f'",                       # here-string
+    "cat <<< hi\ngit checkout -- f",
+    "printf 'git checkout -- f' | sh",                    # piped literal text
+    "echo 'git checkout -- f' | bash",
+    "eval 'git checkout -- f'",
+    "sh -c 'git checkout -- f'",
+    ". <(echo 'git checkout -- f')",
+    "git \\\ncheckout -- f",                              # continuation
+    "git \\\r\ncheckout -- f",                            # CRLF continuation
+    "git -c user.name=" + ("x" * 300) + " checkout -- f",  # padded -c global
+    "g=git; $g checkout -- x",                            # indirection via literal
+    "\\git checkout -- x",
+    "git${IFS}checkout -- x",
+    "git fil${x}ter-branch",
+    "git worktree re${x}move w1",
+    "'git' checkout -- f",
+    '"git" "checkout" -- f',
+    "bash <<EOF\ngit checkout -- f\nEOF",
+]
+
+
+class TestNexus0r5l8GitMustBeTheCommand:
+    @pytest.mark.parametrize("cmd", _GIT_SUBSTRING_NOT_THE_COMMAND)
+    def test_git_inside_a_path_or_word_does_not_arm_the_guard(self, cmd, shared_repo):
+        assert not _denies(cmd, shared_repo), cmd
+
+    @pytest.mark.parametrize("cmd", _REAL_GIT_COMMANDS)
+    def test_a_real_git_command_still_denies(self, cmd, shared_repo):
+        assert _denies(cmd, shared_repo), cmd
+
+    @pytest.mark.parametrize("cmd", _CATALOGUED_BYPASSES)
+    def test_every_catalogued_bypass_still_denies(self, cmd, shared_repo):
+        assert _denies(cmd, shared_repo), cmd
+
+    @pytest.mark.parametrize("cmd", _REVIEW_FOUND_BYPASSES)
+    def test_every_review_found_bypass_denies(self, cmd, shared_repo):
+        assert _denies(cmd, shared_repo), cmd
+
+    def test_the_sanctioned_push_wrapper_arms_the_guard(self, shared_repo):
+        """`scripts/git-push-develop.sh` used to deny only by accident (a
+        `git-` word boundary). The basename rule keeps it denied on purpose:
+        a subagent must not push from the shared tree."""
+        assert _denies("scripts/git-push-develop.sh abc123", shared_repo)
+        assert _denies("NX_PUSH_SOURCE=HEAD scripts/git-push-develop.sh abc", shared_repo)
+
+    def test_a_path_hit_before_the_real_git_does_not_hide_the_verb(self, shared_repo):
+        """The scan starts at the first git COMMAND token, so a path hit ahead
+        of it must not consume or shift the verb search."""
+        assert _denies("ls nexus-git-policy.py .git && git reset --hard", shared_repo)
+
+    def test_a_verb_before_the_real_git_stays_allowed_as_before(self, shared_repo):
+        """Unchanged behaviour: the verb scan looks AFTER the first git."""
+        assert not _denies("echo add && git status", shared_repo)
+
+    def test_linked_worktree_exemption_is_untouched(self, linked_worktree):
+        assert not _denies("git checkout -- f.txt", linked_worktree)
+
+    def test_the_wheel_verb_denies_end_to_end(self, shared_repo):
+        out = _decision(_run(_bash("cd .github && git checkout -- f", cwd=str(shared_repo))))
+        assert out["permissionDecision"] == "deny"
+        out = _decision(_run(_bash(
+            "cat conexus/hooks/nexus-git-policy.py | grep reset", cwd=str(shared_repo),
+        )))
+        assert "permissionDecision" not in out
+
+    def test_token_scan_is_linear_on_a_hostile_many_token_command(self):
+        guard = _guard_module()
+        norm_small = guard._normalize_for_primary_scan("a-git-b " * 5_000 + "checkout")
+        norm_big = guard._normalize_for_primary_scan("a-git-b " * 50_000 + "checkout")
+
+        def cpu(text: str) -> float:
+            best = float("inf")
+            for _ in range(3):
+                t0 = time.process_time()
+                assert guard._primary_match(text) is None
+                best = min(best, time.process_time() - t0)
+            return best * 1000
+
+        small, big = cpu(norm_small), cpu(norm_big)
+        assert big < _abs_ceiling_ms(len(norm_big))
+        assert big / max(small, _RATIO_FLOOR_MS) < _MAX_LINEAR_RATIO
+
+
+def _load_plugin_scan():
+    """The plugin script's scan, loaded WITHOUT its interpreter preamble.
+
+    Importing the script as-is runs ``_interpreter.reexec_if_needed()``,
+    which can ``os.execv`` the test process. The preamble statements (the
+    ``sys.path`` inserts, ``import _interpreter``/``_lib``, the re-exec call
+    and the ``__main__`` block) are dropped from the AST; everything the
+    scan uses is kept verbatim, and none of it touches ``_lib`` at import.
+    """
+    import ast
+    import types
+
+    plugin = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / (
+        "subagent_git_write_requires_orchestrator.py"
+    )
+    tree = ast.parse(plugin.read_text())
+
+    def preamble(node: ast.stmt) -> bool:
+        if isinstance(node, ast.Import):
+            return any(a.name in {"_interpreter", "_lib"} for a in node.names)
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+            text = ast.unparse(node.value)
+            return "_interpreter" in text or "sys.path.insert" in text
+        return isinstance(node, ast.If)  # the __main__ block
+
+    tree.body = [n for n in tree.body if not preamble(n)]
+    module = types.ModuleType("_nx0r5l8_plugin_scan")
+    exec(compile(tree, str(plugin), "exec"), module.__dict__)  # noqa: S102
+    return module
+
+
+def _scan_guard(which: str):
+    if which == "wheel":
+        return _guard_module()
+    if "_plugin" not in _GUARD_CACHE:
+        _GUARD_CACHE["_plugin"] = _load_plugin_scan()
+    return _GUARD_CACHE["_plugin"]
+
+
+def _scan_denies(guard, cmd: str) -> bool:
+    """`body()`'s decision minus the escape token and worktree probe: the
+    adjacency gate, then the primary rule on the normalized text and on its
+    zero-expansion form."""
+    n = guard._normalize_for_primary_scan(cmd)
+    return bool(
+        guard._find_spliced_expansion(n)
+        or guard._primary_match(n)
+        or guard._primary_match(guard._delete_all_expansions(n))
+    )
+
+
+@pytest.mark.parametrize("which", ["wheel", "plugin"])
+class TestNexus0r5l8RuleOnBothCopies:
+    """`hooks.json` wires the PLUGIN script; the verb tests above drive the
+    wheel port. Every rule class runs against both, so the live copy has a
+    behavioural test of its own."""
+
+    @pytest.mark.parametrize("cmd", _GIT_SUBSTRING_NOT_THE_COMMAND)
+    def test_substring_is_not_the_command(self, which, cmd):
+        assert not _scan_denies(_scan_guard(which), cmd), cmd
+
+    @pytest.mark.parametrize(
+        "cmd", _REAL_GIT_COMMANDS + _CATALOGUED_BYPASSES + _REVIEW_FOUND_BYPASSES,
+    )
+    def test_real_git_and_every_bypass_deny(self, which, cmd):
+        assert _scan_denies(_scan_guard(which), cmd), cmd
+
+
+
+_PINNED_FUNCTIONS = {
+    "_first_git_command", "_primary_match", "_find_spliced_expansion",
+}
+_PINNED_ASSIGNS = {"_PATHISH_TOKEN_RE", "_GIT_BASENAME_RE", "_VERB_RE"}
+#: Assignments inside ``body()`` that carry the git-present / primary-rule
+#: logic. ``body`` itself differs between the copies (HookResult returns vs
+#: ``pass_through``), so only these statements are compared.
+_PINNED_BODY_ASSIGNS = {"normalized", "spliced_fragment", "primary_match", "git_present"}
+
+
+def _scan_region_sources(path: pathlib.Path) -> dict[str, list[str]]:
+    """Canonical source of everything the git-command scan is made of: the
+    three functions, the three module-level regex assignments, and the
+    ``body()`` assignments that consume them."""
+    import ast
+
+    tree = ast.parse(path.read_text())
+    out: dict[str, list[str]] = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in _PINNED_FUNCTIONS:
+            out.setdefault(node.name, []).append(ast.unparse(node))
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in _PINNED_ASSIGNS:
+                    out.setdefault(target.id, []).append(ast.unparse(node))
+        elif isinstance(node, ast.FunctionDef) and node.name == "body":
+            for sub in ast.walk(node):
+                if isinstance(sub, ast.Assign):
+                    for target in sub.targets:
+                        if isinstance(target, ast.Name) and target.id in _PINNED_BODY_ASSIGNS:
+                            out.setdefault("body:" + target.id, []).append(ast.unparse(sub))
+    return out
+
+
+_PLUGIN_SCRIPT = PROJECT_ROOT / "conexus" / "hooks" / "scripts" / "routing" / (
+    "subagent_git_write_requires_orchestrator.py"
+)
+
+
+def test_plugin_script_and_wheel_verb_share_the_git_command_scan():
+    """`hooks.json` wires the plugin script while the verb tests drive the
+    wheel copy, so the two must carry the same scan (the port is 'move, do
+    not rewrite'). Pins the regexes and `body()`'s git-present logic too:
+    a function-only pin stayed equal when `_GIT_BASENAME_RE` was gutted."""
+    plugin = _scan_region_sources(_PLUGIN_SCRIPT)
+    wheel = _scan_region_sources(HOOK_SCRIPT)
+    expected = (
+        _PINNED_FUNCTIONS | _PINNED_ASSIGNS
+        | {"body:" + n for n in _PINNED_BODY_ASSIGNS}
+    )
+    assert set(plugin) == expected, f"plugin script lost: {expected - set(plugin)}"
+    assert set(wheel) == expected, f"wheel port lost: {expected - set(wheel)}"
+    assert plugin == wheel
+
+
+def test_the_scan_pin_fails_when_a_regex_drifts_in_one_copy(tmp_path):
+    """Falsifiability: swap `_GIT_BASENAME_RE` for a never-matching pattern
+    in a scratch copy of the plugin script; the pin must see it. Same for
+    `body()`'s git-present line."""
+    src = _PLUGIN_SCRIPT.read_text()
+    marker = "_GIT_BASENAME_RE = re.compile("
+    assert src.count(marker) == 1
+    drifted = tmp_path / "drifted.py"
+    drifted.write_text(src.replace(marker, "_GIT_BASENAME_RE = re.compile(r'(?!)') or re.compile(", 1))
+    assert _scan_region_sources(drifted) != _scan_region_sources(HOOK_SCRIPT)
+    line = "git_present = _first_git_command(normalized) is not None"
+    assert src.count(line) == 1
+    drifted.write_text(src.replace(line, "git_present = True"))
+    assert _scan_region_sources(drifted) != _scan_region_sources(HOOK_SCRIPT)

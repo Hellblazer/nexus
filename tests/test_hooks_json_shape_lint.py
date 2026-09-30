@@ -81,7 +81,9 @@ SN_HOOKS = REPO_ROOT / "sn" / "hooks" / "hooks.json"
 #: plugin-resident script, `credential_print_guard`, alongside
 #: `subagent_git_write_requires_orchestrator` and
 #: `phase_review_close_requires_gate`.
-EXPECTED_CONEXUS_ENTRIES = 28
+#: 28 -> 27 at nexus-qxyqz: the `mcp-connect-check` UserPromptSubmit entry
+#: is removed (the verb stays registered as a silent no-op for old plugins).
+EXPECTED_CONEXUS_ENTRIES = 27
 EXPECTED_SN_ENTRIES = 4
 
 MCP_SERVER = "plugin:conexus:nexus"

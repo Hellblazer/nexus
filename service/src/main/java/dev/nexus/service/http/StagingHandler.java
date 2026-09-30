@@ -242,6 +242,12 @@ public final class StagingHandler implements HttpHandler {
             exchange.getResponseHeaders().set("Retry-After", Long.toString(e.retryAfterSeconds()));
             HttpUtil.send(exchange, 429, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage())
                 + ",\"retry_after_seconds\":" + e.retryAfterSeconds() + "}");
+        } catch (dev.nexus.service.vectors.OrtInitGate.ShutdownInProgressException e) {
+            // nexus-o5xyx.3: embed_fill's embed was refused or cancelled because the
+            // engine is exiting. It fills only NULL-embedding rows, so a retry resumes;
+            // 503 is inside the client's gateway retry codes.
+            log.info("event=staging_refused_shutting_down op={} tenant={} error={}", op, tenant, e.getMessage());
+            HttpUtil.send(exchange, 503, "{\"error\":" + MAPPER.writeValueAsString(e.getMessage()) + "}");
         } catch (Exception e) {
             if (!HttpUtil.sendTypedDbError(exchange, e, log, "staging_handler",
                     "op=" + op + " tenant=" + tenant)) {

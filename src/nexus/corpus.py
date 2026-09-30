@@ -3,11 +3,14 @@ from __future__ import annotations
 
 import re
 import threading
+import time
 from collections.abc import Callable
 from typing import TypeVar
 
 import click
 import structlog
+
+from nexus.collection_errors import SupersededCollectionWriteError  # noqa: F401 — re-exported: callers import it from here
 
 _log = structlog.get_logger(__name__)
 
@@ -1649,11 +1652,89 @@ def _is_quarantine_sibling(name: str) -> bool:
     return is_quarantine_sibling_name(name)
 
 
+class _StampedSet(set):
+    """A ``set`` that stamps each element with the time it was added.
+
+    The registration caches are sets (tests seed and clear them directly),
+    and an entry's age decides whether :func:`ensure_collection_registered`
+    trusts it or re-validates it with a read (nexus-wwuzp). Keeping the stamp
+    INSIDE the set ties it to membership: a bare ``add`` gets a fresh stamp
+    and a ``discard``/``clear`` drops it, so an element can never inherit an
+    earlier occupant's age. ``expire`` marks an element for re-validation
+    without removing it.
+    """
+
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)  # type: ignore[arg-type]
+        self._at: dict[object, float] = {}
+        self._gen: dict[object, int] = {}
+        for item in self:
+            self._at[item] = _registration_clock()
+
+    def add(self, item: object) -> None:  # type: ignore[override]
+        super().add(item)
+        self._at[item] = _registration_clock()
+
+    def update(self, *others: object) -> None:  # type: ignore[override]
+        for other in others:
+            for item in other:  # type: ignore[attr-defined]
+                self.add(item)
+
+    def _forget(self, item: object) -> None:
+        """Drop *item*'s stamp and bump its generation, so a re-validation
+        whose read began before this removal cannot re-add the entry fresh."""
+        self._at.pop(item, None)
+        self._gen[item] = self._gen.get(item, 0) + 1
+
+    def discard(self, item: object) -> None:  # type: ignore[override]
+        if item in self:
+            self._forget(item)
+        super().discard(item)
+
+    def remove(self, item: object) -> None:  # type: ignore[override]
+        super().remove(item)
+        self._forget(item)
+
+    def pop(self) -> object:  # type: ignore[override]
+        item = super().pop()
+        self._forget(item)
+        return item
+
+    def clear(self) -> None:  # type: ignore[override]
+        for item in list(self):
+            self._forget(item)
+        super().clear()
+
+    def expire(self, item: object) -> None:
+        """Mark *item* (if present) as due for re-validation on next use, and
+        bump its generation so a re-validation whose read started BEFORE this
+        call cannot re-stamp the entry fresh over it (see
+        :func:`_revalidate_cached_registration`)."""
+        if item in self:
+            self._at[item] = float("-inf")
+            self._gen[item] = self._gen.get(item, 0) + 1
+
+    def generation(self, item: object) -> int:
+        """How many times *item* has been expired; read before a re-validation
+        read and compared at re-stamp time."""
+        return self._gen.get(item, 0)
+
+    def defer(self, item: object, seconds: float) -> None:
+        """Keep *item* stale but not due again for *seconds* (a short backoff
+        after a failed re-validation read)."""
+        if item in self:
+            self._at[item] = _registration_clock() - _REGISTRATION_TTL_SECONDS + seconds
+
+    def is_stale(self, item: object) -> bool:
+        """True when *item* is due for re-validation. Caller checks membership."""
+        return _registration_clock() - self._at.get(item, float("-inf")) >= _REGISTRATION_TTL_SECONDS
+
+
 #: Per-process cache of collection names already registered by
 #: :func:`ensure_collection_registered` through the AMBIENT (default)
 #: registrar — see that function's docstring. Untouched by a scoped
 #: registrar; see :data:`_REGISTERED_COLLECTIONS_SCOPED` for that case.
-_REGISTERED_COLLECTIONS: set[str] = set()
+_REGISTERED_COLLECTIONS: _StampedSet = _StampedSet()
 #: Per-process cache for a registrar bound to an EXPLICIT endpoint/tenant
 #: (nexus-w1ip follow-up, critic review 2026-09-14, gap 1): keyed on
 #: ``((base_url, tenant, bearer digest), name)`` rather than name alone
@@ -1667,37 +1748,171 @@ _REGISTERED_COLLECTIONS: set[str] = set()
 #: uses :data:`_REGISTERED_COLLECTIONS` instead; the two sets are
 #: disjoint partitions of the same idempotent-registration cache, never
 #: merged.
-_REGISTERED_COLLECTIONS_SCOPED: set[tuple[tuple[str, ...], str]] = set()
+_REGISTERED_COLLECTIONS_SCOPED: _StampedSet = _StampedSet()
 _REGISTERED_COLLECTIONS_LOCK = threading.Lock()
 
+#: Longest a cached registration is trusted before the next write to that
+#: name re-validates it with a READ (nexus-wwuzp). The cache exists so a hot
+#: per-chunk write path pays one round trip per NEW collection, but a name can
+#: be retired by ANOTHER process (``nx collection rename``, a deliberate
+#: ``supersede_collection``) while this one keeps writing to it. Re-validation
+#: is a read, never an upsert: ``/collections/upsert`` clears ``superseded_by``
+#: unconditionally, so a periodic re-upsert would un-retire every tombstone
+#: (deliberate supersedes, Phase-4 legacy names) and erase the evidence
+#: ``collection_shape`` reports. One read per name per TTL bounds the
+#: stranding window; the value matches ``mcp_infra._COLLECTIONS_CACHE_TTL``,
+#: the other cross-process staleness bound on collection state.
+_REGISTRATION_TTL_SECONDS: float = 60.0
 
-def _registration_cache_contains(scope: "tuple[str, ...] | None", name: str) -> bool:
-    """True when *name* is already known-registered in *scope*'s cache
-    partition — :data:`_REGISTERED_COLLECTIONS` for ambient (``scope is
-    None``), :data:`_REGISTERED_COLLECTIONS_SCOPED` otherwise. Caller's
-    responsibility to hold :data:`_REGISTERED_COLLECTIONS_LOCK` for the
-    authoritative (non-fast-path) check."""
-    if scope is None:
-        return name in _REGISTERED_COLLECTIONS
-    return (scope, name) in _REGISTERED_COLLECTIONS_SCOPED
+#: After a re-validation read FAILS, the entry is not re-read for this long, so
+#: a catalog outage costs one read per name per backoff, not one per write.
+_REVALIDATION_BACKOFF_SECONDS: float = 5.0
+
+
+def _registration_clock() -> float:
+    """Monotonic seconds; a module attribute so tests can inject a clock."""
+    return time.monotonic()
+
+
+def _registration_cache_key(scope: "tuple[str, ...] | None", name: str) -> object:
+    return name if scope is None else (scope, name)
+
+
+def _registration_cache_set(scope: "tuple[str, ...] | None") -> _StampedSet:
+    return _REGISTERED_COLLECTIONS if scope is None else _REGISTERED_COLLECTIONS_SCOPED
+
+
+def _registration_cache_state(scope: "tuple[str, ...] | None", name: str) -> str:
+    """``"absent"``, ``"fresh"`` (trusted), or ``"stale"`` (cached but due for
+    a read) for *name* in *scope*'s cache partition. Safe without the lock:
+    a racing writer can only make the answer momentarily out of date."""
+    cache = _registration_cache_set(scope)
+    key = _registration_cache_key(scope, name)
+    if key not in cache:
+        return "absent"
+    return "stale" if cache.is_stale(key) else "fresh"
 
 
 def _registration_cache_add(scope: "tuple[str, ...] | None", name: str) -> None:
-    """Mark *name* known-registered in *scope*'s cache partition. Caller
-    holds :data:`_REGISTERED_COLLECTIONS_LOCK`."""
-    if scope is None:
-        _REGISTERED_COLLECTIONS.add(name)
-    else:
-        _REGISTERED_COLLECTIONS_SCOPED.add((scope, name))
+    """Mark *name* known-registered (and freshly stamped) in *scope*'s cache
+    partition. Caller holds :data:`_REGISTERED_COLLECTIONS_LOCK`."""
+    _registration_cache_set(scope).add(_registration_cache_key(scope, name))
 
 
 def _registration_cache_discard(scope: "tuple[str, ...] | None", name: str) -> None:
     """Evict *name* from *scope*'s cache partition. Caller holds
     :data:`_REGISTERED_COLLECTIONS_LOCK`."""
-    if scope is None:
-        _REGISTERED_COLLECTIONS.discard(name)
-    else:
-        _REGISTERED_COLLECTIONS_SCOPED.discard((scope, name))
+    _registration_cache_set(scope).discard(_registration_cache_key(scope, name))
+
+
+def _superseded_successor(row: object) -> str:
+    """The ``superseded_by`` target of a ``/collections/get`` row, or ``""``
+    when the row is absent, not a mapping, or not superseded."""
+    if not isinstance(row, dict):
+        return ""
+    successor = row.get("superseded_by")
+    return successor if isinstance(successor, str) else ""
+
+
+def _row_from_client(client: object, name: str) -> object:
+    """*name*'s catalog row via *client*. A scoped registrar hands back a full
+    catalog client; the ambient writer is a write-only proxy whose
+    ``get_collection`` raises ``AttributeError``, so its reads go through the
+    ambient reader."""
+    try:
+        getter = client.get_collection  # type: ignore[attr-defined]
+    except AttributeError:
+        from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — circular-dep avoidance (catalog)
+        return make_catalog_reader().get_collection(name)  # type: ignore[union-attr]
+    return getter(name)
+
+
+def _read_collection_row(name: str, registrar: "Callable[[], object] | None") -> object:
+    """Read *name*'s catalog row through the endpoint *registrar* writes to."""
+    if registrar is None:
+        from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (catalog)
+        registrar = make_catalog_writer
+    client = registrar()
+    try:
+        return _row_from_client(client, name)
+    finally:
+        client.close()  # type: ignore[attr-defined]
+
+
+def refuse_if_superseded(
+    name: str, *, registrar: "Callable[[], object] | None" = None,
+    remedy: str | None = None,
+) -> None:
+    """Raise :class:`SupersededCollectionWriteError` if *name*'s catalog row is
+    retired. One READ; never registers. A read that fails is logged and lets the
+    caller proceed (a catalog outage fails the caller's own write anyway).
+
+    For a caller about to register with EXPLICIT kwargs on a name it took from
+    stale state (``nx index repo`` after a failed Phase-4 migration): that
+    upsert would un-retire the tombstone. Deliberate registrations
+    (``nx collection reindex``) do not call this.
+    """
+    try:
+        row = _read_collection_row(name, registrar)
+    except Exception as exc:  # noqa: BLE001 — fail open; logged
+        _log.warning(
+            "collection_superseded_check_read_failed", collection=name, error=repr(exc),
+        )
+        return
+    successor = _superseded_successor(row)
+    if successor:
+        raise SupersededCollectionWriteError(name, successor, remedy=remedy)
+
+
+def _revalidate_cached_registration(
+    scope: "tuple[str, ...] | None", name: str,
+    registrar: "Callable[[], object] | None",
+) -> bool:
+    """Re-validate a stale cache entry with a READ. Never registers or upserts.
+
+    Returns ``True`` when the write may proceed, and ``False`` when the row is
+    gone (the caller falls through to ordinary registration, which is what a
+    swept collection has always needed).
+
+    * Superseded: the entry is kept, still stale, and
+      :class:`SupersededCollectionWriteError` is raised, so EVERY later write
+      re-reads and is refused again. Evicting it would make the next write cold
+      and its upsert would revive the tombstone.
+    * Live: the entry is re-stamped, unless an ``expire`` landed after this
+      read began (the entry's generation moved): then it stays stale and the
+      next write re-reads, so a rename that raced the read is not overwritten.
+    * The read fails: logged, the write proceeds on the cached entry, and the
+      entry backs off for :data:`_REVALIDATION_BACKOFF_SECONDS` before the next
+      read, so an outage is not one read and one log line per write.
+
+    The network call runs outside the cache lock.
+    """
+    cache = _registration_cache_set(scope)
+    key = _registration_cache_key(scope, name)
+    generation = cache.generation(key)
+    try:
+        row = _read_collection_row(name, registrar)
+    except Exception as exc:  # noqa: BLE001 — fail open on a read blip; logged, backed off, retried
+        _log.warning(
+            "collection_registration_revalidation_read_failed",
+            collection=name, error=repr(exc),
+        )
+        with _REGISTERED_COLLECTIONS_LOCK:
+            if cache.generation(key) == generation:
+                cache.defer(key, _REVALIDATION_BACKOFF_SECONDS)
+        return True
+    successor = _superseded_successor(row)
+    if successor:
+        with _REGISTERED_COLLECTIONS_LOCK:
+            cache.expire(key)  # kept and stale: every later write is refused too
+        raise SupersededCollectionWriteError(name, successor)
+    with _REGISTERED_COLLECTIONS_LOCK:
+        if row is None:
+            _registration_cache_discard(scope, name)
+            return False
+        if key in cache and cache.generation(key) == generation:
+            _registration_cache_add(scope, name)  # re-stamp; no register, no upsert
+    return True
 
 
 def ensure_collection_registered(
@@ -1848,7 +2063,10 @@ def ensure_collection_registered(
     in an earlier revision of this docstring, corrected here.
     """
     scope = getattr(registrar, "scope", None)
-    if _registration_cache_contains(scope, name):
+    state = _registration_cache_state(scope, name)
+    if state == "fresh":
+        return
+    if state == "stale" and _revalidate_cached_registration(scope, name, registrar):
         return
     if kwargs is None and _is_quarantine_sibling(name):
         # The sibling exists by construction (the engine registered it
@@ -1860,57 +2078,86 @@ def ensure_collection_registered(
         # registers explicitly; only the name-derived path skips.
         _log.debug("collection_registration_skipped_quarantine_sibling", name=name)
         return
+    # A cold IMPLICIT write (nexus-wwuzp) is one whose name came from the write
+    # path, not from a deliberate registration. The upsert below clears
+    # ``superseded_by``, so it reads the row first (once per name per process,
+    # on the same writer it registers with) and refuses a retired name instead
+    # of reviving it. Explicit-kwargs callers (``nx collection reindex``,
+    # backfill) register on purpose and skip the read.
+    implicit = kwargs is None
+    again = False
     with _REGISTERED_COLLECTIONS_LOCK:
-        if _registration_cache_contains(scope, name):
-            return
-        if kwargs is None:
-            kwargs = collection_registration_kwargs(name)
-        profile_model = _profile_model_for_content_type(kwargs["content_type"])
-        if profile_model is not None and profile_model != kwargs["embedding_model"]:
-            raise EmbeddingProfileMismatchError(
-                kwargs["content_type"], kwargs["embedding_model"], profile_model,
-            )
-        if registrar is None:
-            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (catalog)
-            registrar = make_catalog_writer
-        writer = registrar()
-        try:
-            import httpx  # noqa: PLC0415 — deferred: keeps this module httpx-free at import time
+        current = _registration_cache_state(scope, name)
+        if current == "fresh":
+            return  # a racing thread registered it
+        if current == "stale":
+            # A rename or supersede marked it since the check above. Never
+            # upsert over a cached entry: go back through the read-based path.
+            again = True
+        else:
+            if registrar is None:
+                from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — circular-dep avoidance (catalog)
+                registrar = make_catalog_writer
+            # An implicit registration reads the row FIRST, before deriving
+            # kwargs or checking the profile: a retired name then reports the
+            # refusal rather than an unrelated profile mismatch, and skips the
+            # reads those steps make. A read that fails propagates (fail
+            # closed, like the retry path): one failed GET followed by a good
+            # POST would otherwise revive the tombstone.
+            writer = registrar() if implicit else None
             try:
-                writer.register_collection(name, **kwargs)
-            except httpx.HTTPStatusError as exc:
-                if exc.response is None or exc.response.status_code != 409:
-                    raise
-                _log.debug(
-                    "collection_already_registered_race",
-                    name=name,
-                )
-        finally:
-            writer.close()
-        _registration_cache_add(scope, name)
-        # RDR-204 Phase 3 (nexus-ft04v.26, fixture-seam round 2):
-        # nexus.mcp_infra's collection-row cache (_collections_cache,
-        # 60s TTL) is the row source resolve_corpus's bare-corpus fan-out
-        # reads. store_put/store_delete already invalidate it on write
-        # (mcp/core.py); this registration path -- the one EVERY write
-        # path this function documents (T3 chunks, aspects, taxonomy,
-        # the doc indexer) funnels through -- did not, so a NEWLY
-        # registered collection could stay invisible to a search moments
-        # later in the SAME process, for the cache's remaining TTL
-        # window. Real impact: any long-lived process (the MCP server;
-        # an in-process CliRunner test chaining index-then-search calls)
-        # that writes a brand-new collection and searches it within the
-        # TTL window -- found live via test_index_repo_routes_code_to_
-        # code_corpus, whose `nx search --corpus code --json` returned
-        # empty stdout (resolve_corpus dropped the just-registered
-        # code__ collection; both diagnostics this branch prints go to
-        # stderr, never stdout) immediately after `nx index repo`
-        # registered it in the SAME process. A real, separate-OS-process
-        # CLI invocation never hit this (mcp_infra's cache always starts
-        # cold), which is why it stayed invisible until an in-process
-        # test chained the two calls.
-        from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
-        invalidate_collections_cache()
+                import httpx  # noqa: PLC0415 — deferred: keeps this module httpx-free at import time
+                if writer is not None:
+                    cold_successor = _superseded_successor(_row_from_client(writer, name))
+                    if cold_successor:
+                        raise SupersededCollectionWriteError(name, cold_successor)
+                if kwargs is None:
+                    kwargs = collection_registration_kwargs(name)
+                profile_model = _profile_model_for_content_type(kwargs["content_type"])
+                if profile_model is not None and profile_model != kwargs["embedding_model"]:
+                    raise EmbeddingProfileMismatchError(
+                        kwargs["content_type"], kwargs["embedding_model"], profile_model,
+                    )
+                if writer is None:
+                    writer = registrar()
+                try:
+                    writer.register_collection(name, **kwargs)
+                except httpx.HTTPStatusError as exc:
+                    if exc.response is None or exc.response.status_code != 409:
+                        raise
+                    _log.debug(
+                        "collection_already_registered_race",
+                        name=name,
+                    )
+            finally:
+                if writer is not None:
+                    writer.close()
+            _registration_cache_add(scope, name)
+            # RDR-204 Phase 3 (nexus-ft04v.26, fixture-seam round 2):
+            # nexus.mcp_infra's collection-row cache (_collections_cache,
+            # 60s TTL) is the row source resolve_corpus's bare-corpus fan-out
+            # reads. store_put/store_delete already invalidate it on write
+            # (mcp/core.py); this registration path -- the one EVERY write
+            # path this function documents (T3 chunks, aspects, taxonomy,
+            # the doc indexer) funnels through -- did not, so a NEWLY
+            # registered collection could stay invisible to a search moments
+            # later in the SAME process, for the cache's remaining TTL
+            # window. Real impact: any long-lived process (the MCP server;
+            # an in-process CliRunner test chaining index-then-search calls)
+            # that writes a brand-new collection and searches it within the
+            # TTL window -- found live via test_index_repo_routes_code_to_
+            # code_corpus, whose `nx search --corpus code --json` returned
+            # empty stdout (resolve_corpus dropped the just-registered
+            # code__ collection; both diagnostics this branch prints go to
+            # stderr, never stdout) immediately after `nx index repo`
+            # registered it in the SAME process. A real, separate-OS-process
+            # CLI invocation never hit this (mcp_infra's cache always starts
+            # cold), which is why it stayed invisible until an in-process
+            # test chained the two calls.
+            from nexus.mcp_infra import invalidate_collections_cache  # noqa: PLC0415 — circular-dep avoidance (mcp_infra)
+            invalidate_collections_cache()
+    if again:
+        return ensure_collection_registered(name, registrar=registrar, kwargs=kwargs)
 
 
 def discard_cached_registration(name: str) -> None:
@@ -1942,7 +2189,42 @@ def discard_cached_registration(name: str) -> None:
     to observe, not by a write-time 422.
     """
     with _REGISTERED_COLLECTIONS_LOCK:
-        _REGISTERED_COLLECTIONS.discard(name)
+        _registration_cache_discard(None, name)
+
+
+def expire_cached_registration(name: str) -> None:
+    """Mark *name*'s cache entry, in EVERY partition (ambient and each
+    scoped one), as due for a read before its next write.
+
+    nexus-wwuzp: called after this process retires *name* (a rename, a
+    ``supersede_collection``). The catalog client does not know which
+    registrar scopes wrote *name* earlier, so every partition is marked. The
+    entry is kept, stale, rather than evicted: the next write then does one
+    revalidation READ of the row, finds it superseded, and is refused naming
+    the successor (:class:`SupersededCollectionWriteError`), and a revalidation
+    already in flight when this is called cannot re-stamp the entry over it
+    (the generation moved). A row that is still live (a cross-model copy) just
+    re-stamps. Nothing here re-registers. A no-op for an uncached name.
+    Other processes converge through :data:`_REGISTRATION_TTL_SECONDS`.
+    """
+    with _REGISTERED_COLLECTIONS_LOCK:
+        _REGISTERED_COLLECTIONS.expire(name)
+        for entry in [e for e in _REGISTERED_COLLECTIONS_SCOPED if e[1] == name]:
+            _REGISTERED_COLLECTIONS_SCOPED.expire(entry)
+
+
+def _reason_verdict(reason: object) -> bool | None:
+    """True/False when the engine named a ``reason``; None when it named none.
+
+    A named reason is the engine's own classification, so it decides: the
+    unregistered-collection reason is the retryable shape, any other reason
+    is not, whatever its prose says. No reason (every engine that predates
+    nexus-bgvnx) leaves the decision to the wording fallback."""
+    from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON  # noqa: PLC0415 — deferred: this module keeps no top-level nexus imports
+
+    if isinstance(reason, str) and reason:
+        return reason == UNREGISTERED_COLLECTION_REASON
+    return None
 
 
 def _looks_like_stale_registration_error(exc: BaseException) -> bool:
@@ -1956,8 +2238,13 @@ def _looks_like_stale_registration_error(exc: BaseException) -> bool:
     request after boot), never within one call. Any OTHER 422 (most
     notably the profile-mismatch "names a different model" refusal,
     RDR-204 Technical Design step 2) must propagate unretried — this
-    check is deliberately narrowed to the "not registered" wording so
-    it can never mask that different failure as a transient one.
+    check is deliberately narrowed so it can never mask that different
+    failure as a transient one: it keys on the engine's ``reason``
+    (``unregistered_collection``, nexus-bgvnx) and falls back to the
+    "not registered" wording only for a body that carries no ``reason``
+    (an older engine; the wording match was pinned by nexus-f5wwx and
+    nexus-zdzm5). The reason is what keeps a future refusal that reuses the
+    words, such as nexus-mp8ys' superseded-name refusal, from being retried.
 
     Two HTTP-error families reach here, mirroring
     :func:`nexus.retry._extract_status_and_retry_after`'s own
@@ -1970,7 +2257,7 @@ def _looks_like_stale_registration_error(exc: BaseException) -> bool:
     deferred-imports THIS module, to avoid exactly that cycle);
     ``VectorServiceError.__init__`` folds the engine's error body into
     its message, so ``str(exc)`` is where the text lives for that
-    family.
+    family, and its ``.reason`` attribute carries the engine's reason.
     """
     import httpx  # noqa: PLC0415 — deferred: keeps this module httpx-free at import time
 
@@ -1982,9 +2269,19 @@ def _looks_like_stale_registration_error(exc: BaseException) -> bool:
             body_text = resp.text
         except Exception:  # noqa: BLE001 — a response with no readable body is never this specific error
             return False
+        try:
+            body = resp.json()
+        except Exception:  # noqa: BLE001 — a non-JSON body carries no reason; the wording decides
+            body = None
+        verdict = _reason_verdict(body.get("reason") if isinstance(body, dict) else None)
+        if verdict is not None:
+            return verdict
         return "not registered" in body_text.lower()
     code = getattr(exc, "code", None)
     if code == 422:
+        verdict = _reason_verdict(getattr(exc, "reason", None))
+        if verdict is not None:
+            return verdict
         return "not registered" in str(exc).lower()
     return False
 
@@ -2049,6 +2346,20 @@ def write_with_registration_retry(
                 "chunk, so a sibling that does not exist has nothing to "
                 "write into. Check the origin collection and `nx t3 gc`."
             ) from exc
+        # nexus-wwuzp: the re-registration below is an upsert, which clears
+        # ``superseded_by``. A retired name must be refused, never revived by
+        # a retry. A read failure propagates rather than falling open: the
+        # alternative is reviving a tombstone on a guess.
+        successor = _superseded_successor(_read_collection_row(name, registrar))
+        if successor:
+            # Keep the entry, stale, so the next call takes the revalidation
+            # read and is refused again (and an in-flight read cannot re-stamp
+            # it: expire bumps the generation).
+            with _REGISTERED_COLLECTIONS_LOCK:
+                _registration_cache_set(getattr(registrar, "scope", None)).expire(
+                    _registration_cache_key(getattr(registrar, "scope", None), name),
+                )
+            raise SupersededCollectionWriteError(name, successor) from exc
         _log.info(
             "collection_registration_stale_after_boot_sweep_retry",
             name=name,

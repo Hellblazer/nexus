@@ -8,6 +8,17 @@ reflection class descriptor object" — nexus-1yqac. Explanatory notes that used
 to live inline as `_comment` keys are recorded here instead, keyed by the
 descriptor's `name`.
 
+## traced/reachability-metadata.json
+
+- **`ai.onnxruntime.OrtException`** (hand-added, nexus-o5xyx.3)
+  `libonnxruntime4j_jni` throws it from native code through `FindClass` plus
+  the `(int, String)` constructor whenever an ORT call returns an error
+  status. The trace came from happy-path runs that never failed, so it was
+  absent. The first hot path that makes ORT fail on purpose is a shutdown
+  cancelling an in-flight `session.run()` through its terminate flag
+  (`GatedRun`); without the entry the native binary could not raise the
+  exception the gate maps to a 503.
+
 ## reflect-config.json
 
 - **`ch.qos.logback.classic.spi.LogbackServiceProvider`**

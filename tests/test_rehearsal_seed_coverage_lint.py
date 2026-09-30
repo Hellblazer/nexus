@@ -512,6 +512,17 @@ DECLARED_SEED_COVERAGE: frozenset[tuple[str, str]] = frozenset(
         # origin row, the second prefix-stripped with lifecycle_state
         # untouched).
         ("hygiene-008-2", "nexus-0rxvg"),
+        # nexus-6pbwx: catalog-044-3 rewrites catalog_collections.owner_id for
+        # code/docs/rdr rows whose owner_id is not tumbler-shaped and that have
+        # live documents, deriving it from those documents' tumbler prefix. Two
+        # FORCE-RLS tables (the target and the catalog_documents it reads), both
+        # toggled. Seeded at OLD_TAG as a slug-owned code collection with a
+        # document under 1.15.x, and effect-asserted after the hop (owner_id
+        # 1-15); a knowledge collection holding a 1.1.x document is the KEEP
+        # arm. The full rule (majority owner, tombstone, phantom tumblers,
+        # quarantine, other tenants) is proven separately by
+        # Catalog044OwnerFromDocumentsRepairTest.
+        ("catalog-044-3", "nexus-6pbwx"),
     }
 )
 

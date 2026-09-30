@@ -46,6 +46,7 @@ from nexus.db.gateway_backoff import (
     _is_embed_server_side_write_path,
     is_non_idempotent_sweep_path,
 )
+from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON, error_reason
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import is_deadline_abort
 from nexus.redact import redact_credentials
@@ -1708,7 +1709,9 @@ def _post(path: str, body: dict, *, tenant: str = "default", timeout: int = 120)
                 remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
         if remedy:
             msg += f"\n{remedy}"
-        raise VectorServiceError(msg, code=e.code, edge_refusal=bool(edge_server)) from e
+        raise VectorServiceError(
+            msg, code=e.code, edge_refusal=bool(edge_server), reason=error_reason(err),
+        ) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         # Connection-level failure (bad/unreachable endpoint). Reframe with a
         # remedy ONLY for an explicit managed endpoint; local/lease users keep
@@ -1746,17 +1749,29 @@ def _unregistered_collection_message(code: int, err: Any) -> str | None:
     write endpoint for a collection name that simply does not exist
     (nexus-zdzm5, 7.64.1 shakeout surface C F9 / surface E F10).
 
-    A stopgap: it matches the engine's wording. nexus-bgvnx tracks a
-    machine-readable reason code on the engine's typed 422 body to key on
-    instead.
+    Keyed on the engine's ``reason`` field (nexus-bgvnx). An engine that
+    predates it sends no ``reason``, and only then is the wording matched
+    ("is not registered" plus a ``collection`` field). A body that carries a
+    DIFFERENT reason is never rewritten, whatever its prose says.
     """
     if code != 422 or not isinstance(err, dict):
         return None
     name = err.get("collection")
-    if not name or "is not registered" not in str(err.get("error", "")):
+    if not name:
         return None
-    # Keep the words "not registered": corpus._looks_like_stale_registration_error
-    # detects this 422 by them to drive write_with_registration_retry.
+    reason = error_reason(err)
+    if reason is None:
+        if "is not registered" not in str(err.get("error", "")):
+            return None
+    elif reason != UNREGISTERED_COLLECTION_REASON:
+        return None
+    # Keep the words "not registered": the wording fallback of
+    # corpus._looks_like_stale_registration_error (an engine with no reason)
+    # detects this 422 by them to drive write_with_registration_retry
+    # (nexus-f5wwx), and the rewrite's own text was pinned by nexus-zdzm5.
+    # Bead nexus-mp8ys (refuse writes to a superseded name) is why the words
+    # must not be reused for any other refusal: the reason code, not the
+    # wording, is what tells the two apart.
     return (
         f"collection {name!r} is not registered in this tenant, so it does not "
         "exist here. Check the name with `nx collection list`; a collection is "
@@ -1789,7 +1804,9 @@ def _get(path: str, *, tenant: str = "default") -> Any:
                 remedy = _local_voyage_restart_remedy(e.code, str(err.get("error", err)))
         if remedy:
             msg += f"\n{remedy}"
-        raise VectorServiceError(msg, code=e.code, edge_refusal=bool(edge_server)) from e
+        raise VectorServiceError(
+            msg, code=e.code, edge_refusal=bool(edge_server), reason=error_reason(err),
+        ) from e
     except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
         remedy = _managed_remedy()
         if remedy is None:
@@ -1935,10 +1952,20 @@ class VectorServiceError(RuntimeError):
     """
 
     def __init__(
-        self, message: str, *, code: int | None = None, edge_refusal: bool = False
+        self,
+        message: str,
+        *,
+        code: int | None = None,
+        edge_refusal: bool = False,
+        reason: str | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
+        #: nexus-bgvnx: the engine's stable machine-readable ``reason`` from a
+        #: typed error body (``unregistered_collection`` on the 422 for a
+        #: collection with no catalog row); ``None`` when the body carried
+        #: none, which includes every engine that predates the field.
+        self.reason = reason
         #: nexus-1jtob: True when the EDGE (AWS ALB/WAF) generated this
         #: response and the application never saw the request. Deterministic
         #: in the request body — a caller must not retry it.

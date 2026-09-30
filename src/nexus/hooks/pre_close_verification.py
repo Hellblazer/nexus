@@ -39,11 +39,24 @@ appeal to.
 says the CONCEPT is in 19 files and the strings are nowhere duplicated;
 two sentences collapsed into one wrong one.)
 
-**Fail-open stays fail-open.** A missing marker denies; an unreachable T1,
-an absent ``nx``, a blown time budget all ALLOW with verification stamped
-``unverified`` rather than ``passed``. A broken verification path must not
-brick every close, and making this gate fail-closed is a decision the RDR
-deliberately does not take.
+**Fail-open stays fail-open.** A missing marker denies; an unreachable T1
+or an absent ``nx`` lets the close proceed with verification stamped
+``unverified`` rather than ``passed``, and a close whose ids cannot be read
+(``bd close $VAR``) proceeds unstamped; both only through a user prompt
+(``permissionDecision: ask``, nexus-nmzsg): a silent advisory would let an
+auto-mode classifier approve a close the gate knows it could not check. A
+broken verification path must not brick every close, and making this gate
+fail-closed is a decision the RDR deliberately does not take.
+
+**"Fail-open" now holds only when a user is present.** An ``ask`` needs
+something to answer it. In an unattended session with no permission host
+(``claude -p``, ``dontAsk``, an SDK session with no permission callback) the
+prompt cannot be shown and the ask very likely resolves to a denial, so
+there a T1 outage or an unreadable close id blocks the close instead of
+letting it through. That is inferred from how those modes treat any
+permission request, NOT measured against this hook; nexus-mcfaj owns a live
+verification of it. Until that lands, do not assume an unattended close
+survives a T1 outage.
 """
 from __future__ import annotations
 
@@ -218,9 +231,14 @@ def _update_sets_closed_status(tokens: list[str]) -> bool:
 #: quoted-mention/cross-segment class nexus-fv65m already closed for the
 #: verb-position detector, reopened one call away for batch/import. See
 #: :func:`_pipeline_segments` for what "same shell segment" means here.
+#: A bead id, child suffixes included (nexus-x, nexus-x.1, nexus-x.1.2). The one
+#: spelling every id pattern below is built from (nexus-qhskl): the child
+#: suffix was once missing from some and present in others.
+_BEAD_ID = r'nexus-[a-z0-9]+(?:\.[0-9]+)*'
+
 _BD_BATCH_CLOSE_RE = re.compile(
-    r'\b(?:close|done)\s+(?:nexus-[a-z0-9]+)\b'
-    r'|\bupdate\s+nexus-[a-z0-9]+\s+[^\n]*?\bstatus\s*=\s*closed\b',
+    r'\b(?:close|done)\s+(?:' + _BEAD_ID + r')\b'
+    r'|\bupdate\s+' + _BEAD_ID + r'\s+[^\n]*?\bstatus\s*=\s*closed\b',
     re.IGNORECASE,
 )
 
@@ -233,7 +251,7 @@ _BD_BATCH_CLOSE_RE = re.compile(
 #: line that only touches unrelated fields does not match. SCOPED to the
 #: prior pipe stage(s) the same way :data:`_BD_BATCH_CLOSE_RE` is, for the
 #: same round-2 reason.
-_BD_IMPORT_ID_RE = re.compile(r'"id"\s*:\s*"nexus-[a-z0-9]+"', re.IGNORECASE)
+_BD_IMPORT_ID_RE = re.compile(r'"id"\s*:\s*"' + _BEAD_ID + r'"', re.IGNORECASE)
 _BD_IMPORT_CLOSED_RE = re.compile(r'"status"\s*:\s*"closed"', re.IGNORECASE)
 
 #: `bd sql <query>` (a real bd subcommand, `bd sql --help`: "Execute a raw
@@ -724,8 +742,231 @@ _FLAG_VALUE_RE = re.compile(
 )
 
 
+#: nexus-qhskl: a child id (nexus-x.1) is its own bead, with its own review
+#: marker. The pattern once stopped at the dot, so the gate checked the
+#: parent and any child's marker covered every sibling.
+_BEAD_ID_RE = re.compile(r'\b' + _BEAD_ID + r'\b', re.IGNORECASE)
+_ENV_ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+
+
+#: Any mention of ``bd`` as a word, including ``sudo bd``, ``(bd``,
+#: ``xargs bd`` and ``sh -c "bd ..."``. A segment carrying one is a
+#: possible close unless it is exactly one plain non-closing bd verb.
+_BD_WORD_RE = re.compile(r'(?<![\w.-])bd(?![\w.-])')
+
+#: bd verbs that never close a bead. ``update`` is non-closing only when
+#: it does not set status closed, checked separately. Deliberately short:
+#: a verb missing here only sends the command to the whole-command scan.
+#: Leaf commands only: ``dolt`` is absent on purpose, because it wraps a
+#: subcommand tree that could one day carry a raw status write.
+_NON_CLOSING_BD_VERBS = frozenset({
+    'blocked', 'comment', 'comments', 'count', 'dep', 'history',
+    'label', 'list', 'prime', 'ready', 'remember', 'reopen', 'search',
+    'show', 'stats', 'version',
+})
+
+
+#: A close segment's positional argument that is exactly one bead id
+#: (``nexus-abcde``, ``nexus-q02nx.17``). Anything else makes scoping
+#: decline, so the id it might carry is found by the whole-command scan.
+_LITERAL_BEAD_ARG_RE = re.compile(_BEAD_ID, re.IGNORECASE)
+
+#: ``bd update``'s status flag; its separate value (``closed``) is not an id.
+_STATUS_FLAGS = frozenset({'--status', '-s'})
+
+
+def _close_segment_ids(cmd: str) -> list[str] | None:
+    """Bead ids from the arguments of the close-verb segments only, or
+    ``None`` when scoping cannot be trusted to be complete.
+
+    Uses :func:`_pipeline_segments`, the segmentation :func:`_bd_verbs`
+    detects the close with, so a sibling command (``&& bd comment
+    nexus-a``, ``| grep nexus-18``, an earlier line) contributes nothing.
+
+    All or nothing (nexus-t0dt8 review): a result is returned only when
+    every other segment is provably not a close, meaning it mentions no
+    ``bd`` word at all, or it is a single plain ``bd <verb>`` with a verb
+    in :data:`_NON_CLOSING_BD_VERBS` (or a non-closing ``update``).
+    Anything else (``bd batch``/``import``/``sql``, ``sudo bd close``,
+    ``(bd close x)``, ``bd -q close``, a heredoc feeding bd), any segment
+    whose quoting will not tokenize, and any close segment with a
+    positional that is not a literal id (``bd close "$ID"``) returns
+    ``None``, so the caller scans the whole command, as before this bead.
+    A partial set would let the missed close through unchecked.
+
+    KNOWN LIMIT, decided rather than missed (nexus-t0dt8 critique round
+    2): a segment that closes through a name this hook cannot read, such
+    as a wrapper script, alias or shell function (``scripts/close.sh
+    nexus-c``), mentions no ``bd`` and counts as non-closing. Before this
+    bead the whole-command scan caught such an id only when a literal
+    close happened to sit in the same command; alone, the gate has never
+    seen a wrapper close (:func:`_bd_verbs` finds no close and allows).
+    Keeping that accidental catch would mean treating every unrecognized
+    command as a possible close, which brings back the collisions this
+    function removes. ``TestHarvestIsScopedToTheCloseSegment`` pins it.
+    """
+    segments, _groups = _pipeline_segments(cmd)
+    seen: set[str] = set()
+    ids: list[str] = []
+    for seg in segments:
+        try:
+            tokens = shlex.split(seg, posix=True)
+        except ValueError:
+            return None
+        i = 0
+        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+            i += 1
+        rest = tokens[i:]
+        while rest and rest[0] in ('{', '('):
+            rest = rest[1:]
+        is_close = len(rest) >= 2 and rest[0] == 'bd' and (
+            rest[1] in ('close', 'done')
+            or (rest[1] == 'update' and _update_sets_closed_status(rest[2:]))
+        )
+        if not is_close:
+            mentions = len(_BD_WORD_RE.findall(seg))
+            if mentions == 0:
+                continue
+            plain_non_closing = (
+                mentions == 1
+                and len(rest) >= 2
+                and rest[0] == 'bd'
+                and (rest[1] in _NON_CLOSING_BD_VERBS or rest[1] == 'update')
+            )
+            if plain_non_closing:
+                continue
+            return None
+        args = rest[2:]
+        j = 0
+        while j < len(args):
+            tok = args[j]
+            if tok.split('=', 1)[0] in _VALUE_FLAGS | _STATUS_FLAGS:
+                j += 1 if '=' in tok else 2
+                continue
+            if not tok.startswith('-'):
+                # Every positional must be a literal id. "$ID", a path, or
+                # an unknown flag's value may hide a target: scan it all.
+                if not _LITERAL_BEAD_ARG_RE.fullmatch(tok):
+                    return None
+                bead = tok.lower()  # a child id is its own target (nexus-qhskl)
+                if bead not in seen:
+                    seen.add(bead)
+                    ids.append(bead)
+            j += 1
+    return ids
+
+
 def _bead_ids(cmd: str) -> list[str]:
     """Every literal bead id this command names as a close target.
+
+    nexus-t0dt8: the close-verb segments' own arguments first
+    (:func:`_close_segment_ids`). The whole-command scan below remains the
+    fallback whenever that finds nothing or cannot vouch for completeness
+    (``None``: a segment it cannot prove is not a close), which keeps
+    the property the paragraph after next defends: a scoping miss (a
+    ``bd batch`` close on stdin, an id behind a variable, a subshell the
+    segmenter does not strip) harvests the broad set, as before, rather
+    than routing to the INDETERMINATE allow. Only a command whose close
+    segment names a literal id is narrowed, and then only to that id.
+    """
+    scoped = _close_segment_ids(cmd)
+    if scoped:
+        return scoped
+    unreadable = _unreadable_close_ids(cmd)
+    if unreadable is not None:
+        return unreadable
+    return _whole_command_ids(cmd)
+
+
+def _unreadable_close_ids(cmd: str) -> list[str] | None:
+    """Ids for a close whose own target is unreadable, or ``None`` to fall
+    through to the whole-command scan.
+
+    nexus-nmzsg. ``bd show nexus-x; bd close "$ID"`` used to reach the
+    whole-command scan, which harvested ``nexus-x`` from the ``bd show`` and
+    checked THAT bead's marker: a covered ``nexus-x`` passed the close and an
+    uncovered one denied it, while the bead actually closed was never looked
+    at, and the unreadable-id ask (:func:`_ask_unreadable_ids`) never fired.
+
+    Applies only when a close segment has a positional that is not a literal
+    id, and every OTHER segment is one this module can classify: no ``bd``
+    word at all, or a plain non-closing ``bd`` verb (the same test
+    :func:`_close_segment_ids` uses). Anything else (``bd batch``, ``sudo bd
+    close``, unparseable quoting) returns ``None`` and keeps the broad scan,
+    so this can only narrow a case the scoper already understands.
+
+    The ids returned are the ones that can actually define the unreadable
+    positional: the close segment's own text (``$(echo nexus-b)``,
+    ``bd close nexus-a "$ID"``) plus sibling segments that DEFINE a variable,
+    a ``for`` list or a ``NAME=value`` assignment
+    (``for b in nexus-a nexus-b; do bd close $b``). A plain non-closing ``bd``
+    sibling contributes nothing, and neither does any other command: an
+    empty result means the gate cannot see the target and asks. A pipeline
+    feeding ``while read`` is not treated as a source, so it now asks where
+    it used to check the ids it printed; asking is the safe direction.
+    """
+    segments, _groups = _pipeline_segments(cmd)
+    ids: list[str] = []
+    unreadable = False
+
+    def _add(found: list[str]) -> None:
+        for bead in found:
+            if bead not in ids:
+                ids.append(bead)
+
+    for seg in segments:
+        try:
+            tokens = shlex.split(seg, posix=True)
+        except ValueError:
+            return None
+        i = 0
+        while i < len(tokens) and _ENV_ASSIGN_RE.match(tokens[i]):
+            i += 1
+        assignment_only = i > 0 and i == len(tokens)
+        rest = tokens[i:]
+        while rest and rest[0] in ('{', '('):
+            rest = rest[1:]
+        is_close = len(rest) >= 2 and rest[0] == 'bd' and (
+            rest[1] in ('close', 'done')
+            or (rest[1] == 'update' and _update_sets_closed_status(rest[2:]))
+        )
+        if is_close:
+            args = rest[2:]
+            j = 0
+            seg_unreadable = False
+            while j < len(args):
+                tok = args[j]
+                if tok.split('=', 1)[0] in _VALUE_FLAGS | _STATUS_FLAGS:
+                    j += 1 if '=' in tok else 2
+                    continue
+                if not tok.startswith('-') and not _LITERAL_BEAD_ARG_RE.fullmatch(tok):
+                    seg_unreadable = True
+                j += 1
+            if seg_unreadable:
+                unreadable = True
+                _add(_whole_command_ids(seg))
+            else:
+                _add(_close_segment_ids(seg) or [])
+            continue
+        mentions = len(_BD_WORD_RE.findall(seg))
+        if mentions:
+            plain_non_closing = (
+                mentions == 1
+                and len(rest) >= 2
+                and rest[0] == 'bd'
+                and (rest[1] in _NON_CLOSING_BD_VERBS or rest[1] == 'update')
+            )
+            if plain_non_closing:
+                continue
+            return None
+        if assignment_only or (rest and rest[0] == 'for'):
+            _add(_whole_command_ids(seg))
+    return ids if unreadable else None
+
+
+def _whole_command_ids(cmd: str) -> list[str]:
+    """Every bead-id-shaped token in the command, outside flag values and
+    paths. The fallback for :func:`_bead_ids`.
 
     Carried verbatim with ONE correction. ``_scan_text`` ran on every
     non-flag token, a path included: once the worktree convention landed
@@ -737,16 +978,15 @@ def _bead_ids(cmd: str) -> list[str]:
     bead-SHAPED and reads as a real id -- the version that costs an hour.
 
     The fix excludes tokens containing ``/``, because a bead id never
-    does. DELIBERATELY NOT the tighter rule of scanning only bd segments,
-    although :func:`_bd_verbs` already does exactly that and it would be
-    more principled: getting segment detection wrong makes the harvester
-    find NOTHING, and finding nothing routes to the INDETERMINATE branch,
-    which ALLOWS. A mistake in the tight rule is silently permissive; a
-    mistake in this one can only decline to scan a path. Every historical
-    defect in this file failed open, so a fix must not add a new way.
+    does. It deliberately did not scan only bd segments, because getting
+    segment detection wrong makes a harvester find NOTHING, and finding
+    nothing routes to the INDETERMINATE branch, which ALLOWS. Every
+    historical defect in this file failed open. :func:`_bead_ids` now
+    scopes first (nexus-t0dt8) and keeps this scan as its fallback, so a
+    scoping miss still lands here rather than on an allow.
     """
     VALUE_FLAGS = _VALUE_FLAGS
-    BEAD_RE = re.compile(r'\bnexus-[a-z0-9]+\b', re.IGNORECASE)
+    BEAD_RE = _BEAD_ID_RE
     OPERATORS = {';', '&&', '||', '|', 'then', 'do'}
     seen, ids = set(), []
 
@@ -916,7 +1156,9 @@ def _coverage(
             return False
         if bead_id in tags:
             return True
-        pat = re.compile(r'(?<![A-Za-z0-9-])' + re.escape(bead_id) + r'(?![A-Za-z0-9-])', re.IGNORECASE)
+        # Exact id: nexus-x.1 must not cover nexus-x, nor nexus-x.12 cover
+        # nexus-x.1 (nexus-qhskl). A sentence-ending dot still ends the id.
+        pat = re.compile(r'(?<![A-Za-z0-9-])' + re.escape(bead_id) + r'(?![A-Za-z0-9-]|\.[0-9])', re.IGNORECASE)
         return bool(pat.search(content_line))
 
     def _parse_entries(raw):
@@ -1024,6 +1266,7 @@ def _deny_message(
     lines.append('marker to T1 scratch (this session; the MCP scratch tool and the CLI converge):')
     lines.append('  nx scratch put "review-completed: <bead-id> reviewers=code-review-expert,substantive-critic" --tags "review-completed,<bead-id>"')
     lines.append('The marker MUST name both reviewers; naming one (or neither) is refused. T2 memory markers do not satisfy this gate (nexus-fgekf).')
+    lines.append('It must also name each exact bead id, .N suffix included: a parent\'s or a sibling\'s marker does not cover a child, and a close of several ids needs a marker for each (nexus-qhskl).')
     lines.append('then re-run this close. A subagent hands the close back to its orchestrator instead of writing this marker itself (CONTEXT_PROTOCOL.md: the marker is reserved to the gate-owning session).')
     lines.append('An override (NX_REVIEW_GATE_OVERRIDE=1) exists for this gate, but only on explicit instruction from the user to use it -- it is not yours to reach for.')
     return chr(10).join(lines)
@@ -1400,12 +1643,114 @@ _INDETERMINATE_SOURCE_MESSAGE = (
 )
 
 
+def _ask_uncertain(uncertain: list[str]) -> HookResult:
+    """Put an unverifiable close to the user instead of letting it pass.
+
+    nexus-nmzsg. This branch used to return an advisory-only ``_allow``:
+    correct for the gate's fail-open posture (a broken verification path
+    must not brick every close), but after nexus-452oy removed the explicit
+    ``permissionDecision: allow`` an advisory carries no decision at all, so
+    in auto mode the classifier was free to approve the close silently. The
+    one case where this gate KNOWS it could not check the review and a
+    close-shaped command is definitely running was the one case with no human
+    in the loop. ``ask`` forces the prompt in auto mode as well (the
+    classifier can deny, not approve), so the close still proceeds if the
+    user says so and the gate still never denies on a capability gap.
+
+    The stamp (``unverified``) is written before the prompt, by the caller,
+    because the hook cannot see the answer. If the user declines, the bead
+    is left stamped ``unverified`` and open, which is true: it was not
+    verified. ``reason`` is what the USER reads in the prompt; the fuller
+    text the MODEL needs (remedies, the override's standing) rides in
+    ``additionalContext``.
+    """
+    # Deferred: 3 modules / ~3ms (measured 2026-09-29) on the one path that
+    # needs it; this gate fires on every Bash call and a module-scope import
+    # would charge every no-op dispatch. The lib is stdlib-only, so nothing
+    # here can pull structlog onto the hook's stdout channel.
+    from nexus.hooks._routing_lib import ask_result  # noqa: PLC0415
+
+    ids = " ".join(uncertain)
+    reason = (
+        f"Review gate could not verify review-completed coverage for {ids}: "
+        "T1 scratch is unreachable (the nx binary is absent, or 'nx scratch "
+        "list' failed; check 'nx doctor --check-t1'). These beads are "
+        "marked 'unverified' either way (the mark is written before this "
+        "prompt): approving closes them anyway, declining leaves them open. "
+        "Decline to run the review or restore T1 first."
+    )
+    context = (
+        "WARNING: could not verify review-completed coverage in T1 scratch "
+        f"for {ids} \u2014 T1 unreachable (the nx binary is "
+        "absent, or 'nx scratch list' failed; post-nexus-f7xyq that includes "
+        "a dead CLI T1 lease failing loud, check 'nx doctor --check-t1'). "
+        "The close is put to the user for confirmation rather than passing "
+        "silently, because a broken verification path must not brick every "
+        "bead close but must not be approved unseen either. If approved it is "
+        "stamped verification=unverified for those ids, NOT passed. If review "
+        "truly happened this is a capability gap, not a review gap. An "
+        "override (NX_REVIEW_GATE_OVERRIDE=1) exists for this gate, but only "
+        "on explicit instruction from the user to use it."
+    )
+    return ask_result(reason, context)
+
+
+#: The model-facing text for a close whose bead ids the gate cannot read.
+#: Kept verbatim from before nexus-nmzsg (tests and readers key on the
+#: INDETERMINATE prefix); the user-facing prompt is separate.
+_NO_LITERAL_ID_MESSAGE = (
+    "INDETERMINATE: no literal bead id (nexus-*) found anywhere in this "
+    "bd close/done command \u2014 cannot check a review marker statically, "
+    "so verification is NOT stamped. Prefer literal ids over shell "
+    "variables so the review gate can verify coverage."
+)
+
+
+def _ask_unreadable_ids(command: str, override: bool) -> HookResult:
+    """A definite close whose targets the gate cannot read: ask, not pass.
+
+    nexus-nmzsg, the sibling of :func:`_ask_uncertain`. ``bd close $VAR`` or
+    ``bd close $(cat f)`` is unquestionably a close, and the gate cannot tell
+    which beads or whether they were reviewed, so the advisory it used to
+    return left an auto-mode classifier free to approve it silently.
+
+    Override precedence is the T1-unreachable branch's: an explicit override
+    wins, the close passes without a prompt, and the bypass is audited. There
+    are no ids to stamp, so nothing is stamped either way. This is NOT the
+    ``bd batch``/``import``/``sql`` branch above, which is not known to be a
+    close and stays advisory.
+    """
+    if override:
+        _log_override_escape(["(bead ids unreadable)"], command)
+        return _allow(
+            "NX_REVIEW_GATE_OVERRIDE=1 \u2014 review gate bypassed for a close "
+            "whose bead ids could not be read. Logged as a routing escape."
+        )
+    from nexus.hooks._routing_lib import ask_result  # noqa: PLC0415 — deferred as in _ask_uncertain: on the rare path only, ~3ms, stdlib-only
+
+    return ask_result(
+        "Review gate cannot see which beads are being closed: the id comes "
+        "from a shell variable or command substitution, so no "
+        "review-completed marker can be checked and nothing is stamped. "
+        "Approve to close anyway, or decline and re-run with the literal "
+        "bead ids so the gate can verify them.",
+        _NO_LITERAL_ID_MESSAGE
+        + " The close is put to the user for confirmation rather than "
+        "passing silently. An override (NX_REVIEW_GATE_OVERRIDE=1) exists "
+        "for this gate, but only on explicit instruction from the user to "
+        "use it.",
+    )
+
+
 def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
     """The decision table, in the script's order.
 
     Linear with early returns because the ORDER is the semantics. Every
-    uncertain path allows: this gate fails open by design and the RDR
-    deliberately does not revisit that.
+    uncertain path still lets the close proceed (this gate fails open by
+    design and the RDR deliberately does not revisit that), but the
+    T1-unreachable and unreadable-id paths proceed only through a user
+    prompt (:func:`_ask_uncertain`, :func:`_ask_unreadable_ids`,
+    nexus-nmzsg), not silently.
     """
     if verbs["has_create"]:
         return _create_gate(command)
@@ -1449,17 +1794,11 @@ def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
         return _allow(_INDETERMINATE_SOURCE_MESSAGE)
 
     ids = _bead_ids(command)
-    if not ids:
-        return _allow(
-            "INDETERMINATE: no literal bead id (nexus-*) found anywhere in this "
-            "bd close/done command \u2014 cannot check a review marker statically, "
-            "so verification is NOT stamped. Prefer literal ids over shell "
-            "variables so the review gate can verify coverage."
-        )
-
     override = (
         os.environ.get("NX_REVIEW_GATE_OVERRIDE") == "1" or verbs["inline_override"]
     )
+    if not ids:
+        return _ask_unreadable_ids(command, override)
 
     result = _coverage(ids)
     status = result["status"]
@@ -1514,17 +1853,7 @@ def _run_gate(data: dict, command: str, verbs: dict) -> HookResult:
             "T1 scratch unreachable at close time (capability gap, not a "
             "time-budget issue)",
         )
-        return _allow(
-            "WARNING: could not verify review-completed coverage in T1 scratch "
-            f"for {' '.join(uncertain)} \u2014 T1 unreachable (the nx binary is "
-            "absent, or 'nx scratch list' failed; post-nexus-f7xyq that includes "
-            "a dead CLI T1 lease failing loud, check 'nx doctor --check-t1'). "
-            "Closing anyway (a broken verification path must not brick every "
-            "bead close) but stamped verification=unverified for those ids, NOT "
-            "passed. If review truly happened this is a capability gap, not a "
-            "review gap. An override (NX_REVIEW_GATE_OVERRIDE=1) exists for this "
-            "gate, but only on explicit instruction from the user to use it."
-        )
+        return _ask_uncertain(uncertain)
 
     _stamp_ids(covered, "passed", "review-completed marker verified at close")
     return _allow(f"Review completed for {' '.join(ids)}.")

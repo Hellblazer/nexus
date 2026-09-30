@@ -16,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from nexus.cli import main
+from nexus.collection_errors import SupersededCollectionWriteError
 from nexus.db.http_vector_client import HttpVectorClient, is_live_collection_row, live_collection_rows
 
 _OLD = "docs__4w07i-old__bge-base-en-v15-768__v1"
@@ -36,11 +37,15 @@ def test_rows_without_the_key_behave_as_before():
 
 @pytest.mark.integration
 def test_a_retired_name_holding_chunks_is_not_routed_to(t2_service_env, tmp_path):
-    """Engine substrate end to end: index A, rename A to B, write to A again
-    (a stale writer: this succeeds), and the routing listing leaves A out
-    while the inventory still names it with its successor. The stale write
-    reaches the old name because this process's collection-registration
-    cache still holds A from the first write (critique of 5d3b4cf66)."""
+    """Engine substrate end to end: index A, rename A to B, write to A again,
+    and the routing listing leaves A out while the inventory still names it
+    with its successor.
+
+    A current client refuses the stale write (nexus-wwuzp revalidates an aged
+    registration with a read), so that refusal is asserted first. The engine
+    still accepts a write to the retired name from a client that predates
+    wwuzp, which is how a retired name comes to hold chunks; that client is
+    modelled by skipping the revalidation read for the second write."""
     from nexus.doc_indexer import index_markdown  # noqa: PLC0415 — test-local import
 
     client = HttpVectorClient(tenant=t2_service_env)
@@ -53,7 +58,10 @@ def test_a_retired_name_holding_chunks_is_not_routed_to(t2_service_env, tmp_path
 
     stale = tmp_path / "stale.md"
     stale.write_text("# stale\n\n" + " ".join(f"4w07i stale sentence {j}." for j in range(60)))
-    assert index_markdown(stale, corpus="4w07i", t3=client, collection_name=_OLD)
+    with pytest.raises(SupersededCollectionWriteError):
+        index_markdown(stale, corpus="4w07i", t3=client, collection_name=_OLD)
+    with patch("nexus.corpus._revalidate_cached_registration", return_value=True):
+        assert index_markdown(stale, corpus="4w07i", t3=client, collection_name=_OLD)
 
     inventory = {r["name"]: r for r in client.list_collections()}
     assert _OLD in inventory, "the retired name must hold chunks for this test to mean anything"

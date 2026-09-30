@@ -1088,7 +1088,7 @@ class TestT1OnlyCoverage:
         assert "T2" in _get_reason(parsed)  # the deny names the retirement
         assert not log.exists() or log.read_text().strip() == ""
 
-    def test_t1_unreachable_allows_unverified_regardless_of_t2(
+    def test_t1_unreachable_asks_unverified_regardless_of_t2(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
         """T1 unreachable is a capability gap (post-f7xyq: a dead CLI lease
@@ -1108,7 +1108,7 @@ class TestT1OnlyCoverage:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
         assert "WARNING" in _get_context(parsed) or "WARNING" in _get_reason(parsed)
         calls = log.read_text()
         assert "nexus-abc12 verification=unverified" in calls
@@ -1158,7 +1158,7 @@ class TestT1OnlyCoverage:
         assert "memory search" not in calls
         assert calls.count("scratch list") == 1
 
-    def test_t1_down_with_empty_t2_allows_unverified_the_named_corner(
+    def test_t1_down_with_empty_t2_asks_unverified_the_named_corner(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
         """THE deliberately accepted corner change (critique [23831]):
@@ -1178,7 +1178,7 @@ class TestT1OnlyCoverage:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
         calls = log.read_text()
         assert "nexus-abc12 verification=unverified" in calls
         assert "verification=passed" not in calls
@@ -1256,11 +1256,15 @@ class TestLoopVariableDatum:
         assert "nexus-uncov" in _get_reason(parsed)
         assert "nexus-cotmr" not in _get_reason(parsed).split("Remedy")[0].split("found in T1 scratch for:")[1]
 
-    def test_no_literal_bead_id_is_indeterminate_not_denied(
+    def test_no_literal_bead_id_asks_not_denies(
         self, mock_config_env, fake_nx
     ) -> None:
         """A truly dynamic id (no literal nexus-* anywhere) cannot be
-        statically verified -- allow without stamping, not deny."""
+        statically verified. It is a definite close whose targets the gate
+        cannot see, so (nexus-nmzsg) it is put to the user with ``ask``
+        rather than passing on an advisory an auto-mode classifier could
+        approve silently. Not a deny, and not stamped: there is no id to
+        stamp."""
         env = mock_config_env({"on_close": True})
         fake_bin = fake_nx("No scratch entries.")
         result = _run_hook(
@@ -1269,8 +1273,111 @@ class TestLoopVariableDatum:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
+        assert "cannot see which beads" in _get_reason(parsed)
         assert "INDETERMINATE" in _get_context(parsed)
+
+    @pytest.mark.parametrize(
+        "command, extra_env",
+        [
+            ("bd close $(cat /tmp/id.txt)", {"NX_REVIEW_GATE_OVERRIDE": "1"}),
+            ("NX_REVIEW_GATE_OVERRIDE=1 bd close $(cat /tmp/id.txt)", {}),
+        ],
+        ids=["ambient-env", "inline-prefix"],
+    )
+    def test_no_literal_bead_id_with_override_does_not_ask(
+        self, command, extra_env, mock_config_env, fake_nx, tmp_path
+    ) -> None:
+        """Override precedence matches the T1-unreachable branch: an
+        explicit override wins, the close passes without a prompt, and the
+        bypass is audited (a dropped routing_events write is the observable
+        proxy in a subprocess with no engine)."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        drop_path = tmp_path / "dropped_writes.jsonl"
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides={**env, **extra_env, "NX_DROPPED_WRITES_LOG_PATH": str(drop_path)},
+        )
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "", parsed
+        assert "OVERRIDE" in _get_context(parsed), parsed
+        assert drop_path.exists(), "override on an unreadable-id close was not audited"
+
+
+class TestUnreadableCloseIdNextToAnUnrelatedLiteralId:
+    """nexus-nmzsg: the unreadable-id ask must not be defeated by a sibling.
+
+    ``bd show nexus-x; bd close "$ID"`` used to fall back to the
+    whole-command scan, harvest ``nexus-x`` from the ``bd show`` and check
+    THAT bead's marker: a covered ``nexus-x`` passed the close ("Review
+    completed for nexus-x") and an uncovered one denied it, while the bead
+    actually being closed was never looked at."""
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'bd show nexus-xxxxx; bd close "$ID"',
+            "bd comment nexus-xxxxx 'noted' && bd close $(cat /tmp/id.txt)",
+            'bd ready && bd show nexus-xxxxx && bd close "$ID"',
+        ],
+    )
+    def test_an_unrelated_literal_sibling_does_not_hide_the_unreadable_close(
+        self, command, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        # nexus-xxxxx IS covered: pre-fix this passed the close on its marker.
+        fake_bin = fake_nx(
+            _marker("review-completed,nexus-xxxxx", "review-completed: nexus-xxxxx")
+        )
+        result = _run_hook(
+            _make_payload(command=command),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "ask", (command, parsed)
+        assert "cannot see which beads" in _get_reason(parsed)
+
+    def test_an_uncovered_unrelated_sibling_asks_rather_than_denies(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='bd show nexus-xxxxx; bd close "$ID"'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        # Pre-fix: deny, naming nexus-xxxxx, a bead this command never closes.
+        assert _get_decision(_parse_stdout(result.stdout)) == "ask"
+
+    def test_override_precedence_is_unchanged_for_this_shape(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command='NX_REVIEW_GATE_OVERRIDE=1 bd show nexus-xxxxx; bd close "$ID"'),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
+
+    def test_a_loop_list_is_still_a_source_of_ids_for_the_close(
+        self, mock_config_env, fake_nx
+    ) -> None:
+        """The counterpart: the fix must not drop a sibling that DEFINES the
+        variable. An uncovered id in the ``for`` list still denies."""
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx("No scratch entries.")
+        result = _run_hook(
+            _make_payload(command="for b in nexus-xxxxx; do bd close $b; done"),
+            path_prefix=str(fake_bin),
+            env_overrides=env,
+        )
+        assert _get_decision(_parse_stdout(result.stdout)) == "deny"
 
 
 class TestOverride:
@@ -1319,9 +1426,11 @@ class TestCapabilityHonestBothSourcesDown:
     """nexus-4av2n item 3(iv), narrowed at nexus-fgekf (T2 leg retired):
     'uncertain' is T1 unreachable — the nx binary absent, or `nx scratch list`
     failing (post-f7xyq that includes a dead CLI lease failing loud).
-    Never brick the close, but never claim 'passed' either."""
+    Never brick the close, but never claim 'passed' either -- and never let
+    an auto-mode classifier approve it silently either (nexus-nmzsg): the
+    close is put to the user with ``permissionDecision: ask``."""
 
-    def test_t1_unreachable_allows_with_loud_warning_and_unverified_stamp(
+    def test_t1_unreachable_asks_and_stamps_unverified(
         self, mock_config_env, fake_nx, fake_bd
     ) -> None:
         env = mock_config_env({"on_close": True})
@@ -1333,11 +1442,12 @@ class TestCapabilityHonestBothSourcesDown:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
+        assert "unreachable" in _get_reason(parsed).lower() or "not verify" in _get_reason(parsed).lower()
         assert "unreachable" in _get_context(parsed).lower() or "not verify" in _get_context(parsed).lower()
         assert "nexus-abc12 verification=unverified" in log.read_text()
 
-    def test_nx_missing_entirely_allows_with_loud_warning(
+    def test_nx_missing_entirely_asks(
         self, mock_config_env, fake_bd
     ) -> None:
         env = mock_config_env({"on_close": True})
@@ -1348,8 +1458,55 @@ class TestCapabilityHonestBothSourcesDown:
             env_overrides=env,
         )
         parsed = _parse_stdout(result.stdout)
-        assert _get_decision(parsed) == ""
+        assert _get_decision(parsed) == "ask"
         assert "nexus-abc12 verification=unverified" in log.read_text()
+
+    def test_ask_reason_names_the_uncertain_ids_and_the_stamp(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """The reason is what the USER reads in the prompt: it must say which
+        beads could not be verified and that approving stamps them
+        ``unverified``. The ask envelope is the whole stdout -- one JSON
+        object, no second channel (a hook's stdout is a protocol channel)."""
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(scratch_unreachable=True)
+        fake_bd_bin, _log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = _parse_stdout(result.stdout)
+        hso = parsed["hookSpecificOutput"]
+        assert hso["hookEventName"] == "PreToolUse"
+        assert hso["permissionDecision"] == "ask"
+        assert "nexus-abc12" in hso["permissionDecisionReason"]
+        assert "unverified" in hso["permissionDecisionReason"]
+        # The stamp is written BEFORE the prompt, so a declined close leaves
+        # an open bead stamped too: the prompt must not imply that approving
+        # is what causes the stamp.
+        assert "either way" in hso["permissionDecisionReason"]
+        assert result.returncode == 0
+
+    def test_several_uncertain_ids_are_all_named_and_all_stamped_unverified(
+        self, mock_config_env, fake_nx, fake_bd
+    ) -> None:
+        """One prompt for the whole close, naming every id it could not verify."""
+        env = mock_config_env({"on_close": True})
+        fake_nx_bin = fake_nx(scratch_unreachable=True)
+        fake_bd_bin, log = fake_bd()
+        result = _run_hook(
+            _make_payload(command="bd close nexus-abc12 nexus-def34"),
+            path_prefix=f"{fake_nx_bin}:{fake_bd_bin}",
+            env_overrides=env,
+        )
+        parsed = _parse_stdout(result.stdout)
+        assert _get_decision(parsed) == "ask"
+        calls = log.read_text()
+        assert "nexus-abc12 verification=unverified" in calls
+        assert "nexus-def34 verification=unverified" in calls
+        reason = _get_reason(parsed)
+        assert "nexus-abc12" in reason and "nexus-def34" in reason
 
     def test_t1_unreachable_plus_override_stamps_overridden_not_unverified(
         self, mock_config_env, fake_bd
@@ -2421,3 +2578,46 @@ class TestE3makCompleteReviewerSet:
             env_overrides={**env, "NX_REVIEW_GATE_OVERRIDE": "1"},
         )
         assert _get_decision(_parse_stdout(result.stdout)) == ""
+
+
+class TestQhsklChildBeadIds:
+    """nexus-qhskl: a child bead id (nexus-x.1) is its own close target.
+    The id pattern stopped at the dot, so closing nexus-x.2 checked
+    coverage for nexus-x, and a marker naming nexus-x.1 matched nexus-x
+    by substring: any child's marker let every sibling close unreviewed."""
+
+    def _close(self, mock_config_env, fake_nx, marker_id: str, close_id: str) -> dict:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(_marker(f"review-completed,{marker_id}", f"review-completed: {marker_id}"))
+        result = _run_hook(
+            _make_payload(command="bd " + "close " + close_id),
+            path_prefix=str(fake_bin), env_overrides=env,
+        )
+        return _parse_stdout(result.stdout)
+
+    def test_a_childs_own_marker_covers_its_close(self, mock_config_env, fake_nx) -> None:
+        assert _get_decision(self._close(mock_config_env, fake_nx, "nexus-qhs01.1", "nexus-qhs01.1")) == ""
+
+    def test_a_siblings_marker_does_not_cover_a_child(self, mock_config_env, fake_nx) -> None:
+        parsed = self._close(mock_config_env, fake_nx, "nexus-qhs01.1", "nexus-qhs01.2")
+        assert _get_decision(parsed) == "deny"
+        assert "nexus-qhs01.2" in _get_reason(parsed)
+
+    def test_a_grandchilds_marker_does_not_cover_its_parent_child(self, mock_config_env, fake_nx) -> None:
+        # The id is followed by ".2": only the \.[0-9] half of the lookahead
+        # refuses this; the alphanumeric half alone would match.
+        parsed = self._close(mock_config_env, fake_nx, "nexus-qhs01.1.2", "nexus-qhs01.1")
+        assert _get_decision(parsed) == "deny"
+
+    def test_a_sentence_ending_dot_still_ends_the_id(self, mock_config_env, fake_nx) -> None:
+        env = mock_config_env({"on_close": True})
+        fake_bin = fake_nx(_marker("review-completed", "review-completed: nexus-qhs01.1."))
+        result = _run_hook(_make_payload(command="bd " + "close nexus-qhs01.1"),
+                           path_prefix=str(fake_bin), env_overrides=env)
+        assert _get_decision(_parse_stdout(result.stdout)) == ""
+
+    def test_the_parents_marker_does_not_cover_a_child(self, mock_config_env, fake_nx) -> None:
+        assert _get_decision(self._close(mock_config_env, fake_nx, "nexus-qhs01", "nexus-qhs01.3")) == "deny"
+
+    def test_a_childs_marker_does_not_cover_the_parent(self, mock_config_env, fake_nx) -> None:
+        assert _get_decision(self._close(mock_config_env, fake_nx, "nexus-qhs01.3", "nexus-qhs01")) == "deny"

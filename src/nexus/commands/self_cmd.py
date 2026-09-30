@@ -44,16 +44,19 @@ doing it by accident here is the specific thing the fence forbids.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
+import urllib.parse
+from collections.abc import Mapping
 from pathlib import Path
 
 import click
 
 from nexus.bounded_subprocess import run_bounded
 
-__all__ = ["self_group", "perform_self_install", "packaged_install_dir"]
+__all__ = ["self_group", "perform_self_install", "packaged_install_dir", "index_failure_hint"]
 
 
 def packaged_install_dir() -> Path:
@@ -273,6 +276,173 @@ def _build_argv(
     return build
 
 
+# ── Package-index failure diagnosis (nexus-12pyx) ───────────────────────────
+
+#: What uv prints when it cannot reach an index: DNS, connect, timeout and retry
+#: exhaustion. A resolver failure ("No solution found") is deliberately absent:
+#: blaming the network there would send the user after the wrong cause.
+_NETWORK_FAILURE_RE = re.compile(
+    r"dns error|failed to lookup address|nodename nor servname|"
+    r"temporary failure in name resolution|name or service not known|"
+    r"request failed after \d+ retries|error sending request|"
+    r"tcp connect error|connection refused|connection reset|"
+    r"timed out|failed to connect",
+    re.IGNORECASE,
+)
+#: A certificate or TLS failure: reachability is not the problem, trust is.
+_TLS_FAILURE_RE = re.compile(
+    r"invalid peer certificate|unknownissuer|unknown issuer|certificate verify failed|"
+    r"self[- ]signed|certificate (?:has )?expired|invalid certificate|"
+    r"tls handshake|ssl error|certificate_verify_failed",
+    re.IGNORECASE,
+)
+# Backtick excluded: uv prints ``Failed to fetch: `https://...` ``.
+_URL_RE = re.compile(r"https?://[^\s'\"`)<>]+")
+
+#: Environment variables uv reads for the index, and the pip one (which uv does
+#: not read, but which a wrapper may forward).
+_UV_INDEX_ENV = ("UV_INDEX_URL", "UV_DEFAULT_INDEX", "UV_INDEX")
+_PROXY_ENV = ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")
+
+
+def _index_target(url: str) -> tuple[str, str] | None:
+    """``(display, host)`` for *url*, or ``None`` when it does not parse.
+
+    *display* is scheme, host, port and path only: userinfo, query and
+    fragment are dropped, because an index URL can carry a token in any of
+    them. urllib raises ValueError on a bad port (``host:abc``) and on a broken
+    IPv6 literal (``[abc``); either returns ``None`` so the caller degrades to
+    the generic line instead of turning a ClickException into a traceback.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if not host or parts.scheme not in ("http", "https"):
+        return None
+    shown = f"[{host}]" if ":" in host else host
+    if port:
+        shown = f"{shown}:{port}"
+    return f"{parts.scheme}://{shown}{parts.path}", host
+
+
+def _failed_index_url(stderr: str) -> str | None:
+    """The URL uv failed to fetch: the one on its ``Failed to fetch`` line,
+    else the first URL in the output."""
+    for line in stderr.splitlines():
+        if "failed to fetch" in line.lower():
+            match = _URL_RE.search(line)
+            if match:
+                return match.group(0).rstrip(".,;:")
+    match = _URL_RE.search(stderr)
+    return match.group(0).rstrip(".,;:") if match else None
+
+
+def _names_host(text: str, host: str) -> bool:
+    """True when *text* contains *host* as a whole host name: not as the tail
+    of ``test.pypi.org`` nor the head of ``pypi.org.evil``."""
+    if not host:
+        return False
+    return re.search(rf"(?<![\w.-]){re.escape(host)}(?![\w.-])", text, re.IGNORECASE) is not None
+
+
+def _where_index_is_set(host: str, *, env: Mapping[str, str], home: Path) -> list[str]:
+    """Human-readable places that name *host*: environment variables (by name,
+    never value) and uv/pip config files (by path). Empty when none does."""
+    found: list[str] = []
+    for name in (*_UV_INDEX_ENV, "PIP_INDEX_URL"):
+        if _names_host(env.get(name, ""), host):
+            note = (
+                " (pip's variable; uv does not read it, so something else forwarded it)"
+                if name == "PIP_INDEX_URL" else ""
+            )
+            found.append(f"the {name} environment variable{note}")
+    xdg = Path(env.get("XDG_CONFIG_HOME") or home / ".config")
+    uv_files = [xdg / "uv" / "uv.toml", Path("/etc/uv/uv.toml")]
+    if env.get("UV_CONFIG_FILE"):
+        uv_files.insert(0, Path(env["UV_CONFIG_FILE"]))
+    pip_files = [xdg / "pip" / "pip.conf", home / ".pip" / "pip.conf", Path("/etc/pip.conf")]
+    if env.get("PIP_CONFIG_FILE"):
+        pip_files.insert(0, Path(env["PIP_CONFIG_FILE"]))
+    for path in uv_files:
+        if _file_names_host(path, host):
+            found.append(str(path))
+    for path in pip_files:
+        if _file_names_host(path, host):
+            found.append(f"{path} (a pip config; uv does not read it, so a UV_* variable or wrapper may forward it)")
+    return found
+
+
+def _file_names_host(path: Path, host: str) -> bool:
+    try:
+        return _names_host(path.read_text(encoding="utf-8", errors="replace"), host)
+    except OSError:
+        return False
+
+
+def index_failure_hint(
+    stderr: str, *, env: Mapping[str, str] | None = None, home: Path | None = None,
+) -> str | None:
+    """Explain a network-shaped generation-build failure, or ``None``.
+
+    ``nx self install`` used to print uv's raw output and nothing else, so an
+    unreachable corporate index (off VPN) read as a nexus fault. This names the
+    index uv was trying, where that setting most likely comes from, that the
+    running install was not changed, and the remedy (nexus-12pyx). A
+    certificate failure, or a configured proxy, is a trust or routing problem
+    rather than reachability, so those get the proxy and certificate variables
+    instead of the VPN and PyPI advice. *env* and *home* are injectable for
+    tests; they default to the process's.
+    """
+    tls = _TLS_FAILURE_RE.search(stderr) is not None
+    if not tls and not _NETWORK_FAILURE_RE.search(stderr):
+        return None
+    env = os.environ if env is None else env
+    home = Path.home() if home is None else home
+    proxies = [name for name in _PROXY_ENV if env.get(name)]
+    url = _failed_index_url(stderr)
+    target = _index_target(url) if url else None
+    lines: list[str] = []
+    host = ""
+    if target is None:
+        lines.append("uv could not reach the package index it was using.")
+    else:
+        shown, host = target
+        lines.append(f"uv could not reach the package index at {shown}")
+        sources = _where_index_is_set(host, env=env, home=home)
+        if sources:
+            lines.append("That host is named by: " + "; ".join(sources) + ".")
+        else:
+            lines.append(
+                f"No setting naming {host} was found (checked the UV_INDEX_URL, "
+                "UV_DEFAULT_INDEX and UV_INDEX variables, uv.toml and pip.conf)."
+            )
+    lines.append("The install you have was not changed.")
+    if tls or proxies:
+        cause = "a certificate or TLS error" if tls else "a configured proxy"
+        set_now = f" ({', '.join(proxies)} is set)" if proxies else ""
+        lines += [
+            f"This looks like {cause}{set_now}, not an unreachable host. Check that the proxy "
+            "(HTTPS_PROXY / ALL_PROXY) is reachable and correct. If the proxy or index uses a "
+            "private certificate authority, point SSL_CERT_FILE at its CA bundle, or set "
+            "UV_NATIVE_TLS=1 to use the system certificate store.",
+        ]
+    else:
+        lines.append("Reach that index (connect to the VPN it needs, or check your network).")
+        if host.lower() != "pypi.org":
+            lines += [
+                "Or build this once from PyPI:",
+                "    UV_INDEX_URL=https://pypi.org/simple nx self install",
+            ]
+    lines.append(
+        "A local-mode upgrade also downloads the pinned engine from GitHub releases, "
+        "which a corporate network may block too."
+    )
+    return "\n".join(lines)
+
+
 def _build_flip_shims(build: list[str], *, install_dir: Path, tools: Path, bin_dir: Path) -> Path:
     """Run one generation build, flip ``current`` to it, write the shims.
 
@@ -287,8 +457,12 @@ def _build_flip_shims(build: list[str], *, install_dir: Path, tools: Path, bin_d
         build, capture_output=True, text=True, check=False,
     )
     if built.returncode != 0:
+        detail = built.stderr.strip()
+        hint = index_failure_hint(detail)
+        if hint is None:
+            raise click.ClickException(f"generation build failed:\n{detail}")
         raise click.ClickException(
-            f"generation build failed:\n{built.stderr.strip()}"
+            f"generation build failed:\n{hint}\n\nuv output:\n{detail}"
         )
     generation = Path(built.stdout.strip().splitlines()[-1])
     _sh(install_dir, f'nx_flip_current "{generation}" "{tools}"')

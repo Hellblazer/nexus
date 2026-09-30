@@ -52,29 +52,19 @@ against a genuinely ancient leftover from a killed process reusing the same
 session id (astronomically unlikely -- session ids are per-conversation
 UUIDs) outliving a fresh process's own wait; it is not a liveness protocol.
 
-**The `pid` field, and why there is no separate `start_time` field (round
-4, nexus-veh77).** ``nexus.hooks.mcp_connect_check`` uses ``pid`` to detect
-a MID-SESSION disconnect -- the marker existing is not enough once a
-session has run for a while, since a crashed `nx-mcp` leaves its marker
-behind (a clean shutdown clears it; a SIGKILL or hard crash does not, and
-neither runs this module's own teardown code). The obvious hardening,
-comparing the recorded pid's OS-level start time against a fresh read at
-check time to rule out pid reuse, was considered and left out: the only
-existing per-pid age sources in this codebase either need `/proc` (Linux
-only) or a `ps` subprocess (tens of ms, and this check runs on every
-`UserPromptSubmit` -- explicitly budgeted at "a stat plus a `kill(pid,
-0)`", no subprocess). ``published_at`` already in this file is captured
-within the process's own early lifespan and is a reasonable proxy if a
-future caller needs one; the reuse window this leaves open is bounded by
-the pid allocator not reusing a freed pid for a long time on every
-platform this ships on, and further bounded by `expires_at` for a truly
-stale leftover. Consistent with this project's own standing doctrine
-(`src/nexus/daemon/AGENTS.md`: "liveness is lease freshness, not pid" for
-the T1/T2/T3 daemon-consumer case) -- lease freshness (`expires_at`) is
-the primary bound here too; `pid_alive` is a secondary, fast-reacting
-signal layered on top, read through the ONE shared implementation
-(`nexus.daemon.service_registry.pid_alive`), never a hand-rolled `os.kill`
-call of this module's own.
+**What the marker is for, and what it is NOT (nexus-qxyqz).** It answers one
+question, once: "has an `nx-mcp` for this session id reached the point past
+which it can serve `initialize`?", asked by the SessionStart barrier
+(``nexus.hooks.mcp_connect_wait``). It is NOT a liveness signal. A mid-session
+"nx-mcp is not connected" warning (``nx-hook mcp-connect-check``) used to read
+it as one and was deleted, because a session-id-keyed file with one publisher
+cannot carry that meaning: a nested ``claude -p`` server or the ``nx doctor``
+probe resolves the real session's id and publishes and deletes under it, a
+``/mcp`` reconnect overlaps the old and new server, and ``/clear`` or
+``/resume`` moves the session id without moving the file. Making it reliable
+would take owner election, a heartbeat, locking, expiry and handoff tracking.
+The ``pid`` field exists only so :func:`clear_mcp_connect_marker` can tell its
+own marker from a successor's.
 
 **A short-bound heuristic for "`nx-mcp` was never going to start at all"
 (disabled by the user, or a spawn failure) was considered and rejected**
@@ -155,14 +145,10 @@ def publish_mcp_connect_marker(
 class ConnectMarkerInfo:
     """The raw contents of a connect marker, TTL-unaware.
 
-    ``nexus.hooks.mcp_connect_wait`` (the startup barrier) only needs a
-    fresh/stale bool -- :func:`read_mcp_connect_marker` below. ``nexus.
-    hooks.mcp_connect_check`` (the mid-session detector, round 4) needs the
-    ``pid`` itself, and deliberately does NOT gate on ``expires_at``: a
-    long-lived session whose `nx-mcp` has genuinely been serving for over
-    an hour (past the marker's generous default TTL) is still connected,
-    and the detector's own signal for that is ``pid_alive(pid)``, not this
-    file's age.
+    The startup barrier (``nexus.hooks.mcp_connect_wait``) only needs a
+    fresh/stale bool, :func:`read_mcp_connect_marker` below. The raw fields
+    are read by :func:`clear_mcp_connect_marker`, which compares ``pid`` to
+    its own before unlinking.
     """
 
     pid: int
@@ -207,15 +193,26 @@ def read_mcp_connect_marker(session_id: str, config_dir: Path) -> bool:
 
 
 def clear_mcp_connect_marker(session_id: str, config_dir: Path) -> None:
-    """Remove *session_id*'s marker, best-effort. Missing file is not an error.
+    """Remove *session_id*'s marker if THIS process published it, best-effort.
 
-    Called at every one of ``_t1_lifespan``'s teardown points, mirroring
-    :func:`nexus.db.t1.clear_t1_session_lease`'s own unconditional-unlink-
-    at-teardown contract -- safe here for the identical reason: nothing
-    else will ever read or republish this exact session id's marker once
-    this process's lifespan has ended.
+    Owner-scoped, unlike :func:`nexus.db.t1.clear_t1_session_lease`'s
+    unconditional teardown unlink, because "nothing else will ever
+    republish this session id's marker" is false here: on a ``/mcp``
+    reconnect the successor ``nx-mcp`` publishes under the SAME session id
+    while this one is still tearing down, and an unconditional unlink would
+    delete the successor's marker (nexus-qxyqz). A marker naming a different
+    pid is left alone; a missing file is not an error; a malformed one names
+    no owner and is removed.
+
+    Called at every one of ``_t1_lifespan``'s teardown points. The compare and
+    the unlink are two steps, so a successor publishing between them still
+    loses its marker; that only matters to a reader arriving after the
+    successor's startup barrier, of which there is none.
     """
     path = _marker_path(session_id, config_dir)
+    info = read_mcp_connect_marker_info(session_id, config_dir)
+    if info is not None and info.pid != os.getpid():
+        return
     try:
         path.unlink()
     except OSError:

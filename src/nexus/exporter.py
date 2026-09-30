@@ -21,12 +21,13 @@ Without it, an imported chunk has no catalog document or manifest row at
 all: since RDR-192 Step 5 (nexus-wbfpw.10) a content read returns only
 chunks with a live owner, so a manifest-less imported chunk is invisible
 to search once its liveness grace window lapses, and the RDR-192 reaper
-deletes it outright. ``import_collection`` registers (or reconciles onto
-an existing) catalog document per distinct owner identity in the file and
-writes its manifest explicitly, once, after every one of its chunks has
-been upserted -- see that function's docstring for why a per-upsert-batch
-manifest write cannot be trusted for a document spanning more than one
-300-chunk batch.
+deletes it outright. ``import_collection`` registers (or finds) the
+catalog document per distinct owner identity in the file and writes its
+manifest explicitly, once, after every one of its chunks has been upserted
+-- see that function's docstring for why a per-upsert-batch manifest write
+cannot be trusted for a document spanning more than one 300-chunk batch.
+A document that already owns chunks keeps its manifest (nexus-wbfpw.40):
+the file's chunks it does not own stay unowned and are reported.
 """
 from __future__ import annotations
 
@@ -539,8 +540,10 @@ def _resolve_import_owner_tumbler(collection_name: str, reader: Any, writer: Any
 
     * A non-knowledge collection whose row's ``owner_id`` is a registered
       owner: that owner. Writers store it in the name's hyphenated form
-      (``1-1``), and ``upsertCollection`` overwrites it from the name on
-      every chunk write (nexus-7tys2), so both the stored value and its
+      (``1-1``), and before nexus-7tys2 ``upsertCollection`` overwrote it
+      from the name on every chunk write. The fixed engine no longer does,
+      but nothing backfills a row that was already overwritten, so those
+      still hold the name's segment. Both the stored value and its
       hyphens-as-dots form are tried, and either is used only when the
       catalog confirms it is a registered owner. A slug
       (``arcaneum-2ad2825c``) matches no owner and falls through.
@@ -775,10 +778,14 @@ def import_collection(
     Returns
     -------
     dict with keys: collection_name, imported_count, skipped_count,
-    rehashed_count, owned_count, elapsed_seconds. ``owned_count``
-    (nexus-wbfpw.31) is the number of chunks that got an explicit
-    catalog-manifest row written by THIS call, which is every record in
-    the file.
+    rehashed_count, owned_count, unowned_count, unowned_documents,
+    elapsed_seconds.
+    ``owned_count`` (nexus-wbfpw.31) is the number of the file's chunks
+    that end the import owned by their document. ``unowned_count``
+    (nexus-wbfpw.40) is the number left unowned because their document
+    already existed with a manifest that does not name them: an existing
+    document's manifest is never replaced by an import.
+    ``unowned_documents`` lists those documents as ``{"tumbler", "title"}``.
 
     Every record is grouped by owner identity as it streams: a legacy
     record carrying ``meta.doc_id`` by that doc_id
@@ -794,11 +801,11 @@ def import_collection(
     ``fire_store_chains`` call and restarts at 0 per batch, which is
     wrong the moment a document's chunks span more than one 300-record
     upsert batch (exactly the shape RDR-192 Step 5 needs this fix to
-    close for a large import). For non-legacy records the hook no-ops
-    (their group key is the empty string, which its ``if not by_doc:
-    return`` guard skips). For legacy records it still fires per upserted
-    batch, as before; the explicit write here runs after every batch and
-    is a replace, so it has the last word on the manifest either way.
+    close for a large import). The import fires its store chains without
+    that hook at all (nexus-wbfpw.40): for legacy records it used to
+    replace a live document's manifest batch by batch. The explicit write
+    is skipped for a document that already owns chunks (Sam, 2026-09-29:
+    keep existing), so an import never hides a document's current chunks.
 
     Raises
     ------
@@ -817,6 +824,13 @@ def import_collection(
         from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
         hooks = HookRegistry()
         install_default_hooks(hooks)
+    # nexus-wbfpw.40: the explicit end-of-import write below is the only
+    # manifest writer an import has. The per-batch hook replaced a live
+    # document's manifest for every legacy doc_id batch before the
+    # keep-existing check could run, and then looked like that document's
+    # existing manifest to it.
+    from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred to avoid import cycle
+    hooks = hooks.without_batch(manifest_write_batch_hook)
 
     # Phase 1: read and validate header.
     with open(input_path, "rb") as f:
@@ -1031,13 +1045,14 @@ def import_collection(
                 embeddings.append(emb)
                 metadatas.append(meta)
 
-                # nexus-wbfpw.31: group every non-legacy record for the
-                # explicit end-of-import manifest write. Uses the FINAL
-                # (possibly rehashed) rec_id -- the id that will actually
-                # be written to T3. Unconditional (before --skip-existing
-                # filtering below): a record dropped as a duplicate at
-                # flush time was already written by a prior run and must
-                # still end up owned by this one.
+                # nexus-wbfpw.31: group every record for the explicit
+                # end-of-import manifest write. Uses the FINAL (possibly
+                # rehashed) rec_id -- the id that will actually be written
+                # to T3. Unconditional (before --skip-existing filtering
+                # below), so a duplicate dropped at flush time is owned
+                # exactly as it would be without the flag -- which, for a
+                # document that already owns chunks, means not at all
+                # (nexus-wbfpw.40: an import never replaces its manifest).
                 # An export-time ``owner`` is the chunk's current owner; a
                 # ``meta.doc_id`` beside it is stale pre-RDR-108 metadata.
                 if meta.get("doc_id") and not record.get("owner"):
@@ -1084,6 +1099,9 @@ def import_collection(
     # has been upserted -- see this function's docstring for why this
     # cannot be the per-batch manifest_write_batch_hook.
     owned_count = 0
+    unowned_count = 0
+    unowned_documents: list[dict[str, str]] = []
+    unowned_tumblers: list[str] = []
     if owner_groups and not _owners_apply(db):
         # A non-service handle (the InMemoryVectorClient unit-test
         # substrate) holds its chunks outside the engine, so the catalog
@@ -1127,6 +1145,41 @@ def import_collection(
                 rows_by_doc.setdefault(doc, []).extend(group["rows"])
             for doc, doc_rows in rows_by_doc.items():
                 rows = _manifest_rows(doc_rows)
+                # nexus-wbfpw.40 (Sam, 2026-09-29: keep existing): a live
+                # document that already owns chunks is current truth. The
+                # manifest write replaces every row the document has, so
+                # writing the file's rows over it hid its current chunks
+                # (an older export imported over a re-put note hid the
+                # correction). Leave its manifest alone; the file's chunks
+                # it does not own stay unowned, and are counted.
+                try:
+                    # Rows stamped with another collection (None only from a
+                    # pre-field engine) do not make this collection's
+                    # manifest non-empty.
+                    existing = {
+                        r.chash for r in reader.get_manifest(doc)
+                        if r.collection in (None, collection_name)
+                    }
+                except Exception as exc:  # noqa: BLE001 — cannot prove the document is empty: do not overwrite it
+                    _log.warning(
+                        "import_owner_manifest_read_failed",
+                        collection=collection_name, doc=doc, error=str(exc),
+                    )
+                    failures.append((doc, str(exc)))
+                    continue
+                if existing:
+                    file_chashes = {r["chash"] for r in rows}
+                    kept = len(file_chashes & existing)
+                    owned_count += kept
+                    unowned_count += len(file_chashes) - kept
+                    if kept < len(file_chashes):
+                        unowned_tumblers.append(doc)
+                        _log.warning(
+                            "import_owner_kept_existing_manifest",
+                            collection=collection_name, doc=doc,
+                            file_chunks=len(file_chashes), left_unowned=len(file_chashes) - kept,
+                        )
+                    continue
                 try:
                     writer.write_manifest(doc, rows, collection=collection_name)
                 except Exception as exc:  # noqa: BLE001 — collected and re-raised below as one NexusError
@@ -1137,6 +1190,18 @@ def import_collection(
                     failures.append((doc, str(exc)))
                     continue
                 owned_count += len(rows)
+            if unowned_tumblers:
+                # The remedy nx store import prints is `nx store delete
+                # --title`, so name each document by its CURRENT title.
+                # title None: the lookup failed; "": the document has none.
+                try:
+                    found = reader.resolve_many(unowned_tumblers)
+                    unowned_documents = [
+                        {"tumbler": t, "title": getattr(found.get(t), "title", "") or ""}
+                        for t in unowned_tumblers
+                    ]
+                except Exception:  # noqa: BLE001 — naming is best-effort; the counts above stand
+                    unowned_documents = [{"tumbler": t, "title": None} for t in unowned_tumblers]
         finally:
             _close = getattr(writer, "close", None)
             if callable(_close):
@@ -1146,6 +1211,7 @@ def import_collection(
             collection=collection_name,
             document_groups=len(owner_groups),
             owned_count=owned_count,
+            unowned_count=unowned_count,
             failed_groups=len(failures),
         )
         if failures:
@@ -1183,5 +1249,7 @@ def import_collection(
         "skipped_count": skipped_count,
         "rehashed_count": rehashed_count,
         "owned_count": owned_count,
+        "unowned_count": unowned_count,
+        "unowned_documents": unowned_documents,
         "elapsed_seconds": round(elapsed, 2),
     }

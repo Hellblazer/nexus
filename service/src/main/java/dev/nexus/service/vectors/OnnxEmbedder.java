@@ -6,6 +6,7 @@ import ai.djl.huggingface.tokenizers.Encoding;
 import ai.djl.huggingface.tokenizers.HuggingFaceTokenizer;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OrtEnvironment;
+import ai.onnxruntime.OrtException;
 import ai.onnxruntime.OrtSession;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -74,6 +75,8 @@ public final class OnnxEmbedder implements Embedder {
      * @param tokenizerPath path to {@code tokenizer.json}
      */
     public OnnxEmbedder(String modelPath, String tokenizerPath) {
+        // nexus-o5xyx.1: hold process exit off until ORT init returns (see OrtInitGate).
+        OrtInitGate.Scope initScope = OrtInitGate.process().enter("onnx-minilm");
         try {
             this.ortEnv = OrtEnvironment.getEnvironment();
 
@@ -99,6 +102,8 @@ public final class OnnxEmbedder implements Embedder {
             log.info("event=onnx_embedder_loaded model={} tokenizer={}", modelPath, tokenizerPath);
         } catch (Exception e) {
             throw new RuntimeException("Failed to initialise OnnxEmbedder: " + e.getMessage(), e);
+        } finally {
+            initScope.close();
         }
     }
 
@@ -107,6 +112,8 @@ public final class OnnxEmbedder implements Embedder {
         if (texts == null || texts.isEmpty()) return List.of();
         try {
             return embedBatch(texts);
+        } catch (OrtInitGate.ShutdownInProgressException e) {
+            throw e;   // nexus-o5xyx.3: unwrapped, so VectorHandler answers a retryable 503
         } catch (Exception e) {
             throw new RuntimeException("OnnxEmbedder.embed failed: " + e.getMessage(), e);
         }
@@ -126,6 +133,8 @@ public final class OnnxEmbedder implements Embedder {
         if (texts == null || texts.isEmpty()) return new EmbedResult(List.of(), 0L);
         try {
             return embedBatchWithUsage(texts);
+        } catch (OrtInitGate.ShutdownInProgressException e) {
+            throw e;   // nexus-o5xyx.3: unwrapped, so VectorHandler answers a retryable 503
         } catch (Exception e) {
             throw new RuntimeException("OnnxEmbedder.embedWithUsage failed: " + e.getMessage(), e);
         }
@@ -178,28 +187,34 @@ public final class OnnxEmbedder implements Embedder {
 
         long[] shape = {batchSize, maxLen};
 
-        try (OnnxTensor inputIdsTensor     = OnnxTensor.createTensor(ortEnv,
-                 LongBuffer.wrap(inputIdsFlat),  shape);
-             OnnxTensor attentionMaskTensor = OnnxTensor.createTensor(ortEnv,
-                 LongBuffer.wrap(attentionMaskFlat), shape);
-             OnnxTensor tokenTypeIdsTensor  = OnnxTensor.createTensor(ortEnv,
-                 LongBuffer.wrap(tokenTypeIdsFlat), shape);
-             OrtSession.Result result = session.run(Map.of(
-                 "input_ids",      inputIdsTensor,
-                 "attention_mask", attentionMaskTensor,
-                 "token_type_ids", tokenTypeIdsTensor
-             ))) {
+        // nexus-o5xyx.3: the run sits in the OrtInitGate from tensor creation to tensor
+        // release, and shutdown cancels it (see GatedRun).
+        try (GatedRun run = GatedRun.open("onnx-minilm-run")) {
+            try (OnnxTensor inputIdsTensor     = OnnxTensor.createTensor(ortEnv,
+                     LongBuffer.wrap(inputIdsFlat),  shape);
+                 OnnxTensor attentionMaskTensor = OnnxTensor.createTensor(ortEnv,
+                     LongBuffer.wrap(attentionMaskFlat), shape);
+                 OnnxTensor tokenTypeIdsTensor  = OnnxTensor.createTensor(ortEnv,
+                     LongBuffer.wrap(tokenTypeIdsFlat), shape);
+                 OrtSession.Result result = session.run(Map.of(
+                     "input_ids",      inputIdsTensor,
+                     "attention_mask", attentionMaskTensor,
+                     "token_type_ids", tokenTypeIdsTensor
+                 ), run.options())) {
 
-            // Output 0 = last_hidden_state shape [batch, seq, 384]
-            float[][][] hiddenState = (float[][][]) result.get(0).getValue();
+                // Output 0 = last_hidden_state shape [batch, seq, 384]
+                float[][][] hiddenState = (float[][][]) result.get(0).getValue();
 
-            List<float[]> embeddings = new ArrayList<>(batchSize);
-            for (int i = 0; i < batchSize; i++) {
-                long[] mask = encodings[i].getAttentionMask();
-                int seqLen  = Math.min(mask.length, maxLen);
-                embeddings.add(maskedMeanPoolNormalize(hiddenState[i], mask, seqLen));
+                List<float[]> embeddings = new ArrayList<>(batchSize);
+                for (int i = 0; i < batchSize; i++) {
+                    long[] mask = encodings[i].getAttentionMask();
+                    int seqLen  = Math.min(mask.length, maxLen);
+                    embeddings.add(maskedMeanPoolNormalize(hiddenState[i], mask, seqLen));
+                }
+                return embeddings;
+            } catch (OrtException e) {
+                throw run.cancelledOr(e);
             }
-            return embeddings;
         }
     }
 

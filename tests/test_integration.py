@@ -296,6 +296,33 @@ def test_nx_search_knowledge_corpus(runner):
 
 # ── Code search: voyage-code-3 ──────────────────────────────────────────────
 
+def _register_live_owner(collection: str, title: str, content: str) -> str:
+    """Give the single chunk written for ``content`` a live catalog owner.
+
+    RDR-192 Step 5 live(c) (nexus-q0nwd; engine fc99baac9, nexus-wbfpw.10):
+    every content read returns only chunks that a ``catalog_document_chunks``
+    manifest row ties to a live ``catalog_documents`` row in the same
+    collection. A raw ``upsert_chunks_with_embeddings`` or ``T3Database.put``
+    stores the chunk but registers no owner (real ``store_put`` and indexing
+    do, through the catalog hook), so a search over it returns nothing. This
+    registers the owner the way those paths do; the tests below keep proving
+    the embedding/search property, not the write.
+    """
+    from nexus.catalog.store_hook import (
+        catalog_store_hook_tracked,
+        single_chunk_manifest_metadata,
+        store_put_manifest_direct,
+    )
+
+    chash, metadatas = single_chunk_manifest_metadata(content)
+    owner, _created = catalog_store_hook_tracked(
+        title=title, doc_id=chash, collection_name=collection,
+    )
+    assert owner, f"catalog owner registration must succeed for {collection!r}"
+    store_put_manifest_direct(owner, metadatas, collection=collection)
+    return chash
+
+
 @pytest.mark.integration
 @pytest.mark.cloud_mode
 @requires_t3
@@ -336,6 +363,7 @@ def test_voyage_code3_index_and_query():
             metadatas=[{"title": f"auth_{uid}.py:1-6", "tags": "py", "category": "code",
                         "embedding_model": "voyage-code-3", "expires_at": "", "ttl_days": 0}],
         )
+        assert _register_live_owner(collection, f"auth_{uid}.py", code) == chunk_id(code)
         results = db.search(query=f"user authentication JWT {uid}",
                             collection_names=[collection], n_results=3)
         assert results and any(uid in r.get("content", "") for r in results)
@@ -402,12 +430,16 @@ def test_t3_put_embedding_model_in_search_metadata():
     # RDR-103 strict naming: db.put does no name synthesis (the CLI path does);
     # the service 400s non-conformant names.
     collection = f"knowledge__int-prov-{uid}__voyage-context-3__v1"
+    content = f"Provenance test document {uid}"
     db = make_t3()
     try:
         doc_id = db.put(collection=collection,
-                        content=f"Provenance test document {uid}",
+                        content=content,
                         title=f"{uid}-provenance.md", ttl_days=1)
         assert doc_id
+        # db.put stores the chunk only; the catalog hook that registers its
+        # owner lives in the store_put callers, so do it here (live(c)).
+        assert _register_live_owner(collection, f"{uid}-provenance.md", content) == doc_id
         results = db.search(query=f"provenance test {uid}",
                             collection_names=[collection], n_results=5)
         assert results

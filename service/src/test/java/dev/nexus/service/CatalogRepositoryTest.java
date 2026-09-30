@@ -1617,22 +1617,512 @@ class CatalogRepositoryTest {
      * critique of the nexus-uxd2a landing): hygiene-005's GC functions copy a
      * quarantine sibling's model_version from the origin's row, which is only
      * ever right if a same-name re-registration cannot move the origin's value.
-     * The mutable attributes (owner_id here) still update on conflict.
      */
     @Test @Order(60)
-    void collection_upsert_onConflict_pinsModelVersion_updatesMutableAttributes() {
+    void collection_upsert_onConflict_pinsModelVersion() {
         String name = "code__pin-mv__voyage-code-3__v1";
         repo.upsertCollection(TENANT_A, Map.of(
             "name", name, "content_type", "code", "owner_id", "pin-mv",
             "embedding_model", "voyage-code-3", "model_version", "v1"));
         repo.upsertCollection(TENANT_A, Map.of(
-            "name", name, "content_type", "code", "owner_id", "pin-mv-renamed",
+            "name", name, "content_type", "code", "owner_id", "pin-mv",
             "embedding_model", "voyage-code-3", "model_version", "v7"));
-        var coll = repo.getCollection(TENANT_A, name);
-        assertThat(coll.get("model_version"))
+        assertThat(repo.getCollection(TENANT_A, name).get("model_version"))
             .as("a same-name re-registration never moves model_version").isEqualTo("v1");
-        assertThat(coll.get("owner_id"))
-            .as("owner_id is not pinned and follows the re-registration").isEqualTo("pin-mv-renamed");
+    }
+
+    /**
+     * nexus-7tys2: a registered owner_id survives a later registration. The client
+     * registers a collection before its first chunk write in every process, sending
+     * the owner segment it parses out of the NAME (a slug such as
+     * {@code dbgslug-2ad2825c}, not an owner). That is name-derived, the class
+     * RDR-204 forbids the engine to trust, and it used to overwrite an owner a
+     * caller had registered on purpose. The column holds the hyphenated owner
+     * segment ({@code 1-1}, what owner_segment_for_tumbler gives), never the dotted
+     * tumbler.
+     */
+    @Test @Order(60)
+    void collection_upsert_onConflict_keepsRegisteredOwnerId() {
+        String name = "code__dbgslug-2ad2825c__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "1-1",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        // What ensure_collection_registered sends on a cache miss: the name's owner segment.
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "dbgslug-2ad2825c",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
+            .as("a re-registration never replaces a registered owner_id").isEqualTo("1-1");
+    }
+
+    /**
+     * nexus-7tys2: the one owner_id that is known garbage still takes the incoming
+     * value. hygiene-002-1 branch D stamps a row it cannot classify with the tenant
+     * id as its owner (and 'disputed'); a re-registration used to repair that, and
+     * pinning owner_id for every row would have stopped it.
+     */
+    @Test @Order(60)
+    void collection_upsert_onConflict_placeholderOwnerTakesIncomingOwnerId() throws Exception {
+        String name = "code__disputed-own__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", TENANT_A,
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
+            .as("guard: the row holds the tenant-id placeholder").isEqualTo(TENANT_A);
+        markDisputed(name);
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "disputed-own",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
+            .as("a placeholder owner is repaired by a re-registration")
+            .isEqualTo("disputed-own");
+    }
+
+    /**
+     * nexus-7tys2: 'disputed' alone is not the exception. hygiene-002-1 branches A
+     * and C mark rows 'disputed' while they hold a real name segment, and the state
+     * never clears, so keying the repair on it would leave those rows
+     * last-writer-wins.
+     */
+    @Test @Order(60)
+    void collection_upsert_onConflict_disputedRowWithRealOwnerKeepsIt() throws Exception {
+        String name = "code__disputed-real__voyage-code-3__v1";
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "1-1",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        markDisputed(name);
+        repo.upsertCollection(TENANT_A, Map.of(
+            "name", name, "content_type", "code", "owner_id", "disputed-real",
+            "embedding_model", "voyage-code-3", "model_version", "v1"));
+        assertThat(repo.getCollection(TENANT_A, name).get("owner_id"))
+            .as("a disputed row that holds a real owner keeps it").isEqualTo("1-1");
+    }
+
+    private void markDisputed(String name) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            int updated = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                .update(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_collections")))
+                .set(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("lifecycle_state"), String.class), "disputed")
+                .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("name"), String.class).eq(name))
+                .execute();
+            assertThat(updated).as("guard: the row was marked disputed").isEqualTo(1);
+        }
+    }
+
+    // ── nexus-6pbwx: a code/docs/rdr collection's owner_id is its documents' owner segment ──
+
+    private static final String TENANT_OWN = "own6pbwx-tenant";
+    private static final String OWN_MODEL = "voyage-code-3";
+
+    private void registerColl(String tenant, String name, String contentType, String ownerId) {
+        repo.upsertCollection(tenant, Map.of(
+            "name", name, "content_type", contentType, "owner_id", ownerId,
+            "embedding_model", contentType.equals("code") ? OWN_MODEL : "voyage-context-3",
+            "model_version", "v1"));
+    }
+
+    private void putDoc(String tenant, String tumbler, String contentType, String collection) {
+        repo.upsertDocument(tenant, mapOf(
+            "tumbler", tumbler, "title", "doc " + tumbler, "content_type", contentType,
+            "physical_collection", collection,
+            "source_uri", "file:///own6pbwx/" + tenant + "/" + tumbler));
+    }
+
+    private String ownerOf(String tenant, String name) {
+        return (String) repo.getCollection(tenant, name).get("owner_id");
+    }
+
+    /**
+     * nexus-6pbwx: the client registers a repo collection under the owner segment it
+     * parses out of the NAME, a slug for a legacy repo. The documents in it live under a
+     * tumbler, and that is the authoritative owner: registering a document into the
+     * collection replaces the slug with the hyphenated owner segment ({@code 1-15}).
+     * Both write paths that mint a document are covered.
+     */
+    @Test @Order(60)
+    void collectionOwner_documentRegistrationReplacesSlugOwner() {
+        String viaUpsert = "code__arcaneum-2ad2825c__voyage-code-3__v1";
+        registerColl(TENANT_OWN, viaUpsert, "code", "arcaneum-2ad2825c");
+        assertThat(ownerOf(TENANT_OWN, viaUpsert)).as("guard: the slug is what was registered")
+            .isEqualTo("arcaneum-2ad2825c");
+        putDoc(TENANT_OWN, "1.15.7", "code", viaUpsert);
+        assertThat(ownerOf(TENANT_OWN, viaUpsert)).isEqualTo("1-15");
+
+        String viaRegister = "docs__arcaneum-2ad2825c__voyage-context-3__v1";
+        registerColl(TENANT_OWN, viaRegister, "docs", "arcaneum-2ad2825c");
+        repo.registerDocument(TENANT_OWN, "1.16", mapOf(
+            "title", "readme", "content_type", "docs", "file_path", "README.md",
+            "physical_collection", viaRegister));
+        assertThat(ownerOf(TENANT_OWN, viaRegister)).isEqualTo("1-16");
+    }
+
+    /** nexus-6pbwx: an owner that is already tumbler-shaped is the first registration and stands. */
+    @Test @Order(60)
+    void collectionOwner_tumblerShapedOwnerIsNotReplacedByDocuments() {
+        String name = "code__1-3__voyage-code-3__v1";
+        registerColl(TENANT_OWN, name, "code", "1-3");
+        putDoc(TENANT_OWN, "1.15.8", "code", name);
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-3");
+    }
+
+    /**
+     * nexus-6pbwx: documents may be registered before their collection row exists, and a
+     * chunk write registers the collection with the name's slug every process. The
+     * registration itself must take the documents' owner, not only a later document write.
+     */
+    @Test @Order(60)
+    void collectionOwner_collectionUpsertOverExistingDocumentsTakesTheirOwner() {
+        String name = "rdr__docs-first-6pbwx__voyage-context-3__v1";
+        putDoc(TENANT_OWN, "1.17.1", "rdr", name);
+        registerColl(TENANT_OWN, name, "rdr", "docs-first-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).as("first registration").isEqualTo("1-17");
+        // The chunk-write re-registration the client sends on every cold process.
+        registerColl(TENANT_OWN, name, "rdr", "docs-first-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).as("re-registration").isEqualTo("1-17");
+    }
+
+    /** nexus-6pbwx: a collection with no documents keeps the value it was registered with. */
+    @Test @Order(60)
+    void collectionOwner_collectionWithoutDocumentsKeepsRegisteredOwner() {
+        String name = "code__empty-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, name, "code", "empty-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("empty-6pbwx");
+    }
+
+    /** nexus-6pbwx: a tombstoned document, or a tumbler that is not an owner address, gives no owner. */
+    @Test @Order(60)
+    void collectionOwner_tombstonedAndMalformedTumblersDoNotDeriveAnOwner() {
+        // Documents first, then the tombstone, then the registration: no live document
+        // is left to name an owner, so the slug stands.
+        String name = "code__dead-6pbwx__voyage-code-3__v1";
+        putDoc(TENANT_OWN, "1.18.1", "code", name);
+        assertThat(repo.deleteDocument(TENANT_OWN, "1.18.1")).isEqualTo(1);
+        registerColl(TENANT_OWN, name, "code", "dead-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).as("a tombstoned document names no owner")
+            .isEqualTo("dead-6pbwx");
+        // A live one registered afterwards does.
+        putDoc(TENANT_OWN, "1.18.2", "code", name);
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-18");
+
+        String neverLive = "code__dead3-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, neverLive, "code", "dead3-6pbwx");
+        putDoc(TENANT_OWN, "rn.2", "code", neverLive);
+        putDoc(TENANT_OWN, "1.5", "code", neverLive);
+        assertThat(ownerOf(TENANT_OWN, neverLive))
+            .as("neither a non-numeric tumbler nor a two-segment phantom names an owner")
+            .isEqualTo("dead3-6pbwx");
+    }
+
+    /**
+     * nexus-6pbwx: a knowledge collection's owner is its subject, not its documents'
+     * tumbler. Knowledge documents live under 1.1, so deriving from them would overwrite
+     * every subject with 1-1. A rename keeps taking the owner the client derived from the
+     * new name.
+     */
+    @Test @Order(60)
+    void collectionOwner_knowledgeOwnerStaysTheSubject() {
+        String name = "knowledge__distributed-systems__voyage-context-3__v1";
+        registerColl(TENANT_OWN, name, "knowledge", "distributed-systems");
+        putDoc(TENANT_OWN, "1.1.501", "knowledge", name);
+        putDoc(TENANT_OWN, "1.1.502", "knowledge", name);
+        assertThat(ownerOf(TENANT_OWN, name)).as("document registration").isEqualTo("distributed-systems");
+        registerColl(TENANT_OWN, name, "knowledge", "distributed-systems");
+        assertThat(ownerOf(TENANT_OWN, name)).as("re-registration").isEqualTo("distributed-systems");
+
+        String renamed = "knowledge__consensus__voyage-context-3__v1";
+        repo.renameCollection(TENANT_OWN, name, renamed, null, "knowledge", "consensus");
+        assertThat(ownerOf(TENANT_OWN, renamed))
+            .as("rename derives the owner from the new name, and the re-homed documents do not override it")
+            .isEqualTo("consensus");
+    }
+
+    /** nexus-6pbwx: quarantine rows keep the owner they were filed with. */
+    @Test @Order(60)
+    void collectionOwner_quarantineCollectionsAreNotRederived() {
+        String name = "quarantine-code__quar-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, name, "quarantine-code", "quar-6pbwx");
+        putDoc(TENANT_OWN, "1.20.1", "code", name);
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("quar-6pbwx");
+    }
+
+    /**
+     * nexus-6pbwx: renaming a repo collection re-homes its documents onto a row the
+     * client registered under the new name's owner segment. The new row takes the owner
+     * of the documents that moved onto it.
+     */
+    @Test @Order(60)
+    void collectionOwner_renamedRepoCollectionTakesTheDocumentsOwner() {
+        String old = "code__rn-old-6pbwx__voyage-code-3__v1";
+        String neu = "code__rn-new-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, old, "code", "rn-old-6pbwx");
+        putDoc(TENANT_OWN, "1.21.1", "code", old);
+        assertThat(ownerOf(TENANT_OWN, old)).as("guard").isEqualTo("1-21");
+        repo.renameCollection(TENANT_OWN, old, neu, null, "code", "rn-new-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, neu)).isEqualTo("1-21");
+    }
+
+    /**
+     * nexus-6pbwx: collectionOwnerRoot finds a legacy slug-named collection once its
+     * documents have given it the hyphenated owner. The owner row is keyed on the dotted
+     * tumbler prefix, the collection's owner_id is the hyphenated segment.
+     */
+    @Test @Order(60)
+    void collectionOwner_collectionOwnerRootFindsARepairedSlugCollection() {
+        String tenant = "own6pbwx-root-tenant";
+        String name = "code__arcaneum-2ad2825c__voyage-code-3__v1";
+        repo.upsertOwner(tenant, mapOf(
+            "tumbler_prefix", "1.15", "name", "arcaneum", "owner_type", "repo",
+            "repo_root", "/projects/arcaneum"));
+        registerColl(tenant, name, "code", "arcaneum-2ad2825c");
+        assertThat(repo.collectionOwnerRoot(tenant, name).get("repo_root"))
+            .as("guard: before any document, the slug matches no owner").isEqualTo("");
+        putDoc(tenant, "1.15.3", "code", name);
+
+        var root = repo.collectionOwnerRoot(tenant, name);
+        assertThat(root.get("owner_id")).isEqualTo("1-15");
+        assertThat(root.get("repo_root")).isEqualTo("/projects/arcaneum");
+        assertThat(repo.listCollections(tenant, null, "live").stream()
+                .filter(c -> "1-15".equals(c.get("owner_id"))).map(c -> c.get("name")).toList())
+            .as("what the client's collections_by_owner('1-15') filters").contains(name);
+    }
+
+    private void putOwner(String tenant, String prefix, String name, String type) {
+        repo.upsertOwner(tenant, mapOf(
+            "tumbler_prefix", prefix, "name", name, "owner_type", type, "repo_root", ""));
+    }
+
+    /**
+     * nexus-6pbwx: the wbfpw.33 import fallback mints an import's documents under the
+     * knowledge CURATOR when the collection has no usable owner, so a curator document can
+     * be the first to land in a slug-owned repo collection. It names the collection's
+     * owner only provisionally: a repo document registered afterwards replaces it, and it
+     * never replaces a repo owner back. Curator documents are not ignored outright, because
+     * a collection with nothing else (docs__default, curator 1.14) still takes 1-14.
+     */
+    @Test @Order(60)
+    void collectionOwner_curatorDocumentsGiveWayToRepoDocuments() {
+        String tenant = "own6pbwx-curator-tenant";
+        putOwner(tenant, "1.22", "knowledge", "curator");
+        putOwner(tenant, "1.23", "some-repo", "repo");
+        String name = "code__curator-first-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, name, "code", "curator-first-6pbwx");
+
+        putDoc(tenant, "1.22.1", "code", name);
+        assertThat(ownerOf(tenant, name)).as("curator documents alone still name an owner").isEqualTo("1-22");
+        putDoc(tenant, "1.23.1", "code", name);
+        assertThat(ownerOf(tenant, name)).as("a repo document replaces the curator's segment").isEqualTo("1-23");
+        putDoc(tenant, "1.22.2", "code", name);
+        putDoc(tenant, "1.22.3", "code", name);
+        assertThat(ownerOf(tenant, name)).as("more curator documents never replace a repo owner back")
+            .isEqualTo("1-23");
+        registerColl(tenant, name, "code", "curator-first-6pbwx");
+        assertThat(ownerOf(tenant, name)).as("nor does a re-registration").isEqualTo("1-23");
+    }
+
+    /** nexus-6pbwx: over existing documents, a repo owner outranks a curator with more of them. */
+    @Test @Order(60)
+    void collectionOwner_registrationOverMixedDocumentsPrefersTheRepoOwner() {
+        String tenant = "own6pbwx-mixed-tenant";
+        putOwner(tenant, "1.22", "knowledge", "curator");
+        putOwner(tenant, "1.23", "some-repo", "repo");
+        String name = "docs__mixed-6pbwx__voyage-context-3__v1";
+        putDoc(tenant, "1.22.1", "docs", name);
+        putDoc(tenant, "1.22.2", "docs", name);
+        putDoc(tenant, "1.22.3", "docs", name);
+        putDoc(tenant, "1.23.1", "docs", name);
+        registerColl(tenant, name, "docs", "mixed-6pbwx");
+        assertThat(ownerOf(tenant, name)).isEqualTo("1-23");
+    }
+
+    /**
+     * nexus-6pbwx: a registered CURATOR segment is replaceable even though it is
+     * tumbler-shaped, and a curator-only collection settles on the curator's segment
+     * (docs__default under 1.14) and stays there while more curator documents arrive.
+     */
+    @Test @Order(60)
+    void collectionOwner_curatorOnlyCollectionSettlesAndACuratorSegmentIsReplaceable() {
+        String tenant = "own6pbwx-default-tenant";
+        putOwner(tenant, "1.14", "default", "curator");
+        putOwner(tenant, "1.23", "some-repo", "repo");
+        String name = "docs__default__voyage-context-3__v1";
+        registerColl(tenant, name, "docs", "default");
+        putDoc(tenant, "1.14.1", "docs", name);
+        assertThat(ownerOf(tenant, name)).isEqualTo("1-14");
+        putDoc(tenant, "1.14.2", "docs", name);
+        putDoc(tenant, "1.14.3", "docs", name);
+        assertThat(ownerOf(tenant, name)).isEqualTo("1-14");
+
+        // A collection REGISTERED with a curator's segment and then given a repo document.
+        String other = "code__registered-curator-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, other, "code", "1-14");
+        assertThat(ownerOf(tenant, other)).as("guard: registered with the curator segment").isEqualTo("1-14");
+        putDoc(tenant, "1.23.7", "code", other);
+        assertThat(ownerOf(tenant, other)).isEqualTo("1-23");
+    }
+
+    /**
+     * nexus-6pbwx: the document trigger's UPDATE OF deleted_at arm. A collection registered
+     * while its only document was tombstoned keeps the slug; restoring the document names
+     * the owner. restoreDocument sets deleted_at alone, so only that arm can fire.
+     */
+    @Test @Order(60)
+    void collectionOwner_restoringATombstonedDocumentNamesTheOwner() {
+        String name = "code__restore-6pbwx__voyage-code-3__v1";
+        putDoc(TENANT_OWN, "1.28.1", "code", name);
+        assertThat(repo.deleteDocument(TENANT_OWN, "1.28.1")).isEqualTo(1);
+        registerColl(TENANT_OWN, name, "code", "restore-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).as("guard: no live document yet").isEqualTo("restore-6pbwx");
+        assertThat(repo.restoreDocument(TENANT_OWN, "1.28.1")).isEqualTo(1);
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-28");
+    }
+
+    /**
+     * nexus-6pbwx: the collections trigger's UPDATE OF content_type arm. A row filed as
+     * knowledge keeps its subject however many 1.x documents it holds; re-filing it as a
+     * repo type (a change of content_type alone, not of owner_id) makes the rule apply.
+     */
+    @Test @Order(60)
+    void collectionOwner_changingContentTypeToARepoTypeAppliesTheRule() throws Exception {
+        String name = "code__retyped-6pbwx__voyage-code-3__v1";
+        registerColl(TENANT_OWN, name, "knowledge", "retyped-6pbwx");
+        putDoc(TENANT_OWN, "1.29.1", "code", name);
+        assertThat(ownerOf(TENANT_OWN, name)).as("guard: knowledge is outside the rule").isEqualTo("retyped-6pbwx");
+        try (Connection su = pg.createConnection("")) {
+            int updated = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES)
+                .update(org.jooq.impl.DSL.table(org.jooq.impl.DSL.name("nexus", "catalog_collections")))
+                .set(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("content_type"), String.class), "code")
+                .where(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("name"), String.class).eq(name))
+                .and(org.jooq.impl.DSL.field(org.jooq.impl.DSL.name("tenant_id"), String.class).eq(TENANT_OWN))
+                .execute();
+            assertThat(updated).isEqualTo(1);
+        }
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-29");
+    }
+
+    /** nexus-6pbwx: over existing documents that tie, the lexically lower owner segment wins. */
+    @Test @Order(60)
+    void collectionOwner_equalDocumentCountsTieToTheLowerSegment() {
+        String name = "code__tie-6pbwx__voyage-code-3__v1";
+        putDoc(TENANT_OWN, "1.26.1", "code", name);
+        putDoc(TENANT_OWN, "1.25.1", "code", name);
+        registerColl(TENANT_OWN, name, "code", "tie-6pbwx");
+        assertThat(ownerOf(TENANT_OWN, name)).isEqualTo("1-25");
+    }
+
+    /**
+     * nexus-6pbwx: a repaired legacy slug collection and the conformant collection of the
+     * same owner now share a (content_type, owner_id, embedding_model) tuple. The tie-break
+     * is deliberate: at equal version the lexically lower name wins, which is the conformant
+     * one (its hyphenated segment starts with a digit; the old NAME DESC picked the slug,
+     * 'z' above '1'), and a higher version still wins whatever the name.
+     */
+    @Test @Order(60)
+    void collectionForTuple_conformantNameBeatsARepairedSlugAtEqualVersion() {
+        String tenant = "own6pbwx-tuple-tenant";
+        String conformant = "code__1-27__voyage-code-3__v1";
+        String slug = "code__zslug-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, conformant, "code", "1-27");
+        registerColl(tenant, slug, "code", "zslug-6pbwx");
+        putDoc(tenant, "1.27.1", "code", slug);
+        assertThat(ownerOf(tenant, slug)).as("guard: the slug row now shares the tuple").isEqualTo("1-27");
+
+        assertThat(repo.collectionForTuple(tenant, "code", "1-27", OWN_MODEL).get("name"))
+            .as("equal version: the lexically lower, conformant name wins").isEqualTo(conformant);
+
+        String slugV2 = "code__zslug-6pbwx__voyage-code-3__v2";
+        repo.upsertCollection(tenant, Map.of(
+            "name", slugV2, "content_type", "code", "owner_id", "zslug-6pbwx",
+            "embedding_model", OWN_MODEL, "model_version", "v2"));
+        putDoc(tenant, "1.27.2", "code", slugV2);
+        assertThat(repo.collectionForTuple(tenant, "code", "1-27", OWN_MODEL).get("name"))
+            .as("a higher model_version still wins").isEqualTo(slugV2);
+    }
+
+    /**
+     * nexus-6pbwx: the NAME ASC tie-break is a proxy for "the conformant name", and this
+     * documents where it stops holding: a slug that starts with '0' sorts below the
+     * conformant '1-..' segment and wins the tie. The consequence is bounded. The only
+     * consumers of /collections/for_tuple (HttpCatalogClient.collection_for and
+     * _tuple_registered) read the returned name's model_version, or only that it exists,
+     * and re-render the collection name from owner_id themselves, and version dominates the
+     * ordering, so both names carry the same version here. Only which same-version name comes
+     * back changes. If this test starts failing because the ordering learned better, delete it.
+     */
+    @Test @Order(60)
+    void collectionForTuple_zeroLeadingSlugWinsTheTieAndThatIsVersionNeutral() {
+        String tenant = "own6pbwx-tuple0-tenant";
+        String conformant = "code__1-34__voyage-code-3__v1";
+        String slug = "code__0slug-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, conformant, "code", "1-34");
+        registerColl(tenant, slug, "code", "0slug-6pbwx");
+        putDoc(tenant, "1.34.1", "code", slug);
+        assertThat(ownerOf(tenant, slug)).as("guard: the slug row shares the tuple").isEqualTo("1-34");
+        var resolved = repo.collectionForTuple(tenant, "code", "1-34", OWN_MODEL);
+        assertThat(resolved.get("name")).as("the documented limit of the proxy").isEqualTo(slug);
+        assertThat(resolved.get("model_version")).as("version-neutral: same version either way")
+            .isEqualTo("v1");
+    }
+
+    /**
+     * nexus-6pbwx: the first-registration race. A curator write and a repo write land in
+     * different transactions. The curator document's trigger reads the collection while
+     * its owner is still a slug, derives the curator segment, and only then reaches its
+     * UPDATE, which blocks on the row the repo transaction holds. When the repo transaction
+     * commits, the UPDATE must be re-evaluated against the committed row and leave the repo
+     * owner alone. Without the replaceable() predicate on that UPDATE it overwrites it.
+     */
+    @Test @Order(60)
+    void collectionOwner_aConcurrentCuratorWriteDoesNotOverwriteACommittedRepoOwner() throws Exception {
+        String tenant = "own6pbwx-race-tenant";
+        putOwner(tenant, "1.22", "knowledge", "curator");
+        putOwner(tenant, "1.23", "some-repo", "repo");
+        String name = "code__race-6pbwx__voyage-code-3__v1";
+        registerColl(tenant, name, "code", "race-6pbwx");
+        assertThat(ownerOf(tenant, name)).as("guard: registered with the slug").isEqualTo("race-6pbwx");
+
+        try (Connection repoTx = pg.createConnection("");
+             Connection curatorTx = pg.createConnection("")) {
+            repoTx.setAutoCommit(false);
+            curatorTx.setAutoCommit(true);
+            assertThat(DSL.using(repoTx, SQLDialect.POSTGRES)
+                .update(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS)
+                .set(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.OWNER_ID, "1-23")
+                .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+                .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS.NAME.eq(name))
+                .execute()).isEqualTo(1);
+            var pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+            try {
+                var docs = dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+                var curatorWrite = pool.submit(() ->
+                    DSL.using(curatorTx, SQLDialect.POSTGRES)
+                        .insertInto(docs, docs.TENANT_ID, docs.TUMBLER, docs.TITLE, docs.PHYSICAL_COLLECTION)
+                        .values(tenant, "1.22.1", "curator doc", name)
+                        .execute());
+                // Wait until the curator's trigger is really parked on the repo transaction's row lock.
+                long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(20);
+                boolean blocked = false;
+                var activity = DSL.table(DSL.name("pg_catalog", "pg_stat_activity"));
+                try (Connection probe = pg.createConnection("")) {
+                    var probeCtx = DSL.using(probe, SQLDialect.POSTGRES);
+                    while (System.nanoTime() < deadline && !blocked) {
+                        blocked = probeCtx.fetchCount(activity,
+                            DSL.field(DSL.name("wait_event_type"), String.class).eq("Lock")
+                                .and(DSL.field(DSL.name("datname"), String.class)
+                                    .eq(DSL.function("current_database", String.class)))
+                                .and(DSL.field(DSL.name("pid"), Integer.class)
+                                    .ne(DSL.function("pg_backend_pid", Integer.class)))) > 0;
+                        if (!blocked) Thread.sleep(50);
+                    }
+                }
+                assertThat(blocked).as("non-vacuity: the curator's trigger UPDATE is waiting on the repo row").isTrue();
+                repoTx.commit();
+                assertThat(curatorWrite.get(20, java.util.concurrent.TimeUnit.SECONDS)).isEqualTo(1);
+            } finally {
+                pool.shutdownNow();
+            }
+        }
+        assertThat(ownerOf(tenant, name)).as("the committed repo owner survives the curator write")
+            .isEqualTo("1-23");
     }
 
     /**
@@ -1977,32 +2467,47 @@ class CatalogRepositoryTest {
         assertThat(forTuple.get("name")).isEqualTo(name);
     }
 
+    /**
+     * nexus-bc7ps, and THIS TEST IS THE POINT rather than the predicate it guards. A
+     * quarantine sibling shares every discriminator column with its origin, so the only
+     * thing keeping it from a tuple is the {@code lifecycle_state != 'quarantine'}
+     * predicate, and the tie-break that would otherwise decide is a name ordering that
+     * has changed before (DESC until nexus-6pbwx, ASC now). Whichever direction it runs,
+     * SOME content type has its quarantine sibling on the winning side: under NAME DESC
+     * 'quarantine-code' sorted above 'code' (the live incident), under NAME ASC
+     * 'quarantine-rdr' sorts below 'rdr'. So the pin covers BOTH and each case guards, by
+     * assertion, that its sibling really is the name the tie-break would have picked
+     * under one of the two directions, or the case pins nothing.
+     *
+     * <p>The live incident: hygiene-002-1 (2026-09-08 20:25:14Z) populated
+     * content_type/owner_id/embedding_model on 8 quarantine rows, making them eligible
+     * here. 'q' sorts above 'c'/'d'/'k', so seven contested tuples began resolving to
+     * their quarantine sibling 18 seconds after the last good write. The client cannot
+     * parse 'quarantine-code' as a content_type, swallowed the ValueError, and
+     * synthesised a path-derived name -- stranding 41,032 chunks (nexus-n9xjy).
+     *
+     * <p>Falsifiability: with the {@code LIFECYCLE_STATE.ne("quarantine")} predicate
+     * removed from {@link CatalogRepository#collectionForTuple}, the rdr case fails under
+     * NAME ASC; the code case fails again if the ordering is ever flipped back to DESC.
+     */
     @Test @Order(62)
     void collectionForTuple_neverResolvesToAQuarantineSibling() {
-        // nexus-bc7ps, and THIS TEST IS THE POINT rather than the predicate it
-        // guards. collectionForTuple breaks ties with NAME DESC, so ANY future
-        // prefix that sorts above the real content types re-creates this class;
-        // the predicate fixes today's instance, this pins the property.
-        //
-        // The live incident: hygiene-002-1 (2026-09-08 20:25:14Z) populated
-        // content_type/owner_id/embedding_model on 8 quarantine rows, making them
-        // eligible here. 'q' sorts above 'c'/'d'/'k', so seven contested tuples
-        // began resolving to their quarantine sibling 18 seconds after the last
-        // good write. The client cannot parse 'quarantine-code' as a
-        // content_type, swallowed the ValueError, and synthesised a path-derived
-        // name -- stranding 41,032 chunks (nexus-n9xjy). rdr__ survived only
-        // because 'r' sorts above 'q'.
-        String real = "code__qsib__voyage-code-3__v1";
-        String quarantined = "quarantine-code__qsib__voyage-code-3__v1";
+        assertQuarantineSiblingNeverWins("code", "voyage-code-3", "qsib", false);
+        assertQuarantineSiblingNeverWins("rdr", "voyage-context-3", "qsib", true);
+    }
+
+    private void assertQuarantineSiblingNeverWins(String contentType, String model, String owner,
+                                                   boolean siblingWinsUnderAsc) {
+        String real = contentType + "__" + owner + "__" + model + "__v1";
+        String quarantined = "quarantine-" + contentType + "__" + owner + "__" + model + "__v1";
         repo.upsertCollection(TENANT_A, Map.of(
-            "name", real, "content_type", "code",
-            "owner_id", "qsib", "embedding_model", "voyage-code-3"));
+            "name", real, "content_type", contentType,
+            "owner_id", owner, "embedding_model", model));
         // Seeded through PgContainerHelper.insertCollection, which derives
         // lifecycle_state='quarantine' from the name prefix exactly as
         // gc_quarantine_orphans does in production. upsertCollection does NOT
         // carry lifecycle_state in from its map -- the first draft of this test
-        // tried that and the non-vacuity guard below caught it, which is the
-        // guard earning its place before the test had even run once.
+        // tried that and the non-vacuity guard below caught it.
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.insertCollection(
                 org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES),
@@ -2013,14 +2518,16 @@ class CatalogRepositoryTest {
         // Give it the SAME discriminators as the real row, which is what made the
         // live rows contend: hygiene-002-1 populated exactly these three columns.
         repo.importCollection(TENANT_A, Map.of(
-            "name", quarantined, "content_type", "code",
-            "owner_id", "qsib", "embedding_model", "voyage-code-3"));
+            "name", quarantined, "content_type", contentType,
+            "owner_id", owner, "embedding_model", model));
 
         // NON-VACUITY, and this test is worthless without it: the sibling must
         // actually be a candidate that WOULD WIN. It shares every discriminator
         // column, is not superseded, is not legacy-grandfathered, ties on
-        // model_version, and sorts ABOVE the real row by name. If any of that
-        // stops being true the test passes for the wrong reason.
+        // model_version, and sorts on the winning side of the CURRENT tie-break
+        // (or, for the code case, of the retired DESC one, which is what the
+        // live incident ran under). If any of that stops being true the case
+        // passes for the wrong reason.
         var sibling = repo.getCollection(TENANT_A, quarantined);
         assertThat(sibling).as("guard: the quarantine sibling must exist").isNotNull();
         // Read lifecycle_state from the COLUMN, not from getCollection: collRow
@@ -2043,12 +2550,19 @@ class CatalogRepositoryTest {
         assertThat(sibling.get("superseded_by"))
             .as("guard: it must pass the superseded_by filter, as the live rows did")
             .isEqualTo("");
-        assertThat(quarantined.compareTo(real))
-            .as("guard: it must SORT ABOVE the real name, or NAME DESC would not "
-                + "have picked it and this pins nothing")
-            .isGreaterThan(0);
+        if (siblingWinsUnderAsc) {
+            assertThat(quarantined.compareTo(real))
+                .as("guard: it must SORT BELOW the real name, or NAME ASC would not "
+                    + "have picked it and this case pins nothing")
+                .isLessThan(0);
+        } else {
+            assertThat(quarantined.compareTo(real))
+                .as("guard: it must SORT ABOVE the real name, the shape NAME DESC "
+                    + "picked in the live incident; this case guards a flip back to DESC")
+                .isGreaterThan(0);
+        }
 
-        var resolved = repo.collectionForTuple(TENANT_A, "code", "qsib", "voyage-code-3");
+        var resolved = repo.collectionForTuple(TENANT_A, contentType, owner, model);
         assertThat(resolved).as("the tuple must still resolve to something").isNotNull();
         assertThat(resolved.get("name"))
             .as("a quarantine sibling must NEVER win a tuple, however it sorts")

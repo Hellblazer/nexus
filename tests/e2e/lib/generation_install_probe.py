@@ -39,11 +39,151 @@ silently (nexus-utpuw.10).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 FAILURES: list[str] = []
+
+
+# ── nexus-qfeez: wait out PyPI propagation lag around the real installer ─────
+#
+# `fresh-install-mvv.sh --published` proves leg 1's `uv tool install` saw the
+# release, but PyPI's simple index is served by a CDN whose edges do not all
+# catch up together. Leg 9 is a SEPARATE uv invocation (install_generation.sh's
+# own `uv pip install`), so it can land on an edge that still answers "no
+# version of conexus==X" minutes after leg 1 succeeded (7.64.1, 7.65.0).
+# A probe that first checks the index would only be a second sample of the
+# same lottery, so the wait wraps the real installer: retry it, bounded, and
+# succeed only when the installer itself exits 0. Any other failure shape, and
+# a ceiling overrun, still fail loud.
+
+_PIN = re.compile(r"conexus(?P<extras>\[[^\]]*\])?==(?P<version>[^\s=;]+)")
+
+
+def is_registry_pin(source: str) -> bool:
+    """True only for an exact registry pin (``conexus==X``, extras allowed).
+
+    A wheel path has no index to lag behind, and an unpinned name has no
+    specific version whose absence could be lag, so neither may wait.
+    """
+    return _PIN.fullmatch(source) is not None
+
+
+def is_propagation_miss(text: str, source: str) -> bool:
+    """uv's "that exact version is not on the index (yet)" for THIS pin.
+
+    Narrower than leg 1's shell grep on purpose. That grep accepts any
+    "no solution found" that mentions conexus, which a real dependency
+    conflict also does; here a conflict must fail at once rather than burn
+    the whole ceiling. The message is line-wrapped by uv, so tokens are
+    matched across arbitrary whitespace.
+    """
+    m = _PIN.fullmatch(source)
+    if m is None:
+        return False
+    extras = re.escape(m.group("extras") or "")
+    version = re.escape(m.group("version"))
+    no_version = rf"no\s+version\s+of\s+conexus{extras}==\s*{version}"
+    # Exactly this package: `conexus-foo was not found` or a dependency that
+    # was not found must not read as our own release being late.
+    not_in_registry = (
+        rf"(?<![\w.-])conexus{extras}\s+was\s+not\s+found\s+in\s+the\s+package\s+registry"
+    )
+    return re.search(no_version, text) is not None or re.search(not_in_registry, text) is not None
+
+
+@dataclass(frozen=True)
+class PropagationSettings:
+    ceiling_s: float = 1800.0
+    initial_backoff_s: float = 15.0
+    max_backoff_s: float = 60.0
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> PropagationSettings:
+        """Same knobs, same defaults as leg 1 (fresh-install-mvv.sh).
+
+        ``or`` rather than a ``get`` default: leg 1's ``${VAR:-default}`` treats
+        an exported-but-empty value as unset, and so must this.
+        """
+        return cls(
+            ceiling_s=float(env.get("FRESH_MVV_PROPAGATION_CEILING_SECONDS") or 1800),
+            initial_backoff_s=float(
+                env.get("FRESH_MVV_PROPAGATION_INITIAL_BACKOFF_SECONDS") or 15
+            ),
+            max_backoff_s=float(env.get("FRESH_MVV_PROPAGATION_MAX_BACKOFF_SECONDS") or 60),
+        )
+
+
+@dataclass(frozen=True)
+class InstallOutcome:
+    proc: subprocess.CompletedProcess[str]
+    attempts: int
+    waited_s: float
+    exhausted: bool  # True only when the ceiling ran out on propagation misses
+
+
+def install_with_propagation_wait(
+    run: Callable[[dict[str, str]], subprocess.CompletedProcess[str]],
+    source: str,
+    settings: PropagationSettings,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> InstallOutcome:
+    """Run the installer; while it fails ONLY with a propagation miss, retry.
+
+    ``run(extra_env)`` performs one real install attempt. The first attempt is
+    unmodified. Retries add ``UV_NO_CACHE=1``: uv honours the index's own
+    cache headers, so a stale "no such version" page cached by an earlier
+    attempt could otherwise be served back for the rest of its max-age (the
+    same reason leg 1's calls carry ``--no-cache``).
+    """
+    start = clock()
+    backoff = settings.initial_backoff_s
+    attempts = 0
+    while True:
+        attempts += 1
+        proc = run({} if attempts == 1 else {"UV_NO_CACHE": "1"})
+        if proc.returncode == 0:
+            return InstallOutcome(proc, attempts, clock() - start, False)
+        if not is_propagation_miss(f"{proc.stderr}\n{proc.stdout}", source):
+            return InstallOutcome(proc, attempts, clock() - start, False)
+        elapsed = clock() - start
+        if elapsed >= settings.ceiling_s:
+            return InstallOutcome(proc, attempts, elapsed, True)
+        pause = min(backoff, settings.ceiling_s - elapsed)
+        print(
+            f"  uv does not see {source} yet (attempt {attempts}, {elapsed:.0f}s elapsed, "
+            f"retrying in {pause:.0f}s) -- PyPI CDN propagation lag (nexus-qfeez)",
+            flush=True,
+        )
+        sleep(pause)
+        backoff = min(backoff * 2, settings.max_backoff_s)
+
+
+def build_generation(
+    install_dir: Path,
+    source: str,
+    env: dict[str, str],
+    settings: PropagationSettings,
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> InstallOutcome:
+    """One or more real ``install_generation.sh`` runs under the propagation wait."""
+
+    def run(extra_env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(install_dir / "install_generation.sh"), "--source", source],
+            capture_output=True, text=True, timeout=1800, env={**env, **extra_env},
+        )
+
+    return install_with_propagation_wait(run, source, settings, clock=clock, sleep=sleep)
 
 
 def pdftext_bound_ok(pdftext_version: str, pypdfium2_version: str) -> bool:
@@ -146,12 +286,24 @@ def main() -> int:
     tools_root.mkdir(parents=True, exist_ok=True)
 
     # (2) Build a generation from the artifact under test.
-    built = subprocess.run(
-        ["bash", str(install_dir / "install_generation.sh"), "--source", source],
-        capture_output=True, text=True, timeout=1800, env=env,
-    )
+    #
+    # nexus-qfeez: under --published the source is `conexus==X`, and a fresh
+    # release can be visible to leg 1's resolve yet not to this one (CDN edge
+    # lag). build_generation() retries the REAL installer on exactly that
+    # miss, bounded; success still means install_generation.sh exited 0.
+    outcome = build_generation(install_dir, source, env, PropagationSettings.from_env(os.environ))
+    built = outcome.proc
+    if outcome.attempts > 1 and built.returncode == 0:
+        print(f"generation install propagation wait: {outcome.waited_s:.0f}s "
+              f"over {outcome.attempts} attempts (nexus-qfeez)")
     if built.returncode != 0:
-        print(f"FAIL install_generation.sh exited {built.returncode}")
+        if outcome.exhausted:
+            print(f"FAIL {source} did not become resolvable within "
+                  f"{outcome.waited_s:.0f}s ({outcome.attempts} attempts) even though the "
+                  f"uv-tool install of the same version succeeded -- PyPI's simple index "
+                  f"stayed stale for this resolution; re-run this leg later (nexus-qfeez)")
+        else:
+            print(f"FAIL install_generation.sh exited {built.returncode}")
         print(built.stderr[-3000:])
         return 1
     generation = Path(built.stdout.strip().splitlines()[-1])

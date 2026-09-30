@@ -280,6 +280,8 @@ Pass `offset=N` back to the same tool to fetch the next page. Default page size:
 
 The plugin installs a `PermissionRequest` hook that auto-approves tool calls matching `mcp__plugin_conexus_.*` against an explicit per-tool allowlist, not a blanket wildcard pass-through: `mcp__plugin_conexus_nexus__daemon_uninstall` is deliberately excluded, since it can tear down the storage-service autostart unit and, with `remove_data=true`, irreversibly delete the entire nexus config directory. This covers both servers plus the bundled `sequential-thinking` server. Dangerous system operations (force-push, `bd delete`, deploys) are not matched and stay behind the normal confirmation flow.
 
+The separate `sn` plugin auto-approves Serena's read and navigation tools and both Context7 tools. Serena's file and memory writers, `jet_brains_debug` (arbitrary Groovy/Java in the IDE's JVM), `query_project`, `onboarding` and `restart_language_server` get no decision and reach Claude Code's own prompt or auto-mode classifier, as Edit and Write do (nexus-2lf1v; before that every Serena tool was auto-approved). To stop being asked for the writers you use, add them by name to `permissions.allow`.
+
 To enforce stricter permission boundaries on a custom agent, narrow the matcher in `conexus/hooks/hooks.json`.
 
 ## Failure modes

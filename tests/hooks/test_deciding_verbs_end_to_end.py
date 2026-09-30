@@ -122,44 +122,73 @@ def test_auto_approve_stays_silent_for_a_tool_it_does_not_own() -> None:
     )
 
 
-def test_the_close_gate_denies_an_unmarked_bead_over_the_real_wire(tmp_path) -> None:
-    """The regression, end to end.
+def _unreachable_t1_env(tmp_path: Path) -> dict[str, str]:
+    """Environment that makes T1 deterministically UNREACHABLE for the gate.
 
-    Armed with a purpose-built `.nexus.yml` under CLAUDE_PROJECT_DIR
-    rather than the live one, so the verdict does not depend on whether
-    the developer running this has `on_close` enabled in their own
-    `.nexus.yml` — a test that inherited that would pass or fail by
-    machine rather than by code. (This used to stub a fake
-    read_verification_config.py under CLAUDE_PLUGIN_ROOT; the reader is
-    in the wheel now and that script is deleted, nexus-z9cz2.)
+    A fake ``nx`` that always fails goes first on PATH, so ``nx scratch list``
+    fails whatever this box's real T1 is doing, and a fake ``bd`` keeps the
+    ``unverified`` stamp off the real tracker. Without this the verdict
+    depended on the machine: a live T1 with no marker denies, a dead one asks.
     """
     (tmp_path / ".nexus.yml").write_text("verification:\n  on_close: true\n")
+    bin_dir = tmp_path / "fakebin"
+    bin_dir.mkdir()
+    for name, body in (("nx", "#!/bin/sh\nexit 1\n"), ("bd", "#!/bin/sh\nexit 0\n")):
+        script = bin_dir / name
+        script.write_text(body)
+        script.chmod(0o755)
+    return {
+        "CLAUDE_PROJECT_DIR": str(tmp_path),
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+    }
 
+
+_CLOSE_PAYLOAD = {
+    "session_id": "e2e-no-such-session",
+    "tool_name": "Bash",
+    "tool_input": {"command": "bd close nexus-99xyz --reason e2e"},
+}
+
+
+def test_the_close_gate_asks_when_t1_is_unreachable_over_the_real_wire(tmp_path) -> None:
+    """The regression, end to end, with the outcome PINNED.
+
+    T1 is made unreachable on purpose (:func:`_unreachable_t1_env`), so the
+    one correct verdict is ``ask`` (nexus-nmzsg). It used to accept
+    ``{ask, deny}``, which made the assertion true of two different gate
+    behaviours and so of neither. The config is a purpose-built
+    ``.nexus.yml`` under CLAUDE_PROJECT_DIR rather than the live one, so the
+    verdict does not depend on the developer's own ``on_close`` setting.
+    """
     proc = _run_verb(
-        "pre-close-verification",
-        {
-            "session_id": "e2e-no-such-session",
-            "tool_name": "Bash",
-            "tool_input": {"command": "bd close nexus-99xyz --reason e2e"},
-        },
-        extra_env={"CLAUDE_PROJECT_DIR": str(tmp_path)},
+        "pre-close-verification", _CLOSE_PAYLOAD, extra_env=_unreachable_t1_env(tmp_path)
     )
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip(), "the close gate wrote nothing at all"
     envelope = json.loads(proc.stdout)["hookSpecificOutput"]
-    decision = envelope.get("permissionDecision")
-    # An unreachable T1 fails OPEN by design, and "e2e-no-such-session"
-    # has no T1 -- but nexus-452oy: fail-open now means NO decision
-    # (advisory text in additionalContext only), not an explicit allow,
-    # because an explicit allow on this path bypassed both Claude Code's
-    # own permission prompt and its auto-mode classifier for every
-    # `bd close` this gate could not verify. A reachable T1 with the
-    # marker genuinely missing still denies. What this asserts is narrower
-    # and is the thing that was broken: the verb resolves, runs, and puts
-    # a well-formed envelope on stdout either way.
-    assert decision in {None, "deny"}, proc.stdout
-    if decision is None:
-        assert envelope.get("additionalContext"), proc.stdout
+    assert envelope.get("permissionDecision") == "ask", proc.stdout
+    assert "nexus-99xyz" in envelope.get("permissionDecisionReason", ""), proc.stdout
+
+
+def test_the_ask_envelope_is_the_whole_of_stdout_over_the_real_wire(tmp_path) -> None:
+    """Raw stdout is exactly ONE JSON object, nothing before or after it.
+
+    A hook's stdout is a protocol channel; a stray log line makes the
+    harness discard the verdict. The in-process driver in
+    test_pre_close_verification_hook.py redirects stray stdout to stderr, so
+    it cannot see that. This is the real ``nx-hook`` process and the bytes it
+    wrote.
+    """
+    proc = _run_verb(
+        "pre-close-verification", _CLOSE_PAYLOAD, extra_env=_unreachable_t1_env(tmp_path)
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout == proc.stdout.lstrip(), "leading bytes before the envelope"
+    obj, end = json.JSONDecoder().raw_decode(proc.stdout)
+    assert proc.stdout[end:].strip() == "", (
+        f"stdout carries more than the one envelope: {proc.stdout!r}"
+    )
+    assert obj["hookSpecificOutput"]["permissionDecision"] == "ask"
 
 
 def test_a_non_bash_call_is_no_decision_immediately() -> None:

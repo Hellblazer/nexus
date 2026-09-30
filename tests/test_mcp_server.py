@@ -848,6 +848,42 @@ def test_store_list_docs_groups_a_split_note_as_one_document(t3, local_mode_writ
     )
 
 
+def test_store_list_docs_lists_two_documents_that_share_every_chunk(t3, local_mode_write):
+    """nexus-sis0m.5: identical text in one collection is one T3 row by
+    design, so two titled notes with the same content share their chunk.
+    Keying each chunk to one tumbler listed the pair as one document."""
+    text = "identical body shared by two titled notes"
+    store_put(content=text, collection="fixture-subject", title="shared-a")
+    store_put(content=text, collection="fixture-subject", title="shared-b")
+
+    result = store_list(collection="fixture-subject", docs=True)
+    assert len(_docs_rows_for(result, "shared-a")) == 1, result
+    assert len(_docs_rows_for(result, "shared-b")) == 1, result
+    # Non-vacuity: the two really share one stored chunk.
+    assert "(2 documents, 1 chunks)" in result, result
+
+
+def test_store_get_and_search_name_both_documents_that_share_a_chunk(t3, local_mode_write):
+    """nexus-sis0m.5: a chunk row carries its last writer's title, so a hit
+    or a get by id named only the second of two notes with the same text.
+    Both now show the live catalog documents holding the chunk."""
+    text = "sis0m5 identical body for the title display check"
+    store_put(content=text, collection="fixture-subject", title="title-a")
+    store_put(content=text, collection="fixture-subject", title="title-b")
+    chash = hashlib.sha256(text.encode()).hexdigest()
+
+    got = store_get(doc_id=chash, collection="fixture-subject")
+    assert "title-a · title-b" in got, got
+    # Asked by title, the answer names that title, not the last writer's.
+    by_title = store_get(doc_id="title-a", collection="fixture-subject")
+    assert not by_title.startswith("Not found"), by_title
+    assert text in by_title and "title-b" not in by_title.split("\n")[0], by_title
+
+    hits = search(query=text, corpus="knowledge__fixture-subject").content[0].text
+    line = next((ln for ln in hits.splitlines() if "title-a" in ln or "title-b" in ln), "")
+    assert "title-a · title-b" in line, hits
+
+
 def test_store_list_docs_keeps_a_manifest_less_chunk_as_its_own_row(t3, local_mode_write):
     """A chunk with no manifest row is never merged into a neighbour.
 

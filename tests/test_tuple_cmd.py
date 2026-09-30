@@ -157,13 +157,21 @@ class TestTupleRdPaging:
         assert res.exit_code == 2
         assert "CREATED_AT,ID" in res.output
 
-    def test_newest_past_max_rows_exits_non_zero(self, seeded) -> None:
-        res = CliRunner().invoke(tuple_group, [
-            "rd", f"mailbox/{seeded}", "--pattern", f"to={seeded}", "--json",
-            "--newest", "-n", "5", "--max-rows", "100",
-        ])
-        assert res.exit_code == 3, res.output
-        assert "not the newest" in res.stderr
+    def test_newest_past_max_rows_is_the_true_newest_from_a_descending_read(self, seeded) -> None:
+        # nexus-kp5q3: before the engine's descending read this paged 100 of the
+        # 310 oldest rows and exited 3 ("not the newest"); now --max-rows does
+        # not bound --newest at all.
+        bodies, err = self._rd(seeded, "--newest", "-n", "5", "--max-rows", "100")
+        assert bodies == [f"m{i:04d}" for i in range(self.ROWS - 5, self.ROWS)]
+        assert "truncated" not in err, err
+
+    def test_newest_asking_past_the_read_cap_returns_the_capped_newest_and_says_so(self, seeded) -> None:
+        # nexus-kp5q3: 310 rows, -n 400, engine cap 300. The engine echoes the
+        # limit it ran with, so the client keeps the real newest 300 and says the
+        # cap trimmed it, instead of paging and exiting 3.
+        bodies, err = self._rd(seeded, "--newest", "-n", "400")
+        assert bodies == [f"m{i:04d}" for i in range(self.ROWS - 300, self.ROWS)]
+        assert "asked for 400" in err and "read cap is 300" in err, err
 
     def test_all_at_exactly_max_rows_is_not_reported_truncated(self, seeded) -> None:
         bodies, err = self._rd(seeded, "--all", "--max-rows", str(self.ROWS))

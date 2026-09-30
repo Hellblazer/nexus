@@ -108,6 +108,26 @@ class FakeT2HandlerBase(BaseHTTPRequestHandler):
     _params = _qs
 
 
+class DeepBacklogThreadingHTTPServer(ThreadingHTTPServer):
+    """A ``ThreadingHTTPServer`` whose listen queue holds a whole test's
+    worth of simultaneous connects (nexus-vj72t).
+
+    ``socketserver.TCPServer.request_queue_size`` defaults to 5. A test that
+    fires 7 concurrent connections at a fresh server, while the accept loop
+    is starved for the GIL by those same 7 client threads, overflows that
+    queue, and macOS answers the overflow with a connection RESET (measured
+    on hellmini, 2026-09-29: ``[Errno 54] Connection reset by peer`` in 16 of
+    180 runs of the concurrent-401 tests under CPU load). The client's
+    self-heal treats a reset as retryable, so the reset caller re-mints and
+    retries on a different bearer, the arrival gate then sees 6 of 7
+    requests, and the run proves nothing. A queue deeper than any test's
+    thread count removes the cause; it changes nothing about what the tests
+    assert.
+    """
+
+    request_queue_size = 128
+
+
 @contextmanager
 def fake_http_server(
     handler_cls: type[BaseHTTPRequestHandler], *, threaded: bool = False,
@@ -127,7 +147,7 @@ def fake_http_server(
     (it can only ever have one request in progress).
     """
     port = free_port()
-    server_cls = ThreadingHTTPServer if threaded else HTTPServer
+    server_cls = DeepBacklogThreadingHTTPServer if threaded else HTTPServer
     server = server_cls(("127.0.0.1", port), handler_cls)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

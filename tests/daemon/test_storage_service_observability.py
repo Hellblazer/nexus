@@ -205,6 +205,51 @@ class TestServiceExitCodeLogged:
         assert kw.get("pid") == 777
 
 
+    def test_exit_detected_names_the_hs_err_report_when_the_jvm_left_one(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-o5xyx.2: a crashed JVM launch leaves logs/hs_err_<pid>.log
+        (-XX:ErrorFile); the exit warning must point at it."""
+        rec = _RecordingLog()
+        monkeypatch.setattr(ssd, "_log", rec)
+        sup = ssd.StorageServiceSupervisor(
+            config_dir=config_dir,
+            binary_path=Path("/fake/nexus-service"),
+            pg_port=15432,
+            service_port=18080,
+            creds={"NX_SERVICE_TOKEN": "tok-deadbeef", "PG_PORT": "15432"},
+        )
+        sup._proc = _FakeProc(pid=4321, returncode=134)
+        sup._supervisor = object()
+        report = config_dir / "logs" / "hs_err_4321.log"
+        report.parent.mkdir(parents=True, exist_ok=True)
+        report.write_text("# SIGSEGV")
+
+        sup.heartbeat_once()
+        assert rec.kwargs_for("storage_service_exit_detected").get("hs_err") == str(report)
+
+    def test_exit_detected_has_no_hs_err_field_without_a_report(
+        self, config_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        rec = _RecordingLog()
+        monkeypatch.setattr(ssd, "_log", rec)
+        sup = ssd.StorageServiceSupervisor(
+            config_dir=config_dir,
+            binary_path=Path("/fake/nexus-service"),
+            pg_port=15432,
+            service_port=18080,
+            creds={"NX_SERVICE_TOKEN": "tok-deadbeef", "PG_PORT": "15432"},
+        )
+        sup._proc = _FakeProc(pid=4322, returncode=143)
+        sup._supervisor = object()
+        (config_dir / "logs").mkdir(parents=True, exist_ok=True)
+        # Another process's report must not be attributed to this one.
+        (config_dir / "logs" / "hs_err_9999.log").write_text("x")
+
+        sup.heartbeat_once()
+        assert "hs_err" not in rec.kwargs_for("storage_service_exit_detected")
+
+
 class _FakeStorageSupervisor:
     """Stands in for StorageServiceSupervisor inside run_storage_supervisor."""
 

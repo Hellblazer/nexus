@@ -392,10 +392,10 @@ def _start_threaded_fake_server() -> tuple[Any, int]:
     needs the server to actually process >1 request concurrently, so this
     helper is kept separate rather than changing the shared fixture every
     other test in this file depends on."""
-    import http.server
+    from tests.db._fake_t2_server import DeepBacklogThreadingHTTPServer
 
     port = _free_port()
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), _FakeHandler)
+    server = DeepBacklogThreadingHTTPServer(("127.0.0.1", port), _FakeHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server, port

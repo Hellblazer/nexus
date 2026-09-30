@@ -750,6 +750,41 @@ HikariPool fail-fast. Such a fixture pops every key here
 tests in ``test_xnz0o_commands_integration.py``)."""
 
 
+def jvm_error_file_arg() -> str:
+    """``-XX:ErrorFile=<run temp dir>/hs_err_%p.log``: where a crashing engine JVM
+    writes its hs_err report (nexus-o5xyx.2).
+
+    Without it the JVM drops ``hs_err_pid<N>.log`` into its cwd, which for a test
+    launched from the repo is the repo. ``%p`` is expanded by the JVM to its own
+    pid, so concurrent engines do not overwrite each other. ``tempfile.gettempdir()``
+    honours ``TMPDIR``, the same root every other test artifact uses.
+
+    JVM launches ONLY. A GraalVM native image is not a JVM and has no hs_err
+    machinery, so this flag does not apply to it and is deliberately not passed to
+    a native launch (a fatal error there writes Substrate VM's own crash file, not
+    an hs_err). ``tests/test_jvm_jar_launch_error_file_lint.py`` fails any
+    ``-jar`` launch in tests/ or src/ that omits it.
+    """
+    return f"-XX:ErrorFile={Path(tempfile.gettempdir()) / 'hs_err_%p.log'}"
+
+
+def jar_argv(java: str | Path, jar: str | Path) -> list[str]:
+    """argv for ``java -jar <jar>`` with the hs_err redirect. Pass it to
+    :func:`spawn_service` instead of spelling ``"-jar"`` out."""
+    return [str(java), jvm_error_file_arg(), "-jar", str(jar)]
+
+
+def with_error_file(cmd: list[str]) -> list[str]:
+    """Insert the hs_err redirect just before ``-jar`` when *cmd* is a JVM launch
+    that has none (nexus-o5xyx.2). A command without ``-jar`` (a native binary) or
+    with its own ``-XX:ErrorFile=`` comes back unchanged. The flag must precede
+    ``-jar``: after it, the JVM hands it to the program as an argument."""
+    if "-jar" not in cmd or any(str(a).startswith("-XX:ErrorFile=") for a in cmd):
+        return list(cmd)
+    i = cmd.index("-jar")
+    return [*cmd[:i], jvm_error_file_arg(), *cmd[i:]]
+
+
 def spawn_service(
     cmd: list[str],
     env: dict[str, str],
@@ -777,7 +812,11 @@ def spawn_service(
     Returns ``(proc, log_path)``. Pair with :func:`wait_for_service`, which
     surfaces the tail of *log_path* when the port never opens — the diagnostic
     the PIPE form threw away.
+
+    A JVM launch (``-jar`` in *cmd*) gets ``-XX:ErrorFile=`` injected by
+    :func:`with_error_file`, so no caller can drop hs_err into the cwd.
     """
+    cmd = with_error_file(cmd)
     d = Path(log_dir) if log_dir is not None else Path(tempfile.mkdtemp(prefix="nexus-svc-log-"))
     d.mkdir(parents=True, exist_ok=True)
     log_path = d / "engine.log"

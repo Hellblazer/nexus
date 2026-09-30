@@ -705,8 +705,14 @@ class DataTokenManager:
         key = (base_url.rstrip("/"), tenant)
         with self._lock_for(key):
             popped = self._cache.pop(key, None)
+            if popped is not None:
+                # nexus-vj72t: the lease delete stays INSIDE the key lock.
+                # bearer_for reads the lease on a cache miss under this same
+                # lock, so a pop that released the lock before the delete let
+                # a concurrent caller re-cache the very token being
+                # invalidated from the file it was about to lose.
+                self._delete_lease(base_url, tenant, expected_token=popped.token)
         if popped is not None:
-            self._delete_lease(base_url, tenant, expected_token=popped.token)
             _log.info("data_token_invalidated", tenant=tenant, endpoint=_host(base_url))
 
     def _is_futile_locked(self, key: tuple[str, str]) -> bool:
@@ -759,7 +765,8 @@ class DataTokenManager:
         :meth:`bearer_for` currently returns, which is a fresh mint when
         this call returned ``True`` and the unchanged current token
         otherwise (see the module docstring). The whole check-then-pop
-        sequence (futility peek + cache compare + pop) is atomic under
+        sequence (futility peek + cache compare + pop + lease delete,
+        nexus-vj72t) is atomic under
         this key's :meth:`_lock_for` lock — the same lock
         :meth:`bearer_for` and :meth:`invalidate` use — so a concurrent
         winner's ``bearer_for`` mint-on-miss and a loser's
@@ -773,7 +780,11 @@ class DataTokenManager:
             if cached is None or cached.token != sent_token:
                 return False
             popped = self._cache.pop(key)
-        self._delete_lease(base_url, tenant, expected_token=popped.token)
+            # nexus-vj72t: delete the lease before the lock is released, so
+            # a loser's bearer_for cannot take the lock between the pop and
+            # the delete, miss the cache, and borrow the token this call just
+            # invalidated back out of the lease file (see invalidate).
+            self._delete_lease(base_url, tenant, expected_token=popped.token)
         _log.info("data_token_invalidated", tenant=tenant, endpoint=_host(base_url))
         return True
 

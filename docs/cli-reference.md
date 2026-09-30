@@ -1584,6 +1584,12 @@ resolution, so it can never be picked as a write target. Renaming *back* onto a
 tombstoned name revives it. Before 7.0.0 the row was deleted instead, which silently
 discarded the rename's history (nexus-cecqy).
 
+A write that names the tombstoned collection directly is refused with an error
+naming its successor, and `nx index repo` stops the same way with the remedy
+(nexus-wwuzp). A long-running process that registered the old name before the
+rename checks its cached registration again within 60 s; before 7.67.0 it kept
+writing chunks under the tombstone.
+
 ### nx catalog migrate-fallback
 
 ```
@@ -2239,7 +2245,7 @@ A note whose text is too large for the collection's embedding model's token wind
 |------|-------------|
 | `-c` / `--collection NAME` | Collection name (required) |
 | `--id ID` | Exact 64-char document ID from `nx store list` |
-| `--title TITLE` | Exact title metadata match (deletes all matching chunks) |
+| `--title TITLE` | Title of the document(s) to delete; a chunk another document still holds is kept and that document named |
 | `-y` / `--yes` | Skip confirmation prompt |
 
 Note: IDs shown by `nx store list` are 64 hex chars (the full `sha256(text)` digest — RDR-180). Pre-cohort 32-hex IDs are no longer resolvable at all: the `chash_alias` legacy-reference route was retired at nexus-lgdel.l1 (its beneficiary population reached zero) — re-index the source to mint a canonical 64-hex chash. `--title` delete is paginated and safe for multi-chunk documents. To delete an entire collection use `nx collection delete`.
@@ -2258,13 +2264,15 @@ catalog cleanup for it has already run; check 'nx catalog list' / 'nx catalog re
 
 Run `nx catalog gc` / `nx catalog reconcile` to resolve the ambiguity, then retry the delete.
 
-`--title` reports the SERVER's actual deleted count, not the number of matching chunks found (nexus-o8dil.45): `nx store delete --title 'X' -c Y` prints `Deleted K entries with title 'X' from Y.`, where K can be less than the N chunks matched, because the same anti-join can legitimately retain a chunk another live document's manifest still references. When `K < N`, a second line on stderr reports the shortfall:
+`--title` names documents (nexus-sis0m.5). Each store_put-origin catalog document titled X in Y (or a ghost with no collection that owns one of X's chunks) is tombstoned with its own manifest rows retracted first, then its chunks are deleted. A chunk whose row carries title X but that no catalog document owns (stored before the catalog existed) goes through the chunk-id reap above alongside. Two notes with identical bodies share one chunk, so deleting one of them keeps the chunk for the other. Before nexus-sis0m.5 neither note was removed there, and the command printed `Deleted 0 entries` at exit 0 with X still live. The output is one line per removed document, then the SERVER's actual chunk count (nexus-o8dil.45), then on stderr any chunks kept and who holds them:
 
 ```
-(N-K of N requested were retained -- still referenced by another live document, not deleted.)
+Deleted document 'X' (1.2.3) from Y.
+Deleted K entries with title 'X' from Y.
+  N-K of N chunk(s) kept: still held by 'W' (1.2.4).
 ```
 
-A script that asserts an exact `Deleted N entries` count against the number of chunks it expected to match can now legitimately see a smaller number without that being a bug; check stderr for the retained-count line before treating it as a failure.
+The count line is omitted when K is 0. Exit is non-zero only when X was not removed as asked: a document whose manifest could not be retracted (left live, named on stderr), or uncataloged chunks that were all kept.
 
 `nx store expire` (removes all TTL-lapsed `knowledge__*` entries, no flags) has the same actual-count contract: it prints `Expired N entries.` where N is the count `batch_delete` actually removed, not the number of lapsed rows it found. The reap-before-delete ordering above applies here too: each expired chash's manifest row is retracted before the chunk delete is attempted, so a genuinely shared chash correctly stays retained and correctly stays out of the reported count, rather than being counted as expired while the chunk survives.
 
@@ -2275,7 +2283,7 @@ A script that asserts an exact `Deleted N entries` count against the number of c
 | `-c` / `--collection NAME` | Collection name or prefix (default: `knowledge`) |
 | `--json` | Output as JSON |
 
-**`export` flags:**
+**`export` flags:** (`COLLECTION` is resolved as for every store verb: a bare subject or a two-segment name finds the conformant collection it promotes to, or an existing legacy collection of that name when no conformant counterpart exists; nexus-sis0m.5)
 
 | Flag | Description |
 |------|-------------|
@@ -2288,7 +2296,7 @@ A script that asserts an exact `Deleted N entries` count against the number of c
 
 | Flag | Description |
 |------|-------------|
-| `-c` / `--collection NAME` | Override target collection name (default: from export header) |
+| `-c` / `--collection NAME` | Override target collection name (default: from export header). Resolved as every store verb resolves `-c`: a bare subject or a legacy two-segment name that has no existing collection becomes the conformant name for this install's model, and an existing legacy collection keeps its name unless its conformant counterpart also exists, which wins (nexus-8o7ae, nexus-sis0m.5) |
 | `--remap OLD:NEW` | Path substitution for `source_path` metadata (repeatable) |
 | `--assume-model MODEL` | Override the export header's declared embedding model. Pre-migration `.nxexp` files can carry a wrong label (GH #1370); use this to supply the true model instead of trusting the header |
 | `--skip-existing` | Skip records whose id already exists in the target collection, instead of overwriting. Useful for resuming a partial import |
@@ -2322,9 +2330,17 @@ is otherwise invisible to search and get.
 - A record with no owner at all (an older export predating this field, or a
   live-but-unmanifested chunk the export could not resolve) is grouped under
   one document per import file, keyed by the target collection and file name.
-- `--skip-existing` still ends every record owned: grouping happens before
-  duplicate filtering, since a chunk dropped as an existing duplicate was
-  written by a prior run and must still end up owned by this one.
+- An import never replaces the manifest of a document that already owns
+  chunks (nexus-wbfpw.40). That document's current chunk list is what search
+  shows; an older export imported over a re-put note would otherwise hide the
+  correction. The file's chunks such a document does not own stay unowned:
+  not searchable, and in a `knowledge__` collection removable by the RDR-192
+  reaper after its grace window. The command reports how many and names up
+  to 5 documents. To restore a document from the file instead, delete it
+  first, then import.
+- `--skip-existing` does not change ownership: grouping happens before
+  duplicate filtering, so a chunk dropped as an existing duplicate is owned
+  exactly as it would be without the flag.
 - An owner with no title (an export whose document had none) keeps its
   source URI as the registered document's title.
 - If an owner document or its manifest fails to write, the rest of the
@@ -2607,6 +2623,12 @@ nx hooks install [PATH]
 Hooks run `nx index repo` in the background after each qualifying git operation, appending output to `~/.config/nexus/index.log`. If a hook file already exists, the nexus stanza is appended (sentinel-bounded) without overwriting existing content.
 
 **Hook status values:** `not installed` · `owned` (nexus-created) · `appended` (added to existing hook) · `unmanaged` (no nexus sentinel)
+
+`owned` and `appended` carry `, stanza stale` (and a `!` in place of the `✓`) when the installed stanza differs from the current template. That is the same comparison `nx doctor` uses for its stanza-drift line, and the remedy is the same: `nx hooks update [PATH]`; the repo path in the printed command is shell-quoted.
+
+A hook with a begin sentinel but no end sentinel reports `malformed sentinel (begin without end) — repair by hand: <path>` (also `!`). It is not `stale`: nx cannot tell where the stanza ends, and stripping from the begin marker to end of file could delete your own hook content. `install`, `uninstall` and `update` refuse while any of the three hooks is malformed, naming each file and leaving every hook untouched; `nx doctor` reports the same file as `git hooks (malformed stanza)` with no `nx hooks update` suggestion. Repair the file by hand, then re-run. The hidden `update-all` sweep (and the hook refresh inside `nx upgrade`) skips a malformed hook, prints its path, and reports it as `N malformed hook(s) left for hand repair`, separate from `N repo(s) skipped`; the repo's other hooks are still refreshed. When a repo has both a malformed and a stale hook, `nx doctor`'s drift row says to repair the malformed one first, then run `nx hooks update`.
+
+The four verbs that take a `PATH` (`status`, `install`, `uninstall`, `update`) exit with a one-line error instead of a traceback when `PATH` is not a git repository (`Not a git repository: <path>`) or does not exist (`Not a directory: <path>`).
 
 ### nx hook routing-stats
 
@@ -3633,6 +3655,7 @@ in (all under `~/.config/nexus/` unless noted):
 | `logs/storage_service.log` | Supervisor lifecycle (rotating): start/exit breadcrumbs, service exit codes, restart attempts, PG recoveries, crash backstop. |
 | `logs/storage_service_native.log` | The native service's stdout/stderr (banners, fatal errors). Size-rotated at respawn. |
 | `logs/storage_service.crash.log` | Pre-startup failures of the detached supervisor (import errors, bad argv) and interpreter-fatal tracebacks. Quiet in healthy operation. |
+| `logs/hs_err_<pid>.log` | JVM crash report from a jar launch (`-XX:ErrorFile`, nexus-o5xyx.2). The supervisor's `storage_service_exit_detected` warning names it when one exists; each launch keeps the newest 5. A native launch writes none. |
 | `<pg_data>/pg.log` | The nx-managed Postgres cluster log (`pg_ctl`). |
 
 A supervisor death without a `storage_service_supervisor_exit` breadcrumb
@@ -3795,8 +3818,11 @@ both source versions.
 | `--sn-dir`, `--conexus-dir` | Read the parts from these directories instead of the paths in `~/.claude/plugins/installed_plugins.json` (a dev checkout, or tests). |
 | `--dest` | Write somewhere other than `~/.claude/agents/<name>.md`. |
 
-After installing, allow `mcp__serena-wt__*` in `~/.claude/settings.json`
-permissions; the sn auto-approve covers only the plugin's own server.
+After installing, allow the `mcp__serena-wt__*` tools the agent needs in
+`~/.claude/settings.json` permissions; the sn auto-approve covers only the
+plugin's own server. Name them: the wildcard also allows `jet_brains_debug`
+(arbitrary Groovy/Java in the IDE's JVM), `query_project` and every writer,
+with no prompt.
 `nx doctor` warns (non-fatal) when the generated file lags the installed
 plugins, so drift is caught without anyone remembering `--check`.
 `--check` and `--dry-run` are mutually exclusive.
@@ -3850,12 +3876,28 @@ half-built tree is never mistaken for a working one.
 |------|-------------|
 | `--keep N` | Generations to retain (default 3). The four never-delete rules still apply on top of it: the generation `current` points at, the previous one (free rollback), any generation with a live holder, and the generation hosting the running installer. |
 | `--version X.Y.Z` | Install this version instead of whatever the source resolves to. **One-shot** — the pin is not sticky, and the next bare `nx self install` resolves the current release. Downgrades are safe by construction here: they build a new generation and flip, leaving the old tree for its holders. |
+| `--extras NAME` | Extra(s) to add, repeatable or comma-separated. Merged with the extras the receipt already carries, never replacing them (nexus-pffc4; see above). |
 | `--dry-run` | Print the build command and stop. |
 
 Extras travel in the generation's receipt and are threaded into the build
 explicitly, so an upgrade never silently drops `[local]` (and with it the
-768-dim embedder). There is no flag that *adds* an extra to an existing
-generation — extras are fixed when the install is created.
+768-dim embedder). An existing generation's extras never change; `--extras`
+adds one by building the next generation with it.
+
+**A build that cannot reach the package index says so (nexus-12pyx).** When
+the generation build fails with a network-shaped error (DNS, connect,
+timeout, retry exhaustion), the command prints, above uv's own output: the
+index URL uv tried (scheme, host, port and path only; credentials, query and
+fragment are dropped), where that host is set (`UV_INDEX_URL`,
+`UV_DEFAULT_INDEX`, `UV_INDEX` or `PIP_INDEX_URL` by name, `uv.toml` or
+`pip.conf` by path, or that no setting names it), that the running install was
+not changed, and the remedy: reach the index (connect the VPN it needs), or
+build once from PyPI with `UV_INDEX_URL=https://pypi.org/simple nx self install`.
+A certificate failure, or a set `HTTPS_PROXY`/`ALL_PROXY`, gets proxy and
+certificate advice instead (`SSL_CERT_FILE`, `UV_NATIVE_TLS=1`). A local-mode
+upgrade also downloads the pinned engine from GitHub releases, which the same
+network may block. Resolver failures and other errors print uv's output as
+before.
 
 It distinguishes THREE sites, not two (nexus-gu9zo). From a generation it
 builds the next one, as above. From a **legacy `uv tool install conexus`
@@ -4282,12 +4324,12 @@ Non-destructive read from `SUBSPACE`. Matches on equality over whatever subset o
 | `-n N` | Max rows to return (default 1). One engine read returns at most 300; with `--newest`, how many of the newest rows to keep |
 | `--since CREATED_AT,ID` | Start after this cursor, the one a truncation note prints. Both halves are required |
 | `--all` | Page through every matching row, oldest first, up to `--max-rows` (`-n` is ignored) |
-| `--newest` | Return the newest `-n` rows instead of the oldest (pages the subspace, up to `--max-rows`) |
-| `--max-rows N` | Hard bound on rows read by `--all` / `--newest` (default 10000) |
+| `--newest` | Return the newest `-n` rows instead of the oldest, by one descending engine read (an engine without it is paged oldest-first up to `--max-rows`) |
+| `--max-rows N` | Hard bound on rows read by `--all`, and by `--newest` against an engine without descending reads (default 10000) |
 | `--timeout-s SECONDS` | Seconds to park when nothing matches immediately; 0 (default) never blocks |
 | `--json` | Output as a JSON array |
 
-Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` and `--newest` print the same marker when they stop at `--max-rows` with rows left, and `--newest` then exits 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
+Rows come back OLDEST first. A plain read returns one page; when more rows exist past it, a line on stderr beginning `nx tuple rd: truncated` says more may exist and names the `--since` cursor for the next page. `--all` prints the same marker when it stops at `--max-rows` with rows left. `--newest` asks the engine for a descending read (nexus-kp5q3), so it returns the real newest rows whatever the subspace size; asking for more than the engine's read cap (300 by default) returns the newest cap-many rows with the marker and a note naming the cap, exit 0. Only against an engine that predates the read does it page oldest-first, print the marker at `--max-rows` and exit 3, since the rows it printed are not the newest. Stdout stays a JSON array under `--json` either way (nexus-sh1ea).
 
 ### nx tuple in
 

@@ -495,7 +495,9 @@ class FakeCatalogHandler(BaseHTTPRequestHandler):
                     "legacy_grandfathered": "__" not in name,
                     "superseded_by": "", "superseded_at": "",
                     "created_at": "2026-07-01T00:00:00+00:00",
-                    "dimension": 1024, "lifecycle_state": "live",
+                    # No dimension/lifecycle_state: getCollection builds
+                    # collRowWithAspects, which only /collections/list's
+                    # collRowWithLifecycle widens (nexus-oy689).
                     # nexus-l46pu: aspects_enabled is nullable -- None here
                     # mirrors an unset row, never coerced to False (round-2
                     # fix, Finding A).

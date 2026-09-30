@@ -16,9 +16,12 @@ that literal syntax inside inline backticks, and this very repo's own
 ``docs/cli-reference.md`` does. Both are handled HERE, once, and BOTH
 are opt-in keyword arguments of :func:`iter_plain_lines`
 (``mask_inline_code``, ``skip_indented_code``): a consumer scanning for
-link syntax wants them, a consumer scanning for names (ref_scanner,
-citations) does not, since a name in backticks or in an indented
-paragraph is still a real reference. When enabled:
+link syntax wants them, a consumer scanning for names (ref_scanner)
+does not, since a name in backticks or in an indented paragraph is still
+a real reference. The citation scanner sits between the two: it masks
+inline code, because a citation quoted in backticks is syntax rather than
+a citation (nexus-0qqcu), but keeps indented lines, which are usually
+list-continuation prose. When enabled:
 
 * **Inline code spans** — `` `...` `` or `` ``...`` `` (CommonMark:
   closing delimiter must be the SAME backtick-run length as the

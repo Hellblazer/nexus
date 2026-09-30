@@ -53,7 +53,7 @@ class TestPublishAndRead:
 
 
 class TestReadInfo:
-    """The TTL-unaware raw read (round 5, nexus.hooks.mcp_connect_check's signal)."""
+    """The TTL-unaware raw read, used by the owner-scoped clear (nexus-qxyqz)."""
 
     def test_published_marker_yields_this_process_pid(self, tmp_path: Path) -> None:
         publish_mcp_connect_marker("sess-G", tmp_path, ttl_seconds=3600)
@@ -99,3 +99,38 @@ class TestClear:
         publish_mcp_connect_marker("sess-F", tmp_path, ttl_seconds=3600)
         clear_mcp_connect_marker("sess-F", tmp_path)
         clear_mcp_connect_marker("sess-F", tmp_path)  # must not raise
+
+
+class TestClearIsOwnerScoped:
+    """nexus-qxyqz: on a ``/mcp`` reconnect the NEW ``nx-mcp`` publishes its
+    marker (same session id) while the OLD one is still tearing down, and the
+    old one's teardown unlink used to delete the new one's marker. (That made
+    the since-deleted ``mcp-connect-check`` warning read a live server as
+    disconnected; the owner-scoped clear stays because it is correct for any
+    reader of the marker.)
+    """
+
+    def _write_marker_for(self, session_id: str, config_dir: Path, pid: int) -> Path:
+        import json
+
+        publish_mcp_connect_marker(session_id, config_dir, ttl_seconds=3600)
+        path = config_dir / f"mcp_connect_marker.{session_id}"
+        data = json.loads(path.read_text())
+        data["pid"] = pid
+        path.write_text(json.dumps(data))
+        return path
+
+    def test_clear_leaves_a_successor_processes_marker(self, tmp_path: Path) -> None:
+        successor_pid = os.getppid()  # a live pid that is not this process
+        assert successor_pid != os.getpid()
+        path = self._write_marker_for("sess-R", tmp_path, successor_pid)
+        clear_mcp_connect_marker("sess-R", tmp_path)  # the OLD process's teardown
+        assert path.exists()
+        info = read_mcp_connect_marker_info("sess-R", tmp_path)
+        assert info is not None and info.pid == successor_pid
+
+    def test_clear_removes_a_malformed_marker(self, tmp_path: Path) -> None:
+        path = tmp_path / "mcp_connect_marker.sess-M"
+        path.write_text("not json")
+        clear_mcp_connect_marker("sess-M", tmp_path)
+        assert not path.exists()

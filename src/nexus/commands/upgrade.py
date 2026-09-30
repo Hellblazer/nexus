@@ -524,19 +524,23 @@ def _refresh_all_git_hooks() -> None:
     upgrade. Silent when no managed hooks exist anywhere.
     """
     try:
-        from nexus.commands.hooks import refresh_all_managed_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+        from nexus.commands.hooks import _sweep_tail, refresh_all_managed_hooks  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
         summary = refresh_all_managed_hooks(echo=False)
+        # Skipped repos and malformed hooks are worded apart (nexus-sis0m.6):
+        # a partly refreshed repo is not "skipped".
+        tail = _sweep_tail(summary)
+        if tail != ".":
+            tail = tail[:-1] + " (see `nx hooks update-all`)."
         if summary["refreshed"]:
             click.echo(
                 f"\nRefreshed {summary['refreshed']} git hook(s) across "
-                f"{summary['repos']} repo(s)"
-                + (
-                    f"; {summary['errors']} repo(s) skipped "
-                    "(see `nx hooks update-all`)."
-                    if summary["errors"]
-                    else "."
-                )
+                f"{summary['repos']} repo(s)" + tail
+            )
+        elif summary.get("malformed"):
+            click.echo(
+                f"\n{summary['malformed']} malformed hook(s) left for hand "
+                "repair (see `nx hooks update-all`)."
             )
     except Exception as exc:  # noqa: BLE001 — best-effort git-hook refresh; failure logged via _log.warning and upgrade continues
         _log.warning("upgrade_git_hook_refresh_failed", error=str(exc))

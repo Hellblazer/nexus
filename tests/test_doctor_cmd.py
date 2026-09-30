@@ -502,8 +502,11 @@ def test_doctor_hooks_installed(runner):
     assert "post-commit" in result.output
 
 
-def test_doctor_reports_a_malformed_stanza_as_drift(runner):
-    """Begin sentinel, no end sentinel: previously green by accident."""
+def test_doctor_reports_a_malformed_stanza_as_malformed_not_drift(runner):
+    """Begin sentinel, no end sentinel: previously green by accident, then
+    called "stale" with an ``nx hooks update`` remedy that cannot repair it
+    (nexus-sis0m.6). It is its own state, agreeing with ``nx hooks status``:
+    repair by hand, no update suggestion."""
     reg = MagicMock()
     reg.all.return_value = ["/some/repo"]
     with tempfile.TemporaryDirectory() as td:
@@ -514,7 +517,10 @@ def test_doctor_reports_a_malformed_stanza_as_drift(runner):
             patch("nexus._git_hooks_meta.effective_hooks_dir",
                   return_value=hooks_dir),
         ])
-    assert "stanza differs" in result.output
+    assert "malformed sentinel (begin without end)" in result.output
+    assert "repair by hand" in result.output
+    assert "stanza differs" not in result.output
+    assert "nx hooks update" not in result.output
 
 
 def test_doctor_hooks_not_installed(runner):

@@ -41,12 +41,10 @@ stale -- and stays exactly where it is until moved back deliberately.
 
 
 
-## Awaiting the next release or plugin cut (pinned: v7.66.0)
+## Awaiting the next release or plugin cut (pinned: v7.67.0)
 
 ONE PATH PER BULLET, on the bullet's FIRST line.
 
 ## Deferred to the next client release
 
-_Empty. The entries deferred here (nexus-5l8i8, nexus-xxvv3, nexus-3lc5s,
-nexus-smsau, nexus-egm7p) shipped with the 7.64.0 client release, together with
-nexus-sxiay's new tumbler-footnotes skill._
+_Empty. The entries deferred here (nexus-nmzsg, nexus-qxyqz, nexus-0r5l8) shipped with the 7.67.0 client release, together with nexus-2lf1v's sn reads-only auto-approve._
