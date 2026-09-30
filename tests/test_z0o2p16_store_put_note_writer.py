@@ -539,7 +539,9 @@ class TestARealEngineRefusalLeavesTheOldManifest:
 # ── the command writes through put_note and registers nothing itself ─────────
 
 _SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "nexus" / "commands" / "store.py"
-_SPLIT_WRITE_NAMES = frozenset({"_catalog_store_hook_tracked", "catalog_store_hook_tracked"})
+_SPLIT_WRITE_NAMES = frozenset({
+    "_catalog_store_hook_tracked", "catalog_store_hook_tracked", "put", "existing_ids",
+})
 
 
 def test_put_cmd_calls_put_note_and_does_not_register_the_catalog_row_itself() -> None:

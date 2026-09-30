@@ -249,7 +249,8 @@ class HookRegistry:
         file-agnostic consumers like taxonomy/chash whose per-call cost
         is round-trip-dominated). ``grain="all"`` (default) fires every
         hook regardless — every pre-existing caller (legacy per-file
-        indexing, ``nx store import``) is behaviorally unchanged.
+        indexing, ``nx store import``, ``note_write.fire_note_chains`` for
+        the four note writers) is behaviorally unchanged.
 
         *manifest_complete* (nexus-5xn3k.4, RUNFENCE) — ``{doc_id:
         content_hash}`` for documents the PRODUCER asserts are WHOLLY

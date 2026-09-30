@@ -778,6 +778,75 @@ class TestPutNote:
         assert fail.call_count == 1
         assert rollback.call_count == (1 if manifest_empty else 0)
 
+    def test_a_minted_row_whose_own_removal_fails_keeps_no_stamp_for_a_chunk_never_written(self, vec):
+        """Case E: the write is refused with an empty manifest and the row this call minted cannot be
+        deleted (the same outage). The surviving row must not keep ``meta.doc_id`` naming the first chash
+        of a chunk that does not exist, or a later note that owns and drops that chash has it kept by
+        ``live_note_chashes`` as if it were a manifest-less note."""
+        import nexus.catalog.note_write as nw
+        from nexus.catalog.factory import make_catalog_reader
+        from unittest.mock import patch
+
+        content = "z0o2p12 case E survivor"
+        refusal = NoteWriteError(catalog_doc_id="x", collection=_COLLECTION, reason="refused",
+                                 manifest_empty=True)
+        with patch("nexus.catalog.note_write.write_note", side_effect=refusal), \
+             patch("nexus.catalog.store_hook.rollback_minted_catalog_entry", return_value=False) as rollback:
+            out = put_note(content=content, collection=_COLLECTION, title="z0o2p12-case-e")
+        assert out.status == nw.NOT_LANDED and out.minted is True
+        assert rollback.call_count == 1
+        entry = make_catalog_reader().resolve(out.catalog_doc_id)
+        assert entry is not None, "control: the row survived its failed removal"
+        assert (entry.meta or {}).get("doc_id", "") == "", (
+            f"the row still names chunk {(entry.meta or {}).get('doc_id')!r}, which was never written")
+        assert out.doc_id == _chash(content), "control: the stamp catalog_store_hook_tracked wrote was that chash"
+
+    def test_an_unexpected_failure_after_registration_restores_a_reconciled_rows_stamp(self, vec):
+        """The generic-exception branch re-raises, but a row the call reconciled onto (not minted) gets
+        the identity stamp it changed put back, exactly as the refused-write branch does."""
+        from nexus.catalog.factory import make_catalog_reader
+        from unittest.mock import patch
+
+        old = "z0o2p12 reconciled row original"
+        new = "z0o2p12 reconciled row replacement"
+        title = "z0o2p12-reconciled-odd"
+        first = put_note(content=old, collection=_COLLECTION, title=title)
+        assert first.status == "stored"
+        with patch("nexus.catalog.note_write.write_note", side_effect=RuntimeError("odd")), \
+             patch("nexus.doc_indexer._fence_fail"):
+            with pytest.raises(RuntimeError, match="odd"):
+                put_note(content=new, collection=_COLLECTION, title=title)
+        entry = make_catalog_reader().resolve(first.catalog_doc_id)
+        assert (entry.meta or {}).get("doc_id") == _chash(old), "the stamp must be the pre-call one"
+
+    def test_a_skipped_engine_sweep_is_warned_about_with_the_counts(self, vec):
+        """The engine sweeps what a supersede dropped after the commit and reports ``sweep_skipped`` when
+        that sweep errored (the old chunk then stays, hidden by live(c)). Nothing else tells the operator."""
+        from structlog.testing import capture_logs
+
+        cat = _SweepCat(swept=0, sweep_skipped=1, dropped=["a" * 64, "b" * 64])
+        with capture_logs() as logs:
+            out = put_note(content="z0o2p12 sweep skipped", collection=_COLLECTION,
+                           title="z0o2p12-sweep-skipped", cat=cat)
+        assert out.status == "stored"
+        events = [e for e in logs if e["event"] == "note_sweep_skipped"]
+        assert len(events) == 1, logs
+        ev = events[0]
+        assert ev["log_level"] == "warning"
+        assert (ev["doc_id"], ev["collection"]) == (out.doc_id, _COLLECTION)
+        assert (ev["swept"], ev["sweep_skipped"], ev["dropped"]) == (0, 1, 2)
+
+    def test_a_shared_piece_the_sweep_legitimately_keeps_does_not_warn(self, vec):
+        """swept < dropped with no error is a chunk another document owns: kept by design."""
+        from structlog.testing import capture_logs
+
+        cat = _SweepCat(swept=1, sweep_skipped=0, dropped=["a" * 64, "b" * 64])
+        with capture_logs() as logs:
+            out = put_note(content="z0o2p12 sweep kept", collection=_COLLECTION,
+                           title="z0o2p12-sweep-kept", cat=cat)
+        assert out.status == "stored"
+        assert [e for e in logs if e["event"] == "note_sweep_skipped"] == []
+
     def test_a_bad_ttl_and_an_oversized_note_fail_before_any_row_is_minted(self, vec):
         from nexus.errors import PutOversizedError
         from unittest.mock import patch
@@ -812,6 +881,21 @@ class _CannedCat:
 
     def fail_index_run(self, doc_id, error):
         return {}
+
+
+class _SweepCat(_CannedCat):
+    """A catalog writer whose ``write_manifest_many`` answers for whatever document it is given, with
+    the engine's sweep counts and drop list as given."""
+
+    def __init__(self, *, swept: int, sweep_skipped: int, dropped: list[str]) -> None:
+        super().__init__({})
+        self._swept, self._sweep_skipped, self._dropped = swept, sweep_skipped, dropped
+
+    def write_manifest_many(self, docs, **kwargs):
+        doc = docs[0][0]
+        return {"failed_doc_ids": [], "chunks_written": 1, "swept": self._swept,
+                "sweep_skipped": self._sweep_skipped,
+                "dropped_chashes": {doc: list(self._dropped)}, "dropped_count": {doc: len(self._dropped)}}
 
 
 _DOC = "1.9.9"

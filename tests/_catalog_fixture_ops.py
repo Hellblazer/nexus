@@ -293,6 +293,7 @@ def seed_note_manifest(catalog_doc_id: str, manifest_metadatas: list[dict], *, c
     from nexus.catalog.note_write import note_manifest_rows
 
     rows = note_manifest_rows(manifest_metadatas)
+    assert rows, "seed_note_manifest: no chunk_text_hash in the metadatas, nothing to catalog"
     cat = ActiveCatalog()
     cat.atomic_manifest_replace(catalog_doc_id, rows, collection=collection)
     cat.resync_chunk_count_cache(catalog_doc_id)

@@ -37,9 +37,8 @@ class ManifestVerifyUncertainError(RuntimeError):
     RDR-223) when the catalog reader used to verify was unavailable, or the
     verify READ ITSELF raised, on every one of the bounded retry attempts
     (:func:`_read_manifest_rows_with_retry`), or when the write returned without
-    being stamped complete. This is distinct from a plain ``RuntimeError`` or
-    ``NoteWriteError``, both of which mean the write is CONFIRMED not to have
-    landed. This one means the outcome is UNKNOWN: the write may have landed and
+    being stamped complete. This is distinct from ``NoteWriteError``, which
+    means the write is CONFIRMED not to have landed. This one means the outcome is UNKNOWN: the write may have landed and
     simply could not be observed, so callers report the uncertainty and never
     treat the note as absent. See :mod:`nexus.catalog.note_write`'s module
     docstring for the outcome split.
@@ -989,10 +988,9 @@ def catalog_store_hook_tracked(
         if source_uri is not None:
             existing_by_uri = reader.by_source_uri(source_uri)
             if existing_by_uri is not None:
-                # nexus-k54nk fix-round 1 (T2 nexus/critique-k54nk Critical
-                # 1, SETTLED against T2 nexus/review-k54nk-code by direct
-                # test: TestK54nkRollbackLiveNoteGuard::
-                # test_case_a_content_changing_repute_self_collision_is_fixed):
+                # nexus-k54nk fix-round 1 (T2 nexus/critique-k54nk Critical 1):
+                # pinned now by b6enc's TestZ0o2p12McpFailedReput::
+                # test_a_failed_reput_leaves_the_old_note_whole_and_restores_the_stamp.
                 # THIS branch is the mainline note-edit path and fires on
                 # ANY re-put of an existing title, regardless of whether
                 # content changed — capture the row's meta.doc_id AS IT
@@ -1199,33 +1197,32 @@ def rollback_minted_catalog_entry(tumbler: str, *, original_error: str = "") -> 
 def restore_pre_call_stamp(
     catalog_doc_id: str, pre_call_doc_id: str, stamped_doc_id: str,
 ) -> None:
-    """Undo :func:`catalog_store_hook_tracked`'s own pre-manifest-write
-    stamp on a confirmed-failed call (nexus-k54nk fix-round 2, T2
-    ``nexus/review-k54nk-code-r2`` Significant 1 / ``nexus/critique-k54nk-r2``
-    Significant 1, both ship-blocker-adjacent).
+    """Undo :func:`catalog_store_hook_tracked`'s own pre-write identity
+    stamp on a refused or failed note write (nexus-k54nk fix-round 2).
 
     Every RECONCILE branch in :func:`catalog_store_hook_tracked` (chash-
     dedup, ``by_source_uri``, ghost-by-title) stamps *catalog_doc_id*'s
-    document's ``meta.doc_id`` to *stamped_doc_id`` (``doc_ids[0]`` — the
-    not-yet-manifested chash the call is about to try) BEFORE the manifest
-    write is even attempted. Left in place after a confirmed failure, that
-    stamp names a chash the failed write left without a live owner
-    (no longer a live identity for this document):
-    the manifest-blind :func:`nexus.indexer_utils.live_note_chashes`
-    predicate then treats the document as permanently note-shaped for a
-    chash that no longer exists anywhere, and a LATER write that happens
-    to collide with it is wrongly protected — concretely, an identical-
-    content RETRY of a confirmed-failed call captures the dangling value
-    as ITS OWN ``pre_call_doc_id`` and re-protects the very chunk it is
-    trying to delete, reopening nexus-wbfpw.28 on a two-consecutive-
-    identical-failures sequence.
+    document's ``meta.doc_id`` to *stamped_doc_id* (``doc_ids[0]``, the
+    first chash of the note about to be written) BEFORE the write is
+    attempted. Left in place after a write that did not land, that stamp
+    names a chunk that was never written.
 
-    Restores *catalog_doc_id*'s ``meta.doc_id`` to *pre_call_doc_id* — the
-    same document's identity as it stood before this call touched it — or
+    This function exists only because consumers of
+    :func:`nexus.indexer_utils.live_note_chashes` (``nx t3 gc``, the
+    ``mcp_infra`` supersede sweeps and the prune sites) still read a
+    document's ``meta.doc_id`` as "a manifest-less note owns this chash"
+    and so protect a chash the stamp names from deletion, forever. A
+    dangling stamp therefore over-retains: a later note that owns and then
+    drops that chash has it kept. It is retired with nexus-wbfpw.22, which
+    removes those guards together with ``pre_call_doc_id_out`` and its test.
+
+    Restores *catalog_doc_id*'s ``meta.doc_id`` to *pre_call_doc_id*, the
+    same document's identity as it stood before this call touched it, or
     ``""`` (an unstamped document's own shape, per every reconcile
     branch's own ``.get("doc_id", "")`` default) when this call minted a
-    brand-new row with no prior identity to protect (e.g. Case E: a
-    minted row whose own delete then failed).
+    brand-new row with no prior identity and the row's removal failed.
+    :func:`nexus.catalog.note_write.put_note` calls it on every failure
+    leg that leaves the row standing.
 
     COMPARE-AND-SET, not a blind write: only when the document's CURRENT
     ``meta.doc_id`` still equals *stamped_doc_id* (this call's own,

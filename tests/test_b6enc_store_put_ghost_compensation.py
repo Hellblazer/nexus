@@ -1,27 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """nexus-b6enc (GH #1419 Issue 8): silent store_put data loss — client side.
 
-Four seams, all locked here:
+Every note writer (MCP ``store_put``, ``nx store put``, ``nx memory promote``, the recovery
+import) registers a catalog row, then writes the note's chunks and owner rows in ONE request
+through ``note_write.put_note`` (RDR-223; the split chunk-put-then-manifest-write path these
+tests were first written for was deleted at nexus-z0o2p.32). What is locked here:
 
-- **C2 ghost-register compensation**: both MCP ``store_put`` and CLI
-  ``nx store put`` register the catalog row BEFORE ``t3.put``. A put
-  failure must delete the row minted IN THIS CALL (never a pre-existing
-  dedup target) and still surface the original error.
-- **C3 manifest leg out of best-effort**: the manifest write no longer
-  rides the swallowing ``fire_batch`` chain for the store_put producer;
-  it is called directly and VERIFIED. Failure yields an explicit error,
-  never a bare "Stored:" — updated by RDR-192 Step 3a (nexus-wbfpw.28,
-  Sam's ruling 2026-09-26) to roll back the chunk it just wrote rather
-  than the original "stored ... but NOT cataloged" result that left it
-  recoverable in T3; see the "RDR-192 Step 3a" section below for the
-  catalog-registration-failure half of that same contract, the
-  concurrent-identical-content race guard, and the recovery-bundle
-  importer's own two failure legs.
-- **C4 delete asymmetry**: MCP ``store_delete`` removes the
-  store_put-origin catalog row (manifest cascades) so no row survives
-  with a stale chunk_count.
-- Success parity: chunk_count == manifest count == T3 chunks, even with
-  every fire_* chain dead (the manifest leg is independent now).
+- **Ghost-register compensation**: a write that fails must delete the row minted IN THIS CALL
+  (never a pre-existing dedup target) and still surface the original error; a row reconciled
+  onto keeps its identity stamp; an unknown outcome (``ManifestVerifyUncertainError``) rolls
+  nothing back.
+- **The failure is explicit**: a refused or failed write is an error result, never a bare
+  "Stored:", and leaves no chunk without its owner (RDR-192 Step 3a, nexus-wbfpw.28).
+- **Catalog-registration failure**: nothing is written for a note with no catalog row, on every
+  producer including the recovery-bundle importer.
+- **Delete asymmetry**: MCP ``store_delete`` removes the store_put-origin catalog row
+  (manifest cascades) so no row survives with a stale chunk_count.
+- Success parity: chunk_count == manifest count == T3 chunks, even with every fire_* chain dead.
 
 Tests use the live (service) catalog via the same factories the hooks use
 + a real in-memory T3; mocks appear only at the failure-injection points,

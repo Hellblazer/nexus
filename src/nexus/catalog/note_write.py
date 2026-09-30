@@ -661,7 +661,8 @@ def put_note(
        the completion stamp rides the request.
     4. On :class:`NoteWriteError`: ``_fence_fail``; remove the row this call minted, but only when
        its manifest is empty (a concurrent writer's version means the row is no longer ours), or,
-       for a row this call reconciled onto, put back the identity stamp it changed.
+       for a row this call reconciled onto, put back the identity stamp it changed; a minted row
+       whose removal fails has its stamp cleared instead.
        On :class:`StampRefusedError` (the engine accepted the write and refused the completion
        stamp): UNCERTAIN with ``stamp_refused`` set, and NO ``_fence_fail``: the writer's rule
        leaves the fence ``indexing`` so no failed-document heal runs; the refusal was recorded by
@@ -752,18 +753,41 @@ def put_note(
             collection=collection, manifest_empty=exc.manifest_empty, refusal=exc.refusal,
             error=out.reason[:300], cause_chain=_cause_chain(exc))
         if out.minted:
-            if exc.manifest_empty:
-                sh.rollback_minted_catalog_entry(doc, original_error=out.reason)
+            if exc.manifest_empty and not sh.rollback_minted_catalog_entry(doc, original_error=out.reason):
+                # The row this call minted could not be removed and survives with meta.doc_id naming
+                # the first chash of a chunk that was never written: clear it (a minted row had no
+                # prior identity), or live_note_chashes treats it as a manifest-less note.
+                sh.restore_pre_call_stamp(doc, "", out.doc_id)
         else:
             sh.restore_pre_call_stamp(doc, pre_call.get("doc_id", ""), out.doc_id)
         return out
     except Exception as exc:
         _fence_fail(doc, str(exc))
         if out.minted:
-            sh.rollback_minted_catalog_entry(doc, original_error=str(exc))
+            if not sh.rollback_minted_catalog_entry(doc, original_error=str(exc)):
+                sh.restore_pre_call_stamp(doc, "", out.doc_id)
+        else:
+            sh.restore_pre_call_stamp(doc, pre_call.get("doc_id", ""), out.doc_id)
         raise
     out.status, out.write = STORED, write
+    _warn_if_sweep_skipped(out, write)
     return out
+
+
+def _warn_if_sweep_skipped(out: PutNoteOutcome, write: NoteWriteResult) -> None:
+    """Say so when the engine's post-commit sweep of what a supersede dropped errored.
+
+    ``sweep_skipped`` is the engine's ``errored`` flag for the note's sweep: the dropped chunks then
+    stay in T3, hidden by live(c) until the reaper finds them, and nothing else reports it (the client
+    reap this replaced logged its own failure). ``swept`` below the drop count with no error is a chunk
+    another document owns, kept by design, so it is not a warning.
+    """
+    if not write.sweep_skipped:
+        return
+    _log.warning(
+        "note_sweep_skipped", doc_id=out.doc_id, catalog_doc_id=out.catalog_doc_id,
+        collection=out.collection, swept=write.swept, sweep_skipped=write.sweep_skipped,
+        dropped=len(write.dropped_chashes or []))
 
 
 # ── the words and the firing every producer shares ───────────────────────────
