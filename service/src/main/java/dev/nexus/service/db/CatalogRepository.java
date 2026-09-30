@@ -8563,9 +8563,12 @@ public final class CatalogRepository {
      * same time, consistent and wrong. That is not theoretical: {@code gc_audit} landed
      * 2026-07-30 and this list, written the next day, omitted it. The gate is
      * {@code tests/catalog/test_collection_scoped_tables_schema_parity.py}, which asks
-     * {@code information_schema} directly. It lives in pytest because {@code service-ci} is
-     * NOT a required check on develop or main (nexus-hq9na) — a Java test of this invariant
-     * would be advisory at merge, which for this defect class is no gate at all (nexus-20890).
+     * {@code information_schema} directly. It lives in pytest because, when it was written,
+     * {@code service-ci} was NOT a required check on develop or main (nexus-hq9na) — a Java
+     * test of this invariant would have been advisory at merge, which for this defect class is
+     * no gate at all (nexus-20890). The Java job is a required check on both branches now
+     * (verified 2026-09-30, nexus-rjk2a); the gate stays in pytest, which rides
+     * {@code pytest-gate}, also required.
      *
      * <p>Tables deliberately NOT here, each documented with a reason in that gate's
      * {@code _DOCUMENTED_EXCLUSIONS}: {@code pdf_pipeline} (transient work queue) and

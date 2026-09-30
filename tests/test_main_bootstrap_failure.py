@@ -14,9 +14,12 @@ never bound, from the one code path every install runs. Fixing the arbiter and p
 at the ``TokenStore`` layer proves ``TokenStore``, NOT the boot — a test below the layer
 production uses proves the layer, not the feature. This is the missing layer.
 
-WHY PYTEST AND NOT JUNIT. ``service-ci`` is not a required check on develop or main
-(nexus-hq9na), so a Java version of this would be advisory at merge — no gate at all for a
-class whose whole point is that its failures are silent. ``pytest-gate`` IS required.
+WHY PYTEST AND NOT JUNIT. When this was written ``service-ci`` was not a required check
+on develop or main (nexus-hq9na), so a Java version of this would have been advisory at
+merge — no gate at all for a class whose whole point is that its failures are silent.
+That premise no longer holds: the Java job is a required check on both branches
+(verified 2026-09-30, nexus-rjk2a). The file stays in pytest, which
+rides ``pytest-gate``, also required.
 Same reasoning as tests/catalog/test_collection_scoped_tables_schema_parity.py.
 
 WHY IT SPAWNS THE JAR. Extracting ``Main`` into a testable ``Bootstrap.run()`` would cover
