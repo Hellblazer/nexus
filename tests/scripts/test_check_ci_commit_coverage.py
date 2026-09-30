@@ -1607,9 +1607,19 @@ def test_both_sources_stale_is_still_cannot_verify(
     )
     assert rc == 2
     err = capsys.readouterr().err
-    assert "does not contain a run for" in err
-    assert "unfiltered" in err and "filtered" in err, (
-        "the message must say both sources were tried"
+    # The per-attempt notes already say "unfiltered", so the assertion must
+    # be on the FINAL message alone (the single line starting CANNOT VERIFY).
+    final = [ln for ln in err.splitlines() if ln.startswith("CANNOT VERIFY")]
+    assert len(final) == 1, final
+    assert "does not contain a run for" in final[0]
+    assert "tried filtered and unfiltered" in final[0], (
+        "the final message must say both sources were tried"
+    )
+    assert "last unfiltered fetch" in final[0], (
+        "the final message must report what the unfiltered list returned"
+    )
+    assert "not the intermittent stale page" not in final[0], (
+        "the old wording contradicts the measured cause"
     )
     assert router.filtered_calls == gate.WINDOW_FETCH_ATTEMPTS
     assert len(sleep.calls) == gate.WINDOW_FETCH_ATTEMPTS - 1
@@ -1640,7 +1650,7 @@ def test_the_heads_run_indexed_late_is_found_on_a_later_attempt(
 ) -> None:
     """The run genuinely missing from BOTH sources at first (the original
     indexing race) is still picked up by the backoff loop on a later
-    attempt, via either source."""
+    attempt; here it is the unfiltered list that gains the run."""
     repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
 
     class _LateRouter(_TwoSourceRouter):
@@ -1660,3 +1670,162 @@ def test_the_heads_run_indexed_late_is_found_on_a_later_attempt(
     )
     assert rc == 0
     assert len(sleep.calls) == 1
+
+
+# ── nexus-j94u4 fix round: fallback errors, empty windows, truncation ──────
+
+
+class _ErroringFallbackRouter(_TwoSourceRouter):
+    """Raises URLError on the first *error_count* unfiltered fetches."""
+
+    def __init__(self, *args, error_count: int, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.error_count = error_count
+        self.unfiltered_attempts = 0
+
+    def __call__(self, url: str) -> dict:
+        if "/runs?" in url and "event=push" not in url:
+            self.unfiltered_attempts += 1
+            if self.unfiltered_attempts <= self.error_count:
+                raise urllib.error.URLError("simulated fallback outage")
+        return super().__call__(url)
+
+
+def _fresh_unfiltered(tip_sha: str, floor_sha: str) -> list[dict]:
+    return [_raw(3, tip_sha), _raw(2, floor_sha)]
+
+
+def test_a_fallback_error_is_a_miss_on_that_attempt_not_the_end_of_the_audit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _ErroringFallbackRouter(
+        stale,
+        _fresh_unfiltered(tip_sha, fresh[1]["head_sha"]),
+        jobs,
+        error_count=1,
+    )
+    sleep = _FakeSleep()
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=sleep,
+    )
+    err = capsys.readouterr().err
+    assert rc == 0, err
+    assert router.filtered_calls == 2, "attempt 2 must have happened"
+    assert len(sleep.calls) == 1
+    assert "simulated fallback outage" in err, "the error is logged, not swallowed"
+
+
+def test_every_attempt_erroring_on_the_fallback_is_cannot_verify_naming_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _ErroringFallbackRouter(
+        stale,
+        _fresh_unfiltered(tip_sha, fresh[1]["head_sha"]),
+        jobs,
+        error_count=99,
+    )
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=_FakeSleep(),
+    )
+    assert rc == 2
+    assert router.filtered_calls == gate.WINDOW_FETCH_ATTEMPTS
+    final = [
+        ln for ln in capsys.readouterr().err.splitlines()
+        if ln.startswith("CANNOT VERIFY")
+    ]
+    assert len(final) == 1, final
+    assert "simulated fallback outage" in final[0]
+
+
+def test_an_empty_filtered_window_goes_to_the_fallback_too(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _TwoSourceRouter(
+        [], _fresh_unfiltered(tip_sha, fresh[1]["head_sha"]), jobs
+    )
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=_FakeSleep(),
+    )
+    assert rc == 0, capsys.readouterr().err
+
+
+def test_no_runs_found_is_reported_only_when_the_unfiltered_list_is_empty_too(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _TwoSourceRouter([], [], jobs)
+    sleep = _FakeSleep()
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=sleep,
+    )
+    assert rc == 2
+    assert "no push-triggered ci.yml runs found" in capsys.readouterr().err
+    assert sleep.calls == [], "a wrong branch/workflow name is not retried"
+
+
+def test_an_empty_filtered_window_with_an_erroring_fallback_is_not_no_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The unfiltered list was never actually seen empty, so 'no runs
+    found' would be a claim the audit did not verify."""
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _ErroringFallbackRouter([], [], jobs, error_count=99)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=_FakeSleep(),
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "no push-triggered" not in err
+    assert "simulated fallback outage" in err
+
+
+def test_the_fallback_is_not_touched_when_the_filtered_window_reaches_the_head(
+    tmp_path: Path,
+) -> None:
+    repo, tip_sha, stale, fresh, jobs = _stale_window_repo(tmp_path)
+    router = _TwoSourceRouter(fresh, [], jobs)
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=_FakeSleep(),
+    )
+    assert rc == 0
+    assert router.unfiltered_urls == [], "no unfiltered call on the common path"
+
+
+def test_a_window_truncated_at_the_page_bound_is_cannot_verify_without_bad_advice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The head's run is on page 1 but the exercised floor lies beyond
+    UNFILTERED_MAX_PAGES. The window reaches the head, the floor search
+    runs out, and the answer is CANNOT VERIFY -- not a wrong floor, and not
+    advice to widen --max-runs-scanned, which does not move the page bound."""
+    repo = _init_repo(tmp_path)
+    floor_sha = _commit(repo, "src/nexus/base.py", "base", "the floor")
+    tip_sha = _commit(repo, "src/nexus/tip.py", "tip", "skipped tip")
+    unfiltered = [_raw(3, tip_sha)]
+    unfiltered += [
+        _raw(1000 + i, f"{i:040d}", event="pull_request")
+        for i in range(100 * gate.UNFILTERED_MAX_PAGES - 1)
+    ]
+    unfiltered.append(_raw(1, floor_sha))  # first row of page bound + 1
+    stale = [{"id": 9, "head_sha": "9" * 40, "status": "completed"}]
+    router = _TwoSourceRouter(
+        stale, unfiltered, {1: _SUCCESS_JOBS, 3: _SKIPPED_JOBS}
+    )
+    rc = gate.check(
+        "o/r", "tok", "develop", "ci.yml", tip_sha, str(repo), 100, api=router,
+        sleep=_FakeSleep(),
+    )
+    assert rc == 2
+    assert len(router.unfiltered_urls) == gate.UNFILTERED_MAX_PAGES
+    err = capsys.readouterr().err
+    assert "Widen --max-runs-scanned" not in err
+    assert "UNFILTERED_MAX_PAGES" in err

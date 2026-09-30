@@ -193,7 +193,11 @@ that suggested it. So it is one cached page served at roughly 8% of
 requests, independent of ``per_page``, and a retry is the remedy rather than
 a different query. :data:`WINDOW_FETCH_ATTEMPTS` refetches before believing a
 short window, and each stale observation is logged rather than swallowed, so
-the phenomenon stays visible if its rate changes.
+the phenomenon stays visible if its rate changes. (The "roughly 8% of
+requests" and "independent of ..." reading above was CONTRADICTED on
+2026-09-30: see STALE FILTERED INDEX below, where six consecutive filtered
+fetches across two audits were all stale. It is kept as the record of what
+23/25 looked like, not as a rate to reason from.)
 
 ROUND 5 (nexus-of2x8 critique, 2026-09-24), four independent fixes:
 
@@ -230,24 +234,33 @@ ROUND 5 (nexus-of2x8 critique, 2026-09-24), four independent fixes:
    conservative handling itself is unchanged and correct for a different
    reason -- see that function's docstring.
 
-STALE FILTERED INDEX (nexus-j94u4, 2026-09-30). The retry above assumes the
-staleness is brief. It is not always: on b2fa6b657 two audits five minutes
-apart both failed CANNOT VERIFY because ``runs?branch=develop&event=push``
-kept returning a window whose newest run was three weeks old, while the
-UNFILTERED ``runs`` list returned the audited commit's run first at the same
-moment. Eight minutes later branch+event was fresh but ``event=push`` alone
-was still stale. GitHub serves filtered run queries from a separate index
-that lags; re-asking it cannot recover. So a window that misses the head now
-falls back, within the same attempt and before any backoff, to
-:func:`fetch_unfiltered_push_runs`: the unfiltered list, filtered
-client-side on ``head_branch`` and ``event``. The head's own run must still
-be in the window used (the invariant of :func:`window_reaches_head` is
-unchanged), and when neither source has it the result is still CANNOT VERIFY,
-naming both sources, never a pass. The fallback FOLLOWS the first filtered
+STALE FILTERED INDEX (nexus-j94u4, 2026-09-30). The 2026-09-23 reading above
+(one stale page, drawn independently at a low rate) did not hold on
+2026-09-30. Audits of 7ace82874 and 54d37bf43, and two attempts five minutes
+apart on b2fa6b657, failed CANNOT VERIFY: at least two consecutive audits,
+six filtered fetches, every one stale. The stale window's newest run was
+279ef43ed, dated 2026-09-07 -- the same frozen snapshot the STALE WINDOWS
+section recorded on 2026-09-23 -- while the UNFILTERED ``runs`` list returned
+the audited commit's run first at the same moment. About eight minutes later
+``branch=develop&event=push`` was fresh again (``event=push`` alone was
+still stale then). So the filtered query intermittently serves a frozen
+2026-09-07 snapshot; its rate is NOT measured, and why it does so is not
+established here. What is measured is that the unfiltered list did not show
+it, so a window that misses the head now falls back, within the same
+attempt and before any backoff, to :func:`fetch_unfiltered_push_runs`: the
+unfiltered list, filtered client-side on ``head_branch`` and ``event``. The
+head's own run must still be in the window used (the invariant of
+:func:`window_reaches_head` is unchanged), and when neither source has it the
+result is still CANNOT VERIFY, reporting what each source returned, never a
+pass. An error from the unfiltered fetch counts as a miss on that attempt,
+not the end of the audit. An empty filtered window is treated like any other
+miss and goes to the fallback; "no runs found" is reported only when the
+unfiltered list was seen empty too. The fallback FOLLOWS the first filtered
 fetch and PRECEDES the backoff rather than replacing the retries: the
-retries still cover the head's run not being indexed anywhere yet, but
-sleeping before trying a source that already has the run would only delay
-the answer by seconds against a staleness measured in minutes.
+retries still cover the head's run not being visible in either source yet,
+but sleeping 1s and 2s before trying a source that has the run would only
+delay the answer, given that the stale state lasted across audits minutes
+apart.
 """
 
 from __future__ import annotations
@@ -278,7 +291,9 @@ CODE_EXERCISED_JOB_PREFIXES: tuple[str, ...] = (
 
 #: How many times to fetch the run list before believing a window that does
 #: not reach the audited head. See STALE WINDOWS in the module docstring: the
-#: measured per-request rate is about 8%. What is NOT measured is whether
+#: 2026-09-23 per-request rate was about 8% (23/25), a figure the 2026-09-30
+#: observation (six consecutive stale fetches over two audits) contradicts --
+#: see STALE FILTERED INDEX. What is NOT measured is whether
 #: repeated requests are INDEPENDENT draws against that staleness -- the
 #: observed pattern (one page, repeatedly, at a roughly constant rate) is
 #: also consistent with a session-, edge-, or cache-sticky server, in which
@@ -304,12 +319,14 @@ WINDOW_FETCH_BACKOFF_SECONDS: float = 1.0
 #: Upper bound on pages (100 runs each) the UNFILTERED fallback walks. The
 #: unfiltered ``ci.yml`` list interleaves pull_request and other-branch runs
 #: with develop pushes, so collecting ``max_runs`` matching runs can take
-#: several pages. The audited head's own run is the newest push and sits on
-#: page 1 whenever the list is current, so this bound only limits how far a
-#: sparse list is walked for the floor search, never whether the head is
-#: found. A window cut short by the bound still reaches the head; the floor
-#: search over it just has less history and ends in CANNOT VERIFY, never a
-#: pass, if it runs out (see :func:`check`).
+#: several pages (measured 2026-09-30: 90 of the first 100 rows were develop
+#: pushes, so about two). The head's run is inside the window only if it lies
+#: within the first UNFILTERED_MAX_PAGES pages; that is CHECKED, not assumed
+#: -- :func:`window_reaches_head` runs on the bounded window, so a head
+#: beyond the bound is a miss and ends in CANNOT VERIFY. A window that
+#: reaches the head but is cut by the bound before a covering run is a
+#: separate case and is reported as such (see :func:`check`); either way the
+#: result is CANNOT VERIFY, never a pass.
 UNFILTERED_MAX_PAGES: int = 10
 
 _REMEDY = (
@@ -591,32 +608,21 @@ def fetch_push_runs(
     return runs[:max_runs]
 
 
-def fetch_unfiltered_push_runs(
+def _fetch_unfiltered_window(
     repo: str,
     token: str,
     branch: str,
     workflow_file: str,
     max_runs: int,
     api: Callable[[str], dict] | None = None,
-) -> list[dict]:
-    """Push-triggered *workflow_file* runs on *branch*, newest-first, taken
-    from the UNFILTERED workflow run list and filtered client-side on
-    ``head_branch == branch`` and ``event == "push"`` (nexus-j94u4).
-
-    Why this exists: GitHub's filtered run list (``?branch=..&event=push``,
-    what :func:`fetch_push_runs` asks for) is served from a separate index
-    that lags and stays stale for minutes at a time. Measured 2026-09-30:
-    the filtered query's newest run was three weeks old while the
-    unfiltered ``.../runs`` list returned the audited commit's run first, at
-    the same moment. So this query deliberately sends NO filter.
-
-    The unfiltered list also carries pull_request, workflow_dispatch and
-    other-branch runs, so paging is driven by how many MATCHING runs have
-    been collected, not by rows seen: stop at *max_runs* matches, at a short
-    page (GitHub's "no more pages"), or at :data:`UNFILTERED_MAX_PAGES`.
-    """
+) -> tuple[list[dict], bool]:
+    """``(runs, truncated)``; see :func:`fetch_unfiltered_push_runs`.
+    *truncated* is True iff all :data:`UNFILTERED_MAX_PAGES` pages came back
+    full and still held fewer than *max_runs* matching runs, i.e. the page
+    bound, not the end of the list or the run cap, ended the walk."""
     call = api or (lambda u: _api(u, token))
     runs: list[dict] = []
+    truncated = False
     for page in range(1, UNFILTERED_MAX_PAGES + 1):
         url = (
             f"https://api.github.com/repos/{repo}/actions/workflows/"
@@ -632,7 +638,40 @@ def fetch_unfiltered_push_runs(
         )
         if len(runs) >= max_runs or len(page_runs) < 100:
             break
-    return runs[:max_runs]
+    else:
+        truncated = True
+    return runs[:max_runs], truncated
+
+
+def fetch_unfiltered_push_runs(
+    repo: str,
+    token: str,
+    branch: str,
+    workflow_file: str,
+    max_runs: int,
+    api: Callable[[str], dict] | None = None,
+) -> list[dict]:
+    """Push-triggered *workflow_file* runs on *branch*, newest-first, taken
+    from the UNFILTERED workflow run list and filtered client-side on
+    ``head_branch == branch`` and ``event == "push"`` (nexus-j94u4).
+
+    Why this exists: on 2026-09-30 the filtered query
+    (``?branch=..&event=push``, what :func:`fetch_push_runs` asks for)
+    returned a window whose newest run was 279ef43ed, dated 2026-09-07 --
+    the same frozen snapshot the STALE WINDOWS section recorded on
+    2026-09-23 -- while the unfiltered ``.../runs`` list returned the
+    audited commit's run first, at the same moment. So this query
+    deliberately sends NO filter. Why the filtered query does that is not
+    established here; only that the unfiltered one did not.
+
+    The unfiltered list also carries pull_request, workflow_dispatch and
+    other-branch runs, so paging is driven by how many MATCHING runs have
+    been collected, not by rows seen: stop at *max_runs* matches, at a short
+    page (GitHub's "no more pages"), or at :data:`UNFILTERED_MAX_PAGES`.
+    """
+    return _fetch_unfiltered_window(
+        repo, token, branch, workflow_file, max_runs, api=api
+    )[0]
 
 
 def fetch_run_jobs(
@@ -869,6 +908,11 @@ def check(
         return 2
 
     raw_runs: list[dict] = []
+    # Where the window the floor search uses came from, and what the last
+    # attempt saw, for the final CANNOT VERIFY message.
+    window_truncated = False
+    filtered_newest = "<none>"
+    unfiltered_summary = "not fetched"
     for attempt in range(1, WINDOW_FETCH_ATTEMPTS + 1):
         try:
             raw_runs = fetch_push_runs(
@@ -881,54 +925,79 @@ def check(
             )
             return 2
 
-        if not raw_runs:
-            print(
-                f"CANNOT VERIFY: no push-triggered {workflow_file} runs found on "
-                f"{branch!r} in {repo!r} -- either the branch/workflow name is "
-                "wrong, or this repo genuinely has no CI history yet.",
-                file=sys.stderr,
-            )
-            return 2
-
         if window_reaches_head(raw_runs, head_sha):
             break
+        filtered_newest = (
+            raw_runs[0].get("head_sha", "<none>") if raw_runs else "<none>"
+        )
         print(
-            f"note: attempt {attempt}/{WINDOW_FETCH_ATTEMPTS} got a window of "
-            f"{len(raw_runs)} run(s) whose newest is for "
-            f"{raw_runs[0].get('head_sha', '<none>')}, not reaching the "
-            f"audited head {head_sha} -- trying the unfiltered run list, "
-            "refetching if that misses too (see STALE WINDOWS).",
+            f"note: attempt {attempt}/{WINDOW_FETCH_ATTEMPTS} got a filtered "
+            f"window of {len(raw_runs)} run(s) whose newest is for "
+            f"{filtered_newest}, not reaching the audited head {head_sha} -- "
+            "trying the unfiltered run list, refetching if that misses too "
+            "(see STALE WINDOWS).",
             file=sys.stderr,
         )
-        # nexus-j94u4: the filtered index can lag for MINUTES while the
-        # unfiltered list already has the head's run. Ask the unfiltered
-        # list right now, inside the attempt and before any backoff: the
-        # backoff below re-asks an index that stays stale far longer than
-        # 1s + 2s, so sleeping first would only delay a fallback that works
-        # immediately. The backoff stays for the case the fallback cannot
-        # help -- the head's run not indexed anywhere yet -- where each
-        # later attempt tries both sources again.
+        # nexus-j94u4: on 2026-09-30 the filtered query served a stale
+        # window across two consecutive audits (six fetches, all stale)
+        # while the unfiltered list already had the head's run, and was
+        # fresh again about 8 minutes later. Ask the unfiltered list right
+        # now, inside the attempt and before any backoff: the 1s + 2s of
+        # backoff below cannot be expected to outlast a staleness measured
+        # in minutes, so sleeping first would only delay a fallback that
+        # answers immediately. The backoff stays for the case the fallback
+        # cannot help -- the head's run not visible in either source yet --
+        # where each later attempt asks both again.
         try:
-            unfiltered = fetch_unfiltered_push_runs(
+            unfiltered, truncated = _fetch_unfiltered_window(
                 repo, token, branch, workflow_file, max_runs_scanned, api=api
             )
         except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+            # A miss on this attempt, not the end of the audit: before the
+            # fallback existed a transient error on a later attempt could
+            # not cost the audit its remaining attempts either.
+            unfiltered_summary = f"errored ({exc})"
             print(
-                f"CANNOT VERIFY: GitHub API error listing {workflow_file} runs "
-                f"(unfiltered fallback): {exc}",
+                f"note: attempt {attempt}/{WINDOW_FETCH_ATTEMPTS}: the "
+                f"unfiltered {workflow_file} fallback errored: {exc}",
                 file=sys.stderr,
             )
-            return 2
-        if window_reaches_head(unfiltered, head_sha):
-            print(
-                f"note: the unfiltered {workflow_file} run list reaches the "
-                f"audited head {head_sha} ({len(unfiltered)} matching "
-                f"{branch!r} push run(s)); using it in place of the lagging "
-                "filtered window.",
-                file=sys.stderr,
+        else:
+            if window_reaches_head(unfiltered, head_sha):
+                print(
+                    f"note: the unfiltered {workflow_file} run list reaches "
+                    f"the audited head {head_sha} ({len(unfiltered)} matching "
+                    f"{branch!r} push run(s)); using it in place of the "
+                    "filtered window.",
+                    file=sys.stderr,
+                )
+                raw_runs = unfiltered
+                window_truncated = truncated
+                break
+            if not raw_runs and not unfiltered:
+                # Empty from BOTH sources, the second one actually seen
+                # empty: only now is "no runs at all" a verified claim, and
+                # it is a naming problem or a new repo, not a window that
+                # lags, so retrying with backoff would only delay it.
+                print(
+                    f"CANNOT VERIFY: no push-triggered {workflow_file} runs "
+                    f"found on {branch!r} in {repo!r} (filtered and "
+                    "unfiltered both empty) -- either the branch/workflow "
+                    "name is wrong, or this repo genuinely has no CI "
+                    "history yet.",
+                    file=sys.stderr,
+                )
+                return 2
+            unfiltered_summary = (
+                f"{len(unfiltered)} matching push run(s), "
+                f"newest for {unfiltered[0].get('head_sha', '<none>')}"
+                if unfiltered
+                else "0 matching push run(s)"
+            ) + (
+                f", cut at the {UNFILTERED_MAX_PAGES}-page bound"
+                if truncated
+                else ""
             )
-            raw_runs = unfiltered
-            break
         if attempt < WINDOW_FETCH_ATTEMPTS:
             # Backoff BEFORE the next attempt, not after the last one -- a
             # sleep that only precedes a real retry, never a final refusal
@@ -937,20 +1006,19 @@ def check(
             # chance to have moved on by the next request).
             sleep(WINDOW_FETCH_BACKOFF_SECONDS * attempt)
     else:
-        newest = raw_runs[0].get("head_sha", "<none>")
         print(
-            f"CANNOT VERIFY: {WINDOW_FETCH_ATTEMPTS} fetches of the "
-            f"{workflow_file} run list, each tried both filtered "
-            "(branch+event) and unfiltered (filtered client-side), all "
-            "returned a window that does not "
+            f"CANNOT VERIFY: {WINDOW_FETCH_ATTEMPTS} attempts at the "
+            f"{workflow_file} run list, each tried filtered and unfiltered "
+            f"(filtered client-side), all returned a window that does not "
             f"contain a run for {head_sha}, the very commit being audited "
-            f"(newest in the last filtered window is for {newest}). Every push to "
-            f"{branch!r} starts a {workflow_file} run for that same sha, so "
-            "the head's own run missing from every window means this is not "
-            "the intermittent stale page the retry exists for. Choosing a "
-            "coverage floor from it would name a commit hundreds of pushes "
-            "back and report everything since as BLOCKED, which is a false "
-            "alarm, not a finding.",
+            f"(last filtered window: {len(raw_runs)} run(s), newest for "
+            f"{filtered_newest}; last unfiltered fetch: {unfiltered_summary}). "
+            f"Every push to {branch!r} starts a {workflow_file} run for that "
+            "same sha, so its absence from both sources means the API does "
+            "not show that run yet (or the workflow did not fire). Choosing "
+            "a coverage floor from a window that stops short of it would "
+            "name a commit hundreds of pushes back and report everything "
+            "since as BLOCKED, which is a false alarm, not a finding.",
             file=sys.stderr,
         )
         return 2
@@ -1063,14 +1131,28 @@ def check(
         break
 
     if last_covering_run is None:
+        if window_truncated:
+            # The window came from the unfiltered fallback and the walk
+            # stopped at UNFILTERED_MAX_PAGES, not at max_runs_scanned, so
+            # widening --max-runs-scanned would change nothing.
+            advice = (
+                f"The unfiltered run list was cut at UNFILTERED_MAX_PAGES "
+                f"({UNFILTERED_MAX_PAGES} pages) before a covering run "
+                "appeared, and --max-runs-scanned does not move that bound; "
+                "rerun once the filtered query is fresh again, or raise "
+                "UNFILTERED_MAX_PAGES."
+            )
+        else:
+            advice = (
+                "Widen --max-runs-scanned if this repo has gone that long "
+                "without a code-touching push."
+            )
         print(
             f"CANNOT VERIFY: scanned {len(raw_runs)} push-triggered "
             f"{workflow_file} runs on {branch!r} (max_runs_scanned="
             f"{max_runs_scanned}) and found none that both exercised code "
             f"and is an ancestor of {head_sha} -- absence is a failure to "
-            "verify, never evidence that everything is fine. Widen "
-            "--max-runs-scanned if this repo has gone that long without a "
-            "code-touching push.",
+            f"verify, never evidence that everything is fine. {advice}",
             file=sys.stderr,
         )
         return 2
