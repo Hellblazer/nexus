@@ -784,7 +784,9 @@ def _prepass_groups(
     return groups
 
 
-def _wire_embedding_model(db: Any, collection_name: str, effective_model: str) -> str:
+def _wire_embedding_model(
+    db: Any, collection_name: str, effective_model: str, *, name_carries_model: bool,
+) -> str:
     """The ``embedding_model`` an import request names: the model the engine will compare it with.
 
     The engine refuses a request whose ``embedding_model`` is not the model the collection is
@@ -796,7 +798,7 @@ def _wire_embedding_model(db: Any, collection_name: str, effective_model: str) -
     the collection has, or, when it has no row yet, the one its registration will derive (the write
     path's own derivation, :func:`nexus.corpus.collection_registration_kwargs`). The engine still
     checks every vector's dimension against the collection's."""
-    if embedding_model_for_collection_name(collection_name) is not None:
+    if name_carries_model:
         return effective_model
     resolver = getattr(db, "_resolve_collection_row", None)
     row = resolver(collection_name) if callable(resolver) else None
@@ -1380,10 +1382,8 @@ def import_collection(
     # unconditionally would block that pre-existing, unaffected
     # workflow; scope it to the cases where GH #1370 D2 actually bites
     # (migrating into a properly self-declaring conformant collection).
-    enforce_dims_check: bool = (
-        assume_model is not None
-        or embedding_model_for_collection_name(collection_name) is not None
-    )
+    name_carries_model: bool = embedding_model_for_collection_name(collection_name) is not None
+    enforce_dims_check: bool = assume_model is not None or name_carries_model
 
     # Stream records from gzip-compressed msgpack body and upsert in batches.
     # Single file open: read header, then gzip body from the same handle
@@ -1415,7 +1415,8 @@ def import_collection(
         page_size = min(page_size, MANIFEST_APPEND_MANY_MAX_CHUNKS)
         owner_import = _OwnerImport(
             db=db, collection_name=collection_name, hooks=hooks,
-            embedding_model=_wire_embedding_model(db, collection_name, effective_model),
+            embedding_model=_wire_embedding_model(
+                db, collection_name, effective_model, name_carries_model=name_carries_model),
             file_hash=_file_sha256(input_path), skip_existing=skip_existing,
         )
     else:
