@@ -537,3 +537,155 @@ def test_forced_reindex_keeps_enrichment_and_clears_an_owned_key_the_write_dropp
         assert _embedded(again) == len(every), "--re-embed really re-embeds"
     else:
         assert _embedded(again) == 0
+
+
+# ── the ChunkBatcher flush merges per chunk, for a flush of several files ─────
+
+
+def _git(repo: Path, *args: str) -> None:
+    import subprocess
+
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def flush_repo(tmp_path, monkeypatch):
+    """A git repo of three SMALL files: ``a.md`` and ``b.md``, which both land in ONE ``docs__``
+    flush, and ``m.py`` for ``code__``. Returns ``(repo, registry)``. The collection names are
+    the catalog owner's (``docs__<owner>__<model>__v1``), which ``_run_index`` resolves itself once
+    the repo has an owner, so the test reads them from the traffic of a first run."""
+    from nexus.registry import RepoRegistry
+
+    for k, v in (("GIT_AUTHOR_NAME", "Test"), ("GIT_AUTHOR_EMAIL", "t@test.invalid"),
+                 ("GIT_COMMITTER_NAME", "Test"), ("GIT_COMMITTER_EMAIL", "t@test.invalid")):
+        monkeypatch.setenv(k, v)
+    tag = uuid.uuid4().hex[:10]
+    repo = tmp_path / f"flushrepo-{tag}"
+    repo.mkdir()
+    (repo / "a.md").write_text(
+        "".join(f"# Heading {i}\n\nAlpha {tag} paragraph {i} with some text.\n\n" for i in range(3)),
+        encoding="utf-8")
+    (repo / "b.md").write_text(
+        "".join(f"Bravo {tag} plain paragraph {i}, no heading anywhere.\n\n" for i in range(3)),
+        encoding="utf-8")
+    (repo / "m.py").write_text(
+        "".join(f"def fn_{i}():\n    return {i}  # {tag} flush unique {i}\n\n" for i in range(3)),
+        encoding="utf-8")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "a.md", "b.md", "m.py")
+    _git(repo, "commit", "-q", "-m", "init")
+    reg = RepoRegistry(tmp_path / "repos.json")
+    reg.add(repo)
+    return repo, reg
+
+
+def _docs_by_file(collection: str) -> dict[str, tuple[str, list[str]]]:
+    """``{file name: (doc_id, [chash in position order])}`` for the documents of *collection*."""
+    out = {}
+    for entry in _reader().list_by_collection(collection):
+        tumbler = str(entry.tumbler)
+        out[Path(entry.file_path).name] = (tumbler, [r.chash for r in _reader().get_manifest(tumbler)])
+    return out
+
+
+@pytest.fixture
+def asymmetric_rows(monkeypatch):
+    """Make the chunk rows of the two markdown files carry DIFFERENT owned keys, as a PDF's rows do
+    next to a markdown file's in one ``docs__`` flush (``extraction_method`` is set on PDF chunks
+    only). No markdown or code indexer emits a key the others drop, so the factory is wrapped:
+    ``a.md``'s rows gain ``extraction_method`` and ``b.md``'s gain ``extraction_source``. Each file
+    then lacks a key the other carries, so neither file's rows alone give the flush's delete list."""
+    import nexus.metadata_schema as ms
+
+    orig = ms.make_chunk_metadata
+
+    def wrapped(**kw):
+        meta = orig(**kw)
+        title = kw.get("title", "")
+        if title.startswith("a.md:"):
+            meta["extraction_method"] = "probe-method"
+        elif title.startswith("b.md:"):
+            meta["extraction_source"] = "probe-source"
+        return meta
+
+    monkeypatch.setattr(ms, "make_chunk_metadata", wrapped)
+
+
+@pytest.mark.parametrize("re_embed", [False, True], ids=["force", "force-re-embed"])
+def test_a_forced_index_repo_flush_merges_each_chunks_metadata(
+    flush_repo, asymmetric_rows, re_embed: bool,
+) -> None:
+    """``_batch_flush`` writes every file of a flush in ONE combined write and names one request-level
+    ``metadata_delete_keys`` list for all of them: the keys the writer owns that SOME row lacks.
+    The engine applies that list chunk by chunk, stripping each named key from the chunk's stored
+    row before it merges the chunk's own metadata on top. So a chunk that carries a named key
+    writes it back, a chunk that lacks it loses a stale value, and a key another writer owns
+    (``bib_year``) is never named. Only a kwargs pin on a mock covered this. Here ``_run_index``
+    (``_batch_flush`` is a closure) runs against the real engine on two markdown files that land in
+    ONE ``docs__`` flush and carry different owned keys, plus a python file for ``code__``."""
+    from nexus.indexer import _run_index
+
+    repo, reg = flush_repo
+    _run_index(repo, reg, force=False)            # registers the repo's owner
+    with _traffic() as base:                      # from here on the owner names the collections
+        _run_index(repo, reg, force=True)
+    written = {b["collection"] for p, b, _ in base if p == "/manifest/write_many"}
+    (docs_col,) = [c for c in written if c.startswith("docs__")]
+    (code_col,) = [c for c in written if c.startswith("code__")]
+    docs = _docs_by_file(docs_col)
+    code = _docs_by_file(code_col)
+    assert set(docs) == {"a.md", "b.md"} and set(code) == {"m.py"}
+    a_hashes, b_hashes = docs["a.md"][1], docs["b.md"][1]
+    m_hashes = code["m.py"][1]
+    assert a_hashes and b_hashes and m_hashes and not set(a_hashes) & set(b_hashes)
+
+    a_before = _stored_metadata(docs_col, a_hashes)
+    b_before = _stored_metadata(docs_col, b_hashes)
+    assert all(m.get("extraction_method") == "probe-method" and "extraction_source" not in m
+               for m in a_before.values())
+    assert all(m.get("extraction_source") == "probe-source" and "extraction_method" not in m
+               for m in b_before.values())
+
+    # Another writer's enrichment and a stale owned key on every chunk, and on each file the key
+    # that only the OTHER file's rows carry.
+    both = a_hashes + b_hashes
+    stale = {"bib_year": 2020, "quality_gate_overridden": True}
+    client = HttpVectorClient()
+    client.update_chunks(docs_col, both, [dict(stale) for _ in both])
+    client.update_chunks(docs_col, a_hashes, [{"extraction_source": "STALE-S"} for _ in a_hashes])
+    client.update_chunks(docs_col, b_hashes, [{"extraction_method": "STALE-M"} for _ in b_hashes])
+    client.update_chunks(code_col, m_hashes, [dict(stale) for _ in m_hashes])
+    seeded = _stored_metadata(docs_col, both)
+    assert all(m["bib_year"] == 2020 and m["quality_gate_overridden"] is True for m in seeded.values())
+    assert all(seeded[h]["extraction_source"] == "STALE-S" for h in a_hashes)
+    assert all(seeded[h]["extraction_method"] == "STALE-M" for h in b_hashes)
+
+    with _traffic() as log:
+        _run_index(repo, reg, force=True, force_re_embed=re_embed)
+
+    # Non-vacuity: the two markdown files went out in ONE write_many of TWO documents, and that
+    # write named the union of what each file's rows lack.
+    flushes = [(b, r) for p, b, r in log if p == "/manifest/write_many" and b["collection"] == docs_col]
+    assert len(flushes) == 1
+    body, resp = flushes[0]
+    assert len(body["docs"]) == 2
+    assert body["metadata_merge"] is True and resp.get("metadata_merge") is True
+    for key in ("extraction_method", "extraction_source", "quality_gate_overridden"):
+        assert key in body["metadata_delete_keys"], key
+    assert "bib_year" not in body["metadata_delete_keys"]
+    code_writes = [b for p, b, _ in log if p == "/manifest/write_many" and b["collection"] == code_col]
+    assert len(code_writes) == 1 and len(code_writes[0]["docs"]) == 1
+    assert int(resp.get("embed_embedded") or 0) == (len(set(both)) if re_embed else 0)
+
+    a_after = _stored_metadata(docs_col, a_hashes)
+    b_after = _stored_metadata(docs_col, b_hashes)
+    for after in (a_after, b_after, _stored_metadata(code_col, m_hashes)):
+        assert all(m.get("bib_year") == 2020 for m in after.values()), "enrichment survived"
+        assert all("quality_gate_overridden" not in m for m in after.values()), \
+            "a stale owned key is cleared"
+    # Each file keeps the key its own rows carry (stripped by the union list, then written back)
+    # and loses the stale value of the key only the other file's rows carry.
+    assert all(m.get("extraction_method") == "probe-method" and "extraction_source" not in m
+               for m in a_after.values())
+    assert all(m.get("extraction_source") == "probe-source" and "extraction_method" not in m
+               for m in b_after.values())

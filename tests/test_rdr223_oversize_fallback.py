@@ -302,6 +302,11 @@ def test_a_chash_repeated_at_two_positions_keeps_the_first_occurrences_metadata(
     rows = [r for k, b in cat.calls if k in ("write_many", "append") for r in b["rows"]]
     assert [(r["position"], r["chash"]) for r in rows] == list(enumerate(ids))
     assert rows[2]["line_start"] == 30                            # its own row keeps its own span
+    # The engine compares the completion count with count(*) over the manifest ROWS (one per
+    # position), so a repeated chash counts at every position: 5 rows, 4 distinct chashes.
+    done = [b for k, b in cat.calls if k == "complete"]
+    assert len(rows) == 5 and len(set(ids)) == 4
+    assert [d["chunk_count"] for d in done] == [5]
 
 
 # ── the per-request grouping is the old upsert paging ─────────────────────────
@@ -495,3 +500,90 @@ def test_a_service_backed_t3_with_no_batcher_is_a_wiring_bug_and_fails_loud(
     with pytest.raises(RuntimeError, match="no ChunkBatcher"):
         run(tmp_path, monkeypatch, batcher=None, db=db)
     assert db.mock_calls == [] and cat.calls == []
+
+
+def test_an_identity_less_file_with_no_batcher_never_needs_the_writer(
+    cat, tmp_path, monkeypatch, run,
+) -> None:
+    """A file with no catalog document never reaches the writer, so a service-backed T3 that
+    carries no ChunkBatcher is no wiring bug for it: ``use_writer`` answers False on identity
+    before it asks about the batcher (the ``_index_pdf_file`` callers of
+    ``test_y8xjh_force_reindex_clears_sparse_keys.py`` are this shape)."""
+    from nexus.oversize_write import use_writer
+
+    assert use_writer(_http_db(), None, "") is False
+    _cap(monkeypatch, 16)
+    db = _http_db()
+    run(tmp_path, monkeypatch, doc_id="", batcher=None, db=db)
+    assert db.upsert_chunks_with_embeddings.call_count == 1
+    assert cat.calls == []
+
+
+# ── which exception ended the write ──────────────────────────────────────────
+
+
+def _raised_inside_a_handler(first: BaseException, second: BaseException) -> BaseException:
+    """``second`` raised while ``first`` is being handled, as ``RefreshableHttpStoreMixin._request``
+    does: its re-resolve retry runs inside the ``except`` block of the first attempt, so the retry's
+    exception carries the first attempt's as ``__context__`` (implicit chaining, no ``from``)."""
+    try:
+        try:
+            raise first
+        except type(first):
+            raise second
+    except BaseException as caught:  # noqa: BLE001 — capture the chained exception for the test
+        return caught
+
+
+def _transient(exc: BaseException) -> bool:
+    from nexus.oversize_write import _is_transient_write_error
+
+    return _is_transient_write_error(exc)
+
+
+def test_a_connect_failure_that_the_clients_retry_could_not_outlast_is_transient() -> None:
+    """The client's retry raises the SECOND attempt's transport error with the first as its
+    ``__context__``; the top-level exception is the connectivity failure that ended the write."""
+    exc = _raised_inside_a_handler(
+        httpx.ConnectError("first", request=_REQ), httpx.ConnectError("second", request=_REQ))
+    assert isinstance(exc.__context__, httpx.ConnectError)
+    assert _transient(exc) is True
+
+
+def test_a_transport_drop_reframed_with_from_is_transient() -> None:
+    """A client that reframes a transport drop as an application error says so with ``raise ... from``."""
+    try:
+        try:
+            raise httpx.ReadTimeout("slow", request=_REQ)
+        except httpx.ReadTimeout as drop:
+            raise RuntimeError("the write failed") from drop
+    except RuntimeError as reframed:
+        assert _transient(reframed) is True
+
+
+def test_a_permanent_400_raised_while_handling_a_transport_error_is_not_transient() -> None:
+    """The retry attempt after a transport error can itself end on a real 400. Its ``__context__``
+    is the first attempt's ConnectError, which did not end the write: the 400 did."""
+    exc = _raised_inside_a_handler(httpx.ConnectError("first", request=_REQ), _status(400))
+    assert isinstance(exc.__context__, httpx.ConnectError)
+    assert _transient(exc) is False
+
+
+def test_an_application_error_raised_in_a_transport_handler_without_from_is_not_transient() -> None:
+    exc = _raised_inside_a_handler(
+        httpx.ConnectError("first", request=_REQ), ValueError("the response was not JSON"))
+    assert _transient(exc) is False
+
+
+def test_a_permanent_400_after_a_transport_error_propagates_from_the_writer(
+    tmp_path, monkeypatch,
+) -> None:
+    """End to end through ``write_oversize_file``: the file is not deferred, the 400 surfaces."""
+    bad = _raised_inside_a_handler(httpx.ConnectError("first", request=_REQ), _status(400))
+    rec = _install(monkeypatch, _RecordingCat(raises={"append_manifest_chunks": bad}))
+    _cap(monkeypatch, 16)
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        _run_prose(tmp_path, monkeypatch)
+    assert not isinstance(ei.value, OversizeWriteDeferred)
+    assert ei.value.response.status_code == 400
+    assert rec.kinds().count("fail") == 1

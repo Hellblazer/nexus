@@ -1812,6 +1812,12 @@ def index_repo_cmd(
                 f"above used the in-memory count instead.",
                 err=True,
             )
+        # RDR-223 P2.4 round 3 (nexus-z0o2p.14): every failure below is RECORDED in
+        # ``_run_failure`` (the first one wins, in the order the checks run) and raised once,
+        # after every warning line has printed. A raise in the middle used to hide the warning
+        # lines of the checks after it, so a run with a deferred file AND another failure named
+        # only one of them.
+        _run_failure: click.ClickException | None = None
         if manifest_problems_detected:
             from nexus.commands._helpers import raise_identity_drop_exception  # noqa: PLC0415 — deliberate function-local import (rare branch: only on failure)
             # nexus-wbfpw.29 round 3 (round 6: same VERIFIED set the
@@ -1820,12 +1826,15 @@ def index_repo_cmd(
             # than recomputed, since verification does a real catalog
             # round trip), so a self-healed write failure never appears
             # in the "causes" list either.
-            raise_identity_drop_exception(
-                subject="document",
-                healed_doc_ids=_confirmed_write_failure_doc_ids,
-            )
+            try:
+                raise_identity_drop_exception(
+                    subject="document",
+                    healed_doc_ids=_confirmed_write_failure_doc_ids,
+                )
+            except click.ClickException as _exc:
+                _run_failure = _run_failure or _exc
         if pdf_quality_gate_failed:
-            raise click.ClickException(
+            _run_failure = _run_failure or click.ClickException(
                 f"{pdf_quality_gate_failed} PDF(s) failed the post-extraction "
                 f"quality gate (nexus-wi1uv) — see the WARNING line(s) above "
                 f"for the affected file(s). Retry an individual file with "
@@ -1849,7 +1858,7 @@ def index_repo_cmd(
         if (stats or {}).get("systemic_extraction_failure", False):
             _attempted = (stats or {}).get("files_attempted_total", 0)
             _pct = f"{skipped_unextractable_files / _attempted:.0%}" if _attempted else "?"
-            raise click.ClickException(
+            _run_failure = _run_failure or click.ClickException(
                 f"skipped {skipped_unextractable_files} of {_attempted} files "
                 f"({_pct}) — extraction may be broken (nexus-deyd5). If this "
                 f"corpus contains scanned/image-only PDFs, the default "
@@ -1900,14 +1909,14 @@ def index_repo_cmd(
                 f"affected files are stale and will be retried "
                 f"automatically."
             )
-            raise click.ClickException(
+            _run_failure = _run_failure or click.ClickException(
                 f"{chunk_flush_failed_files} file(s) failed to flush chunk "
                 f"uploads this run (nexus-4s1ww) — see the WARNING line "
                 f"above."
             )
 
         if transient_upsert_deferred_files:
-            raise click.ClickException(
+            _run_failure = _run_failure or click.ClickException(
                 f"{transient_upsert_deferred_files} file(s) deferred on a transient write "
                 f"error this run (nexus-z0o2p.14) — see the WARNING line above. Re-run "
                 f"'nx index repo' to retry."
@@ -1947,21 +1956,24 @@ def index_repo_cmd(
                 f"successful re-index."
             )
             if taxonomy_assign_batches_failed == taxonomy_assign_batches_attempted:
-                raise click.ClickException(
+                _run_failure = _run_failure or click.ClickException(
                     f"all {taxonomy_assign_batches_failed} taxonomy-assign "
                     f"batch(es) failed this run (nexus-7lw6a) — no chunks "
                     f"received a topic assignment. See the WARNING line "
                     f"above."
                 )
-            raise click.ClickException(
-                f"{taxonomy_assign_batches_failed}/"
-                f"{taxonomy_assign_batches_attempted} taxonomy-assign "
-                f"batch(es) failed this run (nexus-7lw6a) — "
-                f"{taxonomy_assign_chunks_failed} chunk(s) lost their topic "
-                f"assignment; the index itself completed. Re-run once the "
-                f"assign endpoint is healthy to repair. See the WARNING line "
-                f"above."
-            )
+            else:
+                _run_failure = _run_failure or click.ClickException(
+                    f"{taxonomy_assign_batches_failed}/"
+                    f"{taxonomy_assign_batches_attempted} taxonomy-assign "
+                    f"batch(es) failed this run (nexus-7lw6a) — "
+                    f"{taxonomy_assign_chunks_failed} chunk(s) lost their topic "
+                    f"assignment; the index itself completed. Re-run once the "
+                    f"assign endpoint is healthy to repair. See the WARNING line "
+                    f"above."
+                )
+        if _run_failure is not None:
+            raise _run_failure
 
 
 def _taxonomy_incomplete(collections: list[str], *, client=None) -> bool:

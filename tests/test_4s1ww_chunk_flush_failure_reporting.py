@@ -33,6 +33,7 @@ so this choice is falsifiable, not just asserted in prose.
 """
 from __future__ import annotations
 
+import re
 from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -330,7 +331,7 @@ def test_index_repo_deferred_files_are_named_and_fail_the_run(runner, repo_dir, 
         },
     )
     assert result.exit_code != 0, result.output
-    assert "2" in result.stdout and "deferred" in result.stdout, result.stdout
+    assert re.search(r"2/\d+ file\(s\) deferred on a transient write error", result.stdout), result.stdout
     assert "src/big.py" in result.stdout and "docs/huge.md" in result.stdout, result.stdout
     assert "Re-run 'nx index repo' to retry" in result.stdout, result.stdout
     assert "Done." in result.output          # the rest of the run still completed
@@ -344,6 +345,7 @@ def test_index_repo_many_deferred_files_are_truncated_to_ten_paths(runner, repo_
                       "transient_upsert_deferred_paths": paths},
     )
     assert result.exit_code != 0
+    assert re.search(r"13/\d+ file\(s\) deferred on a transient write error", result.stdout), result.stdout
     assert "f9.py" in result.stdout and "f10.py" not in result.stdout, result.stdout
     assert "and 3 more" in result.stdout, result.stdout
 
@@ -355,7 +357,42 @@ def test_index_repo_deferred_and_chunk_flush_failures_both_print(runner, repo_di
                       "transient_upsert_deferred_paths": ["a.py"]},
     )
     assert result.exit_code != 0
-    assert "deferred" in result.stdout and "failed to flush" in result.stdout, result.stdout
+    assert re.search(r"1/\d+ file\(s\) deferred on a transient write error", result.stdout), result.stdout
+    assert re.search(r"1/\d+ file\(s\) failed to flush chunk uploads", result.stdout), result.stdout
+
+
+_DEFERRED = {"transient_upsert_deferred_files": 2, "transient_upsert_deferred_paths": ["a.py", "b.md"]}
+_DEFERRED_LINE = r"2/\d+ file\(s\) deferred on a transient write error"
+
+
+def test_index_repo_deferral_warning_prints_with_a_taxonomy_failure(runner, repo_dir, mock_reg):
+    """A run with deferred files AND lost taxonomy assignments prints both warning lines; the
+    deferral raise used to sit before the taxonomy block, so only the deferral printed."""
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={**_DEFERRED, "taxonomy_assign_batches_attempted": 5,
+                      "taxonomy_assign_batches_failed": 2, "taxonomy_assign_chunks_failed": 40},
+    )
+    assert result.exit_code != 0, result.output
+    assert re.search(_DEFERRED_LINE, result.stdout), result.stdout
+    assert "2/5 taxonomy-assign batch(es) failed" in result.stdout, result.stdout
+    assert result.output.count("Error:") == 1, result.output        # one non-zero exit, one message
+
+
+def test_index_repo_deferral_warning_prints_before_an_earlier_failure_raises(runner, repo_dir, mock_reg):
+    """The quality-gate and systemic-extraction raises sit above the deferral block; the deferral
+    warning line still reaches the operator, who would otherwise re-run blind."""
+    for extra, marker in (
+        ({"pdf_quality_gate_failed": 1}, "failed the post-extraction quality gate"),
+        ({"systemic_extraction_failure": True, "skipped_unextractable_files": 4,
+          "files_attempted_total": 5}, "extraction may be broken"),
+    ):
+        result, _ = _invoke_repo(
+            runner, [str(repo_dir)], mock_reg, index_return={**_DEFERRED, **extra})
+        assert result.exit_code != 0, result.output
+        assert re.search(_DEFERRED_LINE, result.stdout), (extra, result.stdout)
+        assert marker in result.output, (extra, result.output)        # the earlier failure still names itself
+        assert result.output.count("Error:") == 1, result.output
 
 
 def test_index_repo_no_deferred_files_exit_zero(runner, repo_dir, mock_reg):

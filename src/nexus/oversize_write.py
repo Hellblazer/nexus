@@ -57,8 +57,12 @@ class OversizeWriteDeferred(RuntimeError):
     """The oversize file's write hit a transient condition (a gateway or rate-limit status, the
     embed timeout, or a connectivity error the writer's own bounded retry could not outlast).
 
-    Raised only by :func:`write_oversize_file`, with the cause chained, after the writer marked the
-    fence failed. ``indexer._contain_transient_upsert`` defers the file to the next run on it and
+    Raised only by :func:`write_oversize_file`, with the cause chained. The fence state depends on
+    where the transient hit: a failure after the writer's fence begin leaves the fence ``failed``
+    (the writer's abort marks it); a failure AT the begin call leaves it ``indexing`` (abort is a
+    no-op when nothing was fenced), from the caller's early ``_fence_begin``. Either way the next
+    run re-indexes the file (``never_fresh`` covers both states).
+    ``indexer._contain_transient_upsert`` defers the file to the next run on it and
     nothing else: an ``httpx.HTTPStatusError`` raised elsewhere in the per-file path (the doc-id
     resolver, a hook) is not a write outcome and keeps propagating.
     """
@@ -79,17 +83,20 @@ def use_writer(db: object, batcher: object, catalog_doc_id: str) -> bool:
     stops those). A non-service ``db`` is the in-memory test topology, which the engine's combined
     write cannot reach, and keeps the old upsert. ``_run_index`` builds the ChunkBatcher for every
     ``HttpVectorClient``, so a service-backed db with no batcher is a broken invariant, not a
-    topology: it raises rather than choosing a path.
+    topology: it raises rather than choosing a path. Identity is tested first: a file with no
+    catalog document never needs the writer, so it never reaches the batcher check either.
     """
     from nexus.db.http_vector_client import is_service_backed  # noqa: PLC0415 — deferred: the vector client imports back into catalog code
 
     if not is_service_backed(db):
         return False
+    if not catalog_doc_id:
+        return False
     if batcher is None:
         raise RuntimeError(
             "the oversize fallback got a service-backed T3 and no ChunkBatcher: _run_index builds "
             "the batcher for every HttpVectorClient, so this is a wiring bug, not a topology")
-    return bool(catalog_doc_id)
+    return True
 
 
 def write_oversize_file(
@@ -157,14 +164,32 @@ def write_oversize_file(
 def _is_transient_write_error(exc: BaseException) -> bool:
     """A write outcome worth deferring the file over: the embed timeout, a transient HTTP status,
     or a connectivity error (begin, complete and sweep-only appends carry no retry beyond the
-    writer's own bounded one)."""
-    import httpx  # noqa: PLC0415 — deferred: only the failure arm needs the type
+    writer's own bounded one).
 
-    from nexus.retry import _is_connectivity_error  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
+    The rule decides on the exception that ENDED the write, not on whatever happened to be in
+    flight when it was raised. A transport error counts when it is the exception itself or an
+    explicit ``raise ... from`` cause of it (walked along ``__cause__``). An incidental
+    ``__context__`` does not count: ``RefreshableHttpStoreMixin._request`` runs its re-resolve retry
+    inside the ``except`` block of the first attempt, so a permanent error raised by the retry
+    carries the first attempt's transport error as ``__context__`` and would otherwise be deferred
+    as a blip instead of aborting the run. (The shared ``nexus.retry._is_connectivity_error`` reads
+    ``__context__`` too, and is right to for its manifest-retry and eviction uses; this site is the
+    one that turns a classification into "skip the file".) A genuine connect failure that the
+    client's retry could not outlast is itself a transport error at the top level, so it still
+    defers.
+    """
+    import httpx  # noqa: PLC0415 — deferred: only the failure arm needs the type
 
     if isinstance(exc, CombinedWriteEmbedTimeoutError):
         return True
     if isinstance(exc, httpx.HTTPStatusError):
         resp = exc.response
         return resp is not None and resp.status_code in _TRANSIENT_WRITE_STATUSES
-    return _is_connectivity_error(exc)
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        if isinstance(cur, (httpx.TransportError, ConnectionError, TimeoutError)):
+            return True
+        seen.add(id(cur))
+        cur = cur.__cause__
+    return False
