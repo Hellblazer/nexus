@@ -154,22 +154,25 @@ jobs:
     # and cancel-in-progress above are unchanged (a pending push run is still
     # replaced by a newer one; a started run is never cancelled by a push).
     #
-    # CONTAINER CLEANUP. There is deliberately no end-of-job container sweep:
-    # hellmini's colima daemon is shared with hand-run and agent-run engine
-    # suites (scripts/mvnw-leased.sh), and any sweep by label or creation time
-    # would remove THEIR containers mid-suite. Testcontainers' Ryuk is the
-    # reaper: it is enabled here (the TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE
-    # step above is what lets it mount the socket on colima), one Ryuk starts
-    # per Maven JVM and reaps that JVM's containers when its connection drops,
-    # including on a hard kill at the job timeout. Probe run 36770360357 started
-    # Ryuk in both Maven invocations and left no container behind.
+    # CONTAINER CLEANUP. There is deliberately no end-of-job container sweep.
+    # The runner (user ghrunner) runs its OWN colima VM per job, started by the
+    # runner's job-started hook and pruned and stopped by its job-completed
+    # hook, so the job's Docker state does not outlive the job. Testcontainers'
+    # Ryuk is the in-job reaper: it is enabled here (the
+    # TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE step above is what lets it mount the
+    # socket on colima), one Ryuk starts per Maven JVM and reaps that JVM's
+    # containers when its connection drops, including on a hard kill at the job
+    # timeout. Probe run 36770360357 started Ryuk in both Maven invocations and
+    # left no container behind.
     #
     # KNOWN LIMITATION: no lease is shared between this job and hand-run suites.
-    # mvnw-leased.sh serializes builders through a lock in the git common dir of
-    # the clone it runs from, and this job runs from the runner's own checkout,
-    # so the two never see each other's lock. A push job and a hand-run suite
-    # can overlap on the same colima VM (4 CPUs / 8 GB at 2026-09-30) and slow
-    # or destabilize each other. Colima's settings are not changed here.
+    # The job's Docker daemon is separate from the always-on one that
+    # scripts/mvnw-leased.sh suites use (user hhildebrand), so the two do not
+    # collide on containers. They do compete for the host's 24 GB of RAM: a full
+    # host `pytest -n auto` uses about 23 GB, so a push job's 8 GiB VM running
+    # at the same time can thrash. mvnw-leased.sh serializes builders through a
+    # lock in the git common dir of the clone it runs from, and this job runs
+    # from the runner's own checkout, so the two never see each other's lock.
     #
     # COST DISCIPLINE. "macOS/premium runners only where the artifact requires
     # the platform" (AGENTS.md § CI Cost Discipline) is about BILLED runners.
