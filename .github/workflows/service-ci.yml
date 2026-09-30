@@ -120,7 +120,46 @@ jobs:
     name: Java tests + jOOQ codegen drift guard
     needs: changes
     if: needs.changes.outputs.service == 'true'
-    runs-on: ubuntu-latest
+    # WHERE THIS JOB RUNS (nexus-f5i1m; Sam, 2026-09-30, session nexus_654).
+    # Pushes to main/develop run on the `hellmini` self-hosted runner (Mac mini,
+    # macOS arm64, Docker via colima); pull_request ALWAYS stays on
+    # ubuntu-latest. The job took 21 to 34 min on GitHub-hosted runners, timed
+    # out, flaked on chance-based tests, and every develop push queued behind
+    # it; hellmini is otherwise idle.
+    #
+    # This WIDENS hellmini's trust boundary: until then it took release-tag
+    # jobs only (AGENTS.md § Engine-service release). The repo is PUBLIC, so:
+    #   - only `push` events can reach hellmini, never pull_request (fork PRs
+    #     included);
+    #   - only pushes by the repo owner can: any other actor falls through to
+    #     ubuntu-latest in the expression below, so a collaborator's push is
+    #     still tested, just not on the self-hosted box;
+    #   - the first step re-checks both conditions from inside the job and
+    #     fails before anything else runs (defense in depth, same actor as
+    #     hellmini-probe.yml's `if:`).
+    # A job-level `if:` cannot host the actor guard, because skipping would
+    # leave a non-owner push untested instead of rerouting it.
+    #
+    # OFFLINE FALLBACK. A job queued for a runner that is down waits forever
+    # (hellmini needs a KVM unlock after a FileVault reboot). Set the repository
+    # variable SERVICE_CI_PUSH_RUNNER to `ubuntu-latest` (Settings > Secrets and
+    # variables > Actions > Variables) and the next push runs on GitHub's
+    # runners with no code change; delete the variable to return to hellmini.
+    # The variable is read at job start, so a run already queued for a dead
+    # runner must be cancelled and re-run to pick it up.
+    #
+    # SHARED RUNNER. hellmini is ONE runner, so this job now serializes with the
+    # engine-service release legs and the PG-bundle cache seed: a push can wait
+    # behind a release build (up to 65 min) and vice versa. The concurrency group
+    # and cancel-in-progress above are unchanged (a pending push run is still
+    # replaced by a newer one; a started run is never cancelled by a push).
+    #
+    # COST DISCIPLINE. "macOS/premium runners only where the artifact requires
+    # the platform" (AGENTS.md § CI Cost Discipline) is about BILLED runners.
+    # hellmini is owned hardware billed at nothing per minute, and the job moves
+    # OFF a billed runner, so the directive's concern (premium minutes) does not
+    # apply. The Java suite has no macOS requirement; it runs there for speed.
+    runs-on: ${{ github.event_name == 'push' && github.actor == 'Hellblazer' && (vars.SERVICE_CI_PUSH_RUNNER || 'hellmini') || 'ubuntu-latest' }}
     # nexus-rjk2a, measured 2026-09-29/30 (14 runs in 30 hours): the job took
     # 21 to 34 min. The old 30-minute limit cut three runs with no test failure
     # (release PR #1583, 5de0e23f9 at 30m flat, 54d37bf43 at 30m16s); the
@@ -150,6 +189,39 @@ jobs:
     timeout-minutes: 60
 
     steps:
+      # Runs only on a self-hosted runner (hellmini). Guard first, then the
+      # Docker/tmp setup the GitHub-hosted image gets for free.
+      - name: Self-hosted runner guard and setup
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Defense in depth behind the runs-on expression: a self-hosted
+          # runner serves only a push by the repo owner.
+          if [ "$GITHUB_EVENT_NAME" != "push" ] || [ "$GITHUB_ACTOR" != "Hellblazer" ]; then
+            echo "::error::refusing to run on a self-hosted runner for event=$GITHUB_EVENT_NAME actor=$GITHUB_ACTOR (owner pushes only)"
+            exit 1
+          fi
+          # Temp files of this job land in the runner's per-job temp dir,
+          # which the runner wipes, instead of a directory that persists
+          # between jobs on this box.
+          echo "TMPDIR=$RUNNER_TEMP" >> "$GITHUB_ENV"
+          # Testcontainers does not read docker contexts. On colima the
+          # daemon's socket is not /var/run/docker.sock on the host, so point
+          # Testcontainers at the active context's endpoint, and tell Ryuk
+          # (which bind-mounts the socket into its own container) the path
+          # INSIDE the colima VM, where it is /var/run/docker.sock.
+          if [ -z "${DOCKER_HOST:-}" ]; then
+            host="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
+            echo "DOCKER_HOST=$host" >> "$GITHUB_ENV"
+          fi
+          if [ -z "${TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE:-}" ]; then
+            echo "TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock" >> "$GITHUB_ENV"
+          fi
+          docker info --format 'docker daemon: arch={{.Architecture}} cpus={{.NCPU}} mem={{.MemTotal}}'
+          # Stamp for the leftover-container sweep at the end of the job.
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$RUNNER_TEMP/job-start.stamp"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
           # SchemaUpgradeRehearsalIntegrationTest (nexus-4m6i0.6) needs an old
@@ -165,7 +237,9 @@ jobs:
           java-version: '25'
           distribution: 'graalvm'
           # Cache Maven local repo across runs; bust when pom.xml changes.
-          cache: 'maven'
+          # Skipped on self-hosted: hellmini's ~/.m2 already persists between
+          # jobs, so restoring and re-saving a tarball of it is pure cost.
+          cache: ${{ runner.environment == 'github-hosted' && 'maven' || '' }}
 
       - name: Cache MiniLM ONNX model
         # EmbedParityTest constructs OnnxEmbedder, which loads the
@@ -190,8 +264,8 @@ jobs:
             echo "ONNX model not in cache; downloading."
             mkdir -p "$MODEL_DIR"
             curl -fsSL https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz \
-              -o /tmp/onnx.tar.gz
-            tar -xzf /tmp/onnx.tar.gz -C "$MODEL_DIR"
+              -o "$RUNNER_TEMP/onnx.tar.gz"
+            tar -xzf "$RUNNER_TEMP/onnx.tar.gz" -C "$MODEL_DIR"
             test -f "$MODEL_DIR/onnx/model.onnx" || { echo "model.onnx missing after extract"; exit 1; }
           else
             echo "ONNX model restored from cache."
@@ -300,6 +374,41 @@ jobs:
       - name: Slowest test classes (diagnostic, never fails)
         if: always()
         run: python3 scripts/surefire_slowest.py service/target/surefire-reports --top 25
+
+      # Self-hosted only: Docker state outlives a job on hellmini, unlike a
+      # GitHub-hosted VM. Testcontainers' Ryuk normally reaps every container
+      # when the test JVM exits, but a timeout or cancel can kill the JVM
+      # before Ryuk finishes, and a leaked Postgres container holds RAM in the
+      # 4 GB colima VM for the next job. Sweep containers Testcontainers
+      # labelled that were CREATED AFTER this job started (the stamp above),
+      # so nothing older is touched. A Testcontainers run on hellmini that
+      # OVERLAPS this job's window (a dev suite started by hand) would be
+      # swept too if its containers are still up when this step runs.
+      - name: Remove leftover Testcontainers containers (self-hosted)
+        if: always() && runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          set -uo pipefail
+          stamp_file="$RUNNER_TEMP/job-start.stamp"
+          [ -f "$stamp_file" ] || { echo "no start stamp; skipping sweep"; exit 0; }
+          # Give Ryuk its reconnection grace to finish first.
+          sleep 15
+          start="$(cat "$stamp_file")"
+          leftovers=""
+          for id in $(docker ps -aq --filter label=org.testcontainers=true); do
+            # .Created is RFC 3339 UTC, so it compares as a string.
+            created="$(docker inspect --format '{{.Created}}' "$id" 2>/dev/null || true)"
+            if [[ -n "$created" && "$created" > "$start" ]]; then
+              leftovers="$leftovers $id"
+            fi
+          done
+          if [ -n "$leftovers" ]; then
+            echo "::warning::removing leftover Testcontainers containers:$leftovers"
+            # shellcheck disable=SC2086
+            docker rm -f -v $leftovers || true
+          else
+            echo "no leftover Testcontainers containers."
+          fi
 
   # 2026-07-06 CI-cost pass: the native-image-build-and-smoke job that lived
   # here was removed — every service/** push was building the native image
