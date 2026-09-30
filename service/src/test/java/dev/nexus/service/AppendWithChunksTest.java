@@ -2,27 +2,12 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service;
 
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.db.CatalogRepository;
-import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.CombinedWriteService;
-import dev.nexus.service.db.TenantScope;
-import dev.nexus.service.vectors.EmbedResult;
-import dev.nexus.service.vectors.Embedder;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.RacedEmbedActivity;
-import org.jooq.SQLDialect;
-import org.jooq.impl.DSL;
-import org.junit.jupiter.api.AfterAll;
-import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestInstance;
-import org.testcontainers.containers.PostgreSQLContainer;
 
-import java.sql.Connection;
-import java.util.ArrayList;
-import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -32,10 +17,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -50,120 +33,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code CatalogRepository#appendManifestChunks}. Hermetic Testcontainers PG, mirroring
  * {@code CombinedWriteRepositoryTest} / {@code CombinedWriteRacedEmbedCounterTest}.
  */
-@TestInstance(TestInstance.Lifecycle.PER_CLASS)
-class AppendWithChunksTest {
-
-    private static final String SVC_ROLE = "svc_append_chunks_test";
-    private static final String SVC_PASS = "svc_append_chunks_test_pass";
-    private static final String TENANT   = "append-chunks-tenant";
-
-    private PostgreSQLContainer<?> pg;
-    private HikariDataSource svcDs;
-    private TenantScope tenantScope;
-    private CatalogRepository repo;
-    private CombinedWriteService svc;
-    private CountingFakeEmbedder embedder;
-    private final AtomicInteger seq = new AtomicInteger();
-
-    @BeforeAll
-    void startAll() throws Exception {
-        pg = PgContainerHelper.start();
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.applyProductSchema(su);
-        }
-        try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
-        }
-        var cfg = new HikariConfig();
-        cfg.setJdbcUrl(pg.getJdbcUrl());
-        cfg.setUsername(SVC_ROLE);
-        cfg.setPassword(SVC_PASS);
-        cfg.setMaximumPoolSize(8);
-        cfg.setConnectionTimeout(10_000);
-        cfg.setAutoCommit(true);
-        svcDs = new HikariDataSource(cfg);
-        tenantScope = new TenantScope(svcDs);
-        repo = new CatalogRepository(tenantScope);
-        embedder = new CountingFakeEmbedder();
-        svc = new CombinedWriteService(tenantScope, repo, new EmbedderRouter(embedder, "document"));
-    }
-
-    @AfterAll
-    void stopAll() {
-        if (svcDs != null) svcDs.close();
-        if (pg != null) pg.stop();
-    }
-
-    // ── helpers ─────────────────────────────────────────────────────────────────
-
-    /** A fresh registered collection + one registered document per test. */
-    private record Fx(String collection, String docId) {}
-
-    private Fx fixture(String tag) {
-        int n = seq.incrementAndGet();
-        String collection = "code__ap" + tag + n + "__minilm-l6-v2-384__v1";
-        String docId = "ap." + tag + "." + n;
-        tenantScope.withTenant(TENANT, ctx -> {
-            PgContainerHelper.insertCollection(ctx, TENANT, collection);
-            return null;
-        });
-        registerDoc(docId, collection);
-        return new Fx(collection, docId);
-    }
-
-    private void registerDoc(String tumbler, String collection) {
-        repo.upsertDocument(TENANT, Map.of(
-            "tumbler", tumbler, "title", "append-chunks-" + tumbler,
-            "content_type", "code", "corpus", "code",
-            "physical_collection", collection, "chunk_count", 0));
-    }
-
-    private static String ch(String seed) {
-        return Chash.ofText(seed).toHex();
-    }
-
-    private static Map<String, Object> chunk(String chash, String text) {
-        return Map.of("chash", chash, "text", text, "metadata", Map.of());
-    }
-
-    private static Map<String, Object> row(int position, String chash) {
-        return Map.of("position", position, "chash", chash, "chunk_index", position);
-    }
-
-    private static Map<String, Object> doc(String docId, List<Map<String, Object>> rows) {
-        return Map.of("doc_id", docId, "rows", rows);
-    }
-
-    private String chunkText(String collection, String hexChash) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            return DSL.using(su, SQLDialect.POSTGRES)
-                .select(CHUNKS.CHUNK_TEXT).from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(TENANT))
-                .and(CHUNKS.COLLECTION.eq(collection))
-                .and(CHUNKS.CHASH.eq(HexFormat.of().parseHex(hexChash)))
-                .fetchOne(CHUNKS.CHUNK_TEXT);
-        }
-    }
-
-    private long chunkCount(String collection) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-            return DSL.using(su, SQLDialect.POSTGRES)
-                .selectCount().from(CHUNKS)
-                .where(CHUNKS.TENANT_ID.eq(TENANT))
-                .and(CHUNKS.COLLECTION.eq(collection))
-                .fetchOne(0, Long.class);
-        }
-    }
-
-    private List<String> manifestChashes(String docId) {
-        List<String> out = new ArrayList<>();
-        for (var r : repo.getManifest(TENANT, docId)) {
-            out.add(String.valueOf(r.get("chash")));
-        }
-        return out;
-    }
+class AppendWithChunksTest extends AtomicWriteTestBase {
 
     // ── Test Plan 2: known vs content-changed chashes ────────────────────────────
 
@@ -369,34 +239,6 @@ class AppendWithChunksTest {
             }
         } finally {
             pool.shutdownNow();
-        }
-    }
-
-    // ── fixtures ─────────────────────────────────────────────────────────────────
-
-    static final class CountingFakeEmbedder implements Embedder {
-        final AtomicInteger calls = new AtomicInteger();
-
-        @Override
-        public List<float[]> embed(List<String> texts) {
-            calls.addAndGet(texts.size());
-            List<float[]> out = new ArrayList<>(texts.size());
-            for (String t : texts) {
-                float[] v = new float[384];
-                v[Math.floorMod(t.hashCode(), 384)] = 1.0f;
-                out.add(v);
-            }
-            return out;
-        }
-
-        @Override
-        public EmbedResult embedWithUsage(List<String> texts) {
-            return new EmbedResult(embed(texts), texts.size());
-        }
-
-        @Override
-        public String modelToken() {
-            return "minilm-l6-v2-384";
         }
     }
 }

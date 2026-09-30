@@ -5509,6 +5509,11 @@ public final class CatalogRepository {
         List<Map<String, Object>> failedDetail = new ArrayList<>();
         List<Map<String, Object>> completeRefused = new ArrayList<>();
         List<Map<String, Object>> sweepDetail = new ArrayList<>();
+        // RDR-223 P1.2 (bead nexus-z0o2p.3): per-document {doc_id -> chashes this write dropped
+        // from that document's previous manifest}, filled for every document whose transaction
+        // committed, whether or not `sweep` is on. Insertion-ordered so the response follows
+        // request order. See the dropped_chashes note at the response build below.
+        Map<String, List<String>> droppedByDoc = new LinkedHashMap<>();
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, code-review CRITICAL): chashes
         // already WRITTEN (committed) by an earlier doc of THIS SAME call. A doc's
         // own per-doc INSERT hitting ON CONFLICT against a chash a SIBLING doc of
@@ -5567,11 +5572,19 @@ public final class CatalogRepository {
                         // anywhere, not in sweep_skipped, not in sweep_detail — the
                         // exact "swallowed failure" class nexus-fhhwf already fixed
                         // once for the doc-level catch a few lines up.
+                        //
+                        // RDR-223 P1.2 (bead nexus-z0o2p.3): the read now runs with `sweep`
+                        // OFF too. A multi-batch writer writes its first batch with sweep off
+                        // and needs the dropped list in the response to carry to the
+                        // document's last append; before this, that list was computed only
+                        // for a sweep. The read is the same savepoint-guarded, fail-open PK
+                        // read; with sweep off a failed read costs only the list (the doc's
+                        // entry is left out of dropped_chashes and the RDR-192 reaper covers
+                        // the un-swept chunks), never the write.
                         long tBeforeReadStart = System.nanoTime();
-                        Set<String> beforeRead = sweep
-                            ? withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
-                                  tenant, docId, () -> currentManifestChashes(ctx, tenant, docId), null)
-                            : Set.of();
+                        Set<String> beforeRead =
+                            withSavepointFailOpen(ctx, "write_manifest_many_sweep_before_read_failed",
+                                  tenant, docId, () -> currentManifestChashes(ctx, tenant, docId), null);
                         long tBeforeReadEnd = System.nanoTime();
                         beforeReadNanosTotal[0] += (tBeforeReadEnd - tBeforeReadStart);
                         boolean beforeReadFailed = sweep && beforeRead == null;
@@ -5587,11 +5600,12 @@ public final class CatalogRepository {
                             sweepOutcome[0] = Map.of("doc_id", docId, "dropped", 0,
                                 "swept", 0, "kept", 0, "errored", true,
                                 "reason", "before_read_failed");
-                        } else if (sweep) {
+                        } else if (beforeRead != null) {
                             // nexus-11gh6 rev 2 §2.3: capture `before` for the
                             // POST-COMMIT dropped-chash computation below — this
                             // lambda is the only place that has it. The actual
                             // sweep DELETE no longer runs in this transaction.
+                            // RDR-223 P1.2: captured with sweep off too.
                             beforeHolder[0] = beforeRead;
                         }
                         if (completeHash != null) {
@@ -5625,9 +5639,10 @@ public final class CatalogRepository {
                     // construction: a doc that lands in `failed` below never
                     // reaches this line, so a rolled-back manifest write can
                     // no longer contribute a "swept" count to the response.
-                    if (sweep && beforeHolder[0] != null) {
+                    if (beforeHolder[0] != null) {
                         List<String> dropped = computeDroppedChashes(beforeHolder[0], rows);
-                        if (!dropped.isEmpty()) {
+                        droppedByDoc.put(docId, dropped);
+                        if (sweep && !dropped.isEmpty()) {
                             long tSweepStart = System.nanoTime();
                             sweepOutcome[0] = runSweepTransaction(tenant, docId, collection, dropped);
                             sweepNanosTotal[0] += (System.nanoTime() - tSweepStart);
@@ -5718,6 +5733,14 @@ public final class CatalogRepository {
         result.put("swept", totalSwept);
         result.put("sweep_skipped", sweepSkipped);
         result.put("sweep_detail", sweepDetail);
+        // RDR-223 P1.2 (bead nexus-z0o2p.3): {doc_id -> the chashes this write dropped from
+        // that document's previous manifest}, one entry per document whose write committed
+        // (an empty list for a new or unchanged document; a document that failed has none).
+        // Present whether or not `sweep` is on; with sweep on it equals the list handed to
+        // the sweep. Uncapped: it reports a write that already committed (Sam, 2026-09-29,
+        // nexus-z0o2p.1). A multi-batch writer carries a document's list to that document's
+        // last append as `sweep_chashes`.
+        result.put("dropped_chashes", droppedByDoc);
         // nexus-kl2z6 increment 1 (design memo §5.1/§5.2): ONLY present when
         // this call actually carried `chunks` — an absent field is what
         // makes the no-chunks path byte-for-byte identical to pre-kl2z6
@@ -5798,10 +5821,13 @@ public final class CatalogRepository {
      */
     private static Set<String> currentManifestChashes(DSLContext ctx, String tenant, String docId) {
         Set<String> out = new LinkedHashSet<>();
+        // RDR-223 P1.2: ORDER BY position so the dropped list a write_many response reports is
+        // in the previous manifest's order, deterministically (the sweep itself never cared).
         var rows = ctx.select(CHK_CHASH_HEX).from(CATALOG_DOCUMENT_CHUNKS)
                       .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
                              .and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(docId))
                              .and(liveParentDoc(ctx, tenant)))
+                      .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
                       .fetch();
         for (var r : rows) {
             String c = r.value1();
