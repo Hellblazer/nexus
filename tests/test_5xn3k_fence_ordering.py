@@ -211,7 +211,7 @@ def test_index_document_register_and_begin_precede_first_write(tmp_path) -> None
     the first byte of content is written. RDR-223: the write is the combined
     chunk+owner request, so there is no separate chunk upsert at all."""
     seq: list = []
-    fence = _RecordingFenceWriter(seq)
+    fence = _RecordingFenceWriter(seq, complete_result={"referenced": 1, "present": 1, "missing": 0, "flagged": 0})
     n, hooks, register_calls = _drive_index_document(tmp_path, seq, fence)
 
     assert n == 1
@@ -228,7 +228,7 @@ def test_index_document_begin_uses_the_one_computed_content_hash(tmp_path) -> No
     from nexus.doc_indexer import _sha256
 
     seq: list = []
-    fence = _RecordingFenceWriter(seq)
+    fence = _RecordingFenceWriter(seq, complete_result={"referenced": 1, "present": 1, "missing": 0, "flagged": 0})
     f = tmp_path / "doc.md"
     f.write_text("hello fence")
     expected = _sha256(f)
@@ -239,37 +239,37 @@ def test_index_document_begin_uses_the_one_computed_content_hash(tmp_path) -> No
     assert fence.begin_calls[0]["collection"] == COLLECTION
 
 
-def test_index_document_completion_rides_the_one_request_write(tmp_path) -> None:
-    """RDR-223 (nexus-z0o2p.13): a document that fits one request is one
-    write_manifest_many carrying its chunks, the sweep, and the completion
-    stamp (``complete``) with the SAME content_hash begin carried. There is
-    no separate complete call, and the batch manifest hook is dropped so the
-    manifest is not written a second time. (Before RDR-223 the stamp was an
-    explicit ``_fence_complete`` after a hook-written manifest, nexus-tp8yk
-    D2a.)
+def test_index_document_completion_is_its_own_request_after_the_hooks(tmp_path) -> None:
+    """RDR-223 (nexus-z0o2p.13, decision D2): a document that fits one request is one
+    write_manifest_many carrying its chunks and the sweep, and the completion stamp is its own
+    ``complete_index_run`` AFTER the post-store hooks, with the SAME content_hash begin carried, so a
+    process killed in a hook leaves the fence ``indexing``. The batch manifest hook is dropped so
+    the manifest is not written a second time. (Before RDR-223 the stamp was an explicit
+    ``_fence_complete`` after a hook-written manifest, nexus-tp8yk D2a; before D2 it rode the write.)
     """
     seq: list = []
-    fence = _RecordingFenceWriter(seq)
+    fence = _RecordingFenceWriter(seq, complete_result={"referenced": 1, "present": 1, "missing": 0, "flagged": 0})
     n, hooks, _ = _drive_index_document(tmp_path, seq, fence)
 
     assert n == 1
     assert len(fence.write_calls) == 1, "one request for a one-request document"
     w = fence.write_calls[0]
     assert w["sweep"] is True
-    assert w["complete"] == {DOC_ID: fence.begin_calls[0]["content_hash"]}
+    assert not w["complete"], "the stamp does not ride the write"
     assert len(w["chunks"]) == 1 and w["chunks"][0]["text"] == "chunk text"
     # The write MERGES chunk metadata (the old upsert's semantics), naming the owned keys this
     # document's rows dropped, so bib_* enrichment survives a re-index.
     assert w["metadata_merge"] is True
     assert isinstance(w["metadata_delete_keys"], list)
-    assert fence.complete_calls == [], "the stamp rides the write; no second call"
+    assert [(c["doc_id"], c["content_hash"], c["chunk_count"]) for c in fence.complete_calls] == [
+        (DOC_ID, fence.begin_calls[0]["content_hash"], 1)], "the stamp is its own call"
     assert hooks.batch_calls, "fire_batch never fired"
     assert hooks.batch_calls[0]["manifest_complete"] is None
     assert len(getattr(hooks, "dropped_batch_hooks", [])) == 1, (
         "the batch manifest hook must be dropped: the write carried the manifest"
     )
     ops = [op for op, *_ in seq]
-    assert ops.index("write") < ops.index("manifest_batch"), seq
+    assert ops.index("write") < ops.index("manifest_batch") < ops.index("complete"), seq
 
 
 def test_index_document_no_catalog_identity_fails_the_run(tmp_path) -> None:
@@ -387,9 +387,11 @@ def test_incremental_begin_before_first_write_complete_after_last_write(tmp_path
     # hash-once MUST: begin and complete carry the SAME content_hash.
     assert fence.begin_calls[0]["content_hash"] == CONTENT_HASH
     assert fence.complete_calls[0]["content_hash"] == CONTENT_HASH
-    # The batch hooks fire once per batch, after the write; the manifest hook is left out.
+    # The batch hooks fire once per batch, after the write; the manifest hook is left out. The stamp
+    # follows the hooks (decision D2).
     assert ops.count("manifest_batch") == 2, seq
-    assert ops.index("manifest_batch") > ops.index("complete"), seq
+    last_hook = max(i for i, op in enumerate(ops) if op == "manifest_batch")
+    assert ops.index("complete") > last_hook, seq
     assert hooks.dropped_batch_hooks, "the manifest hook must be dropped (the writer wrote the manifest)"
     assert all(c["manifest_complete"] is None for c in hooks.batch_calls)
 
