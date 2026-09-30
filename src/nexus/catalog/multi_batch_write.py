@@ -66,6 +66,15 @@ bound every other writer obeys. A batch larger than that is split into consecuti
 chunk payload of each carrying only the chunks its own rows reference that no earlier request of
 this run already carried.
 
+``defer_completion=True`` (nexus-z0o2p.11, the streaming PDF pipeline) runs everything above EXCEPT
+the completion stamp: ``finish()`` leaves the run ``indexing`` and the caller stamps it later with
+:meth:`complete`. The streaming pipeline enriches every chunk's metadata after the last chunk has
+landed (title, author, extraction method) and must not have the document stamped complete before
+that pass succeeded: a process killed between the stamp and the pass would leave a document that
+looks complete and is missing its enrichment, and the next run would skip it. A single-request
+document then writes its ``write_many`` with no ``complete`` and :meth:`complete` sends
+``complete_index_run``, the same stamp a multi-request document ends with.
+
 Only write ops are used, so ``cat`` may be the ``get_catalog_writer()`` proxy (the closed
 ``CATALOG_WRITE_OPS`` whitelist); the writer never reads the catalog. A request that fails
 propagates its exception unchanged (a killed process is the model) and poisons the writer;
@@ -169,7 +178,8 @@ class MultiBatchDocumentWriter:
 
     *cat* is a catalog writer (``get_catalog_writer()`` or ``HttpCatalogClient``). *content_hash*
     turns on the index-run fence and the completion stamp; it is required as soon as the document
-    takes more than one request. Without it the caller stamps (or not).
+    takes more than one request. Without it the caller stamps (or not). With *defer_completion*
+    the writer never stamps: :meth:`complete` does, after :meth:`finish`.
     """
 
     def __init__(
@@ -183,6 +193,7 @@ class MultiBatchDocumentWriter:
         embedding_model: str | None = None,
         force_re_embed: bool = False,
         chunk_cap: int | None = None,
+        defer_completion: bool = False,
     ) -> None:
         if not doc_id:
             raise ValueError("MultiBatchDocumentWriter: 'doc_id' is required")
@@ -190,6 +201,10 @@ class MultiBatchDocumentWriter:
             raise ValueError("MultiBatchDocumentWriter: 'collection' is required")
         if content_hash is not None and not content_hash:
             raise ValueError("MultiBatchDocumentWriter: 'content_hash' must be non-empty when given")
+        if defer_completion and content_hash is None:
+            raise ValueError(
+                "MultiBatchDocumentWriter: defer_completion needs a 'content_hash' (it is the "
+                "completion stamp that is deferred)")
         if chunk_cap is None:
             from nexus.db.http_vector_client import per_collection_chunk_cap  # noqa: PLC0415 — deferred: the vector client imports back into catalog code
             chunk_cap = per_collection_chunk_cap(collection)
@@ -204,6 +219,7 @@ class MultiBatchDocumentWriter:
         self._run_id = run_id or uuid.uuid4().hex
         self._embedding_model = embedding_model
         self._force_re_embed = force_re_embed
+        self._defer = defer_completion
         self._pending: tuple[list[dict], list[dict]] | None = None
         self._carried: set[str] = set()      # chashes whose chunk payload an earlier request carried
         self._sent = 0                       # data requests sent so far
@@ -284,6 +300,31 @@ class MultiBatchDocumentWriter:
         self._result.manifest_rows = len(self._positions)
         return self._result
 
+    def complete(self) -> DocumentWriteResult:
+        """Stamp the run complete. Only for a ``defer_completion`` writer, after :meth:`finish`.
+
+        Raises :class:`~nexus.errors.IndexRunVerifyRefused` when the engine refuses the stamp
+        (recorded for the run summary; the fence stays ``indexing``) and
+        :class:`BatchWriteFailedError` when the engine has no fence route. A second call after the
+        stamp landed does nothing."""
+        if not self._defer:
+            raise ValueError(
+                "MultiBatchDocumentWriter.complete: only a defer_completion writer is stamped "
+                "by the caller; this one stamps itself in finish()")
+        if not self._finished:
+            raise ValueError("MultiBatchDocumentWriter.complete: call finish() first")
+        if self._result.completed:
+            return self._result
+        if self._failed:
+            raise self._fail(self._sent, "an earlier request of this writer failed; the writer "
+                                         "refuses to stamp the document")
+        try:
+            self._stamp(self._sent)
+        except BaseException:
+            self._failed = True
+            raise
+        return self._result
+
     def mark_fence_handled(self) -> None:
         """Tell the writer the caller already failed (or deliberately left) the index run, so
         :meth:`abort` and the ``with`` block do not fail it again."""
@@ -293,10 +334,12 @@ class MultiBatchDocumentWriter:
         """Mark the index run failed, if a fence was begun. Best effort; for a caller that
         survives a failed write (a killed process needs nothing: the fence stays ``indexing``).
 
-        A no-op once the writer finished (the stamp landed), after the engine refused the stamp
-        (the fence stays ``indexing``, see the module docstring) and after the first call."""
-        if (self._finished or self._refused or self._aborted or not self._fenced
-                or self._content_hash is None):
+        A no-op once the stamp landed, after the engine refused the stamp (the fence stays
+        ``indexing``, see the module docstring) and after the first call. A deferred-completion
+        writer that finished but was never stamped is still open, so it is failed."""
+        stamped = self._result.completed
+        if (stamped or (self._finished and not self._defer) or self._refused or self._aborted
+                or not self._fenced or self._content_hash is None):
             return
         self._aborted = True
         try:
@@ -449,7 +492,9 @@ class MultiBatchDocumentWriter:
         return resp
 
     def _send_only_request(self, rows: list[dict], chunks: list[dict]) -> None:
-        complete = {self._doc_id: self._content_hash} if self._content_hash is not None else None
+        complete = (
+            {self._doc_id: self._content_hash}
+            if self._content_hash is not None and not self._defer else None)
         resp = self._write_many(rows, chunks, sweep=True, complete=complete)
         for refused in resp.get("complete_refused") or ():
             if refused.get("doc_id") == self._doc_id:
@@ -537,20 +582,24 @@ class MultiBatchDocumentWriter:
             self._result.sweep_skipped += int(sresp.get("sweep_skipped") or 0)
         self._result.dropped = sweep
         self._result.dropped_count = len(sweep)
-        if self._content_hash is not None:
-            # The engine compares this with count(*) over the manifest ROWS. Positions are unique
-            # in a run, so that is the number of positions written, not the distinct chashes.
-            try:
-                done = self._retrying(
-                    self._cat.complete_index_run, self._doc_id, self._content_hash,
-                    len(self._positions))
-            except IndexRunVerifyRefused:
-                self._note_refusal()
-                raise
-            if done is None:
-                raise self._fail(n, "complete_index_run answered 404: the engine has no "
+        if self._content_hash is not None and not self._defer:
+            self._stamp(n)
+
+    def _stamp(self, batch: int) -> None:
+        """``complete_index_run``, after the last data request and its sweeps."""
+        # The engine compares this with count(*) over the manifest ROWS. Positions are unique
+        # in a run, so that is the number of positions written, not the distinct chashes.
+        try:
+            done = self._retrying(
+                self._cat.complete_index_run, self._doc_id, self._content_hash,
+                len(self._positions))
+        except IndexRunVerifyRefused:
+            self._note_refusal()
+            raise
+        if done is None:
+            raise self._fail(batch, "complete_index_run answered 404: the engine has no "
                                     "index-run fence route, so the document was NOT stamped")
-            self._result.completed = True
+        self._result.completed = True
 
 
 def write_document(

@@ -26,6 +26,7 @@ import pytest
 from nexus.db.t3 import T3Database
 from nexus.db.http_pipeline_client import HttpPipelineDB, PipelineRunFenced
 from nexus.pipeline_stages import pipeline_index_pdf
+from tests._owner_write_double import install_streaming_writer
 from tests.pipeline_fake_engine import FakePipelineEngine, make_fake_engine_db
 from tests.test_pipeline_stages import _P_CHK, _P_EXT, _embed, _er, _fx, _tc
 
@@ -43,6 +44,15 @@ def _stub_fence_complete(monkeypatch: pytest.MonkeyPatch) -> None:
     # chunk in the real substrate, so the fence's verify-then-stamp would
     # refuse; the fence is tests/test_5xn3k_fence_ordering.py's territory.
     monkeypatch.setattr("nexus.doc_indexer._fence_complete", lambda *a, **k: None)
+
+
+@pytest.fixture(autouse=True)
+def writer(monkeypatch: pytest.MonkeyPatch):
+    """RDR-223 (nexus-z0o2p.11): the uploader writes a document's chunks and owner rows through its
+    multi-batch writer. These runs use fake chunk ids and catalog ids the real engine would refuse,
+    so the writer is a recorder; its behaviour against the real engine is in
+    ``tests/integration/test_rdr223_pdf_journey.py``."""
+    return install_streaming_writer(monkeypatch)
 
 
 @pytest.fixture()
@@ -72,6 +82,9 @@ def _seed_completed_leftover(engine: FakePipelineEngine, pdf_path: str, collecti
 
 def _run(engine: FakePipelineEngine, pdf_path: str, collection: str, doc_id: str, *, force: bool = False):
     hooks = MagicMock()
+    # The uploader leaves the manifest hook out (the writer writes the manifest with the chunks) by
+    # taking ``without_batch`` of the registry; the double answers with itself.
+    hooks.without_batch.return_value = hooks
     t3 = create_autospec(T3Database, instance=True)
     col = MagicMock()
     col.get.return_value = {"ids": [], "metadatas": []}
@@ -101,13 +114,14 @@ def _run(engine: FakePipelineEngine, pdf_path: str, collection: str, doc_id: str
 
 
 class TestSecondDocumentSharingTheBytes:
-    def test_second_path_with_a_completed_leftover_uploads_its_own_chunks(self, engine) -> None:
+    def test_second_path_with_a_completed_leftover_uploads_its_own_chunks(self, engine, writer) -> None:
         leftover_id = _seed_completed_leftover(engine, "/docs/a.pdf", "docs__test")
 
         total, t3, hooks = _run(engine, "/docs/b.pdf", "docs__test", doc_id="1.9.2")
 
         assert total == 2, "the second path must index, never return the leftover's 0"
-        t3.upsert_chunks_with_embeddings.assert_called_once()
+        (w,) = writer.instances
+        assert w.kwargs["doc_id"] == "1.9.2" and sum(len(r) for r, _ in w.batches) == 2
         assert hooks.fire_batch.call_args.kwargs["catalog_doc_id"] == "1.9.2"
         # The leftover is untouched: a different document's run.
         rows = engine.rows_for(_HASH)
@@ -115,22 +129,22 @@ class TestSecondDocumentSharingTheBytes:
         assert rows[0]["pipeline_id"] == leftover_id
         assert rows[0]["status"] == "completed"
 
-    def test_second_collection_same_path_is_its_own_run(self, engine) -> None:
+    def test_second_collection_same_path_is_its_own_run(self, engine, writer) -> None:
         _seed_completed_leftover(engine, "/docs/a.pdf", "docs__one")
         total, t3, hooks = _run(engine, "/docs/a.pdf", "docs__two", doc_id="1.9.3")
         assert total == 2
-        t3.upsert_chunks_with_embeddings.assert_called_once()
-        assert t3.upsert_chunks_with_embeddings.call_args.args[0] == "docs__two"
+        (w,) = writer.instances
+        assert w.kwargs["collection"] == "docs__two"
         assert [r["collection"] for r in engine.rows_for(_HASH)] == ["docs__one"]
 
-    def test_same_document_completed_leftover_reruns_instead_of_skipping(self, engine) -> None:
+    def test_same_document_completed_leftover_reruns_instead_of_skipping(self, engine, writer) -> None:
         """The tombstone-and-reindex trigger: the same path, a leftover
         completed row, a NEW catalog document. Pre-fix this was the bead's
         exact symptom via a different trigger."""
         _seed_completed_leftover(engine, "/docs/a.pdf", "docs__test")
         total, t3, hooks = _run(engine, "/docs/a.pdf", "docs__test", doc_id="1.9.4")
         assert total == 2
-        t3.upsert_chunks_with_embeddings.assert_called_once()
+        assert len(writer.instances) == 1
         assert hooks.fire_batch.call_args.kwargs["catalog_doc_id"] == "1.9.4"
         assert engine.rows_for(_HASH) == [], "the re-run's own cleanup removed its row"
 

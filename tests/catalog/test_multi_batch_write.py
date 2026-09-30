@@ -1011,3 +1011,95 @@ def test_write_document_aborts_the_fence_when_a_request_fails() -> None:
         write_document(cat, [_batch(0, 2), _batch(2, 2)], doc_id=_DOC,
                        collection=_COLLECTION, content_hash="hash1")
     assert len(cat.of("fail_index_run")) == 1
+
+
+# ── deferred completion (nexus-z0o2p.11: the streaming PDF pipeline stamps after its post-pass) ──
+
+
+def test_deferred_completion_needs_a_content_hash() -> None:
+    with pytest.raises(ValueError, match="defer_completion"):
+        _writer(FakeCat(), defer_completion=True)
+
+
+def test_deferred_single_request_writes_no_complete_and_stamps_only_on_complete() -> None:
+    cat = FakeCat()
+    w = _writer(cat, content_hash="hash1", defer_completion=True)
+    w.add_batch(*_batch(0, 3))
+    res = w.finish()
+    assert cat.names() == ["begin_index_run", "write_manifest_many"]
+    assert cat.of("write_manifest_many")[0]["complete"] in (None, {})
+    assert res.completed is False, "the writer does not stamp a deferred run"
+    w.complete()
+    assert cat.names() == ["begin_index_run", "write_manifest_many", "complete_index_run"]
+    assert cat.of("complete_index_run")[0] == {
+        "doc_id": _DOC, "content_hash": "hash1", "chunk_count": 3}
+    assert res.completed is True
+
+
+def test_deferred_multi_request_stops_before_the_stamp_and_complete_sends_it() -> None:
+    cat = FakeCat(prior=[_h(900)])
+    w = _writer(cat, content_hash="hash1", defer_completion=True)
+    for b in (_batch(0, 2), _batch(2, 2), _batch(4, 1)):
+        w.add_batch(*b)
+    w.finish()
+    assert cat.names() == [
+        "begin_index_run", "write_manifest_many", "append_manifest_chunks",
+        "append_manifest_chunks"], "everything but the stamp, including the deferred sweep"
+    assert cat.of("append_manifest_chunks")[-1]["sweep_chashes"] == [_h(900)]
+    res = w.complete()
+    assert cat.names()[-1] == "complete_index_run"
+    assert cat.of("complete_index_run")[0]["chunk_count"] == 5
+    assert res.completed
+
+
+def test_complete_before_finish_and_on_a_self_stamping_writer_is_refused() -> None:
+    w = _writer(FakeCat(), content_hash="hash1", defer_completion=True)
+    w.add_batch(*_batch(0, 1))
+    with pytest.raises(ValueError, match="finish"):
+        w.complete()
+    plain = _writer(FakeCat(), content_hash="hash1")
+    plain.add_batch(*_batch(0, 1))
+    plain.finish()
+    with pytest.raises(ValueError, match="stamps itself"):
+        plain.complete()
+
+
+def test_complete_twice_stamps_once() -> None:
+    cat = FakeCat()
+    w = _writer(cat, content_hash="hash1", defer_completion=True)
+    w.add_batch(*_batch(0, 2))
+    w.finish()
+    w.complete()
+    w.complete()
+    assert cat.names().count("complete_index_run") == 1
+
+
+def test_a_refused_deferred_stamp_is_recorded_and_leaves_the_fence_indexing() -> None:
+    cat = FakeCat()
+    w = _writer(cat, content_hash="hash1", defer_completion=True)
+    w.add_batch(*_batch(0, 2))
+    w.finish()
+    cat.manifest.pop(1)          # the engine now sees fewer rows than the run claims
+    with pytest.raises(IndexRunVerifyRefused):
+        w.complete()
+    w.abort("after the refusal")
+    assert "fail_index_run" not in cat.names(), "a refusal leaves index_state as begin left it"
+
+
+def test_abort_after_a_deferred_finish_fails_the_fence_that_was_never_stamped() -> None:
+    cat = FakeCat()
+    w = _writer(cat, content_hash="hash1", defer_completion=True)
+    w.add_batch(*_batch(0, 2))
+    w.finish()
+    w.abort("post-pass failed")
+    assert cat.of("fail_index_run") == [{"doc_id": _DOC, "error": "post-pass failed"}]
+
+
+def test_abort_after_a_deferred_stamp_does_nothing() -> None:
+    cat = FakeCat()
+    w = _writer(cat, content_hash="hash1", defer_completion=True)
+    w.add_batch(*_batch(0, 2))
+    w.finish()
+    w.complete()
+    w.abort("late")
+    assert "fail_index_run" not in cat.names()

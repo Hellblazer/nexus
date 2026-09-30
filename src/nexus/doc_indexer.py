@@ -1754,6 +1754,8 @@ def _write_chunks_with_owner_rows(
     metadatas: list[dict],
     *,
     force_re_embed: bool = False,
+    batch_size: int = 0,
+    on_progress: "Callable[[int, int], None] | None" = None,
 ) -> "DocumentWriteResult":
     """Write one document's chunks together with their owner rows (RDR-223, nexus-z0o2p.13).
 
@@ -1765,6 +1767,14 @@ def _write_chunks_with_owner_rows(
     first request with the sweep off, appends the rest with their chunks, sweeps
     after the last, and stamps. A client that dies between two requests leaves every
     chunk it wrote owned. *content_hash* turns on the fence and the stamp.
+
+    *batch_size* (nexus-z0o2p.15, the incremental PDF path) hands the writer the
+    document in batches of that many chunks, the way the embed loop it replaces
+    walked them; the writer still sends each batch as one or more requests under the
+    chunk cap. *on_progress* is called as ``(chunks_sent, total)``: after each batch
+    that is handed over, with the chunks whose requests have been SENT (the writer
+    holds the latest batch back until it knows whether it is the last), and once with
+    ``(total, total)`` when the write finished.
 
     The writer raises for a request that fails or an answer it cannot trust (the
     run fails, and the caller's fence bracket marks it), and
@@ -1779,12 +1789,8 @@ def _write_chunks_with_owner_rows(
     ``bib_*`` enrichment another writer set survives a forced re-index.
     """
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
-    from nexus.catalog.multi_batch_write import write_document  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
-    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-        _manifest_chunk_rows,
-        _record_superseded_swept,
-        _record_superseded_sweep_skip,
-    )
+    from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
+    from nexus.mcp_infra import _manifest_chunk_rows  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
     from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
 
     rows = _manifest_chunk_rows(list(enumerate(metadatas)))
@@ -1794,26 +1800,89 @@ def _write_chunks_with_owner_rows(
         {"chash": chash, "text": text, "metadata": meta}
         for chash, text, meta in zip(ids, documents, metadatas)
     ]
+    total = len(ids)
+    size = batch_size if 0 < batch_size < total else max(total, 1)
     raw_cat = make_catalog_writer()
     cat = _MetadataMergingCatalog(raw_cat, rewrite_delete_keys(metadatas))
     try:
-        result = write_document(
-            cat, [(rows, chunks)], doc_id=doc_id, collection=collection_name,
-            content_hash=content_hash, force_re_embed=force_re_embed,
-        )
+        with MultiBatchDocumentWriter(
+            cat, doc_id=doc_id, collection=collection_name, content_hash=content_hash,
+            force_re_embed=force_re_embed,
+        ) as w:
+            for start in range(0, total, size):
+                w.add_batch(rows[start:start + size], chunks[start:start + size])
+                if on_progress is not None and start > 0:
+                    on_progress(start, total)
+            result = w.finish()
+        if on_progress is not None:
+            on_progress(total, total)
     finally:
         close = getattr(raw_cat, "close", None)
         if close is not None:
             close()
+    _account_write_result(result, cat.sweep_errors, doc_id, collection_name)
+    return result
+
+
+def _account_write_result(
+    result: "DocumentWriteResult", sweep_errors: list[dict], doc_id: str, collection_name: str,
+) -> None:
+    """Feed a finished write's sweep outcome to the run summary's collectors: the chunks it swept,
+    and every sweep the engine skipped, with the engine's own reason when it gave one
+    (nexus-39upx: a skipped sweep is never silent). *sweep_errors* is
+    :attr:`_MetadataMergingCatalog.sweep_errors`."""
+    from nexus.mcp_infra import (  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+        _record_superseded_swept,
+        _record_superseded_sweep_skip,
+    )
+
     _record_superseded_swept(result.swept)
-    for err in cat.sweep_errors:
+    for err in sweep_errors:
         _record_superseded_sweep_skip(err["doc_id"] or doc_id, collection_name, err["reason"])
-    if result.sweep_skipped > len(cat.sweep_errors):
+    if result.sweep_skipped > len(sweep_errors):
         # The engine counted skips it gave no reason for (or an older shape without detail).
         _record_superseded_sweep_skip(doc_id, collection_name, "sweep_failed")
-    # No dropped_unknown branch: this caller always passes content_hash, so the writer is fenced and
-    # takes the drop list from the begin snapshot, never from the write_many response.
-    return result
+    # No dropped_unknown branch: every caller passes content_hash, so the writer is fenced and takes
+    # the drop list from the begin snapshot, never from the write_many response.
+
+
+def _raise_identity_missing(
+    file_path: "Path | str", collection_name: str, chunk_count: int | None,
+) -> None:
+    """Fail a run whose catalog registration produced no document (RDR-223).
+
+    A chunk is written together with its owner row, and there is no owner without a catalog
+    document. Writing the chunks anyway is the ownerless write these paths used to make (hidden
+    from every read by live(c) until the reaper removes it), so the run fails instead. The drop
+    is recorded for the batch summaries (nexus-pbawi: a registration failure must not leave a
+    batch run at rc 0) as one that wrote nothing. *chunk_count* is ``None`` when the run stops
+    before it knows how many chunks the document has (the streaming pipeline refuses before it
+    extracts)."""
+    from nexus.errors import CatalogIdentityMissingError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+    from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
+
+    _record_manifest_identity_drop(collection_name, chunk_count or 0, written=False)
+    owns = "its chunks" if chunk_count is None else f"{chunk_count} chunk(s)"
+    raise CatalogIdentityMissingError(
+        f"{file_path}: catalog registration failed, so there is no catalog "
+        f"document to own {owns} in {collection_name!r}; nothing "
+        f"was written. See the 'preflight_register_failed' log event, check "
+        f"'nx doctor' and the service health, then re-run the index."
+    )
+
+
+def _preview_upsert(
+    t3: Any, collection_name: str, ids: list[str], documents: list[str], embeddings: list,
+    metadatas: list[dict], *, force_re_embed: bool = False,
+) -> None:
+    """Put a dry run's chunks into its throwaway store.
+
+    A dry run (``nx index pdf --dry-run``) previews extraction and chunking into an in-memory
+    store and touches no catalog, so there is no owner row to write and no engine to write
+    to. This is the one place a PDF path still upserts chunks without an owner, and the store it
+    writes to is discarded with the process."""
+    t3.upsert_chunks_with_embeddings(
+        collection_name, ids, documents, embeddings, metadatas, force_re_embed=force_re_embed)
 
 
 def _index_document(
@@ -2061,22 +2130,8 @@ def _index_document(
             source_uri=source_uri,
         )
     if not _catalog_doc_id_for_batch:
-        # RDR-223: a chunk is written together with its owner row, and there is
-        # no owner without a catalog document. Writing the chunks anyway is the
-        # ownerless write this path used to make (hidden from every read by
-        # live(c) until the reaper removes it), so the run fails instead. The
-        # drop is recorded for the batch summaries (nexus-pbawi: a registration
-        # failure must not leave a batch run at rc 0) as one that wrote nothing.
-        from nexus.errors import CatalogIdentityMissingError  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
-        from nexus.mcp_infra import _record_manifest_identity_drop  # noqa: PLC0415 — deferred: avoids a module-load-time cross-import
-
-        _record_manifest_identity_drop(collection_name, len(ids), written=False)
-        raise CatalogIdentityMissingError(
-            f"{file_path}: catalog registration failed, so there is no catalog "
-            f"document to own {len(ids)} chunk(s) in {collection_name!r}; nothing "
-            f"was written. See the 'preflight_register_failed' log event, check "
-            f"'nx doctor' and the service health, then re-run the index."
-        )
+        # RDR-223: no catalog document, no owner for the chunks; see the helper.
+        _raise_identity_missing(file_path, collection_name, len(ids))
 
     # nexus-5xn3k.4 review follow-up (code-review-expert MEDIUM): the fail
     # bracket around the embed/write/hook region. RDR-223: the index-run

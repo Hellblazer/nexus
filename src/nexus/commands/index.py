@@ -2890,6 +2890,7 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
         SourceUriCollectionMismatchError,
         SourceUriNotFoundError,
         UnchunkableContentError,
+        CatalogIdentityMissingError,
     )
 
     # Local wrapper: convert the typed credential/identity errors into a
@@ -2907,6 +2908,11 @@ def index_pdf_cmd(path: Path | None, dir_path: Path | None, corpus: str, collect
             # this command must fail loud, before any catalog write --
             # see index_pdf's guard and index_md_cmd's identical
             # UnchunkableContentError handling for the full rationale.
+            raise click.ClickException(str(e)) from e
+        except CatalogIdentityMissingError as e:
+            # nexus-z0o2p.11 / .15 (RDR-223): registration returned no identity, so the chunks
+            # have no owner to be written with and nothing was written. The message names the
+            # cause and the remedy.
             raise click.ClickException(str(e)) from e
         except ChunkLandingUnverifiedError as e:
             # nexus-tp8yk D1 substantive-critic SIGNIFICANT (2026-08-04):
