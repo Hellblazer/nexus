@@ -452,16 +452,25 @@ jobs:
 
       # Self-hosted only, REPORT-ONLY: lists Testcontainers containers still on
       # the job's Docker daemon so a Ryuk miss shows up in this log instead of
-      # in the next job's RAM. Never removes anything.
+      # in the next job's RAM. Never removes anything. It waits up to 30 s for
+      # the list to empty first: Ryuk reaps a JVM's containers a few seconds
+      # AFTER that JVM exits, and the first probe (run 36776716369) listed the
+      # last Maven invocation's pgvector container and two Ryuk containers 2 s
+      # after it ended, all inside that grace window, which read as a leak.
       - name: Report leftover Testcontainers containers (self-hosted, report only)
         if: always() && runner.environment == 'self-hosted'
         shell: bash
         run: |
           set -uo pipefail
-          left="$(docker ps -a --filter label=org.testcontainers=true 2>&1)" || true
-          echo "$left"
-          if [ "$(printf '%s\n' "$left" | wc -l)" -gt 1 ]; then
-            echo "::warning::Testcontainers containers remain after the suite (listed above; not removed)"
+          left=""
+          for _ in 1 2 3 4 5 6; do
+            left="$(docker ps -a --filter label=org.testcontainers=true --format '{{.ID}} {{.Image}} {{.Status}}' 2>&1)" || true
+            [ -z "$left" ] && break
+            sleep 5
+          done
+          if [ -n "$left" ]; then
+            echo "$left"
+            echo "::warning::Testcontainers containers remain 30 s after the suite (listed above; not removed)"
           else
             echo "no Testcontainers containers remain."
           fi
