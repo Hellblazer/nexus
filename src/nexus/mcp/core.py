@@ -6322,8 +6322,13 @@ def store_list(
             lines.append(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
         shown_end = offset + len(page)
         # A full page is the live signal that more rows may follow; the stored
-        # total can exceed the live rows and point at an empty page.
-        if len(page) >= limit:
+        # total can exceed the live rows and point at an empty page. "Full" is
+        # against the page the engine can actually serve: it clamps one
+        # /v1/vectors/get page to MAX_QUERY_RESULTS, so limit=500 returns 300 and
+        # comparing against 500 would call a full page the end.
+        from nexus.db.limits import MAX_QUERY_RESULTS  # noqa: PLC0415 — deferred, matches this module's convention
+
+        if len(page) >= min(limit, MAX_QUERY_RESULTS):
             lines.append(
                 f"--- showing {offset + 1}-{shown_end} ({total} stored). next: offset={shown_end}"
             )

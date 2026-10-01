@@ -14,6 +14,7 @@ import structlog
 
 from typing import TYPE_CHECKING
 
+from nexus.catalog.tombstones import read_tombstones
 from nexus.catalog.tumbler import Tumbler
 
 if TYPE_CHECKING:
@@ -1109,7 +1110,12 @@ def _owner_by_name(cat: "CatalogReader", name: str) -> Tumbler | None:
     """
     # nexus-xnz0o: use curator_owner_tumbler_by_name() (portable API).
     prefix = cat.curator_owner_tumbler_by_name(name)
-    return Tumbler.parse(prefix) if prefix else None
+    if not prefix:
+        return None
+    # The service client already returns a Tumbler; re-parsing one raised
+    # AttributeError ('Tumbler' has no 'split') on every re-run of a backfill whose
+    # curator exists (found by the nexus-wbfpw.35 fix-round-2 tests).
+    return prefix if isinstance(prefix, Tumbler) else Tumbler.parse(str(prefix))
 
 
 def _get_or_create_curator(cat: "CatalogReader", name: str, *, writer: object = None) -> Tumbler:
@@ -1210,6 +1216,18 @@ def _stored_chunk_count(collection_row: dict) -> int:
     for both.
     """
     return int(collection_row.get("stored_count", collection_row.get("count", 0)) or 0)
+
+
+def _note_skipped_deleted(collection: str, skipped: int) -> None:
+    """Say, once per collection, that stored chunks were left alone because the
+    catalog holds their document as a tombstone (nexus-wbfpw.35 fix round 2)."""
+    if not skipped:
+        return
+    click.echo(
+        f"  {collection}: skipped {skipped} path(s) the catalog holds as deleted "
+        f"documents (restore with `nx catalog restore`, or purge-trash reclaims them)"
+    )
+    _log.info("backfill_skipped_tombstoned", collection=collection, skipped=skipped)
 
 
 def _backfill_knowledge(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: object = None) -> int:
@@ -1375,12 +1393,20 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                 # the other content types.
                 owner = _get_or_create_curator(cat, "orphaned-rdrs", writer=w)
 
+            # nexus-wbfpw.35 fix round 2: the stored-chunk read above also sees the
+            # chunks of TOMBSTONED documents, and `existing` below excludes
+            # tombstones, so a deliberately deleted document would register anew.
+            tombstones = read_tombstones(cat)
+            skipped_deleted = 0
             for path, title in seen_paths.items():
+                fp = make_relative(path, repo_root) if repo_root else path
+                if tombstones.covers_path((path, fp), owner=str(owner)):
+                    skipped_deleted += 1
+                    continue
                 if dry_run:
                     click.echo(f"  [dry-run] {title} → {col_name}")
                     count += 1
                     continue
-                fp = make_relative(path, repo_root) if repo_root else path
                 existing = [
                     e for e in cat.by_owner(owner)
                     if e.file_path in (path, fp)
@@ -1391,6 +1417,7 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                         file_path=fp, physical_collection=col_name,
                     )
                     count += 1
+            _note_skipped_deleted(col_name, skipped_deleted)
         except Exception as exc:  # noqa: BLE001 — best-effort; error surfaced via log/echo, must not crash caller
             click.echo(f"  warning: {col_name} — {exc}")
             _log.debug("backfill_rdrs_error", col=col_name, exc_info=True)
@@ -1466,6 +1493,21 @@ def _backfill_papers(
             click.echo(f"  warning: {col_name} skipped — metadata unreadable ({exc}); re-run after fixing")
             _log.warning("backfill_papers_metadata_error", col=col_name, exc_info=True)
             continue
+
+        # nexus-wbfpw.35 fix round 2: the stored first chunk may belong to a
+        # TOMBSTONED paper, which the live `existing` lookup below cannot see.
+        # One paper per collection: a collection the papers curator holds only as
+        # a deleted document is not a gap to register.
+        paper_owner = _owner_by_name(cat, "papers")
+        if paper_owner is not None:
+            live_here = [
+                e for e in cat.by_owner(paper_owner) if e.physical_collection == col_name
+            ]
+            if not live_here and read_tombstones(cat).covers_collection(
+                owner=str(paper_owner), collection=col_name, content_type="paper",
+            ):
+                _note_skipped_deleted(col_name, 1)
+                continue
 
         if dry_run:
             click.echo(f"  [dry-run] Would register paper: {title} → {col_name}")
@@ -1649,6 +1691,8 @@ def _backfill_per_file_from_t3(
         offset += page_size
 
     registered = 0
+    skipped_deleted = 0
+    tombstones = read_tombstones(cat)
     for abs_path in sorted(seen_paths):
         # Anchor relative to repo_root when possible; fall back to the
         # raw path. The register-time guard rejects paths outside
@@ -1657,6 +1701,13 @@ def _backfill_per_file_from_t3(
             rel = abs_path[len(repo_root) + 1:]
         else:
             rel = abs_path
+
+        # nexus-wbfpw.35 fix round 2: a stored chunk of a TOMBSTONED document
+        # reaches this loop now, and by_file_path (live rows only) would call it
+        # a gap. A path the catalog holds as a deleted document stays deleted.
+        if tombstones.covers_path((abs_path, rel), owner=str(owner)):
+            skipped_deleted += 1
+            continue
 
         if dry_run:
             registered += 1
@@ -1727,6 +1778,7 @@ def _backfill_per_file_from_t3(
                 error=str(exc),
             )
 
+    _note_skipped_deleted(collection, skipped_deleted)
     return registered
 
 

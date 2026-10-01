@@ -1017,6 +1017,37 @@ def reindex_cmd(name: str, force: bool) -> None:
             break
         offset += 300
 
+    # nexus-wbfpw.35 fix round 2: the scan above reads STORED chunks, which
+    # includes those of TOMBSTONED catalog documents. The collection is deleted
+    # wholesale below and every path in source_paths is then re-indexed into a NEW
+    # live document, so a path the catalog holds only as a deleted document would
+    # be revived. Drop those paths from the rebuild and say so.
+    if source_paths and _cat is not None:
+        from nexus.catalog.tombstones import read_tombstones  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+        try:
+            tombstones = read_tombstones(_cat)
+        except Exception:  # noqa: BLE001 — best-effort; the unguarded path is the pre-fix behaviour, warned below
+            tombstones = None
+            click.echo(
+                "WARNING: could not read the catalog's deleted documents; a source "
+                "that was deleted on purpose may be re-indexed.",
+                err=True,
+            )
+        if tombstones is not None:
+            deleted = sorted(
+                sp for sp in source_paths
+                if tombstones.covers_path((sp,), collection=name)
+            )
+            if deleted:
+                source_paths.difference_update(deleted)
+                click.echo(
+                    f"Skipping {len(deleted)} source(s) of deleted catalog "
+                    f"documents (not re-indexed): "
+                    + ", ".join(Path(d).name for d in deleted[:5])
+                    + (" ..." if len(deleted) > 5 else "")
+                )
+
     # If EVERY entry is sourceless, --force does nothing useful — there is
     # no source to reindex from, so the operation collapses to "delete the
     # collection". GitHub #367: a user lost 28 store_put-only entries this
@@ -1027,8 +1058,9 @@ def reindex_cmd(name: str, force: bool) -> None:
             f"Refusing to reindex '{name}': all {len(sourceless)} entries "
             f"lack source_path (e.g. manual store_put entries, "
             f"taxonomy__centroids, or other programmatically-populated "
-            f"collections). There is no source to re-index from — this "
-            f"would destroy every chunk with no recovery path.\n\n"
+            f"collections, or chunks hidden from every listing because no "
+            f"live catalog document owns them). There is no source to re-index "
+            f"from — this would destroy every chunk with no recovery path.\n\n"
             f"  • If you want to delete the collection, run:\n"
             f"      nx collection delete {name}\n"
             f"  • In-place re-embedding (preserve content, swap embedding "
@@ -1038,9 +1070,13 @@ def reindex_cmd(name: str, force: bool) -> None:
 
     if sourceless and not force:
         raise click.ClickException(
-            f"{len(sourceless)} entries lack source_path (manual entries) "
-            f"and {len(source_paths)} have source files. The {len(sourceless)} "
-            f"sourceless entries cannot be re-indexed and will be LOST. "
+            f"{len(sourceless)} entries lack source_path and "
+            f"{len(source_paths)} have source files. The {len(sourceless)} "
+            f"sourceless entries cannot be re-indexed and will be LOST. They "
+            f"are manual store_put entries and/or hidden chunks: chunks with no "
+            f"live catalog document, which a plain listing does not show "
+            f"(`nx collection info {name}` reports live and stored counts; the "
+            f"difference is the hidden chunks). "
             f"Use --force to proceed and accept that loss."
         )
 
@@ -1473,6 +1509,14 @@ def _reembed_collection(
     if total == 0:
         return 0, 0
 
+    # LIVE ROWS ONLY, deliberately (nexus-wbfpw.35 fix round 2). `total` is the
+    # STORED count (an upper bound: the loop below ends on the first empty live
+    # page, so hidden rows only make it stop earlier than `total`), while the
+    # reads below see live rows. Chunks with no live owner, or owned only by a
+    # tombstoned document, are not re-embedded: the write is a billed server-side
+    # embed per chunk and a client re-write refreshes last_written_at, the reap
+    # grace anchor (vectors-020), so re-embedding them would spend money on
+    # chunks the reaper is about to reclaim and delay the reclaim.
     processed = 0
     skipped = 0
     page = QUOTAS.MAX_QUERY_RESULTS  # 300
@@ -1647,8 +1691,9 @@ def reembed_cmd(
                 f"collection {name!r}: {type(exc).__name__}: {exc}"
             )
         click.echo(
-            f"dry-run: would re-embed {n} chunk(s) in {name!r} with "
-            f"{target_model!r}. Pass --no-dry-run --yes to apply."
+            f"dry-run: would re-embed up to {n} stored chunk(s) in {name!r} with "
+            f"{target_model!r} (chunks with no live catalog document are left as "
+            f"they are). Pass --no-dry-run --yes to apply."
         )
         return
 
