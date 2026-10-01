@@ -46,6 +46,22 @@ def orphan_backfill_group() -> None:
     """
 
 
+def _without_deleted(cat, collection: str, groups: list) -> list:
+    """Drop the title groups a deleted catalog document owns, and say so
+    (nexus-wbfpw.35 fix round 3). Refuses, via ``TombstoneGuardUnavailable``,
+    when the engine cannot list deleted documents."""
+    from nexus.catalog import orphan_backfill as ob  # noqa: PLC0415  — command-local import (nexus.catalog.orphan_backfill)
+
+    kept, dropped = ob.drop_deleted_title_groups(cat, collection, groups)
+    if dropped:
+        click.echo(
+            f"  Skipping {len(dropped)} title group(s) of deleted catalog "
+            f"documents (not re-registered): " + ", ".join(dropped[:5])
+            + (" ..." if len(dropped) > 5 else "")
+        )
+    return kept
+
+
 def _get_owner_for(collection: str) -> str:
     """Resolve owner-tumbler for ``collection`` from the default map.
 
@@ -101,7 +117,7 @@ def dt_link_cmd(
     t3 = make_t3()
 
     click.echo(f"Gathering chunks from T3 {collection}...")
-    groups = ob.gather_titled_chunks(t3, collection)
+    groups = _without_deleted(cat, collection, ob.gather_titled_chunks(t3, collection))
     total_chunks = sum(len(g.chunks) for g in groups)
     click.echo(
         f"  {len(groups)} distinct titles, {total_chunks} chunks total"
@@ -167,7 +183,7 @@ def synthetic_cmd(
     t3 = make_t3()
 
     click.echo(f"Gathering chunks from T3 {collection}...")
-    groups = ob.gather_titled_chunks(t3, collection)
+    groups = _without_deleted(cat, collection, ob.gather_titled_chunks(t3, collection))
     total_chunks = sum(len(g.chunks) for g in groups)
     titled = [g for g in groups if g.title]
     untitled = [g for g in groups if not g.title]
@@ -267,7 +283,7 @@ def apply_csv_cmd(
     t3 = make_t3()
 
     click.echo(f"Re-gathering T3 chunks for {collection} (chunk_lookup)...")
-    groups = ob.gather_titled_chunks(t3, collection)
+    groups = _without_deleted(cat, collection, ob.gather_titled_chunks(t3, collection))
     chunk_lookup = {g.title: g.chunks for g in groups if g.title}
 
     click.echo(f"Applying {csv_path}...")
@@ -368,7 +384,7 @@ def link_existing_cmd(
                 owner_str = owner
             owner_t = Tumbler.parse(owner_str)
             sdocs, slinks = ob.register_synthetic(
-                cat, owner_t, collection, unlinked,
+                cat, owner_t, collection, _without_deleted(cat, collection, unlinked),
             )
             click.echo(
                 f"Synthetic fallback: registered {sdocs} Documents, "

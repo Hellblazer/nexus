@@ -158,6 +158,43 @@ def gather_titled_chunks(
     return [TitleGroup(title=t, chunks=cs) for t, cs in by_title.items()]
 
 
+def drop_deleted_title_groups(
+    catalog: "CatalogReader", collection: str, groups: list[TitleGroup],
+) -> tuple[list[TitleGroup], list[str]]:
+    """Split off the title groups that belong to a DELETED catalog document.
+
+    The gather above reads every stored chunk, which includes those of a document
+    that was deleted but not yet purged, and the registering verbs (``dt-link``,
+    ``synthetic``, ``apply-csv``) mint a new live Document per title group. A
+    group whose title is a tombstoned document's in *collection*, with no live
+    document of that title there, would bring the deleted document back under a
+    synthetic or DEVONthink identity (nexus-wbfpw.35 fix round 3). The title is
+    this module's own identity for a group (``link_by_title`` matches on it), so
+    it is what a tombstone is matched on, exactly.
+
+    Returns ``(kept_groups, dropped_titles)``. Raises
+    :class:`~nexus.catalog.tombstones.TombstoneGuardUnavailable` when the engine
+    cannot list deleted documents: failing closed, as the other registering verbs
+    do.
+    """
+    from nexus.catalog.tombstones import read_tombstones  # noqa: PLC0415 — deferred: keeps catalog import light
+
+    tombs = read_tombstones(catalog)
+    deleted_titles = {
+        d.title for d in tombs.docs if d.title and d.physical_collection == collection
+    }
+    if not deleted_titles:
+        return groups, []
+    live_titles = {
+        e.title for e in catalog.list_by_collection(collection, limit=1_000_000) if e.title
+    }
+    gone = deleted_titles - live_titles
+    dropped = sorted({g.title for g in groups if g.title in gone})
+    if not dropped:
+        return groups, []
+    return [g for g in groups if g.title not in gone], dropped
+
+
 # ── DEVONthink search via osascript ──────────────────────────────────────────
 
 

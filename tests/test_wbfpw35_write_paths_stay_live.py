@@ -2,12 +2,15 @@
 """nexus-wbfpw.35 fix round 2: the maintenance verb that WRITES reads live rows.
 
 ``nx collection re-embed`` pages a collection and re-upserts chunks. A client
-re-write refreshes ``nexus.chunks.last_written_at`` (vectors-020), the anchor
-``reapable(c)``'s grace window keys on, so a verb that read HIDDEN chunks (no live
-owner, or owned only by a tombstoned document) would re-write the very rows the
-reaper and ``purge_trash`` are about to reclaim and hand them a fresh grace
-window. The readers that only discover or guard (backfill, the reindex pre-delete
-scan) read stored chunks; this one must not.
+re-write refreshes ``nexus.chunks.last_written_at`` (vectors-020), the anchor the
+reaper's grace window keys on. Two kinds of hidden chunk, two reasons: a
+never-owned chunk would get a fresh grace window (the grace argument holds for
+those only), and a chunk owned only by a tombstoned document gains nothing from a
+refresh under the final design (nexus-wbfpw.15: ``nexus.chunk_orphaned_at``,
+reapable keyed on ``GREATEST(last_written_at, orphaned_at)``), so for it the
+reasons are the billed Voyage embed and the pointlessness of patching a chunk of a
+deleted document. The readers that only discover or guard (backfill, the reindex
+pre-delete scan) read stored chunks; this one must not.
 
 The fake hides non-live rows unless ``include_non_live=True`` is passed, as the
 engine does, and records every read so the decision is asserted on the call as
@@ -71,3 +74,49 @@ def test_re_embed_does_not_re_write_hidden_chunks() -> None:
     assert sorted(upserted) == sorted(LIVE_IDS)
     assert (processed, skipped) == (len(LIVE_IDS), 0)
     assert not any(r["include_non_live"] for r in col.reads), col.reads
+
+
+def test_re_embed_summary_says_how_many_chunks_stayed_on_the_old_model() -> None:
+    """The walk reads live rows only, so "re-embedded 2" on a collection that
+    stores 4 would read as the whole collection. The summary names the rest."""
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from nexus.cli import main
+
+    col = _LiveAwareCollection()
+    db = MagicMock()
+    db.get_collection.return_value = col
+
+    with patch("nexus.commands.collection._t3", return_value=db), \
+         patch("nexus.hook_registry.install_default_hooks"):
+        result = CliRunner().invoke(
+            main, ["collection", "re-embed", col.name, "--to", "voyage-3",
+                   "--no-dry-run", "--yes"],
+        )
+
+    assert result.exit_code == 0, result.output
+    assert f"re-embedded {len(LIVE_IDS)} chunk(s)" in result.output
+    assert "2 of 4 stored chunk(s) were not re-embedded" in result.output
+
+
+def test_re_embed_prompt_does_not_claim_every_chunk() -> None:
+    from unittest.mock import patch
+
+    from click.testing import CliRunner
+
+    from nexus.cli import main
+
+    col = _LiveAwareCollection()
+    db = MagicMock()
+    db.get_collection.return_value = col
+
+    with patch("nexus.commands.collection._t3", return_value=db):
+        result = CliRunner().invoke(
+            main, ["collection", "re-embed", col.name, "--to", "voyage-3", "--no-dry-run"],
+            input="n\n",
+        )
+
+    assert "every chunk's vector" not in result.output
+    assert "live catalog document" in result.output

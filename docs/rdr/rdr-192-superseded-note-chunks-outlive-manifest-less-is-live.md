@@ -1541,7 +1541,11 @@ To be completed at gate (Layer 3 AI critique).
   `stored_count`. Decisions: `nexus.live_chunks` stays as a view with no
   production reader (pinned by the P2 column and granted to PUBLIC, so an operator can
   read it), it is not dropped; `fetchChunkText`, the `chroma://` permalink resolver, is a
-  physical read on purpose; `collection_vector_stats` is the inventory, so a
+  physical read (M7, Sam's option A: a `chroma://` permalink keeps resolving a chunk that
+  no live document owns, so a link to a chunk of a trashed or superseded document does not
+  break; the consequence is that such a chunk's text stays readable through the permalink,
+  inside the tenant, until `purge_trash` or the reaper reclaims it, and `live(c)` does not
+  hide it from that one reader); `collection_vector_stats` is the inventory, so a
   collection whose chunks are all hidden is not dormant until its chunks are
   purged. Predicate 9 keeps its own shape; Migration order item 3 records the
   difference from `live(c)` on R3 and R9 and the matrix's P9 column pins it.
@@ -1550,6 +1554,35 @@ To be completed at gate (Layer 3 AI critique).
   `nexus/rdr-192-live-c-explain-evidence-2026-10-01`;
   `Rdr192LiveCExplainEvidenceIntegrationTest` pins that `chunk_live_owners`
   inlines on each and that the stats view probes once per chunk.
+- 2026-10-01: Phase 2 gate minors, fix rounds 2 and 3 (nexus-wbfpw.34, .35, .37; T2
+  `nexus/wbfpw34-35-37-fix-round-2`, `nexus/wbfpw34-35-37-fix-round-3`). Decisions.
+  (1) The maintenance verbs that WRITE, `nx collection backfill-hash` and
+  `nx collection re-embed`, stay on live rows. A client re-write refreshes
+  `chunks.last_written_at`, so for a chunk no document ever owned (R1) it would hand the
+  reaper's grace window a fresh start. For a chunk owned only by a tombstoned document
+  (R3) that argument does not hold under the final design of nexus-wbfpw.15 (side table
+  `nexus.chunk_orphaned_at`, `reapable(c)` keyed on `GREATEST(last_written_at,
+  orphaned_at)`): the chunk is not reapable until `purge_trash` drops its manifest rows,
+  which stamps `orphaned_at` after any earlier refresh, and `purge_trash` keys on
+  `deleted_at`. For R3 the reasons are the billed Voyage embed (re-embed) and that
+  patching a chunk of a deleted document is pointless. `re-embed` reports how many stored
+  chunks it left on their old vectors. (2) Reading stored chunks brings back the chunks of
+  a document that was deleted and not yet purged, so every verb that registers or
+  re-indexes from stored chunks (`nx catalog backfill`, `nx collection reindex`,
+  `nx catalog orphan-backfill`) checks the trash first. The match is exact on the
+  catalog's own identity, `(owner, file_path)` for a path and the title for an
+  orphan-backfill title group, never a suffix; a path the catalog also holds as a live
+  document is not skipped (the tombstone and the live row coexist after a delete and a
+  re-index); and the guard fails closed: a catalog that cannot be read, an engine whose
+  `GET /v1/catalog/trash` entries carry no `file_path`, or a `reindex` whose every source is
+  a deleted document, refuses the verb. (3) `GET /v1/catalog/trash` entries carry
+  `file_path` and order by `deleted_at` then tumbler, so an `OFFSET` page boundary inside a
+  batch delete cannot hide a tombstone from the client's guard. The guard therefore needs
+  an engine newer than `engine-service-v0.1.142`. `manifest_backfill` and `manifest_heal`
+  write manifest rows for documents that already exist and are live, so they cannot revive
+  a deleted one and are unchanged. The wire-ledger entry for the new `file_path` field
+  waits for the engine commit to be published (nexus-wbfpw.35 depends on the bead that
+  files it).
 - 2026-10-01: Step 9 widened to the reaper as built (nexus-2x9xa rounds 3 and 4; T2
   `nexus/review-reaper-2x9xa-round3-critique` S4, `-round3-code` M1; Sam's two rulings of
   2026-10-01; text only, no status change). The engine expires only the chunks it tagged,

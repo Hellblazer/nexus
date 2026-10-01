@@ -14,7 +14,11 @@ import structlog
 
 from typing import TYPE_CHECKING
 
-from nexus.catalog.tombstones import read_tombstones
+from nexus.catalog.tombstones import (
+    TombstoneGuardUnavailable,
+    has_live_document,
+    read_tombstones,
+)
 from nexus.catalog.tumbler import Tumbler
 
 if TYPE_CHECKING:
@@ -1285,6 +1289,14 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
     count = 0
     unreadable: list[str] = []
 
+    # nexus-wbfpw.35 fix rounds 2-3: the stored-chunk reads below also see the
+    # chunks of TOMBSTONED documents, and `existing` below excludes tombstones, so
+    # a deliberately deleted document would register anew. Read the trash ONCE,
+    # before the loop and outside its per-collection catch: an engine that cannot
+    # list deleted documents with their paths refuses the whole pass rather than
+    # being reported as one unreadable collection.
+    tombstones = read_tombstones(cat) if rdr_cols else None
+
     for col_info in rdr_cols:
         col_name = col_info["name"]
 
@@ -1393,14 +1405,14 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
                 # the other content types.
                 owner = _get_or_create_curator(cat, "orphaned-rdrs", writer=w)
 
-            # nexus-wbfpw.35 fix round 2: the stored-chunk read above also sees the
-            # chunks of TOMBSTONED documents, and `existing` below excludes
-            # tombstones, so a deliberately deleted document would register anew.
-            tombstones = read_tombstones(cat)
             skipped_deleted = 0
             for path, title in seen_paths.items():
                 fp = make_relative(path, repo_root) if repo_root else path
-                if tombstones.covers_path((path, fp), owner=str(owner)):
+                # Skip only a path the catalog holds as a tombstone and nowhere
+                # live: a re-registered document has both, and is not deleted.
+                if tombstones.covers_path((path, fp), owner=str(owner)) and not has_live_document(
+                    cat, tombstones, (path, fp), owner=str(owner),
+                ):
                     skipped_deleted += 1
                     continue
                 if dry_run:
@@ -1456,6 +1468,13 @@ def _backfill_papers(
     ]
     count = 0
 
+    # nexus-wbfpw.35 fix round 3: the trash is read once for the whole pass (it was
+    # re-paged per collection), on first need: a pass whose collections all fail
+    # their metadata read registers nothing and has nothing to guard. An engine
+    # that cannot list it refuses the pass at that point (outside the per-
+    # collection catch above), not as one skipped collection.
+    tombstones = None
+
     total = len(paper_cols)
     for i, col_info in enumerate(paper_cols, 1):
         col_name = col_info["name"]
@@ -1503,11 +1522,14 @@ def _backfill_papers(
             live_here = [
                 e for e in cat.by_owner(paper_owner) if e.physical_collection == col_name
             ]
-            if not live_here and read_tombstones(cat).covers_collection(
-                owner=str(paper_owner), collection=col_name, content_type="paper",
-            ):
-                _note_skipped_deleted(col_name, 1)
-                continue
+            if not live_here:
+                if tombstones is None:
+                    tombstones = read_tombstones(cat)
+                if tombstones.covers_collection(
+                    owner=str(paper_owner), collection=col_name, content_type="paper",
+                ):
+                    _note_skipped_deleted(col_name, 1)
+                    continue
 
         if dry_run:
             click.echo(f"  [dry-run] Would register paper: {title} → {col_name}")
@@ -1692,7 +1714,7 @@ def _backfill_per_file_from_t3(
 
     registered = 0
     skipped_deleted = 0
-    tombstones = read_tombstones(cat)
+    tombstones = read_tombstones(cat)  # raises TombstoneGuardUnavailable: fail closed
     for abs_path in sorted(seen_paths):
         # Anchor relative to repo_root when possible; fall back to the
         # raw path. The register-time guard rejects paths outside
@@ -1705,7 +1727,10 @@ def _backfill_per_file_from_t3(
         # nexus-wbfpw.35 fix round 2: a stored chunk of a TOMBSTONED document
         # reaches this loop now, and by_file_path (live rows only) would call it
         # a gap. A path the catalog holds as a deleted document stays deleted.
-        if tombstones.covers_path((abs_path, rel), owner=str(owner)):
+        # Only when no LIVE document holds the path too (delete + re-register).
+        if tombstones.covers_path((abs_path, rel), owner=str(owner)) and not has_live_document(
+            cat, tombstones, (abs_path, rel), owner=str(owner),
+        ):
             skipped_deleted += 1
             continue
 
@@ -1860,6 +1885,11 @@ def backfill_cmd(
                 mode = "would register" if dry_run else "registered"
                 click.echo(f"  {target}: {mode} {count} row(s)")
                 total_registered += count
+            except TombstoneGuardUnavailable:
+                # The engine cannot list deleted documents: every remaining
+                # collection would hit the same wall, and a skip-and-continue
+                # sweep would read as "done". Refuse the whole verb.
+                raise
             except click.ClickException as exc:
                 # Non-repo-owned collection in --all sweep: skip with a note.
                 if from_t3_all:

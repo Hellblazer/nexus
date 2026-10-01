@@ -1017,36 +1017,40 @@ def reindex_cmd(name: str, force: bool) -> None:
             break
         offset += 300
 
-    # nexus-wbfpw.35 fix round 2: the scan above reads STORED chunks, which
+    # nexus-wbfpw.35 fix rounds 2-3: the scan above reads STORED chunks, which
     # includes those of TOMBSTONED catalog documents. The collection is deleted
     # wholesale below and every path in source_paths is then re-indexed into a NEW
     # live document, so a path the catalog holds only as a deleted document would
-    # be revived. Drop those paths from the rebuild and say so.
-    if source_paths and _cat is not None:
-        from nexus.catalog.tombstones import read_tombstones  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    # be revived. Drop exactly those paths from the rebuild and say so.
+    #
+    # The guard fails CLOSED. A path is dropped only when a tombstone's file_path
+    # EQUALS it (after making it relative to the tombstone owner's repo_root) and
+    # the catalog holds NO live document at that (owner, file_path): a re-indexed
+    # file has a tombstone AND a live document at one path, and dropping it would
+    # purge the live chunks and rebuild none of them. A catalog that cannot be
+    # read, or an engine whose trash listing carries no file_path, refuses the
+    # verb instead of running it unguarded.
+    deleted: list[str] = []
+    if source_paths:
+        from nexus.catalog.tombstones import deleted_only_sources, read_tombstones  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
-        try:
-            tombstones = read_tombstones(_cat)
-        except Exception:  # noqa: BLE001 — best-effort; the unguarded path is the pre-fix behaviour, warned below
-            tombstones = None
+        if _cat is None:
+            raise click.ClickException(
+                f"Refusing to reindex '{name}': the catalog could not be read, so "
+                f"the verb cannot tell a source that was deleted on purpose from "
+                f"one that was not, and re-indexing would revive it. Nothing was "
+                f"deleted."
+            )
+        tombstones = read_tombstones(_cat)
+        deleted = deleted_only_sources(_cat, tombstones, source_paths, collection=name)
+        if deleted:
+            source_paths.difference_update(deleted)
             click.echo(
-                "WARNING: could not read the catalog's deleted documents; a source "
-                "that was deleted on purpose may be re-indexed.",
-                err=True,
+                f"Skipping {len(deleted)} source(s) of deleted catalog "
+                f"documents (not re-indexed): "
+                + ", ".join(Path(d).name for d in deleted[:5])
+                + (" ..." if len(deleted) > 5 else "")
             )
-        if tombstones is not None:
-            deleted = sorted(
-                sp for sp in source_paths
-                if tombstones.covers_path((sp,), collection=name)
-            )
-            if deleted:
-                source_paths.difference_update(deleted)
-                click.echo(
-                    f"Skipping {len(deleted)} source(s) of deleted catalog "
-                    f"documents (not re-indexed): "
-                    + ", ".join(Path(d).name for d in deleted[:5])
-                    + (" ..." if len(deleted) > 5 else "")
-                )
 
     # If EVERY entry is sourceless, --force does nothing useful — there is
     # no source to reindex from, so the operation collapses to "delete the
@@ -1066,6 +1070,15 @@ def reindex_cmd(name: str, force: bool) -> None:
             f"  • In-place re-embedding (preserve content, swap embedding "
             f"model) is not yet supported. Track at GitHub #367.\n\n"
             f"--force does not bypass this check — there is nothing to force."
+        )
+
+    if deleted and not source_paths:
+        raise click.ClickException(
+            f"Refusing to reindex '{name}': every source in it ({len(deleted)}) "
+            f"belongs to a deleted catalog document, so there is nothing to "
+            f"rebuild and the verb would purge the collection and leave it empty. "
+            f"Restore a document (`nx catalog restore`), or run "
+            f"`nx collection delete {name}` if the collection should go."
         )
 
     if sourceless and not force:
@@ -1467,10 +1480,12 @@ def _reembed_collection(
     on_progress=None,
     hooks=None,
 ) -> tuple[int, int]:
-    """Re-embed every chunk in *col_name* with *target_model*.
+    """Re-embed every LIVE chunk in *col_name* with *target_model*.
 
     Preserves chunk id, document text, and metadata. Only the embedding
-    vector changes. Returns ``(processed, skipped)``.
+    vector changes. Returns ``(processed, skipped)``. A chunk with no live
+    catalog document is not read and keeps its vector (see the decision
+    comment below); the caller reports how many stored chunks that left behind.
 
     nexus-bw65: in-place re-embed for Voyage models. CCE
     (``voyage-context-3``) was refused here while the CLIENT embedded,
@@ -1509,14 +1524,20 @@ def _reembed_collection(
     if total == 0:
         return 0, 0
 
-    # LIVE ROWS ONLY, deliberately (nexus-wbfpw.35 fix round 2). `total` is the
+    # LIVE ROWS ONLY, deliberately (nexus-wbfpw.35 fix rounds 2-3). `total` is the
     # STORED count (an upper bound: the loop below ends on the first empty live
     # page, so hidden rows only make it stop earlier than `total`), while the
-    # reads below see live rows. Chunks with no live owner, or owned only by a
-    # tombstoned document, are not re-embedded: the write is a billed server-side
-    # embed per chunk and a client re-write refreshes last_written_at, the reap
-    # grace anchor (vectors-020), so re-embedding them would spend money on
-    # chunks the reaper is about to reclaim and delay the reclaim.
+    # reads below see live rows. Chunks with no live owner are not re-embedded.
+    # For a never-owned chunk the write would refresh last_written_at, the anchor
+    # of the reaper's grace window (vectors-020), and extend its life; that grace
+    # argument holds for those chunks only. For a chunk owned only by a
+    # tombstoned document the refresh extends nothing under the final design
+    # (nexus-wbfpw.15: nexus.chunk_orphaned_at, reapable keyed on
+    # GREATEST(last_written_at, orphaned_at)); the reasons there are cost, since
+    # every re-embed is a billed Voyage call per chunk, and pointlessness, since
+    # the document is deleted. A document restored later keeps its pre-repair
+    # vectors until the next run, which sees them live. The chunks left on the
+    # old model are counted by the caller and reported.
     processed = 0
     skipped = 0
     page = QUOTAS.MAX_QUERY_RESULTS  # 300
@@ -1628,9 +1649,11 @@ def reembed_cmd(
 ) -> None:
     """In-place re-embed: preserve content, swap embedding model.
 
-    nexus-bw65: rebuild embeddings for every chunk in NAME using
-    --to MODEL. Chunk ids, document text, and metadata are
-    preserved; only the vector changes.
+    nexus-bw65: rebuild embeddings for every chunk in NAME that has a
+    live catalog document, using --to MODEL. Chunk ids, document text,
+    and metadata are preserved; only the vector changes. A chunk with no
+    live document (no owner, or owned only by a deleted document) is left
+    on its old vector, and the summary says how many.
 
     Use case: an embedding-model upgrade on a sourceless collection
     (store_put-only / MCP-promoted notes). For source-backed
@@ -1650,8 +1673,9 @@ def reembed_cmd(
     """
     if not dry_run and not yes:
         click.confirm(
-            f"Re-embed {name!r} with {target_model!r}? This rewrites "
-            f"every chunk's vector in place.",
+            f"Re-embed {name!r} with {target_model!r}? This rewrites the vector "
+            f"of every chunk that has a live catalog document, in place; chunks "
+            f"with none keep their old vector.",
             abort=True,
         )
 
@@ -1710,6 +1734,20 @@ def reembed_cmd(
         f"{target_model!r}; skipped {skipped} row(s) (empty document, or no "
         f"longer owned by a live document when the write reached the engine)."
     )
+    # nexus-wbfpw.35 fix round 3: the walk reads live rows, so a stored chunk with
+    # no live catalog document is never visited. Say how many stayed on the old
+    # model rather than let "re-embedded N" read as the whole collection.
+    try:
+        stored = db.get_collection(name).count()
+    except Exception:  # noqa: BLE001 — the count only decorates a finished run
+        stored = None
+    if stored is not None and stored > processed:
+        click.echo(
+            f"{stored - processed} of {stored} stored chunk(s) were not "
+            f"re-embedded and keep their old vectors: the skipped rows above, "
+            f"and chunks with no live catalog document (`nx collection info "
+            f"{name}` shows live and stored counts)."
+        )
 
 
 @collection.command("rewrite-metadata")

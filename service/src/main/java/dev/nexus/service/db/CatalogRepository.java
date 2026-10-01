@@ -2933,7 +2933,12 @@ public final class CatalogRepository {
                        CATALOG_DOCUMENTS.DELETED_AT)
                .from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
-               .orderBy(CATALOG_DOCUMENTS.DELETED_AT.desc())
+               // TUMBLER breaks ties: a batch delete stamps every row with one
+               // transaction timestamp, so deleted_at alone leaves the order inside
+               // a tie to the planner, and an OFFSET page boundary inside a tie
+               // can skip a tombstone (nexus-wbfpw.35 fix round 3). The client's
+               // revival guard pages this whole listing and must see every row.
+               .orderBy(CATALOG_DOCUMENTS.DELETED_AT.desc(), CATALOG_DOCUMENTS.TUMBLER)
                .limit(limit <= 0 ? 200 : limit)
                .offset(offset)
                .fetch()
