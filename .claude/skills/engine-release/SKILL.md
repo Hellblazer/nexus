@@ -35,6 +35,14 @@ scripts/mvnw-leased.sh -q test
 
 The Java CI (`service-ci.yml`) is a required check on `main`, but nothing gates a push to `develop` on it, and a develop run can be cancelled or time out — so verify it actually passed on this tree rather than assuming.
 
+### 2b. PRE-TAG check: the rider commits are ancestors of the commit you will tag (nexus-ujbz8)
+
+```bash
+uv run python scripts/check_engine_cut_riders.py ancestry <tag-commit>
+```
+
+Must end `PASSED`. A fix that is on develop does not ride a tag placed on an older commit, and the release job has no check that would notice (the native-image size fix, nexus-lhr6a and nexus-vwfc0, ships binaries at the old size when either commit is missing). The rider list is `RIDERS` in the script; add a commit there when a bead says its fix must ride the next cut, and remove it when the bead closes. Exit 1 names the missing commits; exit 2 means a rider or the commit did not resolve in this clone (fetch first), which is never a pass. A tag cut from the develop tip carries every rider.
+
 ### 3. PRE-TAG gate: `--shakeout` (the leg that builds the candidate)
 
 > **`--guided` IS RETIRED — do not use it.** RDR-155 P4b (commit `7e47c285`,
@@ -316,7 +324,7 @@ exact window before a client release ships the fix) is not a tag-cut
 blocker — acknowledge it explicitly and by name:
 
 ```bash
-NX_EXPECTED_CLIENT_LAG=nexus-sh9v2 tests/e2e/published-client-write-gate.sh
+NX_EXPECTED_CLIENT_LAG=<the bead the script's EXPECTED_LAG_BEAD names> tests/e2e/published-client-write-gate.sh
 ```
 
 Exits 2 (`PUBLISHED-CLIENT WRITE GATE EXPECTED-INCOMPATIBLE`) — a named,
@@ -325,6 +333,32 @@ counted state, never a silent pass. The script refuses the acknowledgment
 is >= the version its own header names as the fix — an ack held past its
 expiry is exactly the drift this gate exists to catch. See the script's own
 header for the full contract; do not re-derive it here.
+
+**The RDR-223 + RDR-192 cut: run this gate TWICE, once per ownerless-write mode
+(nexus-9a6io).** The final cut's engine refuses a chunk write no document owns
+(422, `reason: ownerless_chunk_write`), and every published client before the
+Phase 2 client migration writes that way for `nx store put` and `nx index md`. So
+against this candidate the published client is incompatible by design, and the
+expected result depends on the engine's `NX_OWNERLESS_WRITE_MODE`:
+
+```bash
+# first production deploy posture (an UNSET variable is log-only): expect exit 0
+NX_GATE_OWNERLESS_WRITE_MODE=log-only tests/e2e/published-client-write-gate.sh
+# the final posture: expect exit 2, EXPECTED-INCOMPATIBLE
+NX_EXPECTED_CLIENT_LAG=nexus-z0o2p.24 NX_GATE_OWNERLESS_WRITE_MODE=enforce \
+  tests/e2e/published-client-write-gate.sh
+```
+
+Exit 0 in `log-only` requires the engine's `ownerless_writes_would_refuse_total` to be
+above zero afterwards, which proves the legacy path reached the ownerless route. Exit 2 in
+`enforce` is accepted only with `ownerless_writes_refused_total` above zero behind it, so
+the ack cannot hide a different failure. A red verdict from either run is a stop. If the
+published client is already at or above `FIXED_IN_VERSION` (the paired release), both
+runs must pass with both counters at zero, and a published client below it that moves no
+counter means `FIXED_IN_VERSION` in the script is stale: set it to the paired release in
+the release PR. The cutover order that follows this gate is
+`docs/operations/ownerless-write-cutover.md`; the verdict logic is pinned by
+`tests/e2e/published_client_write_gate_verdict_test.sh`.
 
 ### 3d. PRE-TAG gate: RDR-194 D4 cloud-count-5 delivery precondition (nexus-tk070.p5a)
 
@@ -475,6 +509,14 @@ Trigger: `service/` since the last engine tag includes a new Liquibase changeset
 
 Full rationale and evidence citations: `docs/contributing.md` § Schema/data-migration releases.
 
+### 5c. POST-PUBLISH check: the binaries are the fixed size (nexus-ujbz8)
+
+```bash
+uv run python scripts/check_engine_cut_riders.py sizes engine-service-vX.Y.Z
+```
+
+Must end `PASSED`. It reads the published release's asset sizes (`gh release view`) and fails when a binary is at or near its pre-fix size: v0.1.142 shipped `nexus-service-linux-amd64` at 231.8 MiB, `linux-arm64` at 227.0 and `mac-arm64` at 193.3, and the fixed build is about 150, under 227 and about 154. A size back near the old values means the dedup did not take effect in the release build, which the embedded-resources checker does not cover (nexus-zz2w7). Step 2b proves the fix was in the tagged commit; this proves it shipped. Close nexus-ujbz8 after a pass.
+
 ### 6. Relay deploy + post-deploy cloud validation to conexus
 
 Deploy and cloud-validation are **conexus-side operations**. Send the relay to
@@ -492,6 +534,21 @@ design, exactly as a ruling relayed from them is not acted on here (same rule,
 both directions). Say the deploy is theirs; do not say it is happening:
 
 > **Before the relay, when this tag carries a changeset: ask conexus to run the PITR-fork walk rehearsal.** conexus can restore a Crunchy fork of production to a point in time (~6 min, `deploy/RESTORE.md`) and replay the Liquibase walk against the real row set before it runs live. That is the pre-deploy gate for a schema-carrying tag, and it is the one this skill used to omit. It caught `v0.1.78`'s zero-grant `nexus_diag` regression. The walk is CUMULATIVE — it replays everything the target cluster is behind on — so confirm the cloud's live `release_version` from the engine and size the walk from THAT, not from how many changesets you added.
+>
+> **Assertions the fork walk must carry (nexus-k9fs1, from the nexus-q81g7 schema pin).** The engine pins Liquibase's history to `public` and the migration session's `search_path`; the failing property (a second walk that replans everything) exists only on a database that has already been walked once, so only the fork shows it. Hand conexus these three commands, which need `psql` access to the fork (libpq environment, nothing on argv) and the engine log of each boot. The migration role is the engine's own `NX_DB_ADMIN_USER`, read from the engine's environment, never from records:
+>
+> ```bash
+> # before the walk, after walk 1, after walk 2 (pass --expect-rows <count after walk 1> on the last)
+> uv run python scripts/check_pitr_fork_walk.py schema --migration-role "$NX_DB_ADMIN_USER"
+> # on walk 1's engine log: the count identity, no anomaly event, the session line present
+> uv run python scripts/check_pitr_fork_walk.py walk --engine-log walk1.log --migration-role "$NX_DB_ADMIN_USER"
+> # on walk 2's engine log, from a SECOND boot of the same engine on the fork: nothing applies
+> uv run python scripts/check_pitr_fork_walk.py walk --engine-log walk2.log --migration-role "$NX_DB_ADMIN_USER" --noop
+> ```
+>
+> `schema` asserts exactly one `databasechangelog` and one `databasechangeloglock`, both in `public`, the lock not held, the role named `nexus`, `t1` or `staging` (or any existing schema) refused, and prints the `pg_db_role_setting` rows. `walk` asserts `new + reexecuted + mark_ran == pending_at_start`, no `schema_migration_count_anomaly`, and that `schema_migration_session` was logged, which a pre-fix engine cannot do. `--noop` asserts `new_changesets` 0 and `reexecuted_changesets` equal to the `runAlways` count (12 when this was written; `--expect-reexecuted N` if the changelog has grown). Exit 2 is "evidence unreadable", never a pass. `tests/e2e/two-walk-check.sh` runs the same assertions against a throwaway local engine across two boots; run it before the relay so the checker is known good.
+>
+> **Cutover posture for the ownerless-write refusal (nexus-20onx).** Tell conexus the first deploy runs `NX_OWNERLESS_WRITE_MODE` unset or `log-only` (never `enforce`), that the flip is a Terraform parameter plus a same-tag redeploy, and where the soak is read; the full order of operations, including the restart step, is `docs/operations/ownerless-write-cutover.md`. Include the doc in the relay.
 >
 > Also confirm with conexus before the window opens: (a) the per-release PRE-DEPLOY prerequisites table — some changesets need a Crunchy-superuser grant to EXIST before boot migration, and its absence is a loud failure on the live engine; (b) the per-release DATA EFFECTS table — anything the walk deletes is acknowledged in advance, never discovered mid-deploy; (c) the image is cosign-signed, since under `enable_image_verification=true` an unsigned image BRICKS BOOT; (d) the current image tag is captured FIRST as the rollback target, and the rollback floor is `nexus-service-0.1.84`.
 >
