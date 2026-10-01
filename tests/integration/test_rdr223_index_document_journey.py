@@ -482,6 +482,7 @@ def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
     from datetime import UTC, datetime
 
     from nexus.corpus import index_model_for_collection
+    from nexus.metadata_schema import rewrite_delete_keys
 
     lines = _lines("meta", 6)
     path = _write_file(tmp_path, "meta", lines)
@@ -495,9 +496,14 @@ def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
     # metadata dict the client sent, merged into nothing), into a control collection. They carry
     # no owner row, which the write routes refuse from RDR-223 Phase 3, so they go in with
     # substrate SQL.
+    metas = [dict(m) for _, _, m in prepared]
+    # Non-vacuity, kept from the old path: the writer drops owned keys from its dict, so the
+    # delete_keys the old route call named were non-empty. With a first write into an empty
+    # collection they stripped nothing, which is why plain SQL is equivalent.
+    assert rewrite_delete_keys(metas)
     seed_chunks_direct(
         _CONTROL_COLLECTION, [p[0] for p in prepared], [p[1] for p in prepared],
-        [dict(m) for _, _, m in prepared], embed=True)
+        metas, embed=True)
 
     new = _stored_metadata(_COLLECTION, every)
     # The old path stored the chunks with no owner row, which live(c) hides.

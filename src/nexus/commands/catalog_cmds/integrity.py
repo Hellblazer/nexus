@@ -641,8 +641,9 @@ def _classify_never_chunked(e: object, owner_roots: dict[str, str] | None = None
     # SAME candidate-string derivation only when e.physical_collection has
     # no row -- this diagnostic's whole purpose is reporting a
     # name-versus-row disagreement, so a row that exists must win, matching
-    # the treatment db/reconcile.py's _model_for_collection and
-    # db/http_vector_client.py's _is_cce_collection already got.
+    # the treatment db/http_vector_client.py's _is_cce_collection already got
+    # (db/reconcile.py's _model_for_collection, the other, was deleted by
+    # RDR-223 P3.3).
     from nexus.corpus import resolve_row_preferred, split_candidate_collection_name  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
 
     content_type = resolve_row_preferred(

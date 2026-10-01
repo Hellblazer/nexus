@@ -1382,8 +1382,8 @@ def _backfill_chunk_text_hash(
     survives is the half that was always independently meaningful: backfilling
     ``chunk_text_hash`` into the T3 chunks themselves (RDR-180 widths).
 
-    Implementation (nexus-o9an): two-pass walk, mirrors
-    ``reidentify_collection``. Pass 1 paginates ``col.get(include=[])``
+    Implementation (nexus-o9an): two-pass walk, the shape the since-deleted
+    ``reidentify_collection`` used. Pass 1 paginates ``col.get(include=[])``
     to collect every chunk id; pass 2 fetches by exact id and re-upserts
     chunks needing the hash with a canonical-schema-normalized payload.
 

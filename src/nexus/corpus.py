@@ -998,7 +998,7 @@ def resolve_row_preferred(
     :func:`collection_model`, which raise on exactly that case).
 
     Extracted from FOUR independently-written copies of this same
-    pattern (:func:`nexus.db.reconcile._model_for_collection`,
+    pattern (the since-deleted ``db/reconcile._model_for_collection``,
     :func:`nexus.db.http_vector_client._is_cce_collection`, and two
     inline checks in ``commands/catalog_cmds/integrity.py`` /
     ``reconcile_stale.py``) -- two were upgraded to row-preferred during
