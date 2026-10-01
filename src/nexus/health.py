@@ -3900,8 +3900,10 @@ def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
         label=label, ok=False, warn=True,
         detail=(
             f"engine mode={mode}: {' and '.join(parts)} since the engine started. A client "
-            "older than the RDR-223 Phase 2 release writes a chunk before its owner, or a "
-            "process upgraded on disk still runs the old code."
+            "older than the RDR-223 Phase 2 release writes a chunk before its owner, a "
+            "process upgraded on disk still runs the old code, or a caller that is not the "
+            "nexus client (curl, a script) writes that way. The counters are since the "
+            "engine started and name no cause."
         ),
         fix_suggestions=[
             "On every machine that writes to this engine, upgrade conexus, then RESTART every "
@@ -3909,7 +3911,8 @@ def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> lis
             "`nx daemon restart-stale` lists what predates the install",
             "The engine log line `ownerless_chunk_write_would_refuse` (or `_refused`) names "
             "the route, collection, User-Agent and X-Nexus-Client-Version of each writer; a "
-            "missing version is a client older than the cut",
+            "missing version is a client older than the cut OR a caller that never sends it "
+            "(curl, a script), which an upgrade cannot fix",
             "Flip NX_OWNERLESS_WRITE_MODE from log-only to enforce only after this count "
             "stops moving with every client restarted (docs/operations/ownerless-write-cutover.md)",
         ],

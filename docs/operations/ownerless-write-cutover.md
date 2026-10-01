@@ -40,16 +40,27 @@ live estate.
 
 `GET /v1/status` reports `ownerless_write_mode`, `ownerless_writes_refused_total` and
 `ownerless_writes_would_refuse_total`. The counters are since-boot: a redeploy resets them,
-so read them and the log together.
+so read them and the log together. The live mode is asserted, not assumed:
+`NX_EXPECTED_OWNERLESS_WRITE_MODE=log-only tests/e2e/cloud-client-path-gate.sh` after the
+first deploy and `=enforce` after the flip (the `engine-release` skill, Step 6.1).
 
 ## Who is affected (measured 2026-10-01)
 
 conexus-55's census of `POST /v1/vectors/store-put` and `/upsert-chunks` over
-2026-09-01 to 2026-10-01: every request was WAF ALLOW, from **two IP addresses** (the
-operator's and one other), `Python-urllib/3.12` and `python-httpx/0.28.1`. The population
-to upgrade and restart is two hosts. The user agent carries no client version, so
-`X-Nexus-Client-Version` is the only soak signal, and the final-cut client sends it on both
-transports (urllib and httpx).
+2026-09-01 to 2026-10-01: every request was WAF ALLOW, from **two source IP addresses**
+(the operator's and one other), `Python-urllib/3.12` and `python-httpx/0.28.1`. Two
+addresses is a floor on the machines, not the machine count. NAT can put several machines
+behind one address: the Mac mini, the WSL appliance and qwentescence share one egress, and
+each can run its own `nx-mcp` servers and hook-spawned `nx`. The population to upgrade and restart is every machine behind those two addresses, so
+inventory machines and not addresses.
+
+The census also shows what the version header cannot tell you. The user agent carries no
+client version, so `X-Nexus-Client-Version` is the only soak signal, and the final-cut nexus
+client sends it on both transports (urllib and httpx). A caller that is not the nexus client
+never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` (351
+`upsert-chunks`), and a conexus-side or script caller that builds its own request logs
+`client_version=absent` for as long as it exists. Upgrading a package cannot fix that, so
+`absent` does not mean "an old client". Step 3 dispositions each pair.
 
 ## Order of operations
 
@@ -57,27 +68,92 @@ transports (urllib and httpx).
    Terraform parameter in the engine-redeploy SSM document (conexus-3jue's parameter),
    defaulting to `log-only`, next to the `NX_HNSW_MAX_SCAN_TUPLES` rollback lever. The
    engine's environment file is rendered at boot, so a hand edit on the host is lost.
-2. **Upgrade and restart every client.** On each of the two hosts: upgrade conexus to the
-   paired release, then restart every long-lived process that holds the old code. Upgrading
-   the package on disk does not change a running process.
+   Confirm the live mode with the gate in the previous section: `ownerless_write_mode` must
+   read `log-only`, because a mis-wired parameter that reads `enforce` refuses every legacy
+   write from every host at the first deploy.
+2. **Upgrade and restart every client.** On each machine behind the two addresses: upgrade
+   conexus to the paired release, then restart every long-lived process that holds the old
+   code. Upgrading the package on disk does not change a running process.
    - Each `nx-mcp` server is one per Claude Code session: reconnect it (`/mcp`) or quit and
      relaunch the session.
    - Hook-spawned and background `nx` processes: `nx daemon restart-stale` lists and
      restarts what predates the install and names the sessions only you can close.
    - Check with `nx doctor`: the `Process freshness` row must be green, and the
      `Ownerless writes` row shows the engine's counters.
-3. **Soak.** Read `ownerless_writes_would_refuse_total` and the engine log (CloudWatch group
-   `/conexus/dev/engine`, filter `event=ownerless_chunk_write_would_refuse`). Each line names
-   the route, the collection, the `user_agent` and `client_version`; `client_version=absent`
-   is a client older than the cut. The line is rate limited to one per route and collection
-   per minute, the counter is not. The count stops moving once every writer is upgraded and
-   restarted.
-4. **Flip to `enforce`.** Set the parameter to `enforce` and redeploy the **same tag**.
-   No new tag is cut for the flip. Recommended criterion, for Sam to confirm: no
-   would-refuse line for a full day of normal use on both hosts after the restart.
+3. **Soak, and disposition every caller.** Read `ownerless_writes_would_refuse_total` and the
+   engine log (CloudWatch group `/conexus/dev/engine`, filter
+   `event=ownerless_chunk_write_would_refuse`). Each line names the route, the tenant, the
+   collection, the `user_agent` and `client_version`. The count stops moving once every
+   writer is upgraded and restarted, **or** is a caller that cannot be fixed by an upgrade.
+   Collect every distinct `(user_agent, client_version)` pair that appears during the soak
+   and write down what each one is:
+
+   | Pair | Disposition |
+   |---|---|
+   | nexus client, version at or above the paired release | counted only if a process still runs old code: find it with `nx doctor` on that machine |
+   | nexus client, `client_version=absent` | a client older than the cut: upgrade and restart it |
+   | not the nexus client (`curl`, a conexus-side `httpx` caller, a script), `absent` | it never sends the header. Move it to the combined write (`/v1/catalog/manifest/write_many`, which writes the chunks and the owner rows together) or confirm it is retired. Do not wait for it to disappear |
+   | a pair nobody can name | hold the flip until it is named |
+
+   Every pair needs a written disposition before the flip. A pair that stays `absent`
+   forever blocks the flip forever; only this step turns that into a decision.
+
+   The log line is a sample, not a list. It is rate limited to one line per
+   `route|tenant|collection` per minute (with `suppressed_since_last`), and it carries only
+   the first unowned chunk's metadata and a sample of chashes, so it names one source per
+   request. The counter is not limited; use it for counts and the log to find callers.
+4. **Flip to `enforce`.** Only with a positive control, because the engine logs only
+   would-refuse lines and silence is also what a powered-off host looks like. Proceed
+   when all of these hold, for Sam to confirm:
+   - the WAF or ALB request counts for `store-put` and `upsert-chunks` are **non-zero for
+     each of the two source addresses after the restart**, so a quiet log means "writers ran
+     and nothing was ownerless" and not "nothing ran";
+   - `Process freshness` is green on each machine behind each address;
+   - the window since the restart is **at least as long as the longest writer cadence**, read
+     from the census (for a weekly index job, a week; "a full day" is only enough if no
+     writer is slower than daily);
+   - every pair from step 3 has a disposition.
+
+   **Export the since-boot counters first.** The flip redeploy resets them, and with them the
+   soak evidence. Save the `/v1/status` body and the CloudWatch query result for the soak
+   window to the release record (the bead's comment or a T2 note) before the redeploy.
+   Then set the parameter to `enforce` and redeploy the **same tag**; no new tag is cut for
+   the flip. Confirm `ownerless_write_mode` reads `enforce` with the gate in "The knob".
 5. **If a writer turns up after the flip.** Its 422 error text says to upgrade conexus and
    restart `nx-mcp` and Claude Code sessions. To buy time, set the parameter back to
-   `log-only` and redeploy the same tag; nothing else changes.
+   `log-only` and redeploy the same tag; nothing else changes. The redeploy is not instant
+   (it goes through conexus).
+   **Writes refused in the window are lost, not queued.** A client does not retry a 422, and
+   a background indexer fails that write in its own log. After the rollback:
+   - bound the window: the flip redeploy time to the rollback redeploy time;
+   - read `ownerless_writes_refused_total` from before the rollback redeploy for the count;
+   - find the callers in the log (`event=ownerless_chunk_write_refused`), keeping in mind
+     that it is sampled as in step 3, so it undercounts documents;
+   - **re-index everything those clients wrote in the window**: re-run `nx index repo` for
+     the repositories, and re-store the notes and re-run the `nx index md` and `nx index pdf`
+     work, from each affected machine. Do not assume the log lists every refused file.
+
+## Local-mode installs
+
+A local install gets `enforce` at its first boot of the upgraded engine, with no soak: the
+launcher sets it. The first write from a process that still runs the old code is refused.
+So the restart instruction is part of the upgrade, not a follow-up: after upgrading, restart
+every long-lived `nx-mcp` server (one per Claude Code session) and every hook-spawned `nx`
+(`nx daemon restart-stale`, then `nx doctor`'s `Process freshness` row). The release's
+CHANGELOG entry for the refusal and the `nx upgrade` section of the CLI reference carry the
+same instruction. A local census run that wants to see the writers before refusing them
+exports `NX_OWNERLESS_WRITE_MODE=log-only` before `nx daemon service start`.
+
+## What the doctor row does and does not say
+
+`nx doctor`'s `Ownerless writes` row warns when either engine counter is above zero. The
+counters are since-boot and the engine exposes no per-client breakdown, so the row cannot
+name the cause (an old client, a process still running old code, a non-nexus caller) and
+cannot clear after the cause is fixed until the engine restarts. It does not warn that the
+installed client is older than the paired release: an old client has no new doctor to run
+it, and a stale local process is what `Process freshness` reports. That per-client signal
+needs the engine to count would-refuse writes by `client_version` and report a
+`last_would_refuse_at` timestamp in `/v1/status` (an additive change, nexus-z0o2p.39).
 
 ## What the published-client gate expects
 
@@ -85,5 +161,6 @@ transports (urllib and httpx).
 engine in both modes (`NX_GATE_OWNERLESS_WRITE_MODE=log-only` and `enforce`). With the
 published client older than the paired release it expects exit 0 under `log-only` (and a
 non-zero would-refuse count), and exit 2 under `enforce`
-(`NX_EXPECTED_CLIENT_LAG=nexus-z0o2p.24`, accepted only with the engine's refusal counter
-behind it). The `engine-release` skill, Step 3c, carries the invocations.
+(`NX_EXPECTED_CLIENT_LAG=nexus-z0o2p.24`, accepted only when both journeys failed with the
+refusal and the engine's refusal counter is at least 2 behind it). The `engine-release`
+skill, Step 3c, carries the invocations.
