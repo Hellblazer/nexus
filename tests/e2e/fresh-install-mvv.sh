@@ -432,6 +432,16 @@ fi
 GATE_OK=0
 _fail() { echo "FRESH-INSTALL MVV FAILED: $*" >&2; exit 1; }
 
+# nexus-0kmat: the candidate engine (NX_CANDIDATE_ENGINE), through the one
+# explicit input that survives the `env -i` allowlist below. Without it `nx init`
+# downloads the PINNED PUBLISHED engine, which has no ownership check, and this
+# journey passes vacuously for an engine change that is not yet tagged. Resolved
+# before anything is built or provisioned: a cut-mode run with no candidate, or
+# a candidate that cannot be found, fails here.
+# shellcheck source=tests/e2e/lib/candidate_engine.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/candidate_engine.sh"
+candidate_engine_load "$WORK/engine" || _fail "candidate engine refused (see CANDIDATE ENGINE REFUSED above)"
+
 cleanup() {
     # Stop the sandbox service + PG so nothing leaks past the gate.
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
@@ -457,6 +467,7 @@ _nx() {
         NX_LOCAL=1 \
         ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} \
         ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} \
+        ${CAND_ENV_ARGS[@]+"${CAND_ENV_ARGS[@]}"} \
         "$BIN_DIR/nx" "$@"
 }
 
@@ -820,6 +831,11 @@ echo "── 4/10 nx init (local mode, virgin HOME, scrubbed env) ──"
 _nx init -y --no-autostart 2>&1 | tee "$LOGS/init.log"
 grep -Eq "the service backend is serving" "$LOGS/init.log" \
     || _fail "init did not confirm a serving backend"
+# nexus-0kmat: name the engine this journey actually runs against, so a vacuous
+# pass against the pinned published engine is visible in the log, and fail in
+# cut mode unless it is the candidate.
+candidate_engine_identity "$HOME_DIR/.config/nexus" fresh-install-mvv 2>&1 | tee "$LOGS/engine-identity.log" \
+    || _fail "engine identity check failed (see CANDIDATE ENGINE CHECK FAILED above)"
 # nexus-9xfx5: init converges the ladder — a virgin box must not boot with a
 # vacuous pending rung. ("converged and verified" is the runner's literal
 # success line — upgrade.py's LadderRunner output.)
@@ -1001,6 +1017,15 @@ fi
 # The sentinel below matches NOTHING (an empty regex would match
 # everything through grep -v -E and silently allowlist every warning).
 ALLOWLIST_REGEX='__NO_ALLOWLISTED_WARNINGS_SENTINEL__'
+# nexus-0kmat: the ONE entry, and only while a candidate engine is active. A
+# candidate is launched through NEXUS_SERVICE_JAR / NEXUS_SERVICE_BIN, which
+# records no installed-binary provenance, so doctor's engine-convergence row
+# reads "installed vunknown". The default (pinned, `nx init`-installed) engine
+# path keeps the empty sentinel above: it must stay at ZERO warnings. The
+# trigger is mechanical, not a promise: with no candidate this branch never runs.
+if [ "${#CAND_ENV_ARGS[@]}" -gt 0 ]; then
+    ALLOWLIST_REGEX='Engine convergence: engine convergence pending .* installed vunknown, release dependency'
+fi
 WARNING_LINES="$(grep -E "level='warning'|\[warning|⚠" "$LOGS/doctor.log" || true)"
 UNALLOWLISTED="$(printf '%s\n' "$WARNING_LINES" | grep -v -E "$ALLOWLIST_REGEX" | grep -v '^$' || true)"
 if [ -n "$UNALLOWLISTED" ]; then
@@ -1338,6 +1363,10 @@ if [ -n "$GEN_WAIT_S" ]; then
     PROPAGATION_WAIT_S=$(( ${PROPAGATION_WAIT_S:-0} + GEN_WAIT_S ))
 fi
 
+echo "── 9b/10 engine refusals (nexus-0kmat) ──"
+candidate_engine_refusals "$HOME_DIR/.config/nexus" fresh-install-mvv 2>&1 | tee "$LOGS/engine-refusals.log" \
+    || _fail "the engine refused an ownerless chunk write during this journey (see CANDIDATE ENGINE CHECK FAILED above)"
+
 echo "── 10/10 non-vacuity ──"
 # The gate must never skip-pass: prove the substantive legs actually ran.
 # nexus-1ktd5 item C: `test -s` alone only proves non-emptiness -- every
@@ -1347,7 +1376,7 @@ echo "── 10/10 non-vacuity ──"
 # despite a background-thread exception) read as fine. This calls
 # _leg_log_is_substantive instead, which adds the one thing `-s` cannot: no
 # unhandled Python traceback anywhere in the leg's own log.
-LEGS_TO_CHECK="mcp-entrypoints.log init.log store.log store-reput.log search-reput.log index.log doctor.log resolver-bound.log tuple-hook-drive.log generation-install.log"
+LEGS_TO_CHECK="mcp-entrypoints.log init.log engine-identity.log engine-refusals.log store.log store-reput.log search-reput.log index.log doctor.log resolver-bound.log tuple-hook-drive.log generation-install.log"
 if [ "$PUBLISHED_MODE" = 1 ]; then
     LEGS_TO_CHECK="install.log $LEGS_TO_CHECK"
 else

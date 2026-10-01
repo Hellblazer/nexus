@@ -107,6 +107,15 @@ fi
 GATE_OK=0
 _fail() { echo "DATA-TOKEN CLI GATE FAILED: $*" >&2; exit 1; }
 
+# nexus-0kmat: the candidate engine (NX_CANDIDATE_ENGINE), through the one
+# explicit input that survives the `env -i` scrub below. Resolved BEFORE
+# anything is built or provisioned: a cut-mode run with no candidate, or a
+# candidate that cannot be found, fails here and never reaches the pinned
+# published engine `nx init` would otherwise download.
+# shellcheck source=tests/e2e/lib/candidate_engine.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/candidate_engine.sh"
+candidate_engine_load "$WORK/engine" || _fail "candidate engine refused (see CANDIDATE ENGINE REFUSED above)"
+
 cleanup() {
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
         _nx daemon service stop --with-pg >/dev/null 2>&1 || true
@@ -134,6 +143,7 @@ _nx() {
         NX_LOCAL=1 \
         ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} \
         ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} \
+        ${CAND_ENV_ARGS[@]+"${CAND_ENV_ARGS[@]}"} \
         "$BIN_DIR/nx" "$@"
 }
 
@@ -164,6 +174,7 @@ _nx_poisoned() {
         NEXUS_LOG_LEVEL=INFO \
         ${HTTPS_PROXY:+HTTPS_PROXY="$HTTPS_PROXY"} \
         ${HTTP_PROXY:+HTTP_PROXY="$HTTP_PROXY"} \
+        ${CAND_ENV_ARGS[@]+"${CAND_ENV_ARGS[@]}"} \
         "$BIN_DIR/nx" "$@"
 }
 
@@ -181,6 +192,11 @@ echo "── 2/10 nx init (local mode, virgin HOME, scrubbed env) ──"
 _nx init -y --no-autostart 2>&1 | tee "$LOGS/init.log"
 grep -Eq "the service backend is serving" "$LOGS/init.log" \
     || _fail "init did not confirm a serving backend"
+# nexus-0kmat: name the engine this journey actually runs against, so a
+# vacuous pass against the pinned published engine is visible in the log, and
+# fail in cut mode unless it is the candidate.
+candidate_engine_identity "$HOME_DIR/.config/nexus" data-token-cli-gate 2>&1 | tee "$LOGS/engine-identity.log" \
+    || _fail "engine identity check failed (see CANDIDATE ENGINE CHECK FAILED above)"
 if [ -n "${DATA_TOKEN_GATE_CACHE:-}" ] && [ -d "$HOME_DIR/.cache/nexus" ]; then
     mkdir -p "$DATA_TOKEN_GATE_CACHE"
     rm -rf "$DATA_TOKEN_GATE_CACHE/nexus"
@@ -480,13 +496,17 @@ done
     || _fail "the 8-way concurrent fan-out minted $FANOUT_MINT_COUNT times (expected exactly 1) — either flock-guarded mint-on-miss is not converging concurrent cold-start racers (nexus-nnr26 regression), or a racer took the OSError lock-open degrade branch and minted unguarded (check for lock-file create failures / FD pressure in the run's environment before diagnosing the flock path)"
 echo "  fan-out: $FANOUT_N/$FANOUT_N succeeded, $FANOUT_MINT_COUNT total mint(s)"
 
+echo "── engine refusals (nexus-0kmat) ──"
+candidate_engine_refusals "$HOME_DIR/.config/nexus" data-token-cli-gate 2>&1 | tee "$LOGS/engine-refusals.log" \
+    || _fail "the engine refused an ownerless chunk write during this journey (see CANDIDATE ENGINE CHECK FAILED above)"
+
 echo "── non-vacuity ──"
 # issue.log (stderr-only capture of `nx service token issue`) is
 # EXPECTED empty on success — it is not a useful non-vacuity signal for
 # that leg, which already has its own explicit assertion above (the
 # "^Tenant: gate-dtok$" grep against $WORK/issue.out). Check issue.out
 # here instead, from the directory it actually lands in.
-LEGS_TO_CHECK="build.log init.log config-set-token.log store-put.log store-put.stderr.log search.log doctor.log negative.combined.log recovery.log fanout-1.log fanout-1.stderr.log"
+LEGS_TO_CHECK="build.log init.log engine-identity.log engine-refusals.log config-set-token.log store-put.log store-put.stderr.log search.log doctor.log negative.combined.log recovery.log fanout-1.log fanout-1.stderr.log"
 for f in $LEGS_TO_CHECK; do
     [ -s "$LOGS/$f" ] || _fail "leg log $f is empty — a journey leg silently skipped"
 done

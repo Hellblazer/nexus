@@ -2,6 +2,18 @@
 # Release battery driver (nexus-mfage fix B item 4, nexus-fp7ez item d).
 #
 #   tests/e2e/release-battery.sh [--artifacts DIR] [--max-parallel N] [--only a,b,c] [--skip-preflight]
+#                                [--cut] [--candidate-engine PATH]
+#
+# CUT MODE (--cut, or NX_CUT_MODE=1; nexus-0kmat): this battery gates an ENGINE
+# cut, so the gates that provision their own engine must run the CANDIDATE, not
+# the pinned published one (which predates the change and passes vacuously).
+# The candidate is --candidate-engine PATH (a *.jar or a native binary), else
+# the stamped dev jar the artifacts leg just built. It reaches mvv, smoke,
+# shakedown and dtok (the data-token CLI gate, a cut-mode-only leg) as
+# NX_CANDIDATE_ENGINE, which each leg puts inside its own env scrub. Each of
+# those legs prints an `ENGINE IDENTITY` line, and in cut mode a leg whose log
+# lacks one naming the candidate is FAILED even when its own checks went green.
+# See tests/e2e/lib/candidate_engine.py.
 #
 # Leg 0, serial: build every artifact ONCE (tests/e2e/migration-rehearsal/
 # build-artifacts.sh — wheel, stamped dev jar, linux native candidate, plus
@@ -31,6 +43,8 @@ MAX_PARALLEL="${MAX_PARALLEL:-4}"
 ARTIFACTS=""
 ONLY=""
 SKIP_PREFLIGHT=0
+CUT_MODE="${NX_CUT_MODE:-0}"
+CANDIDATE_ENGINE="${NX_CANDIDATE_ENGINE:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --artifacts) ARTIFACTS="$2"; shift 2 ;;
@@ -40,11 +54,23 @@ while [ $# -gt 0 ]; do
     --only) ONLY="$2"; shift 2 ;;
     --only=*) ONLY="${1#--only=}"; shift ;;
     --skip-preflight) SKIP_PREFLIGHT=1; shift ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --cut) CUT_MODE=1; shift ;;
+    --candidate-engine) CANDIDATE_ENGINE="$2"; shift 2 ;;
+    --candidate-engine=*) CANDIDATE_ENGINE="${1#--candidate-engine=}"; shift ;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || { echo "--max-parallel must be a positive integer" >&2; exit 2; }
+[ "$CUT_MODE" = 1 ] || [ "$CUT_MODE" = 0 ] || { echo "NX_CUT_MODE must be 0 or 1 (got '$CUT_MODE')" >&2; exit 2; }
+# nexus-0kmat: legs inherit the exported environment through `bash -c`.
+export NX_CUT_MODE="$CUT_MODE"
+if [ -n "$CANDIDATE_ENGINE" ]; then
+  [ -f "$CANDIDATE_ENGINE" ] || { echo "--candidate-engine: $CANDIDATE_ENGINE is not a file" >&2; exit 2; }
+  export NX_CANDIDATE_ENGINE="$CANDIDATE_ENGINE"
+else
+  unset NX_CANDIDATE_ENGINE
+fi
 
 # >>> BEGIN moving-tree guard (nexus-57cvk) -- extracted verbatim by
 # tests/test_release_battery_refuses_moving_tree.py; keep both markers.
@@ -176,6 +202,11 @@ if [ "$CHANGESET_DELTA" = 1 ]; then
 define_leg candmig    group  "CANDIDATE-MIGRATION REHEARSAL (PASSED|FAILED)"     tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --candidate-migration
 fi
 define_leg mvv        group  "FRESH-INSTALL MVV (PASSED|FAILED)"        tests/e2e/fresh-install-mvv.sh
+# nexus-0kmat: the data-token CLI gate drives the real CLI through a full
+# local-engine journey; it is a battery leg only in cut mode, where its engine
+# must be the candidate (an ordinary client release does not pay its ~10 min).
+[ "$CUT_MODE" != 1 ] || \
+define_leg dtok       group  "DATA-TOKEN CLI GATE (PASSED|FAILED)"      tests/e2e/data-token-cli-gate.sh
 define_leg smoke      group  "SMOKE (PASSED|FAILED)"                    env "NEXUS_SANDBOX_HOME=$WORK/sb-smoke" tests/e2e/release-sandbox.sh smoke
 define_leg upshakeout group  "UPGRADE-SHAKEOUT PASSED"                  tests/e2e/upgrade-shakeout.sh run
 define_leg genflip    group  "GEN-FLIP LIVE-HOLDER (PASSED|FAILED)"     tests/e2e/gen-flip-live-holder.sh
@@ -212,8 +243,21 @@ start_leg() {
   LEG_PID[$leg]=$!
 }
 declare -A LEG_PID
+# nexus-0kmat: legs that provision their OWN engine, and so must name which one
+# they ran against. (lsg, candmig, pkgup and shakeout take $ARTIFACTS, which IS
+# the candidate; the rest provision no engine of their own.)
+CUT_ENGINE_LEGS=" mvv smoke shakedown dtok "
+# In cut mode a green leg that ran against the pinned published engine, or never
+# said which engine it ran against, is not a pass. Prints the reason; empty = ok.
+cut_mode_vacuity() {  # cut_mode_vacuity <leg>
+  [ "${CUT_MODE:-0}" = 1 ] || return 0
+  [[ "${CUT_ENGINE_LEGS:-}" == *" $1 "* ]] || return 0
+  local out
+  out="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" cut-assert-log "$LOGS/$1.log" "$1" 2>&1 || true)"
+  printf '%s' "${out%%$'\n'*}"
+}
 finish_leg() {  # finish_leg <leg> <rc>
-  local leg="$1" rc="$2" line clean prop
+  local leg="$1" rc="$2" line clean prop vac
   LEG_END[$leg]=$(date +%s); LEG_RC[$leg]="$rc"
   clean="$(sed -e 's/\x1b\[[0-9;]*m//g' "$LOGS/$leg.log")"
   # verbatim verdict line: last match after stripping ANSI colour
@@ -223,6 +267,12 @@ finish_leg() {  # finish_leg <leg> <rc>
   elif [ "$rc" -eq 0 ] && [ -n "$line" ]; then LEG_STATUS[$leg]="FAILED"; line="(exit 0 but the verdict line says otherwise) $line"
   elif [ "$rc" -eq 0 ]; then LEG_STATUS[$leg]="MISSING"; line="(exit 0 but no verdict line matching /${LEG_VERDICT[$leg]}/ — not a pass)"
   else LEG_STATUS[$leg]="FAILED"; [ -n "$line" ] || line="(exit $rc, no verdict line; tail: $(tail -3 "$LOGS/$leg.log" | tr '\n' ' ' | cut -c1-200))"
+  fi
+  # nexus-0kmat: cut-mode non-vacuity. Only a leg that otherwise PASSED can be
+  # downgraded here; a leg that is already red stays red with its own reason.
+  if [ "${LEG_STATUS[$leg]}" = PASSED ] && [ "${CUT_MODE:-0}" = 1 ]; then
+    vac="$(cut_mode_vacuity "$leg" || true)"
+    if [ -n "$vac" ]; then LEG_STATUS[$leg]="FAILED"; line="(VACUOUS in cut mode) $vac"; fi
   fi
   # nexus-tt5vm review round 2 (Sam's data-point goal): fresh-install-mvv's
   # propagation wait, when it fires, folds PROPAGATION_WAIT_S=<n> into its
@@ -276,12 +326,32 @@ done
 
 echo "== leg 0 (serial): ${SERIAL_LEGS[*]}"
 LEG0_ABORT=0
+CUT_NO_CANDIDATE=0
 for leg in "${SERIAL_LEGS[@]}"; do
   run_serial "$leg"
   # An artifacts red aborts: every group leg consumes them. A preflight red
   # is reported and the battery continues (item e: sandbox reds all report).
   if [ "$leg" = artifacts ] && [ "${LEG_STATUS[$leg]}" != PASSED ]; then LEG0_ABORT=1; break; fi
 done
+
+# nexus-0kmat: in cut mode the candidate engine is --candidate-engine, else the
+# stamped dev jar the artifacts leg just built (verified against this tree by
+# the manifest). No candidate is a refusal: the legs below would otherwise
+# provision the pinned published engine and pass vacuously.
+if [ "$LEG0_ABORT" = 0 ] && [ "$CUT_MODE" = 1 ] && [ -z "${NX_CANDIDATE_ENGINE:-}" ]; then
+  cand_rel="$(python3 tests/e2e/lib/artifact_manifest.py verify "$ARTIFACTS" "$REPO_ROOT" 2>"$LOGS/candidate-manifest.err" \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["artifacts"]["jar"]["path"])' 2>>"$LOGS/candidate-manifest.err")" || cand_rel=""
+  if [ -n "$cand_rel" ] && [ -f "$ARTIFACTS/$cand_rel" ]; then
+    export NX_CANDIDATE_ENGINE="$ARTIFACTS/$cand_rel"
+  else
+    echo "CUT MODE: no candidate engine: pass --candidate-engine PATH, or fix the artifacts manifest ($(tr '\n' ' ' <"$LOGS/candidate-manifest.err" | cut -c1-200))" >&2
+    # The artifacts leg PASSED, so the abort below would leave every other leg
+    # "NOT RUN" and the report would read green: flag it red explicitly.
+    CUT_NO_CANDIDATE=1
+    LEG0_ABORT=1
+  fi
+fi
+[ "$CUT_MODE" != 1 ] || echo "CUT MODE: candidate engine = ${NX_CANDIDATE_ENGINE:-<none>}"
 
 GROUP_T0=""; GROUP_T1=""
 if [ "$LEG0_ABORT" = 0 ]; then
@@ -310,6 +380,9 @@ for leg in "${ORDER[@]}"; do
   printf '%-11s %-22s %8s  %s\n' "$leg" "${LEG_STATUS[$leg]}" "$wall" "${LEG_LINE[$leg]}"
   case "${LEG_STATUS[$leg]}" in PASSED|SKIPPED*|"NOT RUN"*) ;; *) RED=$((RED+1)) ;; esac
 done
+if [ "$CUT_NO_CANDIDATE" = 1 ]; then
+  echo "CUT MODE: no candidate engine, so no engine-bearing leg ran (nexus-0kmat): RED"; RED=$((RED+1))
+fi
 [ "$CHANGESET_DELTA" = 1 ] || echo "candmig     NOT RUN (no changeset in service/src/main/resources/db/changelog since engine-service-v$REQUIRED_ENGINE)"
 # max overlap of the group's [start,end] intervals: the AC5 proof
 if [ -n "$GROUP_T0" ]; then

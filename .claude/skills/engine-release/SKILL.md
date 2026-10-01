@@ -416,6 +416,66 @@ absent on older engines stays absent") and record the conexus bead id on the
 nexus bead before the tag — the edge half must be live before Step 6.1 can
 pass, and Step 6.1 is what gates the paired client release.
 
+### 3f. PRE-TAG gate: the gates that provision their own engine must run the CANDIDATE (nexus-0kmat)
+
+`fresh-install-mvv.sh`, `data-token-cli-gate.sh` and `release-sandbox.sh`
+(battery legs `mvv`, `smoke`, `shakedown`) run `nx init`, which downloads the
+PINNED PUBLISHED engine (`REQUIRED_ENGINE_VERSION`). That engine predates the
+change you are about to tag, so a gate that provisions it passes vacuously for
+that change (the RDR-223 ownerless-write refusal passed all of them: the
+pinned engine has no ownership check). The pin only moves after the tag is
+immutable, so a missed writer costs a re-cut. The legs that already take
+`$ARTIFACTS` (`lsg`, `pkgup`, `candmig`, `shakeout`) are not affected.
+
+Run the battery in cut mode, from the release worktree:
+
+```bash
+tests/e2e/release-battery.sh --cut [--candidate-engine PATH]
+```
+
+The candidate is `--candidate-engine PATH` (a `*.jar` or an executable native
+binary), else the stamped dev jar the artifacts leg builds. It reaches the
+gates as `NX_CANDIDATE_ENGINE` (and `NX_CUT_MODE=1`), which each gate carries
+INSIDE its own `env -i` scrub and launches through `NEXUS_SERVICE_JAR` /
+`NEXUS_SERVICE_BIN`; a gate run by hand takes the same two variables. Cut mode
+adds `dtok` (the data-token CLI gate) to the battery.
+
+What makes it more than plumbing, all in `tests/e2e/lib/candidate_engine.py`:
+
+- No candidate in cut mode, a candidate that cannot be found, or an ambient
+  `NEXUS_SERVICE_*` naming a different artifact, is a refusal at the gate's
+  start; nothing falls back to the pinned engine.
+- Each gate prints `ENGINE IDENTITY [leg]: candidate=yes|no kind= artifact=
+  sha256= release_version= build_ref= ownerless_write_mode=`. `release_version`
+  alone cannot tell a dev jar from the pinned release (the jar bakes the same
+  floor value); read `build_ref` and `sha256`.
+- In cut mode a leg whose engine is not the candidate (byte-compared), or whose
+  `/v1/status` lacks `ownerless_write_mode=enforce`, FAILS, and the battery
+  downgrades any engine-bearing leg whose log carries no candidate identity line
+  to FAILED even when its own checks were green. `NX_CANDIDATE_EXPECT_OWNERLESS_MODE=none`
+  drops only the mode assert (a warning prints); use it for a candidate that
+  predates the check, never for the final cut.
+- At the end of each journey the gate reads `/v1/status`
+  `ownerless_writes_refused_total` / `ownerless_writes_would_refuse_total` and
+  counts `ownerless_chunk_write_refused` lines in the engine log; in cut mode
+  any hit is a red. A red here is the oracle: a writer this journey exercises
+  writes a chunk with no manifest owner. Fix the writer before tagging.
+- Each gate stages a private copy of the candidate: the supervisor finds its
+  engine by argv, so two parallel gates on one jar path stop each other's
+  engines (measured 2026-10-01: exit 143 on a freshly spawned engine).
+
+A native candidate is not required: the JVM jar from `scripts/build-gate-jar.sh`
+is what every gate here takes. A leg that can only take a native binary
+(`release-sandbox.sh service` requires `NEXUS_SERVICE_BIN`) gets the JVM-jar
+shim AGENTS.md's release-workflow shape-check section describes: an executable
+`#!/bin/sh` whose body is `exec java -jar <abs jar> "$@"`, named by
+`NX_CANDIDATE_ENGINE`.
+
+Still NOT covered by cut mode: writers outside this repo (other machines,
+hooks, the WSL appliance, hellmini), which only production traffic exercises
+(T2 `nexus/review-z0o2p24-critique` Issue 2b), and the remaining engine-driving
+legs (`upshakeout`, `genflip`, `rehearse_*`), which this bead did not touch.
+
 ### 4. Push the tag (human, or AI when explicitly authorized)
 
 Releaser is **human, every time** (AI preps + validates; the human pushes the
