@@ -117,12 +117,164 @@ machinery that performed that migration no longer ships:
    one. The pin has to be IN the command: a bare `nx self install` installs
    the newest release, which is the hop this procedure exists to avoid
 2. `nx upgrade` there, which performs the Chroma to PG copy (copy-not-move;
-   the Chroma directory is left on disk afterward, untouched)
+   the Chroma directory is left on disk afterward, untouched). Three
+   preconditions, all about WHICH engine the pin talks to:
+   - **Local engine only.** The pin must provision and talk to its own local
+     engine, so clear every setting that names a managed one and force local
+     mode. Write down your `service_url` and `service_token` values first: the
+     cloud steps below need both again. In the shell:
+     `unset NX_SERVICE_URL NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT`
+     and `export NX_LOCAL=1`. In the config file: delete the
+     `service_url:` line (and `service_token:` if it is there) under
+     `credentials:` in `~/.config/nexus/config.yml` (`$NEXUS_CONFIG_DIR/config.yml`
+     if you set that variable). There is no `nx config unset` verb, so this is a
+     file edit; leave every other key alone. `nx config get service_url` prints
+     `service_url: not set` once it is clear. A machine that ran in cloud
+     mode has the key set. **Both halves are needed.** Clearing `service_url`
+     alone is not enough, and `NX_LOCAL=1` alone is not enough. A configured
+     `service_url` names the engine at the pin whatever `NX_LOCAL` says, so
+     `NX_LOCAL=1` does not by itself override it. And the pin's provisioning
+     (`provision_service_stack`) returns without starting an engine, and the
+     upgrade then stops with "guided-upgrade provisioning requires a LOCAL
+     service", whenever `is_local_mode()` is false: that is the case under
+     `NX_LOCAL=0`, under `install.mode: managed` in `config.yml` (written by
+     `nx init`'s managed path), and for a box with a ChromaDB Cloud key
+     (`chroma_api_key`) and no mode record, which is the Voyage-from-ChromaDB-Cloud
+     case in the table below. `NX_LOCAL=1` is the top-precedence step of
+     `is_local_mode()`, so it fixes all three, and it does not change which
+     Chroma store the migration reads. (This is read from the v6.18.1 source:
+     `config.py` `is_local_mode`, `commands/init.py` `provision_service_stack`,
+     `upgrade_ladder/provisioning.py` `provision_and_serve`. It has not been run
+     at the pin on a box with `install.mode: managed`.) Never
+     run the pin's `nx guided-upgrade` with `--service-url`, and never aim
+     `nx upgrade` at a managed endpoint. That path is unsupported: the engine
+     retired the `/v1/staging` routes the 6.x migration lands through
+     (nexus-z0o2p.27). What the path did against a current engine before the
+     routes went has not been measured (nexus-6g218); do not rely on it
+   - **Stop any current-engine local service first.** A 7.x install may have
+     left its local service running (`nx daemon service status`; stop it with
+     `nx daemon service stop`). The pin's own engine (v0.1.52) must be the one
+     it provisions, not a newer engine that no longer has the routes
+   - **A Voyage-embedded source needs a Voyage-keyed local engine.** If the
+     Chroma data is Voyage-embedded (a ChromaDB Cloud store, or any
+     `voyage-*` collection), run the local engine with `NX_VOYAGE_API_KEY`
+     reaching the service. Without it a voyage-model collection is refused
+     (the migration will not copy Voyage vectors onto a bge-only service) or
+     re-embedded to bge-768, and a bge collection is not expected to import into
+     a Voyage cloud afterward. This is the most consequential choice in the hop
+     for anyone headed to the cloud. Whether the pin's v0.1.52 engine runs the
+     Voyage posture has not been verified, and neither has what a current local
+     engine without the key does with a voyage-named collection when you export
+     it later (nexus-xbqh9)
 3. upgrade to current normally
 
 Frozen Chroma directories left on disk after that copy are relics, not a
 rollback option: nothing in this release reads them, and there is no path
 back to the Chroma/SQLite era (Sam, 2026-08-29).
+
+### Getting that data into the managed cloud
+
+The data migration ends on a local engine. Reaching the managed cloud is a
+separate hop made with the CURRENT client, after step 3. **This second hop has
+not been rehearsed end to end.** The verbs below exist and their flags match
+`--help`, and the gates named below were read in source, but nobody has run the
+whole sequence against a cloud tenant and counted what arrived (nexus-xbqh9
+will). Treat it as a plan, check counts as you go, and expect to find
+something. What hop 1 does when aimed at a current managed engine is likewise
+unmeasured (nexus-6g218).
+
+**Pick the path by what the data is:**
+
+| You are | Hop 1 gives you | Best path to the cloud |
+|---|---|---|
+| Local-ONNX (minilm-384 or bge-768 collections) | Collections embedded with a local model; T2 memory and plans; taxonomy; notes | Do not carry the vectors: a bge collection is not expected to import into a Voyage cloud (see below). For code, docs and rdr content, **re-index from source in the cloud** (`nx index repo`, `nx index pdf`, `nx index rdr`), which is cheaper than two hops and embeds with Voyage. Hop 1 matters only for T2 memory (hand-carried, step 2 below) and notes; plans and taxonomy do not reach the cloud |
+| Voyage, from ChromaDB Cloud | Voyage collections kept as Voyage only if hop 1 ran Voyage-keyed (above) | `nx store export` and `nx store import` carry the vectors as they are. Re-indexing source content is still the cheaper path where you have the source |
+| Notes with no source files (`store_put`-origin knowledge) | The notes, as chunks plus catalog documents | `nx catalog export` and `nx catalog import`: the bundle holds no embeddings, so import re-embeds each note and works across models |
+
+**Before you switch to the cloud (local steps).** Do these while the
+current client still talks to your local engine; once you switch, the local
+engine's data is unreachable from the client.
+
+1. Write down what you want to carry: `nx store export --all -o ./nxexp-backup/`
+   (one `.nxexp` per collection, embeddings included) and
+   `nx catalog export recovery.jsonl` (link graph plus `store_put`-origin
+   notes; no embeddings).
+2. Hand-carry the T2 memory entries you cannot lose: `nx memory list` to see
+   them, `nx memory get --project NAME --title NAME` to read one, and later
+   `nx memory put CONTENT --project NAME --title NAME` in the cloud. `nx memory`
+   has no export or import verb, and doing this by hand does not scale past tens
+   of entries. Past that, plan on treating T2 memory as left behind, or write a
+   loop yourself. The hand-carry is lossy: `get` prints the content only, and
+   `list` shows the id, project/title, agent and timestamp, so tags, agent, TTL
+   and timestamps are not carried unless you retype them (`--tags`, `--ttl`);
+   quarantined entries are hidden from `list` unless you ask for them
+   (`nx memory list --quarantined`). Read one entry by id (`nx memory get ID`,
+   the id `list` prints in brackets) rather than by `--title`, because a title
+   is matched as a unique prefix and a prefix shared with another entry fails as
+   ambiguous. On the way in, pass the body on stdin (`nx memory put - --project
+   NAME --title NAME < body.txt`) rather than in argv, so a body that starts with
+   a dash or is very large does not trip the shell or the argument-length limit.
+
+**After you switch (cloud steps).**
+
+3. Switch as in
+   [Getting Started § Cloud mode](getting-started.md#cloud-mode-optional)
+   (`nx config set service_url ...` plus `NX_SERVICE_TOKEN`), using the
+   `service_url` and `service_token` you wrote down before hop 1. First
+   `unset NX_LOCAL` (and drop it from your shell profile if you added it
+   there): `NX_LOCAL=1` wins over `service_url` in current clients too, so with
+   it set the client would stay local after you set the endpoint.
+4. **Clear the stranded banner.** The pre-PG files from hop 1 are still on
+   disk (copy-not-move), and in cloud mode the stranded-install detector
+   cannot trust the engine's migration record, so every command banners and
+   `nx doctor` fails until you either run `nx stranded ack` (attests that this
+   machine's pre-PG data was migrated) or move the pre-PG files the banner names
+   aside. They are relics (Sam, 2026-08-29).
+5. **Re-index from source first, then load.** `nx index repo` / `nx index pdf`
+   for the content you are re-indexing; then `nx store import FILE` for each
+   `.nxexp` you are carrying; then `nx catalog import recovery.jsonl` LAST. The
+   bundle's links resolve by `source_uri` against documents the target already
+   holds, so a link to a document not indexed yet stays unresolved. An
+   interrupted `nx store import` finishes the documents it left open when rerun.
+   Idempotence of the catalog import and of a re-index over an import is
+   unmeasured (nexus-xbqh9).
+
+**What happens to a collection embedded with a local model.** Hop 1 renames a
+local-model collection to a bge-named one (the pin swaps the model segment of
+the name for minilm sources and for voyage-named collections whose vectors
+measure 768). That name passes `nx store import`'s name check and its dimension
+check (768 equals 768), so the file is sent to the cloud engine. The cloud
+engine is a Voyage deployment and may refuse a collection whose name does not
+carry a Voyage model. Nobody has run this, so what the cloud answers is
+unverified (nexus-xbqh9). `EmbeddingDimensionMismatch` ("header
+claims 'voyage-context-3' (1024-dim) but vectors are 768-dim") is a different
+case: a file whose header says Voyage over vectors that measure 768.
+`--assume-model` only corrects a mislabeled header like that and does not get
+past a real mismatch. Either way the answer for a locally-embedded collection is
+to re-index its source.
+
+**What this path does not carry.** An `.nxexp` holds chunks, embeddings and
+owner rows. The recovery bundle holds links and `store_put`-origin notes. Nothing
+here carries:
+
+- T2 memory and plans, except the entries you hand-carry in step 2 (plans have
+  no hand-carry path)
+- taxonomy topics, their assignments, topic links and centroids
+- `document_aspects` (LLM-extracted; re-extracting is billed), the aspect queue
+  and `aspect_promotion_log`
+- `frecency` and `relevance_log`, including per-note TTL: a note that expired on
+  its old box is permanent in the cloud
+- the telemetry stores (search telemetry, hook and index failure records)
+- DEVONthink highlights
+- curated catalog metadata beyond links and `store_put` notes: author, year,
+  corpus, `meta` fields and collection supersession. Owner tumblers are
+  re-minted in the cloud, so a tumbler you noted on the old box does not name
+  the same owner there
+
+The old direct path landed the pointer stores, `document_aspects` and the aspect
+queue through the staging routes and T2 through ordinary ones, so the two-hop
+route delivers less than that path did when it worked. That is the cost of
+retiring the staging routes.
 
 ## A stranded migration banner
 

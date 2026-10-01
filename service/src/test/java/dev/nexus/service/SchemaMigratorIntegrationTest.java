@@ -151,7 +151,7 @@ class SchemaMigratorIntegrationTest {
     // FUNCTION with a plpgsql SECURITY DEFINER body (no typed DSL for authoring an
     // arbitrary function body). Same class as this file's own admin/svc role
     // bootstrap below, kept raw by decision per RawSqlGateTest's own javadoc.
-    private static void bootstrapVectorExtensionsForFreshWalk(
+    static void bootstrapVectorExtensionsForFreshWalk(
             Connection su, String migratingRole) throws Exception {
         su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS vector");
         su.createStatement().execute("CREATE EXTENSION IF NOT EXISTS pg_trgm");

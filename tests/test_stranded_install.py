@@ -260,9 +260,33 @@ class TestArmedDetection:
             f"would look like an empty install, not data loss; nothing has been "
             f"touched. Two-hop upgrade: (1) install conexus=={_PIN} "
             f"(`uv tool install conexus=={_PIN}` or `pip install conexus=={_PIN}`), "
-            f"(2) run `nx upgrade` there to migrate the data, "
+            f"(2) run `nx upgrade` there to migrate the data "
+            f"({stranded_install.LOCAL_ENGINE_CLAUSE}), "
             f"(3) upgrade back to this version."
         )
+
+    def test_first_hop_clause_names_what_the_user_must_do(self) -> None:
+        """The banner, the doctor remedy and the retired-sqlite message all print
+        LOCAL_ENGINE_CLAUSE. It must name the config key (a cloud-mode strandee's
+        endpoint is the config.yml service_url, not the env var), say how to clear
+        it (there is no `nx config unset`), name NX_LOCAL=1 as REQUIRED alongside
+        clearing it (at 6.18.1 the pin's provisioning refuses unless
+        is_local_mode() is true, and NX_LOCAL=1 by itself does not override a
+        configured service_url), carry the note-the-values, clear-the-endpoint-env
+        and Voyage-key preconditions, and point at the runbook. It must NOT offer
+        NX_LOCAL=1 as an alternative to clearing service_url."""
+        c = stranded_install.LOCAL_ENGINE_CLAUSE
+        assert "service_url" in c and "config.yml" in c
+        assert "no `nx config unset`" in c
+        assert "`export NX_LOCAL=1`" in c
+        assert "needed in addition" in c
+        assert "does not by itself override a configured service_url" in c
+        assert "or export NX_LOCAL=1" not in c
+        assert "NX_SERVICE_HOST" in c and "NX_SERVICE_PORT" in c
+        assert "service_token" in c and "need both again" in c
+        assert "nx daemon service stop" in c
+        assert "NX_VOYAGE_API_KEY" in c
+        assert "migration-runbook.md" in c
 
     def test_era_fallback_when_stamp_missing(self, dirs: tuple[Path, Path, Path]) -> None:
         """A box that never ran the stamped CLI (or predates the stamp) still
@@ -401,6 +425,11 @@ class TestWiring:
         assert results[0].fatal is True
         assert "unmigrated pre-PG data" in results[0].detail
         assert any(f"conexus=={_PIN}" in s for s in results[0].fix_suggestions)
+        # The remedy names the local-engine preconditions, the config key included.
+        assert any(
+            "service_url" in s and "migration-runbook.md" in s
+            for s in results[0].fix_suggestions
+        ), results[0].fix_suggestions
 
     def test_doctor_keeps_the_pin_and_agrees_with_itself_on_a_generation_box(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

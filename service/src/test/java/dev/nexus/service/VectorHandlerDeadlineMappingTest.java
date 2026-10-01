@@ -229,12 +229,13 @@ class VectorHandlerDeadlineMappingTest {
 
     @Test
     void everyEmbeddingHandlerMapsAShutdownRefusalTo503AheadOfItsGenericArms() throws Exception {
-        // nexus-o5xyx.3 review: write_many (CatalogHandler, via CombinedWriteService) and
-        // embed_fill (StagingHandler) embed too. Static pin, as for the 429/deadline arms
+        // nexus-o5xyx.3 review: write_many (CatalogHandler, via CombinedWriteService)
+        // embeds too (embed_fill's StagingHandler was retired at nexus-z0o2p.27, so
+        // its row left this list with it). Static pin, as for the 429/deadline arms
         // (VectorHandlerUpstreamRateLimitedTest's proportionality argument); the live-HTTP
         // proof of the shape is the VectorHandler test above.
         String arm = "catch (dev.nexus.service.vectors.OrtInitGate.ShutdownInProgressException";
-        for (String handler : List.of("VectorHandler", "CatalogHandler", "StagingHandler")) {
+        for (String handler : List.of("VectorHandler", "CatalogHandler")) {
             String src = java.nio.file.Files.readString(java.nio.file.Path.of(
                 "src", "main", "java", "dev", "nexus", "service", "http", handler + ".java"));
             int armIdx = src.indexOf(arm);

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    nexus-z0o2p.27 - re-COMMENT the two FK-less chunk_id edges whose reason text
+    named a detector that no longer exists.
+
+    fk-005-1 (RDR-194 P4, D7) recorded, AT the column, why nexus.frecency.chunk_id and
+    nexus.relevance_log.chunk_id carry no FK, and said "the ChashCensus grain-mismatch
+    leg for this table stays as the standing detection". ChashCensus was the engine-side
+    census whose only caller was StagingPromoteOps.finalizeTenant; both are deleted with
+    the /v1/staging routes (staging-6-drop-landing-schema). The surviving observation is
+    the nexus_diag debt view nexus.diag_chash_conformance (src/nexus/db/chash_tables.py:
+    frecency and relevance_log, poison=False, observe only), so these comments now name it.
+
+    fk-005-1 is immutable (its checksum is recorded), so this is a NEW changeset that
+    overwrites the two comments. Comment-only: no DDL beyond COMMENT ON COLUMN, no data
+    touched. The Rdr194P4ColumnCommentsIntegrationTest needles stay present in the new text.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="fk-006-1" author="nexus-z0o2p.27">
+        <comment>
+            Re-comment nexus.frecency.chunk_id and nexus.relevance_log.chunk_id so they name
+            the nexus_diag debt view, not the deleted ChashCensus, as the standing detection.
+        </comment>
+        <sql splitStatements="true" stripComments="false">
+COMMENT ON COLUMN nexus.frecency.chunk_id IS
+  'No FK, by GRAIN, not by deferral (RDR-194 D7). nexus.chunks is keyed (tenant_id, collection, chash); frecency has no collection column -- its PK is (tenant_id, chunk_id), one row per chash per tenant ACROSS collections by design. Adding a collection column to make an FK expressible would change the table''s identity grain, a behaviour change, not hygiene. The standing detection for this edge is the nexus_diag debt view nexus.diag_chash_conformance (observe-only for this table; src/nexus/db/chash_tables.py). The engine-side ChashCensus leg this comment used to name was deleted at nexus-z0o2p.27 together with its only caller; D0.10''s one-for-one FK retirement does not fire here.';
+
+COMMENT ON COLUMN nexus.relevance_log.chunk_id IS
+  'No FK, by GRAIN, not by deferral (RDR-194 D7) -- the same reasoning as nexus.frecency.chunk_id: nexus.chunks is keyed (tenant_id, collection, chash) and relevance_log has no collection column, so an FK is not expressible without changing the table''s identity grain. The standing detection for this edge is the nexus_diag debt view nexus.diag_chash_conformance (observe-only for this table; src/nexus/db/chash_tables.py). The engine-side ChashCensus leg this comment used to name was deleted at nexus-z0o2p.27 together with its only caller; D0.10''s one-for-one FK retirement does not fire here.';
+        </sql>
+        <rollback>
+            <!-- Restores fk-005-1's text (which names the deleted ChashCensus). -->
+            <sql splitStatements="true" stripComments="false">
+COMMENT ON COLUMN nexus.frecency.chunk_id IS
+  'No FK, by GRAIN, not by deferral (RDR-194 D7). nexus.chunks is keyed (tenant_id, collection, chash); frecency has no collection column -- its PK is (tenant_id, chunk_id), one row per chash per tenant ACROSS collections by design. Adding a collection column to make an FK expressible would change the table''s identity grain, a behaviour change, not hygiene. The ChashCensus grain-mismatch leg for this table stays as the standing detection; D0.10''s one-for-one FK retirement does not fire here.';
+
+COMMENT ON COLUMN nexus.relevance_log.chunk_id IS
+  'No FK, by GRAIN, not by deferral (RDR-194 D7) -- the same reasoning as nexus.frecency.chunk_id: nexus.chunks is keyed (tenant_id, collection, chash) and relevance_log has no collection column, so an FK is not expressible without changing the table''s identity grain. The ChashCensus grain-mismatch leg for this table stays as the standing detection; D0.10''s one-for-one FK retirement does not fire here.';
+            </sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

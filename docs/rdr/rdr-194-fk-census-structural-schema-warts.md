@@ -972,6 +972,13 @@ rather than in this file only.
   would change the table's identity grain, which is a behaviour change, not
   hygiene. Their `ChashCensus` legs therefore STAY as the standing detection,
   and D0.10's one-for-one retirement does not fire for them.
+  *Amendment 2026-10-01 (nexus-z0o2p.27):* `ChashCensus` was deleted with the
+  `/v1/staging` routes (its only caller was `StagingPromoteOps.finalizeTenant`),
+  so those two legs no longer exist. The standing detection for these two
+  FK-less edges is the `nexus_diag` debt view `nexus.diag_chash_conformance`
+  (`src/nexus/db/chash_tables.py`: `frecency` and `relevance_log`, `poison=False`,
+  observe only). The `COMMENT ON COLUMN` text fk-005-1 stored says otherwise and
+  cannot be edited in place, so changeset `fk-006-1` re-comments both columns.
 - **`pdf_chunks.chunk_id`**: NO FK, same grain argument, and the pdf pipeline's
   wire-parity rationale (`pipeline-001` header) is already excluded from this
   RDR's scope by the Problem Statement.

@@ -79,13 +79,7 @@ class ChunksWriterLastWrittenAtScanTest {
         Map.entry("CatalogRepository#renameCollectionTxn", new Decision(Kind.EXEMPT, 1,
             "collection rename over COLLECTION_SCOPED_TABLES (chunks is one): maintenance, not a client re-write")),
         Map.entry("CatalogRepository#moveScopedTable", new Decision(Kind.EXEMPT, 1,
-            "collection move over COLLECTION_SCOPED_TABLES (chunks is one): maintenance, not a client re-write")),
-        Map.entry("StagingPromoteOps#promoteCollection", new Decision(Kind.EXEMPT, 1,
-            "promote INSERT ... ON CONFLICT DO NOTHING: takes DEFAULT now() on a fresh row and never"
-                + " refreshes an existing one (client-initiated residual, see vectors-020 header)")),
-        Map.entry("StagingPromoteOps#finalizeTenant", new Decision(Kind.EXEMPT, 1,
-            "synthetic-stub INSERT ... ON CONFLICT DO NOTHING: takes DEFAULT now() on a fresh row and"
-                + " never refreshes an existing one"))
+            "collection move over COLLECTION_SCOPED_TABLES (chunks is one): maintenance, not a client re-write"))
     ));
 
     // ── the real tree ────────────────────────────────────────────────────────
