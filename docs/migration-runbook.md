@@ -117,12 +117,59 @@ machinery that performed that migration no longer ships:
    one. The pin has to be IN the command: a bare `nx self install` installs
    the newest release, which is the hop this procedure exists to avoid
 2. `nx upgrade` there, which performs the Chroma to PG copy (copy-not-move;
-   the Chroma directory is left on disk afterward, untouched)
+   the Chroma directory is left on disk afterward, untouched). **Run it
+   against a LOCAL engine.** Leave `NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the
+   `service_url` config key unset (or export `NX_LOCAL=1`), so the pin
+   provisions the bundled local engine, and never run the pin's
+   `nx guided-upgrade` with `--service-url`, or point `nx upgrade` at a managed
+   endpoint. The pin's migration speaks to the engine its own release was
+   built with; a current managed engine no longer serves the routes that
+   migration lands its data through (the `/v1/staging` landing zone was
+   retired at nexus-z0o2p.27), so a 6.x migration aimed at the cloud fails on
+   its first land call
 3. upgrade to current normally
 
 Frozen Chroma directories left on disk after that copy are relics, not a
 rollback option: nothing in this release reads them, and there is no path
 back to the Chroma/SQLite era (Sam, 2026-08-29).
+
+### Getting that data into the managed cloud
+
+The data migration ends on a local engine. Reaching the managed cloud is a
+separate hop made with the CURRENT client, after step 3:
+
+1. **Before switching modes**, while the box is still local, write down what
+   you want to carry: `nx store export --all -o ./nxexp-backup/` (one `.nxexp`
+   per collection, embeddings included) and `nx catalog export recovery.jsonl`
+   (the catalog link graph plus `store_put`-origin notes; no embeddings).
+2. Switch to the cloud as in
+   [Getting Started § Cloud mode](getting-started.md#cloud-mode-optional)
+   (`nx config set service_url ...` plus `NX_SERVICE_TOKEN`).
+3. Load it: `nx store import FILE` for each `.nxexp`, then
+   `nx catalog import recovery.jsonl`. Both are idempotent, and an interrupted
+   `nx store import` finishes the documents it left open when rerun.
+
+What this path does not carry, so you know before you start:
+
+- **A local collection embedded with the local default model (bge-768)
+  cannot be imported into a Voyage cloud collection.** `nx store import`
+  refuses a file whose embedding model differs from the target collection's
+  (`Embedding model mismatch ... Import aborted`), and `--assume-model` only
+  corrects a mislabeled header, it does not bypass that check. Such a
+  collection reaches the cloud by re-indexing its source (`nx index repo`,
+  `nx index pdf`, ...), which the cloud embeds with Voyage. Only a collection
+  the local engine embedded with the cloud's own model imports as-is.
+- `nx catalog import` re-embeds its notes through the note writer, so it works
+  across embedding models, but it carries only links and `store_put`-origin
+  notes, not indexed repository content.
+- T2 memory and plans (`nx memory`) have no export or import verb; carry the
+  entries you need by hand (`nx memory get`, then `nx memory put` in the new
+  mode).
+
+Verified against the 7.x CLI: `nx store export --help`, `nx store import
+--help`, `nx catalog export --help` and `nx memory --help` list exactly the
+verbs and flags used above, and the model gate is
+`nexus.exporter` (`EmbeddingModelMismatch`).
 
 ## A stranded migration banner
 

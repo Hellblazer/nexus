@@ -328,3 +328,12 @@ On a uv-tool box use `uv tool install conexus==6.18.1` for step 1 and
 `uv tool upgrade conexus` for step 3. Running `nx upgrade` on a current release
 over a pre-PG store migrates nothing and searches look empty; nothing is lost,
 follow the hops above.
+
+Do step 2 against a **local** engine: leave `NX_SERVICE_URL`, `NX_SERVICE_TOKEN`
+and the `service_url` config key unset (or export `NX_LOCAL=1`), and never run
+the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
+endpoint. A current managed engine no longer serves the routes the 6.x
+migration lands its data through. To end up on the managed cloud, finish
+steps 1 to 3 locally, then move the data with the current client:
+[Migration Runbook § Getting that data into the managed
+cloud](migration-runbook.md#getting-that-data-into-the-managed-cloud).

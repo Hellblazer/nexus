@@ -260,7 +260,8 @@ class TestArmedDetection:
             f"would look like an empty install, not data loss; nothing has been "
             f"touched. Two-hop upgrade: (1) install conexus=={_PIN} "
             f"(`uv tool install conexus=={_PIN}` or `pip install conexus=={_PIN}`), "
-            f"(2) run `nx upgrade` there to migrate the data, "
+            f"(2) run `nx upgrade` there to migrate the data (against a local "
+            f"engine: leave NX_SERVICE_URL unset, never a managed endpoint), "
             f"(3) upgrade back to this version."
         )
 

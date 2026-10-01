@@ -3243,7 +3243,7 @@ Migration-report checks retired (RDR-155 P4b): the RDR-178 migration-report / wr
 
 Orchestration-hook plugin floor (nexus-3xg21): a soft-warn row checks Claude Code's `installed_plugins.json` for the conexus plugin version — a plugin older than v6.14.0 carries no RDR-184 orchestration hooks (no subagent stop-guard, no expectations ledger) and doctor says so with `/plugin update conexus` as the fix. A box with no plugin install shows a not-applicable pass.
 
-Stranded-install check (nexus-gynt2): a doctor row (`Stranded pre-PG install`) guards the post-Chroma-deletion era. On a release that no longer ships the migration tool (RDR-155 P4b — this one), a box still carrying unmigrated pre-PG data (`chroma.sqlite3`, `t2.db`, `memory.db`, or `catalog/.catalog.db` present with no verified migration report) fails doctor fatally with the two-hop instruction: install the pinned last migration-capable release, run `nx upgrade` there (the ladder converges the data migration), then upgrade back. The same detection also refuses `nx init`, banners every CLI invocation on such a box, and surfaces through both MCP servers' `instructions` channel at startup.
+Stranded-install check (nexus-gynt2): a doctor row (`Stranded pre-PG install`) guards the post-Chroma-deletion era. On a release that no longer ships the migration tool (RDR-155 P4b — this one), a box still carrying unmigrated pre-PG data (`chroma.sqlite3`, `t2.db`, `memory.db`, or `catalog/.catalog.db` present with no verified migration report) fails doctor fatally with the two-hop instruction: install the pinned last migration-capable release, run `nx upgrade` there against a local engine (`NX_SERVICE_URL` unset, never a managed endpoint; the ladder converges the data migration), then upgrade back. Reaching the managed cloud is a later hop with the current client: see [Migration Runbook § Getting that data into the managed cloud](migration-runbook.md#getting-that-data-into-the-managed-cloud). The same detection also refuses `nx init`, banners every CLI invocation on such a box, and surfaces through both MCP servers' `instructions` channel at startup.
 
 ```
 nx doctor --clean-checkpoints   # Delete orphaned PDF checkpoint files
@@ -4152,8 +4152,11 @@ upgrade.
 RDR-155 P4b **deleted** the migration verbs outright (`nx guided-upgrade`,
 `nx migrate-to-service`, `nx migration-audit`, the `nx storage` migrate
 group, `nx daemon t3`): installs still carrying pre-PG data use the pinned
-last migration-capable release (the stranded-install banner names it). The
-remaining demoted-not-deleted primitives — still callable, out of `--help`:
+last migration-capable release (the stranded-install banner names it), run
+against a local engine: never `nx guided-upgrade --service-url`, and never a
+managed endpoint, because a current managed engine no longer serves the
+`/v1/staging` routes that migration lands its data through. The remaining
+demoted-not-deleted primitives — still callable, out of `--help`:
 
 | Demoted verb | Its only job was | Now done by |
 |---|---|---|

@@ -23,8 +23,9 @@ where `nx self install` refuses rather than doing the wrong thing.
 
 `nx upgrade` brings the package, engine, process, and provisioning
 preconditions current, then walks one ordered ladder that auto-applies whichever
-data migrations the install actually needs — T2 schema, the ChromaDB →
-Postgres+pgvector substrate move, pre-RDR-108 chunk identity, embedder era. Each
+data migrations the install actually needs — T2 schema, pre-RDR-108 chunk
+identity, embedder era. (The ChromaDB → Postgres+pgvector move is NOT among
+them on a current release: see "Installs that predate Postgres" below.) Each
 rung detects, converges, and verifies before completion is recorded; the walk is
 idempotent and resumable, and the source store is left byte-untouched as a
 rollback target. An install dormant since 5.x converges the same way a current
@@ -97,10 +98,35 @@ content; it does not force a wrong id through. If you are blocked on
 chash-length errors, run `nx upgrade` or STOP and report — never "unblock" the
 constraint.
 
+## Installs that predate Postgres
+
+A box carrying unmigrated pre-PG data (`chroma.sqlite3`, `t2.db`, `memory.db`,
+`catalog/.catalog.db`) is refused by a current release with a two-hop
+redirect, and `nx upgrade` here cannot migrate it. The path is: install the
+pinned `conexus==6.18.1` (the refusal names the exact command), run `nx upgrade`
+there, then upgrade back to current. **Run that hop against a LOCAL engine.**
+Make sure `NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the `service_url` config key
+are unset (or `NX_LOCAL=1`), and never run the pin's `nx guided-upgrade
+--service-url ...` or aim it at a managed endpoint: a current managed engine no
+longer serves the routes that migration lands its data through, so it fails on
+the first land call. Do not set `service_url` first "to save a step".
+
+If the user wants the managed cloud, that is a second hop made with the CURRENT
+client after the upgrade back, while the box can still read its local data:
+`nx store export --all` and `nx catalog export recovery.jsonl` locally, switch
+to the managed service (below), then `nx store import FILE` and `nx catalog
+import recovery.jsonl`. A collection embedded with the local default model
+(bge-768) is refused by `nx store import` against a Voyage cloud collection
+(`Embedding model mismatch`); it reaches the cloud by re-indexing its source.
+`nx memory` has no export verb. The full procedure is
+`docs/migration-runbook.md` § Getting that data into the managed cloud; surface
+the model caveat to the user rather than choosing for them.
+
 ## Managed service
 
-Pointing at a managed endpoint is configuration, not upgrade. Once configured,
-the upgrade is the same one verb:
+Pointing at a managed endpoint is configuration, not upgrade, and it is for an
+install whose data is already on the Postgres substrate (a pre-PG box migrates
+locally first; see above). Once configured, the upgrade is the same one verb:
 
 ```bash
 nx config set service_url https://api.conexus-nexus.com

@@ -8,7 +8,8 @@
 > deleted outright (RDR-155 P4b), so `nx upgrade` here cannot migrate you.
 > Follow the two-hop redirect instead: install the pinned last
 > migration-capable release (`conexus==6.18.1`), run `nx upgrade` there to
-> migrate the data, then upgrade back to the current version. See the
+> migrate the data (against a local engine: `NX_SERVICE_URL` unset, never a
+> managed endpoint), then upgrade back to the current version. See the
 > [Migration Runbook](../migration-runbook.md) for the full operator
 > procedure.
 
