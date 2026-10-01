@@ -206,10 +206,29 @@ from nexus.catalog.store_hook import split_note_text as _split_note_text  # noqa
               help="Skip this many entries (for pagination)")
 @click.option("--docs", is_flag=True, default=False,
               help="Show unique documents instead of individual chunks")
-def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
+@click.option("--reapable", is_flag=True, default=False,
+              help="List the chunks the engine's reapable predicate selects in --collection "
+                   "(read-only; the set 'nx t3 gc' would quarantine). Requires --collection. "
+                   "--limit bounds the rows shown.")
+def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: bool) -> None:
     """List entries in a T3 knowledge collection."""
+    if reapable:
+        # The operator must NAME the collection: the default ('knowledge') is a convenience for the
+        # plain listing, but an audit of what garbage collection would take should never silently
+        # target a collection the operator did not choose.
+        from click.core import ParameterSource  # noqa: PLC0415 — deferred, branch-local
+
+        ctx = click.get_current_context()
+        if ctx.get_parameter_source("collection") in (ParameterSource.DEFAULT, ParameterSource.DEFAULT_MAP, None):
+            raise click.UsageError("--reapable requires --collection (name the collection to inspect).")
+        if docs or offset:
+            raise click.UsageError("--reapable cannot be combined with --docs or --offset.")
     db = _t3()
     col_name = t3_collection_name(collection, t3=db)
+
+    if reapable:
+        _list_reapable(db, col_name, limit)
+        return
 
     if docs:
         _list_documents(db, col_name)
@@ -259,6 +278,65 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool) -> None:
     # 56bb2e88e).
     if len(entries) >= limit:
         click.echo(f"\n  Next page: --offset {shown_end}")
+
+
+def _reapable_age(created_at: str) -> str:
+    """``created_at`` as whole days ('40d'), or '-' when it will not parse. The engine's grace clock
+    is last_written_at (and the moment the chunk last lost an owner), not this; created_at is the
+    column the listing shows because it is write-once."""
+    from datetime import UTC, datetime  # noqa: PLC0415  — stdlib deferred to call site (datetime)
+
+    try:
+        born = datetime.fromisoformat(created_at)
+    except (TypeError, ValueError):
+        return "-"
+    if born.tzinfo is None:
+        born = born.replace(tzinfo=UTC)
+    return f"{max((datetime.now(UTC) - born).days, 0)}d"
+
+
+def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
+    """``nx store list --reapable``: the chunks of *col_name* that the engine's reapable predicate
+    selects right now, from ``POST /v1/vectors/reapable`` (RDR-192 Step 8/10). Read-only and
+    advisory: a lock-free snapshot with the engine's default grace, i.e. what ``nx t3 gc`` would
+    take at this instant. Paged by keyset; ``limit`` bounds the rows printed."""
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred for startup cost (nexus.db.http_vector_client)
+
+    reapable_chunks = getattr(db, "reapable_chunks", None)
+    if reapable_chunks is None:
+        raise click.ClickException(
+            "--reapable needs the engine-backed T3 handle (nexus.db.make_t3()); this one carries "
+            "no reapable route."
+        )
+    shown = 0
+    truncated = False
+    try:
+        for row in reapable_chunks(col_name):
+            if shown >= limit:
+                truncated = True
+                break
+            if shown == 0:
+                click.echo(f"{col_name}  (chash, created_at, age, title, catalog_doc_id)\n")
+            created = row.get("created_at") or ""
+            title = (row.get("title") or "")[:40]
+            doc = row.get("catalog_doc_id") or "-"
+            click.echo(
+                f"  {row.get('chash', '')}  {created}  {_reapable_age(created):>5}  {title:<40}  {doc}"
+            )
+            shown += 1
+    except VectorServiceError as exc:
+        if exc.code == 404:
+            raise click.ClickException(
+                "The connected engine predates POST /v1/vectors/reapable (RDR-192 Step 8, bead "
+                "nexus-wbfpw.17); upgrade to an engine tag that carries it (compare the deployed "
+                "engine's version against REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py)."
+            ) from exc
+        raise click.ClickException(f"Failed to list reapable chunks for {col_name!r}: {exc}") from exc
+    if shown == 0:
+        click.echo(f"0 reapable chunks in {col_name}")
+        return
+    if truncated:
+        click.echo(f"\n  More reapable chunks exist than --limit {limit}; raise --limit to see them.")
 
 
 def _list_documents(db: T3Database, col_name: str) -> None:

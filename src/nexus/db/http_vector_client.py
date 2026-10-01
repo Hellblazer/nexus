@@ -3923,6 +3923,61 @@ class HttpVectorClient:
             tenant=self._tenant,
         )
 
+    def reapable(
+        self, collection: str, *, grace_seconds: int | None = None,
+        after_chash: str | None = None, limit: int = 300,
+    ) -> dict:
+        """POST /v1/vectors/reapable (RDR-192 S8, bead nexus-wbfpw.17), one page.
+
+        Read-only: lists the chunks of ``collection`` that the engine's
+        ``nexus.chunk_is_reapable`` selects at this instant, ordered by chash.
+        Returns ``{"collection", "grace_seconds", "returned", "next_after",
+        "chunks": [{"chash", "created_at", "last_written_at", "title",
+        "catalog_doc_id"}, ...]}``.
+
+        ``grace_seconds`` is OMITTED from the request when ``None`` (the engine
+        default, 30 days, is what ``gc_quarantine_orphans`` itself uses, so the
+        default listing is what a move would take). ``after_chash`` is the
+        exclusive keyset cursor; there is deliberately no ``offset`` parameter,
+        because a consumer that acts on a page shrinks the set and an offset
+        then skips rows. The listing is a lock-free snapshot: a consumer that
+        deletes must not delete by these ids (the move goes through
+        ``gc_quarantine_orphans``, whose own statement re-checks the predicate).
+
+        Raises :class:`VectorServiceError` -- ``code=404`` when the connected
+        engine predates the route, ``code=400`` on a ``quarantine-*`` collection.
+        """
+        body: dict[str, Any] = {"collection": collection, "limit": limit}
+        if grace_seconds is not None:
+            body["grace_seconds"] = grace_seconds
+        if after_chash:
+            body["after_chash"] = after_chash
+        return _post("/v1/vectors/reapable", body, tenant=self._tenant)
+
+    def reapable_chunks(
+        self, collection: str, *, grace_seconds: int | None = None, page_limit: int = 300,
+    ):
+        """Yield every row :meth:`reapable` lists for ``collection``, paged by
+        keyset (``next_after`` sent back as ``after_chash``), never by offset.
+
+        A cursor that fails to advance is an engine fault, not a reason to loop
+        forever: it raises :class:`VectorServiceError`.
+        """
+        after: str | None = None
+        while True:
+            page = self.reapable(
+                collection, grace_seconds=grace_seconds, after_chash=after, limit=page_limit,
+            )
+            yield from page.get("chunks") or []
+            nxt = page.get("next_after")
+            if not nxt:
+                return
+            if nxt == after:
+                raise VectorServiceError(
+                    f"POST /v1/vectors/reapable returned a cursor that did not advance ({nxt})",
+                )
+            after = nxt
+
     #: Catalog attribute keys the RDR-204 Phase 2 engine joins into
     #: ``/v1/vectors/stats`` rows (``PgVectorRepository`` joins
     #: ``catalog_collections`` by name). Carried through by

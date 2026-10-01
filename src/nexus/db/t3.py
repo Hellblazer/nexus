@@ -1643,7 +1643,9 @@ class T3Database:
         with empty strings for missing keys, so callers do not need to
         guard each key access. The default fields support RDR-101 Phase 6
         ``nx t3 gc`` (``doc_id`` for orphan detection, ``indexed_at`` for
-        the orphan-window filter).
+        the orphan-window filter). Since RDR-192 Step 8 (nexus-wbfpw.18) that
+        verb takes its candidates from the engine instead and no longer calls
+        this.
         """
         try:
             col = self._client_for(collection_name).get_collection(collection_name)

@@ -224,7 +224,7 @@ def _identity_where(file_path: str, corpus: str, *, content_hash: str = "") -> d
     is ``nx t3 gc`` (RDR-108 Phase 4, chash-vs-manifest orphan sweep,
     ``src/nexus/commands/t3.py:219``) — broader than source_path-keyed
     pruning (catches any orphan cause), but manual/operator-triggered
-    with a 30-day orphan-window default, not automatic. No one-time
+    with the engine's fixed 30-day grace, not automatic. No one-time
     ``nx t3 gc`` sweep was run as part of closing this bead (production
     mutation, Hal-gated); confirm one has happened since 2026-08-05, or
     schedule it, before treating this deletion's edge risk as resolved.
