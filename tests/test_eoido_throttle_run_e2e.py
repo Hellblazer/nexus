@@ -24,7 +24,7 @@ from tests.test_4s1ww_chunk_flush_failure_reporting import _reg, _service_mode_p
 
 
 def _throttle_error(status: int, retry_after: str) -> httpx.HTTPStatusError:
-    request = httpx.Request("POST", "http://engine.invalid/v1/vectors/upsert-chunks")
+    request = httpx.Request("POST", "http://engine.invalid/v1/batch-write")
     response = httpx.Response(status, headers={"Retry-After": retry_after}, request=request)
     return httpx.HTTPStatusError(f"{status} from engine", request=request, response=response)
 

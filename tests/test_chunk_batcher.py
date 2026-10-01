@@ -1125,7 +1125,7 @@ def _vector_service_error(status: int, headers: dict[str, str] | None = None) ->
     hdrs = email.message.Message()
     for key, value in (headers or {}).items():
         hdrs[key] = value
-    http_err = urllib.error.HTTPError("http://engine.invalid/v1/vectors/upsert-chunks", status, "error", hdrs, None)
+    http_err = urllib.error.HTTPError("http://engine.invalid/v1/batch-write", status, "error", hdrs, None)
     try:
         try:
             raise http_err
