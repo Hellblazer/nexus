@@ -448,6 +448,31 @@ public final class SchemaMigrator {
             Database database = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(conn));
 
+            // nexus-q81g7: pin Liquibase's bookkeeping to public. Without this,
+            // Liquibase puts DATABASECHANGELOG (and its lock table) in whatever
+            // schema current_schema() reports, and PostgreSQL's default
+            // search_path ("$user", public) makes that the schema named after
+            // the migrating role once such a schema exists. A role called
+            // nexus, t1 or staging (the three schemas this changelog creates)
+            // therefore boots once with the history in public, creates its own
+            // schema mid-walk, and on boot 2 reads an EMPTY history there,
+            // re-plans every changeset and dies re-running CREATE TABLE
+            // nexus.memory. Every engine query on the history table already
+            // hardcodes public.databasechangelog (VersionHandler, and the
+            // count helpers below), and so does grants-nexus-svc.xml's GRANT,
+            // so public is the one place it can live.
+            //
+            // Both names are set: liquibaseSchemaName places the history and
+            // lock tables; defaultSchemaName is what Liquibase resolves
+            // unqualified objects and its own existence checks against, and it
+            // follows the same current_schema(). Pinning only the first would
+            // leave a boot-2 changeset free to land an unqualified object in
+            // the role's schema. For a role with no like-named schema (the
+            // production nexus_admin) current_schema() is already public, so
+            // both calls are no-ops there and existing installs are unchanged.
+            database.setLiquibaseSchemaName("public");
+            database.setDefaultSchemaName("public");
+
             try (Liquibase liquibase = new Liquibase(
                     MASTER_CHANGELOG,
                     new ClassLoaderResourceAccessor(),
