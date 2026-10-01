@@ -1738,6 +1738,6 @@ def census_manifest_less_cmd(
 # ── RDR-192 Step 9 Day-2 (bead nexus-2x9xa): `nx t3 quarantine ...` ─────────
 # Registered here, defined in its own module: this file is already large and the
 # verb shares nothing with it but the group.
-from nexus.commands.t3_quarantine import quarantine_group as _quarantine_group  # noqa: E402 — must follow the `t3` group definition above
+from nexus.commands.t3_cmds.quarantine import quarantine_group as _quarantine_group  # noqa: E402 — must follow the `t3` group definition above
 
 t3.add_command(_quarantine_group)

@@ -24,7 +24,7 @@ from unittest.mock import patch
 import pytest
 from click.testing import CliRunner
 
-from nexus.commands import t3_quarantine
+from nexus.commands.t3_cmds import quarantine as t3_quarantine
 from nexus.commands.t3 import t3
 from nexus.db import gateway_backoff
 from nexus.db import http_vector_client as hv
