@@ -4,6 +4,7 @@ package dev.nexus.service.vectors;
 
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
+import dev.nexus.service.PgActivityProbe;
 import dev.nexus.service.PgContainerHelper;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
@@ -25,7 +26,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
-import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -33,8 +33,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * RDR-192 Step 8 (bead nexus-wbfpw.16): {@code gc_quarantine_orphans} and its bounded twin
  * select candidates with reapable(c). The S1a row table (R1 to R9, P7 equal to REAP, a fresh
  * orphan staying put) is in {@code Rdr192EngineLivenessMatrixIntegrationTest}; this class carries
- * the parts a row table cannot: the default window's edges, the in-flight index pin, and a client
- * write that races the move.
+ * the parts a row table cannot: the default window's edges and a client write that races the move.
+ * The multi-batch re-index case, through the real writers, is in {@code ReapableMidRunJourneyTest}.
  *
  * <p>Fixture chunks are inserted through substrate SQL, not the write routes, which from RDR-223
  * Phase 3 refuse an ownerless write.
@@ -116,18 +116,6 @@ class GcQuarantineReapableIntegrationTest {
                    .and(CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes())))));
     }
 
-    private void indexingDocument(String tumbler, String collection, Duration startedAgo) throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            DSL.using(su, SQLDialect.POSTGRES)
-               .insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                   CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
-                   CATALOG_DOCUMENTS.INDEX_STATE, CATALOG_DOCUMENTS.INDEX_STARTED_AT)
-               .values(TENANT, tumbler, "run " + tumbler, collection, "indexing",
-                   OffsetDateTime.now().minus(startedAgo))
-               .execute();
-        }
-    }
-
     /** The two functions behind one shape: how many chunks moved. */
     private long moved(boolean bounded, String collection) {
         String q = quarantineOf(collection);
@@ -169,29 +157,6 @@ class GcQuarantineReapableIntegrationTest {
         }
     }
 
-    // ── an in-flight index run keeps its old tail ─────────────────────────────
-
-    @Test
-    void aChunkAnIndexingDocumentNamesIsLeftAlone_unbounded() throws Exception {
-        assertIndexPin(false, "pin-u");
-    }
-
-    @Test
-    void aChunkAnIndexingDocumentNamesIsLeftAlone_bounded() throws Exception {
-        assertIndexPin(true, "pin-b");
-    }
-
-    private void assertIndexPin(boolean bounded, String slug) throws Exception {
-        String c = col(slug, "docs");
-        indexingDocument(slug + "-run", c, Duration.ofHours(2));
-        String pinned = orphan(c, "pinned", Duration.ofDays(40), Map.of("catalog_doc_id", slug + "-run"));
-        String unrelated = orphan(c, "unrelated", Duration.ofDays(40), Map.of());
-
-        assertThat(moved(bounded, c)).as("the unrelated orphan moves, the pinned one does not").isEqualTo(1);
-        assertThat(inCollection(c, pinned)).as("old tail chunk of a run in flight stays").isTrue();
-        assertThat(inCollection(c, unrelated)).isFalse();
-    }
-
     // ── a client write that races the move wins ───────────────────────────────
 
     @Test
@@ -228,7 +193,7 @@ class GcQuarantineReapableIntegrationTest {
             Supplier<Long> call = () -> moved(bounded, c);
             CompletableFuture<Long> gc = CompletableFuture.supplyAsync(call);
 
-            assertThat(waitsOnARowLock()).as("the quarantine DELETE blocks on the uncommitted refresh").isTrue();
+            assertThat(PgActivityProbe.waitsOnALock(pg, "%gc_quarantine_orphans%")).as("the quarantine DELETE blocks on the uncommitted refresh").isTrue();
             writer.commit();
 
             long movedCount = gc.get(30, TimeUnit.SECONDS);
@@ -237,21 +202,5 @@ class GcQuarantineReapableIntegrationTest {
         assertThat(inCollection(c, raced)).as("the refreshed chunk stays in its collection").isTrue();
         assertThat(inCollection(c, neighbour)).as("the neighbour moved").isFalse();
         assertThat(inCollection(quarantineOf(c), neighbour)).isTrue();
-    }
-
-    /** Polls pg_stat_activity (superuser) until a backend waits on a row lock inside the gc call. */
-    private boolean waitsOnARowLock() throws Exception {
-        for (int i = 0; i < 150; i++) {
-            try (Connection c = pg.createConnection("");
-                 var st = c.createStatement();
-                 var rs = st.executeQuery("SELECT count(*) FROM pg_stat_activity"
-                     + " WHERE wait_event_type = 'Lock' AND wait_event IN ('transactionid', 'tuple')"
-                     + " AND state = 'active'")) {
-                rs.next();
-                if (rs.getInt(1) > 0) return true;
-            }
-            Thread.sleep(100);
-        }
-        return false;
     }
 }

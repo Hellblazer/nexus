@@ -1377,15 +1377,21 @@ public final class VectorHandler implements HttpHandler {
      * {
      *   "collection":    "docs__owner__voyage-context-3__v1",
      *   "grace_seconds": 86400,   // optional, integer 0 to 315360000; absent or null = engine default (30 days)
+     *   "after_chash":   "64-hex", // optional keyset cursor, exclusive; absent or null starts at the beginning
      *   "limit":         100,     // optional, default 100, clamped to 1..300
-     *   "offset":        0        // optional, default 0
+     *   "offset":        0        // optional, default 0, applied after the cursor
      * }
      * </pre>
-     * <p>Response 200: {@code {"collection": "...", "grace_seconds": N|null, "returned": N, "chunks":
-     * [{"chash": "64-hex", "created_at": ISO-8601, "last_written_at": ISO-8601, "title": str|null,
-     * "catalog_doc_id": str|null}, ...]}}. {@code grace_seconds} echoes the request, {@code null}
-     * meaning the default. {@code title} and {@code catalog_doc_id} come from the chunk's own metadata
-     * ({@code null} when absent or empty). Page by {@code offset += limit} while {@code returned == limit}.
+     * <p>Response 200: {@code {"collection": "...", "grace_seconds": N|null, "returned": N, "next_after":
+     * "64-hex"|null, "chunks": [{"chash": "64-hex", "created_at": ISO-8601, "last_written_at": ISO-8601,
+     * "title": str|null, "catalog_doc_id": str|null}, ...]}}. {@code grace_seconds} echoes the request,
+     * {@code null} meaning the default. {@code title} and {@code catalog_doc_id} come from the chunk's own
+     * metadata ({@code null} when absent or empty; {@code catalog_doc_id} falls back to {@code doc_id}).
+     * Page by sending {@code next_after} back as {@code after_chash} while it is not null; {@code next_after}
+     * is null when fewer than {@code limit} rows came back. Use the cursor, not {@code offset}, for any
+     * consumer that acts on a page before fetching the next: acting shrinks the set, and an offset then skips rows.
+     * The listing is a lock-free snapshot, so a consumer that deletes must not delete by these ids: it needs a
+     * route that re-checks the predicate in its own statement.
      */
     private void handleReapable(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1397,8 +1403,9 @@ public final class VectorHandler implements HttpHandler {
         int limit  = Math.max(1, Math.min(optInt(body, "limit", 100), MAX_REAPABLE_LIMIT));
         int offset = Math.max(0, optInt(body, "offset", 0));
         Long graceSeconds = parseGraceSeconds(body.get("grace_seconds"));
+        String afterChash = parseAfterChash(body.get("after_chash"));
 
-        var rows = repo.reapableChunks(tenant, collection, graceSeconds, limit, offset);
+        var rows = repo.reapableChunks(tenant, collection, graceSeconds, afterChash, limit, offset);
         var chunks = new ArrayList<Map<String, Object>>(rows.size());
         for (var r : rows) {
             // LinkedHashMap, not Map.of: title and catalog_doc_id are null when the metadata has none.
@@ -1414,8 +1421,25 @@ public final class VectorHandler implements HttpHandler {
         out.put("collection", collection);
         out.put("grace_seconds", graceSeconds);
         out.put("returned", chunks.size());
+        out.put("next_after", chunks.size() >= limit ? chunks.get(chunks.size() - 1).get("chash") : null);
         out.put("chunks", chunks);
         HttpUtil.send(ex, 200, json(out));
+    }
+
+    /**
+     * {@code after_chash} of {@code /v1/vectors/reapable}: absent, null or empty is no cursor;
+     * otherwise a canonical 64-character lowercase hex chash. Package-private for a direct unit pin.
+     */
+    static String parseAfterChash(Object raw) {
+        if (raw == null) return null;
+        if (!(raw instanceof String str)) {
+            throw new IllegalArgumentException("field 'after_chash' must be a 64-character hex chash");
+        }
+        if (str.isEmpty()) return null;
+        if (!str.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("field 'after_chash' must be a 64-character lowercase hex chash");
+        }
+        return str;
     }
 
     /**

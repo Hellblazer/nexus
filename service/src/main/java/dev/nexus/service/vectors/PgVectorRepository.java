@@ -3236,35 +3236,46 @@ FROM scope s
 
     /**
      * Read-only listing of the chunks {@code nexus.chunk_is_reapable} (vectors-021) selects in
-     * {@code collection}, ordered by chash ascending, {@code limit}/{@code offset} like {@link #list}.
-     * Selection is that function and nothing else: the call shape is the one every consumer uses
-     * (RDR-192 Step 7), so a chunk is listed exactly when {@code gc_quarantine_orphans} would move
-     * it and the reaper would delete it, at the same instant.
+     * {@code collection}, ordered by chash ascending. Selection is that function and nothing else:
+     * the call shape is the one every consumer uses (RDR-192 Step 7), so a chunk is listed exactly
+     * when {@code gc_quarantine_orphans} would move it and the reaper would delete it, at the same
+     * instant.
      *
      * <p>{@code graceSeconds} {@code null} means the function's own default (30 days, owned by the
      * function and by nothing in Java, so it cannot drift); a value is passed as an interval in exact
-     * seconds. The in-flight-index pin keeps its default TTL. Any collection prefix is listed;
-     * a {@code quarantine-*} collection is refused before this is called, see {@code
-     * VectorHandler#requireNotQuarantineCollection}.
+     * seconds. Any collection prefix is listed; a {@code quarantine-*} collection is refused before
+     * this is called (see {@code VectorHandler#requireNotQuarantineCollection}) and the predicate
+     * itself excludes a quarantine sibling by {@code lifecycle_state}.
+     *
+     * <p>Paging: {@code afterChash} (a 64-hex chash, exclusive) is a keyset cursor and the way to
+     * walk a set a consumer is shrinking as it goes; {@code offset} skips rows after the cursor and
+     * is only safe for a set that does not change between pages. {@code afterChash} {@code null}
+     * starts at the beginning.
      *
      * <p>A snapshot, not a reservation: the listing takes no sweep gate and no lock, so a chunk may
-     * be refreshed or owned the moment after it is listed. A destructive consumer takes the gate and
-     * re-checks the predicate in its own statement; this route only shows what is selectable now.
+     * be refreshed or owned the moment after it is listed. A destructive consumer must take the gate
+     * and re-check the predicate in its own statement (as {@code gc_quarantine_orphans} does), never
+     * delete by the ids this returns.
      */
     public List<ReapableChunk> reapableChunks(String tenant, String collection, Long graceSeconds,
-                                              int limit, int offset) {
+                                              String afterChash, int limit, int offset) {
         Field<org.jooq.types.YearToSecond> grace = DSL.val(
             graceSeconds == null ? null : exactSeconds(graceSeconds), SQLDataType.INTERVAL);
-        Field<org.jooq.types.YearToSecond> pinTtl = DSL.val(null, SQLDataType.INTERVAL);
         Field<String> title = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");
-        Field<String> catalogDocId = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "catalog_doc_id");
+        // The predicate no longer reads metadata; this is the document the chunk says wrote it, for
+        // display only: catalog_doc_id, falling back to the legacy doc_id.
+        Field<String> catalogDocId = DSL.coalesce(
+            DSL.nullif(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "catalog_doc_id"), ""),
+            DSL.nullif(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "doc_id"), ""));
+        org.jooq.Condition after = afterChash == null
+            ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(afterChash).toBytes());
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(ChashHex.hex(CHUNKS.CHASH), CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, title, catalogDocId)
                .from(CHUNKS)
                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)))
+               .and(after)
                .and(DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
-                   CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT, CHUNKS.METADATA,
-                   grace, pinTtl))))
+                   CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT, grace))))
                .orderBy(CHUNKS.CHASH)
                .limit(limit).offset(offset)
                .fetch(r -> new ReapableChunk(

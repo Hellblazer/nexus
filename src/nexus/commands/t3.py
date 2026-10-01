@@ -322,10 +322,15 @@ def gc_cmd(
 
     \b
     The manifest path matches what ``indexer._prune_deleted_files``
-    (run at the end of ``nx index``) does. Both paths are now
-    semantically equivalent; this CLI is the operator-driven one with
-    explicit dry-run + --yes confirmation, plus ``ChunkOrphaned``
-    event emission for audit trail.
+    (run at the end of ``nx index``) does, with one difference: that
+    path calls the engine's gc_quarantine_orphans, which selects with
+    reapable(c) and so honours a 30 day ownerless grace measured from
+    when the chunk lost its last manifest row (RDR-192 Step 8), while
+    this CLI classifies client-side and ages candidates on ``indexed_at``
+    (``--orphan-window``) until nexus-wbfpw.18 moves it onto the engine
+    predicate. This CLI is the operator-driven one with explicit
+    dry-run + --yes confirmation, plus ``ChunkOrphaned`` event emission
+    for audit trail.
 
     \b
     TOMBSTONE PROTECTION (nexus-dkymw, Sam's second 2026-09-07 ruling,

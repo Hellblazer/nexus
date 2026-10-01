@@ -316,21 +316,6 @@ class VectorHandlerReapableRouteTest {
             fresh);
     }
 
-    @Test
-    void anInFlightIndexRunKeepsItsChunksOffTheList() throws Exception {
-        String t = TENANT_A;
-        String col = "docs__reaproute-pin__minilm-l6-v2-384__v1";
-        register(t, col);
-        su(ctx -> ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
-                CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.INDEX_STATE,
-                CATALOG_DOCUMENTS.INDEX_STARTED_AT)
-            .values(t, "pin-run", "run", col, "indexing", OffsetDateTime.now().minusHours(1)).execute());
-        chunk(t, col, "pinned", Duration.ofDays(40), Map.of("catalog_doc_id", "pin-run"));
-        String free = chunk(t, col, "free", Duration.ofDays(40), Map.of());
-
-        assertThat(chashes(reapable(TOKEN_A, col, Map.of()))).containsExactly(free);
-    }
-
     // ── paging at 300 ────────────────────────────────────────────────────────
 
     @Test
@@ -369,6 +354,77 @@ class VectorHandlerReapableRouteTest {
         assertThat(chunks(reapable(TOKEN_A, col, Map.of("limit", 1000)))).as("limit above 300 clamps").hasSize(300);
         assertThat(chunks(reapable(TOKEN_A, col, Map.of()))).as("default page is 100").hasSize(100);
         assertThat(chunks(reapable(TOKEN_A, col, Map.of("limit", 0)))).as("limit below 1 clamps up").hasSize(1);
+    }
+
+    @Test
+    void theKeysetCursorWalksTheSetEvenWhileAConsumerShrinksIt() throws Exception {
+        String t = TENANT_A;
+        String col = "code__reaproute-cursor__minilm-l6-v2-384__v1";
+        register(t, col);
+        List<String> hashes = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<float[]> vecs = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            hashes.add(ch("cursor-" + i));
+            texts.add("t" + i);
+            vecs.add(new float[384]);
+            metas.add(Map.of());
+        }
+        su(ctx -> {
+            PgContainerHelper.insertChunks(ctx, t, col, hashes, texts, vecs, metas);
+            ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, OffsetDateTime.now().minusDays(40))
+               .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(col))).execute();
+        });
+
+        Set<String> seen = new HashSet<>();
+        String after = null;
+        int pages = 0;
+        do {
+            Map<String, Object> req = new java.util.LinkedHashMap<>();
+            req.put("limit", 10);
+            if (after != null) req.put("after_chash", after);
+            Map<String, Object> page = reapable(TOKEN_A, col, req);
+            List<Map<String, Object>> rows = chunks(page);
+            for (var r : rows) seen.add((String) r.get("chash"));
+            // A consumer that acts on the page: it removes what it was shown, so an OFFSET walk would skip rows.
+            su(ctx -> {
+                for (var r : rows) {
+                    ctx.deleteFrom(CHUNKS).where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(col))
+                        .and(CHUNKS.CHASH.eq(bytes((String) r.get("chash"))))).execute();
+                }
+            });
+            after = (String) page.get("next_after");
+            pages++;
+        } while (after != null && pages < 10);
+
+        assertThat(seen).as("every row seen exactly once although each page was deleted before the next").hasSize(25);
+        assertThat(pages).isEqualTo(3);
+    }
+
+    @Test
+    void nextAfterIsNullWhenThePageIsNotFull_andTheCursorIsExclusive() throws Exception {
+        S1a fx = seedS1a(TENANT_A);
+        Map<String, Object> all = reapable(TOKEN_A, COL_A, Map.of());
+        assertThat(all.get("next_after")).as("4 rows, limit 100").isNull();
+
+        List<String> order = new ArrayList<>();
+        for (var c : chunks(all)) order.add((String) c.get("chash"));
+        Map<String, Object> afterFirst = reapable(TOKEN_A, COL_A, Map.of("after_chash", order.get(0)));
+        assertThat(chashes(afterFirst)).as("exclusive: the cursor row itself is not returned")
+            .containsExactlyInAnyOrderElementsOf(order.subList(1, order.size())).doesNotContain(order.get(0));
+        assertThat(fx.r1()).isNotNull();
+
+        Map<String, Object> full = reapable(TOKEN_A, COL_A, Map.of("limit", 2));
+        assertThat(full.get("next_after")).as("a full page names where to resume").isEqualTo(order.get(1));
+    }
+
+    @Test
+    void aMalformedCursorIsRefused() throws Exception {
+        assertThat(post(TOKEN_A, "/v1/vectors/reapable", Map.of("collection", COL_A, "after_chash", "xyz")).statusCode())
+            .isEqualTo(400);
+        assertThat(post(TOKEN_A, "/v1/vectors/reapable", Map.of("collection", COL_A, "after_chash", 5)).statusCode())
+            .isEqualTo(400);
     }
 
     // ── every prefix, tenant isolation, refusals ──────────────────────────────

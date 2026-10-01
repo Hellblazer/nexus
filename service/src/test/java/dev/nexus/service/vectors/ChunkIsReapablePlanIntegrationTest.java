@@ -2,7 +2,17 @@
 // Copyright (c) 2026 Hal Hildebrand. All rights reserved.
 package dev.nexus.service.vectors;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.jooq.binding.Vector;
+import org.jooq.DSLContext;
+import org.jooq.Field;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
+import org.jooq.types.YearToSecond;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -10,35 +20,39 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.ResultSet;
-import java.sql.Statement;
+import java.time.OffsetDateTime;
+import java.util.List;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * RDR-192 Step 7 (bead nexus-wbfpw.15): the plan {@code nexus.chunk_is_reapable} gets under
- * the REAL RLS-subject role, and the HOT-update cost of the one index that would serve its
- * grace column.
+ * RDR-192 Step 7 (bead nexus-wbfpw.15): the plan {@code nexus.chunk_is_reapable} gets under the REAL
+ * RLS-subject role, and the schema decision "no index on {@code last_written_at}".
  *
- * <p>Measured through {@code nexus_svc}-shaped access (a NOSUPERUSER NOBYPASSRLS role with the
- * tenant GUC stamped transaction-locally), never a superuser connection, which skips the
- * security barrier that decides which quals may become index conditions. The fixture follows
- * the shape of the production collections this predicate runs over: one collection with
- * 30,000 chunks of which 10,000 are orphans, 20,000 manifest rows, 1,000 documents of which
- * 20 are mid-index, and a second collection that must not be touched.
+ * <p>Planned through {@code nexus_svc} (a NOSUPERUSER NOBYPASSRLS role with the tenant GUC stamped
+ * transaction-locally), never a superuser connection, which skips the security barrier that decides which
+ * quals may become index conditions. The fixture has the shape of a production collection: 30,000 chunks of
+ * which 10,000 are orphans, 20,000 manifest rows, 1,000 documents, and a second collection that must not be
+ * touched. Everything is typed jOOQ (the plan is EXPLAIN without ANALYZE, so it asserts shape, not timing),
+ * so this class adds nothing to the raw-SQL ratchet.
  *
- * <p>What this pins, each with the number that justified it (T2 {@code nexus/rdr-192-continuation}
- * carries the full plans):
+ * <p>What it pins:
  * <ul>
  *   <li>the function inlines: no function scan and no function name in any plan;</li>
- *   <li>the in-flight index pin is a PRIMARY-KEY probe on {@code catalog_documents}, not a bitmap
- *       scan of {@code idx_catalog_documents_index_state} per candidate chunk;</li>
+ *   <li>the candidate scan is the {@code chunks_pk} range over (tenant, collection);</li>
  *   <li>the manifest probe is {@code idx_catalog_chunks_chash};</li>
- *   <li>the candidate scan is the {@code chunks_pk} range over (tenant, collection), so no index
- *       on {@code last_written_at} is needed;</li>
- *   <li>and the reason not to add one: with an index on {@code last_written_at}, a refresh of
- *       that column cannot be a HOT update.</li>
+ *   <li>the quarantine probe is the primary key of {@code catalog_collections};</li>
+ *   <li>and there is NO index on {@code nexus.chunks (last_written_at)}: a btree on it would stop HOT updates
+ *       for every client re-write (nexus-wbfpw.43 review item 7). That is asserted against the schema the
+ *       changelog builds, so a changeset that adds one turns this red. (An earlier version of this test
+ *       created its own temporary index and measured that, which no production edit could fail. The
+ *       measurement stands as the justification: with page room, a 3,000-row refresh was 100% HOT without
+ *       the index and 0% with it.)</li>
  * </ul>
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -50,12 +64,9 @@ class ChunkIsReapablePlanIntegrationTest {
     private static final String COL = "knowledge__reap-plan-a__minilm-l6-v2-384__v1";
     private static final String OTHER = "knowledge__reap-plan-b__minilm-l6-v2-384__v1";
 
-    /** The exact call shape every consumer uses. */
-    private static final String PREDICATE =
-        "EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(c.tenant_id, c.collection, c.chash,"
-        + " c.last_written_at, c.metadata, NULL, NULL))";
-
     private PostgreSQLContainer<?> pg;
+    private HikariDataSource svcDs;
+    private TenantScope tenantScope;
 
     @BeforeAll
     void seed() throws Exception {
@@ -66,128 +77,133 @@ class ChunkIsReapablePlanIntegrationTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
         }
+        var cfg = new HikariConfig();
+        cfg.setJdbcUrl(pg.getJdbcUrl());
+        cfg.setUsername(SVC_ROLE);
+        cfg.setPassword(SVC_PASS);
+        cfg.setMaximumPoolSize(3);
+        cfg.setAutoCommit(true);
+        svcDs = new HikariDataSource(cfg);
+        tenantScope = new TenantScope(svcDs);
+
         try (Connection su = pg.createConnection("")) {
-            var ctx = org.jooq.impl.DSL.using(su, org.jooq.SQLDialect.POSTGRES);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, TENANT, COL);
             PgContainerHelper.insertCollection(ctx, TENANT, OTHER);
+            // A realistic catalog_collections: with two rows the planner rightly seq-scans it.
+            for (int i = 0; i < 300; i++) {
+                PgContainerHelper.insertCollection(ctx, TENANT, "knowledge__reap-plan-pad" + i + "__minilm-l6-v2-384__v1");
+            }
+
+            OffsetDateTime old = OffsetDateTime.now().minusDays(40);
+            Vector zero = Vector.of(new float[384]);
+            insertChunks(ctx, COL, "a", 30000, old, zero);
+            insertChunks(ctx, OTHER, "b", 15000, old, zero);
+
+            var docs = DSL.generateSeries(0, 999).as("g", "n");
+            Field<Integer> docN = docs.field("n", Integer.class);
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION)
+               .select(ctx.select(DSL.inline(TENANT), DSL.concat(DSL.inline("doc"), DSL.cast(docN, SQLDataType.VARCHAR)),
+                                  DSL.inline("t"), DSL.inline(COL)).from(docs))
+               .execute();
+
+            // 20,000 of the 30,000 chunks are owned.
+            var rows = DSL.generateSeries(1, 20000).as("g", "n");
+            Field<Integer> n = rows.field("n", Integer.class);
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .select(ctx.select(DSL.inline(TENANT),
+                                  DSL.concat(DSL.inline("doc"), DSL.cast(n.mod(1000), SQLDataType.VARCHAR)),
+                                  n, chash("a", n), DSL.inline(COL)).from(rows))
+               .execute();
+
+            PgContainerHelper.analyzeTable(su, CHUNKS);
+            PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
+            PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
+            PgContainerHelper.analyzeTable(su, CATALOG_COLLECTIONS);
         }
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            // Free space on each page stands in for a vacuumed table's steady state: HOT needs room in the
-            // updated row's own page, and a freshly loaded table at the default fillfactor has none.
-            st.execute("ALTER TABLE nexus.chunks SET (fillfactor = 40)");
-            st.execute("INSERT INTO nexus.chunks(tenant_id, collection, chash, chunk_text, embedding_384, metadata,"
-                + " created_at, last_written_at) SELECT '" + TENANT + "', '" + COL + "', sha256(('a' || g)::bytea),"
-                + " 'x', array_fill(0.0::real, ARRAY[384])::nexus.vector(384),"
-                + " jsonb_build_object('catalog_doc_id', 'doc' || (g % 1000)),"
-                + " now() - interval '40 days', now() - interval '40 days' FROM generate_series(1, 30000) g");
-            st.execute("INSERT INTO nexus.chunks(tenant_id, collection, chash, chunk_text, embedding_384, metadata,"
-                + " created_at, last_written_at) SELECT '" + TENANT + "', '" + OTHER + "', sha256(('b' || g)::bytea),"
-                + " 'x', array_fill(0.0::real, ARRAY[384])::nexus.vector(384), '{}'::jsonb,"
-                + " now() - interval '40 days', now() - interval '40 days' FROM generate_series(1, 15000) g");
-            st.execute("INSERT INTO nexus.catalog_documents(tenant_id, tumbler, title, physical_collection,"
-                + " index_state, index_started_at) SELECT '" + TENANT + "', 'doc' || g, 't', '" + COL + "',"
-                + " CASE WHEN g % 50 = 0 THEN 'indexing' ELSE 'complete' END, now() - interval '1 hour'"
-                + " FROM generate_series(0, 999) g");
-            // 20,000 of the 30,000 chunks are owned: the first two thirds, by chash seed.
-            st.execute("INSERT INTO nexus.catalog_document_chunks(tenant_id, doc_id, position, chash, collection)"
-                + " SELECT '" + TENANT + "', 'doc' || (g % 1000), g, sha256(('a' || g)::bytea), '" + COL + "'"
-                + " FROM generate_series(1, 20000) g");
-            st.execute("ANALYZE nexus.chunks");
-            st.execute("ANALYZE nexus.catalog_document_chunks");
-            st.execute("ANALYZE nexus.catalog_documents");
-        }
+    }
+
+    private static Field<byte[]> chash(String prefix, Field<Integer> n) {
+        return DSL.function("sha256", SQLDataType.BLOB,
+            DSL.cast(DSL.concat(DSL.inline(prefix), DSL.cast(n, SQLDataType.VARCHAR)), SQLDataType.BLOB));
+    }
+
+    private static void insertChunks(DSLContext ctx, String collection, String prefix, int count,
+                                     OffsetDateTime when, Vector vector) {
+        var series = DSL.generateSeries(1, count).as("g", "n");
+        Field<Integer> n = series.field("n", Integer.class);
+        ctx.insertInto(CHUNKS, CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.CHUNK_TEXT,
+                CHUNKS.EMBEDDING_384, CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT)
+           .select(ctx.select(DSL.inline(TENANT), DSL.inline(collection), chash(prefix, n), DSL.inline("x"),
+                              DSL.val(vector, CHUNKS.EMBEDDING_384.getDataType()),
+                              DSL.val(when), DSL.val(when)).from(series))
+           .execute();
     }
 
     @AfterAll
     void stop() {
+        if (svcDs != null) svcDs.close();
         if (pg != null) pg.stop();
     }
 
-    /** EXPLAIN (ANALYZE) as the RLS-subject role; a DML statement is rolled back. */
-    private String explain(String sql) throws Exception {
-        try (Connection c = DriverManager.getConnection(pg.getJdbcUrl(), SVC_ROLE, SVC_PASS)) {
-            c.setAutoCommit(false);
-            try (Statement st = c.createStatement()) {
-                st.execute("SELECT set_config('nexus.tenant', '" + TENANT + "', true)");
-                StringBuilder sb = new StringBuilder();
-                try (ResultSet rs = st.executeQuery("EXPLAIN (ANALYZE, BUFFERS, COSTS OFF, TIMING OFF) " + sql)) {
-                    while (rs.next()) sb.append(rs.getString(1)).append('\n');
-                }
-                return sb.toString();
-            } finally {
-                c.rollback();
-            }
-        }
+    private static org.jooq.Condition reapable() {
+        return DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
+            CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT,
+            DSL.val((YearToSecond) null, SQLDataType.INTERVAL))));
     }
 
-    private static final String LISTING =
-        "SELECT c.chash FROM nexus.chunks c WHERE c.tenant_id = '" + TENANT + "' AND c.collection = '" + COL
-        + "' AND " + PREDICATE + " ORDER BY c.chash LIMIT 300";
-
-    private static final String REAPER_DELETE =
-        "DELETE FROM nexus.chunks c WHERE c.tenant_id = '" + TENANT + "' AND c.collection = '" + COL
-        + "' AND " + PREDICATE;
-
-    @Test
-    void listingPlan_inlines_andProbesBothTablesThroughTheirIndexes() throws Exception {
-        String plan = explain(LISTING);
-        System.out.println("\n=== reapable listing, nexus_svc\n" + plan);
-
-        assertThat(plan).doesNotContain("chunk_is_reapable").doesNotContain("Function Scan");
-        assertThat(plan).as("candidates come from the (tenant, collection) primary-key range")
-            .contains("chunks_pk");
-        assertThat(plan).as("manifest probe").contains("idx_catalog_chunks_chash");
-        assertThat(plan).as("the pin is a primary-key probe, not a per-chunk bitmap scan of the 'indexing' index:\n"
-            + plan).contains("catalog_documents_pk").doesNotContain("idx_catalog_documents_index_state");
+    private String plan(java.util.function.Function<DSLContext, org.jooq.Query> query) {
+        return tenantScope.withTenant(TENANT, ctx -> ctx.explain(query.apply(ctx)).toString());
     }
 
     @Test
-    void deletePlan_hasTheGraceQualOnTheTargetRow_soAReadCommittedRecheckSeesARacingRefresh() throws Exception {
-        String plan = explain(REAPER_DELETE);
-        System.out.println("\n=== reapable DELETE, nexus_svc\n" + plan);
+    void listingPlan_inlines_andProbesTheirIndexes() {
+        String plan = plan(ctx -> ctx.select(CHUNKS.CHASH).from(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(COL))).and(reapable())
+            .orderBy(CHUNKS.CHASH).limit(300));
+        System.out.println("\n=== reapable listing, nexus_svc (EXPLAIN)\n" + plan);
 
-        assertThat(plan).doesNotContain("chunk_is_reapable").doesNotContain("Function Scan");
+        assertPlanShape(plan);
+    }
+
+    @Test
+    void deletePlan_hasTheGraceQualOnTheTargetRow_soAReadCommittedRecheckSeesARacingRefresh() {
+        String plan = plan(ctx -> ctx.deleteFrom(CHUNKS)
+            .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(COL))).and(reapable()));
+        System.out.println("\n=== reapable DELETE, nexus_svc (EXPLAIN)\n" + plan);
+
+        assertPlanShape(plan);
         assertThat(plan).as("the grace comparison is evaluated on the DELETE's own rows").contains("last_written_at");
-        assertThat(plan).contains("catalog_documents_pk").doesNotContain("idx_catalog_documents_index_state");
-        assertThat(plan).as("every orphan of the collection is a candidate, none of the other collection")
-            .contains("Delete on chunks");
+        assertThat(plan).contains("Delete on chunks");
+    }
+
+    private static void assertPlanShape(String plan) {
+        assertThat(plan).as("inlined, not an opaque call:%n%s", plan)
+            .doesNotContain("chunk_is_reapable").doesNotContain("Function Scan");
+        assertThat(plan).as("candidates come from the (tenant, collection) primary-key range:%n%s", plan)
+            .contains("chunks_pk");
+        assertThat(plan).as("manifest probe:%n%s", plan).contains("idx_catalog_chunks_chash");
+        assertThat(plan).as("quarantine probe is the catalog_collections primary key:%n%s", plan)
+            .containsPattern("Index (Only )?Scan using \\w*catalog_collections\\w*");
     }
 
     @Test
-    void anIndexOnLastWrittenAt_wouldStopHotUpdates_soNoneIsAdded() throws Exception {
-        long withoutIndex = hotRatioPercent(false);
-        long withIndex = hotRatioPercent(true);
-        System.out.println("\n=== HOT update ratio of a last_written_at refresh: no index " + withoutIndex
-            + "%, with an index on last_written_at " + withIndex + "%");
-
-        assertThat(withoutIndex).as("without an index a refresh is HOT").isGreaterThan(50);
-        assertThat(withIndex).as("with an index on the column every refresh needs a new index entry").isZero();
-    }
-
-    /** Refreshes last_written_at on 3,000 rows and returns the HOT share of those updates. */
-    private long hotRatioPercent(boolean withIndex) throws Exception {
-        try (Connection su = pg.createConnection(""); Statement st = su.createStatement()) {
-            if (withIndex) {
-                st.execute("CREATE INDEX tmp_chunks_last_written_at ON nexus.chunks (last_written_at)");
-            }
-            st.execute("SELECT pg_stat_reset_single_table_counters('nexus.chunks'::regclass)");
-            st.execute("UPDATE nexus.chunks SET last_written_at = now() WHERE tenant_id = '" + TENANT
-                + "' AND collection = '" + OTHER + "' AND chash IN (SELECT chash FROM nexus.chunks"
-                + " WHERE tenant_id = '" + TENANT + "' AND collection = '" + OTHER + "' LIMIT 3000)");
-            st.execute("SELECT pg_stat_force_next_flush()");
-            long upd;
-            long hot;
-            try (ResultSet rs = st.executeQuery("SELECT n_tup_upd, n_tup_hot_upd FROM pg_stat_user_tables"
-                + " WHERE schemaname = 'nexus' AND relname = 'chunks'")) {
-                rs.next();
-                upd = rs.getLong(1);
-                hot = rs.getLong(2);
-            }
-            if (withIndex) {
-                st.execute("DROP INDEX nexus.tmp_chunks_last_written_at");
-            }
-            assertThat(upd).as("the refresh touched the rows").isEqualTo(3000);
-            return hot * 100 / upd;
+    void thereIsNoIndexOnLastWrittenAt_becauseItWouldStopHotUpdates() throws Exception {
+        var indexes = DSL.table(DSL.name("pg_catalog", "pg_indexes"));
+        var schema = DSL.field(DSL.name("schemaname"), String.class);
+        var table = DSL.field(DSL.name("tablename"), String.class);
+        var def = DSL.field(DSL.name("indexdef"), String.class);
+        List<String> defs;
+        try (Connection su = pg.createConnection("")) {
+            defs = DSL.using(su, SQLDialect.POSTGRES).select(def).from(indexes)
+                .where(schema.eq("nexus").and(table.eq("chunks"))).fetch(def);
         }
+
+        assertThat(defs).as("non-vacuity: nexus.chunks has indexes, so the scan looked at something")
+            .isNotEmpty();
+        assertThat(defs).as("a btree on last_written_at stops HOT updates for every client re-write"
+            + " (nexus-wbfpw.43 review item 7)").noneMatch(d -> d.contains("last_written_at"));
     }
 }

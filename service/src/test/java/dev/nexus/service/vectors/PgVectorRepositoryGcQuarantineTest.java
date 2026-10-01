@@ -1200,25 +1200,24 @@ class PgVectorRepositoryGcQuarantineTest {
             .containsOnlyOnce("array_agg")
             .contains("INTO v_collision_count, v_collision_sample");
 
-        // RDR-192 Step 8 (nexus-wbfpw.16): the four inline orphan selections --
-        // (1) the pre-flight's inner guard, (2) the orphan CTE that feeds the
-        // collision-detection query, (3) the copy-to-quarantine INSERT's own
-        // guard, (4) the remove-from-origin DELETE's own guard -- are each
-        // reapable(c), nexus.chunk_is_reapable, instead of an inline NOT EXISTS
-        // over catalog_document_chunks. They are still FOUR independent
-        // re-evaluations inside their own statements (sa731 semantics: no
-        // standalone array-building guard SELECT hands a precomputed chash array to
-        // another statement). The only NOT EXISTS left is the pre-flight's outer
-        // `IF NOT EXISTS (...)`, which asks "is there anything to move at all".
+        // RDR-192 Step 8 (nexus-wbfpw.16): the candidate set is chosen ONCE, into the _wbfpw16_victim
+        // temp table, by reapable(c), nexus.chunk_is_reapable; the collision guard (CTE), the copy INSERT
+        // and the DELETE all read that one set, so a condition that lapses between statements (an owner
+        // appearing, a refresh) cannot make the DELETE take a chunk the INSERT did not copy. The DELETE
+        // still carries the predicate on its target row so a client refresh that lands after the set was
+        // chosen wins at the READ COMMITTED recheck. That is TWO calls: the one selection and the DELETE's
+        // recheck. The only NOT EXISTS left is the "anything to move at all" check on the victim set.
         int reapableCalls = functionDef.split("nexus\\.chunk_is_reapable\\(", -1).length - 1;
         assertThat(reapableCalls)
-            .as("reapable(c) must appear in the pre-flight, the orphan CTE, the copy INSERT "
-                + "and the DELETE: each statement re-derives the candidate set itself")
-            .isEqualTo(4);
-        int notExistsCount = functionDef.split("NOT EXISTS", -1).length - 1;
+            .as("reapable(c) must appear once to choose the victim set and once as the DELETE's recheck")
+            .isEqualTo(2);
+        assertThat(functionDef).as("the victim set is chosen once and read by every later statement")
+            .contains("_wbfpw16_victim").containsOnlyOnce("INSERT INTO _wbfpw16_victim")
+            .contains("USING _wbfpw16_victim v");
+        // "CREATE TEMP TABLE IF NOT EXISTS" is not a predicate; count only the subquery form.
+        int notExistsCount = functionDef.split("NOT EXISTS \\(", -1).length - 1;
         assertThat(notExistsCount)
-            .as("no inline NOT EXISTS over the manifest survives: only the pre-flight's outer "
-                + "IF NOT EXISTS (anything to move at all) remains")
+            .as("no inline NOT EXISTS over the manifest survives: only the emptiness check on the victim set")
             .isEqualTo(1);
         assertThat(functionDef).as("the manifest anti-join is not re-derived inline any more")
             .doesNotContain("FROM nexus.catalog_document_chunks m");

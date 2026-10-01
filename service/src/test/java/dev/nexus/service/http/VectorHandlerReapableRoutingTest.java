@@ -46,6 +46,20 @@ class VectorHandlerReapableRoutingTest {
     }
 
     @Test
+    void afterChashIsAbsentEmptyOrACanonicalHexChash() {
+        assertThat(VectorHandler.parseAfterChash(null)).isNull();
+        assertThat(VectorHandler.parseAfterChash("")).isNull();
+        String hex = "ab".repeat(32);
+        assertThat(VectorHandler.parseAfterChash(hex)).isEqualTo(hex);
+        assertThatThrownBy(() -> VectorHandler.parseAfterChash("AB".repeat(32)))
+            .as("uppercase is not canonical").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> VectorHandler.parseAfterChash("abc"))
+            .as("wrong length").isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> VectorHandler.parseAfterChash(12))
+            .as("not a string").isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void theLimitCapIsThreeHundred() {
         assertThat(VectorHandler.MAX_REAPABLE_LIMIT).isEqualTo(300);
     }

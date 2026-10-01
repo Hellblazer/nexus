@@ -769,8 +769,8 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
                       .and(CHUNKS.CHASH.eq(chash)))
                .and(DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
-                   CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT, CHUNKS.METADATA,
-                   DSL.val(null, SQLDataType.INTERVAL), DSL.val(null, SQLDataType.INTERVAL)))))));
+                   CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT,
+                   DSL.val(null, SQLDataType.INTERVAL)))))));
     }
 
     @Test
@@ -827,15 +827,6 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertThat(chunkIsReapable(tenant, COLLECTION_A, fx.r9()))
             .as("R9 in A: a manifest row exists, its owner is tombstoned").isFalse();
         assertThat(chunkIsReapable(tenant, COLLECTION_B, fx.r9())).as("R9 in B").isFalse();
-    }
-
-    /** Step 8's definition of done: the P7 column IS the REAP column, row for row. */
-    @Test
-    void p7_equalsReap_onEveryRow() {
-        for (String row : ROWS) {
-            assertThat(expected(row, "P7")).as("%s: P7 must equal REAP (RDR-192 Step 8)", row)
-                .isEqualTo(expected(row, "REAP"));
-        }
     }
 
     // ── LIVE: EXISTS(nexus.chunk_live_owners(tenant, collection, chash)) (RDR-192 Step 4, bead nexus-wbfpw.9) ──

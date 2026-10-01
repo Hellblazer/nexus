@@ -4169,6 +4169,13 @@ def _prune_deleted_files(
     actually deletes the document and FK CASCADE drops the manifest
     rows. One-run latency on cleanup, never on correctness.
 
+    The engine moves a chunk only once it has had no owner for the
+    reapable(c) grace window (30 days, RDR-192 Step 8): the clock starts
+    when the chunk's last manifest row is dropped, not when it was written.
+    A pass right after a file is deleted, or in the middle of a multi-batch
+    re-index, therefore moves nothing for those chunks; a smaller ``moved``
+    than the number of orphans is the expected answer, not a failure.
+
     Pre-D1 [:16] cleanup (RDR-108 re-gate O1 mixed-state) was delegated
     to ``nx t3 reidentify``, which RDR-223 P3.3 deleted; a pgvector chunk
     id is its chash by schema, so no such id exists to clean up. GC's job
