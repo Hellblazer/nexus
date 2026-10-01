@@ -312,10 +312,6 @@ ALLOWLIST: dict[str, tuple[int, str]] = {
     "scripts/bundle_sandbox_probe.py": (
         1, "READ-ONLY: operator_extract/operator_summarize only (lines 98-113).",
     ),
-    "scripts/migrate_art_papers.py": (
-        1, "PROSE-ONLY: line 229 is inside a print() suggesting a command to a human "
-           "operator, never executed by this script itself.",
-    ),
     "scripts/spikes/bench_rdr089_sql_fast_path.py": (
         3, "READ-ONLY: operator_filter/operator_groupby/operator_aggregate imports.",
     ),

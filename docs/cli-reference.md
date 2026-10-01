@@ -1849,7 +1849,7 @@ Owner resolution: `--owner` overrides; otherwise the owner is looked up from the
 
 ## nx t3
 
-T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 17 + pgvector behind the native nexus-service; these commands operate on that store through the vector client. (`nx t3 reidentify` was the RDR-108 ChromaDB natural-ID migration and is retained for legacy collections.) Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
+T3 vector-store maintenance commands. As of 6.0 the live T3 store is Postgres 17 + pgvector behind the native nexus-service; these commands operate on that store through the vector client. Distinct from `nx catalog gc`: `nx t3` operates on T3 chunks, the catalog command operates on catalog rows.
 
 ### nx t3 prune-stale — RETIRED in 7.0.0
 
@@ -1883,7 +1883,7 @@ nx t3 gc -c COLLECTION [--orphan-window 30d] [--no-dry-run --yes]
 
 Garbage-collect orphaned T3 chunks via the catalog manifest (RDR-108 Phase 4). A chunk is an orphan when its full `meta.chunk_text_hash` is NOT referenced by any manifest row in the catalog `document_chunks` table for `--collection`, AND its `indexed_at` predates the orphan window (default 30 days). This is the same manifest-vs-T3 comparison the indexer's own `_prune_deleted_files` performs at the end of `nx index`; this CLI is the operator-driven form with explicit dry-run + `--yes` confirmation and `ChunkOrphaned` event emission for the audit trail. `nx t3 gc` is the SOLE emitter of `ChunkOrphaned` events and the SOLE path that physically deletes T3 chunks: the strict per-candidate order is append `ChunkOrphaned(chunk_id, reason)` to the event log, THEN call `T3Database.delete_by_chunk_ids`. A crash between the two leaves the log consistent with T3 (event present, delete pending), and the next run idempotently retries the delete.
 
-Default is report-only; both `--no-dry-run` AND `--yes` are required to actually delete. Chunks missing `chunk_text_hash` (pre-RDR-053 relics — post-Phase-3 chunks have no `doc_id` at all, so that is no longer the skip criterion) are undecidable here and skipped with a warning; re-index the source or run `nx t3 reidentify` to populate the field.
+Default is report-only; both `--no-dry-run` AND `--yes` are required to actually delete. Chunks missing `chunk_text_hash` (pre-RDR-053 relics — post-Phase-3 chunks have no `doc_id` at all, so that is no longer the skip criterion) are undecidable here and skipped with a warning; re-index the source to populate the field.
 
 **Audit record (7.22.0, nexus-fduai).** The engine's background reaps (`sweepChunks`, `purge_trash`, `gc_quarantine_orphans`) write their own `nexus.gc_audit` rows server-side; the delete this verb performs is client-side, so the verb reports it through the engine's client-facing producer (`POST /v1/catalog/gc_audit/record`). A successful `--no-dry-run --yes` run records one row — `operation=t3_gc`, `actor="nx t3 gc"`, the full `chashes` list (the engine caps it and keeps `chash_count` exact), and `details` with `deleted`, `requested`, `chunk_ids_sample` (first 50), `chunk_ids_truncated`, and (nexus-zewg3) `tombstone_protected` (an integer count, or `null` when the engine could not answer — see below) — readable with `nx catalog gc-audit list --operation t3_gc`, and mirrors it as a structured `t3_gc_chunks_deleted` log event carrying the same fields plus `gc_audit_id`. If the audit write fails after the delete succeeded the run prints a WARNING and exits 1 (the delete stands; the event carries `gc_audit_error`). Dry runs record nothing.
 
@@ -1901,24 +1901,6 @@ Default is report-only; both `--no-dry-run` AND `--yes` are required to actually
 
 `--allow-incomplete-index-state` (nexus-g6k6b) overrides the RUNFENCE refusal above. DANGEROUS: only pass it once you've confirmed no reindex is concurrently running against the collection (finish or abandon any in-flight/failed runs first, or accept the risk).
 
-### nx t3 reidentify
-
-```
-nx t3 reidentify (-c COLLECTION | --all-collections) [--no-dry-run] [--max-workers N]
-```
-
-Re-upsert T3 chunks under content-derived natural IDs, the full `chunk_text_hash` (RDR-108 D1 / nexus-jc63; full-width per RDR-180). Per collection the verb paginates T3 chunks (300/op), computes the new natural ID for each chunk, re-upserts under the new ID using the existing embedding (no Voyage call), and batch-deletes the old chunk IDs after the get-loop completes. Document-level metadata fields (`doc_id`, `chunk_index`, `chunk_count`) are stripped at re-upsert; the `document_chunks` manifest table is now authoritative for those.
-
-The verb is idempotent: re-running on a fully-migrated collection performs zero writes. It is also crash-resumable: re-invoking after an interrupted run safely sweeps the un-deleted old IDs.
-
-Default is `--dry-run` (report-only). Use `--no-dry-run` to perform the migration.
-
-`--max-workers N` (default 4) sets how many collections process in parallel under `--all-collections` via a thread pool. Each collection has an independent ID namespace so concurrency is correctness-preserving; the practical ceiling is backend rate limits, not local CPU. Completion order is non-deterministic above 1 worker; pass `--max-workers 1` for serial, operator-readable output. Single-collection runs are inherently serial.
-
-Carve-outs:
-- `taxonomy__*` collections are skipped (centroids use `centroid_hash` from the `topics` table, not `chunk_text_hash`).
-- Pre-RDR-053 chunks lacking `chunk_text_hash` raise a structured error; re-index that collection from source before running.
-
 ### nx t3 backfill-manifest
 
 ```
@@ -1927,7 +1909,7 @@ nx t3 backfill-manifest [-c COLLECTION] [--no-dry-run] [-n N | --limit N] [--res
 
 Backfill the `document_chunks` manifest from T3 chunk metadata (RDR-108 D2). Reads each catalog document's T3 chunk metadata (`doc_id`, `chunk_index`, `chunk_text_hash`, span coordinates) and writes one manifest row per chunk, so the catalog can answer "what chunks compose this Document, in what order?" without consulting T3. Omitting `-c` processes every collection registered in the catalog; `-n` caps documents per collection.
 
-Idempotent: re-running overwrites the manifest with the same content (DELETE + INSERT in one transaction per document). Progress goes to stderr; SIGINT flushes a state file (`$NEXUS_BACKFILL_STATE_FILE`) so `--resume` skips collections already marked done. Same carve-outs as `reidentify`: `taxonomy__*` skipped, pre-RDR-053 chunks without `chunk_text_hash` error out.
+Idempotent: re-running overwrites the manifest with the same content (DELETE + INSERT in one transaction per document). Progress goes to stderr; SIGINT flushes a state file (`$NEXUS_BACKFILL_STATE_FILE`) so `--resume` skips collections already marked done. Carve-outs: `taxonomy__*` skipped, pre-RDR-053 chunks without `chunk_text_hash` error out.
 
 `--only-gapped` (nexus-3n7pr) restricts the run to documents that currently have ZERO manifest rows — a batched pre-pass over the target collection's doc_ids determines the gapped set before any T3 read or write, so a document that already has a manifest is never rewritten. Use this for a targeted repair pass over a large, mostly-healthy collection (the default, unset behavior processes and rewrites every document `-c`/the full catalog selects, which is correct for a first-time backfill but not for repairing a small damaged subset). Honored under `--dry-run` too — the dry run is the sizing instrument, so it reports the same skip/process partition a real run would touch. Skipped docs are counted separately from the other skip classes (`no T3 collection`, `zero chunk matches`, `phase3 no chunk_index`, `chash id/metadata divergent`, `FK conflict`) in both the per-collection and summary output. Under `--only-gapped`, `-n N` bounds the GAPPED set (at most N zero-manifest documents are SELECTED for processing; healthy documents are still counted as skipped), so a canary such as `-n 25 --only-gapped` always exercises the write path when any gapped document exists — but selection is not the same as a written outcome: a selected doc that then hits `zero chunk matches`, `chash id/metadata divergent`, or `FK conflict` still counts against the N budget without producing a written manifest row, so `-n 25` is not a guarantee of 25 written rows. Without `--only-gapped`, `-n N` bounds the raw tumbler-ordered document list as before. `--resume` and `--only-gapped` combine cleanly: `--resume` skips whole COLLECTIONS already marked done in the state file, before `--only-gapped`'s per-DOCUMENT filter ever runs on the remaining ones.
 

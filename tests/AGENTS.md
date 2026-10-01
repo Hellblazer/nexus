@@ -198,6 +198,12 @@ collection's registered model. A Java test that re-seeds a chash must not rely o
 the conflict behavior. A test whose SUBJECT
 is the route itself (deadline mapping, embed errors, the `{"upserted": N}`
 envelope) cannot move; it asserts the refusal or pre-owns its chashes instead.
+`PgContainerHelper.insertOwnedChunks(ctx, tenant, collection, dim, chashes...)` is the
+pre-own form: a zero vector of the collection's width, a live owner, and the test then
+POSTs with `force_re_embed` when it needs the embedder reached (an owned chash with a
+stored vector skips it otherwise). `VectorHandlerUpsertReferenceOnlyTest` (fate pending the conexus relay: its callers may be outside this repo), the
+unregistered-collection test in `VectorHandlerEmbeddingModeTest` and the parity tests in
+`tests/test_chunk_seed.py` are the route-subject tests still waiting for nexus-z0o2p.24.
 
 ## A fresh test host: what it needs, and what the suite provisions itself
 

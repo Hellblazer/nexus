@@ -34,6 +34,7 @@ import pytest
 
 from nexus.catalog.http_catalog_client import HttpCatalogClient
 from nexus.db import http_vector_client as hvc
+from tests._chunk_seed import seed_chunks_direct
 
 pytestmark = [pytest.mark.integration]
 
@@ -476,8 +477,8 @@ def test_forced_reindex_keeps_enrichment_and_clears_the_owned_keys_the_document_
 def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
     """Read each chunk's stored metadata back and compare it to what the previous path
     (a plain ``upsert_chunks_with_embeddings`` into a control collection, the call the removed
-    ``_upsert_skip_reembed`` made) stored for the same chunk; only the
-    write time differs."""
+    ``_upsert_skip_reembed`` made, rebuilt here with substrate SQL) stored for the same chunk;
+    only the write time differs."""
     from datetime import UTC, datetime
 
     from nexus.corpus import index_model_for_collection
@@ -491,13 +492,18 @@ def test_per_chunk_metadata_is_what_the_old_write_path_stored(tmp_path) -> None:
     prepared = _line_chunks(
         path, "control-hash", index_model_for_collection(_CONTROL_COLLECTION),
         datetime.now(UTC).isoformat(), "z0o2p13-meta")
-    # The same chunks, through the old path, into a control collection.
+    # The same chunks, stored the way the old path stored a FIRST write (the stored row is the
+    # metadata dict the client sent, merged into nothing), into a control collection. They carry
+    # no owner row, which the write routes refuse from RDR-223 Phase 3, so they go in with
+    # substrate SQL.
     metas = [dict(m) for _, _, m in prepared]
-    delete_keys = rewrite_delete_keys(metas)
-    assert delete_keys   # non-vacuity: the old path did name owned keys
-    hvc.HttpVectorClient().upsert_chunks_with_embeddings(
+    # Non-vacuity, kept from the old path: the writer drops owned keys from its dict, so the
+    # delete_keys the old route call named were non-empty. With a first write into an empty
+    # collection they stripped nothing, which is why plain SQL is equivalent.
+    assert rewrite_delete_keys(metas)
+    seed_chunks_direct(
         _CONTROL_COLLECTION, [p[0] for p in prepared], [p[1] for p in prepared],
-        [[] for _ in prepared], metas, delete_keys=delete_keys)
+        metas, embed=True)
 
     new = _stored_metadata(_COLLECTION, every)
     # The old path stored the chunks with no owner row, which live(c) hides.

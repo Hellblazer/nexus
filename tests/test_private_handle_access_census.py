@@ -234,8 +234,10 @@ def test_the_fixed_sites_stay_fixed() -> None:
         "src/nexus/commands/catalog_cmds/orphan_backfill.py",
         # db/migrations.py entry removed — RDR-158 P4 Stage 4 (nexus-i711w):
         # the file is DELETED (a deleted file trivially holds zero).
-        "src/nexus/db/t3_reidentify.py",
-        "src/nexus/db/embed_migrate.py",
+        # db/t3_reidentify.py entry removed — RDR-223 P3.3 (nexus-z0o2p.25):
+        # the file is DELETED (a deleted file trivially holds zero).
+        # db/embed_migrate.py entry removed — RDR-223 P3.3 (nexus-z0o2p.25):
+        # the file is DELETED (a deleted file trivially holds zero).
     ):
         assert rel not in live, (
             f"{rel} reacquired a private-handle reach at "

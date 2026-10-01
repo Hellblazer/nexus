@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""nexus-9p0c: integration tests for backfill-hash + reidentify under
-concurrent indexer writes.
+"""nexus-9p0c: integration tests for backfill-hash under concurrent indexer
+writes (its reidentify twin was deleted with ``nx t3 reidentify``, RDR-223
+P3.3, nexus-z0o2p.25).
 
-Both verbs use a two-pass walk (pass 1 collects ids, pass 2 fetches by
+The verb uses a two-pass walk (pass 1 collects ids, pass 2 fetches by
 exact id). The two-pass design is best-effort under concurrent writes:
 new chunks added during pass 1 may be missed by this iteration, but
-the verbs are idempotent so a re-run picks them up. This contract was
+the verb is idempotent so a re-run picks them up. This contract was
 informally documented in code comments after RDR-108 nexus-2exh's
 review caveat #4; this test file locks it.
 
@@ -61,32 +62,6 @@ def _seed_chunks_no_hash(
     docs = [f"chunk content {prefix} {i}" for i in range(count)]
     metas = [{"indexed_at": "2024-01-01T00:00:00+00:00"} for _ in range(count)]
     # Add in 300-batches to respect Cloud-style chunking.
-    for start in range(0, count, _PAGE):
-        end = start + _PAGE
-        col.add(
-            ids=ids[start:end],
-            documents=docs[start:end],
-            metadatas=metas[start:end],
-        )
-    return ids
-
-
-def _seed_chunks_with_synthetic_id(
-    t3_db: T3Database, *, collection: str, count: int, prefix: str,
-) -> list[str]:
-    """Seed *count* chunks under SYNTHETIC ids (not content-derived) but
-    WITH ``chunk_text_hash`` populated. This is the pre-reidentify shape.
-    """
-    col = t3_db._client.get_or_create_collection(collection)
-    ids = [f"{prefix}-syn-{i:04d}" for i in range(count)]
-    docs = [f"reid content {prefix} {i}" for i in range(count)]
-    metas = [
-        {
-            "chunk_text_hash": hashlib.sha256(d.encode()).hexdigest(),
-            "indexed_at": "2024-01-01T00:00:00+00:00",
-        }
-        for d in docs
-    ]
     for start in range(0, count, _PAGE):
         end = start + _PAGE
         col.add(
@@ -201,90 +176,4 @@ class TestBackfillHashConcurrentWrites:
             f"after idempotent re-run, {missing} chunks still lack "
             f"chunk_text_hash; the verb is not converging on the full "
             f"corpus across re-runs"
-        )
-
-
-# ── reidentify ────────────────────────────────────────────────────────────
-
-
-class TestReidentifyConcurrentWrites:
-    """Under concurrent writes, reidentify must migrate every
-    pre-existing chunk and be idempotent on re-run."""
-
-    def test_preexisting_migrated_concurrent_may_be_missed_idempotent_recovery(
-        self, t3_db: T3Database,
-    ) -> None:
-        from nexus.db.t3_reidentify import reidentify_collection
-
-        coll_name = "code__concurrent_reid"
-        # 350 pre-existing chunks under synthetic ids, with
-        # chunk_text_hash populated. > _PAGE forces multi-page pass 1.
-        pre_ids = _seed_chunks_with_synthetic_id(
-            t3_db, collection=coll_name, count=350, prefix="pre",
-        )
-        # Compute the content-derived ids the migration will produce.
-        col = t3_db._client.get_or_create_collection(coll_name)
-        pre_chashes_full = {
-            cid: meta["chunk_text_hash"]
-            for cid, meta in zip(
-                col.get(ids=pre_ids, include=["metadatas"])["ids"],
-                col.get(ids=pre_ids, include=["metadatas"])["metadatas"],
-            )
-        }
-        pre_target_ids = set(pre_chashes_full.values())  # RDR-180: full-width ids
-
-        stop = threading.Event()
-        writer = _writer_thread(
-            t3_db, collection=coll_name, count=50, prefix="pre",
-            stop_event=stop, seed_with_hash=True,
-        )
-
-        try:
-            result = reidentify_collection(
-                t3_db, coll_name, dry_run=False,
-            )
-        finally:
-            stop.set()
-            writer.join(timeout=10)
-
-        assert result.chunks_migrated > 0, (
-            f"first run migrated 0 chunks; expected at least the "
-            f"pre-existing 350; result={result}"
-        )
-
-        # Invariant 1: every pre-existing chunk's content is now under
-        # its content-derived natural id.
-        present = set(col.get(ids=list(pre_target_ids), include=[])["ids"])
-        missing_pre = pre_target_ids - present
-        assert not missing_pre, (
-            f"first run missed {len(missing_pre)} pre-existing chunks; "
-            f"sample={list(missing_pre)[:3]}"
-        )
-
-        # Invariant 2: idempotent re-run sweeps the concurrent-write
-        # tail. After the second run there should be NO chunks under
-        # synthetic ids (every cid == the full chunk_text_hash, RDR-180).
-        result2 = reidentify_collection(
-            t3_db, coll_name, dry_run=False,
-        )
-        offset = 0
-        non_content_derived = 0
-        while True:
-            page = col.get(limit=_PAGE, offset=offset, include=["metadatas"])
-            ids = page.get("ids") or []
-            metas = page.get("metadatas") or []
-            if not ids:
-                break
-            for cid, meta in zip(ids, metas):
-                chash = (meta or {}).get("chunk_text_hash") or ""
-                if chash and cid != chash:
-                    non_content_derived += 1
-            if len(ids) < _PAGE:
-                break
-            offset += _PAGE
-        assert non_content_derived == 0, (
-            f"after idempotent re-run, {non_content_derived} chunks "
-            f"still under synthetic ids; the verb is not converging on "
-            f"the full corpus across re-runs (run1={result}, "
-            f"run2={result2})"
         )

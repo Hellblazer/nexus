@@ -66,6 +66,10 @@ recovery-bundle import, and `doc_indexer._index_document` (`nx index md`,
 same transaction (F-4, R-12). While they accept that, any client path,
 including a future one, can reopen the window.
 
+Amended 2026-10-01: `upsert-reference-only` is retired rather than refused
+(Phase 3 Step 2), so this Gap closes by refusing two routes and deleting the
+third.
+
 #### Gap 4: One path writes ownerless chunks on purpose
 
 In `nx index repo`, chunks from a file with no catalog document go to the
@@ -162,7 +166,8 @@ nexus-76's store-path and import review.
   form, and a first-sighting replace per document.
 - **F-7 (Verified, source).** Engine staging exists
   (`StagingHandler.java`: load, embed_fill, promote); its client half is
-  nexus-b50zw, on hold pending this RDR.
+  nexus-b50zw, on hold pending this RDR. Retired 2026-09-30 (Sam, measured):
+  Phase 3 Step 2 deletes the staging routes and nexus-b50zw closes.
 - **F-8 (Verified, source).** Each collection's embedding model is recorded
   and foreign-keyed (`catalog_collections.embedding_model`,
   `hygiene-002-collection-attributes-walk.xml:287-288`), so a client-supplied
@@ -213,9 +218,15 @@ chunk owned.
    leaves a document with some of its batches and no chunk this run wrote
    without an owner; the deferred sweep never runs, so the previous run's
    dropped chunks stay ownerless and hidden from search. The RDR-192 reaper
-   (nexus-2x9xa, not yet built) is scoped to `knowledge__` collections, so for
-   `docs__`, `code__` and `rdr__` they stay until `nx t3 gc`; nexus-2x9xa
-   carries the decision on widening its coverage. A rerun sweeps what its own
+   (nexus-2x9xa, not yet built) removes them: it covers every prefix,
+   `knowledge__`, `docs__`, `code__` and `rdr__`, behind a per-collection
+   census gate (Sam, 2026-09-30, T2
+   `nexus/rdr-223-192-sam-decisions-2026-09-30-reaper-staging`; this text
+   said `knowledge__` only until the amendment of 2026-10-01). It must not
+   delete a chunk a running multi-batch run is about to reference, so it takes
+   the sweep gate exclusive per collection and skips documents in
+   `index_state = 'indexing'` (with a TTL); RDR-192 Step 9 carries the
+   requirements. A rerun sweeps what its own
    snapshot shows, which is the crashed run's chunks in the manifest, not the
    tail of the run before the crash (the crashed run's first batch already
    dropped that tail from the manifest). A multi-document form, `append_many`, carries several
@@ -264,8 +275,11 @@ chunk owned.
 4. **Stop the ownerless route (closes Gap 4).** The route at
    `src/nexus/indexer.py:5598` becomes a counted event that writes no chunks,
    and the registration gap behind it is fixed. No ghost documents.
-5. **Refuse ownerless writes, last (closes Gap 3).** Once the client release
-   carrying step 3 is the paired release, `upsert-chunks`, `store-put` and
+5. **Refuse ownerless writes, last (closes Gap 3).** *Amended 2026-10-01
+   (Sam, 2026-09-30 and 2026-10-01): this ships in the single final cut, not
+   after a separate Phase 2 release; it ships log-only first and then
+   enforces; and `upsert-reference-only` is retired, not refused. See Phase 3
+   Step 2.* Once the client release carrying step 3 is the paired release, `upsert-chunks`, `store-put` and
    `upsert-reference-only` accept a write only when every chash in it already
    has a live manifest row in that collection, checked inside the write's own
    transaction; that keeps `collection re-embed` and metadata refreshes of
@@ -281,7 +295,7 @@ chunk owned.
 | --- | --- | --- |
 | Append with chunks | `CatalogRepository.appendManifestChunks`, `CombinedWriteService` | Extend: add the chunk insert and the existence partition |
 | Client-supplied vectors | `PgVectorRepository.upsertChunksWithVectors` | Reuse its dimension check pattern on the combined routes |
-| Bulk staging | `StagingHandler` (F-7) | Not used; retire in Phase 3 if nexus-b50zw closes |
+| Bulk staging | `StagingHandler` (F-7) | Not used. Retired in Phase 3 (Sam, 2026-09-30); nexus-b50zw closes |
 
 ### Decision Rationale
 
@@ -315,6 +329,15 @@ yet built (nexus-b50zw).
 **Reason for rejection**: per-batch ownership is enough to stop orphans, and
 append reuses code that exists.
 
+Measured 2026-09-30 (T2 `nexus/staging-decision-evidence-2026-09-30`), on a
+local bge engine over `nx index repo` of a 3,613-file tree: 13.7 chunks/s,
+about 90% of each request spent embedding and about 9% writing, Postgres near
+idle, no 429. Staging's `embed_fill` runs the same embedder serially, so it
+cannot raise throughput, and `promote` writes chunks with no owner until
+`finalize`, which is the ownerless window this RDR closes. Sam retired
+staging on that evidence (2026-09-30): Phase 3 Step 2 deletes the routes and
+nexus-b50zw closes.
+
 ### Briefly Rejected
 
 - **Ownership in chunk metadata** (`store-put`'s `catalog_doc_id`): search and
@@ -328,14 +351,22 @@ append reuses code that exists.
 
 - Positive: once Phase 3 lands, no write inserts a chunk without an owner.
   Chunks a supersede drops still lose their owner; they are swept at the
-  document's last batch. After a crash they stay ownerless until `nx t3 gc`
-  (the RDR-192 reaper, nexus-2x9xa, covers `knowledge__` only).
+  document's last batch. After a crash they stay ownerless until the RDR-192
+  reaper removes them (nexus-2x9xa, all prefixes since Sam's 2026-09-30
+  decision), or `nx t3 gc` does.
 - Positive: the note paths get atomic chunk-plus-owner writes with no engine
   change.
 - Negative: a crash mid-document still leaves a partial document (some
   batches). It is owned and visible, and the next index run replaces it.
-- Negative: old clients that still call `upsert-chunks` without an owner
-  break at Phase 3; the paired-release floor bounds that window.
+- Negative: old clients that still call `upsert-chunks` or `store-put`
+  without an owner break when the refusal enforces. The paired-release floor
+  bounds that window, and the single final cut means the engine and its paired
+  client release go out together. Sam's condition (2026-09-30): every cloud
+  machine upgrades to the new client when the engine deploys (Sam is the only
+  cloud tenant; local installs are always paired). A long-lived `nx-mcp`
+  server or hook-spawned `nx` keeps the old code until restarted and gets the
+  422, so the cutover runbook says restart, not only upgrade (T2
+  `nexus/rdr-223-phase2-gate-critique` S4(f)).
 
 ### Risks and Mitigations
 
@@ -379,7 +410,10 @@ Technical Design 1. Record the wire change as an
 #### Step 2: Client-supplied vectors on the combined routes
 
 Add the optional per-chunk vector with the model and dimension check, as in
-Technical Design 2. Rides the next engine tag after it lands.
+Technical Design 2. Rides the single final engine tag (Sam, 2026-09-30, T2
+`nexus/rdr-223-192-single-cut-decision-2026-09-30`), not a Phase 1 tag of its
+own. The same holds for every Phase 1 and Phase 2 engine change: there is no
+intermediate engine tag and no intermediate client release.
 
 ### Phase 2: Client migration
 
@@ -413,6 +447,51 @@ stored ones.
 Count identity-less files (A-1), stop writing their chunks, and fix the
 registration gap the count exposes.
 
+#### Engine surface Phase 2 carried
+
+Added 2026-10-01 (nexus-wbfpw.39; the Phase 2 gate critique, T2
+`nexus/rdr-223-phase2-gate-critique` O1, found none of this in the text).
+Phase 2 grew the engine beyond Phase 1's append-with-chunks and client
+vectors. Each item has an `[additive]` entry in
+`docs/wire-contract-pending.md` and rides the single final engine tag; the
+paired client release pins it.
+
+- **Begin snapshot** (nexus-z0o2p.10). `POST /v1/catalog/index-run/begin`
+  takes an optional `snapshot_manifest`; the response then carries
+  `prior_chashes` (the document's distinct chashes in position order) and
+  `prior_count`, read in the same transaction as the `indexing` stamp and
+  before any write of the run. This is the pre-run manifest Technical Design
+  1 sweeps from, so a resent first batch cannot hide the previous run's tail.
+- **`append_many` `complete`** (nexus-z0o2p.19). Each document in an
+  `append_many` request may carry `complete: {content_hash, chunk_count}`.
+  After that document's rows and chunks land, the engine runs the same
+  fail-closed verify as `write_many`'s `complete` (no manifest row names a
+  missing chunk and the manifest has exactly `chunk_count` rows) and stamps
+  `index_state='complete'` in the same transaction. A refused verify does not
+  fail the append; the response lists it as `complete_refused`.
+- **`index-run/begin-many` `snapshot_manifest`** (nexus-z0o2p.19). The
+  per-document form of the begin snapshot, for the `.nxexp` import.
+- **`metadata_merge` and `metadata_delete_keys`** (nexus-z0o2p.13). On
+  `write_many`, `append` and `append_many`, a request carrying `chunks` may
+  ask that the metadata of a chash the engine already holds be merged
+  (`(stored - metadata_delete_keys) || incoming`) instead of replaced. The
+  combined routes replaced metadata and the old upsert merged, so without
+  this an `_index_document` re-index would have wiped `bib_*` enrichment.
+- **Pipeline `reset_uploaded`** (nexus-z0o2p.11; Sam, 2026-09-30, T2
+  `nexus/rdr-223-pdf-kill-and-stamp-decisions-2026-09-30`). `POST
+  /v1/pipeline/reset_uploaded` puts every chunk of one streaming-PDF run back
+  to "not yet uploaded", keeping the extracted pages, the chunks and their
+  embeddings, under the same `run_epoch` check as every other pipeline write
+  (a stale run gets 409); `GET /v1/pipeline/counts` gains `uploaded_chunks`.
+  After a hard kill the rerun re-sends the document from position 0 with a
+  fresh writer instead of re-extracting. The engine keeps stored vectors, so
+  nothing is re-embedded.
+- **`put` lock order** (nexus-z0o2p.12). `write_many` takes each document's
+  sweep gate (shared) and index-run lock before it reads the document's
+  previous manifest, in `writeManifestRows`' own order, so two concurrent
+  replacers of one document cannot both read the same previous manifest and
+  strand the loser's chunks. No wire change.
+
 ### Phase 3: Refuse ownerless writes
 
 #### Step 1: Move orphan seeding to direct SQL
@@ -423,11 +502,58 @@ reaper and census tests build orphan states through substrate SQL instead of
 
 #### Step 2: Refuse
 
-Once the client release carrying Phase 2 is the paired release, the engine
-applies Technical Design 5's rule to `upsert-chunks`, `store-put` and
-`upsert-reference-only`. Delete the dead
-paths (`db/reconcile.verify_fill_*`, `db/embed_migrate`). If nexus-b50zw
-closes, retire the staging routes.
+In the single final cut, the engine applies Technical Design 5's rule to
+`upsert-chunks` and `store-put`, and deletes `upsert-reference-only`. Delete
+the dead paths (`db/reconcile.verify_fill_*`, `db/embed_migrate`) and retire
+the staging routes.
+
+Amended 2026-10-01 (nexus-wbfpw.39). This step first read: once the client
+release carrying Phase 2 is the paired release, the engine applies Technical
+Design 5's rule to `upsert-chunks`, `store-put` and `upsert-reference-only`;
+if nexus-b50zw closes, retire the staging routes. Sam's decisions of
+2026-09-30 and 2026-10-01 changed it in five ways:
+
+- **One final cut.** There is no Phase 1 engine tag and no Phase 2 client
+  release that becomes the Phase 3 floor. The refusal ships in the same final
+  engine tag as the Phase 2 engine surface and the RDR-192 engine work, and
+  one client release pins that tag (Sam, 2026-09-30, T2
+  `nexus/rdr-223-192-single-cut-decision-2026-09-30`). The cut waits for the
+  RDR-223 Phase 3 gate and the RDR-192 Phase 4 gate. The intermediate beads
+  nexus-z0o2p.9 (engine tag prep) and nexus-z0o2p.22 (paired client release)
+  fold into it. The condition is Sam's: every cloud machine upgrades to the
+  new client when the engine deploys.
+- **Log-only first, then enforce.** The handler ownership check ships first
+  in a log-only mode: the engine counts and logs each write it would refuse
+  and refuses nothing. The full suite, the local-service gate, native-smoke
+  and the battery legs run against a dev jar, every writer the log names is
+  listed, and the check flips to enforce only when that list is empty or each
+  entry has a disposition. A client-side probe cannot see subprocess, shell or
+  Java HTTP writers, so the engine is the only real oracle (T2
+  `nexus/review-z0o2p23-25-critique`; orchestrator decisions on nexus-z0o2p.24,
+  2026-10-01). Enforcement checks ownership before embedding, so a refused
+  write never pays the embedder, and before the `force_re_embed` and
+  client-vector branches that skip the embed.
+- **The ledger entry is `[not-additive]`.** Old clients get 422 on an
+  ownerless write once it deploys, so the deploy is armed with conexus and the
+  arming confirmed before the client tag pushes (AGENTS.md, rule nexus-1emxn
+  (b)). It must never be written `[additive]` by habit (T2
+  `nexus/review-z0o2p34-35-critique` Issue 3).
+- **`upsert-reference-only` is retired, not refused.** Sam's condition,
+  2026-10-01: retire the route in the final cut if a production log read shows
+  no traffic. It showed none: no request to `/v1/vectors/upsert-reference-only`
+  in the WAF log for 2026-07-03 to 2026-10-01 (5,567,106 records, 90-day
+  retention, with a positive control on `upsert-chunks` and `write_many`),
+  and the one apparent hit was a T2 record title in a query string.
+  conexus has no caller either. The retirement is a `[not-additive]` ledger
+  entry, and `VectorHandlerUpsertReferenceOnlyTest` flips to assert the route
+  is gone. The refusal therefore covers `upsert-chunks` and `store-put`.
+- **Staging is retired.** Measured first, then decided by Sam on 2026-09-30
+  (T2 `nexus/staging-decision-evidence-2026-09-30`, summarised under
+  Alternative 2): the staging routes (`/v1/staging`: load, embed_fill,
+  promote, finalize, clear, counts) are deleted with their schema and the
+  sweep-guard branch that reads them (nexus-z0o2p.27), and nexus-b50zw closes.
+  A follow-up bead: `ChunkBatcher` must not bisect a failed flush on a 429 or
+  a deadline error.
 
 ### Day 2 Operations
 
@@ -451,8 +577,16 @@ None.
   chunks equal one combined write of the whole document.
 - **Scenario**: multi-batch re-index of an unchanged document, first batch
   with `sweep` off — **Verify**: no chunk is swept before its batch lands,
-  zero re-embeds, and after the last append the chashes the new version
-  dropped are swept while re-added and shared ones survive.
+  zero re-embeds, and nothing is swept at the end, because an unchanged
+  document drops nothing.
+- **Scenario**: multi-batch re-index of a partially changed document, first
+  batch with `sweep` off — **Verify**: no chunk is swept before its batch
+  lands, and after the last append the chashes the new version dropped are
+  swept while re-added and shared ones survive. (Split from the scenario above
+  on 2026-10-01: the gate round 2 critique found the single scenario asserted
+  a sweep for a document that drops nothing; the journeys under
+  `tests/integration/test_rdr223_*_journey.py` already test the two cases
+  apart.)
 - **Scenario**: client killed before the last append — **Verify**: the
   deferred sweep does not run and no chunk this run wrote is ownerless.
 - **Scenario**: supplied vector for an existing chash — **Verify**: the stored
@@ -469,11 +603,14 @@ None.
   already owns chunks. See Phase 2 Step 2.)
 - **Scenario**: supplied vector with the wrong dimension or model —
   **Verify**: refused, nothing stored.
-- **Scenario**: Phase 3 refusal — **Verify**: an `upsert-chunks`,
-  `store-put` or `upsert-reference-only` write of a chash with no live
-  manifest row is refused naming the combined routes, even when the request
-  names a document; a re-embed of owned chashes is accepted; the seeding
-  helpers still build orphan states.
+- **Scenario**: Phase 3 refusal — **Verify**: an `upsert-chunks` or
+  `store-put` write of a chash with no live manifest row is refused naming
+  the combined routes, even when the request names a document, and also with
+  `force_re_embed` or client-supplied vectors; ownership is checked before
+  embedding, so a refused write never pays the embedder; a re-embed of owned
+  chashes is accepted; the seeding helpers still build orphan states. In
+  log-only mode the same writes are counted and logged and still land.
+  `upsert-reference-only` is not refused: a test asserts the route is gone.
 
 ## Finalization Gate
 
@@ -481,7 +618,8 @@ None.
 
 No contradictions found between research findings, design principles, and
 proposed solution. The one prior tension (engine staging, F-7, against
-append-with-chunks) is resolved in Alternatives and parked on nexus-b50zw.
+append-with-chunks) is resolved in Alternatives; staging is retired (Phase 3
+Step 2).
 
 ### Assumption Verification
 
@@ -503,8 +641,11 @@ Phase 1, against the real engine substrate.
 
 ### Cross-Cutting Concerns
 
-- **Versioning**: new wire fields are `[additive]`; the Phase 3 refusal waits
-  for the paired client release.
+- **Versioning**: new wire fields are `[additive]`. The Phase 3 refusal and
+  the `upsert-reference-only` retirement are `[not-additive]`, so the deploy
+  is armed with conexus before the client tag pushes (AGENTS.md, rule
+  nexus-1emxn (b)). All of it ships in one engine tag and one paired client
+  release (Sam, 2026-09-30).
 - **Deployment model**: engine changes ride an engine tag; conexus deploys.
 - **Incremental adoption**: each client path migrates in its own bead;
   unmigrated paths keep working until Phase 3.
@@ -535,6 +676,34 @@ per-path beads.
 5. **Keep nexus-wbfpw.28's registration rollback.** No register-if-absent on
    `write_many`.
 
+## Decisions (Sam, 2026-09-30 and 2026-10-01)
+
+Recorded 2026-10-01 (nexus-wbfpw.39). The records are T2 `nexus` entries
+unless stated.
+
+1. **One final engine tag and one paired client release**, shared with
+   RDR-192, with the refusal in it. `rdr-223-192-single-cut-decision-2026-09-30`.
+2. **The RDR-192 reaper covers every prefix** (`knowledge__`, `docs__`,
+   `code__`, `rdr__`), behind a per-collection census gate. Technical Design
+   1 and Consequences were amended to match.
+   `rdr-223-192-sam-decisions-2026-09-30-reaper-staging`.
+3. **Staging is retired**, on measurement.
+   `rdr-223-192-sam-decisions-2026-09-30-reaper-staging`,
+   `staging-decision-evidence-2026-09-30`.
+4. **`upsert-reference-only` is retired**, condition met 2026-10-01 (zero calls
+   in 90 days of WAF logs). Bead nexus-z0o2p.24 comments of 2026-10-01.
+5. **The refusal ships log-only first, then enforces; its ledger entry is
+   `[not-additive]`.** Bead nexus-z0o2p.24; `review-z0o2p23-25-critique`,
+   `review-z0o2p34-35-critique`.
+6. **The `.nxexp` import and PDF kill rulings**: keep-existing import,
+   append-form resume, per-document stamp, `force_re_embed` vector overwrite,
+   `taxonomy__*` rejected up front, and the pipeline `reset_uploaded` route.
+   `rdr-223-nxexp-import-rulings-2026-09-30`,
+   `rdr-223-pdf-kill-and-stamp-decisions-2026-09-30`.
+7. **The completion stamp goes last on every writer path.**
+   `rdr-223-stamp-last-every-path-decision-2026-09-30`. Technical Design 6
+   states the rule.
+
 ## References
 
 - T2 `nexus/chunk-owner-write-path-inventory-2026-09-28`
@@ -564,3 +733,16 @@ per-path beads.
 - 2026-09-28: created from the path inventory (T2
   `nexus/chunk-owner-write-path-inventory-2026-09-28`) and nexus-76's
   store-path notes.
+
+- 2026-10-01: Amended for Sam's decisions of 2026-09-30 and 2026-10-01 and
+  the Phase 2 gate's text findings (nexus-wbfpw.39; T2
+  `nexus/rdr-223-phase2-gate-critique` S1, S3 and O1). The reaper wording in
+  Technical Design 1 and Consequences now says all prefixes. Phase 2 records
+  the engine surface it carried (begin snapshot, `append_many` `complete`,
+  `begin-many` snapshots, `metadata_merge` and `metadata_delete_keys`,
+  pipeline `reset_uploaded`, the `put` lock order). Phase 3 Step 2 records the
+  single final cut, log-only-then-enforce, the `[not-additive]` ledger entry,
+  the `upsert-reference-only` retirement and the staging retirement, with
+  Alternative 2, F-7, the infrastructure audit and the Test Plan updated to
+  match. The Test Plan's "unchanged document" scenario is split in two. A new
+  Decisions section lists the 2026-09-30 and 2026-10-01 decisions.

@@ -879,3 +879,33 @@ def wait_for_service(
     raise TimeoutError(
         f"port {port} on {host} not reachable after {timeout}s{detail}"
     )
+
+
+def seed_chunks_sql(
+    pg: dict,
+    tenant: str,
+    collection: str,
+    ids: list[str],
+    texts: list[str],
+    metas: list[dict],
+    embeddings: list[list[float]],
+) -> None:
+    """INSERT ownerless ``nexus.chunks`` rows into a HERMETIC Postgres (RDR-223 P3.1).
+
+    For the suites in this directory that run their own ``initdb`` cluster and engine, where
+    ``tests/_chunk_seed.seed_chunks_direct`` (which targets the shared per-process substrate)
+    does not reach. Runs ``chunks_insert_sql`` as the cluster's superuser, which bypasses RLS,
+    so *tenant* names the row's tenant and must be the tenant the engine will read it as. The
+    collection must already be registered through the engine (the ``chunks_collection_fk``
+    refuses one that is not). *pg* is the fixture's ``{"port", "dbname", "user"}`` dict.
+    """
+    from tests._chunk_seed import chunks_insert_sql
+
+    proc = subprocess.run(
+        [str(pg_bin_dir() / "psql"), "-h", "127.0.0.1", "-p", str(pg["port"]),
+         "-U", pg["user"], "-d", pg["dbname"], "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
+        input=chunks_insert_sql(tenant, collection, ids, texts, metas, embeddings),
+        capture_output=True, text=True, timeout=120,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"seed_chunks_sql failed ({proc.returncode}): {proc.stderr[:400]}")

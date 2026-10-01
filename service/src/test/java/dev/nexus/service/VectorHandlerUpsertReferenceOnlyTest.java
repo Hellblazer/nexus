@@ -44,6 +44,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  * the 5-arg {@link NexusService} overload, port 0, {@code PER_CLASS}. Two
  * tenants (two bearer tokens, one shared service role/datasource -- RLS,
  * not connection separation, is what is under test for isolation).
+ *
+ * <p>RDR-223 P3.2 (nexus-z0o2p.24): the SUBJECT here is the route itself, so these tests are not
+ * moved onto a seeding helper and stay as they are. Fate pending the conexus relay: the route's
+ * callers may live outside this repo (the conexus Docuverse bridge, RDR-169 G4), and
+ * the combined write has no reference-only chunk form. Do not delete this class or retire the
+ * route on a src grep. Once the relay answers, the tests that write a NEW chunk either keep
+ * passing (route exempted), move onto a reference-only chunk form, or flip into 422 refusal
+ * assertions (route refused).
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class VectorHandlerUpsertReferenceOnlyTest {

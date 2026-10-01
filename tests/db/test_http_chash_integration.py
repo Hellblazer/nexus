@@ -50,10 +50,11 @@ ChashHandler's own route table:
      (the unset-GUC fail-closed property lives at the repo layer —
       ChashRepositoryTest / ChunksRlsBehavioralTest)
 
-Chunk rows are seeded through the PUBLIC vector API
-(POST /v1/vectors/upsert-chunks) using the vector-PASSTHROUGH branch
-(embeddings supplied verbatim — no server-side embed, no model download,
-no API key). Collection names are RDR-103-conformant with the
+Chunk rows are seeded with substrate SQL into the hermetic Postgres
+(tests/db/_service_fixture.py::seed_chunks_sql; RDR-223 P3.1: the engine
+refuses an ownerless write on the public vector route from Phase 3), with
+the vectors supplied verbatim — no server-side embed, no model download,
+no API key. Collection names are RDR-103-conformant with the
 bge-base-en-v15-768 model segment so the service embeds into the
 embedding_768 column of the unified nexus.chunks table.
 
@@ -292,30 +293,30 @@ def other_chash_store(service):
     s.close()
 
 
-def _seed_chunk(service, *, text: str, collection: str, token: str | None = None) -> str:
-    """Materialize a REAL chunk row through the public vector API and return
-    its canonical 64-hex chash.
+def _seed_chunk(
+    service, pg_instance, *, text: str, collection: str, token: str | None = None,
+    tenant: str = "default",
+) -> str:
+    """Materialize a REAL, ownerless chunk row and return its canonical 64-hex chash.
 
-    Uses the vector-PASSTHROUGH branch (embeddings supplied verbatim,
-    nexus-hxry2) so no server-side embed, model download, or API key is
-    involved — the point here is chash-derived-read visibility, not
-    embedding quality. dim=768 matches the collection's model segment.
+    RDR-223 P3.1: inserted with substrate SQL into this suite's hermetic Postgres, not through
+    ``/v1/vectors/upsert-chunks``, which the engine refuses for an ownerless chash from Phase 3.
+    These tests read chash-derived state straight from the chunk tables, which needs the chunk
+    and not an owner. *tenant* is the tenant *token* is bound to (``default`` for the bootstrap
+    bearer). The vector is supplied verbatim, so no embed, model download or API key is involved;
+    dim=768 matches the collection's model segment.
     """
-    import httpx
+    from tests.db._service_fixture import seed_chunks_sql
 
     base_url, default_token, _ = service
     write_token = token or default_token
-    # RDR-204 (nexus-f5wwx): the engine no longer auto-registers a
-    # collection on first write, and this seed posts to
-    # /v1/vectors/upsert-chunks directly -- bypassing HttpVectorClient's
-    # own write_with_registration_retry self-heal entirely. Register
-    # explicitly first, under the SAME bearer this write uses (some
-    # callers pass a non-default tenant token; the collection must be
-    # registered under that tenant, not 'default'). NX_LOCAL=1 pinned for
-    # the derivation window so the derived embedding_model matches this
-    # ONNX engine's bge-768 profile (RDR-160), not a managed-mode
-    # voyage-context-3 guess -- consistent with the model segment already
-    # baked into every _coll()-built name.
+    # RDR-204 (nexus-f5wwx): the engine no longer auto-registers a collection on first write, and
+    # chunks_collection_fk refuses a chunk whose collection is not registered. Register explicitly
+    # first, under the SAME bearer the tenant names (some callers pass a non-default tenant
+    # token; the collection must be registered under that tenant, not 'default'). NX_LOCAL=1
+    # pinned for the derivation window so the derived embedding_model matches this ONNX engine's
+    # bge-768 profile (RDR-160), not a managed-mode voyage-context-3 guess -- consistent with the
+    # model segment already baked into every _coll()-built name.
     saved = {k: os.environ.get(k) for k in ("NX_LOCAL", "NX_SERVICE_URL", "NX_SERVICE_TOKEN")}
     os.environ["NX_LOCAL"] = "1"
     os.environ["NX_SERVICE_URL"] = base_url
@@ -330,24 +331,7 @@ def _seed_chunk(service, *, text: str, collection: str, token: str | None = None
             else:
                 os.environ[k] = v
     chash = _ch(text)
-    resp = httpx.post(
-        f"{base_url}/v1/vectors/upsert-chunks",
-        headers={
-            "Authorization": f"Bearer {write_token}",
-            "Content-Type": "application/json",
-        },
-        json={
-            "collection": collection,
-            "ids": [chash],
-            "documents": [text],
-            "metadatas": [{}],
-            "embeddings": [[0.125] * 768],
-        },
-        timeout=60,
-    )
-    assert resp.status_code == 200, (
-        f"seed upsert-chunks failed ({resp.status_code}): {resp.text[:300]}"
-    )
+    seed_chunks_sql(pg_instance, tenant, collection, [chash], [text], [{}], [[0.125] * 768])
     return chash
 
 
@@ -418,11 +402,11 @@ class TestChashMVV:
     # are both deleted (orphaned no-op, zero production callers) — there is
     # no client method left to exercise the now-410 route through.
 
-    def test_d_distinct_collections_derive_from_chunks(self, chash_store, service):
+    def test_d_distinct_collections_derive_from_chunks(self, chash_store, service, pg_instance):
         """d) distinct_collections reflects collections that actually hold
         chunk rows (chunk-backed truth — zero-chunk registry stubs excluded)."""
-        _seed_chunk(service, text="rdr187 distinct probe x", collection=_coll("dx"))
-        _seed_chunk(service, text="rdr187 distinct probe y", collection=_coll("dy"))
+        _seed_chunk(service, pg_instance, text="rdr187 distinct probe x", collection=_coll("dx"))
+        _seed_chunk(service, pg_instance, text="rdr187 distinct probe y", collection=_coll("dy"))
 
         result = chash_store.distinct_collections()
         assert _coll("dx") in result
@@ -431,12 +415,12 @@ class TestChashMVV:
             "a collection touched only by deprecated no-op writes must not appear"
         )
 
-    def test_e_rename_collection_is_real_over_chunks(self, chash_store, service):
+    def test_e_rename_collection_is_real_over_chunks(self, chash_store, service, pg_instance):
         """e) rename_collection stays REAL post-RDR-187: it re-homes
         chunks_<dim>.collection (design Q3) and reports the re-homed count."""
         old, new = _coll("e-old"), _coll("e-new")
-        ch1 = _seed_chunk(service, text="rdr187 rename chunk one", collection=old)
-        ch2 = _seed_chunk(service, text="rdr187 rename chunk two", collection=old)
+        ch1 = _seed_chunk(service, pg_instance, text="rdr187 rename chunk one", collection=old)
+        ch2 = _seed_chunk(service, pg_instance, text="rdr187 rename chunk two", collection=old)
 
         updated = chash_store.rename_collection(old=old, new=new)
         assert updated == 2
@@ -449,7 +433,7 @@ class TestChashMVV:
         assert colls2 == {new}
 
     def test_f_retired_delete_stale_is_410_and_never_touches_content(
-        self, chash_store, service,
+        self, chash_store, service, pg_instance,
     ):
         """f) delete_stale is 410 Gone (nexus-piwya.11) AND the real chunk row
         survives.
@@ -463,7 +447,7 @@ class TestChashMVV:
         checked if anything ever re-implements this route.
         """
         coll = _coll("f")
-        chash = _seed_chunk(service, text="rdr187 delete-stale guard", collection=coll)
+        chash = _seed_chunk(service, pg_instance, text="rdr187 delete-stale guard", collection=coll)
 
         with pytest.raises(httpx.HTTPStatusError) as exc:
             chash_store.delete_stale(chash=chash, collection=coll)
@@ -485,14 +469,14 @@ class TestChashMVV:
             chash_store.delete_stale(chash=_ch("ghost"), collection="nowhere")
         assert exc.value.response.status_code == 410
 
-    def test_g_lookup_and_count_serve_seeded_chunks(self, chash_store, service):
+    def test_g_lookup_and_count_serve_seeded_chunks(self, chash_store, service, pg_instance):
         """g) The derived read path: a chunk written via the public vector API
         is chash-visible with the router-era response shape (collection +
         second-precision created_at — the RDR-187 compatibility contract)."""
         coll = _coll("g")
         assert chash_store.count_for_collection(coll) == 0
 
-        chash = _seed_chunk(service, text="rdr187 derived read probe", collection=coll)
+        chash = _seed_chunk(service, pg_instance, text="rdr187 derived read probe", collection=coll)
 
         assert chash_store.is_empty() is False
         assert chash_store.count_for_collection(coll) == 1
@@ -503,11 +487,11 @@ class TestChashMVV:
         # RDR-180: the engine echoes the canonical 64-hex it resolved.
         assert rows[0]["chash"] == chash
 
-    def test_h_cross_tenant_rls_negative(self, chash_store, other_chash_store, service):
+    def test_h_cross_tenant_rls_negative(self, chash_store, other_chash_store, service, pg_instance):
         """h) chunk rows seeded by tenant 'default' are invisible to
         'other-tenant' through every derived read."""
         coll = _coll("h")
-        chash = _seed_chunk(service, text="rdr187 rls probe", collection=coll)
+        chash = _seed_chunk(service, pg_instance, text="rdr187 rls probe", collection=coll)
 
         rows = chash_store.lookup(chash)
         assert len(rows) == 1, "default tenant must see its own chunk"
@@ -518,7 +502,7 @@ class TestChashMVV:
         )
         assert other_chash_store.count_for_collection(coll) == 0
 
-    def test_i_other_tenant_write_invisible_to_default(self, chash_store, service):
+    def test_i_other_tenant_write_invisible_to_default(self, chash_store, service, pg_instance):
         """i) RLS isolation: a genuine other-tenant CHUNK write (the write
         that actually materializes post-RDR-187) is invisible to default.
 
@@ -530,9 +514,11 @@ class TestChashMVV:
 
         chash = _seed_chunk(
             service,
+            pg_instance,
             text="rdr187 evil tenant chunk",
             collection=_coll("i"),
             token=evil_token,
+            tenant="evil-tenant",
         )
 
         assert chash_store.lookup(chash) == [], (
@@ -603,14 +589,14 @@ class TestChashMVV:
             f"bearer is authoritative; got bare={bare.json()} spoofed={spoofed.json()}"
         )
 
-    def test_m_registered_chashes_for_collection(self, chash_store, service):
+    def test_m_registered_chashes_for_collection(self, chash_store, service, pg_instance):
         """m) registered_chashes_for_collection returns the full-hex chash set
         derived from the collection's REAL chunk rows (RDR-180: full 64-hex;
         RDR-187: chunk-backed truth)."""
         coll_reg, coll_other = _coll("m-reg"), _coll("m-other")
-        ch1 = _seed_chunk(service, text="rdr187 registered one", collection=coll_reg)
-        ch2 = _seed_chunk(service, text="rdr187 registered two", collection=coll_reg)
-        ch3 = _seed_chunk(service, text="rdr187 registered other", collection=coll_other)
+        ch1 = _seed_chunk(service, pg_instance, text="rdr187 registered one", collection=coll_reg)
+        ch2 = _seed_chunk(service, pg_instance, text="rdr187 registered two", collection=coll_reg)
+        ch3 = _seed_chunk(service, pg_instance, text="rdr187 registered other", collection=coll_other)
 
         result = chash_store.registered_chashes_for_collection(coll_reg)
 
@@ -623,10 +609,10 @@ class TestChashMVV:
         """m2) registered_chashes_for_collection returns empty for absent collection."""
         assert chash_store.registered_chashes_for_collection("col_no_such") == set()
 
-    def test_m3_registered_chashes_rls_isolation(self, chash_store, other_chash_store, service):
+    def test_m3_registered_chashes_rls_isolation(self, chash_store, other_chash_store, service, pg_instance):
         """m3) registered_chashes_for_collection is RLS-isolated per tenant."""
         coll = _coll("m3")
-        chash = _seed_chunk(service, text="rdr187 rls registered", collection=coll)
+        chash = _seed_chunk(service, pg_instance, text="rdr187 rls registered", collection=coll)
 
         own = chash_store.registered_chashes_for_collection(coll)
         assert chash in own
