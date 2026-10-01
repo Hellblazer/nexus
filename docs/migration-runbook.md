@@ -117,16 +117,30 @@ machinery that performed that migration no longer ships:
    one. The pin has to be IN the command: a bare `nx self install` installs
    the newest release, which is the hop this procedure exists to avoid
 2. `nx upgrade` there, which performs the Chroma to PG copy (copy-not-move;
-   the Chroma directory is left on disk afterward, untouched). **Run it
-   against a LOCAL engine.** Leave `NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the
-   `service_url` config key unset (or export `NX_LOCAL=1`), so the pin
-   provisions the bundled local engine, and never run the pin's
-   `nx guided-upgrade` with `--service-url`, or point `nx upgrade` at a managed
-   endpoint. The pin's migration speaks to the engine its own release was
-   built with; a current managed engine no longer serves the routes that
-   migration lands its data through (the `/v1/staging` landing zone was
-   retired at nexus-z0o2p.27), so a 6.x migration aimed at the cloud fails on
-   its first land call
+   the Chroma directory is left on disk afterward, untouched). Three
+   preconditions, all about WHICH engine the pin talks to:
+   - **Local engine only.** Leave `NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the
+     `service_url` config key unset (or export `NX_LOCAL=1`), and never run the
+     pin's `nx guided-upgrade` with `--service-url` or aim `nx upgrade` at a
+     managed endpoint. That path is unsupported: the engine retired the
+     `/v1/staging` routes the 6.x migration lands through (nexus-z0o2p.27), and
+     even before that it very likely lost manifest and topic pointers on a
+     current engine, which dropped `chash_alias` and the rekey route (engine
+     v0.1.100) and now admits only 64-hex chashes where Chroma-era ids are 16
+     or 32 hex. Nobody has measured it; do not rely on it
+   - **Stop any current-engine local service first.** A 7.x install may have
+     left its local service running (`nx daemon service status`; stop it with
+     `nx daemon service stop`). The pin's own engine (v0.1.52) must be the one
+     it provisions, not a newer engine that no longer has the routes
+   - **A Voyage-embedded source needs a Voyage-keyed local engine.** If the
+     Chroma data is Voyage-embedded (a ChromaDB Cloud store, or any
+     `voyage-*` collection), run the local engine with `NX_VOYAGE_API_KEY`
+     reaching the service. Without it a voyage-model collection is refused
+     (the migration will not copy Voyage vectors onto a bge-only service) or
+     re-embedded to bge-768, and a bge collection can never be imported into a
+     Voyage cloud afterward. This is the most consequential choice in the hop
+     for anyone headed to the cloud. Whether the pin's v0.1.52 engine runs the
+     Voyage posture has not been verified
 3. upgrade to current normally
 
 Frozen Chroma directories left on disk after that copy are relics, not a
@@ -136,40 +150,72 @@ back to the Chroma/SQLite era (Sam, 2026-08-29).
 ### Getting that data into the managed cloud
 
 The data migration ends on a local engine. Reaching the managed cloud is a
-separate hop made with the CURRENT client, after step 3:
+separate hop made with the CURRENT client, after step 3. **This second hop has
+not been rehearsed end to end.** The verbs below exist and their flags match
+`--help`, and the gates named below were read in source, but nobody has run the
+whole sequence against a cloud tenant and counted what arrived (nexus-xbqh9
+will). Treat it as a plan, check counts as you go, and expect to find
+something. What hop 1 does when aimed at a current managed engine is likewise
+unmeasured (nexus-6g218).
 
-1. **Before switching modes**, while the box is still local, write down what
-   you want to carry: `nx store export --all -o ./nxexp-backup/` (one `.nxexp`
-   per collection, embeddings included) and `nx catalog export recovery.jsonl`
-   (the catalog link graph plus `store_put`-origin notes; no embeddings).
+**Pick the path by what the data is:**
+
+| You are | Hop 1 gives you | Best path to the cloud |
+|---|---|---|
+| Local-ONNX (minilm-384 or bge-768 collections) | Collections embedded with a local model; T2 memory and plans; taxonomy; notes | Do not carry the vectors: a bge collection cannot be imported into a Voyage cloud collection. For code, docs and rdr content, **re-index from source in the cloud** (`nx index repo`, `nx index pdf`, `nx index rdr`), which is cheaper than two hops and embeds with Voyage. Hop 1 matters only for T2 memory and plans, notes and taxonomy |
+| Voyage, from ChromaDB Cloud | Voyage collections kept as Voyage only if hop 1 ran Voyage-keyed (above) | `nx store export` and `nx store import` carry the vectors as they are. Re-indexing source content is still the cheaper path where you have the source |
+| Notes with no source files (`store_put`-origin knowledge) | The notes, as chunks plus catalog documents | `nx catalog export` and `nx catalog import`: the bundle holds no embeddings, so import re-embeds each note and works across models |
+
+**Steps**, while the box is still local:
+
+1. Write down what you want to carry: `nx store export --all -o ./nxexp-backup/`
+   (one `.nxexp` per collection, embeddings included) and
+   `nx catalog export recovery.jsonl` (link graph plus `store_put`-origin
+   notes; no embeddings).
 2. Switch to the cloud as in
    [Getting Started § Cloud mode](getting-started.md#cloud-mode-optional)
    (`nx config set service_url ...` plus `NX_SERVICE_TOKEN`).
-3. Load it: `nx store import FILE` for each `.nxexp`, then
-   `nx catalog import recovery.jsonl`. Both are idempotent, and an interrupted
-   `nx store import` finishes the documents it left open when rerun.
+3. **Clear the stranded banner.** The pre-PG files from hop 1 are still on
+   disk (copy-not-move), and in cloud mode the stranded-install detector
+   cannot trust the engine's migration record, so every command banners and
+   `nx doctor` fails until you either run `nx stranded ack` (attests that this
+   machine's pre-PG data was migrated) or move the pre-PG files the banner names
+   aside. They are relics (Sam, 2026-08-29).
+4. **Re-index from source first, then load.** `nx index repo` / `nx index pdf`
+   for the content you are re-indexing; then `nx store import FILE` for each
+   `.nxexp` you are carrying; then `nx catalog import recovery.jsonl` LAST. The
+   bundle's links resolve by `source_uri` against documents the target already
+   holds, so a link to a document not indexed yet stays unresolved. All three
+   are idempotent, and an interrupted `nx store import` finishes the documents it
+   left open when rerun.
 
-What this path does not carry, so you know before you start:
+**What `nx store import` refuses, and why.** A collection embedded with a local
+model fails against a Voyage collection. In the default case (a collection
+named with a Voyage token, whose vectors are bge-768) the file's header agrees
+with the name, so the model check passes and the dimension check stops it:
+`EmbeddingDimensionMismatch` ("header claims 'voyage-context-3' (1024-dim) but
+vectors are 768-dim"). `--assume-model` only corrects a mislabeled header and
+does not get past that. A collection named with a bge token passes both checks
+(768 equals 768) and is sent to the cloud engine; what the engine does with it
+has not been verified, so do not rely on it. Either way the answer for such a
+collection is to re-index its source.
 
-- **A local collection embedded with the local default model (bge-768)
-  cannot be imported into a Voyage cloud collection.** `nx store import`
-  refuses a file whose embedding model differs from the target collection's
-  (`Embedding model mismatch ... Import aborted`), and `--assume-model` only
-  corrects a mislabeled header, it does not bypass that check. Such a
-  collection reaches the cloud by re-indexing its source (`nx index repo`,
-  `nx index pdf`, ...), which the cloud embeds with Voyage. Only a collection
-  the local engine embedded with the cloud's own model imports as-is.
-- `nx catalog import` re-embeds its notes through the note writer, so it works
-  across embedding models, but it carries only links and `store_put`-origin
-  notes, not indexed repository content.
-- T2 memory and plans (`nx memory`) have no export or import verb; carry the
-  entries you need by hand (`nx memory get`, then `nx memory put` in the new
-  mode).
+**What this path does not carry.** An `.nxexp` holds chunks, embeddings and
+owner rows. The recovery bundle holds links and `store_put`-origin notes. Nothing
+here carries:
 
-Verified against the 7.x CLI: `nx store export --help`, `nx store import
---help`, `nx catalog export --help` and `nx memory --help` list exactly the
-verbs and flags used above, and the model gate is
-`nexus.exporter` (`EmbeddingModelMismatch`).
+- T2 memory and plans (`nx memory` has no export or import verb; carry entries
+  by hand with `nx memory get` and `nx memory put`)
+- taxonomy topics and their assignments
+- `document_aspects` (LLM-extracted; re-extracting is billed) and the aspect queue
+- `frecency` and `relevance_log`
+- DEVONthink highlights
+- tuples
+
+The old direct path landed the pointer stores, `document_aspects` and the aspect
+queue through the staging routes and T2 through ordinary ones, so the two-hop
+route delivers less than that path did when it worked. That is the cost of
+retiring the staging routes.
 
 ## A stranded migration banner
 

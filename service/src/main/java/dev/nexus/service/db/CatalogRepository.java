@@ -45,7 +45,6 @@ import org.jooq.Query;
 import org.jooq.SelectField;
 import org.jooq.Table;
 import org.jooq.UpdateSetMoreStep;
-import org.jooq.conf.ParamType;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
 import org.slf4j.Logger;
@@ -6083,9 +6082,8 @@ public final class CatalogRepository {
      * embedding model/dim), so scoping by {@code collection} alone already
      * confines the DELETE to the correct dim's rows without needing to name
      * the dim explicitly.
-     */
-    /**
-     * Builds (does NOT execute) the {@code nexus.chunks} sweep DELETE — extracted from
+     *
+     * <p>Builds (does NOT execute) the {@code nexus.chunks} sweep DELETE — extracted from
      * {@link #sweepChunks} (nexus-ajt86) so a test could render and EXPLAIN the EXACT
      * statement production issues rather than a hand-copied mirror. The only such test
      * (the staging-guard plan-shape pin) and its public render hook left with the

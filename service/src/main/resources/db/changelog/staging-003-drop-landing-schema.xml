@@ -39,10 +39,18 @@
     where the schema is already gone (an out-of-band cleanup) marks ran instead
     of erroring.
 
-    DROP SCHEMA without CASCADE on purpose: the table list above is the whole
-    schema (staging-001..002 and telemetry-006 create nothing else in it), so an
-    object this changeset did not name is unexpected, and failing the migration
-    loudly beats silently deleting it.
+    TOLERANT BY DESIGN (the nexus-lgdel.l1 no-wedge directive: no precondition or
+    privilege failure aborts an upgrade walk). The body drops the seven named
+    tables, one at a time, and then asks PostgreSQL to drop the schema WITHOUT
+    CASCADE, which succeeds only when the schema is empty. Two things can stand in
+    the way, and neither may stop a boot: an object this changeset did not name
+    (a DBA- or ops-created table, view or function in schema staging; the
+    changelog creates nothing else there) leaves the schema in place, and a
+    migrating role that does not own the schema or a table (insufficient_privilege)
+    leaves that object in place. Each case raises a NOTICE naming what was left, and
+    the walk goes on. Nothing is deleted that this changeset did not name, so
+    CASCADE is deliberately not used. A later boot does not retry (the changeset is
+    recorded as ran); an operator finishes the drop by hand.
 
     Placed before the runAlways grants blocks (the D0.1 late-append convention).
 -->
@@ -57,9 +65,31 @@
             <sqlCheck expectedResult="1">SELECT count(*) FROM pg_namespace WHERE nspname = 'staging'</sqlCheck>
         </preConditions>
         <comment>DROP the staging landing schema and its seven tables — the RDR-180 land-then-transform landing zone, retired with the /v1/staging routes (RDR-223 Phase 3 step 2, nexus-z0o2p.27). DATA EFFECT: DROPs staging.chunks, staging.document_chunks, staging.topic_assignments, staging.frecency, staging.relevance_log, staging.document_aspects and staging.aspect_extraction_queue, discarding any landed rows; irreversible for the data (the rollback restores the empty structure only: the rows were a landing area, and no code reads them once the routes are gone).</comment>
-        <sql>
-DROP TABLE IF EXISTS staging.chunks, staging.document_chunks, staging.topic_assignments, staging.frecency, staging.relevance_log, staging.document_aspects, staging.aspect_extraction_queue;
-DROP SCHEMA staging;
+        <sql splitStatements="false" stripComments="false">
+DO $$
+DECLARE
+    t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['chunks', 'document_chunks', 'topic_assignments', 'frecency',
+                             'relevance_log', 'document_aspects', 'aspect_extraction_queue']
+    LOOP
+        BEGIN
+            EXECUTE format('DROP TABLE IF EXISTS staging.%I', t);
+        EXCEPTION WHEN insufficient_privilege THEN
+            RAISE NOTICE 'staging-6: staging.% left in place (migrating role may not drop it)', t;
+        END;
+    END LOOP;
+
+    BEGIN
+        EXECUTE 'DROP SCHEMA staging';
+    EXCEPTION
+        WHEN dependent_objects_still_exist THEN
+            RAISE NOTICE 'staging-6: schema staging left in place (it holds objects this changeset did not name)';
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'staging-6: schema staging left in place (migrating role may not drop it)';
+    END;
+END
+$$;
         </sql>
         <!-- The DATA is irreversible (see DATA EFFECT above); the STRUCTURE is not. A
              rollback that stops anywhere after this changeset and is then followed by a

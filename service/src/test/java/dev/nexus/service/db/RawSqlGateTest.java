@@ -1121,6 +1121,10 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/SharedCluster.java", 3),
         Map.entry("dev/nexus/service/SharedClusterMutationFalsifyTest.java", 1),
         Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
+        // nexus-z0o2p.27: CREATE ROLE nexus_diag (jOOQ's open-source DSL has no CREATE ROLE) and the
+        // three-statement GRANT / ALTER DEFAULT PRIVILEGES the old grants-nexus-diag-3 gave that role
+        // on schema staging; both set up the aged shape the drop is walked over.
+        Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 2),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 19),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 11),
@@ -1650,10 +1654,11 @@ class RawSqlGateTest {
     // nexus-wbfpw.44/.45/.46: 979 -> 981 (+2: new test file
     // vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java at 2 -- see that entry's own
     // comment).
-    // nexus-z0o2p.27: -11 against develop's 976 (StagingHandlerJourneyTest.java 4 removed,
+    // nexus-z0o2p.27: 976 -> 967 against develop (StagingHandlerJourneyTest.java 4 removed,
     // CatalogManifestSweepRepositoryTest.java 23 -> 17, Tk070P6bTtlDaysCountedUpdateTest.java
-    // 2 -> 1), set to the measured per-file sum so the ceiling carries no slack.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 965;
+    // 2 -> 1, new StagingSchemaDropLiquibaseTest.java at 2). Set to the measured per-file sum
+    // so the ceiling carries no slack.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 967;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

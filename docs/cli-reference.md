@@ -4154,8 +4154,8 @@ RDR-155 P4b **deleted** the migration verbs outright (`nx guided-upgrade`,
 group, `nx daemon t3`): installs still carrying pre-PG data use the pinned
 last migration-capable release (the stranded-install banner names it), run
 against a local engine: never `nx guided-upgrade --service-url`, and never a
-managed endpoint, because a current managed engine no longer serves the
-`/v1/staging` routes that migration lands its data through. The remaining
+managed endpoint: that path is unsupported (the engine retired the `/v1/staging`
+routes that migration lands its data through). The remaining
 demoted-not-deleted primitives — still callable, out of `--help`:
 
 | Demoted verb | Its only job was | Now done by |

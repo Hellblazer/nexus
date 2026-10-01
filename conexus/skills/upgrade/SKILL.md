@@ -104,23 +104,42 @@ A box carrying unmigrated pre-PG data (`chroma.sqlite3`, `t2.db`, `memory.db`,
 `catalog/.catalog.db`) is refused by a current release with a two-hop
 redirect, and `nx upgrade` here cannot migrate it. The path is: install the
 pinned `conexus==6.18.1` (the refusal names the exact command), run `nx upgrade`
-there, then upgrade back to current. **Run that hop against a LOCAL engine.**
-Make sure `NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the `service_url` config key
-are unset (or `NX_LOCAL=1`), and never run the pin's `nx guided-upgrade
---service-url ...` or aim it at a managed endpoint: a current managed engine no
-longer serves the routes that migration lands its data through, so it fails on
-the first land call. Do not set `service_url` first "to save a step".
+there, then upgrade back to current. Three preconditions for the hop at the pin:
 
-If the user wants the managed cloud, that is a second hop made with the CURRENT
-client after the upgrade back, while the box can still read its local data:
-`nx store export --all` and `nx catalog export recovery.jsonl` locally, switch
-to the managed service (below), then `nx store import FILE` and `nx catalog
-import recovery.jsonl`. A collection embedded with the local default model
-(bge-768) is refused by `nx store import` against a Voyage cloud collection
-(`Embedding model mismatch`); it reaches the cloud by re-indexing its source.
-`nx memory` has no export verb. The full procedure is
+- **A LOCAL engine only.** `NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the
+  `service_url` config key unset (or `NX_LOCAL=1`). Never run the pin's
+  `nx guided-upgrade --service-url ...` or aim it at a managed endpoint: that
+  path is unsupported (the engine retired the `/v1/staging` routes it lands
+  through, and it very likely already lost manifest and topic pointers on a
+  current engine; unmeasured, nexus-6g218). Do not set `service_url` first "to
+  save a step".
+- **Stop any current-engine local service** a 7.x install left running
+  (`nx daemon service stop`) so the pin provisions its own engine.
+- **Voyage-embedded data needs a Voyage-keyed local engine**
+  (`NX_VOYAGE_API_KEY` reaching the service), or those collections are refused
+  or re-embedded to bge-768 and can never be imported into a Voyage cloud.
+
+If the user wants the managed cloud, that is a second hop with the CURRENT
+client after the upgrade back. It has NOT been rehearsed end to end (nexus-xbqh9)
+and carries less than the old direct path: no T2 memory or plans (`nx memory`
+has no export verb), taxonomy, `document_aspects`, aspect queue, `frecency`,
+`relevance_log`, DEVONthink highlights or tuples. Pick by user type:
+
+- Local-ONNX collections (bge-768) cannot be imported into a Voyage cloud
+  collection (`nx store import` stops with `EmbeddingDimensionMismatch`, 768 vs
+  1024). For code, docs and rdr content, re-index from source in the cloud
+  (`nx index repo`, `nx index pdf`); that is cheaper than two hops.
+- Voyage collections from a Voyage-keyed hop 1: `nx store export --all`
+  locally, then `nx store import FILE` in the cloud.
+- Source-less `store_put` notes: `nx catalog export recovery.jsonl` locally,
+  `nx catalog import` in the cloud (re-embeds; carries links and notes only).
+
+Order in the cloud: switch with `nx config set service_url ...`, clear the
+stranded banner (`nx stranded ack`, or move the pre-PG files it names aside),
+re-index from source, `nx store import`, and `nx catalog import` LAST (links
+resolve by `source_uri` against documents already there). The full procedure is
 `docs/migration-runbook.md` § Getting that data into the managed cloud; surface
-the model caveat to the user rather than choosing for them.
+the choices to the user rather than making them.
 
 ## Managed service
 

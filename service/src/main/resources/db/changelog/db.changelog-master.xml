@@ -1671,6 +1671,10 @@
     -->
     <include file="db/changelog/staging-003-drop-landing-schema.xml"/>
 
+    <!-- nexus-z0o2p.27: re-comment the two FK-less chunk_id edges whose fk-005-1 comments
+         named the deleted ChashCensus; they now name the nexus_diag debt view. -->
+    <include file="db/changelog/fk-006-census-comments-name-diag-view.xml"/>
+
     <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.

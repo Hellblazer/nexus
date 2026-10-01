@@ -5120,7 +5120,7 @@ def _check_stranded_install() -> list[HealthResult]:
         detail=stranded.message_for(first_hop),
         fix_suggestions=[
             f"Install the last migration-capable release: {first_hop}",
-            "Run: nx upgrade (the ladder converges the pre-PG data migration)",
+            "Run: nx upgrade against a local engine (NX_SERVICE_URL unset, never a managed endpoint; the ladder converges the pre-PG data migration)",
             "Then upgrade back to this version",
         ],
     )]

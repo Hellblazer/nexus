@@ -329,11 +329,19 @@ On a uv-tool box use `uv tool install conexus==6.18.1` for step 1 and
 over a pre-PG store migrates nothing and searches look empty; nothing is lost,
 follow the hops above.
 
-Do step 2 against a **local** engine: leave `NX_SERVICE_URL`, `NX_SERVICE_TOKEN`
-and the `service_url` config key unset (or export `NX_LOCAL=1`), and never run
-the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
-endpoint. A current managed engine no longer serves the routes the 6.x
-migration lands its data through. To end up on the managed cloud, finish
-steps 1 to 3 locally, then move the data with the current client:
-[Migration Runbook § Getting that data into the managed
+Before step 2: stop any local service a 7.x install left running
+(`nx daemon service stop`), and run step 2 against a **local** engine: leave
+`NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the `service_url` config key unset (or
+export `NX_LOCAL=1`). Never run the pin's `nx guided-upgrade --service-url ...`
+or aim it at a managed endpoint; that path is unsupported. If the data is
+Voyage-embedded, run the local engine with `NX_VOYAGE_API_KEY` reaching it, or
+those collections are refused or re-embedded to bge and can never be imported
+into a Voyage cloud.
+
+To end up on the managed cloud, finish steps 1 to 3 locally, then move the data
+with the current client. That second hop has not been rehearsed end to end and
+carries less than the old direct path did (no T2 memory or plans, taxonomy,
+document aspects, frecency, relevance log, DEVONthink highlights or tuples);
+for code, docs and rdr content, re-indexing from source in the cloud is
+cheaper. See [Migration Runbook § Getting that data into the managed
 cloud](migration-runbook.md#getting-that-data-into-the-managed-cloud).
