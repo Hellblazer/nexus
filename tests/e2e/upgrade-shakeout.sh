@@ -305,7 +305,10 @@ fi
 # path across every context on the same host.
 # shellcheck source=./lib/lock.sh disable=SC1091
 source "$SCRIPT_DIR/lib/lock.sh"
-LOCKDIR="/tmp/nexus-e2e-locks/upgrade-shakeout.lock"
+# Per-USER root (nexus-c6lsu): the uid is in the name, because /tmp is shared across Unix users and a
+# root another user created is unwritable here (lock_acquire fails). $(id -u) is context-independent,
+# so the cross-context contention above is unchanged for one user.
+LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/upgrade-shakeout.lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
 trap 'lock_release "$LOCKDIR" 2>/dev/null || true' EXIT

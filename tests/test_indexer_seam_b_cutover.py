@@ -246,6 +246,18 @@ def test_run_index_batch_flush_forwards_force_re_embed(tmp_path, monkeypatch):
             return {}
 
         @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
+
+        @property
         def stats(self) -> dict:
             return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
@@ -324,6 +336,18 @@ def test_run_index_batch_flush_force_false_omits_force_re_embed(tmp_path, monkey
         @property
         def failed_files(self) -> dict:
             return {}
+
+        @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
 
         @property
         def stats(self) -> dict:
@@ -411,6 +435,18 @@ def test_run_index_batch_flush_retries_transient_failure_then_succeeds(tmp_path,
             return {}
 
         @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
+
+        @property
         def stats(self) -> dict:
             return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
@@ -491,6 +527,18 @@ def test_run_index_batch_flush_shared_chash_is_not_copied_into_an_ownerless_upse
         @property
         def failed_files(self) -> dict:
             return {}
+
+        @property
+        def throttled_files(self) -> dict:
+            return {}
+
+        @property
+        def throttle_retry_after(self) -> float | None:
+            return None
+
+        @property
+        def throttle_breaker_open(self) -> bool:
+            return False
 
         @property
         def stats(self) -> dict:
