@@ -480,9 +480,13 @@ def pytest_sessionstart(session):
     that will actually enforce.
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
-    global _real_autostart_baseline
+    global _real_autostart_baseline, _real_manager_baseline
     global _this_session_conexus_version, _last_seen_version_baseline_content
     _is_controller_or_serial = not _is_xdist_worker(session)
+    # BEFORE the fence below replaces them: the guard's read-only manager probe
+    # must ask the operator's real manager.
+    if _is_controller_or_serial:
+        _capture_real_manager_env()
     if _is_controller_or_serial:
         _gate_on_build_lease()
         _take_suite_lease()
@@ -531,6 +535,7 @@ def pytest_sessionstart(session):
         _fixture_cache_baseline = _scan_fixture_cache_files()
         _real_config_dir_baseline = _snapshot_real_config_dir()
         _real_autostart_baseline = _snapshot_real_autostart_units()
+        _real_manager_baseline = _snapshot_manager_state()
         _this_session_conexus_version = _resolve_this_session_conexus_version()
         _last_seen_version_baseline_content = _snapshot_last_seen_version_content()
     _warn_if_service_jar_is_stale()
@@ -1434,29 +1439,46 @@ def _check_real_config_dir_mutations(session) -> None:
 # suite reported the failures as unrelated assertion errors rather than as the
 # unit having been rewritten.
 
-#: The unit files watched, relative to the real home. Drop-ins are enumerated
-#: at snapshot time (``nexus-service.service.d/*``).
+#: The unit files watched, relative to the real home: the storage-service unit
+#: and the LEGACY T2 unit (``unload_stale_t2_launchagent`` and
+#: ``uninstall_autostart(tier="t2")`` act on those). Drop-ins are enumerated at
+#: snapshot time.
 _REAL_AUTOSTART_UNIT_FILES: tuple[str, ...] = (
     ".config/systemd/user/nexus-service.service",
+    ".config/systemd/user/nexus-t2.service",
     "Library/LaunchAgents/com.nexus.service.plist",
+    "Library/LaunchAgents/com.nexus.t2.plist",
 )
-_REAL_AUTOSTART_DROPIN_DIR = ".config/systemd/user/nexus-service.service.d"
+_REAL_AUTOSTART_DROPIN_DIRS: tuple[str, ...] = (
+    ".config/systemd/user/nexus-service.service.d",
+    ".config/systemd/user/nexus-t2.service.d",
+)
+#: ``systemctl --user enable`` / ``disable`` create and remove these symlinks,
+#: so a disable that leaves the unit FILE intact (the incident's first step) is
+#: still visible. Snapshotted by link target, never followed.
+_REAL_AUTOSTART_ENABLE_LINKS: tuple[str, ...] = (
+    ".config/systemd/user/default.target.wants/nexus-service.service",
+    ".config/systemd/user/default.target.wants/nexus-t2.service",
+)
 
 
 def _snapshot_real_autostart_units() -> dict[str, tuple[int, int, str]]:
     """``{relative_posix_path: (mtime_ns, size, sha256)}`` for the operator's
-    real service autostart unit, its systemd drop-ins and the launchd plist.
+    real service and legacy-T2 autostart units, their systemd drop-ins, the
+    ``default.target.wants`` enable symlinks and the launchd plists.
 
     The sha256 is there because mtime+size misses a same-length rewrite with a
     preserved mtime (``cp -p`` of a backup over the unit). Content is hashed,
-    never kept or printed: a unit's ``Environment=`` lines can carry secrets."""
+    never kept or printed: a unit's ``Environment=`` lines can carry secrets.
+    An enable symlink is recorded by ``readlink`` text, not followed."""
     import hashlib  # noqa: PLC0415 — session-guard only
 
     home = _real_home_for_guard()
     candidates = [home / rel for rel in _REAL_AUTOSTART_UNIT_FILES]
-    dropin_dir = home / _REAL_AUTOSTART_DROPIN_DIR
-    if dropin_dir.is_dir():
-        candidates.extend(sorted(p for p in dropin_dir.rglob("*") if p.is_file()))
+    for rel in _REAL_AUTOSTART_DROPIN_DIRS:
+        dropin_dir = home / rel
+        if dropin_dir.is_dir():
+            candidates.extend(sorted(p for p in dropin_dir.rglob("*") if p.is_file()))
     snapshot: dict[str, tuple[int, int, str]] = {}
     for p in candidates:
         try:
@@ -1467,6 +1489,16 @@ def _snapshot_real_autostart_units() -> dict[str, tuple[int, int, str]]:
         except OSError:
             continue  # raced a live manager touching it; the next scan sees it
         snapshot[p.relative_to(home).as_posix()] = (st.st_mtime_ns, st.st_size, digest)
+    for rel in _REAL_AUTOSTART_ENABLE_LINKS:
+        link = home / rel
+        try:
+            if not link.is_symlink():
+                continue
+            st = link.lstat()
+            digest = hashlib.sha256(("link:" + os.readlink(link)).encode()).hexdigest()
+        except OSError:
+            continue
+        snapshot[rel] = (st.st_mtime_ns, 0, digest)
     return snapshot
 
 
@@ -1485,9 +1517,108 @@ def _diff_autostart_snapshots(
 
 _real_autostart_baseline: dict[str, tuple[int, int, str]] = {}
 
+#: The REAL manager environment (``XDG_RUNTIME_DIR`` / ``DBUS_SESSION_BUS_ADDRESS``),
+#: captured in ``pytest_sessionstart`` BEFORE the fence replaces them, so the
+#: read-only probes below ask the operator's real manager, not the fenced void.
+_real_manager_env: dict[str, str] = {}
+_real_manager_baseline: dict[str, str] = {}
+
+#: Opt-out for a box where even a read-only ``systemctl --user show`` /
+#: ``launchctl print`` is unwelcome (an agent worktree session on a host with a
+#: real nexus unit). Never set by CI.
+_MANAGER_PROBE_OPT_OUT = "NX_NO_MANAGER_STATE_PROBE"
+
+
+def _capture_real_manager_env() -> None:
+    """Record the manager-locating env as it is BEFORE the fence. Once."""
+    if _real_manager_env:
+        return
+    for key in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+        value = os.environ.get(key)
+        if value:
+            _real_manager_env[key] = value
+
+
+def _snapshot_manager_state() -> dict[str, str]:
+    """Read-only state of the operator's real ``nexus-service`` unit, as the
+    service MANAGER reports it, which a file hash cannot see: ``bootout`` and
+    ``disable --now`` leave the unit file intact.
+
+    systemd: ``systemctl --user show nexus-service.service -p
+    NRestarts,UnitFileState,FragmentPath``. launchd: ``launchctl print
+    gui/<uid>/com.nexus.service`` (loaded or not, and its ``state``). Both are
+    read-only verbs. Absence (no manager, no user bus, label not loaded) is a
+    value, not an error: ``{"systemd": "unavailable"}`` before and after is no
+    change, and "tolerated if absent" is the contract."""
+    import shutil  # noqa: PLC0415 — session-guard only
+    import subprocess  # noqa: PLC0415 — session-guard only
+
+    if os.environ.get(_MANAGER_PROBE_OPT_OUT):
+        return {}
+    env = dict(os.environ)
+    env.update(_real_manager_env)
+    state: dict[str, str] = {}
+    if shutil.which("systemctl", path=env.get("PATH")):
+        try:
+            r = subprocess.run(
+                ["systemctl", "--user", "show", "nexus-service.service",
+                 "-p", "NRestarts,UnitFileState,FragmentPath"],
+                capture_output=True, text=True, timeout=10, env=env, check=False,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    key, _, value = line.partition("=")
+                    if key in ("NRestarts", "UnitFileState", "FragmentPath"):
+                        state[f"systemd:{key}"] = value
+            if not any(k.startswith("systemd:") for k in state):
+                state["systemd"] = "unavailable"
+        except (OSError, subprocess.SubprocessError):
+            state["systemd"] = "unavailable"
+    if shutil.which("launchctl", path=env.get("PATH")):
+        try:
+            r = subprocess.run(
+                ["launchctl", "print", f"gui/{os.getuid()}/com.nexus.service"],
+                capture_output=True, text=True, timeout=10, env=env, check=False,
+            )
+            if r.returncode != 0:
+                state["launchd"] = "absent"
+            else:
+                state["launchd"] = "loaded"
+                for line in r.stdout.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("state = "):
+                        state["launchd:state"] = stripped[len("state = "):]
+                        break
+        except (OSError, subprocess.SubprocessError):
+            state["launchd"] = "unavailable"
+    return state
+
+
+def _diff_manager_state(
+    before: dict[str, str], after: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """``(changes, notes)``. A changed ``UnitFileState`` / ``FragmentPath`` /
+    loaded-or-not / launchd ``state`` is a CHANGE. A rising ``NRestarts`` is only
+    a NOTE: a unit that was already crash-looping when the session started (the
+    qwentescence unit, restarting every 5 s) keeps counting for reasons that are
+    not this session's, so failing the run on it would be wrong, but the
+    number is exactly what pointed at the hijacked unit and is worth printing."""
+    changes: list[str] = []
+    notes: list[str] = []
+    for key in sorted(before.keys() | after.keys()):
+        b, a = before.get(key), after.get(key)
+        if b == a:
+            continue
+        if key == "systemd:NRestarts":
+            notes.append(f"{key} {b} -> {a}")
+        else:
+            changes.append(f"{key} {b!r} -> {a!r}")
+    return changes, notes
+
 
 def _check_real_autostart_unit_mutations(session) -> None:
-    """Fail the run when the operator's real autostart unit changed during it.
+    """Fail the run when the operator's real autostart unit, or what the service
+    manager says about it, changed during it.
 
     Controller/serial only, for the reason ``_check_real_config_dir_mutations``
     documents at length: a worker's ``session.exitstatus`` mutation never
@@ -1497,12 +1628,28 @@ def _check_real_autostart_unit_mutations(session) -> None:
     change this file. A legitimate peer (the operator running ``nx daemon
     service install`` in another terminal mid-run) would also trip it; that is
     a rerun, and cheaper than a destroyed unit.
+
+    DETECTIVE ONLY, and blind to a run whose ``pytest_sessionfinish`` never
+    fires (execnet ``os._exit``, SIGKILL, a timeout): the preventive layers are
+    the fence and ``installer._run_manager``'s refusal / the suite tripwire.
     """
     if not _is_controller_or_serial:
         return
     changed = _diff_autostart_snapshots(
         _real_autostart_baseline, _snapshot_real_autostart_units(),
     )
+    state_changes, state_notes = _diff_manager_state(
+        _real_manager_baseline, _snapshot_manager_state(),
+    )
+    if state_notes:
+        print(
+            f"\n\nNOTE: nexus-q81g7 — the real nexus-service unit's manager "
+            f"state moved during the session: {', '.join(state_notes)}. A rising "
+            f"restart count on a unit that was already restarting is not this "
+            f"session's doing; one that was stable is.\n",
+            flush=True,
+        )
+    changed = changed + [f"MANAGER {c}" for c in state_changes]
     if not changed:
         return
     session.exitstatus = 1
@@ -1510,11 +1657,12 @@ def _check_real_autostart_unit_mutations(session) -> None:
         f"\n\nFAIL: nexus-q81g7 real autostart-unit guard caught "
         f"{len(changed)} change(s) to the operator's REAL service autostart "
         f"unit during the session: {', '.join(changed)}\n"
-        f"  A test reached the real ~/.config/systemd/user or "
-        f"~/Library/LaunchAgents instead of the fenced HOME "
-        f"(tests/_fence_home.py), or the operator changed the unit by hand "
-        f"mid-run. Inspect the unit and its pre-convergence backups before "
-        f"re-running: `nx daemon restart-stale` backs up and rewrites it.\n",
+        f"  A test reached the real ~/.config/systemd/user, "
+        f"~/Library/LaunchAgents or the user service manager instead of the "
+        f"fenced HOME (tests/_fence_home.py), or the operator changed the unit "
+        f"by hand mid-run. Inspect the unit and its pre-convergence backups "
+        f"before re-running: `nx daemon restart-stale` backs up and rewrites "
+        f"it.\n",
         flush=True,
     )
 

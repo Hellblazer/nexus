@@ -203,3 +203,150 @@ def test_a_test_that_patches_path_home_still_gets_its_own_home(
     monkeypatch.delenv("NX_REAL_CONFIG_DIR_FOR_GUARD_TEST", raising=False)
     with patch.object(Path, "home", return_value=tmp_path / "elsewhere"):
         assert conftest_mod._real_home_for_guard() == tmp_path / "elsewhere"
+
+
+# ── scope: legacy T2 units, the enable symlink, and the manager's own state ──
+
+
+def test_the_snapshot_covers_the_legacy_t2_units_and_the_enable_symlink(tmp_path: Path) -> None:
+    _write(tmp_path, ".config/systemd/user/nexus-t2.service", "[Service]\n")
+    _write(tmp_path, ".config/systemd/user/nexus-t2.service.d/x.conf", "[Service]\n")
+    _write(tmp_path, "Library/LaunchAgents/com.nexus.t2.plist", "<plist/>\n")
+    wants = tmp_path / ".config/systemd/user/default.target.wants"
+    wants.mkdir(parents=True)
+    unit = _write(tmp_path, ".config/systemd/user/nexus-service.service", "[Service]\n")
+    (wants / "nexus-service.service").symlink_to(unit)
+
+    with patch.object(Path, "home", return_value=tmp_path):
+        before = _snapshot_real_autostart_units()
+        assert {
+            ".config/systemd/user/nexus-t2.service",
+            ".config/systemd/user/nexus-t2.service.d/x.conf",
+            "Library/LaunchAgents/com.nexus.t2.plist",
+            ".config/systemd/user/default.target.wants/nexus-service.service",
+            ".config/systemd/user/nexus-service.service",
+        } <= set(before)
+        # `systemctl --user disable` removes the symlink and leaves the unit file:
+        (wants / "nexus-service.service").unlink()
+        after = _snapshot_real_autostart_units()
+    assert _diff_autostart_snapshots(before, after) == [
+        "REMOVED .config/systemd/user/default.target.wants/nexus-service.service",
+    ]
+
+
+def _shim_dir(tmp_path: Path, systemctl_body: str, launchctl_body: str, sub: str = "mgr-bin") -> Path:
+    d = tmp_path / sub
+    d.mkdir()
+    for name, body in (("systemctl", systemctl_body), ("launchctl", launchctl_body)):
+        p = d / name
+        p.write_text("#!/bin/sh\n" + body)
+        p.chmod(0o755)
+    return d
+
+
+def test_the_manager_probe_reads_state_and_tolerates_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.conftest as conftest_mod
+
+    monkeypatch.delenv("NX_NO_MANAGER_STATE_PROBE", raising=False)
+    monkeypatch.setattr(conftest_mod, "_real_manager_env", {})
+    shims = _shim_dir(
+        tmp_path,
+        'printf "NRestarts=3\\nUnitFileState=enabled\\nFragmentPath=/u/nexus-service.service\\nOther=x\\n"\n',
+        'printf "com.nexus.service = {\\n\\tstate = running\\n\\tpid = 9\\n}\\n"\n',
+    )
+    monkeypatch.setenv("PATH", f"{shims}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    assert conftest_mod._snapshot_manager_state() == {
+        "systemd:NRestarts": "3",
+        "systemd:UnitFileState": "enabled",
+        "systemd:FragmentPath": "/u/nexus-service.service",
+        "launchd": "loaded",
+        "launchd:state": "running",
+    }
+
+    # absent: no user bus / label not loaded. Not an error, a value.
+    absent = _shim_dir(
+        tmp_path, "echo 'Failed to connect to bus' >&2\nexit 1\n", "exit 113\n", sub="absent-bin",
+    )
+    monkeypatch.setenv("PATH", f"{absent}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    assert conftest_mod._snapshot_manager_state() == {
+        "systemd": "unavailable", "launchd": "absent",
+    }
+
+    monkeypatch.setenv("NX_NO_MANAGER_STATE_PROBE", "1")
+    assert conftest_mod._snapshot_manager_state() == {}
+
+
+def test_the_manager_probe_asks_the_real_bus_not_the_fenced_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fence replaces XDG_RUNTIME_DIR; the probe must use the value captured
+    before it, or it would read the fenced void and report 'unavailable' forever."""
+    import tests.conftest as conftest_mod
+
+    monkeypatch.delenv("NX_NO_MANAGER_STATE_PROBE", raising=False)
+    shims = _shim_dir(
+        tmp_path,
+        'echo "UnitFileState=$XDG_RUNTIME_DIR"\n',
+        "exit 113\n",
+    )
+    monkeypatch.setenv("PATH", f"{shims}{os.pathsep}/usr/bin{os.pathsep}/bin")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/fenced/void")
+    monkeypatch.setattr(conftest_mod, "_real_manager_env", {"XDG_RUNTIME_DIR": "/run/user/real"})
+    assert conftest_mod._snapshot_manager_state()["systemd:UnitFileState"] == "/run/user/real"
+
+
+def test_manager_diff_fails_on_state_change_and_only_notes_a_rising_restart_count() -> None:
+    import tests.conftest as conftest_mod
+
+    base = {"systemd:NRestarts": "3", "systemd:UnitFileState": "enabled", "launchd": "absent"}
+    assert conftest_mod._diff_manager_state(base, dict(base)) == ([], [])
+    changes, notes = conftest_mod._diff_manager_state(
+        base, {**base, "systemd:NRestarts": "9"},
+    )
+    assert changes == [] and notes == ["systemd:NRestarts 3 -> 9"]
+    changes, notes = conftest_mod._diff_manager_state(
+        base, {**base, "systemd:UnitFileState": "disabled", "launchd": "loaded"},
+    )
+    assert notes == []
+    assert changes == [
+        "launchd 'absent' -> 'loaded'",
+        "systemd:UnitFileState 'enabled' -> 'disabled'",
+    ]
+
+
+def test_a_manager_state_change_reddens_a_real_run(tmp_path: Path) -> None:
+    """End to end through the real conftest hooks: the unit FILE is untouched,
+    but the (shim) manager reports the unit disabled at session finish."""
+    home = tmp_path / "home"
+    (home / ".config" / "nexus").mkdir(parents=True)
+    _write(home, _UNIT, "[Service]\nExecStart=/real/nx\n")
+    counter = tmp_path / "calls"
+    shims = _shim_dir(
+        tmp_path,
+        f'n=$(cat "{counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{counter}"\n'
+        'if [ "$n" -le 1 ]; then echo "UnitFileState=enabled"; else echo "UnitFileState=disabled"; fi\n',
+        "exit 113\n",
+    )
+    plugin_dir = tmp_path / "probeplug"
+    plugin_dir.mkdir()
+    (plugin_dir / "nxprobe_mgr.py").write_text("")
+    env = dict(os.environ)
+    env["NX_REAL_CONFIG_DIR_FOR_GUARD_TEST"] = str(home)
+    env["NX_BUILD_LEASE_ROOT"] = str(tmp_path / "build-lease")
+    env.pop("NX_BUILD_LEASE_WAIT", None)
+    env.pop("NX_NO_MANAGER_STATE_PROBE", None)
+    env["PATH"] = f"{shims}{os.pathsep}{env['PATH']}"
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(plugin_dir), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", _INNER_TARGET, "-q", "-p", "nxprobe_mgr",
+         "--collect-only", "-p", "no:xdist"],
+        cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=120,
+    )
+    out = proc.stdout + proc.stderr
+    assert "FAIL: nexus-q81g7" in out, out[-3000:]
+    assert "MANAGER systemd:UnitFileState" in out, out[-3000:]
+    assert proc.returncode != 0, out[-3000:]
