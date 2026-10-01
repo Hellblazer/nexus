@@ -4168,7 +4168,7 @@ def _check_migration_state(
             )]
 
     # Query 1: total row count (also verifies the table exists).
-    total_sql = "SELECT COUNT(*) FROM databasechangelog;"
+    total_sql = "SELECT COUNT(*) FROM public.databasechangelog;"
     proc = _run_psql(
         psql_bin, host, port, dbname, user, password, total_sql,
         psql_runner=psql_runner,
@@ -4234,7 +4234,7 @@ def _check_migration_state(
         "SELECT COUNT(*) FILTER (WHERE exectype='FAILED'), "
         "COUNT(DISTINCT (id, author, filename)) "
         "FILTER (WHERE exectype NOT IN ('EXECUTED','FAILED')) "
-        "FROM databasechangelog;"
+        "FROM public.databasechangelog;"
     )
     proc2 = _run_psql(
         psql_bin, host, port, dbname, user, password, drift_sql,
@@ -4282,7 +4282,7 @@ def _check_migration_state(
                 "(mid-run failure, partial state)"
             ),
             fix_suggestions=[
-                "Inspect: psql -c \"SELECT id,exectype FROM databasechangelog "
+                "Inspect: psql -c \"SELECT id,exectype FROM public.databasechangelog "
                 "WHERE exectype='FAILED'\"",
                 "Re-run: nx init --service to recover",
             ],
@@ -4300,7 +4300,7 @@ def _check_migration_state(
     # A NULL checksum causes Liquibase validation to fail on next boot even
     # though the changeset row is present.
     null_md5_sql = (
-        "SELECT COUNT(*) FROM databasechangelog "
+        "SELECT COUNT(*) FROM public.databasechangelog "
         "WHERE exectype='EXECUTED' AND md5sum IS NULL;"
     )
     proc3 = _run_psql(
@@ -4338,7 +4338,7 @@ def _check_migration_state(
                 "NULL md5sum — Liquibase will fail validation on next service boot"
             ),
             fix_suggestions=[
-                "Inspect: psql -c \"SELECT id,md5sum FROM databasechangelog "
+                "Inspect: psql -c \"SELECT id,md5sum FROM public.databasechangelog "
                 "WHERE exectype='EXECUTED' AND md5sum IS NULL\"",
                 "Re-run: nx init --service to re-apply and restore checksums",
             ],

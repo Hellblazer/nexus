@@ -3,6 +3,7 @@ package dev.nexus.service;
 import org.jooq.Field;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
 import org.jooq.SQLDialect;
 import org.jooq.DSLContext;
 import dev.nexus.service.db.SchemaMigrator;
@@ -2084,28 +2085,16 @@ class SchemaMigratorIntegrationTest {
 
         PostgreSQLContainer<?> roleNamedPg = PgContainerHelper.startDedicated();
         try {
-            // Phase A: same minimal DBA-equivalent bootstrap as bootstrap() and
-            // the aged-box tests, for a role whose NAME is the variable under test.
-            try (Connection su = roleNamedPg.createConnection("")) {
-                su.setAutoCommit(true);
-                // SANCTIONED RAW: see bootstrap()'s own comment above -- same
-                // admin/svc role bootstrap class, no jOOQ typed-DSL form.
-                su.createStatement().execute(
-                    "CREATE ROLE \"" + role + "\" LOGIN PASSWORD '" + pass
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO \"" + role + "\"");
-                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO \"" + role + "\"");
-                su.createStatement().execute("GRANT pg_monitor TO \"" + role + "\" WITH ADMIN OPTION");
-                su.createStatement().execute(
-                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                bootstrapVectorExtensionsForFreshWalk(su, role);
-            }
+            // Phase A: the minimal DBA-equivalent bootstrap, for a role whose NAME is
+            // the variable under test.
+            bootstrapRole(roleNamedPg, role, pass);
 
-            // Each boot gets its OWN pool. Liquibase leaves the connection it
-            // borrowed with `SET search_path = public, "$user", public`, so a pool
-            // reused across the two walks would carry that into boot 2 and mask
-            // the bug; a real second boot is a new process with new connections.
+            // Each boot gets its OWN pool. Liquibase's DatabaseUtils.initializeDatabase
+            // (liquibase-core 4.29, PostgresDatabase branch) PREPENDS the default
+            // schema to the session search_path it finds, leaving a pooled
+            // connection on `public, "$user", public` (measured here). A pool reused
+            // across the two walks would carry that into boot 2 and mask the bug; a
+            // real second boot is a new process with new connections.
             java.util.function.Supplier<com.zaxxer.hikari.HikariDataSource> newBootPool = () -> {
                 var cfg = new com.zaxxer.hikari.HikariConfig();
                 cfg.setJdbcUrl(roleNamedPg.getJdbcUrl());
@@ -2147,6 +2136,157 @@ class SchemaMigratorIntegrationTest {
             }
         } finally {
             try { roleNamedPg.stop(); } catch (Exception ignored) { }
+        }
+    }
+
+    // ── Test 12b: nexus-q81g7 review — session pin, split-history refusal ─────
+    //
+    // The two setters pin where Liquibase keeps its OWN bookkeeping. Two cases
+    // remain: a database whose history ALREADY lives in a non-public schema (a
+    // role named for a schema that pre-existed boot 1, e.g. the cloud DBA step
+    // that relocates the extensions into nexus), which the pin would otherwise
+    // read as "empty" and replan from changeset one; and the session search_path,
+    // which "$user", public leaves resolving unqualified names to a role-named
+    // schema from boot 2 on.
+
+    /**
+     * The minimal DBA-equivalent bootstrap (migrating role + nexus_svc + the
+     * vector/pg_trgm relocation helper) for a dedicated container, as ONE
+     * simple-protocol multi-statement call: the same statements the aged-box tests
+     * each spell out, kept as a single raw site so this file's raw-SQL ceiling
+     * (RawSqlGateTest) moves down, not up. The role name is quoted because it is
+     * the variable under test (nexus, t1, staging).
+     */
+    private static void bootstrapRole(PostgreSQLContainer<?> c, String role, String pass)
+            throws Exception {
+        try (Connection su = c.createConnection("")) {
+            su.setAutoCommit(true);
+            // SANCTIONED RAW: see bootstrap()'s own comment above -- the same
+            // admin/svc role bootstrap class, no jOOQ typed-DSL form.
+            su.createStatement().execute(
+                "CREATE ROLE \"" + role + "\" LOGIN PASSWORD '" + pass
+                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE; "
+                    + "GRANT CREATE ON DATABASE postgres TO \"" + role + "\"; "
+                    + "GRANT CREATE ON SCHEMA public TO \"" + role + "\"; "
+                    + "GRANT pg_monitor TO \"" + role + "\" WITH ADMIN OPTION; "
+                    + "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
+                    + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
+            bootstrapVectorExtensionsForFreshWalk(su, role);
+        }
+    }
+
+    private PostgreSQLContainer<?> startRoleContainer(String role, String pass) throws Exception {
+        PostgreSQLContainer<?> c = PgContainerHelper.startDedicated();
+        try {
+            bootstrapRole(c, role, pass);
+        } catch (Exception e) {
+            c.stop();
+            throw e;
+        }
+        return c;
+    }
+
+    private com.zaxxer.hikari.HikariDataSource roleDataSource(
+            PostgreSQLContainer<?> c, String role, String pass, int poolSize) {
+        var cfg = new com.zaxxer.hikari.HikariConfig();
+        cfg.setJdbcUrl(c.getJdbcUrl());
+        cfg.setUsername(role);
+        cfg.setPassword(pass);
+        cfg.setMaximumPoolSize(poolSize);
+        cfg.setPoolName("nexus-q81g7-" + role);
+        return new com.zaxxer.hikari.HikariDataSource(cfg);
+    }
+
+    /**
+     * The migration connection's session {@code search_path} is {@code public}
+     * when the walk is over: the pin is a {@code set_config} on the connection,
+     * not a property of the role. A single-connection pool hands the SAME
+     * connection back, so the setting is observable.
+     */
+    @Test
+    @Order(12)
+    void migrate_pinsTheSessionSearchPathToPublic() throws Exception {
+        final String role = "nexus_admin_q81g7_sp";
+        final String pass = role + "_pass";
+        PostgreSQLContainer<?> c = startRoleContainer(role, pass);
+        try (var ds = roleDataSource(c, role, pass, 1)) {
+            SchemaMigrator.migrate(ds);
+            try (Connection conn = ds.getConnection()) {
+                String sp = DSL.using(conn, SQLDialect.POSTGRES)
+                    .select(DSL.function("current_setting", SQLDataType.VARCHAR,
+                        DSL.val("search_path")))
+                    .fetchOne(0, String.class);
+                assertThat(sp).as("session search_path after the walk").isEqualTo("public");
+            }
+        } finally {
+            try { c.stop(); } catch (Exception ignored) { }
+        }
+    }
+
+    /**
+     * A database whose DATABASECHANGELOG lives in a non-public schema, with
+     * public holding none, is refused BEFORE any changeset runs, naming the
+     * one-line remedy. Without the refusal the pin reads an empty public
+     * history, replans all of it and dies on the first non-idempotent changeset
+     * after the preflight and every runAlways side effect have already run.
+     */
+    @Test
+    @Order(12)
+    void splitHistory_isRefusedBeforeTheWalk_namingTheAlterTableRemedy() throws Exception {
+        final String role = "nexus_admin_q81g7_split";
+        final String pass = role + "_pass";
+        PostgreSQLContainer<?> c = startRoleContainer(role, pass);
+        try {
+            try (var ds = roleDataSource(c, role, pass, 2)) {
+                SchemaMigrator.migrate(ds);
+                try (Connection conn = ds.getConnection()) {
+                    // SANCTIONED RAW: reproduces the split a role named for a
+                    // schema produced in the field; a one-off relocation of
+                    // Liquibase's own table has no typed jOOQ form.
+                    conn.createStatement().execute(
+                        "ALTER TABLE public.databasechangelog SET SCHEMA nexus");
+                }
+            }
+            try (var ds = roleDataSource(c, role, pass, 2)) {
+                assertThatThrownBy(() -> SchemaMigrator.migrate(ds))
+                    .isInstanceOf(MigrationException.class)
+                    .hasMessageContaining("ALTER TABLE nexus.databasechangelog SET SCHEMA public");
+                try (Connection conn = ds.getConnection()) {
+                    assertThat(tablesInSchema(conn, "public"))
+                        .as("the refusal fires before Liquibase creates a second, empty history")
+                        .doesNotContain("databasechangelog");
+                }
+            }
+        } finally {
+            try { c.stop(); } catch (Exception ignored) { }
+        }
+    }
+
+    /**
+     * The control: a STRAY, empty {@code <schema>.databasechangelog} (left by a
+     * failed boot 2 of the original bug) next to a full public history is not a
+     * split. The boot proceeds and lands nothing new.
+     */
+    @Test
+    @Order(12)
+    void strayEmptyHistoryInASchema_nextToAFullPublicHistory_doesNotRefuse() throws Exception {
+        final String role = "nexus_admin_q81g7_stray";
+        final String pass = role + "_pass";
+        PostgreSQLContainer<?> c = startRoleContainer(role, pass);
+        try (var ds = roleDataSource(c, role, pass, 2)) {
+            SchemaMigrator.migrate(ds);
+            try (Connection conn = ds.getConnection()) {
+                // The stray a failed boot 2 leaves: an empty table of that name in the
+                // role's own schema. Only its row count matters to the check.
+                DSL.using(conn, SQLDialect.POSTGRES)
+                    .createTable(DSL.name("nexus", "databasechangelog"))
+                    .column("id", SQLDataType.VARCHAR(255))
+                    .execute();
+            }
+            SchemaMigrator.MigrationOutcome again = SchemaMigrator.migrate(ds);
+            assertThat(again.newChangesets()).isZero();
+        } finally {
+            try { c.stop(); } catch (Exception ignored) { }
         }
     }
 
@@ -2217,22 +2357,9 @@ class SchemaMigratorIntegrationTest {
             final String role = "nexus_admin_jl08t_test";
             final String pass = "nexus_admin_jl08t_test_pass";
 
-            // Phase A: same minimal DBA-equivalent bootstrap as the o8dil29 test.
-            try (Connection su = agedPg.createConnection("")) {
-                su.setAutoCommit(true);
-                // SANCTIONED RAW: see bootstrap()'s own comment above -- same
-                // admin/svc role bootstrap class, no jOOQ typed-DSL form.
-                su.createStatement().execute(
-                    "CREATE ROLE " + role + " LOGIN PASSWORD '" + pass
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE");
-                su.createStatement().execute("GRANT CREATE ON DATABASE postgres TO " + role);
-                su.createStatement().execute("GRANT CREATE ON SCHEMA public TO " + role);
-                su.createStatement().execute("GRANT pg_monitor TO " + role + " WITH ADMIN OPTION");
-                su.createStatement().execute(
-                    "CREATE ROLE " + SVC_ROLE + " LOGIN PASSWORD '" + SVC_PASS
-                        + "' NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS");
-                bootstrapVectorExtensionsForFreshWalk(su, role);
-            }
+            // Phase A: the minimal DBA-equivalent bootstrap (bootstrapRole), same
+            // statements this block used to spell out.
+            bootstrapRole(agedPg, role, pass);
 
             var cfg = new com.zaxxer.hikari.HikariConfig();
             cfg.setJdbcUrl(agedPg.getJdbcUrl());

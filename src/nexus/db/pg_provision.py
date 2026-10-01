@@ -1714,7 +1714,10 @@ def _create_roles(
                   Has CREATE ON DATABASE nexus (allows creating new schemas).
                   Has CREATE ON SCHEMA public (required for Liquibase: its
                   DATABASECHANGELOG / DATABASECHANGELOGLOCK tables land in
-                  the public schema by default; on PG 15/16 the PUBLIC role
+                  the public schema (the engine pins them there:
+                  SchemaMigrator.migrate, nexus-q81g7; before that they
+                  followed the role's search_path and only landed in public
+                  because no schema is named nexus_admin); on PG 15/16 the PUBLIC role
                   no longer holds CREATE on public, so nexus_admin needs it
                   explicitly — as validated by SchemaMigratorIntegrationTest).
                   Also holds pg_monitor WITH ADMIN OPTION (nexus-hzhgl,
