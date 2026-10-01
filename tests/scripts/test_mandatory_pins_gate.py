@@ -160,11 +160,16 @@ def fake_uv(tmp_path: Path):
         esac
         for a in "$@"; do case "$a" in --junit-xml=*) cp "$FAKE_JUNIT" "${a#--junit-xml=}" ;; esac; done
         echo "$*" >> "$FAKE_LOG"
+        echo "TOKEN=${GITHUB_TOKEN:-}" >> "$FAKE_LOG"
         exit "${FAKE_RC:-0}"
         """))
     uv.chmod(0o755)
+    gh = bindir / "gh"  # a fake gh whose login lives only in the REAL home: `gh auth token` answers rc 0 / a token
+    gh.write_text('#!/bin/bash\n[ "$1 $2" = "auth token" ] || exit 1\n[ -z "${FAKE_GH_FAIL:-}" ] || exit 1\necho fake-gh-login-token\n')
+    gh.chmod(0o755)
 
-    def run(junit: str, *, collected: int = 4, rc: int = 0, budget: str | None = None) -> subprocess.CompletedProcess[str]:
+    def run(junit: str, *, collected: int = 4, rc: int = 0, budget: str | None = None,
+            extra_env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
         (tmp_path / "pins.xml").write_text(junit)
         env = {
             "PATH": f"{bindir}:{os.environ['PATH']}", "HOME": str(tmp_path), "TMPDIR": str(tmp_path),
@@ -173,6 +178,7 @@ def fake_uv(tmp_path: Path):
         }
         if budget is not None:
             env["NX_MANDATORY_PIN_SKIP_BUDGET"] = budget
+        env.update(extra_env or {})
         return subprocess.run(["bash", str(GATE)], capture_output=True, text=True, timeout=120, env=env, cwd=tmp_path)
 
     run.log = tmp_path / "uv.log"  # type: ignore[attr-defined]
@@ -183,6 +189,25 @@ def test_the_pins_gate_passes_when_every_pin_ran(fake_uv) -> None:
     r = fake_uv(_junit(ran=4))
     assert r.returncode == 0 and r.stdout.rstrip().endswith("MANDATORY PINS GATE PASSED"), (r.stdout, r.stderr)
     assert "integration and mandatory_regression_pin" in fake_uv.log.read_text()
+
+
+def test_the_pins_gate_hands_pytest_the_token_it_resolves_in_the_real_home(fake_uv) -> None:
+    """The suite's throwaway HOME hides a file-backed gh login from `gh auth token` inside pytest (measured
+    on hellmini 2026-10-01: 3 of 4 pins skipped, gate FAILED). The gate runs in the real HOME, so it
+    resolves the token there and exports it. An operator's or CI's own token wins, GH_TOKEN counts, and a
+    gh that has no login leaves it unset (the pins then skip and the budget reds the gate). Mutation (drop
+    the export): the TOKEN line in the fake uv's log is empty."""
+    def token(**kw) -> str:
+        assert fake_uv(_junit(ran=4), **kw).returncode == 0
+        return re.search(r"^TOKEN=(.*)$", fake_uv.log.read_text(), re.M).group(1)  # type: ignore[union-attr]
+
+    assert token() == "fake-gh-login-token"
+    fake_uv.log.unlink()
+    assert token(extra_env={"GITHUB_TOKEN": "job-token"}) == "job-token"
+    fake_uv.log.unlink()
+    assert token(extra_env={"GH_TOKEN": "operator-token"}) == "operator-token"
+    fake_uv.log.unlink()
+    assert token(extra_env={"FAKE_GH_FAIL": "1"}) == ""
 
 
 def test_the_pins_gate_runs_at_a_zero_budget_unless_told_otherwise(fake_uv) -> None:

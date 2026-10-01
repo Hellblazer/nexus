@@ -34,6 +34,20 @@ export NX_MANDATORY_PIN_SKIP_BUDGET="$BUDGET"
 
 fail() { echo "[pins] $*" >&2; echo "MANDATORY PINS GATE FAILED"; exit 1; }
 
+# The suite runs every test under a throwaway HOME (tests/conftest.py), so a `gh` login that lives in
+# the real HOME's config (hosts.yml: hellmini) is invisible to `gh auth token` inside pytest and every
+# pin skips. This script runs in the real HOME, so it resolves the login here and hands the token to
+# pytest through the environment variable the pins read first. It never prints it, and an operator or
+# CI token already in the environment wins.
+if [ -z "${GITHUB_TOKEN:-}" ]; then
+  if [ -n "${GH_TOKEN:-}" ]; then
+    GITHUB_TOKEN="$GH_TOKEN"
+  elif command -v gh >/dev/null 2>&1; then
+    GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
+  fi
+  [ -z "${GITHUB_TOKEN:-}" ] || export GITHUB_TOKEN
+fi
+
 # These tests drive `gh` and `git`, not the engine; the substrate would only take the machine
 # suite lease for nothing (the lsg collect counts do the same).
 export NX_TEST_T2_SUBSTRATE=none
