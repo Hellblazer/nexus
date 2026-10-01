@@ -625,9 +625,11 @@ class OwnerlessWriteRefusalTest {
             try {
                 Connection holder = pg.createConnection("");
                 holder.setAutoCommit(false);
-                try (var st = holder.createStatement()) {
-                    st.execute("select pg_advisory_xact_lock(hashtext('sweepgate:" + TENANT + "/" + COLLECTION_GATE + "'))");
-                }
+                // The same key CatalogRepository.acquireSweepGateExclusive takes (typed DSL, RawSqlGateTest).
+                DSL.using(holder, SQLDialect.POSTGRES)
+                    .select(DSL.function("pg_advisory_xact_lock", Object.class,
+                        DSL.function("hashtext", Integer.class, DSL.val("sweepgate:" + TENANT + "/" + COLLECTION_GATE))))
+                    .fetch();
                 Thread t = new Thread(() -> {
                     try {
                         Thread.sleep(holdMs);
