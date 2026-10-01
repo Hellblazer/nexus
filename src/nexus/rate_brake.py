@@ -109,6 +109,17 @@ _WAKE_JITTER_FRACTION: float = 0.2
 _RETRY_AFTER_CLAMP_MAX: float = 300.0
 
 
+def _late_monotonic() -> float:
+    """``time.monotonic``, looked up when called (nexus-q81g7), so a test that
+    patches the ``time`` module is seen by every default brake."""
+    return time.monotonic()
+
+
+def _late_sleep(seconds: float) -> None:
+    """``time.sleep``, looked up when called; see :func:`_late_monotonic`."""
+    time.sleep(seconds)
+
+
 class RateLimitBrake:
     """A process-wide shared pause point. Thread-safe.
 
@@ -134,8 +145,10 @@ class RateLimitBrake:
         max_delay_seconds: float = _MAX_DELAY_SECONDS,
         escalation_window_seconds: float = _ESCALATION_WINDOW_SECONDS,
     ) -> None:
-        self._clock = clock
-        self._sleep = sleep
+        # Never None: tests (and tools) read ``brake._clock()`` directly. The late
+        # wrappers look ``time.monotonic`` / ``time.sleep`` up when CALLED.
+        self._clock: Callable[[], float] = clock if clock is not None else _late_monotonic
+        self._sleep: Callable[[float], None] = sleep if sleep is not None else _late_sleep
         self._jitter = jitter
         self._wait_slice_seconds = wait_slice_seconds
         self._base_delay_seconds = base_delay_seconds
@@ -218,10 +231,10 @@ class RateLimitBrake:
         return delay
 
     def _now(self) -> float:
-        return (self._clock if self._clock is not None else time.monotonic)()
+        return self._clock()
 
     def _pause(self, seconds: float) -> None:
-        (self._sleep if self._sleep is not None else time.sleep)(seconds)
+        self._sleep(seconds)
 
     def release(self) -> None:
         """Call on a successful attempt: resets the escalation counter so
