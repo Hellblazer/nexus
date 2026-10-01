@@ -324,7 +324,7 @@ exact window before a client release ships the fix) is not a tag-cut
 blocker — acknowledge it explicitly and by name:
 
 ```bash
-NX_EXPECTED_CLIENT_LAG=<the bead the script's EXPECTED_LAG_BEAD names> tests/e2e/published-client-write-gate.sh
+NX_EXPECTED_CLIENT_LAG="$EXPECTED_LAG_BEAD" tests/e2e/published-client-write-gate.sh   # the bead named in the script header
 ```
 
 Exits 2 (`PUBLISHED-CLIENT WRITE GATE EXPECTED-INCOMPATIBLE`) — a named,
@@ -535,18 +535,7 @@ both directions). Say the deploy is theirs; do not say it is happening:
 
 > **Before the relay, when this tag carries a changeset: ask conexus to run the PITR-fork walk rehearsal.** conexus can restore a Crunchy fork of production to a point in time (~6 min, `deploy/RESTORE.md`) and replay the Liquibase walk against the real row set before it runs live. That is the pre-deploy gate for a schema-carrying tag, and it is the one this skill used to omit. It caught `v0.1.78`'s zero-grant `nexus_diag` regression. The walk is CUMULATIVE — it replays everything the target cluster is behind on — so confirm the cloud's live `release_version` from the engine and size the walk from THAT, not from how many changesets you added.
 >
-> **Assertions the fork walk must carry (nexus-k9fs1, from the nexus-q81g7 schema pin).** The engine pins Liquibase's history to `public` and the migration session's `search_path`; the failing property (a second walk that replans everything) exists only on a database that has already been walked once, so only the fork shows it. Hand conexus these three commands, which need `psql` access to the fork (libpq environment, nothing on argv) and the engine log of each boot. The migration role is the engine's own `NX_DB_ADMIN_USER`, read from the engine's environment, never from records:
->
-> ```bash
-> # before the walk, after walk 1, after walk 2 (pass --expect-rows <count after walk 1> on the last)
-> uv run python scripts/check_pitr_fork_walk.py schema --migration-role "$NX_DB_ADMIN_USER"
-> # on walk 1's engine log: the count identity, no anomaly event, the session line present
-> uv run python scripts/check_pitr_fork_walk.py walk --engine-log walk1.log --migration-role "$NX_DB_ADMIN_USER"
-> # on walk 2's engine log, from a SECOND boot of the same engine on the fork: nothing applies
-> uv run python scripts/check_pitr_fork_walk.py walk --engine-log walk2.log --migration-role "$NX_DB_ADMIN_USER" --noop
-> ```
->
-> `schema` asserts exactly one `databasechangelog` and one `databasechangeloglock`, both in `public`, the lock not held, the role named `nexus`, `t1` or `staging` (or any existing schema) refused, and prints the `pg_db_role_setting` rows. `walk` asserts `new + reexecuted + mark_ran == pending_at_start`, no `schema_migration_count_anomaly`, and that `schema_migration_session` was logged, which a pre-fix engine cannot do. `--noop` asserts `new_changesets` 0 and `reexecuted_changesets` equal to the `runAlways` count (12 when this was written; `--expect-reexecuted N` if the changelog has grown). Exit 2 is "evidence unreadable", never a pass. `tests/e2e/two-walk-check.sh` runs the same assertions against a throwaway local engine across two boots; run it before the relay so the checker is known good.
+> **Assertions the fork walk must carry (nexus-k9fs1, from the nexus-q81g7 schema pin).** The engine pins Liquibase's history to `public` and the migration session's `search_path`. The failing property (a second walk that replans everything) exists only on a database that has already been walked once, so only the fork shows it. Hand conexus the three commands in Step 6a, run before the walk, after walk 1 and after a SECOND boot of the same engine on the fork. `tests/e2e/two-walk-check.sh` runs the same assertions against a throwaway local engine across two boots; run it before the relay so the checker is known good.
 >
 > **Cutover posture for the ownerless-write refusal (nexus-20onx).** Tell conexus the first deploy runs `NX_OWNERLESS_WRITE_MODE` unset or `log-only` (never `enforce`), that the flip is a Terraform parameter plus a same-tag redeploy, and where the soak is read; the full order of operations, including the restart step, is `docs/operations/ownerless-write-cutover.md`. Include the doc in the relay.
 >
@@ -563,6 +552,21 @@ both directions). Say the deploy is theirs; do not say it is happening:
 **nexus-1emxn refinement — prefer deploying BEFORE the client tag when the ledger allows it.** When every wire-ledger `## Unshipped` entry carries the `[additive]` direction-safety token (old client + new engine safe), `check_client_release_precondition.py` accepts the unpaired deploy by name — surface the relay and get the engine LIVE ahead of the client tag, so the tag can never open a refusal window (the v7.23.0 window sat open 48+ minutes because "fires at tag push" was an unsent human relay). When any entry is not additive, the client release's Step 9 refuses to tag until this relay is ARMED with conexus (image built, redeploy staged on the named tag trigger) and confirmed.
 
 The post-deploy `--with-cloud` rehearsal (`run.sh --with-cloud`, the cloud → cloud Voyage journey) requires the candidate to be **deployed on conexus** first — it runs as part of this cloud-gate, once the deploy lands, not in Step 5. For cross-repo gate / deploy status, **read the authoritative bead + the conexus bus, not memory** — cross-repo state goes stale fast (2026-06-26: a `luxe6` condition had been cleared a week earlier than memory implied).
+
+### 6a. PITR-fork walk assertions, handed to conexus (nexus-k9fs1)
+
+These run against the restored fork and the engine log of each boot. They need `psql` access to the fork (libpq environment variables, nothing on argv). The migration role is the engine's own `NX_DB_ADMIN_USER`, read from the engine's environment, never from records.
+
+```bash
+# before the walk, after walk 1, after walk 2 (add --expect-rows N on the last, N = the row count after walk 1)
+uv run python scripts/check_pitr_fork_walk.py schema --migration-role "$NX_DB_ADMIN_USER"
+# on the engine log of walk 1: the count identity, no anomaly event, the session line present
+uv run python scripts/check_pitr_fork_walk.py walk --engine-log walk1.log --migration-role "$NX_DB_ADMIN_USER"
+# on the engine log of walk 2, a SECOND boot of the same engine on the fork: nothing applies
+uv run python scripts/check_pitr_fork_walk.py walk --engine-log walk2.log --migration-role "$NX_DB_ADMIN_USER" --noop
+```
+
+`schema` asserts exactly one `databasechangelog` and one `databasechangeloglock`, both in `public`, the lock not held, the role named `nexus`, `t1` or `staging` (or any existing schema) refused, and prints the `pg_db_role_setting` rows. `walk` asserts `new + reexecuted + mark_ran == pending_at_start`, no `schema_migration_count_anomaly`, and that `schema_migration_session` was logged, which a pre-fix engine cannot do. `--noop` asserts `new_changesets` 0 and `reexecuted_changesets` equal to the `runAlways` count (12 on develop on 2026-10-01, measured by `two-walk-check.sh`; pass `--expect-reexecuted N` if the changelog has grown). Exit 2 is "evidence unreadable", never a pass. `tests/e2e/two-walk-check.sh` runs the same assertions against a throwaway local engine across two boots; run it before the relay so the checker is known good.
 
 ### 6.1. Post-deploy client-visibility gate (MANDATORY, run from a cloud-mode box)
 

@@ -65,7 +65,7 @@ run_case() {
   local out rc
   out="$(bash "$TMP/case.sh" 2>&1)"
   rc=$?
-  if [ "$rc" = "$want_rc" ] && { [ "$want_text" = "-" ] || printf '%s' "$out" | grep -qF -- "$want_text"; }; then
+  if [ "$rc" = "$want_rc" ] && { [ "$want_text" = "-" ] || [[ "$out" == *"$want_text"* ]]; }; then
     PASS=$((PASS + 1))
     echo "[ok]   $label"
   else
