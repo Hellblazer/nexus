@@ -351,6 +351,7 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     # row to write a chunk with (RDR-223, nexus-z0o2p.20), so it is counted
     # as a drop and nothing is written.
     from nexus.oversize_write import (  # noqa: PLC0415 — deferred: rare oversize path
+        complete_oversize_write,
         refuse_identity_less_file,
         use_writer,
         write_oversize_file,
@@ -359,13 +360,15 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
     if refuse_identity_less_file(ctx.db, catalog_doc_id, file_path, ctx.corpus, len(ids)):
         return 0
     _via_writer = use_writer(ctx.db, ctx.batcher, catalog_doc_id)
+    # The completion stamp is sent after the hooks below (RDR-223, nexus-z0o2p.34).
+    _pending = None
     if _via_writer:
 
         with _stage("upload"):
-            write_oversize_file(
+            _pending = write_oversize_file(
                 catalog_doc_id=catalog_doc_id, content_hash=content_hash, collection=ctx.corpus,
                 ids=ids, documents=documents, metadatas=metadatas,
-                force_re_embed=ctx.force_re_embed,
+                force_re_embed=ctx.force_re_embed, defer_completion=True,
             )
     else:
         # nexus-w94eo: the engine merges metadata, so a writer-owned key this full
@@ -396,36 +399,45 @@ def index_prose_file(ctx: IndexContext, file_path: Path) -> int:
                     _fence_fail(catalog_doc_id, str(upload_exc))
                 raise
 
-    with _stage("hooks"):
-        # Post-store hook chains (RDR-095). Both single-doc and batch
-        # chains fire from every storage event; the per-doc loop covers
-        # single-shape consumers on CLI ingest. Own stage bucket
-        # (nexus-cfc72): under concurrent indexing these serialize on
-        # LockedHookRegistry, and lock-wait must not read as upload time.
-        # nexus-vw594 F1: on the old upsert path the upload above is
-        # file-atomic — manifest_complete rides this existing call through
-        # manifest_write_batch_hook's write_manifest_many completion stamp,
-        # no extra round trip. On the writer path the manifest is already
-        # written and stamped, so the manifest hook is excluded (a second
-        # write would double-count the sweep accounting) and no completion
-        # claim rides along.
-        _chain: dict = {"manifest_complete": {catalog_doc_id: content_hash} if catalog_doc_id else None}
-        if _via_writer:
-            from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
-            _chain = {"skip_hooks": {manifest_write_batch_hook}}
-        ctx.hooks.fire_batch(
-            ids, ctx.corpus, documents, embeddings, metadatas,
-            catalog_doc_id=catalog_doc_id, **_chain,
-        )
-        for _did, _doc in zip(ids, documents):
-            ctx.hooks.fire_single(_did, ctx.corpus, _doc)
-        # RDR-089 document-grain chain — once per prose-file boundary.
-        # content="" (chunk-level scope only); hook reads source_path.
-        # nexus-tdgc: forward catalog doc_id when available.
-        ctx.hooks.fire_document(
-            str(file_path), ctx.corpus, "",
-            doc_id=catalog_doc_id,
-        )
+    try:
+        with _stage("hooks"):
+            # Post-store hook chains (RDR-095). Both single-doc and batch
+            # chains fire from every storage event; the per-doc loop covers
+            # single-shape consumers on CLI ingest. Own stage bucket
+            # (nexus-cfc72): under concurrent indexing these serialize on
+            # LockedHookRegistry, and lock-wait must not read as upload time.
+            # nexus-vw594 F1: on the old upsert path the upload above is
+            # file-atomic — manifest_complete rides this existing call through
+            # manifest_write_batch_hook's write_manifest_many completion stamp,
+            # no extra round trip. On the writer path the manifest is already
+            # written, so the manifest hook is excluded (a second write would
+            # double-count the sweep accounting) and no completion claim rides
+            # along; the stamp follows the hooks.
+            _chain: dict = {"manifest_complete": {catalog_doc_id: content_hash} if catalog_doc_id else None}
+            if _via_writer:
+                from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
+                _chain = {"skip_hooks": {manifest_write_batch_hook}}
+            ctx.hooks.fire_batch(
+                ids, ctx.corpus, documents, embeddings, metadatas,
+                catalog_doc_id=catalog_doc_id, **_chain,
+            )
+            for _did, _doc in zip(ids, documents):
+                ctx.hooks.fire_single(_did, ctx.corpus, _doc)
+            # RDR-089 document-grain chain — once per prose-file boundary.
+            # content="" (chunk-level scope only); hook reads source_path.
+            # nexus-tdgc: forward catalog doc_id when available.
+            ctx.hooks.fire_document(
+                str(file_path), ctx.corpus, "",
+                doc_id=catalog_doc_id,
+            )
+        # The stamp, LAST: a kill in a hook above leaves the fence 'indexing', so the next run
+        # redoes the file and fires its hooks again.
+        if _pending is not None:
+            with _stage("upload"):
+                complete_oversize_write(_pending)
+    finally:
+        if _pending is not None:
+            _pending.close()
 
     return len(ids)
 

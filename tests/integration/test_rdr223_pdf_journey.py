@@ -1041,9 +1041,10 @@ def test_a_failed_pdf_write_does_not_heal_the_manifest_from_stored_chunks(
 ) -> None:
     """``_fence_fail`` used to rebuild a failed run's manifest from the chunks it stored
     (``_heal_failed_document``, for paths that wrote chunks BEFORE their owner rows). The PDF
-    writer's manifest is the record and every chunk it sent is owned, so the rebuild has nothing to
+    writer's manifest is the record and every chunk it sent is owned, so the rebuild had nothing to
     do and, on a failed re-index, would replace the manifest with a fragment found by the OLD
-    content hash. It is not run."""
+    content hash. It is retired (nexus-z0o2p.35); this pins that nothing rebuilds a manifest."""
+    import nexus.catalog.manifest_heal as mh
     import nexus.doc_indexer as di
 
     marker = f"noheal-{label}"
@@ -1051,7 +1052,8 @@ def test_a_failed_pdf_write_does_not_heal_the_manifest_from_stored_chunks(
     fake_pdf(lines)
     path = _write_pdf(tmp_path, marker)
     healed: list[str] = []
-    monkeypatch.setattr(di, "_heal_failed_document", lambda doc_id: healed.append(doc_id))
+    assert not hasattr(di, "_heal_failed_document")
+    monkeypatch.setattr(mh, "heal_manifest_gaps", lambda *a, **k: healed.append(a))
 
     with _traffic(die_after=1, error=RuntimeError):
         with pytest.raises(RuntimeError, match="died before write request 2"):
@@ -1359,5 +1361,45 @@ def test_a_kill_in_a_post_store_hook_leaves_the_document_indexing_and_the_rerun_
     with _traffic():
         _index(path, marker, streaming=streaming, hooks=hooks)
     assert fired == ["document", "document"], "the rerun fired the hook again"
+    assert _index_state(doc) == "complete"
+    assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
+
+
+def test_a_kill_in_the_small_pdfs_catalog_enrichment_leaves_the_document_indexing_and_the_rerun_redoes_it(
+    tmp_path, fake_pdf, monkeypatch,
+) -> None:
+    """nexus-z0o2p.34: the small PDF's catalog enrichment (title, author, year, chunk count) ran AFTER
+    the stamp, so a process killed there left a complete document with a stem title that the next
+    run skipped as fresh. It now runs ahead of the stamp: a kill in it leaves the fence ``indexing``
+    with every chunk landed, and the rerun redoes the document and its enrichment."""
+    import nexus.pipeline_stages as stages
+
+    marker = "enrichkill-small"
+    lines = _lines(marker, 12)
+    fake_pdf(lines)
+    path = _write_pdf(tmp_path, marker)
+    every = [_sha(x) for x in lines]
+    calls: list[str] = []
+    killed = {"armed": True}
+    real = stages._catalog_pdf_hook
+
+    def _enrich(*a, **kw):
+        calls.append("enrich")
+        if killed["armed"]:
+            raise ClientDied("killed in the catalog enrichment")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(stages, "_catalog_pdf_hook", _enrich)
+
+    with pytest.raises(ClientDied):
+        _index(path, marker, streaming="never")
+    doc, _ = _register(path, marker)
+    assert calls == ["enrich"], "non-vacuity: the kill landed in the enrichment"
+    assert _index_state(doc) == "indexing", "the stamp had not been sent"
+    assert _present(_COLLECTION, every) == set(every), "every chunk had landed"
+
+    killed["armed"] = False
+    _index(path, marker, streaming="never")
+    assert calls == ["enrich", "enrich"], "the rerun redid the enrichment"
     assert _index_state(doc) == "complete"
     assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]

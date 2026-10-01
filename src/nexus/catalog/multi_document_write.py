@@ -50,6 +50,17 @@ referenced by a row of that request, so a request that fails writes no chunk wit
 engine nevertheless embeds (``embed_embedded`` above zero) the supplied vectors were ignored and the
 import raises: the byte-identical property is lost.
 
+``defer_completion=True`` (RDR-223 decision of 2026-09-30, nexus-z0o2p.34: the stamp comes after the
+post-store hooks on every writer path) runs everything above EXCEPT the completion stamp. A
+document's last request lands with its sweep and no ``complete``, the page result lists it in
+:attr:`PageWriteResult.landed`, and the caller fires its hooks for the page and then calls
+:meth:`MultiDocumentImportWriter.complete_documents` for them: one stamp-only ``append_many`` (an
+empty row list per document, ``complete`` carrying the content hash and the manifest ROW count that
+the engine verifies in the document's own transaction) for up to
+:data:`~nexus.catalog.http_catalog_client.MANIFEST_APPEND_MANY_MAX_DOCS` documents. A process killed
+in a hook leaves its document ``indexing`` with every row owned, and the next run of the same file
+resumes it and fires the hooks again. The cost is one extra request per page that finishes a document.
+
 A refused stamp (``complete_refused``) leaves ``index_state`` as ``begin`` left it, ``indexing``, and
 is recorded for the record-level summary as the single-document writer does; it is not turned into
 ``failed``. A document the engine fails in place is marked failed, gets no further rows, and is
@@ -97,6 +108,9 @@ class PageWriteResult:
     written: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     finished: list[str] = field(default_factory=list)
+    #: With ``defer_completion``: the documents whose last request landed in this page and whose
+    #: stamp has not been sent (the caller sends it with ``complete_documents`` after its hooks).
+    landed: list[str] = field(default_factory=list)
     chunks_written: int = 0
     embed_embedded: int = 0
     vectors_supplied: int = 0
@@ -107,8 +121,8 @@ class PageWriteResult:
 @dataclass
 class FinishResult:
     """What :meth:`MultiDocumentImportWriter.finish` found: the documents stamped ``complete`` over
-    the whole run, and those that were not (failed, a refused stamp, or never brought to their last
-    page), with the reason."""
+    the whole run, and those that were not (failed, a refused stamp, a stamp never sent, or never
+    brought to their last page), with the reason."""
 
     completed: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
@@ -116,7 +130,7 @@ class FinishResult:
 
 class _Doc:
     __slots__ = ("positions", "max_position", "tail", "total", "resume", "received", "begun", "written", "failed",
-                 "prior", "wrote", "sweep_rest", "done", "stamped", "refusal", "collisions")
+                 "prior", "wrote", "sweep_rest", "done", "stamped", "refusal", "collisions", "awaiting")
 
     def __init__(self, total: int, max_position: int, resume: bool) -> None:
         self.max_position = max_position
@@ -133,6 +147,7 @@ class _Doc:
         self.sweep_rest: list[str] = []      # sweep chashes not yet sent (past the 300 cap)
         self.done = False                    # the last request landed
         self.stamped = False
+        self.awaiting = False                # the last request landed and the stamp is deferred
         self.refusal: str | None = None
         self.collisions = 0
 
@@ -151,7 +166,9 @@ class MultiDocumentImportWriter:
 
     *cat* is a catalog writer. *content_hash* stamps the fence and the completion (any stable,
     non-empty identity of this run's source; the import uses a hash of the file). *embedding_model*
-    is required as soon as any chunk carries an ``embedding``. *force_re_embed* makes every payload
+    is required as soon as any chunk carries an ``embedding``. With *defer_completion* the writer never
+    stamps a document with a data request: the caller does, with :meth:`complete_documents`, after its
+    post-store hooks. *force_re_embed* makes every payload
     chunk land with its supplied vector even when the collection already holds the chash (the engine
     otherwise keeps the stored vector and only counts the difference). *metadata_merge* writes a
     stored chash's metadata as ``stored || incoming`` instead of replacing it, so keys another
@@ -172,6 +189,7 @@ class MultiDocumentImportWriter:
         force_re_embed: bool = False,
         metadata_merge: bool = False,
         run_id: str | None = None,
+        defer_completion: bool = False,
     ) -> None:
         if not collection:
             raise ValueError("MultiDocumentImportWriter: 'collection' is required")
@@ -186,10 +204,17 @@ class MultiDocumentImportWriter:
         self._force_re_embed = force_re_embed
         self._metadata_merge = metadata_merge
         self._run_id = run_id or uuid.uuid4().hex
+        self._defer = defer_completion
         self._docs: dict[str, _Doc] = {}
         self._rows_landed = 0
         self._sweep_skipped = 0
         self._finished = False
+        #: Every exception any ATTEMPT of a DATA request (one that carries rows or chunks) raised, so
+        #: a caller that must undo what it registered can tell a definitive refusal from a request
+        #: that may have committed. A begin, a stamp-only request and a sweep-only request carry no
+        #: rows, so they cannot create the zero-chunk registration the caller undoes and are not
+        #: recorded here.
+        self._data_request_errors: list[BaseException] = []
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -224,6 +249,29 @@ class MultiDocumentImportWriter:
                 f"register_document({doc_id!r}): already registered with total_rows={known.total}, "
                 f"max_position={known.max_position}, resume={known.resume}; got total_rows={total_rows}, "
                 f"max_position={max_position}, resume={resume}")
+
+    def landed(self, doc_id: str) -> bool:
+        """True when any row of *doc_id* landed (its first request committed)."""
+        st = self._docs.get(doc_id)
+        return bool(st and (st.written or st.received))
+
+    def request_may_have_written(self) -> bool:
+        """True when any attempt of a failed data request is in flight under the shared classifier
+        (:func:`nexus.catalog.write_outcome.may_have_written`): it may have reached the engine and
+        committed, so nothing registered for it may be undone. Every attempt is judged, not only the
+        last one the retry wrapper re-raises: a dropped connection followed by refused reconnects is
+        one request that may have committed. False when no data request failed."""
+        from nexus.catalog.write_outcome import may_have_written  # noqa: PLC0415 — deferred: keeps this module's import light
+
+        return any(may_have_written(e) for e in self._data_request_errors)
+
+    def discard(self, doc_id: str) -> None:
+        """Forget *doc_id*: the caller removed its catalog row (nothing had landed on it), so there
+        is no fence left for :meth:`abort` to mark."""
+        st = self._docs.get(doc_id)
+        if st is not None:
+            st.failed = "its catalog registration was removed"
+            st.release()
 
     def failure(self, doc_id: str) -> str | None:
         """Why *doc_id* failed, or None."""
@@ -324,6 +372,10 @@ class MultiDocumentImportWriter:
                 out.failed[doc_id] = st.refusal
             elif st.stamped:
                 out.completed.append(doc_id)
+            elif st.awaiting:
+                out.failed[doc_id] = (
+                    "its last page landed and its completion stamp was never sent; it stays "
+                    "indexing and the next run of the same file finishes it")
             elif st.begun:
                 out.failed[doc_id] = (
                     f"never reached its last page ({st.received} of {st.total} rows landed); "
@@ -337,14 +389,19 @@ class MultiDocumentImportWriter:
         :attr:`ABORT_FENCE_CAP` fence calls (each is one request, and a multi-chunk document is open
         for most of a run) and stops at the first one that fails (the engine is the likely cause). A
         document not marked stays ``indexing``, which the next run of the same file resumes exactly as
-        it resumes a ``failed`` one. A no-op once :meth:`finish` returned."""
+        it resumes a ``failed`` one. A document whose last request landed and whose stamp is owed
+        (``defer_completion``: :meth:`complete_documents` may have sent it) is NOT marked, whatever
+        failed: the stamp may have committed and lost its ack, and ``failed`` would flip a ``complete``.
+        It stays ``indexing`` and the next run of the same file resumes it. A no-op once
+        :meth:`finish` returned."""
         if self._finished:
             return
         sent = 0
         unmarked = 0
         stop = False
         for doc_id, st in self._docs.items():
-            if not st.begun or st.stamped or st.refusal is not None or st.failed is not None:
+            if (not st.begun or st.stamped or st.refusal is not None or st.failed is not None
+                    or st.awaiting):
                 continue
             st.failed = error
             st.release()
@@ -366,11 +423,22 @@ class MultiDocumentImportWriter:
         if self._finished:
             raise ValueError("MultiDocumentImportWriter: already finished")
 
-    def _retrying(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def _retrying(self, fn: Callable[..., Any], *args: Any, data: bool = True, **kwargs: Any) -> Any:
         """nexus.retry's bounded manifest-write retry: connectivity errors, and a rate-limit answer
-        paces the shared brake. A ``CombinedWriteEmbedTimeoutError`` is never retried."""
+        paces the shared brake. A ``CombinedWriteEmbedTimeoutError`` is never retried. With
+        *data* (the default) every failed attempt is recorded for :meth:`request_may_have_written`;
+        pass ``data=False`` for a request that carries no rows (a begin, a stamp, a sweep)."""
         from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
-        return _manifest_write_with_retry(fn, *args, **kwargs)
+
+        def attempt(*a: Any, **kw: Any) -> Any:
+            try:
+                return fn(*a, **kw)
+            except BaseException as exc:
+                if data:
+                    self._data_request_errors.append(exc)
+                raise
+
+        return _manifest_write_with_retry(attempt, *args, **kwargs)
 
     def _fail_doc(self, doc_id: str, reason: str, result: PageWriteResult | None = None) -> None:
         st = self._docs[doc_id]
@@ -401,7 +469,7 @@ class MultiDocumentImportWriter:
             resp = self._retrying(
                 self._cat.begin_index_run_many,
                 [{"doc_id": d, "content_hash": self._content_hash, "run_id": self._run_id} for d in todo],
-                self._collection, snapshot_manifest=snapshot)
+                self._collection, snapshot_manifest=snapshot, data=False)
         except EngineOlderThanClientError:
             # The engine answered without the snapshot AFTER stamping every document of the call
             # `indexing`: they are fenced, so abort() must be able to mark them.
@@ -498,10 +566,19 @@ class MultiDocumentImportWriter:
                 reason=f"the engine embedded {n} chunk(s) although every chunk carried its exported "
                        "vector; the supplied vectors were ignored and the stored ones are NOT the export's")
 
+    def _park(self, doc_id: str, result: PageWriteResult) -> None:
+        """The document's last request landed and its stamp is deferred: remember it is owed."""
+        st = self._docs[doc_id]
+        st.done = True
+        st.awaiting = True
+        st.release()
+        result.landed.append(doc_id)
+
     def _finish_stamp(self, doc_id: str, refused: Mapping[str, dict], result: PageWriteResult) -> None:
         """Record the outcome of a stamp that rode a request this document landed in."""
         st = self._docs[doc_id]
         st.done = True
+        st.awaiting = False
         st.release()
         r = refused.get(doc_id)
         if r is None:
@@ -532,7 +609,7 @@ class MultiDocumentImportWriter:
             if not group:
                 continue
             payload = self._payload(group, chunks)
-            stamp = {d: self._content_hash for d in group} if is_single else None
+            stamp = {d: self._content_hash for d in group} if is_single and not self._defer else None
             resp = self._retrying(
                 self._cat.write_manifest_many, list(group.items()), stamp, sweep=is_single,
                 chunks=payload or None, collection=self._collection,
@@ -548,7 +625,10 @@ class MultiDocumentImportWriter:
                     continue
                 self._land(doc_id, rows, result)
                 if is_single:
-                    self._finish_stamp(doc_id, refused, result)
+                    if self._defer:
+                        self._park(doc_id, result)
+                    else:
+                        self._finish_stamp(doc_id, refused, result)
             self._check_no_embeds(resp, list(group))
 
     def _append(
@@ -579,7 +659,7 @@ class MultiDocumentImportWriter:
                 sweeps[doc_id] = sweep[:cap]
             if len(sweep) > cap:
                 rests[doc_id] = sweep[cap:]
-            else:
+            elif not self._defer:
                 stamps[doc_id] = (self._content_hash, st.received + len(rows))
         payload = self._payload(later, chunks)
         resp = self._retrying(
@@ -614,7 +694,10 @@ class MultiDocumentImportWriter:
             if doc_id in rests:
                 self._docs[doc_id].sweep_rest = rests[doc_id]
             elif doc_id in last_docs:
-                self._finish_stamp(doc_id, refused, result)
+                if self._defer:
+                    self._park(doc_id, result)
+                else:
+                    self._finish_stamp(doc_id, refused, result)
         self._check_no_embeds(resp, list(later))
         self._trailing_sweeps(result)
 
@@ -636,10 +719,11 @@ class MultiDocumentImportWriter:
                 st.sweep_rest = rest
                 if not rest:
                     final.add(d)
-                    stamps[d] = (self._content_hash, st.received)
+                    if not self._defer:
+                        stamps[d] = (self._content_hash, st.received)
             resp = self._retrying(
                 self._cat.append_manifest_many, [(d, []) for d, _ in batch], collection=self._collection,
-                sweep_chashes=sweeps, complete=stamps or None)
+                sweep_chashes=sweeps, complete=stamps or None, data=False)
             resp = resp if isinstance(resp, dict) else {}
             failed = {str(d) for d in (resp.get("failed_doc_ids") or ())}
             refused = self._refused_map(resp)
@@ -651,4 +735,56 @@ class MultiDocumentImportWriter:
                     self._docs[d].sweep_rest = []
                     self._fail_doc(d, "the engine could not run the deferred sweep", result)
                 elif d in final:
-                    self._finish_stamp(d, refused, result)
+                    if self._defer:
+                        self._park(d, result)
+                    else:
+                        self._finish_stamp(d, refused, result)
+
+    def complete_documents(self, doc_ids: Sequence[str]) -> PageWriteResult:
+        """Stamp the documents whose last request landed (:attr:`PageWriteResult.landed`), AFTER the
+        caller fired its hooks for them. Only for a ``defer_completion`` writer.
+
+        One stamp-only ``append_many`` per :data:`MANIFEST_APPEND_MANY_MAX_DOCS` documents: an empty
+        row list per document and ``complete`` = (content hash, the manifest ROW count that landed).
+        The engine verifies it in the document's own transaction, so a manifest another writer
+        changed no longer has the count and the stamp is refused: the document is reported and stays
+        ``indexing``, as for a refusal that rode a data request. A document the engine fails in place
+        (its transaction rolled back, so nothing was stamped) is reported and stays ``indexing`` too;
+        its fence is NOT marked failed, since every row it owns landed and the next run of the same
+        file resumes it either way. A request that raises propagates (the documents stay
+        ``indexing``). Returns the stamps' outcome: ``finished`` lists the stamped documents,
+        ``failed`` the others with the reason."""
+        if not self._defer:
+            raise ValueError(
+                "MultiDocumentImportWriter.complete_documents: this writer stamps with its data "
+                "requests; only a defer_completion writer is stamped by the caller")
+        self._require_usable()
+        result = PageWriteResult()
+        owed: list[str] = []
+        for d in doc_ids:
+            st = self._docs.get(d)
+            if st is None:
+                raise ValueError(f"MultiDocumentImportWriter.complete_documents: {d!r} was not registered")
+            if st.awaiting:
+                owed.append(d)
+        for i in range(0, len(owed), MANIFEST_APPEND_MANY_MAX_DOCS):
+            batch = owed[i:i + MANIFEST_APPEND_MANY_MAX_DOCS]
+            stamps = {d: (self._content_hash, self._docs[d].received) for d in batch}
+            resp = self._retrying(
+                self._cat.append_manifest_many, [(d, []) for d in batch], collection=self._collection,
+                complete=stamps, data=False)
+            resp = resp if isinstance(resp, dict) else {}
+            failed = {str(d) for d in (resp.get("failed_doc_ids") or ())}
+            refused = self._refused_map(resp)
+            for d in batch:
+                st = self._docs[d]
+                if d in failed:
+                    st.awaiting = False
+                    st.refusal = ("the engine could not stamp it complete (its stamp request failed in "
+                                  "place); it stays indexing")
+                    result.failed[d] = st.refusal
+                    continue
+                self._finish_stamp(d, refused, result)
+                if st.refusal is not None:
+                    result.failed[d] = st.refusal
+        return result

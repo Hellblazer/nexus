@@ -27,7 +27,7 @@ def route_note_writes_to(monkeypatch: pytest.MonkeyPatch, t3: Any) -> None:
 
     def _write_note(
         *, catalog_doc_id, collection, pieces, content_hash=None, title="", tags="", category="",
-        session_id="", source_agent="", ttl_days=None, content_type="prose", cat=None,
+        session_id="", source_agent="", ttl_days=None, content_type="prose", cat=None, stamp=True,
     ):
         ids = [
             t3.put(
@@ -44,7 +44,7 @@ def route_note_writes_to(monkeypatch: pytest.MonkeyPatch, t3: Any) -> None:
         _catalog_fixture_ops.seed_note_manifest(catalog_doc_id, metadatas, collection=collection)
         return note_write.NoteWriteResult(
             catalog_doc_id=catalog_doc_id, collection=collection, chunk_ids=list(ids),
-            chunks_written=len(ids), completed=bool(content_hash),
+            chunks_written=len(ids), completed=bool(content_hash) and stamp,
         )
 
     monkeypatch.setattr(note_write, "write_note", _write_note)

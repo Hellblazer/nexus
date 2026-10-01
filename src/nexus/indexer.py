@@ -3274,6 +3274,7 @@ def _index_pdf_file(
     # row to write a chunk with (RDR-223, nexus-z0o2p.20), so it is counted
     # as a drop and nothing is written.
     from nexus.oversize_write import (  # noqa: PLC0415 — deferred: rare oversize path
+        complete_oversize_write,
         refuse_identity_less_file,
         use_writer,
         write_oversize_file,
@@ -3282,12 +3283,14 @@ def _index_pdf_file(
     if refuse_identity_less_file(db, catalog_doc_id, file, collection_name, len(ids)):
         return 0
     _via_writer = use_writer(db, batcher, catalog_doc_id)
+    # The completion stamp is sent after the hooks below (RDR-223, nexus-z0o2p.34).
+    _pending = None
     with _stage("upload"):
         if _via_writer:
-            write_oversize_file(
+            _pending = write_oversize_file(
                 catalog_doc_id=catalog_doc_id, content_hash=content_hash_hex,
                 collection=collection_name, ids=ids, documents=documents,
-                metadatas=metadatas, force_re_embed=force_re_embed,
+                metadatas=metadatas, force_re_embed=force_re_embed, defer_completion=True,
             )
         else:
             # nexus-y8xjh: the engine merges chunk metadata (nexus-w94eo), and both
@@ -3320,44 +3323,53 @@ def _index_pdf_file(
                     _fence_fail(catalog_doc_id, str(upload_exc))
                 raise
 
-        # Post-store hook chains (RDR-095). Both single-doc and batch
-        # chains fire from every storage event; consumers register in
-        # whichever shape fits their work. Single-doc fire iterates the
-        # batch one document at a time so per-doc hooks (e.g. RDR-089
-        # aspect extraction) cover CLI ingest the same way they cover
-        # MCP store_put.
-        if hooks is None:
-            from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
-            hooks = HookRegistry()
-            install_default_hooks(hooks)
-        # nexus-vw594 F1: on the old upsert path this file's whole chunk set
-        # lands in the ONE upsert above (file-atomic) — manifest_complete rides
-        # this existing call through manifest_write_batch_hook's
-        # write_manifest_many completion stamp, no extra round trip. On the
-        # writer path the manifest is already written and stamped, so the
-        # manifest hook is excluded (a second write would double-count the
-        # sweep accounting) and no completion claim rides along.
-        _chain: dict = {
-            "manifest_complete": {catalog_doc_id: content_hash_hex} if catalog_doc_id else None,
-        }
-        if _via_writer:
-            from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
-            _chain = {"skip_hooks": {manifest_write_batch_hook}}
-        hooks.fire_batch(
-            ids, collection_name, documents, embeddings, metadatas,
-            catalog_doc_id=catalog_doc_id, **_chain,
-        )
-        for _did, _doc in zip(ids, documents):
-            hooks.fire_single(_did, collection_name, _doc)
-        # RDR-089 document-grain chain — once per PDF file boundary in
-        # the `nx index repo` PDF path. content="" (chunk-level scope
-        # only); the hook reads source_path itself per the P0.1
-        # content-sourcing contract.
-        # nexus-tdgc: forward catalog doc_id when available.
-        hooks.fire_document(
-            str(file), collection_name, "",
-            doc_id=catalog_doc_id,
-        )
+        try:
+            # Post-store hook chains (RDR-095). Both single-doc and batch
+            # chains fire from every storage event; consumers register in
+            # whichever shape fits their work. Single-doc fire iterates the
+            # batch one document at a time so per-doc hooks (e.g. RDR-089
+            # aspect extraction) cover CLI ingest the same way they cover
+            # MCP store_put.
+            if hooks is None:
+                from nexus.hook_registry import HookRegistry, install_default_hooks  # noqa: PLC0415 — deliberate function-scoped import (defer heavy/optional dep, avoid circular import)
+                hooks = HookRegistry()
+                install_default_hooks(hooks)
+            # nexus-vw594 F1: on the old upsert path this file's whole chunk set
+            # lands in the ONE upsert above (file-atomic) — manifest_complete rides
+            # this existing call through manifest_write_batch_hook's
+            # write_manifest_many completion stamp, no extra round trip. On the
+            # writer path the manifest is already written, so the manifest hook
+            # is excluded (a second write would double-count the sweep
+            # accounting) and no completion claim rides along; the stamp follows
+            # the hooks.
+            _chain: dict = {
+                "manifest_complete": {catalog_doc_id: content_hash_hex} if catalog_doc_id else None,
+            }
+            if _via_writer:
+                from nexus.mcp_infra import manifest_write_batch_hook  # noqa: PLC0415 — deferred: mcp_infra imports the indexers
+                _chain = {"skip_hooks": {manifest_write_batch_hook}}
+            hooks.fire_batch(
+                ids, collection_name, documents, embeddings, metadatas,
+                catalog_doc_id=catalog_doc_id, **_chain,
+            )
+            for _did, _doc in zip(ids, documents):
+                hooks.fire_single(_did, collection_name, _doc)
+            # RDR-089 document-grain chain — once per PDF file boundary in
+            # the `nx index repo` PDF path. content="" (chunk-level scope
+            # only); the hook reads source_path itself per the P0.1
+            # content-sourcing contract.
+            # nexus-tdgc: forward catalog doc_id when available.
+            hooks.fire_document(
+                str(file), collection_name, "",
+                doc_id=catalog_doc_id,
+            )
+            # The stamp, LAST: a kill in a hook above leaves the fence 'indexing', so the next
+            # run redoes the file and fires its hooks again.
+            if _pending is not None:
+                complete_oversize_write(_pending)
+        finally:
+            if _pending is not None:
+                _pending.close()
 
     return len(prepared)
 
@@ -5766,6 +5778,15 @@ def _run_index(
     if isinstance(db, HttpVectorClient):
         from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
 
+        # Documents the engine answered with in ``failed_doc_ids`` on a flush's write (their
+        # transaction rolled back, the old manifest and chunks intact), keyed by doc id until that
+        # flush's stamp step consumes them. Doc ids are unique across the concurrent flushes (a file
+        # is staged once, whole), so one dict serves every flush. A document in it is NOT stamped:
+        # the stamp-only request verifies only the row count and that no chunk is missing, so a
+        # re-indexed file with an unchanged chunk count would read ``complete`` with the NEW hash
+        # over the OLD content and the next run would skip it as fresh.
+        _flush_failed_docs: dict[str, None] = {}
+
         def _batch_flush(
             collection: str, _ids: list, _docs: list, _metas: list,
             _file_contexts: list,
@@ -5866,6 +5887,8 @@ def _run_index(
             from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
             _merge_delete_keys = rewrite_delete_keys([c["metadata"] for c in chunks_payload])
 
+            for _d, _r in full_docs:
+                _flush_failed_docs.pop(_d, None)          # a bisect retry starts from a clean slate
             cat = get_catalog_writer()
             try:
                 # Bounded backoff against a flapping connection, matching
@@ -5877,10 +5900,12 @@ def _run_index(
                 # retry) on a non-connection error, so a genuine 4xx/
                 # validation failure or the ack-echo RuntimeError still
                 # propagates on the first attempt.
+                # No `complete`: the stamp comes AFTER the flush's hooks (RDR-223, Sam 2026-09-30,
+                # nexus-z0o2p.34), as one stamp-only append_many from _stamp_flush_documents.
                 res = _manifest_write_with_retry(
                     cat.write_manifest_many,
                     full_docs,
-                    complete=complete_map or None,
+                    complete=None,
                     sweep=True,
                     chunks=chunks_payload,
                     collection=collection,
@@ -5898,12 +5923,14 @@ def _run_index(
             # what this write was trying to put in its manifest (post-run
             # verification reads this back against the manifest).
             _apply_combined_write_response(
-                res, complete_map, collection,
+                res, {}, collection,
                 chash_by_doc={
                     _d: [c["chash"] for c in _chunks]
                     for _d, _chunks in full_docs
                 },
             )
+            for _failed in (res.get("failed_doc_ids") or ()) if isinstance(res, dict) else ():
+                _flush_failed_docs[str(_failed)] = None
 
         # nexus-duoak follow-up: split "file" into its 3 constituent calls
         # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook
@@ -6167,6 +6194,82 @@ def _run_index(
                     _flush_hook_by_name.get("aspect_enqueue", 0.0) + _aspect_elapsed
                 )
 
+        def _stamp_flush_documents(
+            collection: str, _ids: list, _docs: list, _metas: list, _file_contexts: list,
+        ) -> None:
+            """The completion stamp of every document of one flush, sent AFTER its hooks (RDR-223,
+            Sam 2026-09-30, nexus-z0o2p.34).
+
+            ``_batch_flush`` wrote the chunks and owner rows with no stamp; the flush-grain hooks
+            (``_fire_flush_grain_hooks``) and every file's hooks (``_fire_deferred_hooks``) have run
+            by the time ChunkBatcher calls this. A process killed in one of them leaves the flush's
+            documents ``indexing``, so the next run redoes them and fires the hooks again.
+
+            ONE stamp-only ``append_many`` per flush (at most ``MANIFEST_APPEND_MANY_MAX_DOCS``
+            documents; a flush stages far fewer): an empty row list per document and a
+            ``complete`` of (content hash, the manifest ROW count the write sent). The engine verifies
+            the count and that no row names a missing chunk in each document's own transaction, as
+            ``write_many``'s ``complete`` did. A refusal, a document the engine fails in place and a
+            request that raises are recorded for the run summary (the document stays ``indexing``;
+            nothing is rolled back) and never fail the flush: the chunks and owner rows landed.
+            """
+            from nexus.catalog.http_catalog_client import MANIFEST_APPEND_MANY_MAX_DOCS  # noqa: PLC0415 — deferred: avoid module-load cross-import
+            from nexus.mcp_infra import (  # noqa: PLC0415 — deferred: avoid module-load cross-import
+                _record_complete_refusal,
+                get_catalog_writer,
+            )
+            from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred (leaf module, avoid import cost on the no-op path)
+
+            _p, _full_docs, _complete_map, _o = _build_combined_write_payload(
+                _ids, _docs, _metas, _file_contexts)
+            # The write's own failed documents are never stamped (see _flush_failed_docs); popping
+            # consumes the flush's entries, so a stale one cannot leak into a later flush.
+            _write_failed = {_d for _d, _r in _full_docs if _flush_failed_docs.pop(_d, 0) is None}
+            owed = [
+                (_d, _complete_map[_d], len(_rows)) for _d, _rows in _full_docs
+                if _d in _complete_map and _d not in _write_failed
+            ]
+            if _write_failed:
+                _log.warning(
+                    "flush_stamp_skipped_failed_documents", collection=collection,
+                    documents=sorted(_write_failed))
+            if not owed:
+                return
+            cat = get_catalog_writer()
+            try:
+                for _i in range(0, len(owed), MANIFEST_APPEND_MANY_MAX_DOCS):
+                    group = owed[_i:_i + MANIFEST_APPEND_MANY_MAX_DOCS]
+                    try:
+                        res = _manifest_write_with_retry(
+                            cat.append_manifest_many,
+                            [(_d, []) for _d, _h, _n in group],
+                            collection=collection,
+                            complete={_d: (_h, _n) for _d, _h, _n in group},
+                        )
+                    except Exception as exc:  # noqa: BLE001 — the documents stay 'indexing'; recorded so the run summary names them
+                        _log.warning(
+                            "flush_stamp_failed", collection=collection, documents=len(group),
+                            error=str(exc)[:300], exc_info=True)
+                        for _d, _h, _n in group:
+                            _record_complete_refusal(_d)
+                        continue
+                    res = res if isinstance(res, dict) else {}
+                    unstamped = {str(_d) for _d in (res.get("failed_doc_ids") or ())}
+                    refused = [r for r in (res.get("complete_refused") or ()) if isinstance(r, dict)]
+                    unstamped |= {str(r.get("doc_id", "")) for r in refused}
+                    if int(res.get("complete_refused_count") or 0) != len(refused):
+                        # A list that disagrees with its own count: claim no stamp we cannot confirm.
+                        unstamped |= {_d for _d, _h, _n in group}
+                    for _d in sorted(x for x in unstamped if x):
+                        _log.warning(
+                            "flush_stamp_not_applied", doc_id=_d, collection=collection,
+                            refused=any(str(r.get("doc_id", "")) == _d for r in refused))
+                        _record_complete_refusal(_d)
+            finally:
+                _close = getattr(cat, "close", None)
+                if callable(_close):
+                    _close()
+
         # Shared with HttpVectorClient's internal upsert paging (nexus-nf3n7) so
         # the batcher flush cap and the client's oversize-fallback page size are
         # ONE source of truth. CCE collections (docs/knowledge/rdr) embed far
@@ -6180,6 +6283,7 @@ def _run_index(
             on_file_failed=_batched_file_failed,
             on_batch_complete=_fire_flush_grain_hooks,
             on_batch_begin=_fire_flush_grain_begin,
+            on_batch_stamp=_stamp_flush_documents,
             on_flush=on_flush,
             max_chunks=_cap_for,
             # See FLUSH_CONCURRENCY's module-level comment for the
