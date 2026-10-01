@@ -203,8 +203,8 @@ class TestCallerLoopsIsolatePerItem:
         # dead_code.)
         ("src/nexus/commands/catalog_cmds/integrity.py", "catalog_verify_collection_unreadable"),
         # (RDR-155 P4b: migration/collision_audit.py's guarded page loop
-        # died with the file.)
-        ("src/nexus/db/reconcile.py", "vector_etl_verify_fill_page_unreachable"),
+        # died with the file. RDR-223 P3.3, nexus-z0o2p.25: db/reconcile.py's
+        # verify-fill page loop died with its dead module code.)
     ]
 
     @pytest.mark.parametrize(("path", "marker"), SITES)

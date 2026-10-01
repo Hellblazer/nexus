@@ -3843,9 +3843,8 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         A page failure propagates (whole call fails loud). Deliberate:
         every caller already handles the exception in its own safe
-        direction — build_staleness_cache degrades to full re-index,
-        embed_migrate blocks its destructive re-index, and catalog
-        doctor must see a hard error rather than a silent partial that
+        direction — build_staleness_cache degrades to full re-index, and
+        catalog doctor must see a hard error rather than a silent partial that
         reads as data corruption.
 
         nexus-b9puj: same union-guard chain as nexus-ocf52
@@ -3988,7 +3987,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         that flat list directly (the pre-fix behaviour) crashed every consumer
         that does ``by_chash.items()`` (``indexer_utils.build_staleness_cache``,
         ``search_engine._attach_doc_ids_from_catalog``, ``mcp/core.py``,
-        ``db/embed_migrate.py``, ``commands/collection.py``,
+        ``commands/collection.py``,
         ``commands/catalog_cmds/doctor.py``) with ``AttributeError: 'list' object
         has no attribute 'items'`` — silently swallowed to a warning, degrading
         every service-mode ``nx index repo`` to a full re-chunk + re-embed.

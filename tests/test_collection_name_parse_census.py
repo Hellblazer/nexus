@@ -560,24 +560,6 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # `nx store export`, not necessarily an existing registered name.
     "src/nexus/commands/store.py": 1,
     "src/nexus/corpus.py": 0,
-    # class (d)/(a): _classify (:108, prefers the row, falls to
-    # candidate-string for the unregistered-legacy population migration
-    # exists to handle) and _default_reindex's target_name check (:285,
-    # class (a) -- the migration TARGET, model-swapped from an
-    # already-conformant old name, has no row by construction). :403 (2
-    # hits) is nexus-ft04v.22's ORIGINAL raw holdout -- see its own
-    # comment below.
-    # nexus-ft04v.22: :387 (now :403 after nexus-ft04v.26's edits)
-    # `migrate_collection_safe`'s `corpus = stale.name.split("__", 1)[1]
-    # if "__" in stale.name else ""` (two hits: the split and the "__" in
-    # check) is deliberately left raw -- byte-for-byte the SAME shape as
-    # commands/collection.py's reindex_cmd site above, same reason: needs
-    # owner+model/version together, which `collection_owner()` cannot
-    # reproduce for a conformant name. Confirmed by the coordinator's
-    # ruling on nexus-ft04v.22's hand-off report; nexus-ft04v.26 did not
-    # touch this ONE site (item 6) -- open work, tracked in the hand-off
-    # report.
-    "src/nexus/db/embed_migrate.py": 4,
     # class (b): per_collection_chunk_cap/_upsert_byte_budget size the
     # write that will create a collection's FIRST-EVER chunks, so they
     # structurally cannot rely on a row in the common first-write case.
@@ -597,29 +579,6 @@ COLLECTION_NAME_PARSE_CENSUS: dict[str, int] = {
     # embedding_model_for_collection_name above) for the same no-row
     # first-write case.
     "src/nexus/db/http_vector_client.py": 4,
-    # nexus-ft04v.26 item 6 (THE REPOINT): `_is_same_model_passthrough`
-    # (formerly :267) and `_dim_for_collection` (formerly :362) now share
-    # a new `_model_for_collection` helper that PREFERS the catalog row's
-    # `embedding_model` column (RDR-204 Gap 1 -- a row that disagrees with
-    # the name wins) and falls to the SAME LAXER `len(segments) == 4`
-    # count-based name split -- deliberately still not the conformant-
-    # gated `collection_model()` funnel helper, which requires
-    # `is_conformant_collection_name` internally (`[a-zA-Z0-9-]+` owner
-    # charset, no underscore) and fails loud on a name with no row; both
-    # would silently NARROW this migration tool from accepting an
-    # underscored-owner name or an unregistered source to rejecting it,
-    # forbidden by the nexus-ft04v.22 ruling this class still honors --
-    # only when the name has no row (the normal case: a migration source
-    # that may predate RDR-204 Phase 1 registration entirely). The former
-    # third site, the passthrough `declared_model` read (formerly :610),
-    # is now `_model_for_collection(name) if passthrough else None` --
-    # no raw parse of its own, since it shares the SAME resolution
-    # `_is_same_model_passthrough` already made, closing that site
-    # entirely (3 raw sites -> 2: one inside `_model_for_collection`'s
-    # fallback branch, one inside `_dim_for_collection`'s own fallback,
-    # which needs distinct error-reason strings the shared helper's plain
-    # string return cannot carry).
-    "src/nexus/db/reconcile.py": 2,
     # _infer_content_type (write-path metadata normalization, prefers the
     # row, falls to its own documented "anything but code -> prose"
     # default) and the two TTL-expire sweeps (class (c), a collection
@@ -1098,8 +1057,10 @@ def test_pin_matches_documented_total() -> None:
     deleted; then 52 -- 53 the same day when the owner-scope resolver
     gained a class-(a) candidate split on a user-typed scope token; then
     53 -- 52 on 2026-09-24 when index-md's knowledge__ extractor warning,
-    and its class-(a) split, were deleted, nexus-kk4ut) is derived from the same dict the guards above check
+    and its class-(a) split, were deleted, nexus-kk4ut; then 52 -- 46 on
+    2026-10-01 when db/embed_migrate.py (4 sites) and db/reconcile.py's
+    two parse helpers were deleted as dead code, nexus-z0o2p.25) is derived from the same dict the guards above check
     against -- this catches a hand-edited docstring number drifting from
     the dict it claims to summarize."""
     assert PARSE_SITE_PIN == sum(COLLECTION_NAME_PARSE_CENSUS.values())
-    assert PARSE_SITE_PIN == 52
+    assert PARSE_SITE_PIN == 46

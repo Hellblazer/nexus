@@ -2626,8 +2626,8 @@ class HttpVectorClient:
         on (indexers: code/prose/doc indexers, pipeline_stages, the
         ChunkBatcher). Pass ``retry=False`` for a caller that ALREADY owns
         its own retry/backoff stack and would otherwise get THREE nested
-        retry layers on the same failure: ``db/reconcile.py``'s verify-fill
-        path wraps this call in ``_etl_batch_with_breaker`` ->
+        retry layers on the same failure: the verify-fill path (deleted by
+        nexus-z0o2p.25) wrapped this call in ``_etl_batch_with_breaker`` ->
         ``_etl_with_retry``, which — stacked on this method's own
         ``_vector_with_retry`` PLUS ``_request``'s inner gateway retry — put
         worst-case latency far beyond any documented ceiling and tripped/
@@ -2807,8 +2807,8 @@ class HttpVectorClient:
             #
             # nexus-cy9u7 round-3 CRITICAL C2: this wrap is skipped when
             # ``retry=False`` (see the method docstring's ``retry`` param) —
-            # db/reconcile.py's verify-fill path opts out because it already
-            # owns its own retry/breaker stack; wrapping here TOO gave that
+            # the (since deleted) verify-fill path opted out because it already
+            # owned its own retry/breaker stack; wrapping here TOO gave that
             # call site three nested retry layers on one failure.
             if retry:
                 from nexus.retry import _vector_with_retry  # noqa: PLC0415 — deferred import: avoids a module-load-time httpx dependency for this otherwise-urllib-only module (matches the deferred-import convention every other _vector_with_retry caller uses)

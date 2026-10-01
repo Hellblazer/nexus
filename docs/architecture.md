@@ -453,7 +453,7 @@ Two hash fields look similar but mean very different things. Confusing them prod
 | Metadata field | Level | Keyed on | Set by | Used for |
 |---|---|---|---|---|
 | `content_hash` | document | `sha256(file_bytes)` | every indexer at register time (`indexer.py:1198`) | document-level dedup; staleness comparison — paired with the index-run fence's three-way state, see [Index-run fence (RUNFENCE)](#index-run-fence-runfence) below; backup-snapshot identity |
-| `chunk_text_hash` | chunk | `sha256(chunk_text)` (full 64 chars) | every indexer per chunk; healed on an upgraded store by the ladder (`nx upgrade`) | content-addressed link spans (`chash:<hex>`); `nx t3 reidentify` natural-ID source (first 32 chars); cross-collection chunk dedup |
+| `chunk_text_hash` | chunk | `sha256(chunk_text)` (full 64 chars) | every indexer per chunk; healed on an upgraded store by the ladder (`nx upgrade`) | content-addressed link spans (`chash:<hex>`); cross-collection chunk dedup |
 | `chunk_text_hash` (as chunk id) | chunk | the full SHA (RDR-180) | every indexer via `chunk_identity.chunk_id` | the chunk natural ID and the `document_chunks.chash` join key; the pre-RDR-180 `[:32]` truncation is retired, and so (nexus-lgdel.l1) is the `chash_alias` legacy-reference resolver that used to bridge it — a legacy 32-hex reference is unresolvable now, re-index the source |
 | `source_uri` | document | `file://...` or `x-devonthink-item://<uuid>` etc. | indexer / MCP write paths | persistent URI identity; aspect-extraction routing; audit-membership home detection |
 | `source_path` | document | absolute or repo-relative file path | indexer | display + grep targets; legacy path predating `source_uri` |
@@ -464,7 +464,7 @@ Two hash fields look similar but mean very different things. Confusing them prod
 
 `doc_id`, `chunk_index`, and `chunk_count` were ALSO chunk-level metadata pre-[RDR-108](rdr/rdr-108-graph-identity-normalization.md). [RDR-108](rdr/rdr-108-graph-identity-normalization.md) Phase 3 retired them; the catalog `document_chunks` manifest is the single source of truth for chunk position within a document. Read paths that need chunk order consult `Catalog.get_manifest(doc_id)` (see `_attach_doc_ids_from_catalog` in `search_engine.py` for the standard fallback).
 
-Legacy fields (`corpus`, `store_type`, `expires_at`) were dropped in [RDR-101](rdr/rdr-101-catalog-t3-metadata-design.md) Phase 5c. They are not present in current writes; older collections still carry them as cargo until `nx t3 reidentify` runs the canonical-schema funnel and normalizes them away. **`extraction_method` is NOT one of these** — nexus-1oguj (2026-08) promoted it from dropped-cargo to canonical; the field existed at extraction time long before that fix but was discarded before storage, which is exactly the gap nexus-1oguj closed.
+Legacy fields (`corpus`, `store_type`, `expires_at`) were dropped in [RDR-101](rdr/rdr-101-catalog-t3-metadata-design.md) Phase 5c. They are not present in current writes; older collections still carry them as cargo until the chunk is re-written through the canonical-schema funnel (a re-index) and normalizes them away. **`extraction_method` is NOT one of these** — nexus-1oguj (2026-08) promoted it from dropped-cargo to canonical; the field existed at extraction time long before that fix but was discarded before storage, which is exactly the gap nexus-1oguj closed.
 
 **Epistemic hole (nexus-0qc4b): `extraction_method` is new-writes-only, with no backfill.** Chunks indexed before nexus-1oguj carry no `extraction_method` key at all — not an empty string, absent entirely. A query that treats "key absent" as "not mineru" (or as any other negative extractor claim) silently conflates *unknown provenance* with a *known answer*. Re-extraction would be required to recover the value honestly for old chunks, so there is no cheap backfill; scoping "all mineru-extracted documents" is correct only as of the fix's ship date, and only for chunks written after it. Treat absence as unknown, never as evidence.
 
@@ -610,11 +610,11 @@ legacy-reference resolver that briefly survived it, is itself **retired**
 (nexus-lgdel.l1, 2026-08-16 — see
 [Chunk identity](#chunk-identity-the-canonical-chash-rdr-180) above) —
 catalog.md's own ChashIndex/migration-runbook material predates both drops.
-`nx t3 reidentify` (still a live command, `commands/t3.py`) walks a
-collection's chunks to backfill/normalize legacy chunk ids; it is retained
-for the chunk-identity history
-([RDR-053](rdr/rdr-053-xanadu-fidelity.md)/[RDR-108](rdr/rdr-108-graph-identity-normalization.md))
-rather than as a routine operator step. Post-[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md),
+`nx t3 reidentify`, the RDR-108 verb that re-keyed legacy chunk ids
+([RDR-053](rdr/rdr-053-xanadu-fidelity.md)/[RDR-108](rdr/rdr-108-graph-identity-normalization.md)),
+was deleted by RDR-223 P3.3 (nexus-z0o2p.25): it re-upserted through `col.upsert`,
+which the service collection stub does not have, and a pgvector chunk id is its
+`chash` by schema. Post-[RDR-155](rdr/rdr-155-pgvector-t3-consolidation.md),
 T3 serves through pgvector + `nexus-service`, and the upgrade path is
 `nx upgrade` — the single trigger that walks the
 [RDR-185](rdr/rdr-185-single-ladder-convergent-upgrade.md) ladder, whose

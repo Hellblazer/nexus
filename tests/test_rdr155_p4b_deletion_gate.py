@@ -398,9 +398,12 @@ def test_survivor_symbols_present() -> None:
         SRC / "db" / "reconcile.py": {
             "iter_collection_chunks",       # nexus-jg74b rehome
             "list_collection_names",
-            "verify_fill_collections",      # P0e rehome
-            "verify_fill_pg_source",
-            "resolve_local_service_endpoint",
+            # verify_fill_collections / verify_fill_pg_source /
+            # resolve_local_service_endpoint (the P0e rehome) were deleted by
+            # RDR-223 P3.3 (nexus-z0o2p.25): no caller in src, scripts,
+            # tests/e2e or conexus, and their chunk writes went through the
+            # ownerless upsert-chunks route the engine now refuses.
+            "dim_for_model_token",          # nexus-h1zu0, live (health.py)
         },
         SRC / "upgrade_ladder" / "provisioning.py": {
             "establish_verified_service",   # P0e rehome (D-C)
