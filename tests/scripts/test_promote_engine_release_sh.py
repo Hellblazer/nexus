@@ -10,6 +10,7 @@ flip it exactly once.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -32,19 +33,38 @@ def _all_assets() -> list[str]:
     return out
 
 
-def _stub_gh(tmp_path: Path, assets: list[str]) -> tuple[Path, Path]:
-    """A fake ``gh`` that answers ``release view`` with *assets* and records
-    every ``release edit`` call to a log file."""
+_MIB = 1024 * 1024
+
+#: The fixed build's binary sizes in MiB (nexus-lhr6a measured amd64 and mac; arm64 is an estimate).
+FIXED_SIZES_MIB = {"linux-amd64": 150, "linux-arm64": 147, "mac-arm64": 154}
+
+
+def _stub_gh(
+    tmp_path: Path, assets: list[str], sizes_mib: dict[str, float] | None = None,
+) -> tuple[Path, Path]:
+    """A fake ``gh`` that answers ``release view`` with *assets* (names, via ``--jq``) or
+    their JSON with sizes (``--json assets``), and records every call to a log file."""
     bindir = tmp_path / "bin"
     bindir.mkdir()
     log = tmp_path / "gh-calls.log"
     asset_lines = "\n".join(assets)
+    sizes = FIXED_SIZES_MIB if sizes_mib is None else sizes_mib
+    body = json.dumps({"assets": [
+        {"name": a, "size": int(sizes[a.removeprefix("nexus-service-")] * _MIB)
+         if a.removeprefix("nexus-service-") in sizes else 100}
+        for a in assets
+    ]})
+    (tmp_path / "assets.json").write_text(body)
     gh = bindir / "gh"
     gh.write_text(
         "#!/usr/bin/env bash\n"
         f"echo \"$*\" >> '{log}'\n"
         "case \"$1 $2\" in\n"
-        f"  'release view') printf '%s\\n' '{asset_lines}' ;;\n"
+        "  'release view')\n"
+        "    case \"$*\" in\n"
+        f"      *--jq*) printf '%s\\n' '{asset_lines}' ;;\n"
+        f"      *) cat '{tmp_path / 'assets.json'}' ;;\n"
+        "    esac ;;\n"
         "  'release edit') exit 0 ;;\n"
         "  *) echo \"unexpected gh $*\" >&2; exit 99 ;;\n"
         "esac\n"
@@ -82,6 +102,29 @@ def test_one_missing_asset_fails_and_leaves_the_draft(tmp_path: Path, missing: s
     assert not any(c.startswith("release edit") for c in log.read_text().splitlines()), (
         "a missing asset must never flip the draft flag"
     )
+
+
+@pytest.mark.parametrize("arch", ARCHES)
+def test_an_oversized_binary_leaves_the_draft(tmp_path: Path, arch: str) -> None:
+    """nexus-ujbz8: the size ceiling is BLOCKING here, so a regression never publishes."""
+    sizes = dict(FIXED_SIZES_MIB)
+    sizes[arch] = 231.8
+    bindir, log = _stub_gh(tmp_path, _all_assets(), sizes)
+    r = _run(bindir)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "TOO BIG" in r.stdout and f"nexus-service-{arch}" in r.stdout
+    assert "DRAFT" in r.stdout
+    assert not any(c.startswith("release edit") for c in log.read_text().splitlines()), (
+        "an oversized binary must never flip the draft flag"
+    )
+
+
+def test_unreadable_sizes_leave_the_draft(tmp_path: Path) -> None:
+    """Fail closed: a release whose asset JSON has no sizes is never promoted on the missing evidence."""
+    bindir, log = _stub_gh(tmp_path, _all_assets(), {"linux-amd64": 0, "linux-arm64": 0, "mac-arm64": 0})
+    r = _run(bindir)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert not any(c.startswith("release edit") for c in log.read_text().splitlines())
 
 
 def test_zero_assets_fails_cleanly(tmp_path: Path) -> None:
