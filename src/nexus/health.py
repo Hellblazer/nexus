@@ -4168,7 +4168,7 @@ def _check_migration_state(
             )]
 
     # Query 1: total row count (also verifies the table exists).
-    total_sql = "SELECT COUNT(*) FROM databasechangelog;"
+    total_sql = "SELECT COUNT(*) FROM public.databasechangelog;"
     proc = _run_psql(
         psql_bin, host, port, dbname, user, password, total_sql,
         psql_runner=psql_runner,
@@ -4234,7 +4234,7 @@ def _check_migration_state(
         "SELECT COUNT(*) FILTER (WHERE exectype='FAILED'), "
         "COUNT(DISTINCT (id, author, filename)) "
         "FILTER (WHERE exectype NOT IN ('EXECUTED','FAILED')) "
-        "FROM databasechangelog;"
+        "FROM public.databasechangelog;"
     )
     proc2 = _run_psql(
         psql_bin, host, port, dbname, user, password, drift_sql,
@@ -4282,7 +4282,7 @@ def _check_migration_state(
                 "(mid-run failure, partial state)"
             ),
             fix_suggestions=[
-                "Inspect: psql -c \"SELECT id,exectype FROM databasechangelog "
+                "Inspect: psql -c \"SELECT id,exectype FROM public.databasechangelog "
                 "WHERE exectype='FAILED'\"",
                 "Re-run: nx init --service to recover",
             ],
@@ -4300,7 +4300,7 @@ def _check_migration_state(
     # A NULL checksum causes Liquibase validation to fail on next boot even
     # though the changeset row is present.
     null_md5_sql = (
-        "SELECT COUNT(*) FROM databasechangelog "
+        "SELECT COUNT(*) FROM public.databasechangelog "
         "WHERE exectype='EXECUTED' AND md5sum IS NULL;"
     )
     proc3 = _run_psql(
@@ -4338,7 +4338,7 @@ def _check_migration_state(
                 "NULL md5sum — Liquibase will fail validation on next service boot"
             ),
             fix_suggestions=[
-                "Inspect: psql -c \"SELECT id,md5sum FROM databasechangelog "
+                "Inspect: psql -c \"SELECT id,md5sum FROM public.databasechangelog "
                 "WHERE exectype='EXECUTED' AND md5sum IS NULL\"",
                 "Re-run: nx init --service to re-apply and restore checksums",
             ],
@@ -7763,6 +7763,12 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
 
     now = datetime.now(UTC)
     stale: list[tuple[str, str]] = []  # (identifier, age)
+    # nexus-z0o2p.34: the stale documents that are NOTES (content_type "knowledge": MCP store_put,
+    # nx store put, nx memory promote, the recovery import). A note killed in a post-store chain, or
+    # whose completion stamp failed, stays 'indexing' and no command reruns it, so it needs its own
+    # remedy: put it again. `nx catalog reconcile-fences` is deliberately NOT the remedy: it would
+    # stamp the note complete without firing the chains that never ran.
+    stale_notes: set[str] = set()
     checked = 0
     # nexus-vw594 F3 (root cause of nexus-biq4x): a THIRD population,
     # distinct from both "checked" (real index_state, non-null) and the old
@@ -7919,6 +7925,8 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
                     or "?"
                 )
                 stale.append((ident, f"{age_hours:.1f}h"))
+                if str(getattr(entry, "content_type", "") or "") == "knowledge":
+                    stale_notes.add(ident)
     except Exception as exc:  # noqa: BLE001 — best-effort: failure logged, must not crash `nx doctor`
         _log.debug("doctor_stale_indexing_scan_failed", error=str(exc))
         return [HealthResult(label=label, ok=True, detail="skipped (corpus scan failed)")]
@@ -8135,9 +8143,29 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
         ))
 
     if stale:
-        names = "; ".join(f"{ident} ({age})" for ident, age in stale[:10])
+        names = "; ".join(
+            f"{ident} ({age}{', note' if ident in stale_notes else ''})"
+            for ident, age in stale[:10])
         if len(stale) > 10:
             names += f"; +{len(stale) - 10} more"
+        note_hint = ""
+        suggestions = [
+            "nx index <path>   (a normal re-index clears the fence; "
+            "--force is not required)",
+        ]
+        if stale_notes:
+            note_hint = (
+                f" {len(stale_notes)} of them are notes (marked 'note'): a note killed in a "
+                "post-store chain, or whose completion stamp failed, is whole and owned but "
+                "stays 'indexing', and no command reruns it. Put it again with the same title "
+                "(`nx store put`, MCP `store_put`, `nx memory promote`): the re-put is an "
+                "idempotent re-write that fires its chains and stamps it."
+            )
+            suggestions = [
+                "nx store put - --title <title> -c <subject> < note.txt   (re-put a stranded "
+                "note: it fires the chains and stamps it; also MCP store_put, nx memory promote)",
+                *(suggestions if len(stale_notes) < len(stale) else []),
+            ]
         results.append(HealthResult(
             label=label,
             ok=False,
@@ -8150,12 +8178,9 @@ def _check_stale_indexing_runs(documents: list | None = None) -> list[HealthResu
                 "for a repo document that means its own repo's next "
                 "`nx index repo` pass, no --force needed. If it keeps "
                 "recurring, check for a stuck run or a rolling deploy that "
-                "split a begin/complete pair across engine versions."
+                "split a begin/complete pair across engine versions." + note_hint
             ),
-            fix_suggestions=[
-                "nx index <path>   (a normal re-index clears the fence; "
-                "--force is not required)",
-            ],
+            fix_suggestions=suggestions,
         ))
 
     if results:
@@ -8596,12 +8621,12 @@ def _check_failed_runs_hidden_chunks(documents: list | None = None) -> list[Heal
     between the two, the chunks stay stored with no owner, and engine
     v0.1.137's live(c) hides them from every read. Measured 2026-09-28
     (shakeout 7.64.1): FootPrintRAGVA 1.82.146/147, 395 chunks, repaired
-    by hand with ``nx catalog reconcile``. ``_fence_fail`` now heals the
-    document at failure time; this row finds what that could not (a run
-    killed outright, a heal that failed, anything written before the
-    heal existed). Like the heal, it covers documents with no manifest yet
-    (a failed first run); a failed re-index keeps its old, readable
-    manifest and is not counted.
+    by hand with ``nx catalog reconcile``. Since RDR-223 every writer sends a chunk with its
+    owner row, so a failed run no longer leaves ownerless chunks and ``_fence_fail`` no longer heals
+    (the heal was retired, nexus-z0o2p.35); this row finds what remains: a failed document written
+    before the combined write, or by a client older than it. Like the old heal, it covers documents
+    with no manifest yet (a failed first run); a failed re-index keeps its old, readable manifest
+    and is not counted.
 
     Walks the corpus for ``index_state='failed'`` documents, then runs the
     shared heal core in dry-run mode over just those, so the count is the

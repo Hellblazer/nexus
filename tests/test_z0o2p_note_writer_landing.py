@@ -526,6 +526,47 @@ class TestEveryProducerUsesTheSharedHelpers:
                     found.add((rel, fn.name))
         assert found == set(_NOTE_PRODUCERS), found ^ set(_NOTE_PRODUCERS)
 
+    def test_every_function_that_puts_or_fires_a_note_also_stamps_it_after_the_chains(self):
+        """nexus-z0o2p.34: ``put_note`` writes with no completion stamp, so a caller that never calls
+        ``stamp_note`` leaves its notes ``indexing`` forever. A census over the whole source, not the
+        four known producers: any function that calls ``put_note`` or ``fire_note_chains`` (outside
+        note_write.py, which defines them) calls ``stamp_note`` and does so after the chains fired.
+        Non-vacuous: it finds the four producers."""
+        offenders: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for path in _SRC.rglob("*.py"):
+            rel = path.relative_to(_SRC).as_posix()
+            if rel == "catalog/note_write.py":
+                continue
+            s, o = _note_stamp_census(ast.parse(path.read_text()), rel)
+            seen |= s
+            offenders += o
+        assert seen >= set(_NOTE_PRODUCERS), seen ^ set(_NOTE_PRODUCERS)
+        assert not offenders, offenders
+
+    def test_the_census_is_red_on_a_caller_that_skips_or_reorders_the_stamp(self):
+        good = "def f():\n    o = put_note(c)\n    fire_note_chains(o, c)\n    o = stamp_note(o)\n"
+        skipped = "def f():\n    o = put_note(c)\n    fire_note_chains(o, c)\n"
+        early = "def f():\n    o = put_note(c)\n    o = stamp_note(o)\n    fire_note_chains(o, c)\n"
+        assert _note_stamp_census(ast.parse(good), "x.py")[1] == []
+        assert _note_stamp_census(ast.parse(skipped), "x.py")[1]
+        assert _note_stamp_census(ast.parse(early), "x.py")[1]
+
+
+def _note_stamp_census(tree: ast.AST, rel: str) -> tuple[set[tuple[str, str]], list[str]]:
+    seen: set[tuple[str, str]] = set()
+    offenders: list[str] = []
+    for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        names = [n for _l, n in _calls(fn)]
+        if "put_note" not in names and "fire_note_chains" not in names:
+            continue
+        seen.add((rel, fn.name))
+        if "stamp_note" not in names:
+            offenders.append(f"{rel}::{fn.name} never calls stamp_note")
+        elif "fire_note_chains" in names and names.index("stamp_note") < names.index("fire_note_chains"):
+            offenders.append(f"{rel}::{fn.name} stamps before it fires the chains")
+    return seen, offenders
+
 
 # ── MCP store_put: the writer's behaviour change, at the tool level ──────────
 
@@ -580,6 +621,51 @@ class TestMcpStorePut:
         assert result == "Error: store_put: " + failure_message(outcome, subject="content", check="store_get")
         assert "Stored" not in result
         single.assert_not_called(), batch.assert_not_called(), document.assert_not_called()
+
+    @pytest.mark.parametrize("outcome,invalidated", [
+        pytest.param(_outcome(UNCERTAIN, reason="timed out"), True, id="uncertain"),
+        pytest.param(_outcome(UNCERTAIN, reason="r", stamp_refused=True, stamp_detail="409"), True, id="stamp-refused"),
+        pytest.param(_outcome(UNCERTAIN, reason="unstamped", unstamped=True), True, id="unstamped"),
+        pytest.param(_outcome(NOT_LANDED, **_ENGINE_REFUSED), False, id="not-landed"),
+        pytest.param(_outcome(NO_CATALOG, catalog_doc_id="", reason="catalog registration failed: X"), False,
+                     id="no-catalog"),
+    ])
+    def test_an_uncertain_outcome_drops_the_caches_before_the_error_returns(self, outcome, invalidated, engine):
+        """M5: an UNCERTAIN note may have landed (or still land), so a cached page burst or collection
+        list built before it is stale for as long as the note exists, error or not. A note that
+        definitely did not land changes nothing, so it keeps the caches."""
+        from nexus.mcp.core import store_put
+
+        with patch("nexus.catalog.note_write.put_note", return_value=outcome), \
+                patch("nexus.mcp.core._page_cache_invalidate") as page, \
+                patch("nexus.mcp.core._invalidate_collections_cache") as collections:
+            result = store_put(content="z0o2p35 invalidate", collection="z0o2p-landing", title="t")
+        assert result.startswith("Error: store_put: ")
+        assert page.called is invalidated and collections.called is invalidated
+
+    def test_a_stamp_that_fails_still_records_the_write_and_returns_the_tables_error(self, engine):
+        """nexus-z0o2p.34: the note is stored and its chains fired when the stamp fails, so the tier
+        write is recorded and the relevance log runs (they are facts about the write), and the caller
+        is still told the note could not be confirmed complete."""
+        from nexus.mcp.core import store_put
+
+        stored = _outcome(STORED, stamp_pending=True, content_hash="h")
+
+        def failing_stamp(outcome, **_k):
+            outcome.status, outcome.unstamped = UNCERTAIN, True
+            outcome.reason = "the completion stamp failed: boom"
+            return outcome
+
+        with patch("nexus.catalog.note_write.put_note", return_value=stored), \
+                patch("nexus.catalog.note_write.fire_note_chains"), \
+                patch("nexus.catalog.note_write.stamp_note", side_effect=failing_stamp), \
+                patch("nexus.mcp.core._record_tier_write") as record, \
+                patch("nexus.mcp.core._get_recent_search_traces", return_value=[]) as traces:
+            result = store_put(content="z0o2p34 stamp failed", collection="z0o2p-landing", title="t")
+        assert result.startswith("Error: store_put: "), result
+        assert "not stamped complete" in result and "stays 'indexing'" in result
+        record.assert_called_once()
+        traces.assert_called()
 
     def test_a_stored_outcome_fires_the_chains_through_the_shared_helper(self, engine):
         from nexus.mcp.core import store_put

@@ -109,26 +109,46 @@ _WAKE_JITTER_FRACTION: float = 0.2
 _RETRY_AFTER_CLAMP_MAX: float = 300.0
 
 
+def _late_monotonic() -> float:
+    """``time.monotonic``, looked up when called (nexus-q81g7), so a test that
+    patches the ``time`` module is seen by every default brake."""
+    return time.monotonic()
+
+
+def _late_sleep(seconds: float) -> None:
+    """``time.sleep``, looked up when called; see :func:`_late_monotonic`."""
+    time.sleep(seconds)
+
+
 class RateLimitBrake:
     """A process-wide shared pause point. Thread-safe.
 
     Clock/sleep/jitter are constructor-injected so tests never sleep for
     real; production code uses the real-time defaults via :func:`get_brake`.
+
+    ``clock`` and ``sleep`` default to ``None``, meaning "``time.monotonic`` /
+    ``time.sleep``, looked up when USED" (nexus-q81g7). They were bound as default
+    arguments at definition time, which made the seam the retry tests patch
+    (``nexus.retry.time.sleep`` is the global ``time`` module) invisible to the
+    brake: ``wait()`` kept sleeping on the real functions for a widened 429's whole
+    182 s schedule.
     """
 
     def __init__(
         self,
         *,
-        clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
         jitter: Callable[[], float] = random.random,
         wait_slice_seconds: float = _WAIT_SLICE_SECONDS,
         base_delay_seconds: float = _BASE_DELAY_SECONDS,
         max_delay_seconds: float = _MAX_DELAY_SECONDS,
         escalation_window_seconds: float = _ESCALATION_WINDOW_SECONDS,
     ) -> None:
-        self._clock = clock
-        self._sleep = sleep
+        # Never None: tests (and tools) read ``brake._clock()`` directly. The late
+        # wrappers look ``time.monotonic`` / ``time.sleep`` up when CALLED.
+        self._clock: Callable[[], float] = clock if clock is not None else _late_monotonic
+        self._sleep: Callable[[float], None] = sleep if sleep is not None else _late_sleep
         self._jitter = jitter
         self._wait_slice_seconds = wait_slice_seconds
         self._base_delay_seconds = base_delay_seconds
@@ -182,7 +202,7 @@ class RateLimitBrake:
         server, not evidence of a sustained unknown-duration outage.
         """
         with self._lock:
-            now = self._clock()
+            now = self._now()
             if retry_after is not None:
                 delay = max(0.0, retry_after)
             else:
@@ -210,6 +230,12 @@ class RateLimitBrake:
         )
         return delay
 
+    def _now(self) -> float:
+        return self._clock()
+
+    def _pause(self, seconds: float) -> None:
+        self._sleep(seconds)
+
     def release(self) -> None:
         """Call on a successful attempt: resets the escalation counter so
         the NEXT trip (if any) starts back at the base delay rather than
@@ -230,14 +256,21 @@ class RateLimitBrake:
         """
         waited = 0.0
         last_delay = 0.0
+        started = self._now()
         while True:
             with self._lock:
-                remaining = self._resume_at - self._clock()
+                # The later of the clock and what this call has itself slept.
+                # A sleep that RETURNED has elapsed whether or not the clock saw
+                # it: a caller that replaced ``time.sleep`` with a no-op (every
+                # retry test) would otherwise spin here on the real clock for the
+                # whole delay (nexus-q81g7). With real sleep and clock the two
+                # agree, so production behaviour is unchanged.
+                remaining = self._resume_at - max(self._now(), started + waited)
                 last_delay = self._last_delay
             if remaining <= 0:
                 break
             slice_for = min(remaining, self._wait_slice_seconds)
-            self._sleep(slice_for)
+            self._pause(slice_for)
             waited += slice_for
         if waited > 0:
             # nexus-cy9u7: small per-worker jitter on wake so every worker
@@ -245,7 +278,7 @@ class RateLimitBrake:
             # upstream limit in the same instant.
             jitter_extra = last_delay * (self._jitter() * _WAKE_JITTER_FRACTION)
             if jitter_extra > 0:
-                self._sleep(jitter_extra)
+                self._pause(jitter_extra)
                 waited += jitter_extra
             with self._lock:
                 self.seconds_paused += waited

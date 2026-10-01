@@ -707,11 +707,56 @@ class TestChunkMetadata:
         assert res.embed_embedded == 0 and res.embed_skipped == 1
 
 
+    def test_a_reput_keeps_a_key_another_writer_set_on_the_chunk(self, vec, real_cat):
+        """M6: the note's metadata is MERGED into the stored chunk's, as the upsert it replaced did.
+        ``nx enrich bib`` writes ``bib_*`` onto note chunks; a re-put must refresh what the note sets
+        and leave what it does not."""
+        pieces = _pieces("meta-merge", 1)
+        doc = _register("z0o2p35-meta-merge", pieces)
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="old", cat=real_cat)
+        chash = _chash(pieces[0])
+        vec.get_collection(_COLLECTION).update(ids=[chash], metadatas=[{"bib_year": 2024, "bib_venue": "VLDB"}])
+        assert self._meta(vec, chash)["bib_year"] == 2024, "control: the other writer's key is stored"
+
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="new", cat=real_cat)
+        meta = self._meta(vec, chash)
+        assert meta["tags"] == "new", "the key the note sets is refreshed"
+        assert (meta["bib_year"], meta["bib_venue"]) == (2024, "VLDB"), "a key another writer set is kept"
+
+    def test_a_permanent_reput_of_a_ttld_note_drops_its_ttl(self, vec, real_cat):
+        """nexus-z0o2p.34 (critique 5b): the merge keeps a stored key the incoming metadata omits. A
+        re-put that makes a TTL'd note PERMANENT sends no ``ttl_days``, so under a bare merge the old
+        TTL would survive and the note would still expire (data loss). The note's own keys must
+        therefore be overwritten by a re-put, absent ones included."""
+        pieces = _pieces("meta-ttl", 1)
+        doc = _register("z0o2p34-meta-ttl", pieces)
+        chash = _chash(pieces[0])
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, ttl_days=5, cat=real_cat)
+        assert self._meta(vec, chash)["ttl_days"] == 5, "control: the TTL is stored"
+
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, cat=real_cat)    # permanent
+        meta = self._meta(vec, chash)
+        assert meta.get("ttl_days") in (None, 0), f"the permanent re-put must drop the stored TTL: {meta}"
+        assert meta.get("expires_at") in (None, ""), "and any expiry derived from it"
+
+    def test_the_request_asks_the_engine_to_merge(self, vec, real_cat):
+        seen: list[dict] = []
+
+        def spy(docs, kwargs):
+            seen.append(dict(kwargs))
+            return docs, kwargs
+
+        pieces = _pieces("meta-merge-flag", 1)
+        write_note(catalog_doc_id=_register("z0o2p35-meta-merge-flag", pieces), collection=_COLLECTION,
+                   pieces=pieces, cat=_Recording(real_cat, mutate=spy))
+        assert seen and seen[0].get("metadata_merge") is True and not seen[0].get("metadata_delete_keys")
+
+
 # ── put_note: the caller protocol ────────────────────────────────────────────
 
 
 class TestPutNote:
-    def test_put_note_begins_the_fence_before_the_write_and_stamps_it_complete(self, vec):
+    def test_put_note_begins_the_fence_before_the_write_and_leaves_the_stamp_to_stamp_note(self, vec):
         import nexus.catalog.note_write as nw
         import nexus.doc_indexer as di
         from unittest.mock import patch
@@ -732,9 +777,15 @@ class TestPutNote:
             out = put_note(content="z0o2p12 put_note fence order", collection=_COLLECTION,
                            title="z0o2p12-putnote-fence")
         assert order == ["fence-begin", "write"]
-        assert out.status == nw.STORED and out.write.completed
-        assert out.chunk_ids == [_chash("z0o2p12 put_note fence order")] and out.doc_id == out.chunk_ids[0]
+        assert out.status == nw.STORED and out.chunk_ids == [_chash("z0o2p12 put_note fence order")]
+        assert out.doc_id == out.chunk_ids[0]
+        # RDR-223 (nexus-z0o2p.34): the write carries no stamp; the producer stamps after its chains.
+        assert out.stamp_pending and not out.write.completed
+        assert _index_state(out.catalog_doc_id) == "indexing"
+        stamped = nw.stamp_note(out)
+        assert stamped is out and out.status == nw.STORED and out.write.completed and not out.stamp_pending
         assert _index_state(out.catalog_doc_id) == "complete"
+        assert nw.stamp_note(out) is out, "a second call has nothing to send"
 
     def test_no_document_means_nothing_is_written_and_no_fence_begins(self, vec):
         import nexus.catalog.note_write as nw
@@ -748,18 +799,53 @@ class TestPutNote:
         begin.assert_not_called()
         write.assert_not_called()
 
-    def test_a_landed_note_the_fence_was_not_told_about_is_unknown(self, vec):
+    def test_a_stamp_that_fails_after_the_chains_is_unknown_and_leaves_the_fence_indexing(self, vec):
+        """nexus-z0o2p.34: the stamp is sent after the post-store chains. One that fails (a transport
+        error, an engine with no fence route) reports the note as uncertain with ``unstamped`` and
+        leaves the document ``indexing``: nothing fails the fence, nothing is rolled back."""
+        import httpx
         import nexus.catalog.note_write as nw
         from unittest.mock import patch
 
-        unstamped = nw.NoteWriteResult(catalog_doc_id="x", collection=_COLLECTION, completed=False)
-        with patch("nexus.catalog.note_write.write_note", return_value=unstamped), \
+        out = put_note(content="z0o2p12 unstamped", collection=_COLLECTION, title="z0o2p12-unstamped")
+        assert out.status == nw.STORED and out.stamp_pending
+        with patch("nexus.catalog.note_write.complete_document",
+                   side_effect=httpx.ConnectError("refused")), \
              patch("nexus.doc_indexer._fence_fail") as fail, \
              patch("nexus.catalog.store_hook.rollback_minted_catalog_entry") as rollback:
-            out = put_note(content="z0o2p12 unstamped", collection=_COLLECTION, title="z0o2p12-unstamped")
-        assert out.status == nw.UNCERTAIN
-        assert fail.call_count == 1
+            stamped = nw.stamp_note(out)
+        assert stamped is out and out.status == nw.UNCERTAIN and out.unstamped and not out.stamp_refused
+        assert "stamp failed" in out.reason
+        assert "stays 'indexing'" in (nw.failure_message(out, subject="x") or "")
+        fail.assert_not_called()
         rollback.assert_not_called()
+        assert _index_state(out.catalog_doc_id) == "indexing"
+
+    def test_a_stamp_the_engine_refuses_after_the_chains_is_the_stamp_refused_outcome(self, vec):
+        import nexus.catalog.note_write as nw
+        from nexus.errors import IndexRunVerifyRefused
+        from unittest.mock import patch
+
+        out = put_note(content="z0o2p12 refused stamp", collection=_COLLECTION, title="z0o2p12-refused-stamp")
+        refusal = IndexRunVerifyRefused(
+            doc_id=out.catalog_doc_id, referenced=1, present=0, missing=1, chunk_count=1)
+        with patch("nexus.catalog.note_write.complete_document", side_effect=refusal), \
+             patch("nexus.doc_indexer._fence_fail") as fail:
+            nw.stamp_note(out)
+        assert out.status == nw.UNCERTAIN and out.stamp_refused and out.stamp_detail
+        assert "refused to stamp" in (nw.failure_message(out, subject="x") or "")
+        fail.assert_not_called()
+        assert _index_state(out.catalog_doc_id) == "indexing"
+
+    def test_stamp_note_does_nothing_for_a_note_that_did_not_store(self, vec):
+        import nexus.catalog.note_write as nw
+        from unittest.mock import patch
+
+        out = nw.PutNoteOutcome(status=nw.NOT_LANDED, collection=_COLLECTION, stamp_pending=True)
+        with patch("nexus.catalog.note_write.complete_document") as stamp:
+            assert nw.stamp_note(out) is out
+        stamp.assert_not_called()
+        assert out.status == nw.NOT_LANDED
 
     @pytest.mark.parametrize("manifest_empty", [True, False])
     def test_a_minted_row_is_removed_only_when_its_manifest_is_empty(self, vec, manifest_empty):
@@ -775,8 +861,65 @@ class TestPutNote:
             out = put_note(content=f"z0o2p12 minted {manifest_empty}", collection=_COLLECTION,
                            title=f"z0o2p12-minted-{manifest_empty}")
         assert out.status == nw.NOT_LANDED and out.minted is True
-        assert fail.call_count == 1
         assert rollback.call_count == (1 if manifest_empty else 0)
+        assert fail.call_count == 1                      # both still fire (Decision 5)
+
+    def test_a_minted_row_is_removed_before_the_fence_is_failed(self, vec):
+        """M1: the read-then-delete window in ``rollback_minted_catalog_entry`` must not be widened by
+        the fence write, so the removal runs FIRST and the fence is failed after (Decision 5 keeps
+        both); a row that could not be removed has its stamp cleared in between."""
+        import nexus.catalog.note_write as nw
+        from unittest.mock import patch
+
+        refusal = NoteWriteError(catalog_doc_id="x", collection=_COLLECTION, reason="refused",
+                                 manifest_empty=True)
+        for removed in (True, False):
+            order: list[str] = []
+
+            def rollback(*a, _removed=removed, **k):
+                order.append("rollback")
+                return _removed
+
+            with patch("nexus.catalog.note_write.write_note", side_effect=refusal), \
+                 patch("nexus.doc_indexer._fence_fail", side_effect=lambda *a, **k: order.append("fence-fail")), \
+                 patch("nexus.catalog.store_hook.rollback_minted_catalog_entry", side_effect=rollback), \
+                 patch("nexus.catalog.store_hook.restore_pre_call_stamp",
+                       side_effect=lambda *a, **k: order.append("restore-stamp")):
+                out = put_note(content=f"z0o2p35 minted order {removed}", collection=_COLLECTION,
+                               title=f"z0o2p35-minted-order-{removed}")
+            assert out.status == nw.NOT_LANDED
+            assert order == (["rollback", "fence-fail"] if removed
+                             else ["rollback", "restore-stamp", "fence-fail"]), order
+
+    def test_a_landed_note_whose_resend_failed_does_not_fail_the_fence(self, vec):
+        """M2: the manifest showed the note, so attempt 1 committed (without a stamp: the write
+        carries none, nexus-z0o2p.34). A resend that then fails is UNCERTAIN, and ``_fence_fail`` must
+        not run: the note is whole and its fence already reads ``indexing``."""
+        import nexus.catalog.note_write as nw
+        from unittest.mock import patch
+
+        landed = nw.LandedUnconfirmedError("note x is in the manifest, but resending failed")
+        with patch("nexus.catalog.note_write.write_note", side_effect=landed), \
+             patch("nexus.doc_indexer._fence_fail") as fail, \
+             patch("nexus.catalog.store_hook.rollback_minted_catalog_entry") as rollback:
+            out = put_note(content="z0o2p35 landed unconfirmed", collection=_COLLECTION,
+                           title="z0o2p35-landed-unconfirmed")
+        assert out.status == nw.UNCERTAIN and "resending" in out.reason
+        fail.assert_not_called()
+        rollback.assert_not_called()
+
+    def test_an_in_flight_request_the_manifest_does_not_show_still_fails_the_fence(self, vec):
+        """Control for M2: nothing landed that we can see, the request may still commit, and the
+        existing rule (fail the fence, keep the row) stands."""
+        import nexus.catalog.note_write as nw
+        from unittest.mock import patch
+
+        with patch("nexus.catalog.note_write.write_note",
+                   side_effect=ManifestVerifyUncertainError("in flight, not visible")), \
+             patch("nexus.doc_indexer._fence_fail") as fail:
+            out = put_note(content="z0o2p35 in flight", collection=_COLLECTION, title="z0o2p35-in-flight")
+        assert out.status == nw.UNCERTAIN
+        assert fail.call_count == 1
 
     def test_a_minted_row_whose_own_removal_fails_keeps_no_stamp_for_a_chunk_never_written(self, vec):
         """Case E: the write is refused with an empty manifest and the row this call minted cannot be
@@ -1061,7 +1204,11 @@ class TestSettlingFromEveryAttempt:
         def dropped():
             raise httpx.RemoteProtocolError("dropped")
 
-        with pytest.raises(ManifestVerifyUncertainError, match="resending"):
+        from nexus.catalog.note_write import LandedUnconfirmedError
+
+        # The manifest shows the note, so the failure is "landed, unconfirmed", the type put_note
+        # answers without failing the fence (nexus-z0o2p.35, M2).
+        with pytest.raises(LandedUnconfirmedError, match="resending"):
             write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, tags="x",
                        cat=_Recording(real_cat, before=dropped))
 

@@ -803,6 +803,99 @@ class TestFlushInstrumentation:
         assert b.stats["begin_hook_seconds"] == pytest.approx(e["begin_hook_s"], abs=1e-3)
 
 
+class TestOnBatchStamp:
+    """nexus-z0o2p.34 (RDR-223, Sam 2026-09-30): the completion stamp comes AFTER the post-store hooks.
+
+    ``on_batch_stamp`` fires once per SUCCESSFUL flush, after ``on_batch_complete`` (flush-grain
+    hooks) AND every file's ``on_file_complete`` (file-grain hooks), with the same arguments as
+    ``on_batch_complete``. A failure in it is contained; a failed flush never calls it.
+    """
+
+    def test_it_fires_after_the_flush_grain_hooks_and_every_file_completion(self) -> None:
+        order: list[str] = []
+        b = ChunkBatcher(
+            flush=lambda *a: order.append("write"),
+            on_file_complete=lambda p, c=None: order.append(f"file:{p}"),
+            on_batch_complete=lambda *a: order.append("flush-hooks"),
+            on_batch_stamp=lambda coll, ids, docs, metas, fcs: order.append(
+                f"stamp:{coll}:{len(ids)}:{sorted(p for p, _ in fcs)}"),
+            max_chunks=100,
+        )
+        b.add("a.py", "code__x", *_mk(2, "a"), context={"k": "a"})
+        b.add("b.py", "code__x", *_mk(3, "b"), context={"k": "b"})
+        b.drain()
+        assert order == [
+            "write", "flush-hooks", "file:a.py", "file:b.py", "stamp:code__x:5:['a.py', 'b.py']",
+        ]
+
+    def test_a_stamp_that_raises_is_contained_and_the_files_still_complete(self) -> None:
+        rec = Recorder()
+
+        def boom(*a) -> None:
+            raise RuntimeError("stamp down")
+
+        b = _batcher(rec, on_batch_stamp=boom, max_chunks=100)
+        b.add("a.py", "code__x", *_mk(2, "a"))
+        b.drain()
+        assert rec.completed == ["a.py"] and rec.failed == []
+        assert b.failed_files == {}
+
+    def test_a_flush_grain_hook_that_raises_leaves_the_flush_unstamped(self) -> None:
+        """The same rule as a raising ``on_file_complete``: a hook that did not finish is not a hook that
+        ran, so the documents stay ``indexing`` and the next run redoes them and fires it again."""
+        rec = Recorder()
+        stamped: list[str] = []
+
+        def boom(*a) -> None:
+            raise RuntimeError("taxonomy down")
+
+        b = _batcher(rec, on_batch_complete=boom, on_batch_stamp=lambda coll, *a: stamped.append(coll),
+                     max_chunks=100)
+        b.add("a.py", "code__x", *_mk(2, "a"))
+        b.drain()
+        assert rec.completed == ["a.py"], "the files still settle (the hook failure is contained)"
+        assert stamped == []
+
+    def test_a_failed_flush_never_stamps(self) -> None:
+        rec = Recorder(fail_batches={0})
+        stamped: list[str] = []
+        b = _batcher(rec, on_batch_stamp=lambda coll, *a: stamped.append(coll), max_chunks=100)
+        b.add("a.py", "code__x", *_mk(2, "a"))
+        b.drain()
+        assert rec.failed and stamped == []
+
+    def test_a_bisected_flush_stamps_each_half_that_lands(self) -> None:
+        rec = Recorder(fail_batches={0})                  # the 2-file batch fails; each half then lands
+        stamped: list[list[str]] = []
+        b = _batcher(
+            rec, on_batch_stamp=lambda coll, ids, docs, metas, fcs: stamped.append(sorted(p for p, _ in fcs)),
+            max_chunks=100)
+        b.add("a.py", "code__x", *_mk(2, "a"))
+        b.add("b.py", "code__x", *_mk(2, "b"))
+        b.drain()
+        assert stamped == [["a.py"], ["b.py"]]
+
+    def test_the_stamp_is_in_the_flush_wall_and_the_event(self) -> None:
+        import time as _time
+
+        import structlog
+        import structlog.testing
+
+        structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(20))
+        b = ChunkBatcher(
+            flush=lambda *a: None,
+            on_batch_stamp=lambda *a: _time.sleep(0.03),
+            max_chunks=100,
+        )
+        b.add("a.py", "code__x", *_mk(2, "a"))
+        with structlog.testing.capture_logs() as logs:
+            b.drain()
+        e = next(l for l in logs if l["event"] == "chunk_flush_complete")
+        assert e["stamp_s"] >= 0.03
+        assert b.stats["stamp_seconds"] >= 0.03
+        assert b.stats["flush_seconds"] >= b.stats["stamp_seconds"]
+
+
 class TestOnFlushHook:
     """nexus-rhwg5 / GH #1432 ask 3 residue: mid-loop flushes (dispatched
     from ``add()``'s overflow path, not ``drain()``) had NO progress hook

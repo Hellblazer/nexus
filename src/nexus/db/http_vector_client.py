@@ -2912,9 +2912,10 @@ class HttpVectorClient:
         as a drop-in.
 
         Param name ``collection_name`` (not ``collection``) matches
-        ``T3Database.upsert_chunks_with_embeddings`` so callers using the kwarg
-        form (code_indexer.py:470, prose_indexer.py:233, exporter.py:431,448)
-        don't get a TypeError (nexus-7zuzz).
+        ``T3Database.upsert_chunks_with_embeddings`` so a caller using the kwarg
+        form doesn't get a TypeError (nexus-7zuzz). The callers that did
+        (``code_indexer``, ``prose_indexer``, ``exporter``) now write through the combined
+        chunk-plus-owner route (RDR-223) and reach this only on the in-memory T3 double.
 
         ``force_re_embed`` (RDR-181 §Approach step 3): forwarded verbatim to
         :meth:`upsert_chunks` so the indexer's ``--force`` path reaches the

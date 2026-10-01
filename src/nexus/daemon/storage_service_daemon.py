@@ -1628,7 +1628,7 @@ class StorageServiceSupervisor:
             # Snapshot who holds the lock BEFORE releasing it, so the
             # WARNING below is a visible correction (who/since), not silent.
             select_sql = (
-                "SELECT lockedby, lockgranted FROM databasechangeloglock "
+                "SELECT lockedby, lockgranted FROM public.databasechangeloglock "
                 "WHERE id=1 AND locked=true;"
             )
             snap = _run_psql(psql_bin, host, port, dbname, user, password, select_sql)
@@ -1670,7 +1670,7 @@ class StorageServiceSupervisor:
                         terminated_pids.append(int(pid_field))
 
             release_sql = (
-                "UPDATE databasechangeloglock SET locked=false, lockgranted=NULL, "
+                "UPDATE public.databasechangeloglock SET locked=false, lockgranted=NULL, "
                 "lockedby=NULL WHERE id=1 AND locked=true;"
             )
             released = _run_psql(

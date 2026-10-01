@@ -638,8 +638,9 @@ class TestReconcileWriteFailureIsolated:
         # The nexus-ir68m damage (reconcile failure discarding the tumbler,
         # returning "") leaves both of these at zero calls, because
         # index_pdf refuses a run with no catalog document (RDR-223).
-        # The fence begins inside the combined writer (its first request) and, for a one-request
-        # document, the completion stamp rides that same write_manifest_many.
+        # The fence begins inside the combined writer (its first request). Where the completion
+        # stamp travels is not this test's subject (it follows the post-store hooks, RDR-223
+        # decision of 2026-09-30); that the fence CLOSED is Proof 2's index_state below.
         assert spy_begin.call_count == 1, (
             "begin_index_run never fired — the run fell OUT of RUNFENCE, which "
             "is the nexus-ir68m damage: a failed reconcile write discarded "
@@ -647,10 +648,6 @@ class TestReconcileWriteFailureIsolated:
         )
         assert spy_begin.call_args_list[0].args[1] == doc_id, spy_begin.call_args_list
         assert spy_write.call_count == 1, spy_write.call_args_list
-        assert doc_id in (spy_write.call_args_list[0].kwargs.get("complete") or {}), (
-            "the write carried no completion stamp — the run began but never closed "
-            f"the fence. Calls: {spy_write.call_args_list!r}"
-        )
 
         entry = reader.resolve(doc_id)
         assert entry is not None
