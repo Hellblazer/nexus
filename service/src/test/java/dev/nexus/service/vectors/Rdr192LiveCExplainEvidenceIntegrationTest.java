@@ -317,6 +317,39 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         assertInlinedLiveC(plan, "text_gate_probe_384");
     }
 
+    /**
+     * Evidence only: the same selective-gate probe taken as the container superuser, which bypasses
+     * RLS. The planner's choice under {@code nexus_svc} is a sequential scan, and a sequential scan stays
+     * the choice with scans penalised (the test above), so the text gate's GIN indexes are unused. This
+     * records the plan with the RLS qual out of the way, to attribute that to RLS: a user qual whose
+     * operator is not leakproof ({@code @@}, {@code <%}) cannot be an index condition on a relation with
+     * a security qual (PostgreSQL's {@code restriction_is_securely_promotable}).
+     */
+    @Test
+    void gateProbe_selective_asSuperuser_recordsThePlanWithoutRls() throws Exception {
+        Table<?> fn = TEXT_GATE_PROBE_384.call(RARE_TOKEN, new String[] {COLL}, null, null,
+            PgVectorRepository.SELECTIVE_GATE_MAX + 1);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ResultQuery<?> q = ctx.selectFrom(fn);
+            String plan = ctx.explain(q).plan();
+            int rows = q.fetch().size();
+            long[] ms = new long[TIMED_RUNS];
+            for (int i = 0; i < TIMED_RUNS; i++) {
+                long t0 = System.nanoTime();
+                q.fetch();
+                ms[i] = (System.nanoTime() - t0) / 1_000_000;
+            }
+            java.util.Arrays.sort(ms);
+            synchronized (evidence) {
+                evidence.put("text_gate_probe_384 (selective gate, superuser, RLS bypassed)",
+                    "rows=" + rows + "  p50=" + ms[TIMED_RUNS / 2] + " ms  (runs "
+                        + java.util.Arrays.toString(ms) + ")\n" + plan);
+            }
+            assertInlinedLiveC(plan, "text_gate_probe_384");
+        }
+    }
+
     @Test
     void byChashRank_inlinesLiveC() {
         List<String> some = new ArrayList<>();
