@@ -1267,7 +1267,18 @@ class RawSqlGateTest {
         // public writer exists for a bare centroid row outside the real assignment
         // pipeline, and jOOQ's generated pgvector Binding is not reachable here
         // without hand-rolling the same literal that precedent already uses).
-        Map.entry("dev/nexus/service/vectors/Rdr192EngineLivenessMatrixIntegrationTest.java", 1)
+        Map.entry("dev/nexus/service/vectors/Rdr192EngineLivenessMatrixIntegrationTest.java", 1),
+        // RDR-192 Step 7 (bead nexus-wbfpw.15): 1 raw-JDBC site -- waitsOnALock's
+        // pg_stat_activity probe (a backend waiting on a Lock for the reaper-shaped
+        // DELETE has no jOOQ DSL form). The race it proves (a refresh in flight wins)
+        // runs the DELETE itself through typed DSL.
+        Map.entry("dev/nexus/service/vectors/ChunkIsReapableIntegrationTest.java", 1),
+        // RDR-192 Step 7 (bead nexus-wbfpw.15): 16 raw-JDBC sites -- the generate_series
+        // fixture loads, ANALYZE, EXPLAIN (ANALYZE, BUFFERS) of the exact predicate run
+        // through a NOSUPERUSER NOBYPASSRLS connection (jOOQ's explain() cannot ANALYZE),
+        // and the pg_stat_user_tables HOT counters. Same reasons as
+        // ManifestLessCensusNotesGuardIndexPlanShapeTest's entry above.
+        Map.entry("dev/nexus/service/vectors/ChunkIsReapablePlanIntegrationTest.java", 16)
     );
 
     /**
@@ -1648,7 +1659,9 @@ class RawSqlGateTest {
     // nexus-wbfpw.44/.45/.46: 979 -> 981 (+2: new test file
     // vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java at 2 -- see that entry's own
     // comment).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 979;
+    // RDR-192 Step 7 (bead nexus-wbfpw.15): 979 -> 996 (+17: ChunkIsReapableIntegrationTest.java
+    // new at 1 and ChunkIsReapablePlanIntegrationTest.java new at 16 -- see their entries).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 996;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

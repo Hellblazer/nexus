@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-192 Step 7 (bead nexus-wbfpw.15): reapable(c), the ONE engine
+    predicate for "this chunk is garbage collection's to take", as an
+    inlinable SQL function. Non-destructive: this changeset creates the
+    function and nothing else. Its first consumers are Step 8's
+    gc_quarantine_orphans pair (vectors-022) and the read-only listing route;
+    the periodic reaper (nexus-2x9xa) is the third.
+
+    THE PREDICATE. A chunk row c is reapable when ALL of:
+
+      1. c.last_written_at < now() - grace. last_written_at, not created_at
+         (Sam, 2026-09-29, nexus-wbfpw.43): created_at is write-once, so a
+         re-write would otherwise get no fresh grace. last_written_at is
+         refreshed by every client write path and by no maintenance UPDATE
+         (vectors-020's header carries the contract). The existence-partition
+         metadata refresh (the have-vector branch of upsert-chunks and the
+         identical-text branch of the combined write, both batchUpdateMetadata)
+         IS one of those client write paths, so it bumps last_written_at.
+      2. no catalog_document_chunks row names (tenant, collection, chash) in
+         ANY owner state. A tombstoned owner still has a manifest row, so a
+         chunk whose only owners are tombstoned is NOT reapable: it is
+         purge_trash's, which ages the tombstone, not the chunk.
+      3. no document in index_state 'indexing' names the chunk, until that
+         run's index_started_at is older than the pin TTL. A multi-batch
+         re-index replaces the manifest at batch 1, so every old tail chunk is
+         ownerless until a later batch re-adds it (RDR-223 Phase 2 gate
+         critique, S2). The pin is a document-level, TTL-bounded exclusion so a
+         dead run cannot hold chunks forever. The chunk names its document by
+         metadata catalog_doc_id, falling back to doc_id when that is absent or
+         empty: the same forward key the manifest-less census uses. An
+         'indexing' row with no index_started_at cannot be aged, so it does not
+         pin (its TTL cannot be evaluated; the begin route always stamps it).
+
+    PARAMETERS. p_grace and p_pin_ttl are intervals; NULL means the default
+    (30 days and 7 days). The defaults live here and nowhere else, so a caller
+    that passes NULL cannot drift from the predicate. Tests inject small
+    values; a delete path must clamp a user-supplied grace to a floor before it
+    reaches this function (the SQL stays pure).
+
+    SHAPE. Same as live(c) (vectors-018): a set-returning function, because a
+    scalar RETURNS boolean whose body holds an EXISTS subquery can never be
+    inlined, and an opaque per-row call is what the .9 round-1 EXPLAIN caught.
+    It returns one row when the chunk is reapable and none otherwise, so a
+    caller writes:
+
+        EXISTS (SELECT 1 FROM nexus.chunk_is_reapable(
+                    c.tenant_id, c.collection, c.chash, c.last_written_at,
+                    c.metadata, NULL, NULL))
+
+    The row's own last_written_at and metadata are PASSED IN rather than
+    re-read, which is what lets the same call be the WHERE of a DELETE: after
+    inlining, the grace comparison is a qual on the DELETE's own target row, so
+    a client write that refreshes last_written_at while the DELETE waits on its
+    row lock is seen when READ COMMITTED rechecks the new row version, and the
+    DELETE skips it. A select-then-delete-by-key would not see it. The manifest
+    and pin sub-queries are not rechecked by that mechanism: a manifest row
+    committed during the DELETE is the sweep gate's concern (every destructive
+    consumer takes it, as gc_quarantine_orphans and runSweepTransaction do), not
+    this function's.
+
+    THE PIN PROBE IS FENCED WITH OFFSET 0. Under FORCE RLS a NOSUPERUSER role
+    such as nexus_svc evaluates a user qual below the policy's security barrier,
+    and so can use it as an index condition, only when every function it calls is
+    LEAKPROOF; jsonb ->> text is not (nexus-wbfpw.4 round 4, pinned by
+    ManifestLessCensusNotesGuardIndexPlanShapeTest). Written inline as
+    d.tumbler = COALESCE(NULLIF(p_metadata ->> ...)) the key expression made the
+    planner skip catalog_documents_pk and probe idx_catalog_documents_index_state
+    instead, a bitmap scan of every 'indexing' document of the tenant per
+    candidate chunk (40 heap rows per probe on the measured fixture, 802 ms for a
+    60,000-chunk delete). OFFSET 0 keeps the key a subquery output, so the join
+    clause is d.tumbler = kk.k, a leakproof text equality, and the probe is a
+    primary-key lookup (455 ms for the same delete, 5 ms for a LIMIT 300
+    listing). ChunkIsReapablePlanIntegrationTest pins the plan under nexus_svc.
+
+    NOT A VIEW JOIN, for the reason vectors-009 and vectors-018 give.
+    LANGUAGE sql, STABLE, SECURITY INVOKER (FORCE RLS on the catalog tables stays
+    the isolation boundary), no function-level SET, not STRICT; EXECUTE is the
+    PUBLIC default, as for chunk_live_owners.
+
+    NO INDEX is added for last_written_at. A btree on it would stop HOT updates
+    for every client re-write of a chunk (nexus-wbfpw.43 review), and the
+    candidate scan is already bounded by the (tenant_id, collection, chash)
+    primary key prefix. The plan measured under nexus_svc is in
+    ChunkIsReapablePlanIntegrationTest.
+
+    OTHER PREDICATES. strandedChunkCount (purge_trash Step 1) does NOT move onto
+    this function: it counts chunks that HAVE a manifest row whose owners are all
+    aged tombstones, the complement of arm 2 above, so the two are disjoint by
+    design and together make the dead set. purge_trash keeps its own deleted_at
+    grace. RDR-192 Technical Design records the same decision.
+
+    ROW TYPE. RETURNS TABLE adds one generated jOOQ record
+    (ChunkIsReapableRecord); JooqRecordReflectionFeatureTest's count moves by +1.
+
+    No DATA EFFECT: a function definition only; no row changes. Placed after
+    vectors-020 and before the grants-nexus-svc.xml runAlways block (D0.1).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-021-1" author="nexus-wbfpw.15">
+        <comment>nexus.chunk_is_reapable(tenant, collection, chash, last_written_at, metadata, grace, pin_ttl): RDR-192 reapable(c) as an inlinable set-returning SQL function. One row when the chunk has no own-collection manifest row in any owner state, last_written_at is older than the grace (default 30 days) and no document in index_state indexing (younger than the pin TTL, default 7 days) names it; no row otherwise. No call site migrated here (Step 8).</comment>
+        <sql splitStatements="false" stripComments="false">
+CREATE OR REPLACE FUNCTION nexus.chunk_is_reapable(
+    p_tenant          text,
+    p_collection      text,
+    p_chash           bytea,
+    p_last_written_at timestamptz,
+    p_metadata        jsonb,
+    p_grace           interval DEFAULT NULL,
+    p_pin_ttl         interval DEFAULT NULL
+) RETURNS TABLE(reapable boolean)
+LANGUAGE sql
+STABLE
+SECURITY INVOKER
+AS $$
+    SELECT true
+     WHERE p_last_written_at &lt; now() - COALESCE(p_grace, interval '30 days')
+       AND NOT EXISTS (
+             SELECT 1
+               FROM nexus.catalog_document_chunks m
+              WHERE m.tenant_id  = p_tenant
+                AND m.collection = p_collection
+                AND m.chash      = p_chash
+           )
+       AND NOT EXISTS (
+             SELECT 1
+               FROM (SELECT COALESCE(NULLIF(p_metadata ->> 'catalog_doc_id', ''),
+                                     NULLIF(p_metadata ->> 'doc_id', '')) AS k
+                     OFFSET 0) kk
+               JOIN nexus.catalog_documents d
+                 ON d.tenant_id = p_tenant AND d.tumbler = kk.k
+              WHERE d.index_state = 'indexing'
+                AND d.index_started_at &gt; now() - COALESCE(p_pin_ttl, interval '7 days')
+           )
+$$;
+        </sql>
+        <rollback>
+            <sql splitStatements="true" stripComments="false">DROP FUNCTION IF EXISTS nexus.chunk_is_reapable(text, text, bytea, timestamptz, jsonb, interval, interval);</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>
