@@ -28,6 +28,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -47,6 +48,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>the candidate scan is the {@code chunks_pk} range over (tenant, collection);</li>
  *   <li>the manifest probe is {@code idx_catalog_chunks_chash};</li>
  *   <li>the quarantine probe is the primary key of {@code catalog_collections};</li>
+ *   <li>the orphaning-record probe is the primary key of {@code chunk_orphaned_at}, with no sequential scan;</li>
  *   <li>and there is NO index on {@code nexus.chunks (last_written_at)}: a btree on it would stop HOT updates
  *       for every client re-write (nexus-wbfpw.43 review item 7). That is asserted against the schema the
  *       changelog builds, so a changeset that adds one turns this red. (An earlier version of this test
@@ -118,6 +120,18 @@ class ChunkIsReapablePlanIntegrationTest {
                                   n, chash("a", n), DSL.inline(COL)).from(rows))
                .execute();
 
+            // 8,000 of the 10,000 orphans carry an orphaning record, as they would after a deletion or a
+            // re-index dropped their owners. The table must be non-trivial and analyzed for the planner to
+            // prefer the primary-key probe to a sequential scan, which is also what production looks like
+            // once anything has been orphaned (the header of vectors-021 says what an empty table plans).
+            var orphans = DSL.generateSeries(20001, 28000).as("g", "n");
+            Field<Integer> on = orphans.field("n", Integer.class);
+            ctx.insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
+                    CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT)
+               .select(ctx.select(DSL.inline(TENANT), DSL.inline(COL), chash("a", on), DSL.val(old)).from(orphans))
+               .execute();
+
+            PgContainerHelper.analyzeTable(su, CHUNK_ORPHANED_AT);
             PgContainerHelper.analyzeTable(su, CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENT_CHUNKS);
             PgContainerHelper.analyzeTable(su, CATALOG_DOCUMENTS);
@@ -187,6 +201,9 @@ class ChunkIsReapablePlanIntegrationTest {
         assertThat(plan).as("manifest probe:%n%s", plan).contains("idx_catalog_chunks_chash");
         assertThat(plan).as("quarantine probe is the catalog_collections primary key:%n%s", plan)
             .containsPattern("Index (Only )?Scan using \\w*catalog_collections\\w*");
+        assertThat(plan).as("the orphaning record is probed by its primary key, never scanned:%n%s", plan)
+            .containsPattern("Index (Only )?Scan using chunk_orphaned_at_pk")
+            .doesNotContainPattern("Seq Scan on chunk_orphaned_at");
     }
 
     @Test

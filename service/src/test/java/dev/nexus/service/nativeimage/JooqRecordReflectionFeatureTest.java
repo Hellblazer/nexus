@@ -239,12 +239,14 @@ class JooqRecordReflectionFeatureTest {
     // 106 -> 107: nexus-wbfpw.15, vectors-021-chunk-is-reapable-function.xml
     // added nexus.chunk_is_reapable, a RETURNS TABLE(reapable boolean)
     // function, one generated Record type (ChunkIsReapableRecord), +1.
-    // 107 -> 108: nexus-2x9xa, vectors-024-reaper-quarantine-chunks.xml
+    // 107 -> 108: nexus-wbfpw.15 (Sam's option b, 2026-10-01), the same file
+    // also added nexus.chunk_orphaned_at, the side table the orphaning
+    // triggers write, one generated Record type (ChunkOrphanedAtRecord), +1.
+    // 108 -> 109: nexus-2x9xa, vectors-024-reaper-quarantine-chunks.xml
     // added nexus.reaper_quarantine_chunks, a RETURNS TABLE(moved,
     // reapable_count, total_count, refused, remaining) function, one
-    // generated Record type (ReaperQuarantineChunksRecord), +1. The branch
-    // reworking vectors-021 may add its own; the two bumps merge by hand.
-    private static final int EXPECTED_RECORD_TYPES = 108;
+    // generated Record type (ReaperQuarantineChunksRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 109;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

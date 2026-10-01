@@ -3237,9 +3237,11 @@ FROM scope s
     /**
      * Read-only listing of the chunks {@code nexus.chunk_is_reapable} (vectors-021) selects in
      * {@code collection}, ordered by chash ascending. Selection is that function and nothing else:
-     * the call shape is the one every consumer uses (RDR-192 Step 7), so a chunk is listed exactly
-     * when {@code gc_quarantine_orphans} would move it and the reaper would delete it, at the same
-     * instant.
+     * the call shape is the one every consumer uses (RDR-192 Step 7), so with {@code graceSeconds}
+     * {@code null} a chunk is listed exactly when {@code gc_quarantine_orphans} (which passes NULL)
+     * would move it, at the same instant. A smaller {@code graceSeconds} lists more than any
+     * destructive consumer would take: it is an advisory preview and is not clamped, because this
+     * method never deletes.
      *
      * <p>{@code graceSeconds} {@code null} means the function's own default (30 days, owned by the
      * function and by nothing in Java, so it cannot drift); a value is passed as an interval in exact

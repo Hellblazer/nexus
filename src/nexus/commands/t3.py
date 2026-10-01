@@ -325,7 +325,8 @@ def gc_cmd(
     (run at the end of ``nx index``) does, with one difference: that
     path calls the engine's gc_quarantine_orphans, which selects with
     reapable(c) and so honours a 30 day ownerless grace measured from
-    when the chunk lost its last manifest row (RDR-192 Step 8), while
+    when a manifest statement last dropped one of the chunk's owner rows,
+    or from its last write if that is later (RDR-192 Step 8), while
     this CLI classifies client-side and ages candidates on ``indexed_at``
     (``--orphan-window``) until nexus-wbfpw.18 moves it onto the engine
     predicate. This CLI is the operator-driven one with explicit

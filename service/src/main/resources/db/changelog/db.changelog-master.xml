@@ -1664,7 +1664,9 @@
 
     <!--
         nexus-wbfpw.15: nexus.chunk_is_reapable, RDR-192 reapable(c) as an
-        inlinable set-returning function — see the included file's own header.
+        inlinable set-returning function, the nexus.chunk_orphaned_at side
+        table it reads and the manifest triggers that write it — see the
+        included file's own header.
         Placed after vectors-020 (the tail when this landed) and before the
         grants blocks, matching the established D0.1 late-append convention.
     -->

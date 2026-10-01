@@ -18,8 +18,12 @@
     chunk upsert (CatalogRepository#upsertManifestChunkVectors). It is NEVER
     refreshed by maintenance or stamping UPDATEs (frecency and enrichment
     metadata stamps, collection re-homing, collection rename and move): a
-    refresh from those would keep dead chunks alive forever. created_at stays
-    write-once. ChunksWriterLastWrittenAtScanTest lists every chunks writer in
+    refresh from those would keep dead chunks alive forever. The rule has NO
+    exception: the time a chunk last lost an owner row, which reapable(c) needs
+    and which is not a client write, is recorded in its own table,
+    nexus.chunk_orphaned_at (vectors-021), by triggers on the manifest, and never
+    by an UPDATE of nexus.chunks (that rewrote the row into every vector index).
+    created_at stays write-once. ChunksWriterLastWrittenAtScanTest lists every chunks writer in
     service/src/main and fails on one that is neither refreshing nor named
     there with a reason.
 

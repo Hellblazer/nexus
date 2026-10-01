@@ -4130,6 +4130,10 @@ def _prune_collection_serverside(
     cutoff = (
         datetime.now(UTC) - timedelta(days=quarantine_days())
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # NX_GC_FLOOR_FRACTION gates THIS step, the hard delete of quarantined chunks
+    # past their window, and nothing before it: the move into quarantine above
+    # (gc_quarantine_orphans) has no fraction floor. The reaper's move needs
+    # one (RDR-192 / nexus-2x9xa), and it is not built here.
     expired = expire_quarantine_serverside(
         db, quarantine_name, collection_name, cutoff,
         floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS,
@@ -4183,7 +4187,9 @@ def _prune_deleted_files(
 
     The engine moves a chunk only once it has had no owner for the
     reapable(c) grace window (30 days, RDR-192 Step 8): the clock starts
-    when the chunk's last manifest row is dropped, not when it was written.
+    when a manifest statement last dropped one of the chunk's owner rows
+    (recorded in ``nexus.chunk_orphaned_at``), or when the chunk was last
+    written if that is later, not when it was first written.
     A pass right after a file is deleted, or in the middle of a multi-batch
     re-index, therefore moves nothing for those chunks; a smaller ``moved``
     than the number of orphans is the expected answer, not a failure.
