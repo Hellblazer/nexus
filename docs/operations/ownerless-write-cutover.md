@@ -78,7 +78,7 @@ client version, so `X-Nexus-Client-Version` is the only soak signal, and the fin
 client sends it on both transports (urllib and httpx). A caller that is not the nexus client
 never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` (351
 `upsert-chunks`), and a conexus-side or script caller that builds its own request logs
-`client_version=absent` for as long as it exists. Upgrading a package cannot fix that, so
+`client_version="absent"` (the engine quotes the value) for as long as it exists. Upgrading a package cannot fix that, so
 `absent` does not mean "an old client". Step 3 dispositions each pair.
 
 ## Order of operations
@@ -116,7 +116,7 @@ never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` 
    | Pair | Disposition |
    |---|---|
    | nexus client, version at or above the paired release | counted only if a process still runs old code: find it with `nx doctor` on that machine |
-   | nexus client, `client_version=absent` | a client older than the cut: upgrade and restart it |
+   | nexus client, `client_version="absent"` | a client older than the cut: upgrade and restart it |
    | not the nexus client (`curl`, a conexus-side `httpx` caller, a script), `absent` | it never sends the header. Move it to the combined write (`/v1/catalog/manifest/write_many`, which writes the chunks and the owner rows together) or confirm it is retired. Do not wait for it to disappear |
    | a pair nobody can name | hold the flip until it is named |
 
