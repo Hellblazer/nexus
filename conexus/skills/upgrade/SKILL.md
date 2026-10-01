@@ -23,8 +23,9 @@ where `nx self install` refuses rather than doing the wrong thing.
 
 `nx upgrade` brings the package, engine, process, and provisioning
 preconditions current, then walks one ordered ladder that auto-applies whichever
-data migrations the install actually needs — T2 schema, the ChromaDB →
-Postgres+pgvector substrate move, pre-RDR-108 chunk identity, embedder era. Each
+data migrations the install actually needs — T2 schema, pre-RDR-108 chunk
+identity, embedder era. (The ChromaDB → Postgres+pgvector move is NOT among
+them on a current release: see "Installs that predate Postgres" below.) Each
 rung detects, converges, and verifies before completion is recorded; the walk is
 idempotent and resumable, and the source store is left byte-untouched as a
 rollback target. An install dormant since 5.x converges the same way a current
@@ -97,10 +98,74 @@ content; it does not force a wrong id through. If you are blocked on
 chash-length errors, run `nx upgrade` or STOP and report — never "unblock" the
 constraint.
 
+## Installs that predate Postgres
+
+A box carrying unmigrated pre-PG data (`chroma.sqlite3`, `t2.db`, `memory.db`,
+`catalog/.catalog.db`) is refused by a current release with a two-hop
+redirect, and `nx upgrade` here cannot migrate it. The path is: install the
+pinned `conexus==6.18.1` (the refusal names the exact command), run `nx upgrade`
+there, then upgrade back to current. Three preconditions for the hop at the pin:
+
+- **A LOCAL engine only.** Have the user write down `service_url` and
+  `service_token` first; the cloud steps need both again. Then
+  `unset NX_SERVICE_URL NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT` in the
+  shell, delete the `service_url:` line (and `service_token:`) under
+  `credentials:` in `~/.config/nexus/config.yml`, and `export NX_LOCAL=1` for
+  the hop. There is no `nx config unset`, so the config change is a file edit;
+  `nx config get service_url` prints `service_url: not set` when it is clear.
+  Both halves are needed. `NX_LOCAL=1` does not by itself override a configured
+  `service_url` (the endpoint reads it first), and the pin's provisioning
+  refuses when `is_local_mode()` is false (`NX_LOCAL=0`, `install.mode:
+  managed`, or a ChromaDB Cloud key with no mode record), which `NX_LOCAL=1`
+  overrides. Read from the 6.18.1 source, not run at the pin. Never run
+  the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
+  endpoint: that path is unsupported (the engine retired the `/v1/staging`
+  routes it lands through; what it did against a current engine before that is
+  unmeasured, nexus-6g218). Do not set `service_url` first "to save a step".
+- **Stop any current-engine local service** a 7.x install left running
+  (`nx daemon service stop`) so the pin provisions its own engine.
+- **Voyage-embedded data needs a Voyage-keyed local engine**
+  (`NX_VOYAGE_API_KEY` reaching the service), or those collections are refused
+  or re-embedded to bge-768 and are not expected to import into a Voyage cloud.
+
+If the user wants the managed cloud, that is a second hop with the CURRENT
+client after the upgrade back. It has NOT been rehearsed end to end (nexus-xbqh9)
+and carries less than the old direct path. Not carried: T2 plans, taxonomy
+(topics, assignments, links, centroids), `document_aspects`, the aspect queue and
+`aspect_promotion_log`, `frecency` and `relevance_log` (so a note's TTL is lost:
+an expiring note becomes permanent), the telemetry stores, DEVONthink
+highlights, curated catalog metadata (author, year, corpus, `meta`, collection
+supersession), and owner tumblers are re-minted. T2 memory is carried only by
+hand (`nx memory list`, `nx memory get --project NAME --title NAME`, then
+`nx memory put` in the cloud), which has to happen BEFORE the switch to the
+cloud and does not scale past tens of entries. Pick by user type:
+
+- Local-ONNX collections (bge-768): not expected to import into a Voyage cloud.
+  Hop 1 names them bge, so `nx store import` passes its name and dimension
+  checks and sends them to the cloud engine, which may refuse them; what it
+  answers is unverified (nexus-xbqh9). For code, docs and rdr content, re-index
+  from source in the cloud (`nx index repo`, `nx index pdf`); that is cheaper
+  than two hops.
+- Voyage collections from a Voyage-keyed hop 1: `nx store export --all`
+  locally, then `nx store import FILE` in the cloud.
+- Source-less `store_put` notes: `nx catalog export recovery.jsonl` locally,
+  `nx catalog import` in the cloud (re-embeds; carries links and notes only).
+
+Order: hand-carry T2 memory and run the exports while the box is still local;
+then `unset NX_LOCAL` and switch with `nx config set service_url ...` (and the
+`service_token` you noted; `NX_LOCAL=1` wins over `service_url` in current
+clients), clear the stranded banner
+(`nx stranded ack`, or move the pre-PG files it names aside), re-index from
+source, `nx store import`, and `nx catalog import` LAST (links resolve by
+`source_uri` against documents already there). The full procedure is
+`docs/migration-runbook.md` § Getting that data into the managed cloud; surface
+the choices to the user rather than making them.
+
 ## Managed service
 
-Pointing at a managed endpoint is configuration, not upgrade. Once configured,
-the upgrade is the same one verb:
+Pointing at a managed endpoint is configuration, not upgrade, and it is for an
+install whose data is already on the Postgres substrate (a pre-PG box migrates
+locally first; see above). Once configured, the upgrade is the same one verb:
 
 ```bash
 nx config set service_url https://api.conexus-nexus.com

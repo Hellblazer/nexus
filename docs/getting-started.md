@@ -315,7 +315,29 @@ with `nx config set beads_prime.manage false`; deleting the file restores
 
 An install still on ChromaDB (5.x, or 6.x that never migrated) must hop
 through the last release that carries the migration. Current releases detect
-this at startup and print the same path:
+this at startup and print the same path.
+
+**Do this before running `nx upgrade` at the pin (the second command in the
+block below).** First, stop any local service a 7.x install left running
+(`nx daemon service stop`). Second, make the pin run against a **local** engine,
+not a managed one. Write down your `service_url` and `service_token` values
+first (the cloud steps need both again), then `unset NX_SERVICE_URL
+NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT`, delete the `service_url:`
+line under `credentials:` in `~/.config/nexus/config.yml` (there is no
+`nx config unset`; it is a file edit), and `export NX_LOCAL=1` for the hop.
+`nx config get service_url` prints `service_url: not set` when it is clear.
+`NX_LOCAL=1` is needed in addition: it does not by itself override a configured
+`service_url`, and without it the pin's provisioning refuses to start a local
+engine when `NX_LOCAL=0` is set, `install.mode` is `managed`, or the box holds
+a ChromaDB Cloud key with no mode record. (Read from conexus 6.18.1's source;
+not run at the pin.) Never run the pin's `nx guided-upgrade --service-url ...`
+or aim it at a managed endpoint; that path is unsupported. If the data is
+Voyage-embedded, run the local engine with `NX_VOYAGE_API_KEY` reaching it, or
+those collections are refused or re-embedded to bge and are not expected to
+import into a Voyage cloud. When you go on to the cloud, `unset NX_LOCAL`
+before `nx config set service_url` (`NX_LOCAL=1` wins over `service_url` in
+current clients too). Full detail: [Migration Runbook § Installs that predate
+Postgres](migration-runbook.md#installs-that-predate-postgres).
 
 ```bash
 nx self install --version 6.18.1  # 1. pin to the last migration-capable release
@@ -328,3 +350,14 @@ On a uv-tool box use `uv tool install conexus==6.18.1` for step 1 and
 `uv tool upgrade conexus` for step 3. Running `nx upgrade` on a current release
 over a pre-PG store migrates nothing and searches look empty; nothing is lost,
 follow the hops above.
+
+To end up on the managed cloud, finish steps 1 to 3 locally, then move the data
+with the current client. Hand-carry any T2 memory you need BEFORE you switch to
+the cloud (`nx memory` has no export verb, and by hand it does not scale past
+tens of entries). That second hop has not been rehearsed end to end (nexus-xbqh9)
+and carries less than the old direct path did: no T2 plans, taxonomy,
+document aspects, frecency or relevance log (a note's TTL included), telemetry,
+DEVONthink highlights or curated catalog metadata. For code, docs and rdr
+content, re-indexing from source in the cloud is cheaper. See [Migration Runbook
+§ Getting that data into the managed
+cloud](migration-runbook.md#getting-that-data-into-the-managed-cloud).

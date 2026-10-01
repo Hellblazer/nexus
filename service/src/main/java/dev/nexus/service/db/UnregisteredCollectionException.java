@@ -7,7 +7,7 @@ package dev.nexus.service.db;
  * {@code nexus.catalog_collections} (RDR-204 Phase 1, bead nexus-ft04v.7).
  *
  * <p>Seven call sites (AspectRepository, TaxonomyRepository, ChashRepository,
- * StagingPromoteOps, CombinedWriteService, and two in PgVectorRepository) used to
+ * the since-retired StagingPromoteOps, CombinedWriteService, and two in PgVectorRepository) used to
  * paper over this with a stub {@code INSERT ... ON CONFLICT DO NOTHING} carrying
  * blank {@code content_type}/{@code owner_id}/{@code embedding_model} — a row whose
  * presence proved nothing about its columns, which is Gap 2 this RDR closes. Those

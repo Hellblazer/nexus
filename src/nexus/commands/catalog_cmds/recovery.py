@@ -31,7 +31,7 @@ def export_cmd(output: Path) -> None:
     (never tumblers — they are not stable across reindex). Carries NO
     embeddings: import re-embeds through the note writer store_put uses, so the
     bundle is portable across embedding modes. Run this BEFORE a
-    reinstall; pair with 'nx export COLLECTION' (.nxexp) when you also
+    reinstall; pair with 'nx store export COLLECTION' (.nxexp) when you also
     want an embedding-preserving per-collection backup.
     """
     from nexus.catalog.recovery_bundle import export_bundle  # noqa: PLC0415 — command-local import
