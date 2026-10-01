@@ -663,7 +663,10 @@ public final class PgVectorRepository {
      */
     private static final List<String> OWNERSHIP_LOG_META_KEYS = List.of("source_path", "title", "source_agent");
 
-    /** Rate limit for the refusal / would-refuse WARN line: one per (route, collection) per minute. */
+    /** Longest {@code User-Agent} / {@code X-Nexus-Client-Version} the log line carries (same bound as the metadata fields). */
+    static final int OWNERSHIP_LOG_FIELD_MAX = 120;
+
+    /** Rate limit for the refusal / would-refuse WARN line: one per (route, tenant, collection) per minute. */
     private final OwnerlessLogLimiter ownerlessLogLimiter = OwnerlessLogLimiter.system();
 
     /**
@@ -672,8 +675,13 @@ public final class PgVectorRepository {
      * nexus.chunk_live_owners} reports, so "owned" is exactly live(c). Scoped to the tenant AND the
      * collection: a chash owned in another collection, or by another tenant, does not count. Runs on
      * {@code ctx}, so the caller picks the transaction.
+     *
+     * <p>{@code public} so a test can call it on a connection that bypasses row-level security: on
+     * the service's own connections RLS also scopes the read to the tenant, which would hide a
+     * dropped tenant predicate. Not part of the engine's surface; nothing in main calls it from
+     * outside this class.
      */
-    private static Set<String> liveOwnedChashes(DSLContext ctx, String tenant, String collection,
+    public static Set<String> liveOwnedChashes(DSLContext ctx, String tenant, String collection,
                                                 List<String> distinctHex) {
         Set<String> owned = new HashSet<>(distinctHex.size() * 2);
         for (int start = 0; start < distinctHex.size(); start += OWNERSHIP_CHECK_BATCH) {
@@ -761,6 +769,15 @@ public final class PgVectorRepository {
         }
     }
 
+    /** A request header for the log line: "absent" when null or blank, else whitespace-collapsed and cut to {@link #OWNERSHIP_LOG_FIELD_MAX}. */
+    private static String clipLogField(String value) {
+        if (value == null || value.isBlank()) {
+            return "absent";
+        }
+        String text = value.strip().replaceAll("\\s+", " ");
+        return text.substring(0, Math.min(OWNERSHIP_LOG_FIELD_MAX, text.length()));
+    }
+
     /**
      * Count, log (rate limited) and, under enforce, refuse a request that carries unowned chashes.
      * The log line names the writer: the request's {@code User-Agent} and {@code
@@ -778,7 +795,7 @@ public final class PgVectorRepository {
         } else {
             OwnerlessWriteActivity.recordWouldRefuse();
         }
-        long suppressed = ownerlessLogLimiter.tryAcquire(guard.route() + "|" + collection);
+        long suppressed = ownerlessLogLimiter.tryAcquire(guard.route() + "|" + tenant + "|" + collection);
         if (suppressed >= 0) {
             String writer = "";
             int firstIdx = ids.indexOf(unowned.get(0));
@@ -790,15 +807,13 @@ public final class PgVectorRepository {
                     Object v = meta.get(key);
                     if (v != null && !String.valueOf(v).isBlank()) {
                         String text = String.valueOf(v).replaceAll("\\s+", " ");
-                        sb.append(key).append('=').append(text, 0, Math.min(120, text.length())).append(';');
+                        sb.append(key).append('=').append(text, 0, Math.min(OWNERSHIP_LOG_FIELD_MAX, text.length())).append(';');
                     }
                 }
                 writer = sb.toString();
             }
-            String clientVersion = guard.clientVersion() == null || guard.clientVersion().isBlank()
-                    ? "absent" : guard.clientVersion().strip();
-            String userAgent = guard.userAgent() == null || guard.userAgent().isBlank()
-                    ? "absent" : guard.userAgent().strip();
+            String clientVersion = clipLogField(guard.clientVersion());
+            String userAgent = clipLogField(guard.userAgent());
             log.warn("event={} route={} tenant={} collection={} phase={} unowned={} requested={} sample={} "
                             + "user_agent=\"{}\" client_version={} suppressed_since_last={} first_chunk_meta=[{}]",
                     enforce ? "ownerless_chunk_write_refused" : "ownerless_chunk_write_would_refuse",

@@ -18,6 +18,10 @@ import static org.assertj.core.api.Assertions.assertThat;
  * reading the main sources: every call of a guarded repository method outside the repository itself
  * must be in {@code VectorHandler} and must build its guard with {@code ownershipGuard(}.
  *
+ * <p>Method references are caught too: a {@code repo::upsertChunks} cannot carry a guard, so any
+ * {@code ::<guarded method>} outside the repository fails, in any file. A call through reflection
+ * or a lambda that names the method as a string is not matched.
+ *
  * <p>A new caller in another class fails here, with its file named, until it either routes through
  * {@code VectorHandler} or is added to {@link #ALLOWED_CALLERS} with a reason it cannot write an
  * ownerless chunk.
@@ -45,6 +49,16 @@ final class OwnershipGuardCoverageScan {
                 }
                 String src = Files.readString(file);
                 for (String method : GUARDED_METHODS) {
+                    String reference = "::" + method.substring(0, method.length() - 1);
+                    int ref = 0;
+                    while ((ref = src.indexOf(reference, ref)) >= 0) {
+                        int after = ref + reference.length();
+                        // "::upsertChunks" must not match the prefix of "::upsertChunksWithTokens"
+                        if (after >= src.length() || !Character.isJavaIdentifierPart(src.charAt(after))) {
+                            problems.add(name + ": method reference " + reference + " cannot carry an ownershipGuard");
+                        }
+                        ref = after;
+                    }
                     String needle = "." + method;
                     int from = 0;
                     while ((from = src.indexOf(needle, from)) >= 0) {

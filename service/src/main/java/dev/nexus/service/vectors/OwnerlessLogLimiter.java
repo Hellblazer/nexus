@@ -11,7 +11,8 @@ import java.util.function.LongSupplier;
  * the last one, so a client that retries a refused write in a loop cannot flood the engine log.
  * The counters on {@code /v1/status} are NOT limited; they count every request.
  *
- * <p>Keyed by {@code route|collection}. The map is bounded: past {@link #MAX_KEYS} keys a new key
+ * <p>Keyed by {@code route|tenant|collection}: two tenants that registered the same collection name
+ * each get their own line. The map is bounded: past {@link #MAX_KEYS} keys a new key
  * is logged unconditionally and not remembered, which fails toward logging rather than toward
  * silence.
  */
@@ -37,6 +38,11 @@ public final class OwnerlessLogLimiter {
     /** The limiter the repository uses. */
     public static OwnerlessLogLimiter system() {
         return new OwnerlessLogLimiter(System::currentTimeMillis);
+    }
+
+    /** Number of keys currently remembered; never above {@link #MAX_KEYS}. */
+    int size() {
+        return states.size();
     }
 
     /**

@@ -12,8 +12,10 @@ import java.util.Objects;
  * <p>The check is requested by the HANDLER, through this guard, and is not part of the
  * repository's write methods: a repository method called without a guard (the contract and
  * fixture tests, the migration ingest) writes ownerless chunks as it always did.
- * {@code OwnershipGuardCoverageTest} scans the main sources so a handler cannot call a guarded
- * repository method with a null guard, or add a new chunk-write route that never builds one.
+ * {@code OwnershipGuardCoverageScan} scans the main sources so a handler cannot call a guarded
+ * repository method with a null guard, or add a new chunk-write route that never builds one. The
+ * scan matches direct calls and method references to the guarded methods, as text, so it also reads
+ * comments: name a guarded method in prose without the call or the double-colon syntax.
  *
  * @param mode          enforce or log-only
  * @param route         the route name for the error and the log, e.g. {@code upsert-chunks}

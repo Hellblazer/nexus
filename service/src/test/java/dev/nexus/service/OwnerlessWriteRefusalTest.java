@@ -57,6 +57,10 @@ class OwnerlessWriteRefusalTest {
     // The refusal log is rate limited per (route, collection), so each log test gets its own collection.
     private static final String COLLECTION_LOG = "knowledge__owr-owner-log__voyage-context-3__v1";
     private static final String COLLECTION_LOOP = "knowledge__owr-owner-loop__voyage-context-3__v1";
+    private static final String COLLECTION_CLIP = "knowledge__owr-owner-clip__voyage-context-3__v1";
+    /** Registered by BOTH tenants, so the limiter's tenant key can be told from its collection key. */
+    private static final String COLLECTION_SHARED_NAME = "knowledge__owr-owner-shared__voyage-context-3__v1";
+    private static final String COLLECTION_GATE = "knowledge__owr-owner-gate__voyage-context-3__v1";
     private static final String SVC_ROLE = "svc_owr";
     private static final String SVC_PASS = "svc_owr_pass";
     private static final String TENANT   = "owr-tenant";
@@ -113,6 +117,10 @@ class OwnerlessWriteRefusalTest {
             PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_B);
             PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_LOG);
             PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_LOOP);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_CLIP);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_SHARED_NAME);
+            PgContainerHelper.insertCollection(dsl, TENANT_2, COLLECTION_SHARED_NAME);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_GATE);
             PgContainerHelper.insertCollection(dsl, TENANT_2, COLLECTION);
         }
     }
@@ -212,7 +220,9 @@ class OwnerlessWriteRefusalTest {
         Map<String, Object> body = json(resp);
         assertThat((String) body.get("error"))
             .contains(COMBINED_WRITE)
-            .contains(COMBINED_APPEND);
+            .contains(COMBINED_APPEND)
+            .as("the sentence an old-client user acts on")
+            .contains("upgrade conexus and restart nx-mcp");
         assertThat(body.get("reason")).as("the typed discriminator a client keys on")
             .isEqualTo("ownerless_chunk_write");
         assertThat(((Number) body.get("unowned_count")).intValue()).isPositive();
@@ -581,6 +591,71 @@ class OwnerlessWriteRefusalTest {
         assertThat(OwnerlessWriteActivity.refusedTotal()).isEqualTo(1);
     }
 
+
+    @Test
+    void theTenantPredicateOfTheOwnershipRead_isPinnedOnAConnectionThatBypassesRls() throws Exception {
+        // On the service's own connections RLS (FORCE) scopes the read to the tenant, so a dropped
+        // tenant predicate would still pass the HTTP test above. The superuser connection bypasses
+        // RLS: here only the predicate separates the two tenants.
+        String h = owned("owr-tenant-predicate");
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            assertThat(PgVectorRepository.liveOwnedChashes(dsl, TENANT, COLLECTION, List.of(h)))
+                .as("the owning tenant sees its chash").containsExactly(h);
+            assertThat(PgVectorRepository.liveOwnedChashes(dsl, TENANT_2, COLLECTION, List.of(h)))
+                .as("another tenant, same collection name, same chash: not owned").isEmpty();
+        }
+    }
+
+    @Test
+    void theRecheckInTheWriteTransactionWaitsForAnExclusiveSweepGate() throws Exception {
+        // The sweep takes the gate EXCLUSIVE; the recheck must take it SHARED, or the sweep could delete
+        // the chunk row between the recheck's read and the insert. Hold the gate exclusive on a separate
+        // connection from the moment the write has passed its pre-embed check, release it 1.5 s later, and
+        // require the write to have waited for the release. Without acquireSweepGateShared in the recheck
+        // nothing waits and the write returns at once.
+        String text = "owr-gate-owned";
+        String h = chash(text);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertOwnedChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION_GATE, 1024, h);
+        }
+        long holdMs = 1_500L;
+        List<Thread> releasers = new ArrayList<>();
+        repo.setAfterNeedEmbedResolvedHookForTests(() -> {
+            try {
+                Connection holder = pg.createConnection("");
+                holder.setAutoCommit(false);
+                try (var st = holder.createStatement()) {
+                    st.execute("select pg_advisory_xact_lock(hashtext('sweepgate:" + TENANT + "/" + COLLECTION_GATE + "'))");
+                }
+                Thread t = new Thread(() -> {
+                    try {
+                        Thread.sleep(holdMs);
+                        holder.commit();
+                        holder.close();
+                    } catch (Exception e) {
+                        throw new IllegalStateException(e);
+                    }
+                });
+                t.start();
+                releasers.add(t);
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        long start = System.nanoTime();
+        // New text, so the chash takes the need-embed path and reaches the write transaction.
+        var resp = upsert(COLLECTION_GATE, List.of(h), List.of("text that differs from the stored seed"));
+        long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
+        for (Thread t : releasers) {
+            t.join();
+        }
+        assertThat(releasers).as("non-vacuity: the hook ran and took the gate").hasSize(1);
+        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(200);
+        assertThat(elapsedMs).as("the write waited for the exclusive holder (held %d ms)", holdMs)
+            .isGreaterThan(1_000L);
+    }
+
     @Test
     void aNewHandlerRouteCannotFailOpen_everyCallerPassesAGuard() throws Exception {
         OwnershipGuardCoverageScan.assertEveryGuardedRepositoryCallPassesAGuard();
@@ -644,6 +719,40 @@ class OwnerlessWriteRefusalTest {
         });
         assertThat(lines).as("one WARN for four refused requests").hasSize(1);
         assertThat(OwnerlessWriteActivity.refusedTotal()).as("the counter is not limited").isEqualTo(4);
+    }
+
+
+    @Test
+    void twoTenantsWithTheSameCollectionNameEachGetTheirOwnWarnLine() throws Exception {
+        var lines = captureRepositoryWarnings(() -> {
+            for (String token : List.of(TOKEN, TOKEN_2)) {
+                post(token, "/v1/vectors/upsert-chunks", Map.of("collection", COLLECTION_SHARED_NAME,
+                    "ids", List.of(chash("owr-shared-" + token)), "documents", List.of("t"),
+                    "metadatas", List.of(Map.of())), Map.of());
+            }
+            return null;
+        });
+        assertThat(lines).as("one line per tenant, not one for the shared collection name").hasSize(2);
+        assertThat(lines.stream().anyMatch(l -> l.contains("tenant=" + TENANT + " "))).isTrue();
+        assertThat(lines.stream().anyMatch(l -> l.contains("tenant=" + TENANT_2 + " "))).isTrue();
+    }
+
+    @Test
+    void theLoggedUserAgentAndClientVersionAreCutTo120Characters() throws Exception {
+        String longUa = "ua-" + "u".repeat(300);
+        String longVersion = "v-" + "9".repeat(300);
+        var lines = captureRepositoryWarnings(() -> {
+            post(TOKEN, "/v1/vectors/upsert-chunks", Map.of("collection", COLLECTION_CLIP,
+                "ids", List.of(chash("owr-clip")), "documents", List.of("t"), "metadatas", List.of(Map.of())),
+                Map.of("User-Agent", longUa, "X-Nexus-Client-Version", longVersion));
+            return null;
+        });
+        assertThat(lines).hasSize(1);
+        String line = lines.get(0);
+        assertThat(line).contains("user_agent=\"" + longUa.substring(0, 120) + "\"")
+            .doesNotContain(longUa.substring(0, 121))
+            .contains("client_version=" + longVersion.substring(0, 120) + " ")
+            .doesNotContain(longVersion.substring(0, 121));
     }
 
     @Test
