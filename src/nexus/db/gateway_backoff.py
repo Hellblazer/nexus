@@ -182,6 +182,7 @@ _NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES: tuple[str, ...] = (
     "/gc/quarantine-orphans",
     "/gc/restore-rereferenced",
     "/gc/expire-quarantine",
+    "/gc/quarantine-restore",
 )
 
 

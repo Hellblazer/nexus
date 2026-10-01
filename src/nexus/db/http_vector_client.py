@@ -1581,6 +1581,7 @@ _T3_WRITE_PATH_SUFFIXES: tuple[str, ...] = (
     "/gc/expire-quarantine",
     "/gc/quarantine-orphans",
     "/gc/restore-rereferenced",
+    "/gc/quarantine-restore",
 )
 
 
@@ -3882,6 +3883,60 @@ class HttpVectorClient:
             },
             tenant=self._tenant,
         )
+
+    def gc_quarantine_restore(
+        self,
+        origin_collection: str,
+        quarantine_collection: str,
+        *,
+        chashes: list[str] | None = None,
+        audit_id: int | None = None,
+        offset: int | None = None,
+        quarantined_since: str | None = None,
+        quarantined_before: str | None = None,
+        after_chash: str | None = None,
+        limit: int | None = None,
+        dry_run: bool = False,
+        actor: str | None = None,
+    ) -> dict:
+        """POST /v1/vectors/gc/quarantine-restore (RDR-192 Step 9 Day-2, bead
+        nexus-2x9xa; serves ``nx t3 quarantine restore``).
+
+        Moves chunks from ``quarantine_collection`` back to ``origin_collection``
+        with no manifest row required, in one engine statement under the
+        exclusive sweep gate. Name EXACTLY ONE source: ``chashes`` (at most
+        1000), ``audit_id`` (the chash list of a gc_audit row, paged by
+        ``offset``/``limit``), or a ``quarantined_since`` / ``quarantined_before``
+        window over the sibling (paged by ``after_chash``/``limit``). Only the
+        fields given are sent. ``dry_run`` classifies without moving or auditing.
+
+        Returns ``{"origin_collection", "quarantine_collection", "dry_run",
+        "audit_id": int|None, "restored": n, "would_restore": n, "present": n,
+        "dim_conflict": n, "missing": n, "rows": [{"chash", "outcome",
+        "no_manifest": bool|None, "reapable_after": str|None}], "source":
+        {...}|None, "next_after": str|None}``. See the engine route's docstring
+        (``VectorHandler#handleGcQuarantineRestore``) for the outcomes.
+
+        A write that is never auto-retried on a gateway-transient code
+        (:data:`nexus.db.gateway_backoff._NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES`).
+        Raises :class:`VectorServiceError` (``code=404`` on an engine that
+        predates the route, ``400`` for a refused request such as a sample-only
+        audit row, ``422`` for an unregistered collection).
+        """
+        body: dict = {
+            "origin_collection": origin_collection,
+            "quarantine_collection": quarantine_collection,
+        }
+        for key, value in (
+            ("chashes", chashes), ("audit_id", audit_id), ("offset", offset),
+            ("quarantined_since", quarantined_since), ("quarantined_before", quarantined_before),
+            ("after_chash", after_chash), ("limit", limit), ("actor", actor),
+        ):
+            if value is not None:
+                body[key] = value
+        if dry_run:
+            body["dry_run"] = True
+        return _post("/v1/vectors/gc/quarantine-restore", body, tenant=self._tenant)
 
     def manifest_less_census(
         self, collection: str, limit: int = 100, offset: int = 0,

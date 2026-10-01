@@ -93,6 +93,38 @@ reaper.
   is an attestation, not proof; the reaper's own in-engine census (nexus-2x9xa)
   is what covers that case.
 
+### Restoring chunks the reaper quarantined
+
+The reaper moves a chunk it judges ownerless into the collection's `quarantine-`
+sibling; it never deletes. The chunk stays restorable until `gc_expire_quarantine`
+takes it (14 days by default, under its own floors). If the reaper took something it
+should not have (a note with no manifest row is the usual cause), bring it back with
+`nx t3 quarantine restore`, which needs no manifest row:
+
+1. Find what moved. `nx catalog gc-audit list --operation reaper_quarantine
+   --collection <c>` lists the reaper's passes, each with an id and the full chash
+   list. The cleanup at the end of `nx index repo` and `nx t3 gc` write
+   `gc_quarantine_orphans` rows that hold only a 20-chash sample; for those, use
+   the date window in step 2.
+2. Preview, then restore, naming the collection the chunks came from (not the
+   `quarantine-` name):
+
+   ```bash
+   nx t3 quarantine restore -c <c> --audit-id 4125 --dry-run
+   nx t3 quarantine restore -c <c> --audit-id 4125
+   nx t3 quarantine restore -c <c> --quarantined-since 2026-09-28 --quarantined-before 2026-09-29
+   nx t3 quarantine restore -c <c> --chash <64-hex> --chash <64-hex>
+   ```
+
+3. Read the last lines of the output. A restored chunk has no manifest row, so it
+   starts a fresh 30 day grace and the reaper will quarantine it again on the date
+   printed unless an owner row is repaired first: re-index or re-put the document
+   that owns it, or run `nx t3 backfill-manifest`. Restoring buys time to do that; it
+   does not make the chunk owned.
+4. A chunk the collection already holds is left alone (`present`), and a chash found
+   nowhere reads `missing`; exit status 1 means one of those or a `dim_conflict`.
+   Each restore writes a `quarantine_restore` row to the same audit trail.
+
 ## Verifying
 
 ```bash

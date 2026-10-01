@@ -1126,7 +1126,7 @@ An identity drop whose chunks were **never written** (a file refused for want of
 
 #### Orphan-GC quarantine (soft delete)
 
-The `nx index repo` orphan GC never hard-deletes directly: orphan chunks MOVE to a sibling collection (`quarantine-<origin collection name>`, e.g. `quarantine-code__<owner>__<model>__v<n>`, excluded from every search surface by its prefix), embeddings intact. A chunk moves only after it has been without an owner for 30 days (the engine's reapable(c) grace, RDR-192 Step 8): the clock starts when a manifest change last drops one of its owner rows (or when it was last written, if that is later), so a deleted file's chunks and the old tail of a multi-batch re-index stay in place for 30 days, and a pass over a freshly deleted file quarantines nothing. For 30 days after an engine carrying that change is first deployed nothing that already exists is old enough, so the first cleanups after an upgrade move nothing. If a later heal or re-index references a quarantined chunk again, it is restored automatically. Quarantined chunks that this command (or `nx t3 gc`) moved, once older than `NX_GC_QUARANTINE_DAYS` (default `14`), are hard-deleted on a later `nx index repo` pass by the client — and only THAT expiry step is guarded by the safety floor. The engine's own hourly reaper moves chunks into the same `quarantine-` collections, but it tags them and expires only the chunks it moved, on its own retention (`NX_REAPER_QUARANTINE_RETENTION_DAYS`, default 14, an engine setting); it never touches the untagged chunks this command filled, so `NX_GC_QUARANTINE_DAYS` is yours alone for those. The split is symmetric: the client's expiry (this command's, and `POST /v1/vectors/gc/expire-quarantine` with or without `force`) skips every chunk the reaper tagged, and its floor counts only the untagged chunks, so `NX_GC_QUARANTINE_DAYS` cannot shorten what the reaper moved (see `docs/operations/engine-reaper.md`). The floor: a hard-delete condemning more than `NX_GC_FLOOR_FRACTION` (default `0.25`) of the quarantine at 100+ chunks means a manifest defect persisted for the whole grace window (the misclassification class that once deleted 6 live documents) and is refused with the verification path logged (`nx catalog doctor --t3-vs-catalog`, `nx catalog reconcile`); `NX_GC_FORCE=1` overrides after confirming. Ordinary mass updates (a large `git pull` superseding much of a repo) quarantine silently and expire quietly — no warnings, no action needed. Every move logs a per-document identity sample.
+The `nx index repo` orphan GC never hard-deletes directly: orphan chunks MOVE to a sibling collection (`quarantine-<origin collection name>`, e.g. `quarantine-code__<owner>__<model>__v<n>`, excluded from every search surface by its prefix), embeddings intact. A chunk moves only after it has been without an owner for 30 days (the engine's reapable(c) grace, RDR-192 Step 8): the clock starts when a manifest change last drops one of its owner rows (or when it was last written, if that is later), so a deleted file's chunks and the old tail of a multi-batch re-index stay in place for 30 days, and a pass over a freshly deleted file quarantines nothing. For 30 days after an engine carrying that change is first deployed nothing that already exists is old enough, so the first cleanups after an upgrade move nothing. If a later heal or re-index references a quarantined chunk again, it is restored automatically. Quarantined chunks that this command (or `nx t3 gc`) moved, once older than `NX_GC_QUARANTINE_DAYS` (default `14`), are hard-deleted on a later `nx index repo` pass by the client — and only THAT expiry step is guarded by the safety floor. The engine's own hourly reaper moves chunks into the same `quarantine-` collections, but it tags them and expires only the chunks it moved, on its own retention (`NX_REAPER_QUARANTINE_RETENTION_DAYS`, default 14, an engine setting); it never touches the untagged chunks this command filled, so `NX_GC_QUARANTINE_DAYS` is yours alone for those. The split is symmetric: the client's expiry (this command's, and `POST /v1/vectors/gc/expire-quarantine` with or without `force`) skips every chunk the reaper tagged, and its floor counts only the untagged chunks, so `NX_GC_QUARANTINE_DAYS` cannot shorten what the reaper moved (see `docs/operations/engine-reaper.md`). The floor: a hard-delete condemning more than `NX_GC_FLOOR_FRACTION` (default `0.25`) of the quarantine at 100+ chunks means a manifest defect persisted for the whole grace window (the misclassification class that once deleted 6 live documents) and is refused with the verification path logged (`nx catalog doctor --t3-vs-catalog`, `nx catalog reconcile`); `NX_GC_FORCE=1` overrides after confirming. Ordinary mass updates (a large `git pull` superseding much of a repo) quarantine silently and expire quietly — no warnings, no action needed. Every move logs a per-document identity sample. A chunk quarantined wrongly (it has no manifest row, so re-referencing cannot bring it back) is restored by hand with `nx t3 quarantine restore`.
 
 ### nx catalog orphans
 
@@ -1974,6 +1974,46 @@ With `--json`, human-readable diagnostics (the `--require-zero` violation notice
 | `exit_code` | The process exit code, mirrored into the document. |
 
 Needs engine-service-v0.1.133 or later. Against an older engine the verb exits 4; the same census runs as direct SQL (`scripts/sql/manifest_less_census.sql`) under psql.
+
+---
+
+### nx t3 quarantine restore
+
+```
+nx t3 quarantine restore --collection NAME (--chash HEX ... | --audit-id N | --quarantined-since WHEN [--quarantined-before WHEN]) [--dry-run] [--json]
+```
+
+Moves chunks from a collection's `quarantine-` sibling back to the collection (RDR-192 Step 9 Day-2, bead nexus-2x9xa), through the engine route `POST /v1/vectors/gc/quarantine-restore`. It is the way back for a chunk the engine reaper moved wrongly. That chunk has no manifest row (a manifest defect is why the reaper took it), and the only other restore, `gc_restore_rereferenced` (run by `nx index repo`), needs a manifest row in the collection naming the chunk, so before this verb the recovery was hand SQL against the `gc_audit` chash list.
+
+`--collection` is the collection the chunks were quarantined FROM, not the sibling; the verb finds the sibling from the collection's catalog row. Name the chunks one of three ways, exactly one:
+
+| Source | What it takes | Use it when |
+|--------|---------------|-------------|
+| `--chash HEX` (repeatable) | the 64-hex chashes you name | you know which chunks |
+| `--audit-id N` | the chash list of a `gc_audit` row, found with `nx catalog gc-audit list --operation reaper_quarantine` | the reaper moved them. A `gc_quarantine_orphans` row (what `nx index repo` and `nx t3 gc` write) lists only a sample of what it moved, and the verb refuses it and says so |
+| `--quarantined-since WHEN` and/or `--quarantined-before WHEN` | the chunks in the sibling that were quarantined from this collection inside the window (ISO-8601 date or datetime, UTC when naive) | the audit row is a sample, or you want everything from a pass or a day. At least one bound is required, so a bare command never restores a whole sibling |
+
+What happens, in one engine statement under the exclusive sweep gate (a manifest writer holding the collection's gate makes it wait 2 seconds and then fail with nothing moved):
+
+- The chunk MOVES: it leaves the quarantine sibling and becomes a row of the collection with its text, vector and `created_at` intact. The quarantine stamp (`quarantined_at`, `origin_collection`) is removed from its metadata.
+- A chunk the collection already holds is skipped, never overwritten, and reported `present`; its quarantine copy is left for expiry. A second restore of the same chashes therefore reads `present` for all of them. A chunk that is nowhere in this collection's quarantine sibling, and not in the collection either, reports `missing`. `dim_conflict` is `present` with a different embedding width in the quarantine copy: nothing is overwritten, and it means the collection's model identity needs a look.
+- The restored chunk has no manifest row, so the reaper's grace starts over: its `last_written_at` is set to the restore time. The reaper will quarantine it again 30 days later unless an owner row exists by then; the output prints that date and says so. Repair the owner first: re-index or re-put the document that owns the chunk, or run `nx t3 backfill-manifest`.
+- One `gc_audit` row per call that restores anything (`operation=quarantine_restore`, the collection, `actor` naming this verb and the login, the FULL chash list, and `details` with the quarantine collection, the source audit id, the counts, the date the reaper may take them again). Read it with `nx catalog gc-audit list --operation quarantine_restore`. A dry run writes none.
+- Tenant-scoped under row-level security: another tenant's chunk reads `missing`, and another tenant's audit id reads as no such row.
+
+`--dry-run` classifies every chunk (`would restore`, `present`, `dim_conflict`, `missing`) and moves nothing. The output is a table of chash, outcome and a note, then the totals, the audit row ids and, when a restored chunk has no manifest row, the date it becomes reapable. More than 100 rows print the first 100; `--json` carries every row and `reapable_again_after` (the earliest such date).
+
+Exit codes:
+
+| Code | Meaning |
+|------|---------|
+| 0 | Every requested chunk was restored or was already present. A dry run exits 0. |
+| 1 | A requested chunk is missing from quarantine, or its embedding width conflicts. The rest were still restored. |
+| 2 | A bad option (no source, two sources, a malformed chash, a bad date); nothing was sent. |
+| 4 | The connected engine predates the route. Upgrade it (compare its version against `REQUIRED_ENGINE_VERSION` in `src/nexus/engine_version.py`). |
+| 5 | The engine refused the request or failed: a sample-only audit row, an audit row for another collection, a collection that is not registered, a transient 5xx. One line on stderr says which. |
+
+The verb pages itself: chashes go in batches of 1000, an audit row by offset, a window by chash cursor. Needs the engine and the client from the same release (the route first ships in the engine that carries changeset `vectors-025`); against an older engine it exits 4.
 
 ---
 
