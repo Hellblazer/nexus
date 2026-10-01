@@ -27,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -110,6 +111,25 @@ class GcQuarantineReapableIntegrationTest {
         return hex;
     }
 
+    /** Writes the chunk's orphaning record (nexus.chunk_orphaned_at), {@code age} ago. */
+    private void recordOrphaning(String collection, String hex, Duration age) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            OffsetDateTime then = OffsetDateTime.now().minus(age);
+            DSL.using(su, SQLDialect.POSTGRES)
+               .insertInto(CHUNK_ORPHANED_AT, CHUNK_ORPHANED_AT.TENANT_ID, CHUNK_ORPHANED_AT.COLLECTION,
+                   CHUNK_ORPHANED_AT.CHASH, CHUNK_ORPHANED_AT.ORPHANED_AT)
+               .values(TENANT, collection, Chash.fromHex(hex).toBytes(), then)
+               .execute();
+        }
+    }
+
+    private long recordCount(String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchCount(CHUNK_ORPHANED_AT,
+                CHUNK_ORPHANED_AT.TENANT_ID.eq(TENANT).and(CHUNK_ORPHANED_AT.COLLECTION.eq(collection)));
+        }
+    }
+
     private boolean inCollection(String collection, String hex) {
         return tenantScope.withTenant(TENANT, ctx -> ctx.fetchExists(ctx.selectOne().from(CHUNKS)
             .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(collection))
@@ -122,6 +142,44 @@ class GcQuarantineReapableIntegrationTest {
         return bounded
             ? vectors.quarantineOrphansBounded(TENANT, collection, q, "2026-09-30T00:00:00Z", 20, 100).moved()
             : vectors.quarantineOrphans(TENANT, collection, q, "2026-09-30T00:00:00Z", 20).moved();
+    }
+
+    // ── the orphaning record: it holds an old chunk, and the move removes it ───
+
+    /**
+     * A chunk written 40 days ago that lost its owner 5 minutes ago is inside its grace: the later of the
+     * write and the record decides. This is the whole point of the record, seen through both gc functions.
+     */
+    @Test
+    void aRecentOrphaningRecordHoldsAnOldChunk_bothForms() throws Exception {
+        for (boolean bounded : new boolean[] {false, true}) {
+            String c = col("held-" + bounded, "docs");
+            String hex = orphan(c, "held", Duration.ofDays(40), Map.of());
+            recordOrphaning(c, hex, Duration.ofMinutes(5));
+
+            assertThat(moved(bounded, c)).as("bounded=%s: orphaned 5 minutes ago", bounded).isZero();
+            assertThat(inCollection(c, hex)).as("bounded=%s: still in place", bounded).isTrue();
+            assertThat(recordCount(c)).as("bounded=%s: the record is untouched", bounded).isEqualTo(1);
+        }
+    }
+
+    /**
+     * The move deletes the origin chunk, and the foreign key (ON DELETE CASCADE) removes its record with it,
+     * so a quarantined chunk leaves nothing behind in nexus.chunk_orphaned_at.
+     */
+    @Test
+    void theMoveTakesTheOrphaningRecordWithTheChunk_bothForms() throws Exception {
+        for (boolean bounded : new boolean[] {false, true}) {
+            String c = col("moved-" + bounded, "docs");
+            String hex = orphan(c, "moved", Duration.ofDays(40), Map.of());
+            recordOrphaning(c, hex, Duration.ofDays(40));
+            assertThat(recordCount(c)).as("precondition").isEqualTo(1);
+
+            assertThat(moved(bounded, c)).as("bounded=%s: orphaned and written 40 days ago", bounded).isEqualTo(1);
+
+            assertThat(inCollection(c, hex)).as("bounded=%s: left the origin", bounded).isFalse();
+            assertThat(recordCount(c)).as("bounded=%s: the record went with the chunk", bounded).isZero();
+        }
     }
 
     // ── the default window's edges ───────────────────────────────────────────

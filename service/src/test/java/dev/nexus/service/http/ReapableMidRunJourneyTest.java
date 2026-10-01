@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.function.IntConsumer;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_ORPHANED_AT;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -37,7 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>No fixture here stamps anything. The old chunks are written by the real writer and then made OLD by
  * moving {@code last_written_at} into the past, which is what time does; everything that has to protect them
- * (the orphaning stamp, vectors-021-2) is the engine's own. An earlier design protected an in-flight run
+ * (the orphaning record, vectors-021-1 and -3) is the engine's own. An earlier design protected an in-flight run
  * through a metadata key no writer sets, and its tests passed on hand-stamped fixtures; these cannot.
  *
  * <p>Collections are {@code docs__}, one of the all-prefix producers (streaming PDF, oversize code and
@@ -150,13 +151,19 @@ class ReapableMidRunJourneyTest extends AtomicWriteTestBase {
         }
     }
 
-    /** Moves every chunk of the collection 40 days into the past: what time does to a chunk written long ago. */
+    /**
+     * Moves every chunk of the collection 40 days into the past, its write time and its orphaning record:
+     * what time does to a chunk written, and orphaned, long ago.
+     */
     private void makeOld(String collection) throws Exception {
         try (Connection su = pg.createConnection("")) {
             OffsetDateTime then = OffsetDateTime.now().minusDays(40);
-            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.update(CHUNKS)
                .set(CHUNKS.CREATED_AT, then).set(CHUNKS.LAST_WRITTEN_AT, then)
                .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(collection))).execute();
+            ctx.update(CHUNK_ORPHANED_AT).set(CHUNK_ORPHANED_AT.ORPHANED_AT, then)
+               .where(CHUNK_ORPHANED_AT.TENANT_ID.eq(TENANT).and(CHUNK_ORPHANED_AT.COLLECTION.eq(collection))).execute();
         }
     }
 

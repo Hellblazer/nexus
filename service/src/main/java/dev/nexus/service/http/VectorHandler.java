@@ -1368,9 +1368,12 @@ public final class VectorHandler implements HttpHandler {
      * <p>Read-only and tenant-scoped: lists the chunks of {@code collection} that
      * {@code nexus.chunk_is_reapable} (RDR-192 Step 7) selects now, ordered by chash ascending. Any
      * collection prefix (knowledge, docs, code, rdr); a {@code quarantine-} collection is refused with
-     * 400. Selection is that predicate and nothing else, so the list is exactly what
-     * {@code gc_quarantine_orphans} would move and the reaper would delete at this instant. It is a
-     * snapshot: no sweep gate, no lock.
+     * 400. Selection is that predicate and nothing else. With {@code grace_seconds} absent or null the
+     * list is what {@code gc_quarantine_orphans} (which passes NULL, the 30 day default) would take at
+     * this instant, and what a reaper that passes the same default would take. A {@code grace_seconds}
+     * below the default is accepted unclamped (0 to ten years) because this route never deletes, and it
+     * lists chunks no destructive consumer takes yet: it is an advisory preview, and a caller must not
+     * present it as what a gc pass would do. It is a snapshot: no sweep gate, no lock.
      *
      * <p>Request:
      * <pre>

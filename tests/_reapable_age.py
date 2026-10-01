@@ -9,7 +9,9 @@ carries ``last_written_at = now()``, so :func:`age_chunks_past_grace` pushes it
 back, the way ``tests/_chunk_seed.py`` builds the rows in the first place: by
 substrate SQL, never a write route (a route would restamp it).
 
-Only ``last_written_at`` moves. ``created_at`` is write-once and some tests pin it.
+Only ``last_written_at`` and the chunk's ``nexus.chunk_orphaned_at`` record (written by the
+manifest triggers when a fixture drops an owner row) move: reapable(c) counts the grace from
+the later of the two. ``created_at`` is write-once and some tests pin it.
 """
 from __future__ import annotations
 
@@ -30,7 +32,10 @@ def age_chunks_past_grace(collection: str, *, tenant: str | None = None,
     tenant = tenant or ambient_tenant()
     out = _psql_superuser(
         _pg_state(),
-        "WITH u AS (UPDATE nexus.chunks SET last_written_at = now() - "
+        "WITH o AS (UPDATE nexus.chunk_orphaned_at SET orphaned_at = now() - "
+        f"interval '{int(days)} days' WHERE tenant_id = {_lit(tenant)} "
+        f"AND collection = {_lit(collection)} RETURNING 1), "
+        "u AS (UPDATE nexus.chunks SET last_written_at = now() - "
         f"interval '{int(days)} days' WHERE tenant_id = {_lit(tenant)} "
         f"AND collection = {_lit(collection)} RETURNING 1) SELECT count(*) FROM u",
     )

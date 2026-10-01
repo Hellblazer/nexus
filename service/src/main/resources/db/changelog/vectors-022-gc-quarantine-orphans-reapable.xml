@@ -8,11 +8,13 @@
     BEHAVIOUR CHANGE. Both functions now honour the grace window, which they did
     not have: a chunk is quarantined only once its last_written_at is older than 30
     days (the nx t3 gc orphan-window default, accepted by Sam 2026-09-26). Because
-    vectors-021-2 stamps last_written_at when a chunk loses its last manifest row,
-    that is 30 days since the chunk became ownerless, not since it was written: a
-    deleted file's chunks and a multi-batch re-index's old tail are protected for
-    30 days after the manifest change. A chunk that was never owned keeps its write
-    time. The functions' only caller is indexer._prune_deleted_files, which handles
+    vectors-021-3 records an orphaned_at in nexus.chunk_orphaned_at whenever a
+    manifest statement drops a chunk key (any owner row, whether or not another
+    owner remains), that is 30 days since the chunk last lost an owner row, not
+    since it was written: a deleted file's chunks and a multi-batch re-index's old
+    tail are protected for 30 days after the manifest change. A chunk that was never
+    owned keeps its write time. nexus.chunks.last_written_at is not touched by that
+    record, so no vector index is rewritten. The functions' only caller is indexer._prune_deleted_files, which handles
     a smaller moved count; nx t3 gc does not call them (it classifies client-side).
     The functions change; no row changes at deploy, so there is no DATA EFFECT
     line, but see vectors-021's KNOWN CONSEQUENCE AT DEPLOY: for 30 days after the
@@ -50,7 +52,10 @@
     a quarantined row takes DEFAULT now(), as vectors-020's header records: moving a
     chunk into quarantine gives it a fresh grace there, and reapable(c) excludes
     quarantine siblings by lifecycle_state so nothing reaps them by this predicate
-    (gc_expire_quarantine has its own clock and floors).
+    (gc_expire_quarantine has its own clock and floors). The move DELETEs the
+    origin chunk, which removes its nexus.chunk_orphaned_at record through the
+    foreign key's ON DELETE CASCADE (vectors-021-1), so a moved chunk leaves no
+    record behind; the sibling's row has none to begin with.
 
     ROLLBACK restores each function to the body it replaced, verbatim.
 
@@ -63,7 +68,7 @@
         http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
 
     <changeSet id="vectors-022-1" author="nexus-wbfpw.16">
-        <comment>nexus.gc_quarantine_orphans selects its orphans with reapable(c), nexus.chunk_is_reapable: it now honours the 30 day grace window (counted from when the chunk lost its last owner) and chooses its candidate set once, so the collision guard, the copy INSERT and the DELETE read the same set. Built on hygiene-005-1's body (origin-row sibling registration).</comment>
+        <comment>nexus.gc_quarantine_orphans selects its orphans with reapable(c), nexus.chunk_is_reapable: it now honours the 30 day grace window (counted from when the chunk last lost an owner row) and chooses its candidate set once, so the collision guard, the copy INSERT and the DELETE read the same set. Built on hygiene-005-1's body (origin-row sibling registration).</comment>
         <sql splitStatements="false" stripComments="false"><![CDATA[
 CREATE OR REPLACE FUNCTION nexus.gc_quarantine_orphans(
     dim                      int,
