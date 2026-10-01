@@ -145,6 +145,21 @@ class GcQuarantineReapableIntegrationTest {
         assertThat(inCollection(c, twentyNine)).as("29 days old stays").isTrue();
         assertThat(inCollection(c, thirtyOne)).as("31 days old moved").isFalse();
         assertThat(inCollection(quarantineOf(c), thirtyOne)).isTrue();
+        // The quarantine sibling holds ONLY what moved. A copy INSERT that selected its own set (the old manifest
+        // anti-join) or a victim set chosen with a different grace would copy the 29 day chunk too while the DELETE,
+        // judging the predicate, left it in the origin: present in both collections.
+        assertThat(chunkChashes(quarantineOf(c))).as("the quarantine collection holds exactly the moved chunk")
+            .containsExactly(thirtyOne);
+    }
+
+    private java.util.Set<String> chunkChashes(String collection) {
+        return tenantScope.withTenant(TENANT, ctx -> {
+            java.util.Set<String> out = new java.util.LinkedHashSet<>();
+            ctx.select(CHUNKS.CHASH).from(CHUNKS)
+               .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(collection)))
+               .fetch().forEach(r -> out.add(java.util.HexFormat.of().formatHex(r.value1())));
+            return out;
+        });
     }
 
     @Test

@@ -332,8 +332,68 @@ class ChunkIsReapableIntegrationTest {
         assertThat(isReapable(t, KNOWLEDGE, hex)).as("ownerless for seconds, not 30 days").isFalse();
     }
 
+    /**
+     * The race the first version of the stamp lost. Two documents own the same chunk (identical text in one
+     * collection collapses to one chunk row by design); two writers drop the last two owners concurrently. A
+     * trigger that asked "does a manifest row still exist?" saw the OTHER transaction's uncommitted row in each
+     * transaction and stamped nothing, so both committed and the chunk was ownerless with its old stamp and
+     * reapable at once. The triggers now stamp every dropped key, after locking the chunk row, so the second
+     * writer waits for the first and the chunk ends up stamped whichever order they commit in.
+     */
     @Test
-    void aChunkStillOwnedByAnotherDocumentIsNotStamped() throws Exception {
+    void aConcurrentDropOfASharedChunkLeavesItStamped() throws Exception {
+        String t = "reap-stamp-race";
+        register(t, KNOWLEDGE);
+        String hex = orphan(t, KNOWLEDGE, "shared", DAYS_40);
+        document(t, "stamp-r1", KNOWLEDGE, false);
+        document(t, "stamp-r2", KNOWLEDGE, false);
+        manifestRow(t, "stamp-r1", KNOWLEDGE, hex, 0);
+        manifestRow(t, "stamp-r2", KNOWLEDGE, hex, 0);
+        su(ctx -> ageTo(ctx, t, KNOWLEDGE, hex, DAYS_40));
+        assertThat(recentlyStamped(t, KNOWLEDGE, hex)).as("precondition: aged").isFalse();
+
+        try (Connection c1 = svcDs.getConnection(); Connection c2 = svcDs.getConnection()) {
+            c1.setAutoCommit(false);
+            c2.setAutoCommit(false);
+            PgContainerHelper.setTenant(c1, TenantScope.DEFAULT_TENANT_GUC, t, true);
+            PgContainerHelper.setTenant(c2, TenantScope.DEFAULT_TENANT_GUC, t, true);
+            DSLContext w1 = DSL.using(c1, SQLDialect.POSTGRES);
+            DSLContext w2 = DSL.using(c2, SQLDialect.POSTGRES);
+
+            w1.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+              .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("stamp-r1"))).execute();
+            CompletableFuture<Integer> second = CompletableFuture.supplyAsync(() ->
+                w2.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+                  .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("stamp-r2")))
+                  .execute());
+            // The second delete waits on the chunk row the first one's trigger locked and stamped; give it a moment to
+            // reach the wait (it is not required to: a trigger that never waits is the broken one, and the assertion
+            // below is what catches it).
+            try {
+                second.get(1500, TimeUnit.MILLISECONDS);
+            } catch (java.util.concurrent.TimeoutException expected) {
+                // blocked on the chunk row, as designed
+            }
+            c1.commit();
+            second.get(30, TimeUnit.SECONDS);
+            c2.commit();
+        }
+
+        assertThat(su1(t, "stamp-r1", "stamp-r2")).as("both owners are gone").isZero();
+        assertThat(recentlyStamped(t, KNOWLEDGE, hex)).as("the last owner left, so the clock started").isTrue();
+        assertThat(isReapable(t, KNOWLEDGE, hex)).as("not reapable at once").isFalse();
+    }
+
+    private long su1(String tenant, String... docIds) throws Exception {
+        long[] n = new long[1];
+        su(ctx -> n[0] = ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.in(docIds))));
+        return n[0];
+    }
+
+    /** Over-stamping a chunk another document still owns is harmless: reapable(c) needs no owner at all. */
+    @Test
+    void aDropOfOneOfTwoOwnersStampsTheChunkAnyway_andItIsStillNotReapable() throws Exception {
         String t = "reap-stamp-shared";
         register(t, KNOWLEDGE);
         String hex = orphan(t, KNOWLEDGE, "shared", DAYS_40);
@@ -346,7 +406,7 @@ class ChunkIsReapableIntegrationTest {
         su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("stamp-s1"))).execute());
 
-        assertThat(recentlyStamped(t, KNOWLEDGE, hex)).as("another document still owns it: no orphaning").isFalse();
+        assertThat(isReapable(t, KNOWLEDGE, hex)).as("another document still owns it").isFalse();
     }
 
     @Test
@@ -414,6 +474,127 @@ class ChunkIsReapableIntegrationTest {
             .where(CATALOG_DOCUMENTS.TENANT_ID.eq(t).and(CATALOG_DOCUMENTS.TUMBLER.eq("stamp-c1"))).execute());
 
         assertThat(recentlyStamped(t, KNOWLEDGE, hex)).as("the FK cascade deleted the manifest row").isTrue();
+    }
+
+    @Test
+    void aStatementThatMovesThePositionAndTheChashTogetherStampsTheOldChash() throws Exception {
+        String t = "reap-stamp-move";
+        register(t, KNOWLEDGE);
+        String oldHex = orphan(t, KNOWLEDGE, "old", DAYS_40);
+        String newHex = orphan(t, KNOWLEDGE, "new", DAYS_40);
+        document(t, "stamp-m1", KNOWLEDGE, false);
+        manifestRow(t, "stamp-m1", KNOWLEDGE, oldHex, 0);
+        su(ctx -> {
+            ageTo(ctx, t, KNOWLEDGE, oldHex, DAYS_40);
+            ageTo(ctx, t, KNOWLEDGE, newHex, DAYS_40);
+        });
+
+        su(ctx -> ctx.update(CATALOG_DOCUMENT_CHUNKS)
+            .set(CATALOG_DOCUMENT_CHUNKS.POSITION, 5).set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(newHex))
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("stamp-m1"))).execute());
+
+        assertThat(recentlyStamped(t, KNOWLEDGE, oldHex)).as("the old chash was dropped").isTrue();
+        assertThat(recentlyStamped(t, KNOWLEDGE, newHex)).as("the new chash was gained").isFalse();
+    }
+
+    /** Append's upsert of a position (and the import's) is INSERT ... ON CONFLICT (tenant, doc, position) DO UPDATE. */
+    @Test
+    void anInsertOnConflictDoUpdateOverAnOccupiedPositionStampsTheDisplacedChunk() throws Exception {
+        String t = "reap-stamp-upsert";
+        register(t, KNOWLEDGE);
+        String displaced = orphan(t, KNOWLEDGE, "displaced", DAYS_40);
+        String incoming = orphan(t, KNOWLEDGE, "incoming", DAYS_40);
+        document(t, "stamp-up1", KNOWLEDGE, false);
+        manifestRow(t, "stamp-up1", KNOWLEDGE, displaced, 3);
+        su(ctx -> {
+            ageTo(ctx, t, KNOWLEDGE, displaced, DAYS_40);
+            ageTo(ctx, t, KNOWLEDGE, incoming, DAYS_40);
+        });
+
+        su(ctx -> ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+            .values(t, "stamp-up1", 3, bytes(incoming), KNOWLEDGE)
+            .onConflict(CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION)
+            .doUpdate().set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(incoming)).execute());
+
+        assertThat(recentlyStamped(t, KNOWLEDGE, displaced)).as("displaced from position 3").isTrue();
+        assertThat(recentlyStamped(t, KNOWLEDGE, incoming)).isFalse();
+    }
+
+    /** The one-hour margin: a chunk written moments ago is not rewritten by the stamp (it is inside its grace). */
+    @Test
+    void aChunkWrittenWithinTheLastHourIsNotRewrittenByTheStamp() throws Exception {
+        String t = "reap-stamp-guard";
+        register(t, KNOWLEDGE);
+        String hex = orphan(t, KNOWLEDGE, "recent", Duration.ofMinutes(5));
+        document(t, "stamp-g1", KNOWLEDGE, false);
+        manifestRow(t, "stamp-g1", KNOWLEDGE, hex, 0);
+        OffsetDateTime before = lastWrittenAt(t, KNOWLEDGE, hex);
+
+        su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(t).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("stamp-g1"))).execute());
+
+        assertThat(lastWrittenAt(t, KNOWLEDGE, hex)).as("untouched: no new row version").isEqualTo(before);
+        assertThat(isReapable(t, KNOWLEDGE, hex)).isFalse();
+    }
+
+    /**
+     * Run as the RLS-subject role with the tenant GUC, as the engine runs: a tenant-A drop stamps tenant A's chunk
+     * and not tenant B's chunk with the same (collection, chash). The triggers are SECURITY INVOKER, so FORCE RLS
+     * binds them, and they join on tenant_id besides.
+     */
+    @Test
+    void theStampIsTenantScoped_underTheServiceRoleAndItsGuc() throws Exception {
+        String a = "reap-stamp-tenant-a";
+        String b = "reap-stamp-tenant-b";
+        register(a, KNOWLEDGE);
+        register(b, KNOWLEDGE);
+        String chash = ch("tenant-shared-text");
+        for (String t : List.of(a, b)) {
+            su(ctx -> {
+                PgContainerHelper.insertChunks(ctx, t, KNOWLEDGE, List.of(chash), List.of("same text"),
+                    List.of(new float[384]), List.of(Map.of()));
+                ageTo(ctx, t, KNOWLEDGE, chash, DAYS_40);
+            });
+        }
+        document(a, "stamp-ta1", KNOWLEDGE, false);
+        manifestRow(a, "stamp-ta1", KNOWLEDGE, chash, 0);
+        su(ctx -> ageTo(ctx, a, KNOWLEDGE, chash, DAYS_40));
+
+        tenantScope.withTenant(a, ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
+            .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(a).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("stamp-ta1"))).execute());
+
+        assertThat(recentlyStamped(a, KNOWLEDGE, chash)).as("tenant A's chunk lost its owner").isTrue();
+        assertThat(recentlyStamped(b, KNOWLEDGE, chash)).as("tenant B's chunk, same key, is not A's to stamp").isFalse();
+    }
+
+    /**
+     * The stamp triggers are SECURITY INVOKER (the changelog convention) and not callable by PUBLIC. A DEFINER
+     * function would run with its owner's privileges; an INVOKER one runs under the writer's FORCE RLS.
+     */
+    @Test
+    void theStampTriggerFunctionsAreInvokerAndNotExecutableByPublic() throws Exception {
+        var proc = DSL.table(DSL.name("pg_catalog", "pg_proc"));
+        var name = DSL.field(DSL.name("proname"), String.class);
+        var definer = DSL.field(DSL.name("prosecdef"), Boolean.class);
+        var acl = DSL.cast(DSL.field(DSL.name("proacl")), SQLDataType.VARCHAR);
+        java.util.Map<String, Boolean> definers = new java.util.TreeMap<>();
+        java.util.Map<String, String> acls = new java.util.TreeMap<>();
+        su(ctx -> ctx.select(name, definer, acl).from(proc)
+            .where(name.in("stamp_chunks_on_manifest_delete", "stamp_chunks_on_manifest_update"))
+            .fetch().forEach(r -> {
+                definers.put(r.get(name), r.get(definer));
+                acls.put(r.get(name), r.get(acl));
+            }));
+
+        assertThat(definers.keySet()).containsExactly("stamp_chunks_on_manifest_delete", "stamp_chunks_on_manifest_update");
+        definers.forEach((fn, isDefiner) -> {
+            assertThat(isDefiner).as("%s must be SECURITY INVOKER", fn).isFalse();
+            assertThat(acls.get(fn)).as("%s has an ACL (EXECUTE revoked from PUBLIC)", fn).isNotNull();
+            assertThat(acls.get(fn)).as("%s: a bare '=X/' item (no role name) would mean PUBLIC has EXECUTE", fn)
+                .doesNotContainPattern("(^\\{|,)=X/");
+        });
     }
 
     // ── inlining and plan, under the RLS-subject role ────────────────────────

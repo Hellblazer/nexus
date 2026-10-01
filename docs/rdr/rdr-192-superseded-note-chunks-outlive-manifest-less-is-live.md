@@ -510,20 +510,53 @@ nothing, and its tests passed only on hand-stamped fixtures (review T2
 `nexus/review-wbfpw15-17-code` C1). It is removed. What protects an old tail chunk
 is `last_written_at` itself, moved at the right moment: vectors-021-2 adds two
 statement-level triggers on `catalog_document_chunks` (DELETE, and UPDATE of a row's
-chash or collection) that set `last_written_at = now()` on every chunk that just lost
-an own-collection manifest row and has none left, in the manifest change's own
-transaction. Doing it in the database covers every path that drops an owner row by
-construction (`writeManifestRows`' replace, append's upsert of a position,
-`purgeManifest`, delete-collection, the FK cascade of a hard document delete, the SQL
-maintenance functions, the `.nxexp` import, whatever is added later), where a list of
-Java call sites would rot. So a multi-batch re-index's old tail is protected for the
+chash or collection) that set `last_written_at = now()` on every chunk KEY the
+statement dropped from the manifest (for an UPDATE, the old keys minus the new keys),
+in the manifest change's own transaction. The triggers do not read the manifest to ask
+whether the chunk is "really" ownerless. An earlier version did (stamp only when no
+owner remains), and two concurrent writers dropping the last two owners of a shared
+chunk each saw the other's uncommitted row and stamped nothing, which left the chunk
+reapable at once (verification review T2 `nexus/review-wbfpw15-17-verify-code` I1;
+reproduced red by `ChunkIsReapableIntegrationTest.aConcurrentDropOfASharedChunkLeavesItStamped`).
+Stamping every dropped key is safe because `reapable(c)` needs no owner anyway: a
+stamped chunk that is still owned is only inside its grace. Each trigger first locks
+the chunk rows it will stamp (`ORDER BY tenant_id, collection, chash FOR NO KEY UPDATE`),
+so writers that share chunks serialize on them and lock in one order, and the stamping
+UPDATE carries `last_written_at < now() - interval '1 hour'` (see Cost below). The
+functions are SECURITY INVOKER like every function in the changelog, run under the
+writer's FORCE RLS and tenant GUC, and join on `tenant_id`; EXECUTE is revoked from
+PUBLIC; a pg_proc pin asserts `prosecdef = false`. Doing it in the database covers the
+DML paths that drop an owner row (`writeManifestRows`' replace, append's upsert of a
+position, `purgeManifest`, delete-collection, the FK cascade of a hard document delete,
+the SQL maintenance functions, the `.nxexp` import, whatever is added later), where a
+list of Java call sites would rot. "Covers every path" is not "by construction": the
+blind spots are `TRUNCATE` of the manifest (statement DELETE triggers do not fire; no
+code path truncates it and `nexus_svc` has no `TRUNCATE` on it), a session with
+`session_replication_role = replica` (`pg_restore`, logical apply), and manifest DML
+with no `nexus.tenant` GUC (a DBA cleanup or a data-fix changeset: FORCE RLS on
+`nexus.chunks` hides every chunk, so nothing is stamped). A chunk orphaned through one
+of those keeps its old `last_written_at` and reads reapable at once.
+
+**Cost of the stamp, measured.** Every dropped key rewrites its chunk row, a full new
+row version on `nexus.chunks` (HNSW, GIN trigram and tsv, two btrees), non-HOT, about
+1 ms per 1024-d row. Laptop container, 1024-d chunks with HNSW, one run each (the
+shape, not a benchmark): a 5000-row manifest replace and a 1000-document x 5 chunk
+cascade took 4.6 to 4.9 s with the unguarded trigger, whether or not the writer had
+just refreshed the chunks. With the one-hour guard the same two take 1.9 s when the
+chunks are genuinely orphaned (the inherent cost) and 36 to 38 ms when the writer has
+just refreshed them (the usual case: the content upsert runs before the manifest
+change); triggers off, 1 to 13 ms. A 10,000-chunk old tail dropped at batch 1 therefore
+costs a few seconds once, inside the shared sweep gate and the index-run lock. The
+price of the guard is that a chunk written within the hour keeps that hour off its
+orphaning grace. So a multi-batch re-index's old tail is protected for the
 grace after batch 1 (RDR-223 Phase 2 gate critique, S2: a pass between batches finds
 nothing), and a deleted file's chunks are protected for the grace after the purge
 (`last_written_at` is old for chunks written long ago, so an age-only grace would let
 the reaper hard-delete a deleted file's chunks within the hour, bypassing the 14 day
 quarantine and its floor; review T2 `nexus/review-wbfpw15-17-critique` Issue 2). A
-statement that drops and re-adds a chash stamps it too (over-stamping is the safe
-direction). This is the one exception to vectors-020's "never refreshed by
+statement that drops and re-adds a chash stamps it too, and so does an
+`INSERT ... ON CONFLICT DO UPDATE` over an occupied position (it displaces the old
+chunk; a test pins it). This is the one exception to vectors-020's "never refreshed by
 maintenance" rule, and deliberate: that rule exists so dead chunks are not kept alive,
 and a stamp at orphaning only starts a dead chunk's clock. The sweep gate is separate
 and also needed: exclusive per collection for any deleter.
@@ -903,8 +936,10 @@ All four in scope; none deferred.
 Amended 2026-10-01 (nexus-wbfpw.39): (e) **Reaper between batches**. A
 multi-batch re-index of an existing document, with a reaper pass between
 batch 1 and the last batch: no chunk the run later writes or re-adds is
-deleted (Step 9, sweep gate exclusive per collection and the `indexing`
-skip).
+deleted (Step 9: the sweep gate exclusive per collection, and the orphaning
+stamp, which gives the old tail a fresh grace at batch 1; there is no `indexing`
+skip). The fixture seeds the old tail the way a real run leaves it, with
+`last_written_at` old and no metadata key, so it fails if the stamp is removed.
 
 ### Phase 1: Census and legacy-note backfill (non-destructive)
 
@@ -1300,3 +1335,18 @@ To be completed at gate (Layer 3 AI critique).
   the listing route gains a keyset cursor; the unbounded gc chooses its candidate set
   once. Step 9's gate (a) is per CHUNK, not per collection (orchestrator ruling,
   2026-10-01). R8 and the 30 days of nothing-reapable after deploy are stated.
+- 2026-10-01: Phase 3 engine halves reworked again after the verification review
+  (T2 `nexus/review-wbfpw15-17-verify-code`, `-verify-critique`). (1) The orphaning
+  stamp no longer reads the manifest: the triggers stamp every dropped chunk key and
+  pre-lock the chunk rows in key order, which closes a race where two concurrent
+  writers dropping the last two owners of a shared chunk each stamped nothing; the
+  functions are SECURITY INVOKER. (2) The stamp is guarded by
+  `last_written_at < now() - 1 hour`; measured cost, before and after, is in the
+  Technical Design. (3) "Covers every path by construction" is withdrawn and the
+  blind spots are listed (TRUNCATE, `session_replication_role = replica`, manifest
+  DML with no tenant GUC). (4) MVV (e) no longer names an `indexing` skip. (5) Sam
+  ruled on 2026-10-01 (T2 `nexus/rdr-192-reaper-quarantine-decision-2026-10-01`) that
+  the reaper QUARANTINES, it does not hard-delete, with the `NX_GC_FLOOR_FRACTION`
+  floor, for every prefix; the periodic reaper (nexus-wbfpw.18) deletes with
+  `chunk_is_reapable` in its own DELETE predicate and takes no list-then-delete-by-id
+  path.

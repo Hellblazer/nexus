@@ -44,30 +44,77 @@
     file's chunks lose their owner when the client purges its manifest. In both
     cases last_written_at is OLD (the chunk was written long ago), so a chunk
     age grace would let the reaper take it at once. Two statement-level
-    triggers on nexus.catalog_document_chunks (DELETE, and UPDATE of a row's
-    chash or collection) set last_written_at = now() on every chunk that has just
-    lost an own-collection manifest row and has none left at the end of the
-    statement, in the same transaction as the manifest change. Doing it in the
-    database means EVERY path that drops an owner row is covered by construction
-    (writeManifestRows' replace, append's upsert of a position, purgeManifest,
-    delete-collection, the FK cascade of a hard document delete, the SQL
-    maintenance functions, the .nxexp import, anything added later) instead of a
-    list of Java call sites that rots. The grace therefore protects a run's old
-    tail for 30 days after batch 1, and a deleted file's chunks for 30 days after
-    the purge. A statement that drops and re-adds the same chash stamps it too
-    (the delete runs before the insert); that over-stamps, the safe direction,
-    and costs nothing the re-put's own chunk upsert has not already paid.
-    The two trigger functions are SECURITY DEFINER, with a pinned search_path and
-    fully qualified names, unlike every function in this file's family: they stamp a
-    chunk because a manifest row went away, so the stamp must not depend on the
-    caller also holding column privileges on catalog_document_chunks (a role that can
-    delete a manifest row has no reason to need SELECT on its chash to have the chunk
-    stamped, and CatalogManifestSweepRepositoryTest revokes exactly that to prove a
-    failed before-read fails open). They write only the chunks whose own manifest
-    rows the statement removed, matched on the same tenant_id, so they widen nothing.
+    triggers on nexus.catalog_document_chunks (DELETE, and UPDATE) set
+    last_written_at = now() on every chunk KEY the statement dropped from the
+    manifest (the deleted rows' keys; for an UPDATE, the old keys minus the new
+    keys, so a row that moves position and chash together still stamps the old
+    chash), in the same transaction as the manifest change. The triggers do NOT
+    read the manifest to decide whether the chunk is "really" ownerless: two
+    concurrent writers that drop the last two owners of a shared chunk each saw
+    the other's uncommitted row and stamped nothing (reproduced by
+    ChunkIsReapableIntegrationTest.aConcurrentDropOfASharedChunkLeavesItStamped).
+    Stamping every dropped key is safe because reapable(c) needs no owner: a
+    stamped chunk that is still owned is simply inside its grace. To keep the
+    stamp from being lost or deadlocking, each trigger first locks the chunk rows
+    it will stamp, ORDER BY (tenant_id, collection, chash) FOR NO KEY UPDATE, so
+    writers that share chunks serialize on the shared row for their transaction
+    and take their locks in one order.
+    The functions are SECURITY INVOKER, as every function in the changelog is
+    (an earlier draft made them SECURITY DEFINER only so a test that revokes
+    SELECT (chash) from nexus_svc kept passing; not reading the manifest removes
+    that need). They run under the writer's FORCE RLS and tenant GUC, and join on
+    tenant_id besides, so a tenant-A statement never stamps a tenant-B chunk;
+    EXECUTE is revoked from PUBLIC (a trigger function cannot be called directly
+    anyway) and ChunkIsReapableIntegrationTest pins prosecdef = false and the
+    ACL. Doing this in the database covers every DML path that drops an owner
+    row (writeManifestRows' replace, append's ON CONFLICT upsert of a position,
+    purgeManifest, delete-collection, the FK cascade of a hard document delete,
+    the SQL maintenance functions, the .nxexp import, anything added later)
+    instead of a list of Java call sites that rots. It does NOT cover, and these
+    are stated so nobody assumes it does: TRUNCATE of the manifest (statement
+    DELETE triggers do not fire; no code path truncates it and nexus_svc has no
+    TRUNCATE on it); a session with session_replication_role = replica
+    (pg_restore, logical apply); and manifest DML with no nexus.tenant GUC set
+    (a DBA cleanup or a future data-fix changeset: FORCE RLS on nexus.chunks
+    hides every chunk, so nothing is stamped). The grace therefore protects a
+    run's old tail for 30 days after batch 1, and a deleted file's chunks for 30
+    days after the purge.
+    COST, and the guard that bounds it. Every dropped key rewrites its chunk row,
+    which on nexus.chunks (HNSW per dimension, GIN trigram and tsv, two btrees)
+    is a full new row version and index entries, non-HOT, about 1 ms per 1024-d
+    row. The writer has usually just refreshed those rows itself (the content
+    upsert runs before the manifest delete in the same transaction and sets
+    last_written_at = now()), so the stamping UPDATE only touches rows with
+    last_written_at < now() - 1 hour; a chunk written within the hour is already
+    inside its grace by 30 days less an hour, and the shortened grace is the
+    price. A plain "< now()" would skip only rows the SAME transaction refreshed;
+    the one-hour margin also skips rows an earlier request of the same run
+    refreshed moments ago (the writer and the manifest change are often separate
+    requests, hence separate transactions), which a plain comparison would still
+    rewrite. Measured on a laptop container, 1024-d chunks with HNSW, one
+    run each (the shape, not a benchmark):
+    a 5000-row manifest replace took
+    4.6 to 4.8 s with the first version of the trigger whether or not the writer
+    had just refreshed the chunks, and now takes 1.9 s for 5000 genuinely
+    orphaned chunks (the inherent cost) and 36 ms when the writer has refreshed
+    them; a hard delete of 1000 documents x 5 chunks by FK cascade took 4.6 to
+    4.9 s, now 1.9 s (orphaned) and 38 ms (refreshed). With the triggers off
+    the same statements take 1 to 13 ms. A 10,000-chunk old tail dropped at
+    batch 1 of a re-index therefore costs a few seconds inside the shared sweep
+    gate and the index-run lock, once.
     This is the one exception to vectors-020's "never refreshed by maintenance"
     rule, and a deliberate one: that rule exists so dead chunks are not kept
     alive, and a stamp at orphaning only starts a dead chunk's clock.
+
+    R8: THIS PREDICATE IS NOT "NO LIVE OWNER NEEDS THIS CHUNK". A live legacy
+    note stored before nexus-b6enc has a catalog document but no manifest row;
+    once its chunk is old it satisfies every condition above and reads
+    reapable (RDR-192 S1a matrix row R8). The guard is the manifest-less census
+    gate, not the SQL: a consumer that acts on this predicate must first see
+    legacy-unmanifested = 0 for the collection, and a periodic consumer must
+    re-run that census in the engine on every pass rather than trust a stored
+    record (T2 review-wbfpw41-substantive-critique S1). The same text is in
+    COMMENT ON FUNCTION below.
 
     PARAMETERS. p_grace is an interval; NULL means the default (30 days), which
     lives here and nowhere else. Tests inject small values; a delete path must
@@ -163,6 +210,9 @@ AS $$
                 AND cc.lifecycle_state = 'quarantine'
            )
 $$;
+
+COMMENT ON FUNCTION nexus.chunk_is_reapable(text, text, bytea, timestamptz, interval) IS
+    'RDR-192 reapable(c): one row when the chunk has no own-collection manifest row in any owner state, last_written_at is older than the grace (NULL = 30 days) and the collection is not a quarantine sibling. NOT "no live owner needs this chunk": a live legacy note with no manifest row (matrix row R8) reads reapable once aged, so a consumer must first see the manifest-less census read legacy-unmanifested = 0 for the collection, and a periodic consumer must re-run it in the engine on every pass. A destructive caller must take the exclusive sweep gate, pass NULL or a floor-clamped grace, and carry this call in its own DELETE so a racing client write wins. last_written_at is stamped when a chunk loses its last manifest row (vectors-021-2), so the grace is time since the chunk became ownerless.';
         </sql>
         <rollback>
             <sql splitStatements="true" stripComments="false">DROP FUNCTION IF EXISTS nexus.chunk_is_reapable(text, text, bytea, timestamptz, interval);</sql>
@@ -170,26 +220,32 @@ $$;
     </changeSet>
 
     <changeSet id="vectors-021-2" author="nexus-wbfpw.15">
-        <comment>The orphaning stamp: statement-level AFTER DELETE and AFTER UPDATE triggers on nexus.catalog_document_chunks set nexus.chunks.last_written_at = now() on every chunk that just lost an own-collection manifest row and has none left, in the manifest change's own transaction. Covers every path that drops an owner row by construction, so reapable(c)'s grace means time since the chunk became ownerless.</comment>
+        <comment>The orphaning stamp: statement-level AFTER DELETE and AFTER UPDATE triggers on nexus.catalog_document_chunks set nexus.chunks.last_written_at = now() on every chunk key a statement dropped from the manifest, in the manifest change's own transaction, after locking those chunk rows in key order. SECURITY INVOKER; they do not read the manifest. Covers every DML path that drops an owner row, so reapable(c)'s grace means time since the chunk became ownerless.</comment>
         <sql splitStatements="false" stripComments="false">
 CREATE OR REPLACE FUNCTION nexus.stamp_chunks_on_manifest_delete()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
+SECURITY INVOKER
 AS $$
 BEGIN
+    -- Lock the chunk rows first, in key order: two writers that drop the last two owners of a shared
+    -- chunk serialize here (the second blocks until the first commits, then sees its stamp), and
+    -- writers that share several chunks take their locks in the same order, so they cannot deadlock.
+    PERFORM 1
+       FROM nexus.chunks c
+       JOIN (SELECT DISTINCT tenant_id, collection, chash FROM old_rows) o
+         ON o.tenant_id = c.tenant_id AND o.collection = c.collection AND o.chash = c.chash
+      WHERE c.last_written_at &lt; now() - interval '1 hour'
+      ORDER BY c.tenant_id, c.collection, c.chash
+        FOR NO KEY UPDATE OF c;
+
     UPDATE nexus.chunks c
        SET last_written_at = now()
       FROM (SELECT DISTINCT tenant_id, collection, chash FROM old_rows) o
      WHERE c.tenant_id  = o.tenant_id
        AND c.collection = o.collection
        AND c.chash      = o.chash
-       AND NOT EXISTS (
-             SELECT 1 FROM nexus.catalog_document_chunks m
-              WHERE m.tenant_id  = c.tenant_id
-                AND m.collection = c.collection
-                AND m.chash      = c.chash);
+       AND c.last_written_at &lt; now() - interval '1 hour';
     RETURN NULL;
 END;
 $$;
@@ -197,29 +253,37 @@ $$;
 CREATE OR REPLACE FUNCTION nexus.stamp_chunks_on_manifest_update()
 RETURNS trigger
 LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = pg_catalog, pg_temp
+SECURITY INVOKER
 AS $$
 BEGIN
+    -- The keys the statement dropped are the old keys minus the new keys: a row that keeps its
+    -- (tenant, collection, chash), whatever else changed, drops nothing; one that moves position and
+    -- chash together drops the old chash.
+    PERFORM 1
+       FROM nexus.chunks c
+       JOIN (SELECT tenant_id, collection, chash FROM old_rows
+             EXCEPT
+             SELECT tenant_id, collection, chash FROM new_rows) o
+         ON o.tenant_id = c.tenant_id AND o.collection = c.collection AND o.chash = c.chash
+      WHERE c.last_written_at &lt; now() - interval '1 hour'
+      ORDER BY c.tenant_id, c.collection, c.chash
+        FOR NO KEY UPDATE OF c;
+
     UPDATE nexus.chunks c
        SET last_written_at = now()
-      FROM (SELECT DISTINCT o.tenant_id, o.collection, o.chash
-              FROM old_rows o
-              JOIN new_rows n
-                ON n.tenant_id = o.tenant_id AND n.doc_id = o.doc_id AND n.position = o.position
-             WHERE n.chash IS DISTINCT FROM o.chash
-                OR n.collection IS DISTINCT FROM o.collection) o
+      FROM (SELECT tenant_id, collection, chash FROM old_rows
+            EXCEPT
+            SELECT tenant_id, collection, chash FROM new_rows) o
      WHERE c.tenant_id  = o.tenant_id
        AND c.collection = o.collection
        AND c.chash      = o.chash
-       AND NOT EXISTS (
-             SELECT 1 FROM nexus.catalog_document_chunks m
-              WHERE m.tenant_id  = c.tenant_id
-                AND m.collection = c.collection
-                AND m.chash      = c.chash);
+       AND c.last_written_at &lt; now() - interval '1 hour';
     RETURN NULL;
 END;
 $$;
+
+REVOKE EXECUTE ON FUNCTION nexus.stamp_chunks_on_manifest_delete() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION nexus.stamp_chunks_on_manifest_update() FROM PUBLIC;
 
 CREATE TRIGGER trg_catalog_chunks_stamp_on_delete
     AFTER DELETE ON nexus.catalog_document_chunks
