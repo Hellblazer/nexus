@@ -71,6 +71,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * hides a chunk. Chunk text carries a rare token (selective gate, 1%) and a common one (dense gate,
  * 70%). One topic is assigned to the first {@value #TOPIC_CHUNKS} chunks.
  *
+ * <p><b>Which tests guard vectors-023, and which do not.</b> None of the inlining pins below guards
+ * {@code vectors-023} (the move of {@code text_gate_probe_<dim>} onto live(c), nexus-wbfpw.35): all of them
+ * also pass on the OLD probe, with vectors-023 removed from the master include (checked: 13 of 13 green),
+ * because the old probe's tenant-wide dead-set anti-join inlines too. They pin only that
+ * {@code chunk_live_owners} stays inlinable. What fails without vectors-023 is
+ * {@code Rdr192EngineLivenessMatrix#p1p_textGateProbeVisibility} (the probe must not count a hidden
+ * chunk), and, for the fixture shape, {@code HnswScanBudgetOnEverySearchPathIntegrationTest}'s gate chunks,
+ * which need a live owner for the probe to see them. The gate-probe tests here record what the new probe
+ * costs and which plan it takes; they are evidence, not a guard on the changeset.
+ *
  * <p><b>What is pinned and why.</b> The one regression these queries share is the liveness
  * predicate stopping inlining: {@code nexus.chunk_live_owners} is a set-returning SQL function that
  * the planner folds into an indexed per-row probe of {@code catalog_document_chunks} and
@@ -266,7 +276,47 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         });
         String plan = explain("rls_probe", ctx -> ctx.selectCount().from(CHUNKS)
             .where(CHUNKS.COLLECTION.eq(COLL)));
-        assertThat(plan).as("the plan must carry the row-level-security qual").contains("tenant_id");
+        // The tenant GUC comparison, not just the column name: the query names no tenant of its own, so
+        // this qual can only come from the row-level-security policy.
+        assertThat(plan).as("the plan must carry the row-level-security qual").contains("current_setting('nexus.tenant'");
+    }
+
+    /**
+     * Control for the test above: the same query as the container superuser carries NO such qual, so
+     * the assertion there tells a plan taken under RLS from one taken without it.
+     */
+    @Test
+    void thePlanWithoutRlsCarriesNoTenantQual() throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String plan = ctx.explain(ctx.selectCount().from(CHUNKS).where(CHUNKS.COLLECTION.eq(COLL))).plan();
+            assertThat(plan).doesNotContain("current_setting('nexus.tenant'");
+        }
+    }
+
+    /**
+     * The premise of nexus-wbfpw.48 (the gate probe cannot use the GIN text indexes under RLS): the
+     * operator functions the text gate evaluates are not leakproof, and PostgreSQL refuses to make a
+     * non-leakproof operator an index condition on a relation with a security qual
+     * ({@code restriction_is_securely_promotable}). Recorded and pinned: a PostgreSQL that marked them
+     * leakproof would change what the fix has to be.
+     */
+    @Test
+    void textGateOperatorFunctions_areNotLeakproof() throws Exception {
+        Table<?> procs = DSL.table(DSL.name("pg_catalog", "pg_proc"));
+        Field<String> name = DSL.field(DSL.name("proname"), String.class);
+        Field<Boolean> leakproof = DSL.field(DSL.name("proleakproof"), Boolean.class);
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES).select(name, leakproof).from(procs)
+                .where(name.in("ts_match_vq", "word_similarity_op", "word_similarity_commutator_op"))
+                .orderBy(name).fetch();
+            synchronized (evidence) {
+                evidence.put("proleakproof of the text gate's operator functions", rows.toString());
+            }
+            assertThat(rows.getValues(name)).as("every operator function the gate uses must be found")
+                .contains("ts_match_vq", "word_similarity_op", "word_similarity_commutator_op");
+            assertThat(rows.getValues(leakproof)).as("none of them is leakproof").doesNotContain(true);
+        }
     }
 
     // ── topic-scoped ────────────────────────────────────────────────────────
@@ -323,7 +373,10 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
      * the choice with scans penalised (the test above), so the text gate's GIN indexes are unused. This
      * records the plan with the RLS qual out of the way, to attribute that to RLS: a user qual whose
      * operator is not leakproof ({@code @@}, {@code <%}) cannot be an index condition on a relation with
-     * a security qual (PostgreSQL's {@code restriction_is_securely_promotable}).
+     * a security qual (PostgreSQL's {@code restriction_is_securely_promotable}). This run is outside
+     * {@link TenantScope} and as a different role, so on its own it confounds RLS with the role and the
+     * GUC; the single-variable control (a BYPASSRLS clone of nexus_svc under the same tenant GUC, 2 ms,
+     * BitmapOr) is recorded on nexus-wbfpw.48.
      */
     @Test
     void gateProbe_selective_asSuperuser_recordsThePlanWithoutRls() throws Exception {
