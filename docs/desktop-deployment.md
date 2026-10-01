@@ -14,8 +14,9 @@ Nexus runs in three Claude surfaces, all backed by shared host state so it round
 > (copy-not-move, so the Chroma files stay behind afterward as a relic
 > nothing reads, with no path back to that era, Sam 2026-08-29),
 > then upgrade back to this version. Run it against a local engine, with
-> `NX_SERVICE_URL` unset and no `--service-url`, even if you mean to end up on
-> the managed cloud; that is a later hop with the current client.
+> `NX_SERVICE_URL` and the `service_url` config key cleared and no
+> `--service-url`, even if you mean to end up on the managed cloud; that is a
+> later hop with the current client.
 > [migration-runbook.md § Installs that predate Postgres](migration-runbook.md#installs-that-predate-postgres)
 > carries that procedure — including the exact first-hop command, which
 > **differs by install layout**, so do not assume the one you last used —

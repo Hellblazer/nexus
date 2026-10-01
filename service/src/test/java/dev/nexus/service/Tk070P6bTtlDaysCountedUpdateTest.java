@@ -128,7 +128,7 @@ class Tk070P6bTtlDaysCountedUpdateTest {
             seedFrecencyRow(su, TENANT_A, "3".repeat(64), null);
             seedFrecencyRow(su, TENANT_A, "4".repeat(64), 30);
 
-            assertThat(countFrecencyRows(su, "nexus", TTL_DAYS.eq(0)))
+            assertThat(countFrecencyRows(su, TTL_DAYS.eq(0)))
                 .as("ground truth before re-running telemetry-006-1's SQL")
                 .isEqualTo(2);
 
@@ -147,15 +147,15 @@ class Tk070P6bTtlDaysCountedUpdateTest {
                 .anyMatch(n -> n.contains("converted 2 nexus.frecency row(s)"));
 
             // ── Converted-row ground truth: NULL, not gone ──
-            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("1".repeat(64)).and(TTL_DAYS.isNull())))
+            assertThat(countFrecencyRows(su, CHUNK_ID.eq("1".repeat(64)).and(TTL_DAYS.isNull())))
                 .as("a converted row must now read NULL, not be deleted")
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("2".repeat(64)).and(TTL_DAYS.isNull())))
+            assertThat(countFrecencyRows(su, CHUNK_ID.eq("2".repeat(64)).and(TTL_DAYS.isNull())))
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("3".repeat(64)).and(TTL_DAYS.isNull())))
+            assertThat(countFrecencyRows(su, CHUNK_ID.eq("3".repeat(64)).and(TTL_DAYS.isNull())))
                 .as("a NULL-ttl_days (already permanent) decoy must survive untouched")
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("4".repeat(64)).and(TTL_DAYS.eq(30))))
+            assertThat(countFrecencyRows(su, CHUNK_ID.eq("4".repeat(64)).and(TTL_DAYS.eq(30))))
                 .as("a positive-ttl_days decoy must survive untouched")
                 .isEqualTo(1);
 
@@ -180,7 +180,7 @@ class Tk070P6bTtlDaysCountedUpdateTest {
             .execute();
     }
 
-    private static int countFrecencyRows(Connection c, String schema, Condition where) {
+    private static int countFrecencyRows(Connection c, Condition where) {
         return DSL.using(c, SQLDialect.POSTGRES).fetchCount(FRECENCY, where);
     }
 

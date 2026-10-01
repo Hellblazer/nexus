@@ -42,15 +42,33 @@
     TOLERANT BY DESIGN (the nexus-lgdel.l1 no-wedge directive: no precondition or
     privilege failure aborts an upgrade walk). The body drops the seven named
     tables, one at a time, and then asks PostgreSQL to drop the schema WITHOUT
-    CASCADE, which succeeds only when the schema is empty. Two things can stand in
-    the way, and neither may stop a boot: an object this changeset did not name
+    CASCADE, which succeeds only when the schema is empty. Three things can stand in
+    the way, and none may stop a boot: an object this changeset did not name
     (a DBA- or ops-created table, view or function in schema staging; the
-    changelog creates nothing else there) leaves the schema in place, and a
-    migrating role that does not own the schema or a table (insufficient_privilege)
-    leaves that object in place. Each case raises a NOTICE naming what was left, and
-    the walk goes on. Nothing is deleted that this changeset did not name, so
-    CASCADE is deliberately not used. A later boot does not retry (the changeset is
-    recorded as ran); an operator finishes the drop by hand.
+    changelog creates nothing else there) leaves the schema in place; an object
+    OUTSIDE the schema that depends on a named table (a view over it, a foreign key
+    into it: dependent_objects_still_exist) leaves that table in place, and so the
+    schema; and a migrating role that is neither the owner of the schema nor of a
+    table (insufficient_privilege) leaves that object in place. PostgreSQL lets the
+    owner of a schema drop a table another role owns, so the nexus_admin shape
+    (the role that created schema staging) drops all seven named tables even when
+    ops owns one; the privilege branch is reached by a role that owns neither.
+    Each case raises a NOTICE naming what was left, and the walk goes on. Nothing is
+    deleted that this changeset did not name, so CASCADE is deliberately not used.
+    A later boot does not retry (the changeset is recorded as ran); an operator
+    finishes the drop by hand.
+
+    THE NOTICE IS NOT THE OBSERVABLE SIGNAL. Liquibase's own connection does not
+    surface NOTICEs (Tk070P6aTtlDaysCountedDeleteTest records it) and the server's
+    default log_min_messages drops them, so a walk that left something behind
+    leaves no trace in any log. The signal is the catalog: after the walk,
+    `SELECT nspname, pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname =
+    'staging'` and `SELECT tablename FROM pg_tables WHERE schemaname = 'staging'`
+    return no rows when the drop completed. Before the walk, the same
+    nspowner and table-owner query shows whether the migrating role owns the
+    schema. StagingSchemaDropLiquibaseTest asserts each of the three stand-in-the-way
+    cases against the catalog and, for the privilege branch, against the NOTICEs on a
+    statement's warning chain.
 
     Placed before the runAlways grants blocks (the D0.1 late-append convention).
 -->
@@ -75,8 +93,8 @@ BEGIN
     LOOP
         BEGIN
             EXECUTE format('DROP TABLE IF EXISTS staging.%I', t);
-        EXCEPTION WHEN insufficient_privilege THEN
-            RAISE NOTICE 'staging-6: staging.% left in place (migrating role may not drop it)', t;
+        EXCEPTION WHEN insufficient_privilege OR dependent_objects_still_exist THEN
+            RAISE NOTICE 'staging-6: staging.% left in place (migrating role may not drop it, or an object outside the schema depends on it)', t;
         END;
     END LOOP;
 
@@ -111,11 +129,19 @@ $$;
              schema nexus ("type vector does not exist"). The DDL below is therefore a
              copy of theirs with `nexus.vector`, the spelling this changeset's position
              (after search-path-001) requires; staging.chash_index is not recreated
-             because rdr187-3 dropped it long before this changeset. -->
+             because rdr187-3 dropped it long before this changeset.
+
+             IDEMPOTENT after a partial drop: the tolerant body can leave some tables (and the
+             schema) in place, so a rollback after such a boot meets objects that already
+             exist. Every statement below tolerates that: CREATE SCHEMA, TABLE and INDEX use
+             IF NOT EXISTS, each CREATE POLICY is preceded by DROP POLICY IF EXISTS
+             (PostgreSQL has no CREATE POLICY IF NOT EXISTS), and ENABLE/FORCE ROW LEVEL
+             SECURITY are no-ops when already set. StagingSchemaDropLiquibaseTest runs the
+             rollback body twice over a partially dropped schema. -->
         <rollback>
 CREATE SCHEMA IF NOT EXISTS staging;
 
-CREATE TABLE staging.chunks (
+CREATE TABLE IF NOT EXISTS staging.chunks (
     tenant_id  TEXT NOT NULL DEFAULT '',
     collection TEXT NOT NULL,
     dim        INTEGER NOT NULL,
@@ -127,7 +153,7 @@ CREATE TABLE staging.chunks (
     landed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT staging_chunks_pk PRIMARY KEY (tenant_id, collection, legacy_ref)
 );
-CREATE TABLE staging.document_chunks (
+CREATE TABLE IF NOT EXISTS staging.document_chunks (
     tenant_id   TEXT NOT NULL DEFAULT '',
     doc_id      TEXT NOT NULL,
     position    INTEGER NOT NULL,
@@ -139,7 +165,7 @@ CREATE TABLE staging.document_chunks (
     char_end    INTEGER,
     CONSTRAINT staging_document_chunks_pk PRIMARY KEY (tenant_id, doc_id, position)
 );
-CREATE TABLE staging.topic_assignments (
+CREATE TABLE IF NOT EXISTS staging.topic_assignments (
     tenant_id         TEXT NOT NULL DEFAULT '',
     doc_id            TEXT NOT NULL,
     topic_id          INTEGER NOT NULL,
@@ -147,7 +173,7 @@ CREATE TABLE staging.topic_assignments (
     topic_collection  TEXT NOT NULL DEFAULT '',
     CONSTRAINT staging_topic_assignments_pk PRIMARY KEY (tenant_id, doc_id, topic_id)
 );
-CREATE TABLE staging.frecency (
+CREATE TABLE IF NOT EXISTS staging.frecency (
     tenant_id      TEXT NOT NULL DEFAULT '',
     chunk_id       TEXT NOT NULL,
     embedded_at    TEXT NOT NULL DEFAULT '',
@@ -157,7 +183,7 @@ CREATE TABLE staging.frecency (
     last_hit_at    TEXT NOT NULL DEFAULT '',
     CONSTRAINT staging_frecency_pk PRIMARY KEY (tenant_id, chunk_id)
 );
-CREATE TABLE staging.relevance_log (
+CREATE TABLE IF NOT EXISTS staging.relevance_log (
     tenant_id  TEXT NOT NULL DEFAULT '',
     id         BIGINT NOT NULL,
     query      TEXT NOT NULL DEFAULT '',
@@ -168,7 +194,7 @@ CREATE TABLE staging.relevance_log (
     ts         TEXT NOT NULL DEFAULT '',
     CONSTRAINT staging_relevance_log_pk PRIMARY KEY (tenant_id, id)
 );
-CREATE TABLE staging.document_aspects (
+CREATE TABLE IF NOT EXISTS staging.document_aspects (
     tenant_id              TEXT NOT NULL DEFAULT '',
     doc_id                 TEXT NOT NULL DEFAULT '',
     collection             TEXT NOT NULL DEFAULT '',
@@ -186,7 +212,7 @@ CREATE TABLE staging.document_aspects (
     source_uri             TEXT,
     CONSTRAINT staging_document_aspects_pk PRIMARY KEY (tenant_id, collection, source_path)
 );
-CREATE TABLE staging.aspect_extraction_queue (
+CREATE TABLE IF NOT EXISTS staging.aspect_extraction_queue (
     tenant_id       TEXT NOT NULL DEFAULT '',
     collection      TEXT NOT NULL DEFAULT '',
     source_path     TEXT NOT NULL DEFAULT '',
@@ -200,40 +226,47 @@ CREATE TABLE staging.aspect_extraction_queue (
     last_error      TEXT,
     CONSTRAINT staging_aspect_queue_pk PRIMARY KEY (tenant_id, collection, source_path)
 );
-CREATE INDEX idx_staging_document_chunks_chash ON staging.document_chunks (chash);
+CREATE INDEX IF NOT EXISTS idx_staging_document_chunks_chash ON staging.document_chunks (chash);
 
 ALTER TABLE staging.chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staging.chunks FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON staging.chunks;
 CREATE POLICY tenant_isolation ON staging.chunks
     USING (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 ALTER TABLE staging.document_chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staging.document_chunks FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON staging.document_chunks;
 CREATE POLICY tenant_isolation ON staging.document_chunks
     USING (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 ALTER TABLE staging.topic_assignments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staging.topic_assignments FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON staging.topic_assignments;
 CREATE POLICY tenant_isolation ON staging.topic_assignments
     USING (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 ALTER TABLE staging.frecency ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staging.frecency FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON staging.frecency;
 CREATE POLICY tenant_isolation ON staging.frecency
     USING (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 ALTER TABLE staging.relevance_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staging.relevance_log FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON staging.relevance_log;
 CREATE POLICY tenant_isolation ON staging.relevance_log
     USING (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 ALTER TABLE staging.document_aspects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staging.document_aspects FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON staging.document_aspects;
 CREATE POLICY tenant_isolation ON staging.document_aspects
     USING (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
 ALTER TABLE staging.aspect_extraction_queue ENABLE ROW LEVEL SECURITY;
 ALTER TABLE staging.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS tenant_isolation ON staging.aspect_extraction_queue;
 CREATE POLICY tenant_isolation ON staging.aspect_extraction_queue
     USING (tenant_id = current_setting('nexus.tenant', true))
     WITH CHECK (tenant_id = current_setting('nexus.tenant', true));

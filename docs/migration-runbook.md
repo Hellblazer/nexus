@@ -119,15 +119,21 @@ machinery that performed that migration no longer ships:
 2. `nx upgrade` there, which performs the Chroma to PG copy (copy-not-move;
    the Chroma directory is left on disk afterward, untouched). Three
    preconditions, all about WHICH engine the pin talks to:
-   - **Local engine only.** Leave `NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the
-     `service_url` config key unset (or export `NX_LOCAL=1`), and never run the
-     pin's `nx guided-upgrade` with `--service-url` or aim `nx upgrade` at a
-     managed endpoint. That path is unsupported: the engine retired the
-     `/v1/staging` routes the 6.x migration lands through (nexus-z0o2p.27), and
-     even before that it very likely lost manifest and topic pointers on a
-     current engine, which dropped `chash_alias` and the rekey route (engine
-     v0.1.100) and now admits only 64-hex chashes where Chroma-era ids are 16
-     or 32 hex. Nobody has measured it; do not rely on it
+   - **Local engine only.** The pin must provision and talk to its own local
+     engine, so clear every setting that names a managed one. In the shell:
+     `unset NX_SERVICE_URL NX_SERVICE_TOKEN`. In the config file: delete the
+     `service_url:` line (and `service_token:` if it is there) under
+     `credentials:` in `~/.config/nexus/config.yml` (`$NEXUS_CONFIG_DIR/config.yml`
+     if you set that variable). There is no `nx config unset` verb, so this is a
+     file edit; leave every other key alone. `nx config get service_url` prints
+     `service_url: not set` once both are clear. A machine that ran in cloud
+     mode has the key set. `NX_LOCAL=1` is not a substitute: at the pin a
+     configured `service_url` names the engine whatever `NX_LOCAL` says. Never
+     run the pin's `nx guided-upgrade` with `--service-url`, and never aim
+     `nx upgrade` at a managed endpoint. That path is unsupported: the engine
+     retired the `/v1/staging` routes the 6.x migration lands through
+     (nexus-z0o2p.27). What the path did against a current engine before the
+     routes went has not been measured (nexus-6g218); do not rely on it
    - **Stop any current-engine local service first.** A 7.x install may have
      left its local service running (`nx daemon service status`; stop it with
      `nx daemon service stop`). The pin's own engine (v0.1.52) must be the one
@@ -137,10 +143,12 @@ machinery that performed that migration no longer ships:
      `voyage-*` collection), run the local engine with `NX_VOYAGE_API_KEY`
      reaching the service. Without it a voyage-model collection is refused
      (the migration will not copy Voyage vectors onto a bge-only service) or
-     re-embedded to bge-768, and a bge collection can never be imported into a
-     Voyage cloud afterward. This is the most consequential choice in the hop
+     re-embedded to bge-768, and a bge collection is not expected to import into
+     a Voyage cloud afterward. This is the most consequential choice in the hop
      for anyone headed to the cloud. Whether the pin's v0.1.52 engine runs the
-     Voyage posture has not been verified
+     Voyage posture has not been verified, and neither has what a current local
+     engine without the key does with a voyage-named collection when you export
+     it later (nexus-xbqh9)
 3. upgrade to current normally
 
 Frozen Chroma directories left on disk after that copy are relics, not a
@@ -162,55 +170,76 @@ unmeasured (nexus-6g218).
 
 | You are | Hop 1 gives you | Best path to the cloud |
 |---|---|---|
-| Local-ONNX (minilm-384 or bge-768 collections) | Collections embedded with a local model; T2 memory and plans; taxonomy; notes | Do not carry the vectors: a bge collection cannot be imported into a Voyage cloud collection. For code, docs and rdr content, **re-index from source in the cloud** (`nx index repo`, `nx index pdf`, `nx index rdr`), which is cheaper than two hops and embeds with Voyage. Hop 1 matters only for T2 memory and plans, notes and taxonomy |
+| Local-ONNX (minilm-384 or bge-768 collections) | Collections embedded with a local model; T2 memory and plans; taxonomy; notes | Do not carry the vectors: a bge collection is not expected to import into a Voyage cloud (see below). For code, docs and rdr content, **re-index from source in the cloud** (`nx index repo`, `nx index pdf`, `nx index rdr`), which is cheaper than two hops and embeds with Voyage. Hop 1 matters only for T2 memory and plans, notes and taxonomy |
 | Voyage, from ChromaDB Cloud | Voyage collections kept as Voyage only if hop 1 ran Voyage-keyed (above) | `nx store export` and `nx store import` carry the vectors as they are. Re-indexing source content is still the cheaper path where you have the source |
 | Notes with no source files (`store_put`-origin knowledge) | The notes, as chunks plus catalog documents | `nx catalog export` and `nx catalog import`: the bundle holds no embeddings, so import re-embeds each note and works across models |
 
-**Steps**, while the box is still local:
+**Before you switch to the cloud (local steps).** Do these while the
+current client still talks to your local engine; once you switch, the local
+engine's data is unreachable from the client.
 
 1. Write down what you want to carry: `nx store export --all -o ./nxexp-backup/`
    (one `.nxexp` per collection, embeddings included) and
    `nx catalog export recovery.jsonl` (link graph plus `store_put`-origin
    notes; no embeddings).
-2. Switch to the cloud as in
+2. Hand-carry the T2 memory entries you cannot lose: `nx memory list` to see
+   them, `nx memory get --project NAME --title NAME` to read one, and later
+   `nx memory put CONTENT --project NAME --title NAME` in the cloud. `nx memory`
+   has no export or import verb, and doing this by hand does not scale past tens
+   of entries. Past that, plan on treating T2 memory as left behind, or write a
+   loop yourself.
+
+**After you switch (cloud steps).**
+
+3. Switch as in
    [Getting Started § Cloud mode](getting-started.md#cloud-mode-optional)
    (`nx config set service_url ...` plus `NX_SERVICE_TOKEN`).
-3. **Clear the stranded banner.** The pre-PG files from hop 1 are still on
+4. **Clear the stranded banner.** The pre-PG files from hop 1 are still on
    disk (copy-not-move), and in cloud mode the stranded-install detector
    cannot trust the engine's migration record, so every command banners and
    `nx doctor` fails until you either run `nx stranded ack` (attests that this
    machine's pre-PG data was migrated) or move the pre-PG files the banner names
    aside. They are relics (Sam, 2026-08-29).
-4. **Re-index from source first, then load.** `nx index repo` / `nx index pdf`
+5. **Re-index from source first, then load.** `nx index repo` / `nx index pdf`
    for the content you are re-indexing; then `nx store import FILE` for each
    `.nxexp` you are carrying; then `nx catalog import recovery.jsonl` LAST. The
    bundle's links resolve by `source_uri` against documents the target already
-   holds, so a link to a document not indexed yet stays unresolved. All three
-   are idempotent, and an interrupted `nx store import` finishes the documents it
-   left open when rerun.
+   holds, so a link to a document not indexed yet stays unresolved. An
+   interrupted `nx store import` finishes the documents it left open when rerun.
+   Idempotence of the catalog import and of a re-index over an import is
+   unmeasured (nexus-xbqh9).
 
-**What `nx store import` refuses, and why.** A collection embedded with a local
-model fails against a Voyage collection. In the default case (a collection
-named with a Voyage token, whose vectors are bge-768) the file's header agrees
-with the name, so the model check passes and the dimension check stops it:
-`EmbeddingDimensionMismatch` ("header claims 'voyage-context-3' (1024-dim) but
-vectors are 768-dim"). `--assume-model` only corrects a mislabeled header and
-does not get past that. A collection named with a bge token passes both checks
-(768 equals 768) and is sent to the cloud engine; what the engine does with it
-has not been verified, so do not rely on it. Either way the answer for such a
-collection is to re-index its source.
+**What happens to a collection embedded with a local model.** Hop 1 renames a
+local-model collection to a bge-named one (the pin swaps the model segment of
+the name for minilm sources and for voyage-named collections whose vectors
+measure 768). That name passes `nx store import`'s name check and its dimension
+check (768 equals 768), so the file is sent to the cloud engine. The cloud
+engine is a Voyage deployment and may refuse a collection whose name does not
+carry a Voyage model. Nobody has run this, so what the cloud answers is
+unverified (nexus-xbqh9). `EmbeddingDimensionMismatch` ("header
+claims 'voyage-context-3' (1024-dim) but vectors are 768-dim") is a different
+case: a file whose header says Voyage over vectors that measure 768.
+`--assume-model` only corrects a mislabeled header like that and does not get
+past a real mismatch. Either way the answer for a locally-embedded collection is
+to re-index its source.
 
 **What this path does not carry.** An `.nxexp` holds chunks, embeddings and
 owner rows. The recovery bundle holds links and `store_put`-origin notes. Nothing
 here carries:
 
-- T2 memory and plans (`nx memory` has no export or import verb; carry entries
-  by hand with `nx memory get` and `nx memory put`)
-- taxonomy topics and their assignments
-- `document_aspects` (LLM-extracted; re-extracting is billed) and the aspect queue
-- `frecency` and `relevance_log`
+- T2 memory and plans, except the entries you hand-carry in step 2 (plans have
+  no hand-carry path)
+- taxonomy topics, their assignments, topic links and centroids
+- `document_aspects` (LLM-extracted; re-extracting is billed), the aspect queue
+  and `aspect_promotion_log`
+- `frecency` and `relevance_log`, including per-note TTL: a note that expired on
+  its old box is permanent in the cloud
+- the telemetry stores (search telemetry, hook and index failure records)
 - DEVONthink highlights
-- tuples
+- curated catalog metadata beyond links and `store_put` notes: author, year,
+  corpus, `meta` fields and collection supersession. Owner tumblers are
+  re-minted in the cloud, so a tumbler you noted on the old box does not name
+  the same owner there
 
 The old direct path landed the pointer stores, `document_aspects` and the aspect
 queue through the staging routes and T2 through ordinary ones, so the two-hop

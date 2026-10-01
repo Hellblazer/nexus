@@ -365,8 +365,11 @@ RUN pip install --no-cache-dir conexus==<host nx --version>
 > globally or per-store — is now a **hard error** carrying the
 > stranded-install redirect. Pre-migration SQLite files on disk are
 > frozen migration sources; to migrate them, install the last
-> migration-capable 6.x release, run `nx upgrade` there, then upgrade
-> back. The subsections below are retained as history of what the flag
+> migration-capable 6.x release, run `nx upgrade` there against a LOCAL
+> engine (stop any running local service, clear `NX_SERVICE_URL` and the
+> `service_url` key in `config.yml`; see [Migration Runbook § Installs that
+> predate Postgres](migration-runbook.md#installs-that-predate-postgres)), then
+> upgrade back. The subsections below are retained as history of what the flag
 > used to select.
 
 ### The T2 daemon container transport is GONE

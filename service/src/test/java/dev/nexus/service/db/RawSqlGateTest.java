@@ -1123,8 +1123,11 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
         // nexus-z0o2p.27: CREATE ROLE nexus_diag (jOOQ's open-source DSL has no CREATE ROLE) and the
         // three-statement GRANT / ALTER DEFAULT PRIVILEGES the old grants-nexus-diag-3 gave that role
-        // on schema staging; both set up the aged shape the drop is walked over.
-        Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 2),
+        // on schema staging; both set up the aged shape the drop is walked over. Fix round 3: +12 for
+        // the NOSUPERUSER owner provisioning (CREATE ROLE / GRANT, the SchemaMigratorIntegrationTest idiom),
+        // the ops_dba role and ALTER TABLE ... OWNER TO, SET ROLE / RESET ROLE around the extracted
+        // changeset body, and the three executions of that body and of the rollback text.
+        Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 14),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 19),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 11),
@@ -1658,7 +1661,8 @@ class RawSqlGateTest {
     // CatalogManifestSweepRepositoryTest.java 23 -> 17, Tk070P6bTtlDaysCountedUpdateTest.java
     // 2 -> 1, new StagingSchemaDropLiquibaseTest.java at 2). Set to the measured per-file sum
     // so the ceiling carries no slack.
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 967;
+    // nexus-z0o2p.27 fix round 3: 967 -> 979 (+12, StagingSchemaDropLiquibaseTest.java 2 -> 14, see its entry).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 979;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

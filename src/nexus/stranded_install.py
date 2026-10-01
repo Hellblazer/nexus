@@ -120,6 +120,23 @@ ACK_CONSENT_TEXT = (
     "currently on this machine."
 )
 
+#: The preconditions of the first hop in one clause, shared by the banner, the
+#: ``nx doctor`` remedy and the retired-sqlite message so the three cannot drift
+#: apart. The pin must talk to its own local engine: a managed endpoint is
+#: unsupported (the engine retired the routes the 6.x migration lands through,
+#: nexus-z0o2p.27), and at the pin a configured ``service_url`` names the engine
+#: whatever ``NX_LOCAL`` says. There is no ``nx config unset``, so the config key
+#: is cleared by editing the file. Plain text: it is printed verbatim.
+LOCAL_ENGINE_CLAUSE = (
+    "against a LOCAL engine, never a managed endpoint: stop any running local "
+    "service (`nx daemon service stop`), clear NX_SERVICE_URL and NX_SERVICE_TOKEN "
+    "and delete the service_url line under credentials: in "
+    "~/.config/nexus/config.yml (there is no `nx config unset`, and NX_LOCAL=1 "
+    "does not override it), and set NX_VOYAGE_API_KEY if the data is "
+    "Voyage-embedded. Steps: docs/migration-runbook.md, "
+    "'Installs that predate Postgres'"
+)
+
 #: Sentinel distinguishing "use the module constant" from an explicit
 #: ``None`` (= disarmed) passed by a caller or test.
 _USE_PINNED: object = object()
@@ -201,8 +218,7 @@ class StrandedInstall:
             f"would look like an empty install, not data loss; nothing has been "
             f"touched. Two-hop upgrade: (1) install conexus=={pin} "
             f"(`{first_hop}` or `pip install conexus=={pin}`), "
-            f"(2) run `nx upgrade` there to migrate the data (against a local "
-            f"engine: leave NX_SERVICE_URL unset, never a managed endpoint), "
+            f"(2) run `nx upgrade` there to migrate the data ({LOCAL_ENGINE_CLAUSE}), "
             f"(3) upgrade back to this version."
         )
         if self.verification_unavailable:

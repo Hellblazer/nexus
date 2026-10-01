@@ -315,7 +315,21 @@ with `nx config set beads_prime.manage false`; deleting the file restores
 
 An install still on ChromaDB (5.x, or 6.x that never migrated) must hop
 through the last release that carries the migration. Current releases detect
-this at startup and print the same path:
+this at startup and print the same path.
+
+**Two things to do before step 2.** First, stop any local service a 7.x install
+left running (`nx daemon service stop`). Second, make step 2 run against a
+**local** engine, not a managed one: `unset NX_SERVICE_URL NX_SERVICE_TOKEN`,
+and delete the `service_url:` line under `credentials:` in
+`~/.config/nexus/config.yml` (there is no `nx config unset`; it is a file edit).
+`nx config get service_url` prints `service_url: not set` when it is clear.
+`NX_LOCAL=1` does not help: at the pin a configured `service_url` wins. Never
+run the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
+endpoint; that path is unsupported. If the data is Voyage-embedded, run the
+local engine with `NX_VOYAGE_API_KEY` reaching it, or those collections are
+refused or re-embedded to bge and are not expected to import into a Voyage
+cloud. Full detail: [Migration Runbook § Installs that predate
+Postgres](migration-runbook.md#installs-that-predate-postgres).
 
 ```bash
 nx self install --version 6.18.1  # 1. pin to the last migration-capable release
@@ -329,19 +343,13 @@ On a uv-tool box use `uv tool install conexus==6.18.1` for step 1 and
 over a pre-PG store migrates nothing and searches look empty; nothing is lost,
 follow the hops above.
 
-Before step 2: stop any local service a 7.x install left running
-(`nx daemon service stop`), and run step 2 against a **local** engine: leave
-`NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the `service_url` config key unset (or
-export `NX_LOCAL=1`). Never run the pin's `nx guided-upgrade --service-url ...`
-or aim it at a managed endpoint; that path is unsupported. If the data is
-Voyage-embedded, run the local engine with `NX_VOYAGE_API_KEY` reaching it, or
-those collections are refused or re-embedded to bge and can never be imported
-into a Voyage cloud.
-
 To end up on the managed cloud, finish steps 1 to 3 locally, then move the data
-with the current client. That second hop has not been rehearsed end to end and
-carries less than the old direct path did (no T2 memory or plans, taxonomy,
-document aspects, frecency, relevance log, DEVONthink highlights or tuples);
-for code, docs and rdr content, re-indexing from source in the cloud is
-cheaper. See [Migration Runbook § Getting that data into the managed
+with the current client. Hand-carry any T2 memory you need BEFORE you switch to
+the cloud (`nx memory` has no export verb, and by hand it does not scale past
+tens of entries). That second hop has not been rehearsed end to end (nexus-xbqh9)
+and carries less than the old direct path did: no T2 plans, taxonomy,
+document aspects, frecency or relevance log (a note's TTL included), telemetry,
+DEVONthink highlights or curated catalog metadata. For code, docs and rdr
+content, re-indexing from source in the cloud is cheaper. See [Migration Runbook
+§ Getting that data into the managed
 cloud](migration-runbook.md#getting-that-data-into-the-managed-cloud).

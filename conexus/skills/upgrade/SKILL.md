@@ -106,38 +106,50 @@ redirect, and `nx upgrade` here cannot migrate it. The path is: install the
 pinned `conexus==6.18.1` (the refusal names the exact command), run `nx upgrade`
 there, then upgrade back to current. Three preconditions for the hop at the pin:
 
-- **A LOCAL engine only.** `NX_SERVICE_URL`, `NX_SERVICE_TOKEN` and the
-  `service_url` config key unset (or `NX_LOCAL=1`). Never run the pin's
-  `nx guided-upgrade --service-url ...` or aim it at a managed endpoint: that
-  path is unsupported (the engine retired the `/v1/staging` routes it lands
-  through, and it very likely already lost manifest and topic pointers on a
-  current engine; unmeasured, nexus-6g218). Do not set `service_url` first "to
-  save a step".
+- **A LOCAL engine only.** `unset NX_SERVICE_URL NX_SERVICE_TOKEN` in the shell
+  and delete the `service_url:` line (and `service_token:`) under `credentials:`
+  in `~/.config/nexus/config.yml`. There is no `nx config unset`, so this is a
+  file edit; `nx config get service_url` prints `service_url: not set` when it
+  is clear. Do NOT offer `NX_LOCAL=1` as the alternative: at the pin a
+  configured `service_url` names the engine whatever `NX_LOCAL` says. Never run
+  the pin's `nx guided-upgrade --service-url ...` or aim it at a managed
+  endpoint: that path is unsupported (the engine retired the `/v1/staging`
+  routes it lands through; what it did against a current engine before that is
+  unmeasured, nexus-6g218). Do not set `service_url` first "to save a step".
 - **Stop any current-engine local service** a 7.x install left running
   (`nx daemon service stop`) so the pin provisions its own engine.
 - **Voyage-embedded data needs a Voyage-keyed local engine**
   (`NX_VOYAGE_API_KEY` reaching the service), or those collections are refused
-  or re-embedded to bge-768 and can never be imported into a Voyage cloud.
+  or re-embedded to bge-768 and are not expected to import into a Voyage cloud.
 
 If the user wants the managed cloud, that is a second hop with the CURRENT
 client after the upgrade back. It has NOT been rehearsed end to end (nexus-xbqh9)
-and carries less than the old direct path: no T2 memory or plans (`nx memory`
-has no export verb), taxonomy, `document_aspects`, aspect queue, `frecency`,
-`relevance_log`, DEVONthink highlights or tuples. Pick by user type:
+and carries less than the old direct path. Not carried: T2 plans, taxonomy
+(topics, assignments, links, centroids), `document_aspects`, the aspect queue and
+`aspect_promotion_log`, `frecency` and `relevance_log` (so a note's TTL is lost:
+an expiring note becomes permanent), the telemetry stores, DEVONthink
+highlights, curated catalog metadata (author, year, corpus, `meta`, collection
+supersession), and owner tumblers are re-minted. T2 memory is carried only by
+hand (`nx memory list`, `nx memory get --project NAME --title NAME`, then
+`nx memory put` in the cloud), which has to happen BEFORE the switch to the
+cloud and does not scale past tens of entries. Pick by user type:
 
-- Local-ONNX collections (bge-768) cannot be imported into a Voyage cloud
-  collection (`nx store import` stops with `EmbeddingDimensionMismatch`, 768 vs
-  1024). For code, docs and rdr content, re-index from source in the cloud
-  (`nx index repo`, `nx index pdf`); that is cheaper than two hops.
+- Local-ONNX collections (bge-768): not expected to import into a Voyage cloud.
+  Hop 1 names them bge, so `nx store import` passes its name and dimension
+  checks and sends them to the cloud engine, which may refuse them; what it
+  answers is unverified (nexus-xbqh9). For code, docs and rdr content, re-index
+  from source in the cloud (`nx index repo`, `nx index pdf`); that is cheaper
+  than two hops.
 - Voyage collections from a Voyage-keyed hop 1: `nx store export --all`
   locally, then `nx store import FILE` in the cloud.
 - Source-less `store_put` notes: `nx catalog export recovery.jsonl` locally,
   `nx catalog import` in the cloud (re-embeds; carries links and notes only).
 
-Order in the cloud: switch with `nx config set service_url ...`, clear the
-stranded banner (`nx stranded ack`, or move the pre-PG files it names aside),
-re-index from source, `nx store import`, and `nx catalog import` LAST (links
-resolve by `source_uri` against documents already there). The full procedure is
+Order: hand-carry T2 memory and run the exports while the box is still local;
+then switch with `nx config set service_url ...`, clear the stranded banner
+(`nx stranded ack`, or move the pre-PG files it names aside), re-index from
+source, `nx store import`, and `nx catalog import` LAST (links resolve by
+`source_uri` against documents already there). The full procedure is
 `docs/migration-runbook.md` § Getting that data into the managed cloud; surface
 the choices to the user rather than making them.
 
