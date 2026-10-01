@@ -2073,6 +2073,52 @@ def _no_engine_restart_taxonomy_deferral(monkeypatch):
     monkeypatch.setenv("NX_TAXONOMY_DEFER_UPTIME_S", "0")
 
 
+@pytest.fixture(autouse=True)
+def _service_manager_tripwire():
+    """nexus-q81g7: no test reaches a REAL service manager with a mutating verb.
+
+    HOME does not isolate launchd or systemd (T2
+    ``project_home_does_not_isolate_launchd``, recorded 2026-08-11, recurred
+    2026-09-30): ``launchctl bootout gui/<uid>/<label>`` and ``systemctl --user
+    disable --now <unit>`` are addressed by label / over the bus, so the HOME
+    fence only hides the unit file. ``nexus.daemon.installer._run_manager`` is
+    the single funnel for every manager call, so this wraps it and RAISES on a
+    mutating verb (``installer.is_mutating_manager_cmd``) when the call would
+    really spawn: the test has not replaced the spawn (``installer.run_bounded``,
+    the module's documented seam) and the binary exists. A test that replaces
+    ``_run_manager`` itself is not wrapped (the patch lands over this one), and
+    one that strips PATH to prove the no-manager branch keeps its
+    ``FileNotFoundError``. Read-only probes (``print-disabled``, ``is-enabled``,
+    ``show``) pass through.
+
+    A raise, not a skip: the next test that forgets to patch fails by name
+    instead of mutating the operator's box. The product-side twin
+    (``ManagerRefusedUnderFence``) covers real ``nx`` children, which a conftest
+    patch cannot reach."""
+    from nexus.daemon import installer
+
+    original = installer._run_manager
+
+    def guarded(cmd, *, timeout, **kwargs):
+        if (
+            installer.run_bounded is installer._REAL_RUN_BOUNDED
+            and installer.is_service_manager_cmd(cmd)
+            and installer.is_mutating_manager_cmd(cmd)
+            and installer._manager_found(cmd[0])
+        ):
+            raise AssertionError(
+                f"nexus-q81g7 service-manager tripwire: {' '.join(cmd)!r} would run "
+                "against a REAL launchd/systemd. HOME does not isolate a service "
+                "manager. Patch nexus.daemon.installer.run_bounded (or _run_manager) "
+                "in this test; read-only verbs are allowed."
+            )
+        return original(cmd, timeout=timeout, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(installer, "_run_manager", guarded)
+        yield
+
+
 class _VirtualClock:
     """A monotonic clock whose ``sleep`` advances it. Thread-safe: brake waiters
     on several threads each advance it, which only makes time pass faster."""
