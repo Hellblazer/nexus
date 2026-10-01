@@ -39,6 +39,13 @@ ORIGIN = "knowledge__qrestore__bge-base-en-v15-768__v1"
 SIBLING = "quarantine-knowledge__qrestore__bge-base-en-v15-768__v1"
 
 
+def _doc(stdout: str) -> dict:
+    """The one JSON document on stdout. In a dev checkout the production-write guard logs a structlog
+    line to stdout before a write route's first call (``guard_production_write.opt_in_accepted``); that is
+    the test harness, never a deployed client, so skip to the document."""
+    return _json.loads(stdout[stdout.index("{"):])
+
+
 @pytest.fixture()
 def runner() -> CliRunner:
     return CliRunner()
@@ -218,7 +225,7 @@ class TestCli:
         ], audit_id=5)])
         result = _run(runner, stub, "--chash", a, "--chash", b, "--json")
         assert result.exit_code == 0, result.output
-        doc = _json.loads(result.stdout)
+        doc = _doc(result.stdout)
         assert doc["origin_collection"] == ORIGIN and doc["quarantine_collection"] == SIBLING
         assert doc["totals"] == {"restored": 1, "would_restore": 0, "present": 1, "dim_conflict": 0, "missing": 0}
         assert doc["audit_ids"] == [5]
@@ -267,7 +274,7 @@ def test_restore_by_chash_against_the_real_engine(runner: CliRunner, t2_service_
                                 "--chash", hs[0], "--chash", nowhere, "--json"])
 
     assert result.exit_code == 1, result.output   # one chash was missing
-    doc = _json.loads(result.stdout)
+    doc = _doc(result.stdout)
     assert doc["totals"]["restored"] == 1 and doc["totals"]["missing"] == 1
     by = {r["chash"]: r for r in doc["rows"]}
     assert by[hs[0]]["outcome"] == "restored" and by[hs[0]]["no_manifest"] is True
@@ -275,7 +282,7 @@ def test_restore_by_chash_against_the_real_engine(runner: CliRunner, t2_service_
     assert by[nowhere]["outcome"] == "missing"
     # Moved, not copied: a second restore finds it in the origin (the sibling no longer holds it).
     again = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[0], "--json"])
-    assert _json.loads(again.stdout)["totals"]["present"] == 1, "a second restore is an idempotent report"
+    assert _doc(again.stdout)["totals"]["present"] == 1, "a second restore is an idempotent report"
 
 
 def test_restore_by_quarantined_at_window_and_the_sample_audit_row_is_refused(
@@ -297,12 +304,12 @@ def test_restore_by_quarantined_at_window_and_the_sample_audit_row_is_refused(
     dry = runner.invoke(t3, ["quarantine", "restore", "--collection", origin,
                              "--quarantined-since", "2020-01-01", "--dry-run", "--json"])
     assert dry.exit_code == 0, dry.output
-    assert _json.loads(dry.stdout)["totals"]["would_restore"] == 3
+    assert _doc(dry.stdout)["totals"]["would_restore"] == 3
 
     done = runner.invoke(t3, ["quarantine", "restore", "--collection", origin,
                               "--quarantined-since", "2020-01-01", "--json"])
     assert done.exit_code == 0, done.output
-    doc = _json.loads(done.stdout)
+    doc = _doc(done.stdout)
     assert doc["totals"]["restored"] == 3
     assert sorted(r["chash"] for r in doc["rows"]) == sorted(hs)
     assert len(doc["audit_ids"]) == 1
