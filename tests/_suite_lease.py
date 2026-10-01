@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 #: Resource name under the shared lease root. Sibling of ``service``, which
@@ -55,12 +56,36 @@ HELD_BY_ENV = "NX_SUITE_LEASE_HELD_BY"
 #: outlast one is a wait that never succeeds.
 DEFAULT_WAIT_SECONDS = 1800
 
+#: A lease directory with no readable pid is reclaimed once it is this old.
+#: Younger than this, the holder may be between its ``mkdir`` and its pid write
+#: (microseconds, but a loaded or paused machine stretches that), and taking the
+#: lease then would make a second holder. Older than this, nothing is coming:
+#: the maker was killed (a WSL shutdown, an OOM kill, a failed ``rmdir`` in the
+#: release, a directory made 0700 by another user) and every run would
+#: otherwise wait out its whole timeout and exit 75 until a person renamed the
+#: directory by hand (round-3 review M1).
+PIDLESS_GRACE_SECONDS = 60.0
+
 
 def _lease_root() -> Path:
     """Shared with the build lease, resolved per call rather than at import."""
     from tests.db._service_fixture import _build_lease_root  # noqa: PLC0415 — one source of truth for the root
 
     return _build_lease_root()
+
+
+def lease_path(lease_root: Path | None = None) -> Path:
+    """Where the suite lease directory lives, for a message that tells a person where to look."""
+    return (lease_root or _lease_root()) / RESOURCE
+
+
+def recovery_hint(lease_root: Path | None = None) -> str:
+    """The sentence a refused run ends with: where the lease is, and how to clear one that has no live holder."""
+    path = lease_path(lease_root)
+    return (
+        f"The lease is the directory {path}. If no pytest run is live on this box, clear it with: rm -rf {path} "
+        f"(a lease with no readable pid is reclaimed automatically once it is {int(PIDLESS_GRACE_SECONDS)} s old)."
+    )
 
 
 def _pid_alive(pid: int) -> bool:
@@ -112,8 +137,23 @@ def holder(lease_root: Path | None = None) -> str | None:
         return None
 
 
-def _reclaim_if_dead(lease: Path) -> None:
-    """Drop a lease whose holder is gone.
+def _set_aside(lease: Path) -> None:
+    """Rename a lease to a unique name. Atomic, so of two reclaimers exactly one succeeds."""
+    lease.rename(lease.with_name(f"{RESOURCE}.stale.{os.getpid()}.{time.time_ns()}"))
+
+
+def _reclaim_if_dead(lease: Path, now: Callable[[], float] = time.time) -> None:
+    """Drop a lease whose holder is gone, or that never got as far as naming one.
+
+    Two cases, both reclaimed by the same atomic rename:
+
+    * the pid file names a process that no longer exists;
+    * the pid file is missing, empty, non-numeric or unreadable AND the lease is
+      older than ``PIDLESS_GRACE_SECONDS``. A holder is written to disk in two
+      steps (``mkdir``, then the pid), so a young pid-less directory is a holder
+      in the middle of acquiring, not a corpse. Age is the newest mtime of the
+      directory and its pid file, read against *now* (injectable, so the tests
+      run on a fixed clock).
 
     Safe to race: the reclaim is a rename to a unique name, which is atomic,
     so of two processes reclaiming the same stale lease exactly one succeeds
@@ -122,16 +162,29 @@ def _reclaim_if_dead(lease: Path) -> None:
     """
     try:
         pid_file = lease / "pid"
-        if not pid_file.exists():
+        pid: int | None = None
+        try:
+            pid = int(pid_file.read_text().strip())
+        except (OSError, ValueError):
+            pid = None
+        if pid is not None:
+            if _pid_alive(pid):
+                return
+            _set_aside(lease)
             return
-        if _pid_alive(int(pid_file.read_text().strip())):
-            return
-        lease.rename(lease.with_name(f"{RESOURCE}.stale.{os.getpid()}.{time.time_ns()}"))
+        newest = lease.stat().st_mtime
+        try:
+            newest = max(newest, pid_file.stat().st_mtime)
+        except OSError:
+            pass
+        if now() - newest >= PIDLESS_GRACE_SECONDS:
+            _set_aside(lease)
     except Exception:  # noqa: BLE001 — losing the reclaim race is the expected case
         return
 
 
-def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None):
+def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None,
+            now: Callable[[], float] = time.time):
     """Take the suite lease, or report who holds it.
 
     Returns a zero-argument release callable on success, or ``None`` when the
@@ -140,6 +193,8 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
 
     ``os.mkdir`` is the whole mutual exclusion: it is atomic, so of N racing
     acquirers exactly one creates the directory and the rest see EEXIST.
+
+    *now* is the clock the pid-less-lease grace is read against; only tests pass it.
     """
     root = lease_root or _lease_root()
     lease = root / RESOURCE
@@ -150,7 +205,7 @@ def acquire(label: str, *, wait_seconds: int = 0, lease_root: Path | None = None
             root.mkdir(parents=True, exist_ok=True)
             os.mkdir(lease)
         except FileExistsError:
-            _reclaim_if_dead(lease)
+            _reclaim_if_dead(lease, now)
             try:
                 os.mkdir(lease)
             except FileExistsError:

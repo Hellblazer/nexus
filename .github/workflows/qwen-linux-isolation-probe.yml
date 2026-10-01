@@ -3,28 +3,42 @@
 # user can reach, and fails only on things that must never be true.
 #
 # WHY. ci.yml's `test-qwen` job runs the whole pytest suite on `qwen-linux` for
-# owner pushes to develop. The runner is the Linux user `ghci` in a WSL distro
-# that ALSO hosts a live nexus install (user `nexus`, with nexus-service) and the
-# suite user `nxtest`, on a Windows 11 host whose drives WSL can mount. `ghci` is
-# in the `docker` group, and membership of that group on a rootful daemon is root
-# on the distro: `docker run -v /:/h` reads and writes every file in it. So the
-# honest state is "isolated from the other users by file modes, NOT from root via
-# docker", and no workflow file can assert even the first half by reading itself.
-# AGENTS.md says "intended, not proven" until a run of this workflow is green.
+# owner pushes to develop, once the repository variable QWEN_CI_PUSH_RUNNER is set
+# to `qwen-linux` (the route is OPT-IN; Sam, 2026-10-01). The runner is the Linux
+# user `ghci` in a WSL distro that ALSO hosts a live nexus install (user `nexus`,
+# with nexus-service) and the suite user `nxtest`, on a Windows 11 host whose
+# drives WSL can mount. `ghci` is in the `docker` group, and membership of that
+# group on a rootful daemon is root on the distro: `docker run -v /:/h` reads and
+# writes every file in it, and can rewrite /etc/wsl.conf for the next WSL restart.
+# THIS PROBE DOES NOT BOUND DOCKER. It checks the unprivileged route (file modes,
+# sudo, WSL interop, the /mnt drives) at one point in time; the per-run Windows-side
+# preflight in ci.yml's `test-qwen` re-checks the Windows side on every run and is
+# what catches a wsl.conf rewrite after the fact. AGENTS.md says "intended, not
+# proven" until a run of this workflow is green.
 #
 # WHAT IT DOES, each as its own step so one result does not hide the rest:
 #   REPORTS (never fail):
-#     - whether the runner user is in the docker group (the user name and the group list are not printed);
-#     - whether /home/nexus and /home/nxtest are readable by file mode;
-#     - whether a container run through the docker group can read /home/nexus
-#       (EXPECTED to succeed today: this documents that docker is root, it is
-#       a known gap, not a defect of the probe);
+#     - whether the runner user is in the docker group (the user name and the
+#       group list are not printed);
+#     - whether /home/nexus and /home/nxtest are listable by file mode;
+#     - whether the docker daemon is reachable by the runner user. The probe runs
+#       NO container: an image is third-party code on a self-hosted runner, and
+#       the docker route is a known gap (root-equivalent), not something to
+#       measure by running more code. (An earlier draft pulled an unpinned alpine
+#       image; the step was dropped rather than pinned by digest.)
 #   FAILS ONLY ON what must never be true:
-#     - the job runs as `nexus` or root (the probe, and the job it stands for,
-#       would then not be running as the unprivileged runner user);
+#     - the job does not run as exactly `ghci` (the runner user the docs name; as
+#       `nexus` or root the checks below would prove nothing about it, and as
+#       any other account they would prove it about the wrong one);
 #     - `sudo -n true` succeeds (passwordless sudo);
-#     - a credential-shaped file under /home/nexus/.config/nexus is readable by
-#       ghci by file mode (the live install's credentials);
+#     - ANY file under /home/nexus/.config/nexus is readable by ghci by file mode
+#       (the live install's credentials live in config.yml and sibling files; a
+#       count is printed, never a name). An unreachable or absent directory is
+#       reported as NOT CHECKED, which is also what a closed /home/nexus looks
+#       like from here, so it cannot fail;
+#     - this is not a WSL kernel, or binfmt_misc is not mounted (a positive
+#       control: the Windows-side checks are true on any non-WSL machine, so a
+#       pass there proves nothing);
 #     - WSL interop works: /mnt/<drive>/Windows/System32/cmd.exe runs (a
 #       harmless `cmd.exe /c exit 0` with a timeout) or the WSLInterop binfmt
 #       handler is enabled. Measured on qwentescence: the host admin, as ghci,
@@ -34,23 +48,35 @@
 #     - a /mnt/<drive> directory is on the job's PATH (appendWindowsPath).
 #     The fix is host-side, in /etc/wsl.conf: [interop] enabled=false,
 #     appendWindowsPath=false and [automount] enabled=false. Each failure names it.
-#   Reading a credential through the docker route is the known gap above and is
-#   not tested here: the probe never opens a credential file's content. The log of
-#   this public repo carries pass or fail and counts only: no modes, owners, user
-#   names or group lists, and no name found under a /mnt drive, on the PATH or as a
-#   credential-shaped file.
+#   The probe never opens a file's content. The log of this public repo carries
+#   pass or fail and counts only: no modes, owners, user names or group lists, and
+#   no name found under a /mnt drive, on the PATH or under the config directory.
 #
-# TRIGGER. workflow_dispatch only, owner only, never pull_request or push: the
-# job runs on a self-hosted runner in a public repo. The `if:` compares account
-# ids (a renamed login can be re-registered) and is a routing rule, not a
-# security boundary: this file lives where a write collaborator's branch could
-# replace it. The repo has had no write collaborators since 2026-09-30. The probe
-# runs no checkout and no third-party action, reads no secrets, prints no
-# environment and no file contents.
+# TRIGGERS, both owner only, never pull_request:
+#   - workflow_dispatch. GitHub offers a dispatch only for a workflow file on the
+#     DEFAULT branch (main), which this file is not until a release promotes
+#     it, so a dispatch cannot run the probe from develop-era code;
+#   - push to a branch named runner-probe/qwen-*. This is how to run it BEFORE the
+#     file reaches main: push a throwaway branch (`git push origin
+#     HEAD:refs/heads/runner-probe/qwen-<date>`), read the run, then delete the
+#     branch (`git push origin :refs/heads/runner-probe/qwen-<date>`). ci.yml
+#     triggers only on push to develop and on pull_request, so a probe branch
+#     routes nothing else. hellmini-ci-isolation-probe.yml's two recorded runs
+#     were pushes of exactly this shape.
+# The job runs on a self-hosted runner in a public repo. The `if:` compares account
+# ids (a renamed login can be re-registered) and is a routing rule, not a security
+# boundary: this file lives where a write collaborator's branch could replace it,
+# and the push trigger means a pushed branch carries its OWN copy of the file. The
+# repo has had no write collaborators since 2026-09-30. The probe runs no checkout
+# and no third-party action or image, reads no secrets, prints no environment and
+# no file contents.
 name: qwen-linux-isolation-probe
 
 on:
   workflow_dispatch: {}
+  push:
+    branches:
+      - 'runner-probe/qwen-*'
 
 concurrency:
   group: qwen-linux-isolation-probe
@@ -61,28 +87,30 @@ permissions: {}
 jobs:
   probe:
     name: Isolation report (qwen-linux)
-    if: github.event_name == 'workflow_dispatch' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner
+    if: (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner
     runs-on: [self-hosted, Linux, X64, qwen-linux]
     timeout-minutes: 10
     steps:
-      - name: Identity (report; fails if the job runs as nexus or root)
+      - name: Identity (fails unless the job runs as exactly the runner user ghci)
         shell: bash
         run: |
           set -uo pipefail
+          expected=ghci
           user="$(id -un)"
           rc=0
-          case "$user" in
-            nexus|root)
-              echo "::error::the job runs as the live install's user or as root: the checks below prove nothing about the runner user"
-              rc=1
-              ;;
-          esac
+          # Exactly the runner user, not merely "not nexus or root": the docs say
+          # the job runs as ghci, so any other account (nxtest included) means the
+          # checks below describe the wrong user. The name is never printed.
+          if [ "$user" != "$expected" ]; then
+            echo "::error::the job does not run as the runner user the docs name (ghci): the checks below would describe a different account"
+            rc=1
+          fi
           if id -nG | tr ' ' '\n' | grep -qx docker; then
             echo "docker group: member (root-equivalent on this distro; see the docker step)"
           else
             echo "docker group: not a member"
           fi
-          [ "$rc" -eq 0 ] && echo "the job runs as an unprivileged user that is not the live install's user (expected)"
+          [ "$rc" -eq 0 ] && echo "the job runs as the runner user (expected)"
           exit "$rc"
 
       - name: Passwordless sudo is refused
@@ -104,7 +132,7 @@ jobs:
           fi
           echo "sudo -n true failed with exit $status (expected)"
 
-      - name: Other users' homes by file mode (report; fails on a readable nexus credential file)
+      - name: Other users' homes by file mode (report; fails on ANY readable file under the nexus config directory)
         if: always()
         shell: bash
         run: |
@@ -122,25 +150,38 @@ jobs:
           cfg=/home/nexus/.config/nexus
           echo "--- $cfg"
           if [ ! -d "$cfg" ]; then
-            echo "REPORT: $cfg is absent or not reachable by the runner user; nothing to check by file mode"
+            # From here an absent directory and a /home/nexus closed to this user
+            # look the same (the closed home is the EXPECTED good state), so this
+            # cannot fail; it must not read as a pass either.
+            if [ -e "$(dirname "$(dirname "$cfg")")" ]; then
+              echo "REPORT: NOT CHECKED: $cfg is absent or unreachable by the runner user (expected when /home/nexus is closed to it; a moved install looks the same)"
+            else
+              echo "REPORT: NOT CHECKED: there is no /home/nexus on this host, so there is no live install's directory to read"
+            fi
             exit 0
           fi
-          # A count only, never names or contents. A credential-shaped file is one
-          # whose name says so; a plain listing of an unreadable directory finds none.
-          readable="$(find "$cfg" -maxdepth 3 -type f -readable \( -iname '*cred*' -o -iname '*token*' -o -iname '*secret*' -o -iname '*key*' -o -iname '*auth*' -o -iname '.env' -o -iname '*.pem' \) 2>/dev/null || true)"
-          if [ -n "$readable" ]; then
-            echo "::error::$(printf '%s\n' "$readable" | wc -l | tr -d ' ') credential-shaped file(s) under $cfg are readable by the runner user (names withheld)"
+          # ANY readable file is a failure, not a filename heuristic: the install's
+          # credentials sit in config.yml (a `credentials:` block), which no name
+          # pattern would catch. A count only, never names or contents.
+          readable="$(find "$cfg" -type f -readable 2>/dev/null | wc -l | tr -d ' ')"
+          if [ "$readable" -gt 0 ]; then
+            echo "::error::$readable file(s) under $cfg are readable by the runner user (names withheld): the live install's credentials are reachable by file mode"
             rc=1
           else
-            echo "no credential-shaped file under $cfg is readable by the runner user (expected)"
+            echo "$cfg is reachable but holds no file readable by the runner user (expected)"
           fi
           exit "$rc"
 
-      - name: Docker is root (report only; EXPECTED to read /home/nexus today)
+      - name: Docker reachability (report only; docker is root-equivalent and is NOT bounded here)
         if: always()
         shell: bash
         run: |
           set -uo pipefail
+          # No container is started: see the header. Whether the runner user can
+          # reach the daemon is all this reports; if it can, every file of the
+          # distro, /etc/wsl.conf and the other users' homes included, is
+          # reachable to a job through it, whatever the modes and the other checks
+          # in this workflow say.
           if ! command -v docker >/dev/null 2>&1; then
             echo "REPORT: no docker on PATH"
             exit 0
@@ -149,20 +190,11 @@ jobs:
           docker info >/dev/null 2>&1 || status=$?
           if [ "$status" -ne 0 ]; then
             echo "REPORT: the docker daemon is not reachable by the runner user (exit $status): no container-root route from this user"
-            exit 0
-          fi
-          # Read-only bind of the distro root, a count of entries only. This
-          # documents that the docker group is root-equivalent; it is the known
-          # gap in AGENTS.md, so it is reported and never fails the probe.
-          status=0
-          out="$(docker run --rm -v /:/h:ro alpine ls -A /h/home/nexus 2>&1)" || status=$?
-          if [ "$status" -eq 0 ]; then
-            echo "REPORT: a container started by the runner user listed /home/nexus ($(printf '%s\n' "$out" | wc -l | tr -d ' ') entries). docker = root on this distro: file modes do not separate the runner user from the live install."
           else
-            echo "REPORT: the container could not list /home/nexus (exit $status)"
+            echo "REPORT: the docker daemon is reachable by the runner user: docker = root on this distro. File modes do not separate this user from the live install, and /etc/wsl.conf can be rewritten for the next WSL restart. The per-run Windows-side preflight in ci.yml is the control that notices; nothing here bounds it."
           fi
 
-      - name: Windows side (fails if interop runs, a /mnt drive is readable, or PATH has a /mnt entry)
+      - name: Windows side (fails off WSL, if interop runs, a /mnt drive is readable, or PATH has a /mnt entry)
         if: always()
         shell: bash
         run: |
@@ -171,8 +203,21 @@ jobs:
           # fake tree; nothing in the environment can move them.
           mnt_root=/mnt
           binfmt_dir=/proc/sys/fs/binfmt_misc
+          proc_version=/proc/version
           fix="set /etc/wsl.conf to [interop] enabled=false, appendWindowsPath=false and [automount] enabled=false, then run wsl --shutdown from Windows"
           rc=0
+          # POSITIVE CONTROL: "no handler", "no drive" and "no cmd.exe" are all
+          # true on a machine that is not WSL, or where binfmt_misc is unmounted
+          # and no handler can be seen. A pass there would prove nothing.
+          if ! grep -qi microsoft "$proc_version" 2>/dev/null; then
+            echo "::error::this is not a WSL kernel: the Windows-side checks cannot be established here, so the probe fails closed"
+            exit 1
+          fi
+          if [ ! -e "$binfmt_dir/status" ]; then
+            echo "::error::binfmt_misc is not mounted: a WSLInterop handler would not be visible, so the interop check cannot be established and the probe fails closed"
+            exit 1
+          fi
+          echo "positive control: WSL kernel and binfmt_misc present"
           # Every check captures its status: a refused command is the EXPECTED
           # result and the runner shell is bash -e.
 

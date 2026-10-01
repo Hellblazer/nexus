@@ -312,3 +312,189 @@ def test_the_explicit_opt_out_runs_unguarded_and_says_so(
     assert conftest_gate._suite_lease_release is None
     err = capsys.readouterr().err
     assert "UNGUARDED" in err and "pid 4242 (peer-run)" in err
+
+
+# -- a pid-less lease directory must not wedge the box (round-3 review M1) --------
+#
+# A kill or a WSL shutdown between mkdir and the pid write, a failed rmdir in
+# _release, or a 0700 dir made by another user leaves a lease directory whose pid
+# file is missing, empty, non-numeric or unreadable. holder() reads that as free,
+# but acquire() used to return None for it forever (reclaim only handled a DEAD
+# pid, mkdir saw EEXIST), so with the suite lease failing closed every run would
+# wait out its 30 minutes and exit 75 until someone renamed the directory by hand.
+
+_T0 = 1_000_000.0  # a fixed clock: no test below depends on wall time
+
+
+def _pidless_lease(lease_root: Path, how: str, *, mtime: float = _T0) -> Path:
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    if how == "empty-dir":
+        pass
+    elif how == "empty-pid":
+        (lease / "pid").write_text("")
+    elif how == "garbage-pid":
+        (lease / "pid").write_text("not-a-pid\n")
+    elif how == "label-only":
+        (lease / "label").write_text("a run killed before the pid write\n")
+    else:  # pragma: no cover - a typo in this test file
+        raise AssertionError(how)
+    for child in lease.iterdir():
+        os.utime(child, (mtime, mtime))
+    os.utime(lease, (mtime, mtime))
+    return lease
+
+
+def _clock(at: float):
+    return lambda: at
+
+
+@pytest.mark.parametrize("how", ["empty-dir", "empty-pid", "garbage-pid", "label-only"])
+def test_a_pidless_lease_older_than_the_grace_is_reclaimed(lease_root: Path, how: str) -> None:
+    lease = _pidless_lease(lease_root, how)
+    release = _suite_lease.acquire(
+        "after-wedge", lease_root=lease_root, now=_clock(_T0 + _suite_lease.PIDLESS_GRACE_SECONDS + 1))
+    assert release is not None, f"a {how} lease wedged the resource past its grace"
+    try:
+        assert (lease / "pid").read_text().strip() == str(os.getpid())
+        assert [p.name for p in lease_root.iterdir() if ".stale." in p.name], "the old directory is set aside, not deleted"
+    finally:
+        release()
+
+
+@pytest.mark.parametrize("how", ["empty-dir", "empty-pid", "garbage-pid", "label-only"])
+def test_a_pidless_lease_younger_than_the_grace_is_left_alone(lease_root: Path, how: str) -> None:
+    """The holder may be between its mkdir and its pid write RIGHT NOW: reclaiming then would be a second holder."""
+    _pidless_lease(lease_root, how)
+    now = _clock(_T0 + _suite_lease.PIDLESS_GRACE_SECONDS - 1)
+    assert _suite_lease.acquire("too-early", lease_root=lease_root, now=now) is None
+    assert not [p for p in lease_root.iterdir() if ".stale." in p.name]
+
+
+def test_the_grace_boundary_is_exactly_the_grace(lease_root: Path) -> None:
+    _pidless_lease(lease_root, "empty-dir")
+    just_under = _clock(_T0 + _suite_lease.PIDLESS_GRACE_SECONDS - 0.001)
+    assert _suite_lease.acquire("x", lease_root=lease_root, now=just_under) is None
+    release = _suite_lease.acquire("x", lease_root=lease_root, now=_clock(_T0 + _suite_lease.PIDLESS_GRACE_SECONDS))
+    assert release is not None
+    release()
+
+
+def test_the_default_clock_reclaims_a_really_old_pidless_lease(lease_root: Path) -> None:
+    """The wiring: with no `now` given, a lease backdated by the real clock is reclaimed."""
+    import time
+
+    _pidless_lease(lease_root, "empty-pid", mtime=time.time() - 3600)
+    release = _suite_lease.acquire("real-clock", lease_root=lease_root)
+    assert release is not None
+    release()
+
+
+def test_a_live_holder_is_never_reclaimed_however_old_the_lease(lease_root: Path) -> None:
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    (lease / "pid").write_text(f"{os.getpid()}\n")
+    os.utime(lease, (_T0, _T0))
+    os.utime(lease / "pid", (_T0, _T0))
+    assert _suite_lease.acquire("thief", lease_root=lease_root, now=_clock(_T0 + 10 * 86400)) is None
+    assert (lease / "pid").read_text().strip() == str(os.getpid())
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads every file, so an unreadable pid file cannot be built")
+def test_an_unreadable_pid_file_older_than_the_grace_is_reclaimed(lease_root: Path) -> None:
+    lease = lease_root / _suite_lease.RESOURCE
+    lease.mkdir(parents=True)
+    pid = lease / "pid"
+    pid.write_text(f"{os.getpid()}\n")  # a LIVE pid we may not read: no holder is knowable from it
+    os.utime(pid, (_T0, _T0))
+    os.utime(lease, (_T0, _T0))
+    pid.chmod(0o000)
+    try:
+        release = _suite_lease.acquire("x", lease_root=lease_root, now=_clock(_T0 + 120))
+        assert release is not None
+        release()
+    finally:
+        for stale in lease_root.glob(f"{_suite_lease.RESOURCE}.stale.*/pid"):
+            stale.chmod(0o600)
+
+
+def test_a_waiting_acquire_succeeds_once_a_pidless_lease_ages_past_the_grace(
+        lease_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With a wait, the caller no longer waits out the whole timeout on a pid-less corpse."""
+    _pidless_lease(lease_root, "empty-dir")
+    clock = {"t": _T0 + 10.0}
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        clock["t"] += seconds
+
+    monkeypatch.setattr(_suite_lease.time, "sleep", fake_sleep)
+    release = _suite_lease.acquire("waiter", wait_seconds=3600, lease_root=lease_root, now=lambda: clock["t"])
+    assert release is not None, "the wait must end when the lease passes its grace, not at the 3600 s deadline"
+    assert 40 <= len(sleeps) <= 60, sleeps  # about the 50 seconds that were left of the grace
+    release()
+
+
+def test_the_exit_75_messages_name_the_lease_path_and_the_recovery_command(
+        conftest_gate, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A run that cannot take the lease says WHERE it is and how to clear it, on every refusal path."""
+    root = tmp_path / "shared-root"
+    monkeypatch.setattr(_suite_lease, "_lease_root", lambda: root)
+    path = str(root / _suite_lease.RESOURCE)
+    # after the wait: a live-looking holder
+    monkeypatch.setenv("NX_SUITE_LEASE_WAIT", "1")
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: "pid 4242 (peer-run)")
+    with pytest.raises(pytest.exit.Exception) as after_wait:
+        conftest_gate._take_suite_lease()
+    # the lost race: holder() saw it free
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: None)
+    with pytest.raises(pytest.exit.Exception) as lost_race:
+        conftest_gate._take_suite_lease()
+    # no wait requested and a live holder: the first refusal branch
+    monkeypatch.delenv("NX_SUITE_LEASE_WAIT")
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: "pid 4242 (peer-run)")
+    with pytest.raises(pytest.exit.Exception) as no_wait:
+        conftest_gate._take_suite_lease()
+    for err in (after_wait, lost_race, no_wait):
+        assert err.value.returncode == 75
+        assert path in err.value.msg, err.value.msg
+        assert f"rm -rf {path}" in err.value.msg, err.value.msg
+
+
+# -- the opt-out means exactly "1" (round-3 review L3) -----------------------------
+
+
+def test_the_opt_out_means_exactly_one_so_a_typo_or_a_false_does_not_disarm_the_guard(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-3 review L3: `false`, `no`, `off` and `true` used to count as set (only "" and "0" were off)."""
+    gate = sys.modules["tests.conftest"]
+    for value in ("false", "False", "no", "off", "true", "yes", "2", "01", "1 1", "unguarded"):
+        monkeypatch.setenv(gate._SUITE_LEASE_UNGUARDED_ENV, value)
+        assert gate._suite_lease_unguarded() is False, value
+    for value in ("", "0", " 0 "):
+        monkeypatch.setenv(gate._SUITE_LEASE_UNGUARDED_ENV, value)
+        assert gate._suite_lease_unguarded() is False, value
+    monkeypatch.delenv(gate._SUITE_LEASE_UNGUARDED_ENV)
+    assert gate._suite_lease_unguarded() is False
+    for value in ("1", " 1 ", "1\n"):
+        monkeypatch.setenv(gate._SUITE_LEASE_UNGUARDED_ENV, value)
+        assert gate._suite_lease_unguarded() is True, repr(value)
+
+
+def test_a_non_one_value_does_not_lift_the_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The consumer, not only the predicate: `=off` with a live holder and no wait still exits 75."""
+    from tests import _suite_lease
+
+    gate = sys.modules["tests.conftest"]
+    monkeypatch.setattr(gate, "_selected_t2_substrate_boots_engine", lambda: True)
+    monkeypatch.setattr(gate, "_suite_lease_release", None)
+    monkeypatch.setattr(_suite_lease, "inside_a_holder", lambda: False)
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: "pid 4242 (peer-run)")
+    monkeypatch.setattr(_suite_lease, "acquire", lambda *a, **k: None)
+    monkeypatch.delenv("NX_SUITE_LEASE_WAIT", raising=False)
+    monkeypatch.setenv(gate._SUITE_LEASE_UNGUARDED_ENV, "off")
+    with pytest.raises(pytest.exit.Exception) as err:
+        gate._take_suite_lease()
+    assert err.value.returncode == 75
+    assert re.search(r"suite lease: refusing", err.value.msg)

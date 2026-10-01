@@ -296,7 +296,8 @@ def _take_suite_lease() -> None:
                     "machine-wide shared-memory budget and report contention "
                     "as thousands of setup errors (nexus-6qp25). Wait for it, "
                     "set NX_SUITE_LEASE_WAIT=1 to queue behind it, or "
-                    "NX_TEST_T2_SUBSTRATE=none for a run that needs no engine.",
+                    "NX_TEST_T2_SUBSTRATE=none for a run that needs no engine. "
+                    + _suite_lease.recovery_hint(),
                     returncode=75,
                 )
         _suite_lease_release = _suite_lease.acquire(
@@ -321,7 +322,8 @@ def _take_suite_lease() -> None:
                     "after the wait (or won the race for it). Two substrate-heavy "
                     "runs at once exhaust the machine-wide shared-memory budget "
                     "(nexus-6qp25). Re-run when it finishes, or set "
-                    f"{_SUITE_LEASE_UNGUARDED_ENV}=1 to run without the guard.",
+                    f"{_SUITE_LEASE_UNGUARDED_ENV}=1 to run without the guard. "
+                    + _suite_lease.recovery_hint(),
                     returncode=75,
                 )
     except pytest.exit.Exception:
@@ -333,7 +335,9 @@ def _take_suite_lease() -> None:
 
 
 def _suite_lease_unguarded() -> bool:
-    return os.environ.get(_SUITE_LEASE_UNGUARDED_ENV, "").strip() not in ("", "0")
+    # Exactly "1", like the rest of this file's opt-ins: `false`, `no`, `off` and a
+    # typo must not turn the guard off (round-3 review L3).
+    return os.environ.get(_SUITE_LEASE_UNGUARDED_ENV, "").strip() == "1"
 
 
 def _suite_lease_wait_requested() -> bool:

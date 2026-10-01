@@ -219,16 +219,25 @@ jobs:
       - name: Decide where the full pytest suite runs (qwen-linux or the hosted shards)
         id: route
         # WHERE THE PYTEST SUITE RUNS (Sam, 2026-10-01, session nexus_654).
-        # An OWNER PUSH to develop runs the whole suite as ONE `-n 12` job on
-        # the self-hosted `qwen-linux` runner (job `test-qwen` below) and the
-        # six hosted shards (`test`, with `service-jar`) are skipped. Every
-        # pull_request, and every push by anyone but the repo owner, keeps the
-        # hosted shards; `test-qwen` is skipped there. Same owner rule as
-        # service-ci.yml's hellmini-ci routing (see the long comment on that
-        # job's runs-on): account id AND triggering actor both the owner, push
-        # event only. The id compares accounts, not logins (a renamed login can
-        # be re-registered); triggering_actor keeps a re-run by another account
-        # from reaching the self-hosted box.
+        # THE DEFAULT IS THE HOSTED SHARDS. The qwen route is OPT-IN (Sam,
+        # 2026-10-01): an OWNER PUSH to develop runs the whole suite as ONE
+        # `-n 12` job on the self-hosted `qwen-linux` runner (job `test-qwen`
+        # below), and the six hosted shards (`test`, with `service-jar`) are
+        # skipped, ONLY when the repository variable QWEN_CI_PUSH_RUNNER is
+        # exactly `qwen-linux`. Unset, empty, a typo, a different case, a
+        # trailing space or any other value (`hellmini`, `ubuntu-latest`
+        # included) keeps the hosted shards. Landing this file therefore changes
+        # nothing; enabling the route is a deliberate later act (the sequence is
+        # in docs/contributing.md, "First run of the qwen-linux route": the
+        # isolation probe green as ghci first, then the variable).
+        #
+        # Every pull_request, and every push by anyone but the repo owner, keeps
+        # the hosted shards whatever the variable says; `test-qwen` is skipped
+        # there. Same owner rule as service-ci.yml's hellmini-ci routing (see the
+        # long comment on that job's runs-on): account id AND triggering actor
+        # both the owner, push event only. The id compares accounts, not logins
+        # (a renamed login can be re-registered); triggering_actor keeps a
+        # re-run by another account from reaching the self-hosted box.
         #
         # THE DECISION IS MADE ONCE, HERE, and read by every consumer
         # (`service-jar`, `test`, `test-qwen`, `pytest-gate`) through the
@@ -237,25 +246,25 @@ jobs:
         # skipping would leave a non-owner push untested instead of rerouting
         # it: the hosted shards run whenever this output is not `qwen-linux`.
         #
-        # THE TOGGLE. Set the repository variable QWEN_CI_PUSH_RUNNER to
-        # `ubuntu-latest` (Settings > Secrets and variables > Actions >
-        # Variables) and the next owner push runs the hosted shards, with no
-        # code change; delete the variable to return to qwen-linux. That one
-        # value is the only override, and the comparison ignores case like
-        # every GitHub `==` (`Ubuntu-Latest` routes hosted too): unset, any
-        # other value, `hellmini` and `hellmini-ci` included, a typo, all mean
-        # qwen-linux. The two outputs
-        # are the only two this expression can produce, and the qwen job's
-        # runs-on is a literal label set, so the variable can never send a push
-        # to a release or Service CI runner and a typo cannot queue a job for a
-        # label no runner has. The variable is read when the `changes` job runs,
-        # and "Re-run failed jobs" does not re-run `changes` because it
-        # succeeded: a re-run of only the failed jobs keeps the OLD `ci_runner`
-        # output. To flip the route for a commit already pushed, use "Re-run
-        # all jobs" (or push a new commit); cancelling and re-running only the
-        # queued qwen job does nothing. There is NO automatic fallback if the
-        # runner is offline: the qwen job queues, pytest-gate pends until the
-        # 24 h limit, and someone must set the variable.
+        # WHY THE VARIABLE IS COMPARED IN BASH, NOT IN THE EXPRESSION. Every
+        # `==` in a GitHub expression ignores case, so `Qwen-Linux` would enable
+        # the route there. "Exactly qwen-linux" needs a case-sensitive test, and
+        # bash `=` is one. The expression only carries the owner-push rule (the
+        # login comparison SHOULD ignore case); the variable travels raw in env.
+        # The label this step can publish is one of two literals, and the qwen
+        # job's runs-on is a literal label set, so the variable can never send a
+        # push to a release or Service CI runner and a typo cannot queue a job
+        # for a label no runner has.
+        #
+        # The variable is read when the `changes` job runs, and "Re-run failed
+        # jobs" does not re-run `changes` because it succeeded: a re-run of only
+        # the failed jobs keeps the OLD `ci_runner` output, whichever way the
+        # variable moved since. To change the route for a commit already pushed,
+        # use "Re-run all jobs" (or push a new commit); cancelling and re-running
+        # only the queued qwen job does nothing. There is NO automatic fallback
+        # if the runner is offline while the variable is on: the qwen job queues,
+        # pytest-gate pends until the 24 h limit, and someone must unset the
+        # variable.
         #
         # This is a ROUTING RULE, NOT a security boundary (same caveat as
         # service-ci.yml: the expression lives in a file whoever can push a
@@ -263,18 +272,16 @@ jobs:
         # approval policy and branch protection (AGENTS.md § Self-hosted
         # runners and fork PRs).
         env:
-          CI_RUNNER: ${{ github.event_name == 'push' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner && (vars.QWEN_CI_PUSH_RUNNER == 'ubuntu-latest' && 'ubuntu-latest' || 'qwen-linux') || 'ubuntu-latest' }}
+          OWNER_PUSH: ${{ github.event_name == 'push' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner }}
+          QWEN_CI_PUSH_RUNNER: ${{ vars.QWEN_CI_PUSH_RUNNER }}
         run: |
           set -euo pipefail
-          case "$CI_RUNNER" in
-            qwen-linux|ubuntu-latest) ;;
-            *)
-              echo "::error::the routing expression produced '$CI_RUNNER', which is neither qwen-linux nor ubuntu-latest"
-              exit 1
-              ;;
-          esac
+          CI_RUNNER=ubuntu-latest
+          if [ "$OWNER_PUSH" = "true" ] && [ "$QWEN_CI_PUSH_RUNNER" = "qwen-linux" ]; then
+            CI_RUNNER=qwen-linux
+          fi
           echo "ci_runner=$CI_RUNNER" >> "$GITHUB_OUTPUT"
-          echo "pytest suite routing: $CI_RUNNER (event=$GITHUB_EVENT_NAME)"
+          echo "pytest suite routing: $CI_RUNNER (event=$GITHUB_EVENT_NAME owner_push=$OWNER_PUSH)"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
         with:
@@ -831,9 +838,10 @@ jobs:
     # for OWNER PUSHES to develop only (Sam, 2026-10-01, session nexus_654).
     # It replaces the six hosted shards (`test`) and `service-jar` on that path;
     # the routing decision is the `route` step of the `changes` job above, which
-    # also carries the toggle (QWEN_CI_PUSH_RUNNER=ubuntu-latest sends owner
-    # pushes back to the hosted shards) and the reasoning. Every pull_request and
-    # every non-owner push runs the hosted shards and skips this job.
+    # also carries the opt-in (the job runs only when the repository variable
+    # QWEN_CI_PUSH_RUNNER is exactly `qwen-linux`) and the reasoning. Every
+    # pull_request and every non-owner push runs the hosted shards and skips this
+    # job, and so does an owner push while the variable is not `qwen-linux`.
     #
     # THE HOST. qwentescence (Beelink GTR9 Pro, Windows 11) runs the runner in
     # WSL as the user `ghci` (Ubuntu 26.04, 16 CPUs and 40 GB for WSL), with a
@@ -845,7 +853,11 @@ jobs:
     # also hosts a live nexus install (user `nexus`), and `ghci` is in the
     # `docker` group, which is root on the distro: isolation of this job from
     # that install is intended, not proven (AGENTS.md § Self-hosted runners and
-    # fork PRs; the probe workflow is qwen-linux-isolation-probe.yml).
+    # fork PRs; the probe workflow is qwen-linux-isolation-probe.yml). Because
+    # docker is root, a job could rewrite /etc/wsl.conf for the NEXT WSL restart
+    # and bring the Windows side back; the first step below re-checks the
+    # Windows side on EVERY run, so that is caught after the fact, not
+    # prevented. The probe does not bound docker.
     #
     # THE SHARED SUITE LEASE. A hand-run suite by the `nxtest` user overlapping
     # this job would put two `-n 12` runs (about 60 GB) on a 40 GB WSL VM that
@@ -931,6 +943,70 @@ jobs:
       # exports NX_BUILD_LEASE_ROOT and NX_SUITE_LEASE_WAIT for the later steps.
       QWEN_SUITE_LEASE_ROOT: ${{ vars.QWEN_SUITE_LEASE_ROOT || '/var/lib/nx-suite-lease' }}
     steps:
+      - name: Windows-side preflight (fails closed before any repo code runs)
+        shell: bash
+        run: |
+          set -uo pipefail
+          # WHY EVERY RUN. The qwen-linux distro runs on a Windows 11 host, and
+          # with WSL interop or the /mnt automount ON a process of this user
+          # could start Windows programs as the Windows user and read its
+          # drives (measured: the Windows user's SSH key, cmd.exe as a Windows
+          # admin). The fix is host-side (/etc/wsl.conf) and the probe checks it
+          # once; but `ghci` is in the docker group, which is root on the
+          # distro, so a job can rewrite wsl.conf for the next restart. This
+          # step is the per-run check that catches that, and it runs BEFORE
+          # actions/checkout, so no repo code has executed yet.
+          # The paths are plain assignments so the tests can point them at a
+          # fake tree; nothing in the environment can move them. Output is
+          # pass or fail and counts only: no path, name or drive content.
+          proc_version=/proc/version
+          binfmt_dir=/proc/sys/fs/binfmt_misc
+          mounts_file=/proc/mounts
+          mnt_root=/mnt
+          fix="set /etc/wsl.conf to [interop] enabled=false, appendWindowsPath=false and [automount] enabled=false, then run wsl --shutdown from Windows"
+          # POSITIVE CONTROL: every check below is true on a machine that is not
+          # WSL, or where binfmt_misc is unmounted and the handler list is
+          # invisible. A step that passed there would prove nothing, so it fails.
+          if ! grep -qi microsoft "$proc_version" 2>/dev/null; then
+            echo "::error::this is not a WSL kernel: the Windows-side checks cannot be established here, so the job fails closed (host prerequisite)"
+            exit 1
+          fi
+          if [ ! -e "$binfmt_dir/status" ]; then
+            echo "::error::binfmt_misc is not mounted: a WSLInterop handler would not be visible, so the interop check cannot be established and the job fails closed"
+            exit 1
+          fi
+          handlers=0
+          for entry in WSLInterop WSLInterop-late; do
+            if [ -e "$binfmt_dir/$entry" ]; then handlers=$((handlers + 1)); fi
+          done
+          cmds=0
+          for c in "$mnt_root"/*/Windows/System32/cmd.exe; do
+            if [ -e "$c" ]; then cmds=$((cmds + 1)); fi
+          done
+          nonempty=0
+          for d in "$mnt_root"/[a-zA-Z]; do
+            if [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ]; then nonempty=$((nonempty + 1)); fi
+          done
+          drive_mounts=0
+          if [ -r "$mounts_file" ]; then
+            drive_mounts="$(awk -v root="$mnt_root" '($3 == "drvfs" || $3 == "9p") && length($2) == length(root) + 2 && substr($2, 1, length(root) + 1) == root "/" && substr($2, length($2)) ~ /[a-zA-Z]/ { n++ } END { print n + 0 }' "$mounts_file")"
+          fi
+          pathn=0
+          old_ifs="$IFS"
+          IFS=:
+          for entry in $PATH; do
+            case "$entry" in
+              "$mnt_root"|"$mnt_root"/*) pathn=$((pathn + 1)) ;;
+            esac
+          done
+          IFS="$old_ifs"
+          echo "windows-side preflight: WSL kernel and binfmt_misc present (positive control); WSLInterop handlers=$handlers cmd.exe=$cmds non-empty-drives=$nonempty drive-mounts=$drive_mounts path-entries=$pathn"
+          if [ $((handlers + cmds + nonempty + drive_mounts + pathn)) -gt 0 ]; then
+            echo "::error::the Windows side is reachable from this runner user (counts above; names withheld). Fix on the host: $fix"
+            exit 1
+          fi
+          echo "no WSLInterop handler, no Windows cmd.exe, no non-empty or mounted /mnt drive, no /mnt entry on PATH (expected)"
+
       - name: Self-hosted runner consistency check
         shell: bash
         env:
@@ -965,7 +1041,7 @@ jobs:
           fi
           probe="$root/.write-probe.$$"
           if ! mkdir "$probe" 2>/dev/null; then
-            echo "::error::$(id -un) cannot create entries in $root (mode $(stat -c %a "$root"), owner $(stat -c %U:%G "$root"), groups of $(id -un): $(id -Gn)). tests/_suite_lease.py would run unguarded without saying so. $fix"
+            echo "::error::the runner user cannot create entries in $root. tests/_suite_lease.py would run unguarded without saying so. $fix"
             exit 1
           fi
           rmdir "$probe"
@@ -973,7 +1049,7 @@ jobs:
             echo "NX_BUILD_LEASE_ROOT=$root"
             echo "NX_SUITE_LEASE_WAIT=1"
           } >> "$GITHUB_ENV"
-          echo "suite lease root: $root (mode $(stat -c %a "$root"), $(stat -c %U:%G "$root"))"
+          echo "suite lease root: $root (exists, not a symlink, not sticky, writable by the runner user)"
 
       - name: Toolchain preflight
         shell: bash
@@ -1011,10 +1087,10 @@ jobs:
             exit 1
           fi
           if ! docker info >/dev/null 2>&1; then
-            echo "::error::docker is not reachable by $(id -un) (the jOOQ codegen in build-gate-jar.sh needs it)"
+            echo "::error::docker is not reachable by the runner user (the jOOQ codegen in build-gate-jar.sh needs it)"
             exit 1
           fi
-          echo "runner user: $(id -un)  TMPDIR=$TMPDIR ($(du -sh "$TMPDIR" 2>/dev/null | cut -f1) in use)"
+          echo "TMPDIR=$TMPDIR ($(du -sh "$TMPDIR" 2>/dev/null | cut -f1) in use)"
           uv --version
           java -version 2>&1 | head -1
           docker --version
@@ -1081,8 +1157,8 @@ jobs:
           # the suite (a job killed at its timeout can leave them). Report only:
           # reaping is the host owner's decision on a box that also serves
           # inference.
-          if pgrep -u "$(id -un)" -af 'postgres|nexus-service'; then
-            echo "::warning::processes of $(id -un) still running after the suite (listed above)"
+          if pgrep -u "$(id -u)" -af 'postgres|nexus-service'; then
+            echo "::warning::processes of the runner user still running after the suite (listed above)"
           else
             echo "no substrate processes left behind"
           fi

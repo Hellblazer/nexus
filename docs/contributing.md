@@ -203,7 +203,8 @@ https://github.com/Hellblazer/nexus/settings/branches:
     - `pytest-gate` (one required check on both `main` and `develop`; it fans
       in over whichever suite path ran: the sharded hosted pytest matrix, or
       the single `test-qwen` job on the self-hosted `qwen-linux` runner for an
-      owner push to develop, and it fails when the chosen path did not
+      owner push to develop while `QWEN_CI_PUSH_RUNNER` is `qwen-linux`, and it
+      fails when the chosen path did not
       succeed or the other did not skip, plus the lint and census legs. The
       swap from the prior `pytest (Python 3.12)` / `pytest (Python 3.13)`
       two-check shape happened at nexus-n0ful)
@@ -212,26 +213,52 @@ https://github.com/Hellblazer/nexus/settings/branches:
 
 ### First run of the qwen-linux route
 
-The `test-qwen` job (`ci.yml`) and its routing have not run on GitHub until the
-first owner push after they land. Treat the first runs as a checklist, not as
-"green means done"; the host facts are in T2 `nexus/qwentescence-test-host-howto`.
+The qwen route is OPT-IN (Sam, 2026-10-01): `test-qwen` and its routing do
+nothing until the repository variable `QWEN_CI_PUSH_RUNNER` is exactly
+`qwen-linux`. Unset, empty, a typo, another case or a trailing space all mean the
+hosted shards. So landing the change is safe, and enabling it is a deliberate
+sequence. Once enabled, the route fires on every owner push to develop whose diff
+is not doc-only, not only on merges that touch `ci.yml`. The host facts are in T2
+`nexus/qwentescence-test-host-howto`.
 
-Host steps first, once (without them the job fails at its lease step, by design):
-create the shared lease directory (`QWEN_SUITE_LEASE_ROOT`, default
-`/var/lib/nx-suite-lease`: `sudo groupadd -f nx-suite`,
-`sudo usermod -aG nx-suite ghci`, `sudo usermod -aG nx-suite nxtest`,
-`sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
-restart the runner service so `ghci` has the group, and have `nxtest` export
-`NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1` (its
-`.bashrc`, which non-interactive ssh reads too). Apply the `/etc/wsl.conf` fix
-(WSL interop and the `/mnt` automount off, `AGENTS.md` § Self-hosted runners and
-fork PRs), then dispatch `qwen-linux-isolation-probe` (owner only) and record the
-result next to the isolation paragraph in `AGENTS.md`.
+The enable sequence, in order; stop at the first red:
 
-**Until the `wsl.conf` fix is applied and the probe run is green, the repository
-variable `QWEN_CI_PUSH_RUNNER` must be `ubuntu-latest`.** An unset variable means
-`qwen-linux`, so the route is on by default; delete the variable (or set it to
-`qwen-linux`) only for the first run below, after the probe is green.
+1. **Land the change.** The variable is unset, so the hosted shards still run.
+   Check `gh variable list` first: a leftover `qwen-linux` would make the landing
+   push route to the qwen runner.
+2. **Host steps, once.** Without them the job fails at its lease step, by design.
+   Create the shared lease directory (`QWEN_SUITE_LEASE_ROOT`, default
+   `/var/lib/nx-suite-lease`: `sudo groupadd -f nx-suite`,
+   `sudo usermod -aG nx-suite ghci`, `sudo usermod -aG nx-suite nxtest`,
+   `sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
+   restart the runner service so `ghci` has the group, and have `nxtest` export
+   `NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1` (its
+   `.bashrc`, which non-interactive ssh reads too). Apply the `/etc/wsl.conf` fix
+   (WSL interop and the `/mnt` automount off, `AGENTS.md` § Self-hosted runners
+   and fork PRs).
+3. **Run the probe as `ghci` and read it green.** A `workflow_dispatch` is offered
+   only for a workflow file on the default branch (`main`), and this file is not
+   there until a release promotes it. Until then push a throwaway branch named
+   `runner-probe/qwen-<date>` from the commit under test (`git push origin
+   HEAD:refs/heads/runner-probe/qwen-<date>`): the probe's second trigger is a
+   push to that pattern, owner only, and `ci.yml` does not trigger on it. Read the
+   run (every step green: identity as `ghci`, no `sudo`, no readable file under the
+   nexus config directory, the Windows side passing with its positive control),
+   then delete the branch (`git push origin :refs/heads/runner-probe/qwen-<date>`).
+   The same push works after the file is on `main`; a dispatch works then too.
+4. **Record the green run id** in `AGENTS.md` (the "Probe run record" line under
+   the routing section), in the change that does step 5.
+5. **Set the variable:** `gh variable set QWEN_CI_PUSH_RUNNER --body qwen-linux`,
+   then confirm with `gh variable list`.
+6. **Push once and walk the checklist below.**
+
+Turn it off with `gh variable delete QWEN_CI_PUSH_RUNNER`. **"Re-run failed jobs"
+keeps the OLD route** (the `changes` job succeeded, so it is not re-run, and its
+`ci_runner` output stays): after changing the variable use "Re-run all jobs" or
+push again. A green probe is one point in time. `ghci` is in the `docker` group,
+which is root on the distro, so a job could rewrite `/etc/wsl.conf` for the next
+WSL restart; the first step of `test-qwen` re-checks the Windows side on every run
+and fails the job closed (it notices after the fact, it does not prevent).
 
 First cold run:
 1. The job lands on `qwen-linux` (runner name in the log header); the consistency,
@@ -261,11 +288,10 @@ Then, before the route is called settled:
     measured gap is about 2k tests (25,705 passed here against about 27.7k from
     the shards). Fix or accept each reason, then raise the floor to about
     measured minus 2% and delete the TODO.
-12. One exercise of the toggle: set `QWEN_CI_PUSH_RUNNER` to `ubuntu-latest`,
-    push, see the hosted shards run and `test-qwen` skip, then put the variable
-    back to whatever the host's state allows (delete it only when the `wsl.conf`
-    fix is applied and the probe is green). "Re-run failed jobs" keeps the old
-    route, so a toggle takes a new push or "Re-run all jobs".
+12. One exercise of the toggle: delete `QWEN_CI_PUSH_RUNNER`, push, see the hosted
+    shards run and `test-qwen` skip, then set it back to `qwen-linux`. "Re-run
+    failed jobs" keeps the old route, so a toggle takes a new push or "Re-run all
+    jobs".
 
 A green run does not show the overlap or flake behaviour (that takes about ten
 runs), signal-timing tests under `-n 12` while the host's inference is loaded,

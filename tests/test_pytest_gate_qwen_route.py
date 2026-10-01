@@ -27,6 +27,7 @@ import itertools
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -50,10 +51,10 @@ def _route_step() -> dict:
     return found[0]
 
 
-def _routing_expression() -> str:
-    expr = _route_step()["env"]["CI_RUNNER"].strip()
+def _owner_push_expression() -> str:
+    expr = _route_step()["env"]["OWNER_PUSH"].strip()
     m = _GH_EXPR_RE.fullmatch(expr)
-    assert m, f"CI_RUNNER must be a single ${{{{ }}}} expression, got {expr!r}"
+    assert m, f"OWNER_PUSH must be a single ${{{{ }}}} expression, got {expr!r}"
     return m.group(1)
 
 
@@ -69,10 +70,9 @@ class _GhStr(str):
     __hash__ = str.__hash__
 
 
-def _route(*, event: str = "push", actor_id: str = OWNER_ID, triggering_actor: str = OWNER,
-           variable: str = "") -> str:
-    """Evaluate the routing expression the way GitHub does for these contexts."""
-    py = _routing_expression().replace("&&", " and ").replace("||", " or ")
+def _owner_push(*, event: str, actor_id: str, triggering_actor: str) -> str:
+    """Evaluate the OWNER_PUSH expression the way GitHub does, rendered as GitHub renders a boolean into env."""
+    py = _owner_push_expression().replace("&&", " and ").replace("||", " or ")
     py = re.sub(r"'[^']*'", lambda m: f"_GhStr({m.group(0)})", py)  # literals compare case-insensitively
     contexts = {
         "github.event_name": event,
@@ -80,31 +80,59 @@ def _route(*, event: str = "push", actor_id: str = OWNER_ID, triggering_actor: s
         "github.repository_owner_id": OWNER_ID,
         "github.triggering_actor": triggering_actor,
         "github.repository_owner": OWNER,
-        "vars.QWEN_CI_PUSH_RUNNER": variable,
     }
     # longest first so `github.repository_owner_id` is not eaten by `github.repository_owner`
     for name in sorted(contexts, key=len, reverse=True):
         py = py.replace(name, f"_GhStr({contexts[name]!r})")
     assert "github." not in py and "vars." not in py, f"unevaluated context left in {py!r}"
-    return str(eval(py, {"__builtins__": {}, "_GhStr": _GhStr}, {}))  # noqa: S307 - the expression is this repo's own YAML
+    return "true" if eval(py, {"__builtins__": {}, "_GhStr": _GhStr}, {}) is True else "false"  # noqa: S307 - the expression is this repo's own YAML
 
 
-# ── the routing expression ────────────────────────────────────────────────
+def _route(*, event: str = "push", actor_id: str = OWNER_ID, triggering_actor: str = OWNER,
+           variable: str = "") -> str:
+    """The route a push would get: the expression feeds OWNER_PUSH, the step's bash decides, the output is read back.
+
+    The variable reaches the step raw, exactly as `${{ vars.QWEN_CI_PUSH_RUNNER }}` renders it (an unset one as ''),
+    and the real `route` step runs under the runner's `bash -eo pipefail`.
+    """
+    step = _route_step()
+    assert step["env"]["QWEN_CI_PUSH_RUNNER"] == "${{ vars.QWEN_CI_PUSH_RUNNER }}", "the variable must travel raw"
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "github_output"
+        out.write_text("")
+        env = {"PATH": "/usr/bin:/bin", "GITHUB_OUTPUT": str(out), "GITHUB_EVENT_NAME": event,
+               "OWNER_PUSH": _owner_push(event=event, actor_id=actor_id, triggering_actor=triggering_actor),
+               "QWEN_CI_PUSH_RUNNER": variable}
+        proc = subprocess.run(["bash", "-eo", "pipefail", "-c", step["run"]], capture_output=True, text=True, env=env)
+        assert proc.returncode == 0, (proc.stdout, proc.stderr)
+        published = out.read_text()
+    assert re.fullmatch(r"ci_runner=(qwen-linux|ubuntu-latest)\n", published), published
+    return published.removeprefix("ci_runner=").strip()
 
 
-@pytest.mark.parametrize("variable", ["", "qwen-linux", "hellmini", "hellmini-ci", "qwen", "ubuntu", "ubuntu-latest ", "true"])
-def test_an_owner_push_goes_to_qwen_unless_the_variable_is_ubuntu_latest(variable: str) -> None:
-    assert _route(variable=variable) == QWEN_LABEL
+# ── the routing: OPT-IN (Sam, 2026-10-01) ─────────────────────────────────
 
 
-@pytest.mark.parametrize("variable", ["ubuntu-latest", "Ubuntu-Latest", "UBUNTU-LATEST"])
-def test_the_variable_set_to_ubuntu_latest_in_any_case_sends_an_owner_push_to_the_hosted_shards(variable: str) -> None:
-    """GitHub's `==` on strings ignores case, so `Ubuntu-Latest` toggles the route too."""
+def test_an_owner_push_stays_on_the_hosted_shards_while_the_variable_is_unset() -> None:
+    """The default. Landing the route changes nothing until someone sets the variable."""
+    assert _route(variable="") == "ubuntu-latest"
+
+
+def test_only_the_exact_value_qwen_linux_opts_an_owner_push_in() -> None:
+    assert _route(variable="qwen-linux") == QWEN_LABEL
+
+
+@pytest.mark.parametrize("variable", [
+    "", "ubuntu-latest", "qwen-linux ", " qwen-linux", "Qwen-Linux", "QWEN-LINUX", "qwen", "qwen-linux\n", "hellmini",
+    "hellmini-ci", "self-hosted", "true", "1", "garbage", "qwen-linux,ubuntu-latest", "x" * 40,
+])
+def test_every_other_variable_value_keeps_the_hosted_shards(variable: str) -> None:
+    """Empty, another label, a typo, a stray space, a different case, garbage: none of them opts in."""
     assert _route(variable=variable) == "ubuntu-latest"
 
 
 def test_the_login_comparison_ignores_case_like_githubs() -> None:
-    assert _route(triggering_actor=OWNER.lower()) == QWEN_LABEL
+    assert _route(triggering_actor=OWNER.lower(), variable="qwen-linux") == QWEN_LABEL
 
 
 @pytest.mark.parametrize(
@@ -117,20 +145,67 @@ def test_the_login_comparison_ignores_case_like_githubs() -> None:
         ({"triggering_actor": "someone-else"}, "a re-run of the owner's push by another account"),
     ],
 )
-@pytest.mark.parametrize("variable", ["", "ubuntu-latest", "hellmini-ci"])
-def test_everything_but_an_owner_push_stays_on_the_hosted_shards(kw: dict, why: str, variable: str) -> None:
+@pytest.mark.parametrize("variable", ["", "qwen-linux", "ubuntu-latest", "hellmini-ci"])
+def test_everything_but_an_owner_push_stays_on_the_hosted_shards_even_with_the_variable_on(
+        kw: dict, why: str, variable: str) -> None:
     assert _route(variable=variable, **kw) == "ubuntu-latest", why
 
 
 def test_no_input_can_produce_a_label_other_than_the_two_routes() -> None:
     """A typo or a hostile variable value can never name hellmini, hellmini-ci or any other label."""
-    variables = ["", "ubuntu-latest", "hellmini", "hellmini-ci", "self-hosted", "qwen-linux ", "x" * 40]
+    variables = ["", "qwen-linux", "hellmini", "hellmini-ci", "self-hosted", "qwen-linux ", "x" * 40]
     events = ["push", "pull_request", "workflow_dispatch", "schedule"]
     seen = {
         _route(event=e, actor_id=a, triggering_actor=t, variable=v)
         for e, a, t, v in itertools.product(events, [OWNER_ID, "2222"], [OWNER, "x"], variables)
     }
     assert seen == {QWEN_LABEL, "ubuntu-latest"}
+
+
+def test_the_route_step_cannot_be_flipped_by_anything_but_an_owner_push_plus_the_exact_variable() -> None:
+    """Of the whole table, exactly ONE combination reaches qwen-linux."""
+    variables = ["", "qwen-linux", "Qwen-Linux", "qwen-linux ", "ubuntu-latest"]
+    reached = [
+        (e, a, t, v)
+        for e, a, t, v in itertools.product(["push", "pull_request"], [OWNER_ID, "2222"], [OWNER, "x"], variables)
+        if _route(event=e, actor_id=a, triggering_actor=t, variable=v) == QWEN_LABEL
+    ]
+    assert reached == [("push", OWNER_ID, OWNER, "qwen-linux")]
+
+
+def test_the_opt_in_is_decided_in_bash_because_a_github_expression_cannot_compare_case_sensitively() -> None:
+    """Pins WHY the variable is not compared in the expression: `==` there ignores case, so `Qwen-Linux` would opt in."""
+    step = _route_step()
+    assert "QWEN_CI_PUSH_RUNNER" not in step["env"]["OWNER_PUSH"], "the variable must not be compared in the expression"
+    assert '"$QWEN_CI_PUSH_RUNNER" = "qwen-linux"' in step["run"]
+    assert "vars." not in _owner_push_expression()
+
+
+@pytest.mark.parametrize(("old", "new", "label"), [
+    ('[ "$OWNER_PUSH" = "true" ] &&', '[ "$OWNER_PUSH" = "true" ] ||', "&& turned into || (the variable alone opts in)"),
+    ('"$QWEN_CI_PUSH_RUNNER" = "qwen-linux"', '"$QWEN_CI_PUSH_RUNNER" != "qwen-linux"', "variable comparison inverted"),
+    ("CI_RUNNER=ubuntu-latest\n", "CI_RUNNER=qwen-linux\n", "default flipped to qwen-linux"),
+    ('"$OWNER_PUSH" = "true"', '"$OWNER_PUSH" = "false"', "owner rule inverted"),
+])
+def test_the_route_table_kills_each_obvious_mutant_of_the_step(old: str, new: str, label: str) -> None:
+    """The table must have power: each mutant disagrees with it on at least one row."""
+    step = _route_step()
+    assert old in step["run"], f"mutation site {old!r} no longer in the step: update this test with the step"
+    rows = [(e, v) for e in ("push", "pull_request") for v in ("", "qwen-linux", "Qwen-Linux", "ubuntu-latest")]
+    want = {(e, v): ("qwen-linux" if (e, v) == ("push", "qwen-linux") else "ubuntu-latest") for e, v in rows}
+
+    def run(script: str, event: str, variable: str) -> str:
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "o"
+            out.write_text("")
+            env = {"PATH": "/usr/bin:/bin", "GITHUB_OUTPUT": str(out), "GITHUB_EVENT_NAME": event,
+                   "OWNER_PUSH": _owner_push(event=event, actor_id=OWNER_ID, triggering_actor=OWNER),
+                   "QWEN_CI_PUSH_RUNNER": variable}
+            subprocess.run(["bash", "-eo", "pipefail", "-c", script], capture_output=True, text=True, env=env)
+            return out.read_text().removeprefix("ci_runner=").strip()
+
+    assert all(run(step["run"], e, v) == want[(e, v)] for e, v in rows)
+    assert any(run(step["run"].replace(old, new), e, v) != want[(e, v)] for e, v in rows), label
 
 
 def _run_step(step: dict, tmp_path: Path, **env: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
@@ -143,21 +218,11 @@ def _run_step(step: dict, tmp_path: Path, **env: str) -> tuple[subprocess.Comple
     return proc, out, genv
 
 
-def test_the_route_step_publishes_the_output_for_each_of_the_two_routes(tmp_path: Path) -> None:
-    """The positive half: a step that always exited 1 would pass the refusal test alone."""
-    for good in (QWEN_LABEL, "ubuntu-latest"):
-        proc, out, _ = _run_step(_route_step(), tmp_path, CI_RUNNER=good, GITHUB_EVENT_NAME="push")
-        assert proc.returncode == 0, (good, proc.stdout, proc.stderr)
-        assert out.read_text() == f"ci_runner={good}\n"
-        assert good in proc.stdout
-
-
-def test_the_route_step_refuses_an_unrecognised_value_and_publishes_nothing(tmp_path: Path) -> None:
+def test_the_route_step_publishes_one_of_two_outputs_and_nothing_on_a_shell_error(tmp_path: Path) -> None:
     assert "set -euo pipefail" in _route_step()["run"]
-    for bad in ("hellmini-ci", "hellmini", "", "qwen", "self-hosted", "QWEN-LINUX"):
-        proc, out, _ = _run_step(_route_step(), tmp_path, CI_RUNNER=bad, GITHUB_EVENT_NAME="push")
-        assert proc.returncode == 1, (bad, proc.stdout, proc.stderr)
-        assert out.read_text() == "", f"a refused value must not reach GITHUB_OUTPUT: {bad!r}"
+    # an unset OWNER_PUSH is a defect in the wiring: the step must not guess a route
+    proc, out, _ = _run_step(_route_step(), tmp_path, GITHUB_EVENT_NAME="push", QWEN_CI_PUSH_RUNNER="qwen-linux")
+    assert proc.returncode != 0 and out.read_text() == ""
 
 
 # ── the qwen job ──────────────────────────────────────────────────────────
@@ -213,8 +278,187 @@ def test_the_qwen_job_is_armed_the_way_the_shards_are() -> None:
 def test_the_guard_steps_run_before_the_checkout_and_in_a_fixed_order() -> None:
     names = [str(s.get("name", s.get("uses", ""))) for s in _doc()["jobs"]["test-qwen"]["steps"]]
     order = [next(i for i, n in enumerate(names) if n.startswith(p)) for p in (
-        "Self-hosted runner consistency check", "Shared suite lease directory", "Toolchain preflight", "actions/checkout")]
+        "Windows-side preflight", "Self-hosted runner consistency check", "Shared suite lease directory",
+        "Toolchain preflight", "actions/checkout")]
     assert order == sorted(order) and order[0] == 0, names
+
+
+_IDENTITY_READS = (r"\bwhoami\b", r"\blogname\b", r"\bgetent\b", r"\$\{?USER\}?", r"\$\{?LOGNAME\}?",
+                   r"\bid\s+-\w*[nG]\w*", r"\bgroups\b", r"\bstat\s+-c", r"\bls\s+-\w*l\b")
+
+
+def test_the_qwen_job_prints_no_account_name_group_list_mode_or_owner() -> None:
+    """Public log, public repo: pass or fail and counts only (the round-3 review's L2, extended to every step)."""
+    for step in _doc()["jobs"]["test-qwen"]["steps"]:
+        run = str(step.get("run", ""))
+        for pattern in _IDENTITY_READS:
+            assert not re.search(pattern, run), (step.get("name"), pattern)
+
+
+def test_the_lease_step_failure_message_names_no_user_mode_owner_or_group(tmp_path: Path) -> None:
+    root = tmp_path / "lease"
+    root.mkdir()
+    os.chmod(root, 0o555)
+    try:
+        proc, _ = _lease(tmp_path, root)
+    finally:
+        os.chmod(root, 0o755)
+    if os.geteuid() == 0:
+        pytest.skip("root can write anywhere, so the refusal cannot be observed")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1 and "cannot create entries" in out
+    import getpass
+
+    me = getpass.getuser()
+    assert not (len(me) >= 4 and me in out.replace(str(tmp_path), "<tmp>")), "the account name must not be printed"
+    assert "mode " not in out and "owner" not in out and "groups of" not in out
+
+
+def test_the_lease_step_success_line_prints_no_mode_or_owner(tmp_path: Path) -> None:
+    root = tmp_path / "lease"
+    root.mkdir()
+    os.chmod(root, 0o2775)
+    proc, _ = _lease(tmp_path, root)
+    assert proc.returncode == 0 and "suite lease root:" in proc.stdout
+    assert "mode " not in proc.stdout and "2775" not in proc.stdout
+
+
+# The Windows-side preflight: FIRST step, before the checkout, fail closed, executed against a fake tree.
+
+_WSL_VERSION = "Linux version 6.6.87.2-microsoft-standard-WSL2 (root@build) (gcc 11.2.0)\n"
+_PRE_FIX = "/etc/wsl.conf"
+
+
+def _windows_preflight(tmp_path: Path, *, version: str | None = _WSL_VERSION, binfmt_status: bool = True,
+                       handlers: tuple[str, ...] = (), cmd_exe: str | None = None,
+                       drives: dict[str, list[str]] | None = None, mounts: str = "",
+                       path: str = "/usr/bin:/bin") -> subprocess.CompletedProcess[str]:
+    """Run the REAL first step of test-qwen with its four roots pointed at a fake tree."""
+    run = _qwen_step("Windows-side preflight")["run"]
+    roots = {"proc_version": tmp_path / "proc_version", "binfmt_dir": tmp_path / "binfmt",
+             "mounts_file": tmp_path / "mounts", "mnt_root": tmp_path / "mnt"}
+    for name, target in roots.items():
+        line = {"proc_version": "proc_version=/proc/version\n", "binfmt_dir": "binfmt_dir=/proc/sys/fs/binfmt_misc\n",
+                "mounts_file": "mounts_file=/proc/mounts\n", "mnt_root": "mnt_root=/mnt\n"}[name]
+        assert line in run, f"{line!r} must stay a plain assignment so the tests can repoint it"
+        run = run.replace(line, f"{name}={target}\n")
+    if version is not None:
+        roots["proc_version"].write_text(version)
+    roots["binfmt_dir"].mkdir(exist_ok=True)
+    if binfmt_status:
+        (roots["binfmt_dir"] / "status").write_text("enabled\n")
+    for h in handlers:
+        (roots["binfmt_dir"] / h).write_text("enabled\ninterpreter /init\n")
+    roots["mounts_file"].write_text(mounts)
+    roots["mnt_root"].mkdir(exist_ok=True)
+    if cmd_exe is not None:
+        exe = roots["mnt_root"] / cmd_exe / "Windows" / "System32" / "cmd.exe"
+        exe.parent.mkdir(parents=True, exist_ok=True)
+        exe.write_text("MZ")  # not executable: the check is presence, it never starts Windows code
+    for letter, entries in (drives or {}).items():
+        (roots["mnt_root"] / letter).mkdir(exist_ok=True)
+        for e in entries:
+            (roots["mnt_root"] / letter / e).write_text("x")
+    return subprocess.run(["bash", "-eo", "pipefail", "-c", run], capture_output=True, text=True,
+                          env={"PATH": path})
+
+
+def test_the_windows_preflight_is_the_first_step_and_runs_before_any_repo_code() -> None:
+    steps = _doc()["jobs"]["test-qwen"]["steps"]
+    assert str(steps[0]["name"]).startswith("Windows-side preflight")
+    assert steps[0].get("shell") == "bash" and "if" not in steps[0], "no condition may skip it"
+    assert "uses" not in steps[0], "the first step is a script, not an action (no checkout has happened)"
+
+
+def test_a_wsl_host_with_the_fix_applied_passes_and_prints_counts_only(tmp_path: Path) -> None:
+    proc = _windows_preflight(tmp_path, drives={"c": []})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+    assert "WSLInterop handlers=0 cmd.exe=0 non-empty-drives=0 drive-mounts=0 path-entries=0" in proc.stdout
+    assert "::error::" not in proc.stdout
+
+
+@pytest.mark.parametrize("version", ["Linux version 6.8.0-generic (buildd@lcy02) (gcc 13.2.0)\n", "", "Darwin\n"])
+def test_a_kernel_that_is_not_wsl_fails_closed_instead_of_passing_vacuously(tmp_path: Path, version: str) -> None:
+    """POSITIVE CONTROL: every check is trivially true off WSL, so being off WSL must be a failure."""
+    proc = _windows_preflight(tmp_path, version=version)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "not a WSL kernel" in proc.stdout and "WSLInterop handlers=" not in proc.stdout
+
+
+def test_a_missing_proc_version_fails_closed(tmp_path: Path) -> None:
+    proc = _windows_preflight(tmp_path, version=None)
+    assert proc.returncode == 1 and "not a WSL kernel" in proc.stdout
+
+
+def test_an_unmounted_binfmt_misc_fails_closed_because_a_handler_would_be_invisible(tmp_path: Path) -> None:
+    proc = _windows_preflight(tmp_path, binfmt_status=False)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "binfmt_misc is not mounted" in proc.stdout
+
+
+@pytest.mark.parametrize("handler", ["WSLInterop", "WSLInterop-late"])
+def test_a_wslinterop_handler_fails_the_preflight(tmp_path: Path, handler: str) -> None:
+    proc = _windows_preflight(tmp_path, handlers=(handler,))
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "WSLInterop handlers=1" in proc.stdout and _PRE_FIX in proc.stdout and "[interop] enabled=false" in proc.stdout
+
+
+def test_a_windows_cmd_exe_reachable_under_any_mnt_entry_fails_the_preflight_without_naming_it(tmp_path: Path) -> None:
+    proc = _windows_preflight(tmp_path, cmd_exe="a-person-name")
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "cmd.exe=1" in proc.stdout and "a-person-name" not in proc.stdout + proc.stderr
+
+
+def test_a_non_empty_mnt_drive_fails_and_an_empty_one_does_not(tmp_path: Path) -> None:
+    ok = _windows_preflight(tmp_path, drives={"c": []})
+    assert ok.returncode == 0, (ok.stdout, ok.stderr)
+    (tmp_path / "bad").mkdir()
+    bad = _windows_preflight(tmp_path / "bad", drives={"d": ["Users", "id_ed25519"]})
+    assert bad.returncode == 1, (bad.stdout, bad.stderr)
+    assert "non-empty-drives=1" in bad.stdout and "id_ed25519" not in bad.stdout + bad.stderr
+
+
+def test_a_non_letter_mnt_directory_is_not_a_drive_for_the_preflight(tmp_path: Path) -> None:
+    proc = _windows_preflight(tmp_path, drives={"wsl": ["x"], "cc": ["y"]})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+
+
+def test_a_drvfs_or_9p_mount_at_a_drive_letter_fails_even_when_it_lists_empty(tmp_path: Path) -> None:
+    for fs in ("drvfs", "9p"):
+        sub = tmp_path / fs
+        sub.mkdir()
+        proc = _windows_preflight(sub, mounts=f"C: {sub / 'mnt' / 'c'} {fs} rw 0 0\n", drives={"c": []})
+        assert proc.returncode == 1 and "drive-mounts=1" in proc.stdout, (fs, proc.stdout, proc.stderr)
+
+
+def test_wsl_helper_mounts_that_are_not_a_drive_letter_do_not_fail_the_preflight(tmp_path: Path) -> None:
+    """The host really has a 9p mount at /usr/lib/wsl/drivers; a drive mount is only /mnt/<one letter>."""
+    mounts = (f"drivers /usr/lib/wsl/drivers 9p ro 0 0\n"
+              f"x {tmp_path / 'mnt' / 'cc'} 9p rw 0 0\n"
+              f"y {tmp_path / 'mnt' / 'c'} ext4 rw 0 0\n")
+    proc = _windows_preflight(tmp_path, mounts=mounts, drives={"c": []})
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+
+
+@pytest.mark.parametrize("entry", ["/mnt/c/Windows/System32", "/mnt/wsl", "/mnt"])
+def test_any_mnt_entry_on_path_fails_the_preflight_without_printing_it(tmp_path: Path, entry: str) -> None:
+    # the step reads its own mnt_root, which these tests repoint, so build the PATH entry from it
+    run_root = tmp_path / "mnt"
+    proc = _windows_preflight(tmp_path, path=f"/usr/bin:/bin:{run_root}{entry.removeprefix('/mnt')}")
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "path-entries=1" in proc.stdout and "System32" not in proc.stdout + proc.stderr
+
+
+def test_a_path_entry_that_only_resembles_mnt_is_not_flagged(tmp_path: Path) -> None:
+    proc = _windows_preflight(tmp_path, path=f"/usr/bin:/bin:{tmp_path}/mntx:{tmp_path}/opt/mnt")
+    assert proc.returncode == 0, (proc.stdout, proc.stderr)
+
+
+def test_the_preflight_failure_names_the_host_fix_and_never_a_path(tmp_path: Path) -> None:
+    proc = _windows_preflight(tmp_path, handlers=("WSLInterop",), cmd_exe="c", drives={"c": ["Users"]})
+    assert proc.returncode == 1
+    assert "[automount] enabled=false" in proc.stdout and "appendWindowsPath=false" in proc.stdout
+    assert str(tmp_path) not in proc.stdout + proc.stderr
 
 
 # The consistency check: executed, not read. Rows are (event, actor_id, triggering_actor, expected rc).
@@ -429,6 +673,55 @@ def test_the_suite_logs_skip_reasons_and_the_floor_carries_its_reconciliation_to
     assert "First run of the qwen-linux route" in contributing
     for item in ("skip reasons", "minus 2%", "second warm run", "cancel", "overlap", "QWEN_CI_PUSH_RUNNER"):
         assert item in contributing, item
+
+
+_ROOT = Path(__file__).parent.parent
+
+
+def test_the_docs_describe_an_opt_in_route_and_carry_no_stale_default_on_claim() -> None:
+    """Sam, 2026-10-01: unset means the hosted shards. The earlier text said the opposite in five places."""
+    agents = (_ROOT / "AGENTS.md").read_text()
+    contributing = (_ROOT / "docs" / "contributing.md").read_text()
+    ci = WORKFLOW.read_text()
+    for name, text in (("AGENTS.md", agents), ("docs/contributing.md", contributing), ("ci.yml", ci)):
+        for stale in ("unset means `qwen-linux`", "Unset `QWEN_CI_PUSH_RUNNER` means `qwen-linux`", "ON by default",
+                      "route is on by default", "must be `ubuntu-latest`", "QWEN_CI_PUSH_RUNNER=ubuntu-latest sends",
+                      "delete the variable to return to qwen-linux"):
+            assert stale not in text, (name, stale)
+    assert "OPT-IN" in agents and "opt-in" in contributing.lower()
+    assert "exactly `qwen-linux`" in agents and "exactly\n`qwen-linux`" in contributing
+
+
+def test_the_docs_give_the_enable_sequence_in_order_and_the_rerun_caveat() -> None:
+    contributing = (_ROOT / "docs" / "contributing.md").read_text()
+    agents = (_ROOT / "AGENTS.md").read_text()
+    order = [contributing.index(m) for m in (
+        "**Land the change.**", "**Host steps, once.**", "**Run the probe as `ghci` and read it green.**",
+        "**Record the green run id**", "**Set the variable:**", "**Push once and walk the checklist below.**")]
+    assert order == sorted(order)
+    for text in (contributing, agents):
+        assert "gh variable set QWEN_CI_PUSH_RUNNER --body qwen-linux" in text
+        assert "Re-run failed jobs" in text
+    assert "runner-probe/qwen-<date>" in contributing and "default branch" in contributing
+    assert "Probe run record: none yet" in agents, "the run id is recorded here when the probe has run green"
+    assert "EVERY owner push to develop whose diff is not doc-only" in agents, "the scope claim is not 'merges touching ci.yml'"
+
+
+def test_the_docs_say_docker_is_root_and_the_probe_does_not_bound_it() -> None:
+    agents = (_ROOT / "AGENTS.md").read_text()
+    assert "root on the distro" in agents and "rewrite `/etc/wsl.conf`" in agents
+    assert "does not bound docker" in agents and "not a bound on docker" in agents
+    assert "per-run Windows-side preflight" in agents
+
+
+def test_the_suite_lease_refusal_text_lives_in_the_general_lease_section() -> None:
+    agents = (_ROOT / "AGENTS.md").read_text()
+    build = agents.index("The Python suite reads the same lease at session start (nexus-pv93h)")
+    suite = agents.index("**It fails closed on contention**")
+    assert 0 < suite - build < 2500, "the suite-lease text must sit beside the build lease's exit-75 text"
+    section = agents[suite:suite + 1800]
+    assert "unwritable lease root still runs UNGUARDED" in section
+    assert 'exactly `1`' in section and "test_suite_lease_unguarded_lint.py" in section
 
 
 def test_the_hosted_path_still_shards_by_the_committed_durations() -> None:

@@ -159,7 +159,7 @@ This repo is public and has four self-hosted runners:
 |---|---|---|
 | `hellmini` | Mac mini, macOS user `ghrunner` | release jobs: the engine-service release legs, the PG-bundle cache seed (Sam, 2026-09-28, nexus-yd9po) |
 | `hellmini-ci` | same Mac mini, macOS user `ghci` | the Service CI Java job, on owner pushes only (Sam, 2026-09-30, nexus-f5i1m) |
-| `qwen-linux` (labels `self-hosted`, `Linux`, `X64`, `qwen-linux`) | qwentescence, WSL, Linux user `ghci` (private TMPDIR) | the full Python pytest suite as one `-n 12` job (`test-qwen` in `ci.yml`), on owner pushes to develop only (Sam, 2026-10-01) |
+| `qwen-linux` (labels `self-hosted`, `Linux`, `X64`, `qwen-linux`) | qwentescence, WSL, Linux user `ghci` (private TMPDIR) | the full Python pytest suite as one `-n 12` job (`test-qwen` in `ci.yml`), on owner pushes to develop only, and only while the repository variable `QWEN_CI_PUSH_RUNNER` is `qwen-linux` (opt-in; Sam, 2026-10-01) |
 | `gtr-windows` (`[self-hosted, X64, Windows]`, registered earlier as `qwen-windows`) | host not recorded in this repo | no workflow in this repo; intended (Sam, 2026-09-30) |
 
 The two qwen runners carry the generic self-hosted labels. Any job in any
@@ -170,36 +170,61 @@ naming the generic label. `hellmini` and `hellmini-ci` are bare custom labels
 also has a custom label of its own (read from the repository's runner list,
 2026-10-01); the one job that targets it names all four labels.
 
-**CI pytest routing (qwen-linux).** `ci.yml`'s comments are the one
-authoritative copy; this is the summary. The `route` step of the `changes` job
-decides once, with the same owner rule as Service CI (push event, account id and
-triggering actor both the repo owner), and publishes `ci_runner`. On an owner
-push to develop it is `qwen-linux`: the `test-qwen` job runs the whole default
-suite as one `uv run pytest tests/ -n 12` on the qwen runner (the runner's own
-uv, JDK and Docker, no `setup-*` action; `scripts/build-gate-jar.sh` for the
-stamped jar) and the six hosted shards and `service-jar` are skipped. Every
-`pull_request` and any other actor's push gets `ubuntu-latest`: the hosted
-shards run, `test-qwen` is skipped. Setting the repository variable
-`QWEN_CI_PUSH_RUNNER` to `ubuntu-latest` (case ignored, as in every GitHub `==`)
-sends owner pushes back to the hosted shards with no code change; unset, any
-other value, `hellmini` included, or a typo all mean `qwen-linux`, and the job's
-`runs-on` is a literal label set, so the variable cannot reach a release or
-Service CI runner. The route is decided in the `changes` job, and "Re-run failed
-jobs" does not re-run a `changes` job that succeeded, so it keeps the old
-`ci_runner`: flipping the toggle for a commit already pushed needs "Re-run all
-jobs" or a new push. There is no automatic fallback when the runner is offline:
+**CI pytest routing (qwen-linux) is OPT-IN (Sam, 2026-10-01).** `ci.yml`'s
+comments are the one authoritative copy; this is the summary. The `route` step
+of the `changes` job decides once and publishes `ci_runner`. It is `qwen-linux`
+only when BOTH hold: the event is an owner push (same owner rule as Service CI:
+push event, account id and triggering actor both the repo owner) AND the
+repository variable `QWEN_CI_PUSH_RUNNER` is exactly `qwen-linux` (compared in
+bash, case-sensitively: every GitHub `==` ignores case, so an expression could
+not say "exactly"). Unset, empty, a typo, `Qwen-Linux`, a trailing space,
+`ubuntu-latest` or any other value means `ubuntu-latest`: the hosted shards run
+and `test-qwen` is skipped. So landing the route changes nothing; the default
+is the shards. When it is on, `test-qwen` runs the whole default suite as one
+`uv run pytest tests/ -n 12` on the qwen runner (the runner's own uv, JDK and
+Docker, no `setup-*` action; `scripts/build-gate-jar.sh` for the stamped jar)
+and the six hosted shards and `service-jar` are skipped. Every `pull_request`
+and any other actor's push gets the hosted shards whatever the variable says.
+The job's `runs-on` is a literal label set, so the variable cannot reach a
+release or Service CI runner. The route is decided in the `changes` job, and
+**"Re-run failed jobs" does not re-run a `changes` job that succeeded, so it
+keeps the OLD `ci_runner`**, whichever way the variable moved since: changing the
+route for a commit already pushed needs "Re-run all jobs" or a new push. While
+the variable is on there is no automatic fallback when the runner is offline:
 the qwen job queues, `pytest-gate` pends until the 24 hour limit, and someone
-sets the variable. `pytest-gate` reads
-`ci_runner` and requires the chosen path `success` and the other `skipped`, so a
-qwen job that was skipped, cancelled, timed out or never reported fails the
-required check, and `scripts/ci_status.py` expects the job on the develop
-topic. The lint, census and Service CI legs are unchanged.
+deletes the variable. `pytest-gate` reads `ci_runner` and requires the chosen
+path `success` and the other `skipped`, so a qwen job that was skipped,
+cancelled, timed out or never reported fails the required check, and
+`scripts/ci_status.py` expects the job on the develop topic. The lint, census
+and Service CI legs are unchanged.
 
-**An unset `QWEN_CI_PUSH_RUNNER` means `qwen-linux`: the route is ON by default.**
-Until Sam applies the `/etc/wsl.conf` fix (§ Self-hosted runners and fork PRs)
-and `qwen-linux-isolation-probe` has run green, the repository variable must be
-set to `ubuntu-latest`. Setting it is a repository setting, not a code change,
-so check it before merging anything that touches `ci.yml`.
+**Enabling the route is a sequence, not a flip.** Once the route is on, it fires
+on EVERY owner push to develop whose diff is not doc-only (the `code` predicate:
+anything outside `docs/**`, `web/**`, root `README.md`, `CHANGELOG*`, `LICENSE*`,
+`conexus/CHANGELOG.md`), not only on merges that touch `ci.yml`. Do these in
+order and stop at the first red:
+
+1. Land the change. The variable is unset, so the route is off and nothing
+   changes. (Check with `gh variable list` that it is unset; a leftover `qwen-linux`
+   from an earlier attempt would be the one way this step is not safe.)
+2. Host prerequisites, once: the shared lease directory and the `/etc/wsl.conf`
+   fix (`docs/contributing.md` § First run of the qwen-linux route).
+3. Run `qwen-linux-isolation-probe` as `ghci` and read it green. Before the file
+   reaches `main` a dispatch is not offered, so push a throwaway branch named
+   `runner-probe/qwen-<date>` (the probe's second trigger), read the run, then
+   delete the branch. After it is on `main`, a dispatch works too.
+4. Record the green run id in the line below, in the same change that sets the
+   variable.
+5. Set the variable: `gh variable set QWEN_CI_PUSH_RUNNER --body qwen-linux`,
+   then confirm with `gh variable list`.
+6. Push once and walk the first-run checklist in `docs/contributing.md`.
+
+To turn it off: `gh variable delete QWEN_CI_PUSH_RUNNER`; the next push (or a
+"Re-run all jobs") runs the hosted shards.
+
+**Probe run record: none yet.** No `qwen-linux-isolation-probe` run has been
+read green. Until this line carries a run id, read the qwen runner's isolation
+as "intended" and leave the variable unset.
 
 The job and a hand-run suite by the host's `nxtest` user serialize on one lease,
 not by agreement: `test-qwen` points `NX_BUILD_LEASE_ROOT` at a host directory
@@ -207,10 +232,9 @@ not by agreement: `test-qwen` points `NX_BUILD_LEASE_ROOT` at a host directory
 not sticky) and sets `NX_SUITE_LEASE_WAIT=1`, and `nxtest` must export the same
 two variables; the job's lease step fails loud, with the host setup text, when
 the directory is missing or unusable (the suite lease itself would otherwise run
-unguarded and say nothing). The suite lease also fails closed: if a peer still
-holds it after the 30 minute wait, or wins the race for it, the run exits 75
-naming the holder instead of running unguarded; `NX_SUITE_LEASE_UNGUARDED=1` is
-the explicit opt-out for a hand run, and CI never sets it. The job also keeps `TMPDIR` on the runner's
+unguarded and say nothing). The suite lease's refusal rules are in § Engine-service
+release, next to the build lease's; a lint test pins that no workflow sets its
+opt-out. The job also keeps `TMPDIR` on the runner's
 persistent private directory on purpose: the test substrate's orphan sweep finds
 a cancelled run's Postgres and JVM through sidecar files there, which a per-job
 `RUNNER_TEMP` would delete. The host also serves production inference, so a
@@ -243,7 +267,7 @@ The controls are the collaborator list (owner only since 2026-09-30, when four
 write collaborators were removed), the fork-PR approval policy (all external
 contributors need an approval click), and branch protection. A merged external
 or Dependabot PR runs its code on `hellmini-ci` at the owner's next `service/**`
-push, and on `qwen-linux` at the owner's next push to develop that changes
+push, and, once `QWEN_CI_PUSH_RUNNER` is `qwen-linux`, on `qwen-linux` at the owner's next push to develop that changes
 anything outside the doc-only set (`docs/**`, `web/**`, root `README.md`,
 `CHANGELOG*` and `LICENSE*`, `conexus/CHANGELOG.md`), by design: that is `src/`,
 `tests/`, `scripts/`, `pyproject.toml`, `uv.lock`, `service/`, `conexus/`, `sn/`
@@ -260,36 +284,57 @@ Both macOS runners keep state between jobs (Maven `~/.m2`, tool caches); a job o
 
 `qwen-linux` is weaker, and the file modes alone cannot make it otherwise. Its
 `ghci` user is in the `docker` group, and on a rootful Docker daemon that is
-root on the distro (`docker run -v /:/h` reads and writes every file in it). The
-same WSL distro hosts a live nexus install and its service (user `nexus`), the
-suite user `nxtest`, and a Windows host whose `C:` drive WSL can mount; the WSL
-data and `.wslconfig` belong to the Windows user. So a test run as `ghci` can
-reach the live install through docker, whatever the modes say. Nothing has
-measured it: `.github/workflows/qwen-linux-isolation-probe.yml` (owner-only
-`workflow_dispatch`, runs on `qwen-linux`) reports docker-group membership,
-passwordless `sudo`, the other users' homes and the docker route to `/home/nexus`
-(expected to succeed today, reported not failed), prints pass or fail and counts
-only (no modes, owners, user names, group lists or file names), and fails on passwordless `sudo`, a
-readable credential file under `/home/nexus/.config/nexus`, and the Windows
-side. **WSL interop and the `/mnt` automount must be OFF before the CI route is
+**root on the distro**: `docker run -v /:/h` reads and writes every file in it,
+the live install's credentials and `/etc/wsl.conf` included. A job could
+therefore rewrite `/etc/wsl.conf` and, at the next WSL restart, bring interop and
+the `/mnt` automount back. The wsl.conf fix defeats `ghci` acting as `ghci`; it
+does not defeat `ghci` acting through docker, and nothing has measured whether
+it survives that. The same WSL distro hosts a live nexus install and its service
+(user `nexus`), the suite user `nxtest`, and a Windows host whose `C:` drive WSL
+can mount; the WSL data and `.wslconfig` belong to the Windows user.
+
+Two controls, and they are different in kind:
+
+- **The per-run Windows-side preflight** (first step of `test-qwen`, before
+  `actions/checkout`, so no repo code has run) fails the job closed on every run
+  unless the kernel is WSL with binfmt_misc mounted (a positive control: every
+  check below is true on a machine that is not WSL), and there is no
+  `WSLInterop` handler, no `cmd.exe` under `/mnt/*/Windows/System32`, no
+  non-empty or mounted `/mnt/<letter>` drive, and no `/mnt` entry on `PATH`. It
+  notices a wsl.conf rewrite after the fact, at the next run that follows a WSL
+  restart. It does not prevent one, and it does not bound docker.
+- **The probe**, `.github/workflows/qwen-linux-isolation-probe.yml` (owner only;
+  triggers: `workflow_dispatch`, which GitHub offers only for a file on the
+  default branch, and a push to a `runner-probe/qwen-*` branch, which is how it
+  runs from develop-era code), checks the unprivileged route once. It FAILS on:
+  a job that is not running as exactly `ghci`; passwordless `sudo`; ANY file
+  under `/home/nexus/.config/nexus` readable by `ghci` (a count, never a name;
+  an absent or unreachable directory is reported as NOT CHECKED, which is also
+  what a closed `/home/nexus` looks like, so it cannot fail); and the Windows
+  side (the preflight's checks plus an attempt to run `cmd.exe`). It REPORTS
+  docker-group membership and whether the daemon is reachable. It runs no
+  container (an image is third-party code on the runner; an earlier draft pulled
+  an unpinned `alpine` and the step was dropped, not pinned). **Its docker
+  report is not a bound on docker.** Its log carries pass or fail and counts
+  only: no modes, owners, user names, group lists or file names. What the probe
+  asserts about file-mode isolation is the credential count and nothing else;
+  that `/home/nexus` or `/home/nxtest` is listable is reported, not failed.
+
+**WSL interop and the `/mnt` automount must be OFF before the route is
 enabled.** Measured on qwentescence with both on: the host admin, running as
 `ghci`, read the Windows user's SSH private key under `/mnt/c` and ran
-`/mnt/c/Windows/System32/cmd.exe` as a Windows admin. The probe enforces the
-fix and fails if any of these holds: `cmd.exe` under `/mnt/<drive>/Windows`
-runs, a `WSLInterop` binfmt handler is enabled, a `/mnt/<letter>` directory is
-mounted and listable, or a `/mnt/<drive>` entry is on the job's `PATH`. The
-fix is host-side, in `/etc/wsl.conf` (`[interop] enabled=false`,
-`appendWindowsPath=false`, `[automount] enabled=false`, then `wsl --shutdown`),
-and it was applied on the host on 2026-10-01 (reported by the host's operator;
-its three checks were run by hand from an `nxtest` ssh session and passed, which
-is not the workflow run as `ghci`). Unset `QWEN_CI_PUSH_RUNNER` means `qwen-linux`,
-so until a `qwen-linux-isolation-probe` run is green, the variable must be
-`ubuntu-latest` (stated above under CI pytest routing too).
-Until a run is green, read this runner's isolation as "intended", with docker as the known hole; a
-separate or rootless Docker for `ghci` is the remedy if Sam wants it closed. `qwen-linux` keeps state between
-jobs too: the docker daemon and its images and tags are shared by every user of
-the distro, and `ghci`'s home keeps the uv, Maven, model and PG-bundle caches and
-the `TMPDIR`.
+`/mnt/c/Windows/System32/cmd.exe` as a Windows admin. The fix is host-side, in
+`/etc/wsl.conf` (`[interop] enabled=false`, `appendWindowsPath=false`,
+`[automount] enabled=false`, then `wsl --shutdown`), and it was applied on the
+host on 2026-10-01 (reported by the host's operator; its checks were run by hand
+from an `nxtest` ssh session and passed, which is not the workflow run as
+`ghci`, and a read of the host showed a WSL kernel, binfmt_misc mounted, no
+`/mnt/<letter>` mount). Until a probe run is green (see the run record above),
+read this runner's isolation as "intended", with docker as the known hole; a
+separate or rootless Docker for `ghci` is the remedy if Sam wants it closed.
+`qwen-linux` keeps state between jobs too: the docker daemon and its images and
+tags are shared by every user of the distro, and `ghci`'s home keeps the uv,
+Maven, model and PG-bundle caches and the `TMPDIR`.
 
 **Before approving a fork-PR run, read its diff for:**
 
@@ -304,8 +349,8 @@ the `TMPDIR`.
   (`docs/**`, `web/**`, root `README.md`, `CHANGELOG*`, `LICENSE*`,
   `conexus/CHANGELOG.md`): `tests/`, `src/`, `scripts/`, `pyproject.toml`,
   `uv.lock`, `service/`, `conexus/` and `sn/` all reach `qwen-linux` at the next
-  owner push to develop (unless `QWEN_CI_PUSH_RUNNER` is `ubuntu-latest`), where
-  the runner user is in the docker group (see above).
+  owner push to develop once `QWEN_CI_PUSH_RUNNER` is `qwen-linux` (the route is
+  opt-in), where the runner user is in the docker group (see above).
 
 **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even
 when they hold the owner's `gh` token. Report the run id and stop; the approval
@@ -382,6 +427,8 @@ make nearly every cut a docs cut.
 The Java **engine-service** binary is a separate release artifact with its own cadence. Conflating it with the PyPI/marketplace release is how the cloud engine silently drifts behind develop (2026-06-26: 22 `service/` commits / 4 days un-deployed, un-cloud-tested).
 
 Build or test the engine through `scripts/mvnw-leased.sh` (never a bare `./mvnw`/`mvn`) — one builder at a time; a concurrent `./mvnw` invocation against the same `service/target` corrupts jOOQ codegen mid-build (nexus-c00dw, see `scripts/lib/build-lease.sh`). The lease lives in the git common dir, so every worktree shares it, and a live holder is waited for rather than refused (`NX_BUILD_LEASE_WAIT`, nexus-g6xpa): one engine build or suite per box. `scripts/build-gate-jar.sh` caches the stamped jar on the exact `service/` content, so a fresh worktree with an unchanged tree gets a copy instead of a nine-minute rebuild. The Python suite reads the same lease at session start (nexus-pv93h): while a build holds it, `pytest` refuses the whole run with one line and exit 75 naming the holder, and `NX_BUILD_LEASE_WAIT=<seconds>` makes it wait instead; `NX_TEST_T2_SUBSTRATE=none` runs are never gated.
+
+  The suite takes a lease of its own, `suite`, under the same root (`tests/_suite_lease.py`), so two full runs on one box see each other. **It fails closed on contention**: a run that finds the lease held (or loses the race for it) exits 75, naming the holder, the lease directory and the recovery command (`rm -rf <lease dir>`, valid only when no pytest run is live). `NX_SUITE_LEASE_WAIT=<any non-zero>` queues behind a live holder for up to 30 minutes instead of refusing, and a lease directory with no readable pid (a run killed between its `mkdir` and its pid write) is reclaimed automatically once it is 60 seconds old, so a corpse cannot wedge the queue. **Fails closed is a claim about contention only**: an unwritable lease root still runs UNGUARDED, silently (`acquire` swallows it and hands back a no-op release), which is why CI's qwen job validates its lease root in a step of its own. `NX_SUITE_LEASE_UNGUARDED=1` (exactly `1`; `true`, `off` or a typo do not count) is the explicit opt-out for a HAND run; no workflow may set it, pinned by `tests/test_suite_lease_unguarded_lint.py`.
 
 - **hellmini is inside the release trust boundary (Sam, 2026-09-28, nexus-yd9po).** The mac-arm64 release legs (native build + PG bundle, in both `engine-service-release.yml` and `pg-bundle-cache-seed.yml`) build on hellmini, a self-hosted Mac mini runner — accepted as trusted infrastructure for release jobs, not merely "another CI box." That means: physical and network access to it are release-security-relevant (same footing as the GH-hosted runners' isolation, minus the ephemerality); and it PERSISTS STATE BETWEEN JOBS — the Maven `~/.m2` cache, `RUNNER_TOOL_CACHE` (GraalVM/uv installs via `actions/setup-*`), and the Homebrew install (flex/bison) all survive across runs, unlike a GH-hosted runner's throwaway VM. `workflow_dispatch`'s `mac_runner` input falls back to `macos-14` when hellmini is down (FileVault reboot waiting on KVM unlock). Since 2026-09-30 a second runner on the same box, `hellmini-ci` (user `ghci`), takes the Service CI Java job on owner pushes so that test code stays off the release runner's caches; the routing, the isolation evidence, the offline toggle and the fork-PR rules are in § Self-hosted runners and fork PRs, and `service-ci.yml`'s comments carry the mechanics.
 - **Artifact + trigger:** an `engine-service-vX.Y.Z` git tag fires `engine-service-release.yml`, which builds + cosign-signs the 3 native binaries (linux-amd64, linux-arm64, mac-arm64 — mac-arm64 now SMOKED, built on the hellmini self-hosted runner which has Docker via colima; nexus-yd9po closed the nexus-4xf5m no-Docker-on-GH-macOS gap for the default tag-push path, a `workflow_dispatch` run that falls back to `macos-14` when hellmini is offline is still unsmoked there; mac-amd64/Intel is not a supported target). It publishes **nothing to PyPI** and is **NOT gated by the luxe6 / RDR-155-P4a develop release boundary** (the workflow header says so explicitly). **The release is a DRAFT until every asset is attached** (nexus-cl14i, after v0.1.95 published PG bundles with no binary): a final `promote-release` job flips it only when both matrices succeeded and all 21 assets are present, so a tag is consumable roughly 35 to 65 minutes (v0.1.118 took 36, a single measurement) after push, never partially; a failed leg, mac-arm64 included, leaves a draft that `gh run rerun --failed` completes and promotes. So the engine can be refreshed in the cloud at any time, independent of the unreleasable-develop state.

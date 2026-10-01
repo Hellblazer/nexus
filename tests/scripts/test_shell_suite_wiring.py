@@ -175,8 +175,13 @@ SUITES = [
         "tests/e2e/lib/commit_scope_audit_test.sh",
         19 if _bin_bash_is_pre_4() else 16,
     ),
-    # 40: Test 10 (the pgid-liveness pin) is among the 40, so deleting it turns this red.
-    _Suite("scripts/lib/build-lease_test.sh", 40),
+    # 40 as an ordinary user, 39 as root: Test 10 (the pgid-liveness pin) takes
+    # one `ok` instead of two when the process is root (measured in
+    # python:3.12-slim, which runs as root: "39 passed, 0 failed"; round-3 review
+    # L1). Same precedent as the /bin/bash floor above: the floor follows the
+    # host, here the effective uid. Nothing known in CI runs as root; a root hand
+    # run or container does. Deleting Test 10 still turns either floor red.
+    _Suite("scripts/lib/build-lease_test.sh", 39 if os.geteuid() == 0 else 40),
     _Suite("scripts/mvnw-leased_test.sh", 22),
 ]
 
