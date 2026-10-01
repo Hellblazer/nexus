@@ -272,3 +272,55 @@ class TestReleaseOnException:
         finally:
             if fh is not None:
                 fh.close()
+
+
+class TestBootSemaphoreDirIsPerUser:
+    """nexus-c6lsu: the boot-lock directory is shared by every Unix user on a box
+    unless the name carries the uid. The first user to boot creates it 0775 and a
+    second user then gets PermissionError opening ``slot-0.lock``, so EVERY
+    substrate-backed test errors at setup (25,716 errors as user ``nxtest``)."""
+
+    def test_two_uids_get_different_directories_under_one_tempdir(self, tmp_path) -> None:
+        from tests._engine_substrate import _boot_semaphore_dir
+
+        assert _boot_semaphore_dir(tmp_path, uid=1001) != _boot_semaphore_dir(tmp_path, uid=1002)
+
+    def test_one_uid_always_gets_the_same_directory(self, tmp_path) -> None:
+        from tests._engine_substrate import _boot_semaphore_dir
+
+        assert _boot_semaphore_dir(tmp_path, uid=1001) == _boot_semaphore_dir(tmp_path, uid=1001)
+
+    def test_the_directory_stays_directly_under_the_tempdir_and_names_the_uid(self, tmp_path) -> None:
+        from tests._engine_substrate import _boot_semaphore_dir
+
+        d = _boot_semaphore_dir(tmp_path, uid=1001)
+        assert d.parent == tmp_path
+        assert d.name.startswith("nexus_t2_substrate_boot_locks") and "1001" in d.name
+
+    def test_the_real_default_is_the_running_users_directory(self) -> None:
+        import os
+        import tempfile
+        from pathlib import Path
+
+        from tests import _engine_substrate as sub
+
+        assert sub._BOOT_SEMAPHORE_DIR == sub._boot_semaphore_dir(Path(tempfile.gettempdir()), uid=os.getuid())
+
+    def test_a_second_users_directory_is_never_the_first_users(self, tmp_path) -> None:
+        """End to end on the real primitive: user A's directory is made unwritable to
+        everyone else (as it is on a real box), and user B's directory still works."""
+        import os
+        import stat
+
+        from tests._engine_substrate import _boot_semaphore_dir
+
+        a = _boot_semaphore_dir(tmp_path, uid=1001)
+        b = _boot_semaphore_dir(tmp_path, uid=1002)
+        with _boot_semaphore_slot(lock_dir=a):
+            pass
+        os.chmod(a, stat.S_IRUSR | stat.S_IXUSR)  # a peer-owned directory this user cannot write
+        try:
+            with _boot_semaphore_slot(lock_dir=b):
+                assert b.is_dir()
+        finally:
+            os.chmod(a, stat.S_IRWXU)

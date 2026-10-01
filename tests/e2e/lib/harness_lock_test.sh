@@ -109,7 +109,8 @@ declare -A HARNESS_LOCKDIR=(
 # fix, mirrors the same fix in all 4 harnesses): a per-context TMPDIR
 # divergence would make this test compute a DIFFERENT lockdir than the
 # harness itself, silently validating nothing.
-LOCKROOT="/tmp/nexus-e2e-locks"
+# Per-user, matching the harnesses (nexus-c6lsu).
+LOCKROOT="/tmp/nexus-e2e-locks-$(id -u)"
 
 for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox; do
     echo
@@ -310,7 +311,7 @@ if [[ "${out6,,}" == *"unbound variable"* ]]; then
 else
     ok "release-sandbox bogus-mode: no unbound-variable leak"
 fi
-rm -rf "/tmp/nexus-e2e-locks/release-sandbox.lock"
+rm -rf "$LOCKROOT/release-sandbox.lock"
 
 # ── gc-ab: no early-exit/validation-guard region exists ──────────────────
 # gc-ab/run-ab.sh takes no CLI arguments at all — a single linear path from
@@ -319,6 +320,41 @@ rm -rf "/tmp/nexus-e2e-locks/release-sandbox.lock"
 # per-harness loop above (the non-vacuity grep for its lock_acquire call)
 # is the only coverage this harness's shape admits; no separate early-exit
 # region test applies here.
+
+# ── per-user lock root (nexus-c6lsu) ─────────────────────────────────────
+# The lock root carries the uid so two Unix users on one box never share (and
+# never fail to create or write into) each other's lockdirs. Simulate two uids
+# with a PATH shim that answers `id -u` and defers everything else to the real
+# `id`, run each harness's self-test seam under both, and require the two lock
+# paths to differ and to name their own uid. The loop above already pins that
+# the REAL harness computes $LOCKROOT, so this proves the uid reaches it.
+echo
+echo "=== per-user lock root ==="
+REAL_ID="$(command -v id)"
+SHIM_DIR="$(mktemp -d "${TMPDIR:-/tmp}/harness_lock_uid_shim.XXXXXX")"
+cat >"$SHIM_DIR/id" <<SHIM
+#!/usr/bin/env bash
+if [[ "\$*" == "-u" ]]; then echo "\${NX_FAKE_UID:?}"; else exec "$REAL_ID" "\$@"; fi
+SHIM
+chmod +x "$SHIM_DIR/id"
+for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox; do
+    script="${HARNESS_SCRIPT[$name]}"
+    args="${HARNESS_ARGS[$name]}"
+    declare -A seen=()
+    for fake in 31337 42424; do
+        # shellcheck disable=SC2086
+        outu="$(cd "$REPO_ROOT" && PATH="$SHIM_DIR:$PATH" NX_FAKE_UID="$fake" NX_E2E_LOCK_SELFTEST=1 bash "$script" $args 2>&1)"
+        seen[$fake]="$(printf '%s\n' "$outu" | sed -n 's/.*lock acquired: \(.*\) (pid .*/\1/p' | head -1)"
+    done
+    if [[ -n "${seen[31337]}" && -n "${seen[42424]}" && "${seen[31337]}" != "${seen[42424]}" \
+          && "${seen[31337]}" == *"-31337/"* && "${seen[42424]}" == *"-42424/"* ]]; then
+        ok "$name: two uids get different lock dirs (${seen[31337]} vs ${seen[42424]})"
+    else
+        bad "$name: lock dir is not per-user: uid 31337 -> '${seen[31337]}', uid 42424 -> '${seen[42424]}'"
+    fi
+    unset seen
+done
+rm -rf "${SHIM_DIR:?}"
 
 echo
 echo "harness_lock_test.sh: ${PASS} passed, ${FAIL} failed"

@@ -490,7 +490,20 @@ _MAX_CONCURRENT_PG_BOOTS = 4
 #: in slot order (0, 1, 2, ...), never a per-boot-named file, so this
 #: directory itself never accumulates debris the way a per-boot tempdir
 #: would.
-_BOOT_SEMAPHORE_DIR = Path(tempfile.gettempdir()) / "nexus_t2_substrate_boot_locks"
+#:
+#: PER USER (nexus-c6lsu): the tempdir is shared by every Unix user on a box, and the first
+#: user to boot creates the directory 0775, so a second user gets PermissionError opening
+#: ``slot-0.lock`` and every substrate test errors at setup. The uid is part of the name, so
+#: each user gets a directory it owns; the cap then bounds one user's concurrent boots.
+_BOOT_SEMAPHORE_DIR_PREFIX = "nexus_t2_substrate_boot_locks"
+
+
+def _boot_semaphore_dir(root: Path, uid: int | None = None) -> Path:
+    """The boot-lock directory for one Unix user under ``root`` (``uid`` defaults to ours)."""
+    return root / f"{_BOOT_SEMAPHORE_DIR_PREFIX}-{os.getuid() if uid is None else uid}"
+
+
+_BOOT_SEMAPHORE_DIR = _boot_semaphore_dir(Path(tempfile.gettempdir()))
 
 #: Generous: a slow/loaded box waiting out a genuine queue of concurrent
 #: boots is expected, not a hang. Failing loud after this window (rather
