@@ -201,9 +201,15 @@ envelope) cannot move; it asserts the refusal or pre-owns its chashes instead.
 `PgContainerHelper.insertOwnedChunks(ctx, tenant, collection, dim, chashes...)` is the
 pre-own form: a zero vector of the collection's width, a live owner, and the test then
 POSTs with `force_re_embed` when it needs the embedder reached (an owned chash with a
-stored vector skips it otherwise). `VectorHandlerUpsertReferenceOnlyTest` (fate pending the conexus relay: its callers may be outside this repo), the
-unregistered-collection test in `VectorHandlerEmbeddingModeTest` and the parity tests in
-`tests/test_chunk_seed.py` are the route-subject tests still waiting for nexus-z0o2p.24.
+stored vector skips it otherwise). nexus-z0o2p.24 (P3.2) landed the refusal and settled the route-subject tests:
+`OwnerlessWriteRefusalTest` pins the refusal (both chunk-write routes, the `force_re_embed` and
+supplied-vector branches, the order of the three 4xx checks, log-only mode, the `/v1/status` counters);
+`VectorHandlerUpsertReferenceOnlyTest` now asserts the retired route answers 410;
+the parity tests in `tests/test_chunk_seed.py` compare the route's CONFLICT write against the helper
+(the route refuses a first write); and `tests/test_z0o2p24_reembed_concurrent_supersede.py` pins the
+`nx collection re-embed` answer to a chunk that loses its owner mid-run. A test that needs the engine
+in log-only mode sets `NX_OWNERLESS_WRITE_MODE=log-only` in the engine's environment; the suite never
+does, so every substrate-backed test runs against the default (enforce).
 
 ## A fresh test host: what it needs, and what the suite provisions itself
 

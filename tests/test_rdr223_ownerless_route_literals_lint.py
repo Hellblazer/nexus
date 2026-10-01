@@ -39,7 +39,7 @@ _METHODS = frozenset({
 _STUBBED = "transport stubbed (patched _post, loopback fake server, fake or in-memory client): never reaches a real engine"
 _SPY = "names the route only to spy on or assert about traffic; writes nothing itself"
 _OWNED = "writes only chashes it seeded and owned first, so the engine accepts it before and after P3.2"
-_ROUTE_SUBJECT = "its subject is the route itself; nexus-z0o2p.24 flips or retires it"
+_ROUTE_SUBJECT = "its subject is the route itself (nexus-z0o2p.24: pins the route's conflict write and its refusal of an ownerless first write)"
 
 _ALLOWED: dict[str, str] = {
     "tests/_owner_write_double.py": "fake owner-write double over a fake T3; no engine",

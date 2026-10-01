@@ -531,9 +531,26 @@ public final class PgVectorRepository {
                                                     List<Map<String, Object>> metadatas,
                                                     boolean forceReEmbed,
                                                     List<String> deleteKeys) {
+        return upsertChunksWithTokens(tenant, collection, ids, documents, metadatas, forceReEmbed,
+                deleteKeys, null);
+    }
+
+    /**
+     * Ownership-guarded sibling (RDR-223 Phase 3 Step 2, nexus-z0o2p.24): {@code guard} non-null
+     * asks for the "every chash has a live manifest row" check before anything is embedded or
+     * written (see {@link #checkOwnership}); {@code null} is the unguarded write every other
+     * caller keeps.
+     */
+    public Tokened<Integer> upsertChunksWithTokens(String tenant, String collection,
+                                                    List<String> ids,
+                                                    List<String> documents,
+                                                    List<Map<String, Object>> metadatas,
+                                                    boolean forceReEmbed,
+                                                    List<String> deleteKeys,
+                                                    OwnershipGuard guard) {
         long[] tokensOut = {0L};
         upsertChunksInternal(tenant, collection, ids, documents, metadatas, tokensOut, null, forceReEmbed,
-                deleteKeys);
+                deleteKeys, guard);
         return new Tokened<>(ids.size(), tokensOut[0]);
     }
 
@@ -542,7 +559,8 @@ public final class PgVectorRepository {
                              List<String> ids,
                              List<String> documents,
                              List<Map<String, Object>> metadatas) {
-        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, false, List.of());
+        upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, false, List.of(),
+                null);
     }
 
     /** {@code forceReEmbed}-aware sibling of {@link #upsertChunks} — see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean)}. */
@@ -552,7 +570,7 @@ public final class PgVectorRepository {
                              List<Map<String, Object>> metadatas,
                              boolean forceReEmbed) {
         upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, forceReEmbed,
-                List.of());
+                List.of(), null);
     }
 
     /** {@code deleteKeys}-aware sibling of {@link #upsertChunks} — see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean, List)}. */
@@ -563,7 +581,7 @@ public final class PgVectorRepository {
                              boolean forceReEmbed,
                              List<String> deleteKeys) {
         upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, null, forceReEmbed,
-                deleteKeys);
+                deleteKeys, null);
     }
 
     /**
@@ -595,6 +613,21 @@ public final class PgVectorRepository {
                                         List<float[]> embeddings,
                                         List<Map<String, Object>> metadatas,
                                         List<String> deleteKeys) {
+        upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas, deleteKeys, null);
+    }
+
+    /**
+     * Ownership-guarded sibling of the passthrough write (RDR-223 Phase 3 Step 2, nexus-z0o2p.24):
+     * see {@link #upsertChunksWithTokens(String, String, List, List, List, boolean, List,
+     * OwnershipGuard)}. Supplied vectors do not exempt a chash from the check.
+     */
+    public void upsertChunksWithVectors(String tenant, String collection,
+                                        List<String> ids,
+                                        List<String> documents,
+                                        List<float[]> embeddings,
+                                        List<Map<String, Object>> metadatas,
+                                        List<String> deleteKeys,
+                                        OwnershipGuard guard) {
         // nexus-e0hd2 review F2: this is the server-to-server ingest path
         // (MigrationHandler /ingest-cloud) — ids arrive from an EXTERNAL
         // source with no HTTP-boundary validation. Validate here so a
@@ -618,7 +651,95 @@ public final class PgVectorRepository {
         // forceReEmbed is ever consulted. Pass false — never wire this true here,
         // it would be dead plumbing with no behavioral effect.
         upsertChunksInternal(tenant, collection, ids, documents, metadatas, null, embeddings, false,
-                deleteKeys);
+                deleteKeys, guard);
+    }
+
+    /** Chashes per ownership-check query (well under the Bind-message parameter ceiling). */
+    private static final int OWNERSHIP_CHECK_BATCH = 300;
+
+    /** Metadata keys a would-refuse / refused log line carries for the first unowned chunk, to name its writer. */
+    private static final List<String> OWNERSHIP_LOG_META_KEYS =
+            List.of("source_path", "source_uri", "title", "source_agent", "content_type", "store_type");
+
+    /**
+     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): every chash in {@code ids} must already have a LIVE
+     * manifest row in {@code collection}, i.e. a {@code catalog_document_chunks} row whose
+     * document is not tombstoned (the same owner {@code nexus.chunk_live_owners} reports, so "owned"
+     * here is exactly "live(c)"). Anything else is an ownerless write: this route would put a chunk in
+     * the collection that no document owns, which is what {@code /v1/catalog/manifest/write_many}
+     * and {@code /append} exist to prevent.
+     *
+     * <p>Runs in its own short read transaction BEFORE embedding. The embedder call must stay
+     * outside any transaction (RDR-181), so the check cannot share the write's transaction; a chash
+     * that loses its last owner between this read and the write is one a live document owned a
+     * moment earlier, and the write only rewrites that existing chunk row (it creates nothing a
+     * reaper would not already see), so the window is accepted.
+     *
+     * <p>A supplied field naming a document or owner never satisfies the check: only a manifest
+     * row does. Duplicate ids count once.
+     *
+     * @throws OwnerlessChunkWriteException under {@link OwnerlessWriteMode#ENFORCE} when any chash is unowned
+     */
+    private void checkOwnership(String tenant, String collection, List<String> ids,
+                                List<Map<String, Object>> metadatas, OwnershipGuard guard) {
+        List<String> distinct = new ArrayList<>(new java.util.LinkedHashSet<>(ids));
+        Set<String> owned = new HashSet<>(distinct.size() * 2);
+        for (int start = 0; start < distinct.size(); start += OWNERSHIP_CHECK_BATCH) {
+            List<byte[]> batch = new ArrayList<>(OWNERSHIP_CHECK_BATCH);
+            for (String hex : distinct.subList(start, Math.min(start + OWNERSHIP_CHECK_BATCH, distinct.size()))) {
+                batch.add(dev.nexus.service.db.Chash.fromHex(hex).toBytes());
+            }
+            List<String> hits = tenantScope.withTenant(tenant, ctx ->
+                ctx.selectDistinct(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH))
+                   .from(CATALOG_DOCUMENT_CHUNKS)
+                   .join(CATALOG_DOCUMENTS)
+                       .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                   .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                       .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                       .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(batch))
+                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                   .fetch(0, String.class));
+            owned.addAll(hits);
+        }
+        List<String> unowned = new ArrayList<>();
+        for (String hex : distinct) {
+            if (!owned.contains(hex)) {
+                unowned.add(hex);
+            }
+        }
+        if (unowned.isEmpty()) {
+            return;
+        }
+        List<String> sample = unowned.subList(0, Math.min(8, unowned.size()));
+        // Name the writer: the first unowned chunk's own metadata (source_path, source_agent, ...) is
+        // what tells an operator which client sent it, since the request carries no client identity.
+        String writer = "";
+        int firstIdx = ids.indexOf(unowned.get(0));
+        if (metadatas != null && firstIdx >= 0 && firstIdx < metadatas.size() && metadatas.get(firstIdx) != null) {
+            Map<String, Object> meta = metadatas.get(firstIdx);
+            StringBuilder sb = new StringBuilder();
+            for (String key : OWNERSHIP_LOG_META_KEYS) {
+                Object v = meta.get(key);
+                if (v != null && !String.valueOf(v).isBlank()) {
+                    String text = String.valueOf(v).replaceAll("\\s+", " ");
+                    sb.append(key).append('=').append(text, 0, Math.min(120, text.length())).append(';');
+                }
+            }
+            writer = sb.toString();
+        }
+        log.warn("event={} route={} tenant={} collection={} unowned={} requested={} sample={} first_chunk_meta=[{}]",
+                guard.mode() == OwnerlessWriteMode.ENFORCE
+                        ? "ownerless_chunk_write_refused" : "ownerless_chunk_write_would_refuse",
+                guard.route(), tenant, collection, unowned.size(), distinct.size(), String.join(",", sample),
+                writer);
+        if (guard.mode() == OwnerlessWriteMode.LOG_ONLY) {
+            OwnerlessWriteActivity.recordWouldRefuse();
+            return;
+        }
+        OwnerlessWriteActivity.recordRefused();
+        throw new OwnerlessChunkWriteException(
+                guard.route(), collection, unowned.size(), distinct.size(), sample);
     }
 
     private void upsertChunksInternal(String tenant, String collection,
@@ -628,9 +749,18 @@ public final class PgVectorRepository {
                                       long[] tokensOut,
                                       List<float[]> providedEmbeddings,
                                       boolean forceReEmbed,
-                                      List<String> deleteKeys) {
+                                      List<String> deleteKeys,
+                                      OwnershipGuard guard) {
         if (ids.isEmpty()) return;
         int dim = dimForCollection(tenant, collection);
+
+        // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the ownership check runs here, after the
+        // collection resolved (an unregistered collection answers 'register it first' ahead of
+        // this) and BEFORE the force_re_embed / supplied-vector / existence-partition branches and
+        // BEFORE embedding, so a refused write never pays the embedder and no branch skips it.
+        if (guard != null) {
+            checkOwnership(tenant, collection, ids, metadatas, guard);
+        }
 
         // De-duplicate IDs (first-wins, matching T3Database._write_batch). Also required
         // for correctness: ON CONFLICT cannot affect the same row twice within one
@@ -974,6 +1104,11 @@ public final class PgVectorRepository {
 
     // -------------------------------------------------------------------------
     // RDR-169 G4: embed-without-store / reference-only upsert
+    //
+    // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): POST /v1/vectors/upsert-reference-only is RETIRED
+    // (410). This repository method has no HTTP route and no production caller; it stays as the
+    // writer of reference-only rows for tests (and for a future RDR-169 G4 writer, which would
+    // write through the combined routes). Do not add a route over it without a manifest row.
     // -------------------------------------------------------------------------
 
     /**
@@ -1823,9 +1958,16 @@ public final class PgVectorRepository {
      */
     public Tokened<String> putWithTokens(String tenant, String collection, String docId,
                                           String content, Map<String, Object> metadata) {
+        return putWithTokens(tenant, collection, docId, content, metadata, null);
+    }
+
+    /** Ownership-guarded sibling (RDR-223 Phase 3 Step 2, nexus-z0o2p.24); {@code null} guard is the plain put. */
+    public Tokened<String> putWithTokens(String tenant, String collection, String docId,
+                                          String content, Map<String, Object> metadata,
+                                          OwnershipGuard guard) {
         Tokened<Integer> result = upsertChunksWithTokens(
             tenant, collection, List.of(docId), List.of(content),
-            List.of(metadata != null ? metadata : Map.of()));
+            List.of(metadata != null ? metadata : Map.of()), false, List.of(), guard);
         return new Tokened<>(docId, result.tokens());
     }
 

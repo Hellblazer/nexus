@@ -265,15 +265,64 @@ chunk owned.
    `src/nexus/indexer.py:5598` becomes a counted event that writes no chunks,
    and the registration gap behind it is fixed. No ghost documents.
 5. **Refuse ownerless writes, last (closes Gap 3).** Once the client release
-   carrying step 3 is the paired release, `upsert-chunks`, `store-put` and
-   `upsert-reference-only` accept a write only when every chash in it already
-   has a live manifest row in that collection, checked inside the write's own
-   transaction; that keeps `collection re-embed` and metadata refreshes of
-   owned chunks working. Every other write is refused (422) with an error
-   naming the combined routes. A request field naming an owner is not enough,
-   because these routes never write manifest rows. `upsert-reference-only`
-   has no client caller (R-12); if RDR-169's G4 is built, it writes through
-   the combined routes.
+   carrying step 3 is the paired release, `upsert-chunks` and `store-put`
+   accept a write only when every chash in it already has a live manifest row
+   in that collection; that keeps `collection re-embed` and metadata
+   refreshes of owned chunks working. Every other write is refused (422) with
+   an error naming the combined routes. A request field naming an owner is
+   not enough, because these routes never write manifest rows.
+   `upsert-reference-only` is retired (410 Gone) rather than guarded: it had
+   no client caller (R-12), it could not write a new chunk once the refusal
+   applied (the manifest FK wants the chunk first, the refusal wants the
+   manifest first), and the production edge log shows no request to it in the
+   90 days from 2026-07-03 to 2026-10-01 (Sam, 2026-10-01). If RDR-169's G4 is
+   built, it writes through the combined routes.
+
+   As built (nexus-z0o2p.24):
+   - *Where.* The handlers pass an ownership guard to the repository's upsert
+     methods; the repository methods called without one (the contract and
+     fixture tests, the migration ingest) are unchanged. The check runs after
+     the collection resolves and BEFORE the `force_re_embed`, supplied-vector
+     and existence-partition branches and before embedding, so no branch skips
+     it and a refused write never pays the embedder. It cannot share the
+     write's transaction, because the embedder call must stay outside any
+     transaction (RDR-181): it is a short read of live manifest rows. A chash
+     that loses its last owner between that read and the write is one a live
+     document owned a moment earlier, and the write only rewrites the existing
+     chunk row.
+   - *Order of the 4xx answers.* A wrong-width id is 400 (`Chash.requireCanonical`
+     in the handler, before the repository is reached); an unregistered
+     collection is the "register it first" 422 (`dimForCollection`, the first
+     statement of the repository write); the ownership refusal comes after both.
+     `OwnerlessWriteRefusalTest` pins the order, including that an ownerless
+     write with a throwing embedder is 422, not 503.
+   - *Mode.* `NX_OWNERLESS_WRITE_MODE` is `enforce` (the default, and the
+     setting for the final cut) or `log-only`. Log-only writes as before and
+     logs one `ownerless_chunk_write_would_refuse` line per request, naming the
+     route, the collection, a sample of the chashes and the first chunk's
+     `source_path`/`title`/`source_agent`, and counts them in
+     `ownerless_writes_would_refuse_total` on `GET /v1/status` (enforce counts
+     `ownerless_writes_refused_total`). The engine, not a client-side probe, is
+     the oracle for which writers remain: a probe cannot see a subprocess, a
+     shell script or a Java HTTP writer.
+   - *Wire.* The 422 body carries `reason: "ownerless_chunk_write"` plus
+     `unowned_count`, `requested_count` and `unowned_chashes` (a sample of at
+     most eight).
+   - *Re-embed.* `nx collection re-embed` reads a live page and writes it back;
+     a chunk that lost its owner in between would 422 the whole request. On
+     that refusal the client re-reads the batch through the live-filtered get
+     and resends only the chashes still owned (`_upsert_reembed_batch`).
+   - *`store-put`.* The route stays, guarded by the same check. No client in
+     this repository calls it (the note writers moved to `write_many` in
+     Phase 2) but nothing here shows it has no production caller, and a route
+     is not retired without that evidence; with the guard it can only rewrite
+     an owned chunk.
+   - *Cutover.* The ledger entry is `[not-additive]`: an installed pre-RDR-223
+     client gets 422 on its ownerless writes. Every long-lived `nx-mcp` server
+     and every hook-spawned `nx` on a machine runs the code it started with, so
+     after the upgrade each must be RESTARTED, not merely upgraded; until it
+     is, its writes are refused. The deploy is armed with conexus before the
+     paired client tag is pushed (AGENTS.md, nexus-1emxn rule (b)).
 
 ### Existing Infrastructure Audit
 
@@ -424,8 +473,10 @@ reaper and census tests build orphan states through substrate SQL instead of
 #### Step 2: Refuse
 
 Once the client release carrying Phase 2 is the paired release, the engine
-applies Technical Design 5's rule to `upsert-chunks`, `store-put` and
-`upsert-reference-only`. Delete the dead
+applies Technical Design 5's rule to `upsert-chunks` and `store-put`, and
+retires `upsert-reference-only` (410). Built and gated as nexus-z0o2p.24;
+ship the check log-only first and read the engine's would-refuse log before
+the final cut (Technical Design 5, "As built"). Delete the dead
 paths (`db/reconcile.verify_fill_*`, `db/embed_migrate`). If nexus-b50zw
 closes, retire the staging routes.
 
@@ -545,6 +596,13 @@ per-path beads.
 - `scripts/sql/livec_census.sql`
 
 ## Revision History
+
+- 2026-10-01: Phase 3 Step 2 built (nexus-z0o2p.24): the ownership guard,
+  log-only mode and counters, the 410 on `upsert-reference-only`, the
+  re-embed answer, and the cutover note (restart long-lived `nx-mcp`
+  servers). Technical Design 5 gained an "As built" block; the "inside the
+  write's own transaction" wording is replaced by the pre-embed read it
+  actually is.
 
 - 2026-09-28: Gate round 2 — PASSED (0 Critical, 2 Significant, 0 ship-blocker(s)); commit `83f6b9197`; critique `nexus_rdr/223-gate-critique-2026-09-28-r2`.
 

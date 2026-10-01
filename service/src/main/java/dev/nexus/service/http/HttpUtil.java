@@ -188,6 +188,11 @@ public final class HttpUtil {
      *       {@code (tenant, collection)} with no catalog row
      *       ({@link #UNREGISTERED_COLLECTION_REASON}); the body also carries
      *       {@code tenant}, {@code collection} and {@code remedy}.</li>
+     *   <li>{@code ownerless_chunk_write} (422): {@code upsert-chunks} or {@code store-put}
+     *       was asked to write a chash with no live manifest row in the collection
+     *       ({@link #OWNERLESS_CHUNK_WRITE_REASON}, RDR-223 Phase 3 Step 2); the body also
+     *       carries {@code unowned_count}, {@code requested_count} and {@code unowned_chashes}
+     *       (a sample), and {@code error} names the combined write routes that replace it.</li>
      * </ul>
      * The typed 409 bodies predate the rule and discriminate on {@code status}
      * ({@code conflict_running}, {@code stale_run}) or on {@code constraint}; those
@@ -478,6 +483,10 @@ public final class HttpUtil {
     /** The {@code reason} value on the typed 422 for an unregistered collection
      *  (nexus-bgvnx). Part of the wire contract: clients key on it. */
     static final String UNREGISTERED_COLLECTION_REASON = "unregistered_collection";
+
+    /** The {@code reason} value on the typed 422 for an ownerless chunk write
+     *  (RDR-223 Phase 3 Step 2, nexus-z0o2p.24). Part of the wire contract: clients key on it. */
+    static final String OWNERLESS_CHUNK_WRITE_REASON = "ownerless_chunk_write";
 
     /** PostgreSQL SQLSTATE for a plain {@code RAISE EXCEPTION} with no explicit
      *  {@code ERRCODE} (the {@code raise_exception} default class). */
