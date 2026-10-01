@@ -952,6 +952,10 @@ def _boot() -> dict:
         "NX_DB_ADMIN_PASS": "",
     }
     env.pop("NX_STORAGE_BACKEND", None)
+    # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): an UNSET NX_OWNERLESS_WRITE_MODE is log-only on the
+    # engine, but the suite pins the posture the local launch ships (enforce) so every substrate-backed
+    # test sees the refusal. An explicit value in the caller's environment (a log-only census run) wins.
+    env.setdefault("NX_OWNERLESS_WRITE_MODE", "enforce")
     if onnx_root is not None:
         env["NX_ONNX_MODEL_DIR"] = str(onnx_root)
     # Engine output goes to a FILE, never a PIPE (nexus-j0nec root cause):

@@ -46,6 +46,9 @@ fi
 
 SVCPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
 export NX_SERVICE_PORT=$SVCPORT NX_SERVICE_TOKEN=smoketoken NX_EMBED_MODE=onnx
+# RDR-223 P3.2 (nexus-z0o2p.24): an unset NX_OWNERLESS_WRITE_MODE is log-only on the engine; the smoke
+# runs the posture the local launch ships (enforce) unless the caller asks for the log-only census.
+export NX_OWNERLESS_WRITE_MODE="${NX_OWNERLESS_WRITE_MODE:-enforce}"
 # The real-client probes below run `uv run python` from THIS checkout, which the
 # nexus-a2qhz production-write guard classifies as a dev checkout: every HTTP
 # write it makes needs the reason-bearing opt-in or it is refused (burned
@@ -510,6 +513,44 @@ json.dump({'collection': e['RCOL'], 'doc_id': e['CHASH1'], 'content': e['RTEXT1'
       echo "  ok   store-put (owned chash) -> 200"
     else
       echo "  FAIL store-put (owned chash) -> $rsp: $(head -c200 "$SMOKE_TMP/ns-rerank-sp.out")"; fail=1
+    fi
+    # RDR-223 P3.2 (nexus-z0o2p.24): the NEGATIVE leg. A chash with no manifest row is refused 422
+    # by both chunk-write routes, with the typed reason a client keys on and the combined routes
+    # named; the retired reference-only route answers 410. Also the only native-image probe of the
+    # refusal path (a new exception type, a record and a new JSON arm).
+    ORPHAN="$(printf 'd%.0s' {1..64})"
+    ORPHAN="$ORPHAN" RCOL="$RCOL" python3 -c "
+import json, os
+e = os.environ
+json.dump({'collection': e['RCOL'], 'ids': [e['ORPHAN']], 'documents': ['an ownerless chunk'],
+           'metadatas': [{}]}, open(e['SMOKE_TMP'] + '/ns-orphan-up.in', 'w'))
+json.dump({'collection': e['RCOL'], 'doc_id': e['ORPHAN'], 'content': 'an ownerless chunk'},
+          open(e['SMOKE_TMP'] + '/ns-orphan-sp.in', 'w'))"
+    oup=$(curl -s -o "$SMOKE_TMP/ns-orphan-up.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      --data-binary "@$SMOKE_TMP/ns-orphan-up.in" "$U/v1/vectors/upsert-chunks")
+    osp=$(curl -s -o "$SMOKE_TMP/ns-orphan-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      --data-binary "@$SMOKE_TMP/ns-orphan-sp.in" "$U/v1/vectors/store-put")
+    for leg in up sp; do
+      ocode=$([ "$leg" = up ] && echo "$oup" || echo "$osp")
+      if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
+        # Writer-census posture: the engine inherits the mode and accepts the write.
+        if [ "$ocode" = "200" ]; then echo "  ok   $leg ownerless chash -> 200 (log-only)"; else
+          echo "  FAIL $leg ownerless chash (want 200 in log-only) -> $ocode"; fail=1; fi
+      elif [ "$ocode" = "422" ] && OLEG="$leg" python3 -c "
+import json, os, sys
+b = json.load(open(os.environ['SMOKE_TMP'] + '/ns-orphan-' + os.environ['OLEG'] + '.out'))
+sys.exit(0 if b.get('reason') == 'ownerless_chunk_write' and '/v1/catalog/manifest/write_many' in b['error'] and '/v1/catalog/manifest/append' in b['error'] else 1)" 2>/dev/null; then
+        echo "  ok   $leg ownerless chash -> 422 ownerless_chunk_write naming write_many/append"
+      else
+        echo "  FAIL $leg ownerless chash (want 422 ownerless_chunk_write) -> $ocode: $(head -c200 "$SMOKE_TMP/ns-orphan-$leg.out")"; fail=1
+      fi
+    done
+    rro=$(curl -s -o "$SMOKE_TMP/ns-orphan-ro.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
+      -d "{\"collection\":\"$RCOL\",\"chash\":\"$ORPHAN\",\"embedding\":[0.1]}" "$U/v1/vectors/upsert-reference-only")
+    if [ "$rro" = "410" ]; then
+      echo "  ok   upsert-reference-only (retired) -> 410"
+    else
+      echo "  FAIL upsert-reference-only (want 410) -> $rro: $(head -c200 "$SMOKE_TMP/ns-orphan-ro.out")"; fail=1
     fi
     rcode=$(curl -s -o "$SMOKE_TMP/ns-rerank.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       -d "{\"query\":\"how do I bake bread\",\"collections\":[\"$RCOL\"],\"n_results\":2,\"rerank\":true}" \

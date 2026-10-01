@@ -39,7 +39,7 @@ _METHODS = frozenset({
 _STUBBED = "transport stubbed (patched _post, loopback fake server, fake or in-memory client): never reaches a real engine"
 _SPY = "names the route only to spy on or assert about traffic; writes nothing itself"
 _OWNED = "writes only chashes it seeded and owned first, so the engine accepts it before and after P3.2"
-_ROUTE_SUBJECT = "its subject is the route itself; nexus-z0o2p.24 flips or retires it"
+_ROUTE_SUBJECT = "its subject is the route itself (nexus-z0o2p.24: pins the route's conflict write and its refusal of an ownerless first write)"
 
 _ALLOWED: dict[str, str] = {
     "tests/_owner_write_double.py": "fake owner-write double over a fake T3; no engine",
@@ -71,6 +71,8 @@ _ALLOWED: dict[str, str] = {
     "tests/test_vector_retry.py": _STUBBED,
     "tests/test_z0o2p16_store_put_note_writer.py": _SPY,
     "tests/test_z0o2p19_nxexp_import_combined_write.py": _SPY,
+    "tests/test_z0o2p24_client_version_header.py": _STUBBED + " (the opener is replaced; the request is captured, never sent)",
+    "tests/test_z0o2p24_reembed_concurrent_supersede.py": _OWNED + "; the one chash that loses its owner mid-run is refused by the engine by design and the client resends the rest (a fake db covers the other branches)",
     "tests/test_znwc2_response_shape_trust.py": _STUBBED,
 }
 
