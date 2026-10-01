@@ -237,17 +237,25 @@ jobs:
         # skipping would leave a non-owner push untested instead of rerouting
         # it: the hosted shards run whenever this output is not `qwen-linux`.
         #
-        # THE TOGGLE. Set the repository variable QWEN_CI_PUSH_RUNNER to exactly
+        # THE TOGGLE. Set the repository variable QWEN_CI_PUSH_RUNNER to
         # `ubuntu-latest` (Settings > Secrets and variables > Actions >
         # Variables) and the next owner push runs the hosted shards, with no
         # code change; delete the variable to return to qwen-linux. That one
-        # value is the only override: unset, any other value, `hellmini` and
-        # `hellmini-ci` included, a typo, all mean qwen-linux. The two outputs
+        # value is the only override, and the comparison ignores case like
+        # every GitHub `==` (`Ubuntu-Latest` routes hosted too): unset, any
+        # other value, `hellmini` and `hellmini-ci` included, a typo, all mean
+        # qwen-linux. The two outputs
         # are the only two this expression can produce, and the qwen job's
         # runs-on is a literal label set, so the variable can never send a push
         # to a release or Service CI runner and a typo cannot queue a job for a
-        # label no runner has. Read at job start: a run already queued for a
-        # dead runner must be cancelled and re-run to pick the variable up.
+        # label no runner has. The variable is read when the `changes` job runs,
+        # and "Re-run failed jobs" does not re-run `changes` because it
+        # succeeded: a re-run of only the failed jobs keeps the OLD `ci_runner`
+        # output. To flip the route for a commit already pushed, use "Re-run
+        # all jobs" (or push a new commit); cancelling and re-running only the
+        # queued qwen job does nothing. There is NO automatic fallback if the
+        # runner is offline: the qwen job queues, pytest-gate pends until the
+        # 24 h limit, and someone must set the variable.
         #
         # This is a ROUTING RULE, NOT a security boundary (same caveat as
         # service-ci.yml: the expression lives in a file whoever can push a
@@ -832,10 +840,30 @@ jobs:
     # private TMPDIR (/home/ghci/tmp, set in the runner's .env) and JAVA_HOME
     # (OpenJDK 25.0.4.1, same file). The host also serves production llama
     # inference, so a suite run costs it about 10% decode while it runs
-    # (accepted by Sam). A hand-run suite by the `nxtest` user can overlap this
-    # job on the same box; the host owner adds a guard only if that bites, none is
-    # built here. The host's glibc is too new for release artifacts, so this
-    # runner takes tests only, never a release job.
+    # (accepted by Sam). The host's glibc is too new for release artifacts, so
+    # this runner takes tests only, never a release job. The same WSL distro
+    # also hosts a live nexus install (user `nexus`), and `ghci` is in the
+    # `docker` group, which is root on the distro: isolation of this job from
+    # that install is intended, not proven (AGENTS.md § Self-hosted runners and
+    # fork PRs; the probe workflow is qwen-linux-isolation-probe.yml).
+    #
+    # THE SHARED SUITE LEASE. A hand-run suite by the `nxtest` user overlapping
+    # this job would put two `-n 12` runs (about 60 GB) on a 40 GB WSL VM that
+    # hosts the live service, so the two serialize on ONE lease. The suite lease
+    # (tests/_suite_lease.py) and the build lease (scripts/lib/build-lease.sh)
+    # both live under NX_BUILD_LEASE_ROOT, which defaults to the checkout's git
+    # dir, and a CI checkout and nxtest's clone have different ones. The job
+    # therefore points NX_BUILD_LEASE_ROOT at a host directory both users
+    # share (QWEN_SUITE_LEASE_ROOT, default /var/lib/nx-suite-lease; the
+    # repository variable of the same name overrides it) and sets
+    # NX_SUITE_LEASE_WAIT=1 so an overlap queues instead of failing the job
+    # with exit 75. The directory must exist and be writable by ghci, and must
+    # NOT be sticky (a sticky bit would stop either user reclaiming the other's
+    # dead lease); the lease step fails loud, with the setup text, when it is
+    # not, because tests/_suite_lease.py itself runs UNGUARDED, silently, on an
+    # unwritable root. Every hand run by nxtest must export the same two
+    # variables (its .bashrc). Both ends are host state this file cannot
+    # enforce; the lease step proves ghci's end every run.
     #
     # LABELS. `[self-hosted, Linux, X64, qwen-linux]` is the full label set the
     # runner carries (read from the repository's runner list on 2026-10-01):
@@ -898,8 +926,12 @@ jobs:
       NX_T2_SUBSTRATE_EXPECTED: "1"
       # The shards pin 3.12 through setup-uv's python-version input.
       UV_PYTHON: "3.12"
+      # The directory ghci and nxtest share for the suite and build leases (see
+      # THE SHARED SUITE LEASE above). The lease step validates it and then
+      # exports NX_BUILD_LEASE_ROOT and NX_SUITE_LEASE_WAIT for the later steps.
+      QWEN_SUITE_LEASE_ROOT: ${{ vars.QWEN_SUITE_LEASE_ROOT || '/var/lib/nx-suite-lease' }}
     steps:
-      - name: Self-hosted runner consistency check and toolchain preflight
+      - name: Self-hosted runner consistency check
         shell: bash
         env:
           ACTOR_ID: ${{ github.actor_id }}
@@ -910,12 +942,62 @@ jobs:
           set -euo pipefail
           # Consistency check, not a security control (see the `route` step):
           # the routing should never have sent any other event or account here.
+          # It is the only guard for a partial "Re-run failed jobs" by another
+          # account, which keeps the old `changes` output and so lands here.
           if [ "$GITHUB_EVENT_NAME" != "push" ] || [ "$ACTOR_ID" != "$OWNER_ID" ] || [ "$TRIGGERING_ACTOR" != "$OWNER" ]; then
             echo "::error::routing inconsistency: a self-hosted runner got event=$GITHUB_EVENT_NAME actor_id=$ACTOR_ID triggering_actor=$TRIGGERING_ACTOR (expected an owner push)"
             exit 1
           fi
+
+      - name: Shared suite lease directory (must exist, writable, not sticky)
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$QWEN_SUITE_LEASE_ROOT"
+          fix="Host admin, once: sudo groupadd -f nx-suite; sudo usermod -aG nx-suite ghci; sudo usermod -aG nx-suite nxtest; sudo install -d -o root -g nx-suite -m 2775 $root; then restart the runner service (new group) and have nxtest export NX_BUILD_LEASE_ROOT=$root NX_SUITE_LEASE_WAIT=1 in its .bashrc."
+          if [ ! -d "$root" ] || [ -L "$root" ]; then
+            echo "::error::suite lease directory $root is missing (or a symlink); this job would run without the guard against a hand-run suite. $fix"
+            exit 1
+          fi
+          if [ -k "$root" ]; then
+            echo "::error::suite lease directory $root has the sticky bit: neither user could reclaim the other's dead lease, and the next run would wait out its timeout. Fix: sudo chmod 2775 $root. $fix"
+            exit 1
+          fi
+          probe="$root/.write-probe.$$"
+          if ! mkdir "$probe" 2>/dev/null; then
+            echo "::error::$(id -un) cannot create entries in $root (mode $(stat -c %a "$root"), owner $(stat -c %U:%G "$root"), groups of $(id -un): $(id -Gn)). tests/_suite_lease.py would run unguarded without saying so. $fix"
+            exit 1
+          fi
+          rmdir "$probe"
+          {
+            echo "NX_BUILD_LEASE_ROOT=$root"
+            echo "NX_SUITE_LEASE_WAIT=1"
+          } >> "$GITHUB_ENV"
+          echo "suite lease root: $root (mode $(stat -c %a "$root"), $(stat -c %U:%G "$root"))"
+
+      - name: Toolchain preflight
+        shell: bash
+        run: |
+          set -euo pipefail
           # Preflight: name a missing host prerequisite at once instead of
           # failing minutes later inside uv, maven or a prime action.
+          # TMPDIR stays on the runner's persistent private directory ON
+          # PURPOSE (service-ci pins it to RUNNER_TEMP; this job must not):
+          # the test substrate's orphan sweep (tests/_engine_substrate.py)
+          # finds a killed run's Postgres cluster and engine JVM through
+          # sidecar files under tempfile.gettempdir(), at the start of the next
+          # boot. The runner empties RUNNER_TEMP at the end of every job, which
+          # would delete those sidecars together with a cancelled run's live
+          # data directory and leave its postmaster and JVM running with no one
+          # able to find them. /tmp and /var/tmp are shared with nxtest and
+          # nexus, so they are refused.
+          case "${TMPDIR:-}" in
+            ""|/tmp|/tmp/*|/var/tmp|/var/tmp/*)
+              echo "::error::TMPDIR is '${TMPDIR:-unset}': the runner's .env must set a private persistent directory (/home/ghci/tmp), not a path shared with the other users of this distro"
+              exit 1
+              ;;
+          esac
+          mkdir -p "$TMPDIR"
           missing=""
           for tool in uv java git curl tar shasum docker; do
             command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
@@ -932,7 +1014,7 @@ jobs:
             echo "::error::docker is not reachable by $(id -un) (the jOOQ codegen in build-gate-jar.sh needs it)"
             exit 1
           fi
-          echo "runner user: $(id -un)  TMPDIR=${TMPDIR:-unset}"
+          echo "runner user: $(id -un)  TMPDIR=$TMPDIR ($(du -sh "$TMPDIR" 2>/dev/null | cut -f1) in use)"
           uv --version
           java -version 2>&1 | head -1
           docker --version
@@ -940,7 +1022,13 @@ jobs:
           free -g | head -2
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v5
-        # No fetch-tags or fetch-depth, same as the `test` shards (nexus-dhs30).
+        with:
+          # No fetch-tags or fetch-depth, same as the `test` shards (nexus-dhs30).
+          # The job token must not sit in a persistent workspace's .git/config
+          # after the job (this runner keeps its workspace). Nothing later
+          # pushes or fetches with it; the prime-* actions pass github.token
+          # through their own env.
+          persist-credentials: false
 
       - name: Prime bge-768 ONNX (cache or self-hosted asset)
         # Same step and reason as the shards: the engine jar constructs
@@ -967,9 +1055,22 @@ jobs:
         # tee's status and a red suite reports green.
         run: |
           set -euo pipefail
-          uv run pytest tests/ -q -n 12 --durations=25 | tee suite-output.txt
+          # -rs puts every skip reason in the log, so the first runs can be
+          # diffed against a hosted run of the same tree (see the floor step).
+          uv run pytest tests/ -q -rs -n 12 --durations=25 | tee suite-output.txt
 
       - name: Executed-count floor (a run that skipped its corpus must not report green)
+        # TODO(qwen-floor): 20000 is deliberately loose. Measured by hand on
+        # d572ba7b0: 25,705 passed here against about 27.7k summed from the
+        # hosted shards, a gap of about 2k that is unexplained and plausibly
+        # tests skipped for a tool this box lacks, so this job is the SOLE suite
+        # gate on an owner push yet would pass with up to ~5.7k tests silently
+        # missing. RECONCILIATION STEP, on the first real run: diff the `-rs`
+        # skip reasons in suite-output.txt against a hosted run of the same
+        # tree (docs/contributing.md, "First run of the qwen-linux route"), fix
+        # or accept each reason, then raise the floor to about measured minus
+        # 2% (a measured 25,700 means about 25,200). Until then do not read a
+        # green floor as parity with the hosted shards.
         run: uv run python scripts/check_lint_leg_non_vacuity.py suite-output.txt --floor 20000 --label "qwen-linux full suite"
 
       - name: Report substrate processes left behind (report only)
@@ -984,6 +1085,13 @@ jobs:
             echo "::warning::processes of $(id -un) still running after the suite (listed above)"
           else
             echo "no substrate processes left behind"
+          fi
+          # The persistent TMPDIR is reaped by the next boot's orphan sweep;
+          # say how big it is and what it still holds, so growth is visible.
+          echo "TMPDIR $TMPDIR: $(du -sh "$TMPDIR" 2>/dev/null | cut -f1) in use, $(find "$TMPDIR" -maxdepth 1 -name 'nexus_t2_substrate_pg_*' 2>/dev/null | wc -l) substrate cluster dir(s)"
+          if docker ps -q 2>/dev/null | grep -q .; then
+            echo "::warning::containers still running on the shared docker daemon after the suite:"
+            docker ps --format '{{.ID}} {{.Image}} {{.Names}}' 2>&1 | head -20
           fi
 
   test-lint:

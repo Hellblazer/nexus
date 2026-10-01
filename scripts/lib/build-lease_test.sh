@@ -336,6 +336,34 @@ else
     bad "lease dir still present after both wrappers finished"
 fi
 
+# ── Test 10: a process group owned by ANOTHER USER is alive, not stale ───
+# Two users sharing one lease root (NX_BUILD_LEASE_ROOT) is the shape: the
+# holder's `kill -0 -- -PGID` gets EPERM from the second user, which must
+# read as "still held" (build-lease.sh header), not as a dead group.
+echo "Test 10: a group the caller cannot signal (another user's) counts as alive"
+repo10="$WORKDIR/repo10"
+_fake_repo "$repo10"
+if [[ "$(id -u)" -eq 0 ]]; then
+    ok "skipped: root can signal every group (no EPERM to observe)"
+else
+    # Not group 1: `kill -0 -- -1` is "every process" (pid -1), which always succeeds.
+    foreign_pgid="$(ps -axo pgid=,user= 2>/dev/null | awk '$2 == "root" && $1 > 1 { print $1; exit }')"
+    if [[ -z "$foreign_pgid" ]]; then
+        bad "found no root-owned process group to probe with: the test has no evidence (it must not pass vacuously)"
+    else
+        if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive $foreign_pgid"; then
+            ok "root's group $foreign_pgid reads as alive from an unprivileged user (EPERM is not ESRCH)"
+        else
+            bad "root's group $foreign_pgid read as DEAD: a second user would reclaim a live build lease"
+        fi
+    fi
+    if bash -c "source '$repo10/scripts/lib/build-lease.sh'; _build_lease_group_alive 3999999"; then
+        bad "a group that does not exist read as alive"
+    else
+        ok "a group that does not exist still reads as dead"
+    fi
+fi
+
 echo
 echo "build-lease_test.sh: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]

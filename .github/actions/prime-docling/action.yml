@@ -62,11 +62,16 @@ runs:
         set -euo pipefail
         mkdir -p "$HOME/.cache/nexus/docling-artifacts"
         echo "docling artifacts cache miss; fetching from self-hosted release ${ASSET_TAG}."
+        # The tarball goes in the runner's per-job temp dir, never a fixed name
+        # in /tmp: on a self-hosted box that several users share (qwen-linux),
+        # a file another user left at that path makes the download fail, and a
+        # fixed name in a shared directory is a symlink-replacement target.
+        tarball="$(mktemp "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/docling-artifacts.XXXXXX")"
+        trap 'rm -f "$tarball"' EXIT
         curl --fail --silent --show-error --location --retry 3 --retry-delay 5 \
-          -o /tmp/docling-artifacts.tar.gz \
+          -o "$tarball" \
           "https://github.com/${GITHUB_REPOSITORY}/releases/download/${ASSET_TAG}/docling-artifacts-v1.tar.gz"
-        tar -xzf /tmp/docling-artifacts.tar.gz -C "$HOME/.cache/nexus/docling-artifacts"
-        rm -f /tmp/docling-artifacts.tar.gz
+        tar -xzf "$tarball" -C "$HOME/.cache/nexus/docling-artifacts"
 
     - name: Export NEXUS_DOCLING_ARTIFACTS_PATH
       shell: bash

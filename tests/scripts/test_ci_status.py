@@ -629,9 +629,15 @@ CHANGES_JOB = "doc-only fast lane predicate"
 CI_RUN = 36800000002
 
 
-def _ci(*, qwen: list | None = None) -> list:
+SHARD_JOB = "pytest (Python 3.12, shard 1/6)"
+
+
+def _ci(*, qwen: list | None = None, shards: str | None = None) -> list:
+    """CI's posts for one sha; *shards* adds a hosted shard completed with that conclusion."""
     kw = {"workflow": "CI", "run": CI_RUN}
     posts = [_p(T(5), state="completed", conclusion="success", job=CHANGES_JOB, **kw)]
+    if shards:
+        posts.append(_p(T(600), state="completed", conclusion=shards, job=SHARD_JOB, **kw))
     posts += [_p(T(sec), state=state, conclusion=concl, job=QWEN_JOB, **kw) for sec, state, concl in (qwen or [])]
     return posts
 
@@ -663,6 +669,47 @@ def test_a_posted_qwen_job_is_read_as_posted(state: str, conclusion: str | None,
     by_job = {s.job: s for s in _fold_expected(_ci(qwen=[(10, state, conclusion)]), now=_at(6 * 3600))}
     assert by_job[QWEN_JOB].verdict == verdict
     assert by_job[QWEN_JOB].state != "missing"
+
+
+# A develop sha whose CI run started before the qwen job existed has no row for it, and
+# its hosted shards ran. Reading that as `failed` shows a red suite that never was.
+
+
+def test_the_peer_prefix_is_how_the_hosted_shards_are_named_in_ci_yml() -> None:
+    import yaml
+
+    wf = yaml.safe_load((Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml").read_text())
+    [prefix] = cs.EXPECTED_UNLESS_PEER_RAN["CI"].values()
+    assert set(cs.EXPECTED_UNLESS_PEER_RAN["CI"]) == {QWEN_JOB}
+    assert wf["jobs"]["test"]["name"].startswith(prefix)
+    assert SHARD_JOB.startswith(prefix)
+    # nothing else in the workflow carries the prefix, so only a shard can excuse the row
+    assert [k for k, j in wf["jobs"].items() if str(j.get("name", k)).startswith(prefix)] == ["test"]
+
+
+@pytest.mark.parametrize("shards", ["success", "failure"])
+def test_a_run_whose_hosted_shards_ran_expects_no_qwen_row(shards: str) -> None:
+    """Pre-dates the job (or was routed away from it): no `missing` row at any age."""
+    posts = _ci(shards=shards)
+    for age in (60, 5 + cs.MISSING_JOB_GRACE_S + 1, 6 * 3600 + 60):
+        got = _fold_expected(posts, now=_at(age))
+        assert QWEN_JOB not in {s.job for s in got}
+        # the shard's own conclusion is what speaks for the run
+        assert cs.exit_code(got) == (cs.EXIT_FAILED if shards == "failure" else cs.EXIT_GREEN)
+
+
+@pytest.mark.parametrize("shards", [None, "skipped"])
+def test_a_run_whose_shards_did_not_run_still_expects_the_qwen_row(shards: str | None) -> None:
+    """The case the expectation exists for: routed to qwen, its post gone, shards skipped."""
+    posts = _ci(shards=shards)
+    by_job = {s.job: s for s in _fold_expected(posts, now=_at(5 + cs.MISSING_JOB_GRACE_S + 1))}
+    assert (by_job[QWEN_JOB].state, by_job[QWEN_JOB].verdict) == ("missing", "failed")
+
+
+def test_a_shard_that_never_completed_does_not_excuse_a_missing_qwen_row() -> None:
+    posts = _ci() + [_p(T(60), state="in_progress", job=SHARD_JOB, workflow="CI", run=CI_RUN)]
+    by_job = {s.job: s for s in _fold_expected(posts, now=_at(5 + cs.MISSING_JOB_GRACE_S + 1))}
+    assert by_job[QWEN_JOB].verdict == "failed"
 
 
 # ── against the real engine ─────────────────────────────────────────────────

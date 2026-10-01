@@ -180,20 +180,39 @@ uv, JDK and Docker, no `setup-*` action; `scripts/build-gate-jar.sh` for the
 stamped jar) and the six hosted shards and `service-jar` are skipped. Every
 `pull_request` and any other actor's push gets `ubuntu-latest`: the hosted
 shards run, `test-qwen` is skipped. Setting the repository variable
-`QWEN_CI_PUSH_RUNNER` to exactly `ubuntu-latest` sends owner pushes back to the
-hosted shards with no code change; unset, any other value, `hellmini` included,
-or a typo all mean `qwen-linux`, and the job's `runs-on` is a literal label set,
-so the variable cannot reach a release or Service CI runner. `pytest-gate` reads
+`QWEN_CI_PUSH_RUNNER` to `ubuntu-latest` (case ignored, as in every GitHub `==`)
+sends owner pushes back to the hosted shards with no code change; unset, any
+other value, `hellmini` included, or a typo all mean `qwen-linux`, and the job's
+`runs-on` is a literal label set, so the variable cannot reach a release or
+Service CI runner. The route is decided in the `changes` job, and "Re-run failed
+jobs" does not re-run a `changes` job that succeeded, so it keeps the old
+`ci_runner`: flipping the toggle for a commit already pushed needs "Re-run all
+jobs" or a new push. There is no automatic fallback when the runner is offline:
+the qwen job queues, `pytest-gate` pends until the 24 hour limit, and someone
+sets the variable. `pytest-gate` reads
 `ci_runner` and requires the chosen path `success` and the other `skipped`, so a
 qwen job that was skipped, cancelled, timed out or never reported fails the
 required check, and `scripts/ci_status.py` expects the job on the develop
-topic. The lint, census and Service CI legs are unchanged. Like `hellmini-ci`,
-the runner keeps state between jobs (uv, Maven and model caches in `ghci`'s
-home), and a hand-run suite by the host's `nxtest` user can overlap a CI job on
-the same box. The host also serves production inference, so a suite run costs it
-about 10% decode while it runs (accepted by Sam). A qwen-only red on push has no
-PR-side twin: PRs run the hosted shards on Linux amd64, the same platform, but
-as six `pytest-split` shards rather than one `xdist` run.
+topic. The lint, census and Service CI legs are unchanged.
+
+The job and a hand-run suite by the host's `nxtest` user serialize on one lease,
+not by agreement: `test-qwen` points `NX_BUILD_LEASE_ROOT` at a host directory
+(`QWEN_SUITE_LEASE_ROOT`, default `/var/lib/nx-suite-lease`, group-writable,
+not sticky) and sets `NX_SUITE_LEASE_WAIT=1`, and `nxtest` must export the same
+two variables; the job's lease step fails loud, with the host setup text, when
+the directory is missing or unusable (the suite lease itself would otherwise run
+unguarded and say nothing). The job also keeps `TMPDIR` on the runner's
+persistent private directory on purpose: the test substrate's orphan sweep finds
+a cancelled run's Postgres and JVM through sidecar files there, which a per-job
+`RUNNER_TEMP` would delete. The host also serves production inference, so a
+suite run costs it about 10% decode while it runs (accepted by Sam). A qwen-only
+red on push has no PR-side twin, and the difference is more than the platform:
+PRs run the hosted shards on the GitHub Ubuntu image with GraalVM, serial inside
+each of six `pytest-split` shards, while the qwen job is one `xdist -n 12` run
+on Ubuntu 26.04 with OpenJDK 25.0.4.1 as a persistent non-root user. Coverage is
+not yet reconciled: 25,705 tests passed there against about 27.7k summed from the
+shards, so the executed-count floor stays at 20000 until the skip-reason diff in
+`docs/contributing.md` § First run of the qwen-linux route has been done.
 
 **Service CI routing.** `service-ci.yml`'s comments are the one authoritative
 copy of how it works; this is the summary. An owner push (account id and
@@ -215,8 +234,11 @@ The controls are the collaborator list (owner only since 2026-09-30, when four
 write collaborators were removed), the fork-PR approval policy (all external
 contributors need an approval click), and branch protection. A merged external
 or Dependabot PR runs its code on `hellmini-ci` at the owner's next `service/**`
-push, and on `qwen-linux` at the owner's next push to develop that changes code,
-by design.
+push, and on `qwen-linux` at the owner's next push to develop that changes
+anything outside the doc-only set (`docs/**`, `web/**`, root `README.md`,
+`CHANGELOG*` and `LICENSE*`, `conexus/CHANGELOG.md`), by design: that is `src/`,
+`tests/`, `scripts/`, `pyproject.toml`, `uv.lock`, `service/`, `conexus/`, `sn/`
+and `.github/` alike.
 
 **Isolation is intended, not proven by prose.** `ghci` is a separate macOS user,
 not a sandbox. The evidence is a green run of
@@ -224,8 +246,27 @@ not a sandbox. The evidence is a green run of
 `workflow_dispatch`, runs on `hellmini-ci`): ghrunner's paths unreadable, no
 passwordless `sudo`, no Developer ID signing identity, `/Volumes/Bulk` mounted
 with ownership honoured. Until a run is green, read "isolated" as "intended".
-Both runners keep state between jobs (Maven `~/.m2`, tool caches); a job on
+Both macOS runners keep state between jobs (Maven `~/.m2`, tool caches); a job on
 `hellmini-ci` can also write the repo's Actions cache in the develop scope.
+
+`qwen-linux` is weaker, and the file modes alone cannot make it otherwise. Its
+`ghci` user is in the `docker` group, and on a rootful Docker daemon that is
+root on the distro (`docker run -v /:/h` reads and writes every file in it). The
+same WSL distro hosts a live nexus install and its service (user `nexus`), the
+suite user `nxtest`, and a Windows host whose `C:` drive WSL can mount; the WSL
+data and `.wslconfig` belong to the Windows user. So a test run as `ghci` can
+reach the live install through docker, whatever the modes say. Nothing has
+measured it: `.github/workflows/qwen-linux-isolation-probe.yml` (owner-only
+`workflow_dispatch`, runs on `qwen-linux`, informational) reports the groups,
+passwordless `sudo`, the other users' homes, the docker route to `/home/nexus`
+(expected to succeed today, reported not failed), `/mnt/c` and WSL interop, and
+fails only on passwordless `sudo` or a readable credential file under
+`/home/nexus/.config/nexus`. Until a run is green, read this runner's isolation
+as "intended", with docker as the known hole; a separate or rootless Docker for
+`ghci` is the remedy if Sam wants it closed. `qwen-linux` keeps state between
+jobs too: the docker daemon and its images and tags are shared by every user of
+the distro, and `ghci`'s home keeps the uv, Maven, model and PG-bundle caches and
+the `TMPDIR`.
 
 **Before approving a fork-PR run, read its diff for:**
 
@@ -233,10 +274,15 @@ Both runners keep state between jobs (Maven `~/.m2`, tool caches); a job on
 - any `runs-on` that names a self-hosted label, `self-hosted`, `hellmini`,
   `hellmini-ci`, `qwen-linux` or `gtr-windows`;
 - `service/` tests and `pom.xml` (merged, they run on `hellmini-ci` at the next
-  owner push);
-- anything under `tests/`, `src/`, `scripts/`, `pyproject.toml` or `uv.lock`
-  (merged, it runs on `qwen-linux` at the next owner push to develop, unless
-  `QWEN_CI_PUSH_RUNNER` is `ubuntu-latest`).
+  owner push that changes `service/**`, and on `qwen-linux` at the next owner push
+  to develop: `scripts/build-gate-jar.sh` runs Maven, its plugins and the jOOQ
+  codegen there as `ghci`, with docker);
+- anything the `code` predicate admits, which is everything but the doc-only set
+  (`docs/**`, `web/**`, root `README.md`, `CHANGELOG*`, `LICENSE*`,
+  `conexus/CHANGELOG.md`): `tests/`, `src/`, `scripts/`, `pyproject.toml`,
+  `uv.lock`, `service/`, `conexus/` and `sn/` all reach `qwen-linux` at the next
+  owner push to develop (unless `QWEN_CI_PUSH_RUNNER` is `ubuntu-latest`), where
+  the runner user is in the docker group (see above).
 
 **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even
 when they hold the owner's `gh` token. Report the run id and stop; the approval
@@ -539,9 +585,13 @@ things to avoid carefully; they are impossible.
    `hellmini-ci` read green once its `queued` post expired at six hours. CI's
    `pytest (qwen-linux full suite)` job is expected the same way, anchored on
    `doc-only fast lane predicate`: it posts `queued` or `completed skipped` on
-   every develop push, and a commit whose CI run predates the job reads `failed`
-   on its missing row once the anchor is 30 minutes old (the board's reading of
-   a run that never had the job, not a red suite).
+   every develop push. No row is added for a run in which a hosted shard
+   (`pytest (Python ...`) completed with anything but `skipped`
+   (`EXPECTED_UNLESS_PEER_RAN`): that run either predates the job, so a sha
+   pushed before the job landed does not read as a red suite, or was routed to
+   the shards, where the qwen job is skipped and nothing hides. A doc-only sha
+   that predates the job still reads `failed` once, because every shard skipped,
+   until its posts expire.
    Subscribe once per session with
    `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
    delivery starts at the subscribe time, and the posts of one wait

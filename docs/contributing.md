@@ -201,11 +201,69 @@ https://github.com/Hellblazer/nexus/settings/branches:
   - Require a pull request before merging
   - Require status checks to pass before merging:
     - `pytest-gate` (one required check on both `main` and `develop`; it fans
-      in over the sharded pytest matrix — the swap from the prior
-      `pytest (Python 3.12)` / `pytest (Python 3.13)` two-check shape
-      happened at nexus-n0ful)
+      in over whichever suite path ran: the sharded hosted pytest matrix, or
+      the single `test-qwen` job on the self-hosted `qwen-linux` runner for an
+      owner push to develop, and it fails when the chosen path did not
+      succeed or the other did not skip, plus the lint and census legs. The
+      swap from the prior `pytest (Python 3.12)` / `pytest (Python 3.13)`
+      two-check shape happened at nexus-n0ful)
   - Require branches to be up to date before merging
   - Do not allow force-pushes (the develop reset on 2026-05-21 was a one-time bypass via the API; routine resets are not permitted).
+
+### First run of the qwen-linux route
+
+The `test-qwen` job (`ci.yml`) and its routing have not run on GitHub until the
+first owner push after they land. Treat the first runs as a checklist, not as
+"green means done"; the host facts are in T2 `nexus/qwentescence-test-host-howto`.
+
+Host steps first, once (without them the job fails at its lease step, by design):
+create the shared lease directory (`QWEN_SUITE_LEASE_ROOT`, default
+`/var/lib/nx-suite-lease`: `sudo groupadd -f nx-suite`,
+`sudo usermod -aG nx-suite ghci`, `sudo usermod -aG nx-suite nxtest`,
+`sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
+restart the runner service so `ghci` has the group, and have `nxtest` export
+`NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1` (its
+`.bashrc`, which non-interactive ssh reads too). Then dispatch
+`qwen-linux-isolation-probe` (owner only) and record the result next to the
+isolation paragraph in `AGENTS.md`.
+
+First cold run:
+1. The job lands on `qwen-linux` (runner name in the log header); the consistency,
+   lease and toolchain steps are green as `ghci`.
+2. bge and docling prime and `ci_warm_docling.py` pass.
+3. `build-gate-jar.sh` is a cache hit or a roughly 9 minute build; the jar is stamped.
+4. The suite step reports 20000 or more passed and none failed, in 10 to 15 minutes;
+   the floor step is green.
+5. The six hosted shards and `service-jar` show skipped, and `pytest-gate` passes.
+6. The board has `queued`, `in_progress` and `completed` posts for
+   `pytest (qwen-linux full suite)` with an unmangled name, and
+   `scripts/ci_status.py <sha>` exits 0.
+7. The leftover-process report says no substrate processes were left behind.
+
+Then, before the route is called settled:
+8. A second warm run: checkout `clean` deletes `.venv` and `service/target`, so
+   this proves the cache paths (uv, models, the jar cache in the git common dir).
+9. A cancel test: push twice in quick succession so the first run is cancelled
+   mid-suite, then check on the host for orphan Postgres and `nexus-service`
+   processes, containers on the shared docker daemon, and shared-memory
+   segments (`ipcs -m`). The next run's orphan sweep should clear what it left.
+10. One overlap with a hand run: start a full suite as `nxtest` (with the two
+    exported variables), push, and see the CI job queue behind the lease and
+    start when the hand run ends, with no OOM on the distro.
+11. The skip-reason diff (the `TODO(qwen-floor)` in `ci.yml`): diff the `-rs`
+    skip reasons in `suite-output.txt` against a hosted run of the same tree. The
+    measured gap is about 2k tests (25,705 passed here against about 27.7k from
+    the shards). Fix or accept each reason, then raise the floor to about
+    measured minus 2% and delete the TODO.
+12. One exercise of the toggle: set `QWEN_CI_PUSH_RUNNER` to `ubuntu-latest`,
+    push, see the hosted shards run and `test-qwen` skip, then delete the
+    variable. "Re-run failed jobs" keeps the old route, so a toggle takes a new
+    push or "Re-run all jobs".
+
+A green run does not show the overlap or flake behaviour (that takes about ten
+runs), signal-timing tests under `-n 12` while the host's inference is loaded,
+or the `GITHUB_ACTIONS` CI-only skip branches (`NX_T2_SUBSTRATE_EXPECTED=1`
+disarms them, so only their fail-loud twins run).
 
 ## License
 

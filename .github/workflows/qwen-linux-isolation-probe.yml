@@ -1,0 +1,184 @@
+# Isolation probe for the `qwen-linux` self-hosted runner. Written in the style of
+# hellmini-ci-isolation-probe.yml, but INFORMATIONAL: it reports what the runner
+# user can reach, and fails only on things that must never be true.
+#
+# WHY. ci.yml's `test-qwen` job runs the whole pytest suite on `qwen-linux` for
+# owner pushes to develop. The runner is the Linux user `ghci` in a WSL distro
+# that ALSO hosts a live nexus install (user `nexus`, with nexus-service) and the
+# suite user `nxtest`, on a Windows 11 host whose drives WSL can mount. `ghci` is
+# in the `docker` group, and membership of that group on a rootful daemon is root
+# on the distro: `docker run -v /:/h` reads and writes every file in it. So the
+# honest state is "isolated from the other users by file modes, NOT from root via
+# docker", and no workflow file can assert even the first half by reading itself.
+# AGENTS.md says "intended, not proven" until a run of this workflow is green.
+#
+# WHAT IT DOES, each as its own step so one result does not hide the rest:
+#   REPORTS (never fail):
+#     - the user, its groups, and whether it is in the docker group;
+#     - whether /home/nexus and /home/nxtest are readable by file mode;
+#     - whether a container run through the docker group can read /home/nexus
+#       (EXPECTED to succeed today: this documents that docker is root, it is
+#       a known gap, not a defect of the probe);
+#     - whether /mnt/c is visible and WSL Windows interop (cmd.exe) is on PATH.
+#   FAILS ONLY ON what must never be true:
+#     - the job runs as `nexus` or root (the probe, and the job it stands for,
+#       would then not be running as the unprivileged runner user);
+#     - `sudo -n true` succeeds (passwordless sudo);
+#     - a credential-shaped file under /home/nexus/.config/nexus is readable by
+#       ghci by file mode (the live install's credentials).
+#   Reading a credential through the docker route is the known gap above and is
+#   not tested here: the probe never opens a credential file's content.
+#
+# TRIGGER. workflow_dispatch only, owner only, never pull_request or push: the
+# job runs on a self-hosted runner in a public repo. The `if:` compares account
+# ids (a renamed login can be re-registered) and is a routing rule, not a
+# security boundary: this file lives where a write collaborator's branch could
+# replace it. The repo has had no write collaborators since 2026-09-30. The probe
+# runs no checkout and no third-party action, reads no secrets, prints no
+# environment and no file contents.
+name: qwen-linux-isolation-probe
+
+on:
+  workflow_dispatch: {}
+
+concurrency:
+  group: qwen-linux-isolation-probe
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  probe:
+    name: Isolation report (qwen-linux, informational)
+    if: github.event_name == 'workflow_dispatch' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner
+    runs-on: [self-hosted, Linux, X64, qwen-linux]
+    timeout-minutes: 10
+    steps:
+      - name: Identity (report; fails if the job runs as nexus or root)
+        shell: bash
+        run: |
+          set -uo pipefail
+          user="$(id -un)"
+          echo "user=$user uid=$(id -u)"
+          echo "groups=$(id -Gn)"
+          rc=0
+          case "$user" in
+            nexus|root)
+              echo "::error::the job runs as '$user', the live install's user or root: the checks below prove nothing about the runner user"
+              rc=1
+              ;;
+          esac
+          if id -nG | tr ' ' '\n' | grep -qx docker; then
+            echo "docker group: member (root-equivalent on this distro; see the docker step)"
+          else
+            echo "docker group: not a member"
+          fi
+          exit "$rc"
+
+      - name: Passwordless sudo is refused
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          if ! command -v sudo >/dev/null 2>&1; then
+            echo "no sudo on PATH (report: nothing to test, nothing to abuse)"
+            exit 0
+          fi
+          # A refused sudo is the EXPECTED result and the runner shell is bash -e,
+          # so capture the status instead of letting -e end the step.
+          status=0
+          sudo -n true >/dev/null 2>&1 || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "::error::sudo -n true succeeded: $(id -un) has passwordless sudo"
+            exit 1
+          fi
+          echo "sudo -n true failed with exit $status (expected)"
+
+      - name: Other users' homes by file mode (report; fails on a readable nexus credential file)
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          rc=0
+          for home in /home/nexus /home/nxtest; do
+            echo "--- $home"
+            ls -ld "$home" 2>&1 || true
+            status=0
+            ls -A "$home" >/dev/null 2>&1 || status=$?
+            if [ "$status" -eq 0 ]; then
+              echo "REPORT: $home is listable by $(id -un) (file mode)"
+            else
+              echo "REPORT: $home is not listable by $(id -un) (exit $status)"
+            fi
+          done
+          cfg=/home/nexus/.config/nexus
+          echo "--- $cfg"
+          if [ ! -d "$cfg" ]; then
+            echo "REPORT: $cfg is absent or not reachable by $(id -un); nothing to check by file mode"
+            exit 0
+          fi
+          # Names only, never contents. A credential-shaped file is one whose
+          # name says so; a plain listing of an unreadable directory finds none.
+          readable="$(find "$cfg" -maxdepth 3 -type f -readable \( -iname '*cred*' -o -iname '*token*' -o -iname '*secret*' -o -iname '*key*' -o -iname '*auth*' -o -iname '.env' -o -iname '*.pem' \) 2>/dev/null || true)"
+          if [ -n "$readable" ]; then
+            echo "::error::credential-shaped files under $cfg are readable by $(id -un):"
+            printf '%s\n' "$readable"
+            rc=1
+          else
+            echo "no credential-shaped file under $cfg is readable by $(id -un) (expected)"
+          fi
+          exit "$rc"
+
+      - name: Docker is root (report only; EXPECTED to read /home/nexus today)
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "REPORT: no docker on PATH"
+            exit 0
+          fi
+          status=0
+          docker info >/dev/null 2>&1 || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "REPORT: the docker daemon is not reachable by $(id -un) (exit $status): no container-root route from this user"
+            exit 0
+          fi
+          # Read-only bind of the distro root, a count of entries only. This
+          # documents that the docker group is root-equivalent; it is the known
+          # gap in AGENTS.md, so it is reported and never fails the probe.
+          status=0
+          out="$(docker run --rm -v /:/h:ro alpine ls -A /h/home/nexus 2>&1)" || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "REPORT: a container started by $(id -un) listed /home/nexus ($(printf '%s\n' "$out" | wc -l) entries). docker = root on this distro: file modes do not separate ghci from the live install."
+          else
+            echo "REPORT: the container could not list /home/nexus (exit $status); first line: $(printf '%s\n' "$out" | head -1)"
+          fi
+
+      - name: Windows side (report only; /mnt/c and WSL interop)
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          echo "--- /mnt/c"
+          status=0
+          ls /mnt/c >/dev/null 2>&1 || status=$?
+          if [ "$status" -eq 0 ]; then
+            echo "REPORT: /mnt/c is visible and listable ($(find /mnt/c -maxdepth 1 -mindepth 1 2>/dev/null | wc -l) entries): the Windows C: drive is reachable from this user"
+          else
+            echo "REPORT: /mnt/c is not listable (exit $status)"
+          fi
+          if [ -d /mnt/c/Users ]; then
+            echo "REPORT: /mnt/c/Users is $( [ -r /mnt/c/Users ] && echo readable || echo unreadable )"
+          fi
+          echo "--- interop"
+          if command -v cmd.exe >/dev/null 2>&1; then
+            echo "REPORT: cmd.exe is on PATH ($(command -v cmd.exe)): WSL interop is enabled, so a process here can start Windows programs"
+          else
+            echo "REPORT: cmd.exe is not on PATH"
+          fi
+          if [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]; then
+            echo "REPORT: the WSLInterop binfmt handler is registered"
+          else
+            echo "REPORT: no WSLInterop binfmt handler is registered"
+          fi
