@@ -96,17 +96,23 @@ from nexus.catalog.store_hook import (
     _read_manifest_rows_with_retry,
     note_manifest_metadata,
 )
+from nexus.catalog.write_outcome import (
+    IN_FLIGHT,
+    REFUSED_BY_CLIENT,
+    REFUSED_BY_ENGINE,
+    REFUSED_UNREACHABLE,
+    client_side_refusals,
+    judge,
+)
 from nexus.db.limits import QUOTAS
 from nexus.errors import BatchWriteFailedError, CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
 
 _log = structlog.get_logger(__name__)
 
 
-#: Who refused a note write that did not land (:attr:`NoteWriteError.refusal`,
-#: :attr:`PutNoteOutcome.refusal`).
-REFUSED_BY_CLIENT = "client"
-REFUSED_UNREACHABLE = "unreachable"
-REFUSED_BY_ENGINE = "engine"
+# Who refused a note write that did not land (:attr:`NoteWriteError.refusal`,
+# :attr:`PutNoteOutcome.refusal`): REFUSED_BY_CLIENT, REFUSED_UNREACHABLE, REFUSED_BY_ENGINE, defined
+# with the classifier in :mod:`nexus.catalog.write_outcome` and re-exported here.
 
 
 class NoteWriteError(RuntimeError):
@@ -144,13 +150,21 @@ class StampRefusedError(ManifestVerifyUncertainError):
 
     The writer's rule (``multi_batch_write``): a refusal is recorded (``_record_complete_refusal``, for
     the record-level summary) and the fence is LEFT ``indexing``, so nothing fails the index run and
-    no failed-document heal runs. The caller reports it as uncertain and does not call ``_fence_fail``.
+    nothing marks it failed. The caller reports it as uncertain and does not call ``_fence_fail``.
     ``detail`` is the engine's refusal text alone, for a caller that words its own message.
     """
 
     def __init__(self, message: str, *, detail: str = "") -> None:
         super().__init__(message)
         self.detail = detail or message
+
+
+class LandedUnconfirmedError(ManifestVerifyUncertainError):
+    """A read of the document's manifest shows the note's rows, so the request committed, but the
+    resend that applies its metadata and stamp failed. The note exists and may already be stamped
+    complete by the first attempt, so the caller must not fail the fence: ``failIndexRun`` is
+    unconditional and would flip a complete note to ``failed`` (nexus-z0o2p.35, M2). Same rule as
+    :class:`StampRefusedError`."""
 
 
 class _UnstampedError(ManifestVerifyUncertainError):
@@ -178,7 +192,7 @@ class _AttemptRecorder:
         return getattr(self._cat, name)
 
     def any_in_flight(self) -> bool:
-        return any(_classify(e) == _IN_FLIGHT for e in self.errors)
+        return any(_classify(e) == IN_FLIGHT for e in self.errors)
 
 
 @dataclass
@@ -300,6 +314,13 @@ def write_note(
     metadata's content type, by default the one the collection prefix implies. *cat* is a catalog
     writer; by default one is made for the call and closed after it.
 
+    The chunk metadata is MERGED into a stored chunk's (``metadata_merge``, no delete keys), as the
+    ``/store-put`` upsert this replaced did (``current || incoming``; nexus-z0o2p.35, M6): a re-put,
+    a promote or a recovery import refreshes the keys the note sets (``tags``, ``ttl_days``,
+    ``category``, ``indexed_at``, ...) and leaves a key another writer added to the chunk (``bib_*``
+    from ``nx enrich bib``, a taxonomy label) where a replace would clear it. A key the note once set
+    and no longer sets stays (the old upsert did the same), so ``write_note`` names no delete keys.
+
     The request is :func:`~nexus.catalog.multi_batch_write.write_one_request`, the primitive the
     multi-batch writer's single-request path uses too, so the checks on the engine's answer are one
     body of code: 429, 503 with Retry-After and connectivity errors are retried (tripping the shared
@@ -350,7 +371,8 @@ def write_note(
         try:
             out = write_one_request(
                 recorder, doc_id=catalog_doc_id, collection=collection, rows=rows, chunks=chunks,
-                content_hash=(content_hash or None) if stamp else None, sweep=True, dropped="optional")
+                content_hash=(content_hash or None) if stamp else None, sweep=True, dropped="optional",
+                metadata_merge=True)
         except DocumentFailedError as exc:
             if recorder.any_in_flight():
                 # An earlier attempt of this request may have committed before this one was refused.
@@ -400,90 +422,17 @@ def _manifest_is_empty(doc: str) -> bool:
         return False
 
 
-#: The request never reached the engine, so nothing of it can commit.
-_UNSENT = "unsent"
-#: The engine answered with a definitive 4xx refusal, so the transaction did not commit.
-_REFUSED = "refused"
-#: Anything else: the request may have reached the engine and may have committed or still commit
-#: (a dropped connection, a timeout, a gateway 5xx, a 500 that can follow the commit, an exception
-#: nobody anticipated). Settle it from the manifest.
-_IN_FLIGHT = "in-flight"
-
-
-def _client_side_refusals() -> tuple[type[BaseException], ...]:
-    """Refusals the client raises BEFORE it sends: ``write_manifest_many`` registers the collection
-    first, and registration refuses a profile that disagrees with the engine's, a voyage intent with
-    no key, and a retired collection name. Nothing reached the engine, so the note is not in flight.
-    (Imported at call time: ``nexus.corpus`` imports back into the catalog package.)"""
-    from nexus.collection_errors import SupersededCollectionWriteError  # noqa: PLC0415 — deferred: circular-dep avoidance
-    from nexus.corpus import EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError  # noqa: PLC0415 — deferred: circular-dep avoidance
-
-    return (EmbeddingProfileMismatchError, LocalVoyageCredentialMissingError, SupersededCollectionWriteError)
-
-
-def _judge(exc: BaseException) -> tuple[str, str]:
-    """``(shape, refusal)`` of one failed ``write_manifest_many`` attempt.
-
-    *shape* is one of :data:`_UNSENT`, :data:`_REFUSED`, :data:`_IN_FLIGHT`. *refusal* says who refused
-    when the shape is definitive (:data:`REFUSED_BY_ENGINE` for a 4xx, else :data:`REFUSED_BY_CLIENT`
-    when a node of the chain is a client-side refusal, else :data:`REFUSED_UNREACHABLE`) and is ``""``
-    for an attempt in flight.
-
-    Only a 4xx (the engine answered and refused; 408 is a timeout, so not that) and a connection that
-    was never made are definitive. Everything else, unknown exceptions included, is in flight.
-
-    The WHOLE exception chain is judged, not its first recognisable node. The httpx mixin
-    (``_refreshable_client._request``) retries once inside its own ``except`` block, so the
-    exception attempt 2 raises carries attempt 1's as ``__context__``, and the attempt recorder sees
-    only the final one. A dropped connection whose retry was refused (or the reverse) is one request
-    that may have reached the engine. Precedence over the chain: any in-flight node (an embed
-    timeout, a 5xx or 408, a transport error that is not a failed connect) makes it in flight, a
-    registration node included (a dropped request followed by a refused re-registration is one
-    request that may have reached the engine); else any 4xx makes it refused; else it is unsent,
-    which needs at least one failed connect or client-side refusal and no other transport node. A
-    chain of nothing recognisable is in flight. A refusal the client raises before it sends
-    (:func:`_client_side_refusals`) counts as a connection never made.
-    """
-    seen: set[int] = set()
-    pending: list[BaseException] = [exc]
-    refused = unsent = client_side = False
-    while pending:
-        cur = pending.pop()
-        if id(cur) in seen:
-            continue
-        seen.add(id(cur))
-        if isinstance(cur, CombinedWriteEmbedTimeoutError):
-            return _IN_FLIGHT, ""
-        if isinstance(cur, httpx.HTTPStatusError):
-            status = cur.response.status_code
-            if 400 <= status < 500 and status != 408:
-                refused = True
-            else:
-                return _IN_FLIGHT, ""
-        elif isinstance(cur, _client_side_refusals()):
-            unsent = client_side = True
-        elif isinstance(cur, (httpx.ConnectError, httpx.ConnectTimeout)):
-            unsent = True
-        elif isinstance(cur, httpx.TransportError):
-            return _IN_FLIGHT, ""
-        pending.extend(n for n in (cur.__cause__, cur.__context__) if n is not None)
-    if refused:
-        return _REFUSED, REFUSED_BY_ENGINE
-    if unsent:
-        return _UNSENT, REFUSED_BY_CLIENT if client_side else REFUSED_UNREACHABLE
-    return _IN_FLIGHT, ""
-
-
 def _classify(exc: BaseException) -> str:
-    """Which of the three shapes one failed ``write_manifest_many`` attempt is (see :func:`_judge`)."""
-    return _judge(exc)[0]
+    """Which of the three shapes one failed ``write_manifest_many`` attempt is (see
+    :func:`nexus.catalog.write_outcome.judge`)."""
+    return judge(exc)[0]
 
 
 def _refusal_of(errors: Sequence[BaseException]) -> str:
     """Who refused a request none of whose attempts was in flight: the engine if any attempt got a 4xx
     (it received something), else the client if any attempt was its own pre-send refusal, else a
     connection that was never made."""
-    origins = {_judge(e)[1] for e in errors}
+    origins = {judge(e)[1] for e in errors}
     for origin in (REFUSED_BY_ENGINE, REFUSED_BY_CLIENT):
         if origin in origins:
             return origin
@@ -493,14 +442,14 @@ def _refusal_of(errors: Sequence[BaseException]) -> str:
 def is_anticipated_failure(exc: BaseException) -> bool:
     """True when *exc*'s chain holds a failure this code expects from the engine, the network or
     the client's own pre-send checks: an httpx error, an embed timeout, a batch the engine answered
-    badly or refused, a refused stamp, or one of :func:`_client_side_refusals`. The warning for such a
-    failure carries no traceback (the CLI prints it to the terminal and the outcome is worded for the
+    badly or refused, a refused stamp, or one of
+    :func:`~nexus.catalog.write_outcome.client_side_refusals`. The warning for such a failure carries no traceback (the CLI prints it to the terminal and the outcome is worded for the
     operator). A chain of none of these is a bug or an unknown (a ``TypeError`` from signature drift
     settles as "in flight" like any unrecognised exception), so its warning keeps the stack and a
     production fault stays diagnosable."""
     known = (
         httpx.HTTPError, CombinedWriteEmbedTimeoutError, BatchWriteFailedError, IndexRunVerifyRefused,
-        StampRefusedError, _UnstampedError, *_client_side_refusals(),
+        StampRefusedError, LandedUnconfirmedError, _UnstampedError, *client_side_refusals(),
     )
     seen: set[int] = set()
     pending: list[BaseException] = [exc]
@@ -567,7 +516,7 @@ def _settle_after_error(
     """
     doc = result.catalog_doc_id
     kinds = [_classify(e) for e in recorder.errors]
-    if _IN_FLIGHT not in kinds and _classify(exc) != _IN_FLIGHT:
+    if IN_FLIGHT not in kinds and _classify(exc) != IN_FLIGHT:
         raise NoteWriteError(
             catalog_doc_id=doc, collection=result.collection, reason=str(exc),
             manifest_empty=_manifest_is_empty(doc),
@@ -593,11 +542,12 @@ def _settle_after_error(
     try:
         out = write_one_request(
             cat, doc_id=doc, collection=result.collection, rows=rows, chunks=chunks,
-            content_hash=content_hash or None, sweep=True, dropped="optional")
+            content_hash=content_hash or None, sweep=True, dropped="optional",
+            metadata_merge=True)
     except IndexRunVerifyRefused as refused:
         raise _stamp_refused(doc, result.collection, refused) from refused
     except Exception as resend_exc:  # noqa: BLE001 — the note's content is there; whether its metadata and stamp were applied is not known
-        raise ManifestVerifyUncertainError(
+        raise LandedUnconfirmedError(
             f"note {doc} in {result.collection} is in the manifest, but resending the request to apply "
             f"its metadata failed: {resend_exc}") from resend_exc
     _absorb(result, out)
@@ -678,18 +628,21 @@ def put_note(
     3. ``doc_indexer._fence_begin`` (advisory), then :func:`write_note` WITHOUT the completion stamp
        (the fence stays ``indexing``): the stamp is :func:`stamp_note`'s, sent after the producer has
        fired its post-store chains (nexus-z0o2p.34).
-    4. On :class:`NoteWriteError`: ``_fence_fail``; remove the row this call minted, but only when
-       its manifest is empty (a concurrent writer's version means the row is no longer ours), or,
-       for a row this call reconciled onto, put back the identity stamp it changed; a minted row
-       whose removal fails has its stamp cleared instead.
+    4. On :class:`NoteWriteError`: remove the row this call minted, but only when its manifest is
+       empty (a concurrent writer's version means the row is no longer ours), or, for a row this call
+       reconciled onto, put back the identity stamp it changed; a minted row whose removal fails has
+       its stamp cleared instead; THEN ``_fence_fail``. The removal runs before the fence write so the
+       read-then-delete window in ``rollback_minted_catalog_entry`` is not widened (nexus-z0o2p.35, M1).
        On :class:`StampRefusedError` (the engine accepted the write and refused the completion
        stamp): UNCERTAIN with ``stamp_refused`` set, and NO ``_fence_fail``: the writer's rule
-       leaves the fence ``indexing`` so no failed-document heal runs; the refusal was recorded by
+       leaves the fence ``indexing``, and a stamp the engine refused is never flipped to failed; the refusal was recorded by
        :func:`write_note`, and nothing is rolled back.
+       On :class:`LandedUnconfirmedError` (the manifest shows the note, the resend failed): UNCERTAIN
+       and NO ``_fence_fail``, for the same reason: the first attempt may have stamped it (M2).
        On any other :class:`~nexus.catalog.store_hook.ManifestVerifyUncertainError`, or a landed
        note the fence could not be told about: ``_fence_fail`` and nothing else, since the note may
        exist.
-       On any other exception: ``_fence_fail``, remove a minted row, re-raise.
+       On any other exception: remove a minted row (or restore the stamp), ``_fence_fail``, re-raise.
 
     *collection* is the full T3 collection name. Raises ``PutOversizedError`` for an over-quota
     note and ``ValueError`` for empty *content* or a bad ``ttl_days``, all before any side effect.
@@ -739,8 +692,8 @@ def put_note(
             source_agent=source_agent, ttl_days=ttl_days, content_type=content_type, cat=cat,
             stamp=False)
     except StampRefusedError as exc:
-        # The writer's rule: a refused stamp leaves the fence `indexing` (no _fence_fail, so no
-        # failed-document heal); it is recorded and reported as unknown.
+        # The writer's rule: a refused stamp leaves the fence `indexing` (no _fence_fail); it is
+        # recorded and reported as unknown.
         out.status, out.reason = UNCERTAIN, str(exc)
         out.stamp_refused, out.stamp_detail = True, exc.detail
         _log.warning(
@@ -750,7 +703,10 @@ def put_note(
     except ManifestVerifyUncertainError as exc:
         out.status, out.reason = UNCERTAIN, str(exc)
         out.unstamped = isinstance(exc, _UnstampedError)
-        _fence_fail(doc, out.reason)
+        if not isinstance(exc, LandedUnconfirmedError):
+            # The manifest showing the note means it landed, perhaps stamped complete by the first
+            # attempt; failing the fence now could flip a complete note to failed (M2).
+            _fence_fail(doc, out.reason)
         # No traceback for an anticipated failure, like the NOT_LANDED line below: the CLI prints
         # these warnings to the operator's terminal and the caller words the outcome itself. The
         # cause chain keeps what the traceback carried for a reader of the log. A failure nothing
@@ -762,7 +718,6 @@ def put_note(
         return out
     except NoteWriteError as exc:
         out.status, out.reason, out.refusal = NOT_LANDED, exc.reason, exc.refusal
-        _fence_fail(doc, out.reason)
         # No exc_info: a definitive refusal is a normal outcome the caller words itself (the CLI
         # prints this line to the operator's terminal), and the reason names what was refused. The
         # cause chain keeps what the traceback carried for a reader of the log.
@@ -770,22 +725,27 @@ def put_note(
             "store_put_note_write_failed", doc_id=out.doc_id, catalog_doc_id=doc,
             collection=collection, manifest_empty=exc.manifest_empty, refusal=exc.refusal,
             error=out.reason[:300], cause_chain=_cause_chain(exc))
-        if out.minted:
-            if exc.manifest_empty and not sh.rollback_minted_catalog_entry(doc, original_error=out.reason):
+        # The minted row goes FIRST (M1): rollback_minted_catalog_entry reads the manifest and then
+        # deletes the document unconditionally, and every call between the read and the delete is a
+        # window for a concurrent writer of the same (collection, title) to land its note on the row
+        # about to be deleted. The fence is failed after (Decision 5 keeps both).
+        if out.minted and exc.manifest_empty:
+            if not sh.rollback_minted_catalog_entry(doc, original_error=out.reason):
                 # The row this call minted could not be removed and survives with meta.doc_id naming
                 # the first chash of a chunk that was never written: clear it (a minted row had no
                 # prior identity), or live_note_chashes treats it as a manifest-less note.
                 sh.restore_pre_call_stamp(doc, "", out.doc_id)
-        else:
+        elif not out.minted:
             sh.restore_pre_call_stamp(doc, pre_call.get("doc_id", ""), out.doc_id)
+        _fence_fail(doc, out.reason)
         return out
     except Exception as exc:
-        _fence_fail(doc, str(exc))
         if out.minted:
             if not sh.rollback_minted_catalog_entry(doc, original_error=str(exc)):
                 sh.restore_pre_call_stamp(doc, "", out.doc_id)
         else:
             sh.restore_pre_call_stamp(doc, pre_call.get("doc_id", ""), out.doc_id)
+        _fence_fail(doc, str(exc))
         raise
     out.status, out.write = STORED, write
     out.stamp_pending, out.content_hash = True, content_hash

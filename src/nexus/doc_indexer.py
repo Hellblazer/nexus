@@ -532,25 +532,22 @@ def _fence_begin_many(pairs: list[tuple[str, str]], collection: str) -> None:
             close()
 
 
-def _fence_fail(doc_id: str, error: str, *, heal: bool = True) -> None:
+def _fence_fail(doc_id: str, error: str) -> None:
     """Advisory: stamp ``index_state='failed'``. Never raises — the caller's
     own exception (the reason this is being called) must always propagate
     unmasked.
-
-    *heal* False skips the manifest rebuild below. The PDF paths pass it (RDR-223): their
-    writer replaces the manifest with its first request and every chunk it sends carries an
-    owner row, so a failed PDF run has no ownerless stored chunk to give an owner, and the
-    rebuild's premise (no manifest yet) is false for it: on a failed RE-index the entry keeps
-    the previous version's ``chunk_count`` while the manifest holds the new run's partial rows,
-    which reads as a gap, and the rebuild would replace the manifest with a fragment rebuilt
-    from chunks found by the OLD content hash.
 
     Also discards any superseded-vector sweep ``_manifest_write_loop``
     deferred for *doc_id* (nexus-4pj54): a failed run's manifest is not
     complete, so its held candidates are dropped, never swept.
 
-    Then rebuilds *doc_id*'s manifest from any chunks the failed run did
-    store (:func:`_heal_failed_document`, nexus-0ntxj)."""
+    There is no manifest rebuild here (nexus-z0o2p.35 retired ``_heal_failed_document``,
+    nexus-0ntxj's stopgap). A failed run used to leave chunks stored with no owner row, and the
+    rebuild gave them one. Every writer now sends a chunk and its owner row in one request
+    (RDR-223), so a failed run has no ownerless chunk to give an owner. The rebuild could only do
+    harm: it found chunks by content hash, so it could graft ANOTHER document's identical chunk
+    onto the failed one, and on a failed re-index it replaced the manifest with a fragment found
+    by the OLD content hash."""
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
     from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
 
@@ -563,79 +560,6 @@ def _fence_fail(doc_id: str, error: str, *, heal: bool = True) -> None:
         _log.warning("index_run_fail_write_failed", doc_id=doc_id)
     finally:
         close = getattr(w, "close", None)
-        if close is not None:
-            close()
-    if heal:
-        _heal_failed_document(doc_id)
-
-
-def _heal_failed_document(doc_id: str) -> None:
-    """Give a failed run's stored chunks their owner rows (nexus-0ntxj).
-
-    Every index path upserts chunks before it writes their manifest rows. A
-    run that fails between the two leaves chunks with no manifest owner,
-    and engine v0.1.137's live(c) hides such chunks from every read: the
-    content is stored and unreachable (shakeout 7.64.1, FootPrintRAGVA
-    1.82.146/147, 395 chunks). ``nx index repo``'s end-of-run self-heal
-    repairs this only when the run reaches it and only for that verb.
-
-    This runs the same :func:`~nexus.catalog.manifest_heal.heal_manifest_gaps`
-    core on the one document, so its stored chunks stay readable. The
-    document stays ``failed`` and the next run re-indexes it; a run that
-    stored only part of a file leaves that part readable until then.
-
-    Scope: a document whose FIRST run failed (no manifest yet). A failed
-    re-index of a document that completed before is left alone on
-    purpose: its old manifest still makes the old content readable, and
-    rebuilding the manifest from the new run's chunks would replace a
-    whole document with a possibly partial one. The new run's orphaned
-    chunks stay hidden until the next run writes them again; the source
-    is still on disk, so nothing readable is lost.
-
-    Stopgap until RDR-223 writes chunks and owner rows in one request
-    (nexus-z0o2p.13/.14 and siblings); when those land this has nothing to
-    heal and can be retired. The PDF paths have landed and no longer call it
-    (``_fence_fail(..., heal=False)``).
-
-    Never raises: it runs inside a failure path whose own exception must
-    propagate unmasked.
-    """
-    reader = None
-    try:
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
-        from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
-        from nexus.db import make_t3  # noqa: PLC0415 — deferred import
-
-        reader = make_catalog_reader()
-        if reader is None:
-            return
-        entry = reader.resolve(doc_id)
-        if entry is None:
-            return
-        result = heal_manifest_gaps([entry], reader, make_t3, make_catalog_writer)
-        if result.reconciled or result.write_failed:
-            # short_of_chunk_count: the rebuild found fewer chunks than the
-            # document's recorded count, so a partial run is now readable
-            # as a partial document. index_state stays 'failed', which is
-            # what makes the next run redo it.
-            _log.warning(
-                "index_run_fail_healed_stored_chunks",
-                doc_id=doc_id, reconciled=result.reconciled,
-                write_failed=result.write_failed,
-                short_of_chunk_count=bool(result.dup_collapsed),
-            )
-    except Exception as exc:  # noqa: BLE001 — boundary catch: the heal is advisory; must never mask the original failure
-        # No exc_info: the CLI prints WARNING logs to the terminal, and this
-        # runs inside a failure path whose own error is what the user acts on.
-        # A heal that fails for the same reason the write did (a profile
-        # mismatch, a stopped service) would otherwise print a traceback
-        # beside a clean "Error:" line (nexus-z0o2p.16).
-        _log.warning(
-            "index_run_fail_heal_failed",
-            doc_id=doc_id, error_class=type(exc).__name__, error=str(exc)[:500],
-        )
-    finally:
-        close = getattr(reader, "close", None)
         if close is not None:
             close()
 
@@ -1942,8 +1866,9 @@ def _index_document(
             from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
             if is_vector_service_mode():
                 # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
-                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
-                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                # Pass empty embeddings: the writer below sends text only, and the engine's
+                # combined chunk-plus-owner route (/v1/catalog/manifest/write_many, RDR-223)
+                # embeds it (JVM). This write no longer goes to /v1/vectors/upsert-chunks.
                 embeddings = [[]] * len(documents)
                 actual_model = target_model
             else:
@@ -2302,7 +2227,7 @@ def _index_pdf_incremental(
         # never under-work: every request the writer sent before the failure
         # carried its chunks' owner rows, so there is nothing to heal.
         if _catalog_doc_id_for_batch:
-            _fence_fail(_catalog_doc_id_for_batch, str(exc), heal=False)
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
     finally:
         if pending is not None:
@@ -3234,7 +3159,7 @@ def index_pdf(
                 raise
             except Exception as exc:
                 for _pending in _stamps:
-                    _fence_fail(_pending.doc_id, str(exc), heal=False)
+                    _fence_fail(_pending.doc_id, str(exc))
                 _rollback_if_freshly_minted(exc)
                 raise
         finally:
@@ -3389,7 +3314,7 @@ def index_pdf(
         # _fence_fail never raises, so the original exception always
         # propagates unmasked.
         if _catalog_doc_id_for_batch:
-            _fence_fail(_catalog_doc_id_for_batch, str(exc), heal=False)
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
         # nexus-uxg4u round 2 (substantive-critic ship-blocker): this
         # except path re-raises DIRECTLY out of index_pdf -- unlike the
         # streaming/incremental branches (each a separate function

@@ -125,7 +125,7 @@ import structlog
 
 from nexus.catalog.http_catalog_client import MANIFEST_APPEND_SWEEP_CHASHES_CAP
 from nexus.db.limits import QUOTAS
-from nexus.errors import BatchWriteFailedError, IndexRunVerifyRefused
+from nexus.errors import BatchWriteFailedError, EngineOlderThanClientError, IndexRunVerifyRefused
 
 __all__ = [
     "BatchWriteFailedError",
@@ -232,6 +232,7 @@ def write_one_request(
     force_re_embed: bool = False,
     batch: int = 1,
     dropped: str = "required",
+    metadata_merge: bool = False,
 ) -> OneRequestResult:
     """Send ONE ``write_manifest_many`` for *doc_id* and judge the answer.
 
@@ -244,13 +245,18 @@ def write_one_request(
     *content_hash* rides the same request as the completion stamp. *dropped* is ``"required"`` (the
     response must carry a ``dropped_chashes`` and ``dropped_count`` entry for the document that agree,
     or a ``dropped_unknown`` marker) or ``"optional"`` (take the list if the response has one).
+
+    *metadata_merge* asks the engine to MERGE a stored chunk's metadata with the incoming one
+    (``stored || incoming``) instead of replacing it; it is sent only when True, so a catalog writer
+    that wraps this call and adds the mode itself (``MetadataMergingCatalog``) is unaffected.
     """
     chunks = list(first_chunk_per_chash(chunks).values())
+    mode = {"metadata_merge": True} if metadata_merge else {}
     resp = retrying(
         cat.write_manifest_many,
         [(doc_id, rows)], complete={doc_id: content_hash} if content_hash is not None else None,
         sweep=sweep, chunks=chunks or None, collection=collection,
-        force_re_embed=force_re_embed, embedding_model=embedding_model)
+        force_re_embed=force_re_embed, embedding_model=embedding_model, **mode)
     resp = resp if isinstance(resp, dict) else {}
     if doc_id in (resp.get("failed_doc_ids") or ()):
         raise DocumentFailedError(
@@ -283,10 +289,12 @@ def write_one_request(
         counts = resp.get("dropped_count")
         if (not isinstance(dropped_map, dict) or doc_id not in dropped_map
                 or not isinstance(counts, dict) or doc_id not in counts):
-            raise BatchWriteFailedError(
-                doc_id=doc_id, batch=batch,
-                reason="the write_many response carried neither dropped_chashes and "
-                       "dropped_count entries nor a dropped_unknown marker for the document")
+            # An engine that predates the drop list answers without it. Not a corrupt answer: the
+            # remedy is an upgrade, so say so instead of failing the same cryptic way per record.
+            raise EngineOlderThanClientError(
+                f"multi-batch write of {doc_id!r} failed at batch {batch}: the write_many response "
+                "carried neither dropped_chashes and dropped_count entries nor a dropped_unknown "
+                "marker for the document")
         listed = list(dropped_map[doc_id] or ())
         if int(counts[doc_id]) != len(listed):
             raise BatchWriteFailedError(
@@ -616,9 +624,14 @@ class MultiBatchDocumentWriter:
             if (not isinstance(prior, list) or isinstance(count, bool)
                     or not isinstance(count, int) or count < len(prior)
                     or (prior and count == 0)):
-                raise self._fail(1, "begin_index_run(snapshot_manifest=True) returned no usable "
-                                    f"pre-run manifest (prior_chashes={type(prior).__name__}, "
-                                    f"prior_count={count!r})")
+                detail = ("begin_index_run(snapshot_manifest=True) returned no usable "
+                          f"pre-run manifest (prior_chashes={type(prior).__name__}, "
+                          f"prior_count={count!r})")
+                if not isinstance(prior, list) or isinstance(count, bool) or not isinstance(count, int):
+                    # The snapshot fields are absent or untyped: an engine that predates them.
+                    raise EngineOlderThanClientError(
+                        f"multi-batch write of {self._doc_id!r} failed at batch 1: {detail}")
+                raise self._fail(1, detail)   # present but self-contradicting: a corrupt answer
             self._prior = [str(c) for c in prior]
 
     def _send_pending(self, *, last: bool) -> None:

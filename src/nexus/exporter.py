@@ -687,7 +687,7 @@ def _locate_legacy_group(
 
 def _resolve_owner_document(
     group: dict, collection_name: str, owner_tumbler: Tumbler, reader: Any, writer: Any,
-    live_legacy: dict[str, Any] | None = None,
+    live_legacy: dict[str, Any] | None = None, minted_out: list[str] | None = None,
 ) -> str:
     """Find or register the catalog document one owner group belongs to
     in *collection_name* (nexus-wbfpw.31) and return its tumbler. Two
@@ -708,6 +708,10 @@ def _resolve_owner_document(
     in *collection_name* (*live_legacy*, from one batched ``resolve_many``)
     keeps that document; otherwise it falls through to the same find-or-
     register path under its file-scoped ``#<doc_id>`` identity.
+
+    *minted_out*, when given, receives the tumbler of a document this call REGISTERED (the engine's
+    ``created`` answer), never of one it found: the importer removes those again when the run ends
+    before anything was written to them (nexus-z0o2p.35, M4).
     """
     legacy = (live_legacy or {}).get(group.get("legacy_doc_id") or "")
     if legacy is not None:
@@ -719,13 +723,20 @@ def _resolve_owner_document(
         existing = reader.by_source_uri(source_uri)
     if existing is not None:
         return str(existing.tumbler)
-    return str(writer.register(
+    from nexus.catalog.path_ambiguity import created_from_register_result, tumbler_from_register_result  # noqa: PLC0415 — deferred: path_ambiguity imports catalog code
+
+    result = writer.register(
         owner=owner_tumbler,
         title=group["title"] or group["source_uri"],
         content_type=group["content_type"] or "knowledge",
         physical_collection=collection_name,
         source_uri=source_uri,
-    ))
+        with_created=True,
+    )
+    tumbler = str(tumbler_from_register_result(result))
+    if minted_out is not None and created_from_register_result(result):
+        minted_out.append(tumbler)
+    return tumbler
 
 
 @dataclass
@@ -880,6 +891,9 @@ class _OwnerImport:
         self._writer: Any = None
         self._import_writer: Any = None
         self._owner_tumbler: Tumbler | None = None
+        #: Documents :meth:`plan` registered (found ones are never listed): phantoms if the run ends
+        #: before anything lands on them (:meth:`compensate_minted`).
+        self._minted: list[str] = []
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -911,6 +925,43 @@ class _OwnerImport:
         """``(documents stamped complete, documents begun)``."""
         return self._import_writer.progress() if self._import_writer is not None else (0, 0)
 
+    def compensate_minted(self) -> int:
+        """Remove the documents :meth:`plan` registered that nothing was written to, once the run
+        has ended without a request in flight.
+
+        :meth:`plan` registers every owner group's document before the first page is written. A run
+        that ends before a document's first request lands (the first request refused: an engine that
+        predates the writer, a 4xx, a connection never made, a client-side refusal; or a failure
+        between the prepass and the first page) would leave a zero-chunk registration, the ghost that
+        the note and PDF writers already remove. A document is removed only when ALL hold: this call
+        registered it, no row of it landed, its manifest reads empty (another writer's version means
+        the row is no longer this run's to delete), and the last failed request, if there was one, did
+        not leave an outcome open (:func:`~nexus.catalog.write_outcome.may_have_written`: an
+        in-flight request may have committed, and a rerun resumes it). Returns the number removed.
+        Never raises: it runs inside a failure path whose own exception must propagate.
+        """
+        if not self._minted or self._import_writer is None:
+            return 0
+        if self._import_writer.request_may_have_written():
+            return 0
+        from nexus.catalog.store_hook import rollback_minted_catalog_entry  # noqa: PLC0415 — deferred: store_hook imports the indexers' helpers
+
+        removed = 0
+        for doc in self._minted:
+            try:
+                if self._import_writer.landed(doc) or self._reader.get_manifest(doc):
+                    continue
+                if rollback_minted_catalog_entry(doc, original_error="nxexp import ended before its first write"):
+                    self._import_writer.discard(doc)
+                    removed += 1
+            except Exception as exc:  # noqa: BLE001 — compensation must never mask the import's own failure
+                _log.warning("import_minted_compensation_failed", doc_id=doc, error=str(exc))
+        if removed:
+            _log.warning(
+                "import_minted_documents_removed", collection=self.collection_name, removed=removed,
+                minted=len(self._minted))
+        return removed
+
     # ── prepass ───────────────────────────────────────────────────────────────
 
     def plan(self, pre: dict[str, dict]) -> None:
@@ -937,7 +988,7 @@ class _OwnerImport:
             try:
                 doc = _resolve_owner_document(
                     g, self.collection_name, self._owner_tumbler, self._reader, self._writer,
-                    self._live_legacy,
+                    self._live_legacy, minted_out=self._minted,
                 )
             except Exception as exc:  # noqa: BLE001 — collected and re-raised at the end as one NexusError
                 _log.warning(
@@ -1650,6 +1701,7 @@ def import_collection(
             _log.warning(
                 "import_aborted", collection=collection_name, documents_complete=stamped,
                 documents_begun=begun, error=f"{type(exc).__name__}: {exc}")
+            owner_import.compensate_minted()      # before the fence marks: a removed row has no fence left
             owner_import.abort(f"{type(exc).__name__}: {exc}")
         raise
     finally:
