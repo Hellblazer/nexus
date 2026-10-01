@@ -51,7 +51,7 @@ def _seed_real_home(real: Path) -> dict[str, str]:
         ".config/systemd/user/nexus-service.service.d/10-bind-all.conf": "[Service]\n",
         "Library/LaunchAgents/com.nexus.service.plist": "<plist>real</plist>\n",
         "Library/Caches/keep.txt": "an entry the fence must still pass through\n",
-        ".config/gh/hosts.yml": "x\n",
+        ".config/xtool/hosts.yml": "x\n",
     }
     for rel, body in files.items():
         p = real / rel
@@ -93,7 +93,7 @@ def test_python_fence_hides_the_autostart_unit_dirs(tmp_path: Path) -> None:
     # Everything else still passes through, including siblings of the shadowed
     # leaves: this is a denylist, not a rebuild.
     assert (home / "Library" / "Caches" / "keep.txt").read_text().startswith("an entry")
-    assert (home / ".config" / "gh" / "hosts.yml").exists()
+    assert (home / ".config" / "xtool" / "hosts.yml").exists()
 
 
 def test_the_autostart_shadows_apply_whatever_shadow_the_caller_names(tmp_path: Path) -> None:
@@ -124,7 +124,7 @@ def test_shell_fence_hides_the_autostart_unit_dirs(tmp_path: Path) -> None:
 
     _assert_unit_dirs_are_empty_and_fenced(gate)
     assert (gate / "Library" / "Caches" / "keep.txt").exists()
-    assert (gate / ".config" / "gh" / "hosts.yml").exists()
+    assert (gate / ".config" / "xtool" / "hosts.yml").exists()
 
 
 def test_install_fence_makes_the_user_manager_unreachable(
@@ -139,7 +139,7 @@ def test_install_fence_makes_the_user_manager_unreachable(
     real_runtime = tmp_path / "run-user-1000"
     real_runtime.mkdir()
 
-    with patch.dict(os.environ):
+    with patch.dict(os.environ), patch("tests._fence_home.sys.platform", "linux"):
         monkeypatch.setenv("HOME", str(real))
         monkeypatch.setenv("XDG_RUNTIME_DIR", str(real_runtime))
         monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", f"unix:path={real_runtime}/bus")
