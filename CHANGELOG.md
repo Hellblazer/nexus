@@ -6,6 +6,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **`nx doctor` warns when the engine has seen a chunk write with no owner** (nexus-20onx, RDR-223 Phase 3 Step 2). The new "Ownerless writes" row reads `ownerless_writes_refused_total` and `ownerless_writes_would_refuse_total` from the engine's `/v1/status`. A count above zero means a client older than the Phase 2 release is writing, or a process upgraded on disk still runs its old code. After upgrading conexus, restart every long-lived `nx-mcp` server (one per Claude Code session) and any hook-spawned `nx`. The row is green and reads "not applicable" when the engine cannot be reached or predates the refusal. The cloud cutover order (log-only soak, then `enforce` by environment value and a same-tag redeploy) is `docs/operations/ownerless-write-cutover.md`.
+
 ### Removed
 
 - **`nx t3 reidentify` and `scripts/migrate_art_papers.py`** (nexus-z0o2p.25, RDR-223 Phase 3). `nx t3 reidentify` was the RDR-108 verb that re-keyed legacy chunk ids; it re-upserted through `col.upsert`, which the service collection stub does not have, so `--no-dry-run` raised `AttributeError` on every real install, and a pgvector chunk id is its chash by schema. The ART migration script was a one-off over the retired SQLite T2 and catalog files. `nx t3 backfill-manifest` and the other `nx t3` verbs are unchanged. The verify-fill code in `db/reconcile` and `db/embed_migrate` went too; neither had a caller.

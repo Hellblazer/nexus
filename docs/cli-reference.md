@@ -3692,6 +3692,18 @@ This runs automatically on the first `nx` invocation after a version change
 (long-lived MCP-host-only boxes where no CLI runs won't auto-trigger —
 `nx doctor` or this verb is the path there).
 
+**Ownerless writes (nexus-20onx).** `nx doctor`'s "Ownerless writes" row reads the
+engine's `GET /v1/status` counters `ownerless_writes_refused_total` and
+`ownerless_writes_would_refuse_total` (RDR-223 Phase 3 Step 2). It warns when either
+is above zero: some machine that writes to this engine runs a client older than the
+RDR-223 Phase 2 release, or a process upgraded on disk still runs the code it started
+with. The remedy is to upgrade conexus and then restart every long-lived `nx-mcp`
+server (one per Claude Code session) and hook-spawned `nx`; `nx daemon restart-stale`
+lists what predates the install. The counters are since the engine booted. The row is
+green and says "not applicable" when the engine cannot be reached or predates the
+refusal. The order of operations for the cloud engine is
+[`docs/operations/ownerless-write-cutover.md`](operations/ownerless-write-cutover.md).
+
 ### nx daemon t2 — RETIRED
 
 The entire `nx daemon t2` verb group (`start`, `stop`, `status`,
