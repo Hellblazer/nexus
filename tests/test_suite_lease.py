@@ -257,3 +257,58 @@ def test_a_nested_pytest_run_is_not_refused(tmp_path: Path) -> None:
         "a nested run hit the suite-lease refusal path\n"
         f"stdout:\n{out.stdout[-1500:]}\nstderr:\n{out.stderr[-1500:]}"
     )
+
+
+# -- the guard fails closed when the lease cannot be taken ------------------------
+
+
+@pytest.fixture
+def conftest_gate(monkeypatch: pytest.MonkeyPatch):
+    """The real ``_take_suite_lease`` with an acquire that always loses."""
+    gate = sys.modules["tests.conftest"]
+    monkeypatch.setattr(gate, "_selected_t2_substrate_boots_engine", lambda: True)
+    monkeypatch.setattr(gate, "_suite_lease_release", None)
+    monkeypatch.setattr(_suite_lease, "inside_a_holder", lambda: False)
+    monkeypatch.setattr(_suite_lease, "acquire", lambda *a, **k: None)
+    monkeypatch.delenv(gate._SUITE_LEASE_UNGUARDED_ENV, raising=False)
+    monkeypatch.delenv("NX_SUITE_LEASE_WAIT", raising=False)
+    return gate
+
+
+def test_a_lost_acquire_after_the_wait_refuses_with_75_and_names_the_holder(
+    conftest_gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wait ran out: holder() is still alive and acquire() returned None.
+
+    The first cut ignored that None and ran the whole suite unguarded, which is
+    the overlap the lease exists to stop, reported nowhere.
+    """
+    monkeypatch.setenv("NX_SUITE_LEASE_WAIT", "1")
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: "pid 4242 (peer-run)")
+    with pytest.raises(pytest.exit.Exception) as err:
+        conftest_gate._take_suite_lease()
+    assert err.value.returncode == 75
+    assert "pid 4242 (peer-run)" in err.value.msg
+    assert conftest_gate._suite_lease_release is None
+
+
+def test_losing_the_race_between_the_check_and_the_acquire_also_refuses(
+    conftest_gate, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """holder() saw it free, acquire() lost to another run: still a refusal, wait or no wait."""
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: None)
+    with pytest.raises(pytest.exit.Exception) as err:
+        conftest_gate._take_suite_lease()
+    assert err.value.returncode == 75
+    assert "just taken it" in err.value.msg
+
+
+def test_the_explicit_opt_out_runs_unguarded_and_says_so(
+    conftest_gate, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(_suite_lease, "holder", lambda *a, **k: "pid 4242 (peer-run)")
+    monkeypatch.setenv(conftest_gate._SUITE_LEASE_UNGUARDED_ENV, "1")
+    conftest_gate._take_suite_lease()  # does not raise
+    assert conftest_gate._suite_lease_release is None
+    err = capsys.readouterr().err
+    assert "UNGUARDED" in err and "pid 4242 (peer-run)" in err

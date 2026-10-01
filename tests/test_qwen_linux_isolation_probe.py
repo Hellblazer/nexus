@@ -41,17 +41,61 @@ def _run(step: dict, env: dict[str, str] | None = None) -> subprocess.CompletedP
                           env={"PATH": "/usr/bin:/bin", **(env or {})})
 
 
-def test_the_probe_is_owner_only_workflow_dispatch_and_nothing_else() -> None:
+OWNER = "Hellblazer"
+OWNER_ID = "1234"
+
+
+class _GhStr(str):
+    """A string whose `==` ignores case, as every GitHub Actions `==` on strings does."""
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, str) and self.casefold() == other.casefold()
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
+
+    __hash__ = str.__hash__
+
+
+def _runs(*, event: str = "workflow_dispatch", actor_id: str = OWNER_ID, triggering_actor: str = OWNER) -> bool:
+    """Evaluate the job's `if:` the way GitHub does for these contexts (same method as test_pytest_gate_qwen_route._route)."""
+    cond = str(_job()["if"]).strip()
+    py = cond.replace("&&", " and ").replace("||", " or ")
+    py = re.sub(r"'[^']*'", lambda m: f"_GhStr({m.group(0)})", py)
+    contexts = {
+        "github.event_name": event,
+        "github.actor_id": actor_id,
+        "github.repository_owner_id": OWNER_ID,
+        "github.triggering_actor": triggering_actor,
+        "github.repository_owner": OWNER,
+    }
+    for name in sorted(contexts, key=len, reverse=True):  # `repository_owner_id` before `repository_owner`
+        py = py.replace(name, f"_GhStr({contexts[name]!r})")
+    assert "github." not in py, f"unevaluated context left in {py!r}"
+    return bool(eval(py, {"__builtins__": {}, "_GhStr": _GhStr}, {}))  # noqa: S307 - the expression is this repo's own YAML
+
+
+def test_the_probe_triggers_on_workflow_dispatch_only_and_takes_no_permissions() -> None:
     doc = _doc()
     # PyYAML reads the bare key `on` as the boolean True
     triggers = doc.get("on", doc.get(True))
     assert set(triggers) == {"workflow_dispatch"}, triggers
     assert doc["permissions"] == {}
-    cond = _job()["if"]
-    for token in ("github.event_name == 'workflow_dispatch'",
-                  "github.actor_id == github.repository_owner_id",
-                  "github.triggering_actor == github.repository_owner"):
-        assert token in cond
+
+
+def test_the_probe_condition_admits_exactly_an_owner_dispatch_by_the_owner() -> None:
+    """Evaluated, not grepped: `&&` -> `||` or `==` -> `!=` turns a row below red."""
+    assert _runs() is True
+    assert _runs(triggering_actor=OWNER.lower()) is True  # `==` on strings ignores case
+    # every other event, even from the owner
+    for event in ("push", "pull_request", "pull_request_target", "schedule", "workflow_run", "issue_comment"):
+        assert _runs(event=event) is False, event
+    # a dispatch by anyone else, on either identity
+    assert _runs(actor_id="9999") is False
+    assert _runs(triggering_actor="somebody-else") is False
+    assert _runs(actor_id="9999", triggering_actor="somebody-else") is False
+    # the owner as the original actor but someone else re-running it
+    assert _runs(actor_id=OWNER_ID, triggering_actor="a-collaborator") is False
 
 
 def test_the_probe_runs_on_the_qwen_runner_label_set_and_runs_no_repo_or_third_party_code() -> None:
@@ -86,7 +130,7 @@ def test_every_expected_refusal_is_captured_so_bash_e_does_not_end_the_step() ->
 def test_the_probe_reads_the_surfaces_the_review_named_and_never_a_credential_content() -> None:
     text = PROBE.read_text()
     for needle in ("sudo -n true", "/home/nexus", "/home/nxtest", "docker run --rm -v /:/h", "ls -A /h/home/nexus",
-                   "/mnt/c", "cmd.exe", "WSLInterop", "/etc/wsl.conf", "id -Gn", "/home/nexus/.config/nexus"):
+                   "/mnt/c", "cmd.exe", "WSLInterop", "/etc/wsl.conf", "/home/nexus/.config/nexus"):
         assert needle in text, needle
     scripts = "\n".join(s["run"] for s in _steps())
     assert not re.search(r"\b(cat|head|tail|less|more|strings|base64)\b[^\n]*\.config/nexus", scripts)
@@ -97,7 +141,8 @@ def test_the_probe_reads_the_surfaces_the_review_named_and_never_a_credential_co
 def test_the_identity_step_reports_and_passes_for_an_ordinary_user() -> None:
     proc = _run(_step("Identity"))
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
-    assert "groups=" in proc.stdout and "docker group:" in proc.stdout
+    assert "docker group:" in proc.stdout
+    assert "groups=" not in proc.stdout and getpass.getuser() not in proc.stdout.split()
 
 
 def test_the_docker_step_reports_and_never_fails_when_there_is_no_docker() -> None:
@@ -174,7 +219,8 @@ def test_an_executable_cmd_exe_fails_the_windows_side_step_and_names_the_fix(tmp
     _fake_cmd_exe(tmp_path, "#!/bin/sh\nexit 0\n")
     proc = _windows_run(tmp_path)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
-    assert "c/Windows/System32/cmd.exe ran (exit 0)" in proc.stdout
+    assert "a Windows cmd.exe ran (exit 0)" in proc.stdout
+    assert "System32" not in proc.stdout
     assert "[interop] enabled=false" in proc.stdout and FIX in proc.stdout
 
 
@@ -199,7 +245,8 @@ def test_a_readable_mnt_drive_fails_the_windows_side_step_without_printing_a_nam
     (drive / "id_ed25519").write_text("SECRET-VALUE\n")
     proc = _windows_run(tmp_path)
     assert proc.returncode == 1, (proc.stdout, proc.stderr)
-    assert f"{drive} is mounted and listable" in proc.stdout and "2 entries" in proc.stdout
+    assert "a /mnt drive is mounted and listable" in proc.stdout and "(2 entries)" in proc.stdout
+    assert str(drive) not in proc.stdout
     assert "[automount] enabled=false" in proc.stdout
     for leaked in ("a-person-name", "id_ed25519", "SECRET-VALUE"):
         assert leaked not in proc.stdout + proc.stderr
@@ -238,10 +285,11 @@ def test_a_readable_credential_shaped_file_fails_the_homes_step_and_an_ordinary_
     (cfg / "api_token.json").write_text("{}\n")
     bad = _run(probe)
     assert bad.returncode == 1, (bad.stdout, bad.stderr)
-    assert "api_token.json" in bad.stdout and "credential-shaped" in bad.stdout
-    # names only: the file's content never reaches the log
+    assert "1 credential-shaped file(s)" in bad.stdout
+    # a count only: neither the file's name nor its content reaches the log
     (cfg / "api_token.json").write_text("SECRET-VALUE\n")
-    assert "SECRET-VALUE" not in _run(probe).stdout
+    out = _run(probe).stdout
+    assert "api_token" not in out and "SECRET-VALUE" not in out
 
 
 def test_the_homes_step_with_no_nexus_config_reports_and_passes() -> None:
@@ -256,3 +304,11 @@ def test_the_homes_step_with_no_nexus_config_reports_and_passes() -> None:
 def test_the_runner_label_is_registered_with_actionlint() -> None:
     cfg = yaml.safe_load((Path(__file__).parent.parent / ".github" / "actionlint.yaml").read_text())
     assert "qwen-linux" in cfg["self-hosted-runner"]["labels"]
+
+
+def test_the_public_log_carries_no_modes_owners_or_user_names_from_any_step() -> None:
+    """Pass or fail and counts only: no `ls -l`, no `stat`, no `id -un` or group list printed."""
+    scripts = "\n".join(s["run"] for s in _steps())
+    assert not re.search(r"\bls\s+-\w*l", scripts), "ls -l prints modes and owners"
+    assert "stat " not in scripts and "id -Gn" not in scripts and "id -un" not in scripts.replace('user="$(id -un)"', "")
+    assert 'echo "user=' not in scripts and 'echo "groups=' not in scripts

@@ -223,9 +223,15 @@ create the shared lease directory (`QWEN_SUITE_LEASE_ROOT`, default
 `sudo install -d -o root -g nx-suite -m 2775 /var/lib/nx-suite-lease`),
 restart the runner service so `ghci` has the group, and have `nxtest` export
 `NX_BUILD_LEASE_ROOT=/var/lib/nx-suite-lease NX_SUITE_LEASE_WAIT=1` (its
-`.bashrc`, which non-interactive ssh reads too). Then dispatch
-`qwen-linux-isolation-probe` (owner only) and record the result next to the
-isolation paragraph in `AGENTS.md`.
+`.bashrc`, which non-interactive ssh reads too). Apply the `/etc/wsl.conf` fix
+(WSL interop and the `/mnt` automount off, `AGENTS.md` § Self-hosted runners and
+fork PRs), then dispatch `qwen-linux-isolation-probe` (owner only) and record the
+result next to the isolation paragraph in `AGENTS.md`.
+
+**Until the `wsl.conf` fix is applied and the probe run is green, the repository
+variable `QWEN_CI_PUSH_RUNNER` must be `ubuntu-latest`.** An unset variable means
+`qwen-linux`, so the route is on by default; delete the variable (or set it to
+`qwen-linux`) only for the first run below, after the probe is green.
 
 First cold run:
 1. The job lands on `qwen-linux` (runner name in the log header); the consistency,
@@ -256,9 +262,10 @@ Then, before the route is called settled:
     the shards). Fix or accept each reason, then raise the floor to about
     measured minus 2% and delete the TODO.
 12. One exercise of the toggle: set `QWEN_CI_PUSH_RUNNER` to `ubuntu-latest`,
-    push, see the hosted shards run and `test-qwen` skip, then delete the
-    variable. "Re-run failed jobs" keeps the old route, so a toggle takes a new
-    push or "Re-run all jobs".
+    push, see the hosted shards run and `test-qwen` skip, then put the variable
+    back to whatever the host's state allows (delete it only when the `wsl.conf`
+    fix is applied and the probe is green). "Re-run failed jobs" keeps the old
+    route, so a toggle takes a new push or "Re-run all jobs".
 
 A green run does not show the overlap or flake behaviour (that takes about ten
 runs), signal-timing tests under `-n 12` while the host's inference is loaded,

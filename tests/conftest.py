@@ -251,6 +251,11 @@ def _selected_t2_substrate_boots_engine() -> bool:
 _suite_lease_release = None
 
 
+#: Explicit opt-out for a run that must go ahead even though the lease cannot
+#: be taken. Never set by CI; the default is to fail closed.
+_SUITE_LEASE_UNGUARDED_ENV = "NX_SUITE_LEASE_UNGUARDED"
+
+
 def _take_suite_lease() -> None:
     """Hold the box for THIS substrate-heavy run, and refuse a second one.
 
@@ -284,7 +289,7 @@ def _take_suite_lease() -> None:
         held = _suite_lease.holder()
         if held is not None:
             wait = _suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0
-            if wait == 0:
+            if wait == 0 and not _suite_lease_unguarded():
                 pytest.exit(
                     "suite lease: refusing to start — another substrate-heavy "
                     f"run holds this box ({held}). Two at once exhaust the "
@@ -298,12 +303,37 @@ def _take_suite_lease() -> None:
             _suite_lease_label(),
             wait_seconds=_suite_lease.DEFAULT_WAIT_SECONDS if _suite_lease_wait_requested() else 0,
         )
+        if _suite_lease_release is None:
+            # Held past the wait, or another run took it between the check
+            # above and this acquire. Running on would be exactly the overlap
+            # the lease exists to prevent, and silently: fail closed.
+            who = _suite_lease.holder() or "a run that has just taken it"
+            if _suite_lease_unguarded():
+                import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
+
+                _sys.stderr.write(
+                    f"suite lease: held by {who}; proceeding UNGUARDED because "
+                    f"{_SUITE_LEASE_UNGUARDED_ENV} is set\n"
+                )
+            else:
+                pytest.exit(
+                    f"suite lease: refusing to run — {who} still holds this box "
+                    "after the wait (or won the race for it). Two substrate-heavy "
+                    "runs at once exhaust the machine-wide shared-memory budget "
+                    "(nexus-6qp25). Re-run when it finishes, or set "
+                    f"{_SUITE_LEASE_UNGUARDED_ENV}=1 to run without the guard.",
+                    returncode=75,
+                )
     except pytest.exit.Exception:
         raise
     except Exception as exc:  # noqa: BLE001 — the lease must never break collection on its own bug
         import sys as _sys  # noqa: PLC0415 — branch-local, matches this file's convention
 
         _sys.stderr.write(f"suite-lease gate skipped on its own error: {exc!r}\n")
+
+
+def _suite_lease_unguarded() -> bool:
+    return os.environ.get(_SUITE_LEASE_UNGUARDED_ENV, "").strip() not in ("", "0")
 
 
 def _suite_lease_wait_requested() -> bool:

@@ -195,13 +195,22 @@ qwen job that was skipped, cancelled, timed out or never reported fails the
 required check, and `scripts/ci_status.py` expects the job on the develop
 topic. The lint, census and Service CI legs are unchanged.
 
+**An unset `QWEN_CI_PUSH_RUNNER` means `qwen-linux`: the route is ON by default.**
+Until Sam applies the `/etc/wsl.conf` fix (§ Self-hosted runners and fork PRs)
+and `qwen-linux-isolation-probe` has run green, the repository variable must be
+set to `ubuntu-latest`. Setting it is a repository setting, not a code change,
+so check it before merging anything that touches `ci.yml`.
+
 The job and a hand-run suite by the host's `nxtest` user serialize on one lease,
 not by agreement: `test-qwen` points `NX_BUILD_LEASE_ROOT` at a host directory
 (`QWEN_SUITE_LEASE_ROOT`, default `/var/lib/nx-suite-lease`, group-writable,
 not sticky) and sets `NX_SUITE_LEASE_WAIT=1`, and `nxtest` must export the same
 two variables; the job's lease step fails loud, with the host setup text, when
 the directory is missing or unusable (the suite lease itself would otherwise run
-unguarded and say nothing). The job also keeps `TMPDIR` on the runner's
+unguarded and say nothing). The suite lease also fails closed: if a peer still
+holds it after the 30 minute wait, or wins the race for it, the run exits 75
+naming the holder instead of running unguarded; `NX_SUITE_LEASE_UNGUARDED=1` is
+the explicit opt-out for a hand run, and CI never sets it. The job also keeps `TMPDIR` on the runner's
 persistent private directory on purpose: the test substrate's orphan sweep finds
 a cancelled run's Postgres and JVM through sidecar files there, which a per-job
 `RUNNER_TEMP` would delete. The host also serves production inference, so a
@@ -257,9 +266,10 @@ suite user `nxtest`, and a Windows host whose `C:` drive WSL can mount; the WSL
 data and `.wslconfig` belong to the Windows user. So a test run as `ghci` can
 reach the live install through docker, whatever the modes say. Nothing has
 measured it: `.github/workflows/qwen-linux-isolation-probe.yml` (owner-only
-`workflow_dispatch`, runs on `qwen-linux`) reports the groups, passwordless
-`sudo`, the other users' homes and the docker route to `/home/nexus` (expected
-to succeed today, reported not failed), and fails on passwordless `sudo`, a
+`workflow_dispatch`, runs on `qwen-linux`) reports docker-group membership,
+passwordless `sudo`, the other users' homes and the docker route to `/home/nexus`
+(expected to succeed today, reported not failed), prints pass or fail and counts
+only (no modes, owners, user names, group lists or file names), and fails on passwordless `sudo`, a
 readable credential file under `/home/nexus/.config/nexus`, and the Windows
 side. **WSL interop and the `/mnt` automount must be OFF before the CI route is
 enabled.** Measured on qwentescence with both on: the host admin, running as
@@ -271,7 +281,8 @@ mounted and listable, or a `/mnt/<drive>` entry is on the job's `PATH`. The
 fix is host-side, in `/etc/wsl.conf` (`[interop] enabled=false`,
 `appendWindowsPath=false`, `[automount] enabled=false`, then `wsl --shutdown`),
 and it is pending with Sam. Unset `QWEN_CI_PUSH_RUNNER` means `qwen-linux`, so
-until the fix is applied and a probe run is green, set it to `ubuntu-latest`.
+until the fix is applied and a probe run is green, the variable must be
+`ubuntu-latest` (stated above under CI pytest routing too).
 Until a run is green, read this runner's isolation as "intended", with docker as the known hole; a
 separate or rootless Docker for `ghci` is the remedy if Sam wants it closed. `qwen-linux` keeps state between
 jobs too: the docker daemon and its images and tags are shared by every user of

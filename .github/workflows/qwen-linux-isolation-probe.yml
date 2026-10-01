@@ -14,7 +14,7 @@
 #
 # WHAT IT DOES, each as its own step so one result does not hide the rest:
 #   REPORTS (never fail):
-#     - the user, its groups, and whether it is in the docker group;
+#     - whether the runner user is in the docker group (the user name and the group list are not printed);
 #     - whether /home/nexus and /home/nxtest are readable by file mode;
 #     - whether a container run through the docker group can read /home/nexus
 #       (EXPECTED to succeed today: this documents that docker is root, it is
@@ -35,8 +35,10 @@
 #     The fix is host-side, in /etc/wsl.conf: [interop] enabled=false,
 #     appendWindowsPath=false and [automount] enabled=false. Each failure names it.
 #   Reading a credential through the docker route is the known gap above and is
-#   not tested here: the probe never opens a credential file's content, and it
-#   never prints a name found under a /mnt drive or a PATH entry.
+#   not tested here: the probe never opens a credential file's content. The log of
+#   this public repo carries pass or fail and counts only: no modes, owners, user
+#   names or group lists, and no name found under a /mnt drive, on the PATH or as a
+#   credential-shaped file.
 #
 # TRIGGER. workflow_dispatch only, owner only, never pull_request or push: the
 # job runs on a self-hosted runner in a public repo. The `if:` compares account
@@ -68,12 +70,10 @@ jobs:
         run: |
           set -uo pipefail
           user="$(id -un)"
-          echo "user=$user uid=$(id -u)"
-          echo "groups=$(id -Gn)"
           rc=0
           case "$user" in
             nexus|root)
-              echo "::error::the job runs as '$user', the live install's user or root: the checks below prove nothing about the runner user"
+              echo "::error::the job runs as the live install's user or as root: the checks below prove nothing about the runner user"
               rc=1
               ;;
           esac
@@ -82,6 +82,7 @@ jobs:
           else
             echo "docker group: not a member"
           fi
+          [ "$rc" -eq 0 ] && echo "the job runs as an unprivileged user that is not the live install's user (expected)"
           exit "$rc"
 
       - name: Passwordless sudo is refused
@@ -98,7 +99,7 @@ jobs:
           status=0
           sudo -n true >/dev/null 2>&1 || status=$?
           if [ "$status" -eq 0 ]; then
-            echo "::error::sudo -n true succeeded: $(id -un) has passwordless sudo"
+            echo "::error::sudo -n true succeeded: the runner user has passwordless sudo"
             exit 1
           fi
           echo "sudo -n true failed with exit $status (expected)"
@@ -110,31 +111,28 @@ jobs:
           set -uo pipefail
           rc=0
           for home in /home/nexus /home/nxtest; do
-            echo "--- $home"
-            ls -ld "$home" 2>&1 || true
             status=0
             ls -A "$home" >/dev/null 2>&1 || status=$?
             if [ "$status" -eq 0 ]; then
-              echo "REPORT: $home is listable by $(id -un) (file mode)"
+              echo "REPORT: $home is listable by the runner user (file mode)"
             else
-              echo "REPORT: $home is not listable by $(id -un) (exit $status)"
+              echo "REPORT: $home is not listable by the runner user"
             fi
           done
           cfg=/home/nexus/.config/nexus
           echo "--- $cfg"
           if [ ! -d "$cfg" ]; then
-            echo "REPORT: $cfg is absent or not reachable by $(id -un); nothing to check by file mode"
+            echo "REPORT: $cfg is absent or not reachable by the runner user; nothing to check by file mode"
             exit 0
           fi
-          # Names only, never contents. A credential-shaped file is one whose
-          # name says so; a plain listing of an unreadable directory finds none.
+          # A count only, never names or contents. A credential-shaped file is one
+          # whose name says so; a plain listing of an unreadable directory finds none.
           readable="$(find "$cfg" -maxdepth 3 -type f -readable \( -iname '*cred*' -o -iname '*token*' -o -iname '*secret*' -o -iname '*key*' -o -iname '*auth*' -o -iname '.env' -o -iname '*.pem' \) 2>/dev/null || true)"
           if [ -n "$readable" ]; then
-            echo "::error::credential-shaped files under $cfg are readable by $(id -un):"
-            printf '%s\n' "$readable"
+            echo "::error::$(printf '%s\n' "$readable" | wc -l | tr -d ' ') credential-shaped file(s) under $cfg are readable by the runner user (names withheld)"
             rc=1
           else
-            echo "no credential-shaped file under $cfg is readable by $(id -un) (expected)"
+            echo "no credential-shaped file under $cfg is readable by the runner user (expected)"
           fi
           exit "$rc"
 
@@ -150,7 +148,7 @@ jobs:
           status=0
           docker info >/dev/null 2>&1 || status=$?
           if [ "$status" -ne 0 ]; then
-            echo "REPORT: the docker daemon is not reachable by $(id -un) (exit $status): no container-root route from this user"
+            echo "REPORT: the docker daemon is not reachable by the runner user (exit $status): no container-root route from this user"
             exit 0
           fi
           # Read-only bind of the distro root, a count of entries only. This
@@ -159,9 +157,9 @@ jobs:
           status=0
           out="$(docker run --rm -v /:/h:ro alpine ls -A /h/home/nexus 2>&1)" || status=$?
           if [ "$status" -eq 0 ]; then
-            echo "REPORT: a container started by $(id -un) listed /home/nexus ($(printf '%s\n' "$out" | wc -l) entries). docker = root on this distro: file modes do not separate ghci from the live install."
+            echo "REPORT: a container started by the runner user listed /home/nexus ($(printf '%s\n' "$out" | wc -l | tr -d ' ') entries). docker = root on this distro: file modes do not separate the runner user from the live install."
           else
-            echo "REPORT: the container could not list /home/nexus (exit $status); first line: $(printf '%s\n' "$out" | head -1)"
+            echo "REPORT: the container could not list /home/nexus (exit $status)"
           fi
 
       - name: Windows side (fails if interop runs, a /mnt drive is readable, or PATH has a /mnt entry)
@@ -191,10 +189,10 @@ jobs:
             $run_prefix "$cmd" /c exit 0 >/dev/null 2>&1 || status=$?
             case "$status" in
               126|127)
-                echo "REPORT: ${cmd#"$mnt_root"/} exists but could not be executed (exit $status): interop is off for it"
+                echo "REPORT: a Windows cmd.exe exists but could not be executed (exit $status): interop is off for it"
                 ;;
               *)
-                echo "::error::${cmd#"$mnt_root"/} ran (exit $status): WSL interop lets $(id -un) start Windows programs as the Windows user. Fix on the host: $fix"
+                echo "::error::a Windows cmd.exe ran (exit $status): WSL interop lets the runner user start Windows programs as the Windows user. Fix on the host: $fix"
                 rc=1
                 ;;
             esac
@@ -228,11 +226,11 @@ jobs:
             status=0
             out="$(ls -A "$d" 2>/dev/null)" || status=$?
             if [ "$status" -ne 0 ]; then
-              echo "REPORT: $d is not listable by $(id -un) (exit $status)"
+              echo "REPORT: a /mnt drive directory is not listable by the runner user (exit $status)"
             elif [ -z "$out" ]; then
-              echo "REPORT: $d exists and is empty (not a mounted drive)"
+              echo "REPORT: a /mnt drive directory exists and is empty (not a mounted drive)"
             else
-              echo "::error::$d is mounted and listable by $(id -un) ($(printf '%s\n' "$out" | wc -l | tr -d ' ') entries): the Windows drive is reachable. Fix on the host: $fix"
+              echo "::error::a /mnt drive is mounted and listable by the runner user ($(printf '%s\n' "$out" | wc -l | tr -d ' ') entries): the Windows drive is reachable. Fix on the host: $fix"
               rc=1
             fi
           done

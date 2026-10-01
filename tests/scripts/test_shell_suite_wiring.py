@@ -104,6 +104,7 @@ seconds combined — incidental, not the reason they belong here.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import time
@@ -174,9 +175,29 @@ SUITES = [
         "tests/e2e/lib/commit_scope_audit_test.sh",
         19 if _bin_bash_is_pre_4() else 16,
     ),
-    _Suite("scripts/lib/build-lease_test.sh", 38),
+    # 40: Test 10 (the pgid-liveness pin) is among the 40, so deleting it turns this red.
+    _Suite("scripts/lib/build-lease_test.sh", 40),
     _Suite("scripts/mvnw-leased_test.sh", 22),
 ]
+
+
+#: The lease variables a suite must never inherit. CI's lease step exports
+#: NX_BUILD_LEASE_ROOT to every later step, and an nxtest hand run sets it by
+#: design; three suites below assume the lease root is their own fake repo's.
+_LEASE_ENV_PREFIXES = ("NX_BUILD_LEASE_ROOT", "NX_SUITE_LEASE_")
+
+#: The suites that build a fake repo around a lease and so are sensitive to an
+#: inherited lease root (measured: with NX_BUILD_LEASE_ROOT set, these three
+#: fail and the other eight pass).
+_LEASE_SENSITIVE = (
+    "scripts/lib/build-lease_test.sh",
+    "scripts/mvnw-leased_test.sh",
+    "tests/e2e/migration-rehearsal/run_sh_guard_test.sh",
+)
+
+
+def _env_without_lease_vars() -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if not k.startswith(_LEASE_ENV_PREFIXES)}
 
 
 class TestSuitesExist:
@@ -198,6 +219,7 @@ class TestSuitesAreGreen:
             capture_output=True,
             text=True,
             timeout=120,
+            env=_env_without_lease_vars(),
         )
         elapsed = time.monotonic() - start
 
@@ -228,4 +250,35 @@ class TestSuitesAreGreen:
             "exists to catch.\n"
             f"--- stdout ---\n{result.stdout}\n"
             f"--- stderr ---\n{result.stderr}"
+        )
+
+
+class TestSuitesIgnoreAnInheritedLeaseRoot:
+    """A hand run with the documented export must neither fail nor write fixtures into the shared root.
+
+    The wrapper above scrubs the variables, so it cannot see this: the suites'
+    own ``unset`` is what is under test, and a run that inherits the variable
+    is the only way to reach it.
+    """
+
+    @pytest.mark.parametrize("relpath", _LEASE_SENSITIVE, ids=lambda p: Path(p).name)
+    def test_suite_passes_with_the_lease_root_exported_and_leaves_it_empty(
+        self, relpath: str, tmp_path: Path
+    ) -> None:
+        shared = tmp_path / "shared-lease-root"
+        shared.mkdir()
+        env = _env_without_lease_vars()
+        env["NX_BUILD_LEASE_ROOT"] = str(shared)
+        env["NX_SUITE_LEASE_WAIT"] = "1"
+        path = REPO_ROOT / relpath
+        result = subprocess.run(
+            ["bash", str(path)], cwd=REPO_ROOT, capture_output=True, text=True, timeout=120, env=env
+        )
+        assert result.returncode == 0, (
+            f"{path.name} failed with NX_BUILD_LEASE_ROOT exported\n"
+            f"--- stdout ---\n{result.stdout}\n--- stderr ---\n{result.stderr}"
+        )
+        assert list(shared.iterdir()) == [], (
+            f"{path.name} wrote into the inherited lease root: "
+            f"{sorted(p.name for p in shared.iterdir())}"
         )
