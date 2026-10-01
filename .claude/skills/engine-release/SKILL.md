@@ -462,7 +462,10 @@ skip budget, with a non-vacuity read of the junit file (exactly the declared cou
 skipped, at least one run). They used to run inside `lsg`, whose fenced HOME never mirrors
 `~/.config/gh` (`tests/e2e/lib/fence_home.sh`, kept on purpose), so they skipped there and read the
 gate FAILED on every run (nexus-z0o2p.41, Sam's decision: move them out; keep the fence and the zero
-budget). The nightly workflow runs the same script as its own step. `fresh-install-mvv.sh`, `data-token-cli-gate.sh` and
+budget). The script resolves `gh auth token` in the real HOME and hands it to pytest as
+`GITHUB_TOKEN` (the suite's own throwaway HOME hides a file-backed login; an environment token
+wins), and never prints it. The nightly workflow runs the same script as its own step with the
+job token and a budget of 1 for the one pin a job token cannot satisfy. `fresh-install-mvv.sh`, `data-token-cli-gate.sh` and
 `release-sandbox.sh` (battery legs `mvv`, `dtok`, `smoke`, `shakedown`) run
 `nx init`, which downloads the PINNED PUBLISHED engine
 (`REQUIRED_ENGINE_VERSION`). That engine predates the change you are about to
