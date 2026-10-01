@@ -235,6 +235,53 @@ def _refuse_orphan_window(ctx: click.Context, param: click.Parameter, value: str
         raise click.UsageError(_ORPHAN_WINDOW_REMOVED)
 
 
+#: The census buckets the verb refuses on when above zero (RDR-192 R8): ``legacy-unmanifested`` is a
+#: live legacy note the route would take once old; ``unclassified`` is a row the census itself cannot
+#: classify, so the reapable verdict for it is not understood. The reaper refuses on both.
+_GC_CENSUS_BLOCKERS = ("legacy-unmanifested", "unclassified")
+
+
+def _census_blocker_totals(census: dict, collection: str) -> dict[str, int]:
+    """The blocking buckets' totals from one census response. A response missing a blocking bucket
+    cannot be read as zero: refuse to act without it."""
+    totals = census.get("totals") or {}
+    missing = [b for b in _GC_CENSUS_BLOCKERS if totals.get(b) is None]
+    if missing:
+        raise click.ClickException(
+            f"The manifest-less census for {collection!r} carried no {', '.join(missing)} total; "
+            f"refusing to act without it (RDR-192 R8)."
+        )
+    return {b: int(totals[b]) for b in _GC_CENSUS_BLOCKERS}
+
+
+def _census_blocker_reasons(collection: str, blockers: dict[str, int], *, prior: bool = False) -> list[str]:
+    """One refusal reason per blocking bucket above zero. *prior* words them for the re-read made
+    immediately before the move ("now reads ...; it read 0 when this run began")."""
+    reasons: list[str] = []
+    lead = (
+        f"the manifest-less census for '{collection}' now reads"
+        if prior else f"the manifest-less census for '{collection}' reads"
+    )
+    tail = "; it read 0 when this run began" if prior else ""
+    if blockers["legacy-unmanifested"]:
+        reasons.append(
+            f"{lead} legacy-unmanifested = {blockers['legacy-unmanifested']}, not 0{tail}. A live "
+            f"legacy note with no manifest row reads reapable once old, and the engine route takes "
+            f"no exclusion list, so moving this collection could quarantine a live note. Inspect "
+            f"with 'nx t3 census-manifest-less -c {collection}', re-put those notes (so each has a "
+            f"manifest row), then re-run (RDR-192 R8)."
+        )
+    if blockers["unclassified"]:
+        reasons.append(
+            f"{lead} unclassified = {blockers['unclassified']}, not 0{tail}. A row the census "
+            f"cannot classify is a collection state nobody has understood, so the reapable "
+            f"verdict on it cannot be trusted; the reaper refuses on it too. Inspect with "
+            f"'nx t3 census-manifest-less -c {collection}' (it exits 1 on unclassified) and "
+            f"resolve the rows, then re-run (RDR-192 R8)."
+        )
+    return reasons
+
+
 @t3.command("gc")
 @click.option(
     "--collection",
@@ -301,7 +348,8 @@ def gc_cmd(
 
     \b
     The verb MOVES, it does not delete. The act is the engine route
-    ``POST /v1/vectors/gc/quarantine-orphans`` (``gc_quarantine_orphans``): its
+    ``POST /v1/vectors/gc/quarantine-orphans`` (``gc_quarantine_orphans``, the
+    BOUNDED form: 2000 rows per call, looped until ``remaining`` is 0): its
     own statement carries the predicate, takes the exclusive per-collection
     sweep gate, and moves the rows to the ``quarantine-*`` sibling, restorable
     for 14 days (``NX_GC_QUARANTINE_DAYS``) and then expired by the engine. A
@@ -323,14 +371,17 @@ def gc_cmd(
         ``index_state='complete'`` (an in-flight or fence-failed run). Override:
         ``--allow-incomplete-index-state``.
       - Manifest-less census (RDR-192 R8): ``POST /v1/vectors/manifest-less-census``
-        is called on every run, and ``legacy-unmanifested`` must read 0. A live
-        legacy note with no manifest row reads reapable once old, and the route
-        has no exclusion list, so the verb refuses rather than move it. Clear
-        the bucket (re-put the notes, see ``nx t3 census-manifest-less``) first.
+        is called at the start of every run and again right before the move, and
+        ``legacy-unmanifested`` AND ``unclassified`` must both read 0 (as the
+        reaper requires). A live legacy note with no manifest row reads
+        reapable once old, and the route has no exclusion list, so the verb
+        refuses rather than move it. Clear the bucket (re-put the notes, see
+        ``nx t3 census-manifest-less``) first.
       - Fraction floor: a pass whose candidates exceed ``NX_GC_FLOOR_FRACTION``
         (default 0.25) of the collection's chunks, from 100 chunks up, is the
-        manifest-gap misclassification shape. Override: ``NX_GC_FORCE=1``. This
-        is client-side until the engine move carries its own floor.
+        manifest-gap misclassification shape. Override: ``NX_GC_FORCE=1``. The
+        floor is the client's and permanent: the route this verb moves with
+        carries none, and the reaper's lives in a function with no HTTP route.
       - Empty manifest set (nexus-jqrtp): the collection holds chunks but none
         has a manifest row in it (read off the census: stored chunks minus the
         manifest-less buckets is 0), the shape of a fresh or mis-scoped tenant
@@ -425,13 +476,7 @@ def gc_cmd(
         raise click.ClickException(
             f"Failed to read the manifest-less census for {collection!r}: {exc}"
         ) from exc
-    legacy_unmanifested = (census.get("totals") or {}).get("legacy-unmanifested")
-    if legacy_unmanifested is None:
-        raise click.ClickException(
-            f"The manifest-less census for {collection!r} carried no legacy-unmanifested total; "
-            f"refusing to act without it (RDR-192 R8)."
-        )
-    legacy_unmanifested = int(legacy_unmanifested)
+    census_blockers = _census_blocker_totals(census, collection)
     scope_chunk_total = int(census.get("scope_chunk_total", 0))
     # Chunks carrying an own-collection manifest row = everything the collection holds minus the five
     # manifest-less buckets (the census classifies exactly the chunks with no such row).
@@ -476,15 +521,7 @@ def gc_cmd(
             f"confirmed no reindex is concurrently running against this collection, re-run "
             f"with --allow-incomplete-index-state."
         )
-    if legacy_unmanifested:
-        reasons.append(
-            f"the manifest-less census for '{collection}' reads legacy-unmanifested = "
-            f"{legacy_unmanifested}, not 0. A live legacy note with no manifest row reads "
-            f"reapable once old, and the engine route takes no exclusion list, so moving this "
-            f"collection could quarantine a live note. Inspect with "
-            f"'nx t3 census-manifest-less -c {collection}', re-put those notes (so each has a "
-            f"manifest row), then re-run (RDR-192 R8)."
-        )
+    reasons.extend(_census_blocker_reasons(collection, census_blockers))
     if scope_chunk_total > 0 and owned_chunks <= 0 and not allow_empty_manifest_set:
         reasons.append(
             f"the catalog manifest for '{collection}' names NONE of the {scope_chunk_total} "
@@ -494,6 +531,14 @@ def gc_cmd(
             f"with 'nx t3 backfill-manifest -c {collection}' or 'nx catalog reconcile', or, if "
             f"the collection really is fully orphaned, re-run with --allow-empty-manifest-set."
         )
+    # THE FLOOR IS PERMANENT, and it is the client's. gc_quarantine_orphans (the route this verb moves
+    # with) carries no fraction floor; the reaper's floor lives inside reaper_quarantine_chunks, which
+    # has no HTTP route, so no engine-side floor will ever reach this verb. The variable is
+    # NX_GC_FLOOR_FRACTION (with NX_GC_FORCE), the name the indexer's quarantine-expiry floor already
+    # reads through the same fail-safe parser, the same default (0.25) and the same 100-chunk minimum:
+    # one name for the operator across the client GC floors. NX_REAPER_FLOOR_FRACTION is NOT reused:
+    # it configures the engine-side reaper, a different process whose environment a CLI invocation
+    # does not set, so honouring it here would make the floor follow a variable nobody exports.
     floor_fraction = _gc_floor_fraction()
     force = os.environ.get("NX_GC_FORCE", "") == "1"
     if (
@@ -506,9 +551,10 @@ def gc_cmd(
             f"({len(candidates) / scope_chunk_total:.0%}) in '{collection}' are reapable, over "
             f"the NX_GC_FLOOR_FRACTION floor of {floor_fraction:.0%} (applies from "
             f"{_GC_FLOOR_MIN_CHUNKS} chunks up). A verdict this large is the manifest-gap "
-            f"misclassification shape, not routine churn. The engine move carries no floor of "
-            f"its own yet, so this verb holds it. If the collection really is mostly garbage, "
-            f"re-run with NX_GC_FORCE=1 (the move is reversible for the quarantine window)."
+            f"misclassification shape, not routine churn. The engine route this verb moves with "
+            f"carries no floor, so this verb holds it. If the collection really is mostly "
+            f"garbage, re-run with NX_GC_FORCE=1 (the move is reversible for the quarantine "
+            f"window)."
         )
 
     if not will_act:
@@ -549,13 +595,12 @@ def gc_cmd(
         raise click.ClickException(
             f"Failed to re-read the manifest-less census for {collection!r} before the move: {exc}"
         ) from exc
-    if int((recheck.get("totals") or {}).get("legacy-unmanifested") or 0):
-        click.echo(
-            f"\nREFUSING to move: the manifest-less census for '{collection}' now reads "
-            f"legacy-unmanifested = {int(recheck['totals']['legacy-unmanifested'])}; it read 0 "
-            f"when this run began. Re-put the notes (see 'nx t3 census-manifest-less -c "
-            f"{collection}') and re-run (RDR-192 R8)."
-        )
+    recheck_reasons = _census_blocker_reasons(
+        collection, _census_blocker_totals(recheck, collection), prior=True,
+    )
+    if recheck_reasons:
+        for reason in recheck_reasons:
+            click.echo(f"\nREFUSING to move: {reason}")
         raise click.exceptions.Exit(1)
 
     # The act: the engine's own move. No chunk ids cross the wire; the route's statement carries

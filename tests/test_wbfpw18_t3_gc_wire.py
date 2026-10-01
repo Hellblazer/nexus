@@ -60,7 +60,12 @@ class _Engine:
 
     def __init__(self, *, total: int, reapable: list[int], legacy: int = 0,
                  census_error: Exception | None = None, page: int | None = None,
-                 in_t3: bool = True, no_owner: int = 0, legacy_on_recheck: int | None = None) -> None:
+                 in_t3: bool = True, no_owner: int = 0, legacy_on_recheck: int | None = None,
+                 unclassified: int = 0, unclassified_on_recheck: int | None = None,
+                 batches: list[int] | None = None) -> None:
+        self.unclassified = unclassified
+        self.unclassified_on_recheck = unclassified_on_recheck
+        self.batches = list(batches) if batches is not None else None
         self.legacy_on_recheck = legacy_on_recheck
         self.census_calls = 0
         self.no_owner = no_owner
@@ -93,6 +98,10 @@ class _Engine:
                 if self.census_calls > 1 and self.legacy_on_recheck is not None else self.legacy
             )
             totals["no-owner"] = self.no_owner
+            totals["unclassified"] = (
+                self.unclassified_on_recheck
+                if self.census_calls > 1 and self.unclassified_on_recheck is not None else self.unclassified
+            )
             return {"collection": body["collection"], "returned": 0, "chashes": {},
                     "owners": {}, "totals": totals, "scope_chunk_total": self.total}
         if path == "/v1/vectors/reapable":
@@ -108,6 +117,10 @@ class _Engine:
                 "chunks": [_row(i) for i in rows],
             }
         if path == "/v1/vectors/gc/quarantine-orphans":
+            if self.batches is not None:
+                moved = self.batches.pop(0)
+                return {"moved": moved, "sample": [], "remaining": sum(self.batches),
+                        "row_limit": body.get("row_limit")}
             return {"moved": len(self.reapable), "sample": [], "remaining": 0,
                     "row_limit": body.get("row_limit")}
         raise AssertionError(f"unexpected engine route {path}: nx t3 gc must not use it")
@@ -165,6 +178,11 @@ def test_act_moves_through_the_engine_route_and_never_deletes_by_id(runner, real
     assert move["quarantine_collection"] == _QUARANTINE
     # The route is collection-wide: it carries no chash list and no exclusion list.
     assert not ({"chashes", "ids", "exclude", "exclusions"} & set(move))
+    # The BOUNDED form (row_limit present): the unbounded form has a 5 s statement timeout. And the
+    # audit sample is the engine's own ceiling, so every chunk of a batch is in its gc_audit row and
+    # an operator can restore from the row.
+    assert move["row_limit"] == 2000
+    assert move["sample_limit"] == 5000
     assert "quarantined 3 chunk(s)" in result.output
     assert "restorable" in result.output
 
@@ -361,3 +379,54 @@ def test_the_empty_manifest_override_lets_the_move_run(runner, real_client):
     result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes", "--allow-empty-manifest-set"])
     assert result.exit_code == 0, result.output
     assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+
+
+# ── (RDR-192 side-table critique 28255 issue 1) census, bounded form, permanent floor ───────────
+
+
+def test_a_nonzero_unclassified_census_refuses_and_moves_nothing(runner, real_client):
+    """The reaper refuses on unclassified > 0 as well as legacy-unmanifested > 0; the verb matches it.
+    A census that cannot classify a row has not understood the collection."""
+    engine = _Engine(total=10, reapable=[1, 2], unclassified=1)
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code != 0
+    assert "unclassified = 1" in result.output and "REFUSING" in result.output
+    assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
+
+
+def test_the_unclassified_gate_is_reported_by_a_dry_run_and_rechecked_before_the_move(runner, real_client):
+    engine = _Engine(total=10, reapable=[1])
+    engine.unclassified = 2
+    dry = _invoke(runner, real_client, engine, ["--dry-run"])
+    assert dry.exit_code == 0, dry.output
+    assert "REFUSE" in dry.output and "unclassified" in dry.output
+
+    flipped = _Engine(total=10, reapable=[1], unclassified=0, unclassified_on_recheck=1)
+    result = _invoke(runner, real_client, flipped, ["--no-dry-run", "--yes"])
+    assert result.exit_code != 0
+    assert "unclassified" in result.output and "REFUSING" in result.output
+    assert "/v1/vectors/gc/quarantine-orphans" not in flipped.paths()
+
+
+def test_the_bounded_move_is_drained_until_remaining_is_zero(runner, real_client):
+    engine = _Engine(total=10, reapable=[1, 2, 3], batches=[2, 1])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    moves = [b for p, b in engine.posted if p == "/v1/vectors/gc/quarantine-orphans"]
+    assert len(moves) == 2 and all(m["row_limit"] == 2000 for m in moves)
+    assert "quarantined 3 chunk(s)" in result.output
+
+
+def test_the_floor_is_the_gc_family_variable_and_never_the_reapers(runner, real_client, monkeypatch):
+    """The client floor is permanent (the engine route carries none; the reaper's floor lives in a
+    function with no HTTP route) and reads NX_GC_FLOOR_FRACTION, the name the indexer's expiry floor
+    already uses, not the engine reaper's NX_REAPER_FLOOR_FRACTION (a different process's env)."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    monkeypatch.setenv("NX_REAPER_FLOOR_FRACTION", "1.0")  # must not loosen the verb's floor
+    monkeypatch.setenv("NX_GC_FLOOR_FRACTION", "0.5")
+    over = _Engine(total=100, reapable=list(range(1, 61)))  # 60% > 50%
+    refused = _invoke(runner, real_client, over, ["--no-dry-run", "--yes"])
+    assert refused.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in refused.output
+    under = _Engine(total=100, reapable=list(range(1, 41)))  # 40% < 50%
+    allowed = _invoke(runner, real_client, under, ["--no-dry-run", "--yes"])
+    assert allowed.exit_code == 0, allowed.output

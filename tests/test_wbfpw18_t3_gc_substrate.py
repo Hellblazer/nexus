@@ -80,8 +80,12 @@ def test_the_move_quarantines_exactly_the_reapable_rows_and_the_engine_audits_it
     # One pass, one audit row, written by the engine. The verb's own t3_gc row is gone.
     rows = _audit_rows(fx.name)
     assert len(rows) == 1, rows
-    assert rows[0]["operation"] in {"gc_quarantine_orphans", "gc_quarantine_orphans_bounded"}
+    # The BOUNDED form (the unbounded one has a 5 s statement timeout), with the audit sample large
+    # enough that the row names every moved chash: an operator can restore from the audit row.
+    assert rows[0]["operation"] == "gc_quarantine_orphans_bounded"
     assert rows[0]["actor"] == "engine"
+    assert rows[0]["chash_count"] == len(fx.reapable)
+    assert set(rows[0]["chashes"]) == fx.reapable
     assert {r["operation"] for r in rows}.isdisjoint({"t3_gc"})
 
 
