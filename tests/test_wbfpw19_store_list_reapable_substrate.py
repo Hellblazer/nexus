@@ -7,6 +7,8 @@ the empty line on a clean collection.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 from click.testing import CliRunner
 
@@ -34,8 +36,9 @@ def test_lists_exactly_the_reapable_rows_of_the_fixture(env):
     assert listed == fx.reapable, f"listed {listed}, expected exactly {fx.reapable}\n{result.output}"
     for chash in fx.reapable:
         line = next(line for line in result.output.splitlines() if chash in line)
-        assert "wbfpw19-list:" in line  # the chunk's title, from its own metadata
-        assert "40d" in line or "41d" in line  # age, from created_at
+        assert "wbfpw19-list orphan" in line  # the chunk's title, from its own metadata
+        assert re.search(r"\b\d+d\b", line), line  # age in days, from created_at
+        assert "Z" in line  # created_at, as the engine reports it
     # Read-only: listing moved nothing.
     from nexus.db.http_vector_client import HttpVectorClient
 

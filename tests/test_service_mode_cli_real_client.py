@@ -215,6 +215,7 @@ def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypat
     assert paths == [
         "/v1/vectors/manifest-less-census",
         "/v1/vectors/reapable",
+        "/v1/vectors/manifest-less-census",  # re-read immediately before the move
         "/v1/vectors/gc/quarantine-orphans",
     ]
     move = posted[-1][1]

@@ -60,7 +60,9 @@ class _Engine:
 
     def __init__(self, *, total: int, reapable: list[int], legacy: int = 0,
                  census_error: Exception | None = None, page: int | None = None,
-                 in_t3: bool = True, no_owner: int = 0) -> None:
+                 in_t3: bool = True, no_owner: int = 0, legacy_on_recheck: int | None = None) -> None:
+        self.legacy_on_recheck = legacy_on_recheck
+        self.census_calls = 0
         self.no_owner = no_owner
         self.in_t3 = in_t3
         self.total = total
@@ -84,8 +86,12 @@ class _Engine:
         if path == "/v1/vectors/manifest-less-census":
             if self.census_error is not None:
                 raise self.census_error
+            self.census_calls += 1
             totals = dict.fromkeys(_BUCKETS, 0)
-            totals["legacy-unmanifested"] = self.legacy
+            totals["legacy-unmanifested"] = (
+                self.legacy_on_recheck
+                if self.census_calls > 1 and self.legacy_on_recheck is not None else self.legacy
+            )
             totals["no-owner"] = self.no_owner
             return {"collection": body["collection"], "returned": 0, "chashes": {},
                     "owners": {}, "totals": totals, "scope_chunk_total": self.total}
@@ -212,6 +218,19 @@ def test_a_nonzero_legacy_census_refuses_and_moves_nothing(runner, real_client):
     assert "legacy-unmanifested" in result.output
     assert "REFUSING" in result.output
     assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
+
+
+def test_the_census_is_read_again_immediately_before_the_move(runner, real_client):
+    """The gate must be as fresh as it can be: a note that went legacy-unmanifested while the
+    listing was paging (a census that read 0 first and 1 just before the act) stops the move."""
+    engine = _Engine(total=10, reapable=[1, 2], legacy=0, legacy_on_recheck=1)
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code != 0
+    assert "legacy-unmanifested" in result.output and "REFUSING" in result.output
+    assert engine.paths().count("/v1/vectors/manifest-less-census") == 2
+    assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
+    # the recheck is the LAST read before the move: nothing but the move follows it
+    assert engine.paths()[-1] == "/v1/vectors/manifest-less-census"
 
 
 def test_the_census_is_read_on_every_run_not_only_when_acting(runner, real_client):

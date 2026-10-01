@@ -414,7 +414,7 @@ def gc_cmd(
     reapable_fn = getattr(t3_db, "reapable_chunks", None)
     if census_fn is None or reapable_fn is None:
         raise click.ClickException(
-            "nx t3 gc needs the engine-backed T3 handle (nexus.db.make_t3()); this one carries no "
+            "This verb needs the engine-backed T3 handle (nexus.db.make_t3()); this one carries no "
             "reapable routes."
         )
     try:
@@ -540,6 +540,24 @@ def gc_cmd(
             click.echo(f"\nREFUSING to move: {reason}")
         raise click.exceptions.Exit(1)
 
+    # R8, again, as close to the move as the verb can get: the census above was read before the
+    # listing paged, and a note can go legacy-unmanifested in between. The in-engine per-pass
+    # re-run is the reaper's requirement (nexus-2x9xa); this is the verb's own call.
+    try:
+        recheck = census_fn(collection, limit=1)
+    except VectorServiceError as exc:
+        raise click.ClickException(
+            f"Failed to re-read the manifest-less census for {collection!r} before the move: {exc}"
+        ) from exc
+    if int((recheck.get("totals") or {}).get("legacy-unmanifested") or 0):
+        click.echo(
+            f"\nREFUSING to move: the manifest-less census for '{collection}' now reads "
+            f"legacy-unmanifested = {int(recheck['totals']['legacy-unmanifested'])}; it read 0 "
+            f"when this run began. Re-put the notes (see 'nx t3 census-manifest-less -c "
+            f"{collection}') and re-run (RDR-192 R8)."
+        )
+        raise click.exceptions.Exit(1)
+
     # The act: the engine's own move. No chunk ids cross the wire; the route's statement carries
     # the predicate and takes the sweep gate, so a racing client write wins.
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
@@ -567,7 +585,7 @@ def gc_cmd(
         raise click.exceptions.Exit(1)
     if moved_result is None:
         raise click.ClickException(
-            "this T3 handle carries no gc_quarantine_orphans route; nx t3 gc needs the "
+            "this T3 handle carries no gc_quarantine_orphans route; this verb needs the "
             "engine-backed handle."
         )
     moved, _sample = moved_result

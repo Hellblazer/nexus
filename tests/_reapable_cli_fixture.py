@@ -69,7 +69,7 @@ def write_chunks(coll: str, texts: list[str]) -> list[str]:
     chashes = [chash_of(t) for t in texts]
     seed_chunks_direct(
         coll, ids=chashes, documents=texts, embed=True,
-        metadatas=[{"chunk_text_hash": h, "title": f"{coll}:{i}"} for i, h in enumerate(chashes)],
+        metadatas=[{"chunk_text_hash": h, "title": t[:30]} for h, t in zip(chashes, texts)],
     )
     return chashes
 
