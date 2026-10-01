@@ -23,6 +23,7 @@ import org.jooq.impl.SQLDataType;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
@@ -3227,6 +3228,63 @@ FROM scope s
             }
         }
         return new ManifestLessCensusResult(returned, chashes, owners, totals, scopeChunkTotal);
+    }
+
+    /** One chunk {@code reapable(c)} selects (RDR-192 Step 8, bead nexus-wbfpw.17). */
+    public record ReapableChunk(String chash, String createdAt, String lastWrittenAt, String title,
+                                String catalogDocId) {}
+
+    /**
+     * Read-only listing of the chunks {@code nexus.chunk_is_reapable} (vectors-021) selects in
+     * {@code collection}, ordered by chash ascending, {@code limit}/{@code offset} like {@link #list}.
+     * Selection is that function and nothing else: the call shape is the one every consumer uses
+     * (RDR-192 Step 7), so a chunk is listed exactly when {@code gc_quarantine_orphans} would move
+     * it and the reaper would delete it, at the same instant.
+     *
+     * <p>{@code graceSeconds} {@code null} means the function's own default (30 days, owned by the
+     * function and by nothing in Java, so it cannot drift); a value is passed as an interval in exact
+     * seconds. The in-flight-index pin keeps its default TTL. Any collection prefix is listed;
+     * a {@code quarantine-*} collection is refused before this is called, see {@code
+     * VectorHandler#requireNotQuarantineCollection}.
+     *
+     * <p>A snapshot, not a reservation: the listing takes no sweep gate and no lock, so a chunk may
+     * be refreshed or owned the moment after it is listed. A destructive consumer takes the gate and
+     * re-checks the predicate in its own statement; this route only shows what is selectable now.
+     */
+    public List<ReapableChunk> reapableChunks(String tenant, String collection, Long graceSeconds,
+                                              int limit, int offset) {
+        Field<org.jooq.types.YearToSecond> grace = DSL.val(
+            graceSeconds == null ? null : exactSeconds(graceSeconds), SQLDataType.INTERVAL);
+        Field<org.jooq.types.YearToSecond> pinTtl = DSL.val(null, SQLDataType.INTERVAL);
+        Field<String> title = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");
+        Field<String> catalogDocId = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "catalog_doc_id");
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ChashHex.hex(CHUNKS.CHASH), CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, title, catalogDocId)
+               .from(CHUNKS)
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)))
+               .and(DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
+                   CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT, CHUNKS.METADATA,
+                   grace, pinTtl))))
+               .orderBy(CHUNKS.CHASH)
+               .limit(limit).offset(offset)
+               .fetch(r -> new ReapableChunk(
+                   r.value1(), r.value2().toInstant().toString(), r.value3().toInstant().toString(),
+                   blankToNull(r.value4()), blankToNull(r.value5()))));
+    }
+
+    /**
+     * {@code seconds} as an interval whose whole magnitude sits in the day-to-second fields. Not
+     * {@code YearToSecond.valueOf(Duration)}: that normalises into months and years with a fixed
+     * 30-day month (CatalogRepository#olderThanInterval, nexus-ff85q).
+     */
+    private static org.jooq.types.YearToSecond exactSeconds(long seconds) {
+        return new org.jooq.types.YearToSecond(
+            new org.jooq.types.YearToMonth(0, 0),
+            org.jooq.types.DayToSecond.valueOf(java.time.Duration.ofSeconds(seconds)));
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.isEmpty() ? null : s;
     }
 
     /**
