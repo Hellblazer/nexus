@@ -55,6 +55,11 @@ class Prose:
     def __init__(self, cwd: Path, env: dict[str, str], calls: Path) -> None:
         self.cwd, self.env, self.calls_file = cwd, env, calls
 
+    @property
+    def tmp(self) -> Path:
+        """This test's own TMPDIR: work directories made by the scripts land here, and nowhere else."""
+        return Path(self.env["TMPDIR"])
+
     def run(self, *args: str, stdin: str | dict | list | None = None,
             cwd: Path | None = None, env: dict[str, str] | None = None
             ) -> subprocess.CompletedProcess[str]:
@@ -94,6 +99,10 @@ def prose(repo: Path, tmp_path: Path, t2_service_env: str) -> Prose:
     calls = tmp_path / "nx-calls.jsonl"
     env = os.environ.copy()
     env["NEXUS_CONFIG_DIR"] = str(tmp_path / "cfg")
+    # A private temp directory (outside the repo, tmp_path/REPO_NAME): the scripts make their work
+    # directories under TMPDIR, so a test that counts them must not share the machine's.
+    (tmp_path / "tmp").mkdir()
+    env["TMPDIR"] = str(tmp_path / "tmp")
     # The child `nx` is a dev-checkout process, so the production-write guard needs an
     # explicit reason (it is deliberately not inherited from the suite's own opt-in).
     # Grant it only after proving the child points at the hermetic loopback engine

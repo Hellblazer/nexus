@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -87,7 +86,7 @@ def test_each_protected_shape_is_dropped_and_the_plain_sentence_stays(
     got = _filter(prose, name, [edit(1, protected, "x"), edit(2, PLAIN, "Plain sentence stays.")])
     assert [e["n"] for e in got["edits"]] == [2], shape
     cause = "markup" if shape == "html tag attribute" else "protected-region"
-    assert got["dropped"] == [{"n": 1, "old": protected, "cause": cause}], shape
+    assert got["dropped"] == [{"n": 1, "old": protected, "new": "x", "cause": cause}], shape
 
 
 def test_indentation_that_is_not_code_stays_editable(prose: Prose, repo: Path) -> None:
@@ -196,6 +195,18 @@ def test_filter_defaults_to_the_same_budget_as_build(prose: Prose, repo: Path) -
     assert "at most 10 sentence edits" in brief_ok(prose, "build", "docs/x.md")
 
 
+def test_every_dropped_edit_carries_its_new_text_whatever_dropped_it(prose: Prose, repo: Path) -> None:
+    (repo / "docs" / "s.md").write_text("Sentence one is here. Sentence two is here. Sentence three is here.\n")
+    prose.ok("reject", "docs/s.md", "--old", "Sentence two is here.", "--new", "Two.")
+    edits = [edit(1, "Sentence one is here.", "One."), edit(2, "Sentence two is here.", "Two."),
+             edit(3, "not in the file", "Three."), edit(4, "Sentence three is here.", "Four.")]
+    proc = run_brief(prose, "filter", "docs/s.md", "--budget", "3", stdin=fenced(proposal(edits)))
+    assert proc.returncode == 0, proc.stderr
+    got = json.loads(proc.stdout)
+    assert {d["n"]: (d["cause"], d["new"]) for d in got["dropped"]} == {
+        2: ("rejected", "Two."), 3: ("not-found", "Three."), 4: ("over-budget", "Four.")}
+
+
 # ---------------------------------------------------------------------------
 # Temp directory hygiene (code review M1, M5)
 # ---------------------------------------------------------------------------
@@ -210,7 +221,7 @@ def test_rmtmp_removes_only_a_prose_edit_directory_directly_under_the_temp_dir(
     brief_ok(prose, "rmtmp", str(work))
     assert not work.exists()
 
-    tmp_root = Path(tempfile.gettempdir())
+    tmp_root = prose.tmp
     victim = tmp_root / f"not-prose-edit-{os.getpid()}"
     victim.mkdir()
     nested = Path(brief_ok(prose, "tmpdir").strip())
@@ -440,13 +451,13 @@ def test_the_agent_has_the_large_file_and_sentence_and_query_rules() -> None:
 def test_the_skill_is_explicit_only_deletes_work_on_every_stop_and_splits_stdin_at_the_first_line() -> None:
     text = _skill()
     assert _frontmatter(SKILL)["disable-model-invocation"] == "true"
-    assert "On every stop after WORK exists and before step 9, delete WORK first with `BRIEF rmtmp WORK`." in text
+    assert "On every stop after WORK exists and before step 12, delete WORK first with `BRIEF rmtmp WORK`." in text
     # a path run never calls tmpdir: build --work makes WORK only once the brief exists
     assert text.count("BRIEF tmpdir") == 1
     tmp_line = next(ln for ln in text.splitlines() if "BRIEF tmpdir" in ln)
     assert tmp_line.strip().startswith("| true |")
     assert "`BRIEF build <target> --budget <budget> [--genre <genre>] --work`" in text
-    assert "A successful filter deletes WORK." in text
+    assert "A successful apply has already deleted WORK" in text  # the copy lives in WORK until the author answers
     assert "The flags are the first line. The text is everything after the first newline." in text
     assert "For a stdin run pass only `-` and the flags to `parse`." in text
     assert "| `-- <path>` or `./<path>` | A file named `rejections` or `exemplar`. |" in text
@@ -515,7 +526,7 @@ def test_a_stdin_run_without_a_genre_is_refused_at_parse() -> None:
 def test_tmpdir_writes_the_sentinel_and_rmtmp_refuses_lookalikes(prose: Prose, tmp_path: Path) -> None:
     work = Path(brief_ok(prose, "tmpdir").strip())
     other = Path(brief_ok(prose, "tmpdir").strip())
-    base = Path(tempfile.gettempdir())
+    base = prose.tmp
     locks = base / f"prose-edit-locks-{os.getuid()}"
     made = not locks.exists()
     locks.mkdir(exist_ok=True)
@@ -598,23 +609,63 @@ def test_section_six_says_only_filler_is_cut_and_the_agent_finds_near_twins() ->
 # ---------------------------------------------------------------------------
 
 
-def _work_dirs() -> set[str]:
-    return {p.name for p in Path(tempfile.gettempdir()).glob("prose-edit-*") if (p / ".prose-edit-work").exists()}
+def _work_dirs(prose: Prose) -> set[str]:
+    return {p.name for p in prose.tmp.glob("prose-edit-*") if (p / ".prose-edit-work").exists()}
 
 
 def test_build_work_makes_the_directory_only_after_the_brief_exists(prose: Prose, repo: Path) -> None:
-    before = _work_dirs()
+    before = _work_dirs(prose)
     (repo / "notes.txt").write_text("hello\n")
     failed = run_brief(prose, "build", "notes.txt", "--work")  # no genre: nothing may be created
-    assert failed.returncode == 1 and _work_dirs() == before
+    assert failed.returncode == 1 and _work_dirs(prose) == before
     out = brief_ok(prose, "build", "docs/x.md", "--work")
     first, blank, rest = out.split("\n", 2)
     assert first.startswith("WORK=") and blank == "" and rest.startswith("# Editing brief")
     work = Path(first[len("WORK="):])
     try:
-        assert (work / ".prose-edit-work").is_file() and _work_dirs() - before == {work.name}
+        assert (work / ".prose-edit-work").is_file() and _work_dirs(prose) - before == {work.name}
     finally:
         brief_ok(prose, "rmtmp", str(work))
+
+
+def test_the_prose_fixture_gives_each_test_a_private_temp_directory_outside_the_repo(
+    prose: Prose, repo: Path, tmp_path: Path
+) -> None:
+    # without the fixture's TMPDIR line, prose.tmp is the shared temp dir and every check below still holds
+    # but this one: the private directory must sit under this test's own tmp_path
+    assert tmp_path.resolve() in prose.tmp.resolve().parents
+    work = Path(brief_ok(prose, "tmpdir").strip())
+    try:
+        assert tmp_path.resolve() in work.resolve().parents
+        assert work.parent == prose.tmp.resolve() and repo.resolve() not in prose.tmp.resolve().parents
+        assert prose.tmp.resolve() != repo.resolve()
+    finally:
+        brief_ok(prose, "rmtmp", str(work))
+
+
+def test_a_work_directory_never_has_a_work_directory_name_before_its_sentinel_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mod = _module()
+    base = tmp_path / "tmp"
+    base.mkdir()
+    monkeypatch.setattr(mod.tempfile, "tempdir", str(base))
+    seen: list[str] = []
+    real = mod.tempfile.mkdtemp
+
+    def spy(*args: object, **kw: object) -> str:
+        path = real(*args, **kw)
+        seen.append(Path(path).name)
+        return path
+
+    monkeypatch.setattr(mod.tempfile, "mkdtemp", spy)
+    monkeypatch.chdir(tmp_path)  # not a git repository: no containment check
+    work = Path(mod.cmd_tmpdir())
+    assert (work / ".prose-edit-work").is_file() and work.parent == base.resolve()
+    assert mod._WORK_NAME.fullmatch(work.name)
+    # the directory mkdtemp made, which has no sentinel yet, is not shaped like a work directory
+    assert seen and not any(mod._WORK_NAME.fullmatch(name) for name in seen)
+    assert sorted(p.name for p in base.iterdir()) == [work.name]
 
 
 def test_build_work_is_refused_for_a_stdin_run(prose: Prose, tmp_path: Path) -> None:
@@ -641,7 +692,7 @@ def test_a_successful_filter_deletes_its_work_directory_and_a_failed_one_keeps_i
 
 
 def test_tmpdir_sweeps_stale_work_directories_but_not_young_or_lookalike_ones(prose: Prose) -> None:
-    base = Path(tempfile.gettempdir())
+    base = prose.tmp
     old = base / "prose-edit-oldwork1"
     young = base / "prose-edit-younger1"
     bare = base / "prose-edit-nosentin"
@@ -651,9 +702,13 @@ def test_tmpdir_sweeps_stale_work_directories_but_not_young_or_lookalike_ones(pr
         (d / ".prose-edit-work").write_text("x")
     os.utime(old / ".prose-edit-work", (1, 1))
     os.utime(bare, (1, 1))
+    building = base / ".prose-edit-building-zz9"  # what a `tmpdir` killed before its rename leaves
+    building.mkdir()
+    os.utime(building, (1, 1))
     fresh = Path(brief_ok(prose, "tmpdir").strip())
     try:
-        assert not old.exists() and young.exists() and bare.exists() and fresh.exists()
+        assert not old.exists() and not building.exists()
+        assert young.exists() and bare.exists() and fresh.exists()
     finally:
         for d in (young, bare):
             for f in d.iterdir():
