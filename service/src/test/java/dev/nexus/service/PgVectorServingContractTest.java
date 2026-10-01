@@ -248,6 +248,41 @@ class PgVectorServingContractTest {
     }
 
     /**
+     * Seed {@code ids} as OWNED chunks of {@code COL} with STALE content: the text
+     * {@code "stale seed"}, a zero vector and the given stale metadata. A test that then POSTs
+     * a chunk with real text, real metadata and {@code force_re_embed} can assert the stored
+     * row CHANGED, which a handler that answers 200 and writes nothing cannot satisfy. Seeding
+     * the final state instead (as {@link #seedOwned} does) leaves the post-state assertions
+     * true before the POST.
+     */
+    private void seedStale(String tenant, List<String> ids, List<Map<String, Object>> staleMetas)
+            throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertChunks(dsl, tenant, COL, ids,
+                ids.stream().map(i -> "stale seed").toList(),
+                ids.stream().map(i -> new float[1024]).toList(), staleMetas);
+            PgContainerHelper.ownChunks(dsl, tenant, COL, ids.toArray(new String[0]));
+        }
+    }
+
+    /** {@code {text, metadata->>metaKey}} of one stored row, read as superuser; null when absent. */
+    private String[] stored(String tenant, String chashHex, String metaKey) throws Exception {
+        try (Connection su = pg.createConnection("");
+             var ps = su.prepareStatement(
+                 "SELECT chunk_text, metadata->>? FROM " + DimTables.CHUNKS_TABLE_NAME
+                 + " WHERE tenant_id = ? AND collection = ? AND chash = decode(?, 'hex')")) {
+            ps.setString(1, metaKey);
+            ps.setString(2, tenant);
+            ps.setString(3, COL);
+            ps.setString(4, chashHex);
+            try (var rs = ps.executeQuery()) {
+                return rs.next() ? new String[] {rs.getString(1), rs.getString(2)} : null;
+            }
+        }
+    }
+
+    /**
      * Remove {@code ids}' manifest rows in {@code COL} for {@code TENANT_A} — the
      * counterpart to {@link #own}. {@link PgVectorRepository#delete} refuses to
      * delete a still-referenced (manifest-owned) chunk regardless of its owning
@@ -276,11 +311,11 @@ class PgVectorServingContractTest {
     @Test
     @Order(1)
     void upsertChunks_servesFromPgvector() throws Exception {
-        seedOwned(TENANT_A, List.of(C1, C2, C3),
-            List.of("the tenant isolation policy guards every row",
-                    "tenant isolation policy enforcement in postgres",
-                    "a tenant isolation policy for vector chunks"),
-            List.of(Map.of("lang", "java"), Map.of("lang", "py"), Map.of("lang", "java")));
+        // RDR-223 P3.1: the chunks exist (and are owned) with STALE text and metadata before the
+        // POST, because the engine refuses an ownerless first write from Phase 3; the POST then
+        // rewrites them (force_re_embed), and the stored rows are asserted to have CHANGED.
+        seedStale(TENANT_A, List.of(C1, C2, C3),
+            List.of(Map.of("lang", "stale"), Map.of("lang", "stale"), Map.of("lang", "stale")));
         Map<String, Object> resp = postOk("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
             "collection", COL,
             "ids",        List.of(C1, C2, C3),
@@ -289,10 +324,23 @@ class PgVectorServingContractTest {
                 "tenant isolation policy enforcement in postgres",
                 "a tenant isolation policy for vector chunks"),
             "metadatas",  List.of(
-                Map.of("lang", "java"), Map.of("lang", "py"), Map.of("lang", "java"))));
+                Map.of("lang", "java"), Map.of("lang", "py"), Map.of("lang", "java")),
+            "force_re_embed", true));
 
         assertThat(((Number) resp.get("upserted")).intValue())
             .as("upsert envelope {\"upserted\": N} preserved").isEqualTo(3);
+
+        // The write LANDED: each stored row now carries the POSTed text and metadata, not the stale seed.
+        var posted = List.of("the tenant isolation policy guards every row",
+            "tenant isolation policy enforcement in postgres",
+            "a tenant isolation policy for vector chunks");
+        var lang = List.of("java", "py", "java");
+        var chashes = List.of(C1, C2, C3);
+        for (int i = 0; i < 3; i++) {
+            assertThat(stored(TENANT_A, chashes.get(i), "lang"))
+                .as("the POST rewrote chunk %d (text and metadata), not just echoed an envelope", i)
+                .containsExactly(posted.get(i), lang.get(i));
+        }
 
         // The rows must be IN PGVECTOR — count them in the unified nexus.chunks table
         // (RDR-191 Phase 4; formerly chunks_1024) as superuser. This is what makes the
@@ -357,8 +405,11 @@ class PgVectorServingContractTest {
     @Test
     @Order(3)
     void storePut_singleChunk() throws Exception {
+        // Same text (so the stored vector, which the search tests rank on, is already the
+        // embedder's) but STALE metadata: the existing-chash write path refreshes metadata, so the
+        // POST is asserted to have changed it. store-put has no force_re_embed.
         seedOwned(TENANT_A, List.of(PUT1), List.of("single put chunk about tenant isolation policy"),
-            List.of(Map.of()));
+            List.of(Map.of("kind", "stale")));
         Map<String, Object> resp = postOk("/v1/vectors/store-put", TOKEN_A, Map.of(
             "collection", COL,
             "doc_id",     PUT1,
@@ -367,6 +418,9 @@ class PgVectorServingContractTest {
         assertThat(resp.get("id"))
             .as("store-put envelope {\"id\": ...} preserved")
             .isEqualTo(PUT1);
+        assertThat(stored(TENANT_A, PUT1, "kind"))
+            .as("store-put refreshed the stored metadata of the chunk, not just echoed the id")
+            .containsExactly("single put chunk about tenant isolation policy", "put");
     }
 
     @Test
@@ -728,17 +782,24 @@ class PgVectorServingContractTest {
         // a separate path from the SELECT USING policy the read tests exercise.
         // TOKEN_B may write to the SAME collection name — the row must land in
         // tenant-B's partition and tenant-A's rows must be untouched.
-        // RDR-223 P3.1: B1 is tenant-B's OWNED chunk first (the engine refuses an ownerless
-        // write from Phase 3), so this POST is the RLS-gated re-upsert of a tenant-B row; the
-        // INSERT-side WITH CHECK is exercised by the combined write (ChunksRlsBehavioralTest).
-        seedOwned(TENANT_B, List.of(B1), List.of("the tenant isolation policy guards every row"),
-            List.of(Map.of("owner", "b")));
+        // RDR-223 P3.1: B1 is tenant-B's OWNED chunk first, with STALE content (the engine
+        // refuses an ownerless write from Phase 3), so this POST is the RLS-gated rewrite of a
+        // tenant-B row and the stored row is asserted to have changed; the INSERT-side WITH CHECK
+        // is exercised by the combined write (ChunksRlsBehavioralTest).
+        seedStale(TENANT_B, List.of(B1), List.of(Map.of("owner", "stale")));
         Map<String, Object> resp = postOk("/v1/vectors/upsert-chunks", TOKEN_B, Map.of(
             "collection", COL,
             "ids",        List.of(B1),
             "documents",  List.of("the tenant isolation policy guards every row"),
-            "metadatas",  List.of(Map.of("owner", "b"))));
+            "metadatas",  List.of(Map.of("owner", "b")),
+            "force_re_embed", true));
         assertThat(((Number) resp.get("upserted")).intValue()).isEqualTo(1);
+        assertThat(stored(TENANT_B, B1, "owner"))
+            .as("the write landed in tenant-B's partition: B's row now carries the POSTed text and metadata")
+            .containsExactly("the tenant isolation policy guards every row", "b");
+        assertThat(stored(TENANT_A, B1, "owner"))
+            .as("tenant-A has no such row: the write did not leak across the partition")
+            .isNull();
 
         try (Connection su = pg.createConnection("");
              var ps = su.prepareStatement(

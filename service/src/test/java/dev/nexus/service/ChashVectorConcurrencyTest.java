@@ -76,6 +76,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * production shape — ONE collection, many concurrent writers, gated to race the
  * first registration together — which is what {@code CollectionRegistry} fixes.
  *
+ * <p><strong>What this suite tests today (RDR-223 P3.1 review).</strong> The first-registration
+ * burst and the chash-upsert write described above are RETIRED: {@code /v1/chash/upsert_many} is
+ * 410 Gone (nexus-piwya.11) and collection registration is explicit (RDR-204). What still runs is
+ * (a) {@link #VECTOR_THREADS} workers re-writing OWNED chunks through {@code upsert-chunks} with
+ * {@code force_re_embed}, twelve-way pool pressure on a {@value #POOL_SIZE}-connection pool with
+ * zero 5xx and every request accepted, and (b) {@link #CHASH_THREADS} workers hitting the retired
+ * chash route, whose only claim is that EVERY response is the 410 (a retired route must stay a
+ * cheap, typed refusal under load, never a 5xx and never a write). The class name is the original
+ * one; it claims no more than that.
+ *
  * <p>This suite launches {@link #CHASH_THREADS} chash-upsert workers and
  * {@link #VECTOR_THREADS} vector-upsert workers, gated on a {@link CountDownLatch}
  * so their first requests fire in the same instant against ONE brand-new collection
@@ -324,6 +334,7 @@ class ChashVectorConcurrencyTest {
         AtomicInteger status5xx     = new AtomicInteger();
         AtomicInteger exceptions    = new AtomicInteger();
         AtomicInteger vectorOk      = new AtomicInteger();
+        AtomicInteger chashGone     = new AtomicInteger();
         List<String> failures = new CopyOnWriteArrayList<>();
 
         int totalThreads = CHASH_THREADS + VECTOR_THREADS;
@@ -333,7 +344,8 @@ class ChashVectorConcurrencyTest {
         List<Runnable> tasks = new ArrayList<>();
         for (int t = 0; t < CHASH_THREADS; t++) {
             int threadId = t;
-            tasks.add(() -> chashLoop(threadId, startGate, totalRequests, status5xx, exceptions, failures));
+            tasks.add(() -> chashLoop(threadId, startGate, totalRequests, status5xx, exceptions, failures,
+                chashGone));
         }
         for (int t = 0; t < VECTOR_THREADS; t++) {
             int threadId = t;
@@ -373,6 +385,11 @@ class ChashVectorConcurrencyTest {
         assertThat(vectorOk.get())
             .as("every vector upsert was accepted (200); failures: %s", firstN(failures, 10))
             .isEqualTo(VECTOR_THREADS * ITERATIONS_PER_WORKER);
+        // The retired chash route answers 410 to every request, never 5xx and never a write.
+        assertThat(chashGone.get())
+            .as("every request to the retired /v1/chash/upsert_many was 410 Gone; failures: %s",
+                firstN(failures, 10))
+            .isEqualTo(CHASH_THREADS * ITERATIONS_PER_WORKER);
     }
 
     private static List<String> firstN(List<String> list, int n) {
@@ -380,7 +397,8 @@ class ChashVectorConcurrencyTest {
     }
 
     private void chashLoop(int threadId, CountDownLatch startGate, AtomicInteger totalRequests,
-                           AtomicInteger status5xx, AtomicInteger exceptions, List<String> failures) {
+                           AtomicInteger status5xx, AtomicInteger exceptions, List<String> failures,
+                           AtomicInteger chashGone) {
         awaitGate(startGate);
         int iter = 0;
         while (iter < ITERATIONS_PER_WORKER) {
@@ -397,6 +415,9 @@ class ChashVectorConcurrencyTest {
                 var resp = post("/v1/chash/upsert_many", Map.of(
                     "chashes", chashes, "collection", COLLECTION));
                 totalRequests.incrementAndGet();
+                if (resp.statusCode() == 410) {
+                    chashGone.incrementAndGet();
+                }
                 if (resp.statusCode() >= 500) {
                     status5xx.incrementAndGet();
                     failures.add("chash t=" + threadId + " status=" + resp.statusCode()
