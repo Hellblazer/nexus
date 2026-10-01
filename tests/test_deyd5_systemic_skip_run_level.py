@@ -134,6 +134,18 @@ class _DrainTrackingBatcher:
         return {}
 
     @property
+    def throttled_files(self) -> dict:
+        return {}
+
+    @property
+    def throttle_retry_after(self) -> float | None:
+        return None
+
+    @property
+    def throttle_breaker_open(self) -> bool:
+        return False
+
+    @property
     def stats(self) -> dict:
         return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 

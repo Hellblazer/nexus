@@ -2524,8 +2524,9 @@ def index_repository(
                 # commit that changed a file this run deferred (transient
                 # upsert 5xx/timeout, self-heals via staleness retry --
                 # but only if the file is still IN the delta) or
-                # permanently failed (chunk-batch flush surviving
-                # bisect-retry) means the next --since-head git diff
+                # failed (chunk-batch flush rejected after its bisect, or
+                # throttled by the service, nexus-eoido) means the next
+                # --since-head git diff
                 # never offers that file again, and its staleness cache
                 # is empty too (nothing marked it stale this run), so it
                 # stays unindexed until a full (non---since-head) run.
@@ -2535,6 +2536,7 @@ def index_repository(
                 # clean run.
                 _deferred_or_failed_files = (
                     stats.get("chunk_flush_failed_files", 0)
+                    + stats.get("chunk_flush_throttled_files", 0)
                     + stats.get("transient_upsert_deferred_files", 0)
                     + stats.get("identity_less_dropped_files", 0)
                 )
@@ -2543,6 +2545,7 @@ def index_repository(
                         "since_head_base_not_advanced",
                         repo=str(repo),
                         chunk_flush_failed_files=stats.get("chunk_flush_failed_files", 0),
+                        chunk_flush_throttled_files=stats.get("chunk_flush_throttled_files", 0),
                         transient_upsert_deferred_files=stats.get("transient_upsert_deferred_files", 0),
                         identity_less_dropped_files=stats.get("identity_less_dropped_files", 0),
                     )
@@ -5782,12 +5785,18 @@ def _run_index(
     from nexus.db.http_vector_client import HttpVectorClient  # noqa: PLC0415 — deferred to avoid circular import
     _batcher = None
     # nexus-4s1ww / GH #1432: path -> error for every file whose chunks
-    # PERMANENTLY failed to flush this run (populated below from
-    # ChunkBatcher.failed_files — the count that SURVIVED bisect-retry
-    # settlement, never a raw attempt/retry count). Defaults to empty so
+    # failed to flush this run, rejected or throttled (populated below from
+    # ChunkBatcher.failed_files — settled files after the bisect, never a raw
+    # attempt/retry count). Defaults to empty so
     # the stats dict always carries the key, even when db isn't an
     # HttpVectorClient (legacy per-file path, no batcher constructed).
     _batch_failures: dict[str, str] = {}
+    # nexus-eoido: the subset of those failures the SERVICE THROTTLED (429, 503 with Retry-After,
+    # an engine deadline abort, or a flush the throttle breaker refused to send). Reported apart
+    # from rejected files, because the remedy differs: wait and re-run, not look at the file.
+    _batch_throttled: dict[str, str] = {}
+    _batch_throttle_retry_after: float | None = None
+    _batch_throttle_breaker_open = False
     if isinstance(db, HttpVectorClient):
         from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
 
@@ -6012,15 +6021,23 @@ def _run_index(
         def _batched_file_failed(_path: str, error: str, _context: object) -> None:
             _log.error("indexed_file_upload_failed", file=_path, error=error)
             # nexus-bhlfy: ChunkBatcher already fires this callback once
-            # per PERMANENTLY-failed file (settlement at file granularity
-            # — see ``_settle_file_locked``/``_invoke_callbacks``; a
-            # bisected batch retries each half independently so a
-            # genuinely failing file is reported exactly once here, never
-            # for a batch-mate that went on to succeed). The begin stamp
-            # for this file already landed via ``_fire_flush_grain_begin``
-            # (``on_batch_begin``, before the upload) — without this arm
+            # per failed file (settlement at file granularity
+            # — see ``_settle_file_locked``/``_invoke_callbacks``). A
+            # bisected batch retries each half independently, so a file
+            # rejected on its own is reported exactly once here, never
+            # for a batch-mate that went on to succeed. A THROTTLED batch
+            # (nexus-eoido) is not bisected: every file in it is reported
+            # here, batch-mates included, because the service refused the
+            # request as a whole; the next run's staleness check retries
+            # them. The begin stamp
+            # for this file normally landed via ``_fire_flush_grain_begin``
+            # (``on_batch_begin``, before the upload), so without this arm
             # the fence wedged at 'indexing' forever on a flush failure
-            # (the gap this bead closes). ``_fence_fail`` never raises.
+            # (the gap this bead closes). A file whose flush the throttle
+            # breaker deferred never got a begin stamp (the begin hook is
+            # skipped); the failed stamp here is unconditional and
+            # CatalogRepository.failIndexRun accepts it with no prior begin.
+            # ``_fence_fail`` never raises.
             if isinstance(_context, dict):
                 _cdid = _context.get("catalog_doc_id")
                 if _cdid:
@@ -6653,18 +6670,38 @@ def _run_index(
                    if _lock_wait_s else "")
             )
         _batch_failures = _batcher.failed_files
-        if _batch_failures:
+        _batch_throttled = dict(_batcher.throttled_files)
+        _batch_throttle_retry_after = _batcher.throttle_retry_after
+        _batch_throttle_breaker_open = bool(_batcher.throttle_breaker_open)
+        # Rejected = failed and not throttled; the throttled ones get their own line below.
+        _rejected = {p: e for p, e in _batch_failures.items() if p not in _batch_throttled}
+        if _rejected:
             _log.error(
                 "index_batch_upload_failures",
-                count=len(_batch_failures),
-                files=sorted(_batch_failures)[:20],
+                count=len(_rejected),
+                files=sorted(_rejected)[:20],
             )
             if on_phase is not None:
                 on_phase(
-                    f"WARNING: {len(_batch_failures)} file(s) FAILED chunk "
+                    f"WARNING: {len(_rejected)} file(s) FAILED chunk "
                     f"upload (see logs); their vectors are absent or partial: "
-                    + ", ".join(sorted(_batch_failures)[:5])
-                    + ("…" if len(_batch_failures) > 5 else "")
+                    + ", ".join(sorted(_rejected)[:5])
+                    + ("…" if len(_rejected) > 5 else "")
+                )
+        if _batch_throttled:
+            _log.error(
+                "index_batch_upload_throttled",
+                count=len(_batch_throttled),
+                files=sorted(_batch_throttled)[:20],
+                retry_after=_batch_throttle_retry_after,
+                breaker_open=_batch_throttle_breaker_open,
+            )
+            if on_phase is not None:
+                on_phase(
+                    f"WARNING: {len(_batch_throttled)} file(s) THROTTLED by the service "
+                    f"and not indexed this run (re-run later): "
+                    + ", ".join(sorted(_batch_throttled)[:5])
+                    + ("…" if len(_batch_throttled) > 5 else "")
                 )
 
         # nexus-7lw6a: taxonomy_assign_batch_failed (e.g. an HTTP 500 from
@@ -7124,13 +7161,27 @@ def _run_index(
         # post-processing completes.
         "pdf_quality_gate_failed": len(_quality_gate_failed),
         # nexus-4s1ww / GH #1432: count of files whose chunk-batch flush
-        # PERMANENTLY failed this run (ChunkBatcher.failed_files — post
-        # bisect-retry survivors only, see chunk_batcher.py). Zero chunks
-        # from these files landed. index_repo_cmd uses this the same way
-        # as pdf_quality_gate_failed: a non-zero count drives a non-zero
+        # was REJECTED this run (ChunkBatcher.failed_files minus the throttled
+        # ones — what is left after the bisect-retry, see chunk_batcher.py).
+        # Zero chunks from these files landed. index_repo_cmd uses this the same
+        # way as pdf_quality_gate_failed: a non-zero count drives a non-zero
         # exit after the rest of the run completes, so a total-write-path
         # failure is never reported as a clean "Done." at rc=0.
-        "chunk_flush_failed_files": len(_batch_failures),
+        "chunk_flush_failed_files": len(_batch_failures) - len(_batch_throttled),
+        # nexus-eoido: files whose flush the SERVICE THROTTLED (429, 503 with
+        # Retry-After, an engine deadline abort) or that the throttle breaker
+        # deferred unsent. Zero chunks landed for them either, they retry on the
+        # next run, and they hold the --since-head base back like the failed
+        # ones. Counted apart from chunk_flush_failed_files: waiting is the
+        # remedy, not looking at the file. index_repo_cmd names them, shows
+        # the Retry-After, and exits non-zero.
+        "chunk_flush_throttled_files": len(_batch_throttled),
+        "chunk_flush_throttled_paths": sorted(_batch_throttled),
+        # Longest Retry-After (seconds) any throttled flush carried, or None.
+        "chunk_flush_throttle_retry_after": _batch_throttle_retry_after,
+        # True when consecutive throttled flushes opened the breaker and the
+        # rest of the run was deferred without being sent.
+        "chunk_flush_throttle_breaker_open": _batch_throttle_breaker_open,
         # nexus-z0o2p.20 (RDR-223 P2.10): files this run refused BEFORE
         # chunking because they have no catalog document and no deliberate
         # reason (register_failed / catalog_hook_failed / unexplained). Named

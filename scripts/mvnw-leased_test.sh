@@ -342,8 +342,26 @@ else
     # Test 4 in the same process). A SECOND consecutive failure is treated
     # as real, not retried away.
     attempt=""; died=""
+    # nexus-poqc6: the probe's child must not inherit an IGNORED SIGINT. A job launched in the
+    # background of a non-interactive shell (`( cmd & wait )`, how full suites run on hellmini)
+    # starts with SIGINT ignored, and bash cannot reset a signal that was ignored at shell entry
+    # (so `trap - INT` in a bash subshell does nothing). Ignored dispositions survive exec, so a
+    # plain `sleep 30 &` here could never be terminated by `kill -s INT` and the check failed on
+    # a property of how the suite was launched. exec the sleep from an interpreter that sets the
+    # disposition to the default first: the probe then tests the primitive, not the launch shape.
+    _sleep_with_default_sigint() {
+        # perl first: its startup is a few ms against python3's tens, and the window between process
+        # start and the disposition reset must stay well inside the 0.2 s settle below.
+        if command -v perl >/dev/null 2>&1; then
+            perl -e '$SIG{INT} = "DEFAULT"; exec "sleep", "30"' &
+        elif command -v python3 >/dev/null 2>&1; then
+            python3 -c 'import os, signal; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp("sleep", ["sleep", "30"])' &
+        else
+            sleep 30 &
+        fi
+    }
     for attempt in 1 2; do
-        sleep 30 &
+        _sleep_with_default_sigint
         probe_pid=$!
         sleep 0.2   # let the new job's process group settle before signaling it
         died=0

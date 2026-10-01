@@ -490,7 +490,20 @@ _MAX_CONCURRENT_PG_BOOTS = 4
 #: in slot order (0, 1, 2, ...), never a per-boot-named file, so this
 #: directory itself never accumulates debris the way a per-boot tempdir
 #: would.
-_BOOT_SEMAPHORE_DIR = Path(tempfile.gettempdir()) / "nexus_t2_substrate_boot_locks"
+#:
+#: PER USER (nexus-c6lsu): the tempdir is shared by every Unix user on a box, and the first
+#: user to boot creates the directory 0775, so a second user gets PermissionError opening
+#: ``slot-0.lock`` and every substrate test errors at setup. The uid is part of the name, so
+#: each user gets a directory it owns; the cap then bounds one user's concurrent boots.
+_BOOT_SEMAPHORE_DIR_PREFIX = "nexus_t2_substrate_boot_locks"
+
+
+def _boot_semaphore_dir(root: Path, uid: int | None = None) -> Path:
+    """The boot-lock directory for one Unix user under ``root`` (``uid`` defaults to ours)."""
+    return root / f"{_BOOT_SEMAPHORE_DIR_PREFIX}-{os.getuid() if uid is None else uid}"
+
+
+_BOOT_SEMAPHORE_DIR = _boot_semaphore_dir(Path(tempfile.gettempdir()))
 
 #: Generous: a slow/loaded box waiting out a genuine queue of concurrent
 #: boots is expected, not a hang. Failing loud after this window (rather
@@ -532,7 +545,9 @@ def _boot_semaphore_slot(
     duration of the context.
 
     Bounds how many PG boot sequences (initdb + pg_ctl start) can run
-    CONCURRENTLY across every pytest process on the machine (nexus-ui654)
+    CONCURRENTLY across every pytest process of THIS Unix user (the lock directory is
+    per uid, nexus-c6lsu; the SysV shm budget it protects is machine-wide, so N users
+    can each hold ``max_concurrent`` slots) (nexus-ui654)
     -- deliberately NOT the substrate's full session lifetime; callers
     wrap only the shm-heavy initdb/pg_ctl-start window and release
     immediately after, so a booted-and-running substrate never occupies a

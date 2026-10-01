@@ -18,7 +18,8 @@ Runs with an editor reply add:
                    its paragraph): such a line without an exact twin should be a query, not an edit
   inserted_words   words in an edit's new string that its old string lacks (total and edits affected)
   no_twin_queries  queries that say "no twin" instead of "no exact twin found"
-New work directories (prose-edit-*) left behind are counted for canary batches.
+New work directories (prose-edit-*) left behind are counted for canary batches. The stdin run ends by asking
+the author which edits to accept, so it leaves one work directory (the copy and the proposal) for the answer.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ Obj = dict[str, Any]
 ALLOWED_BASH = (
     "python3 .claude/skills/prose-edit/scripts/brief.py",
     "python3 .claude/skills/prose-edit/scripts/memory.py",
+    "python3 .claude/skills/prose-edit/scripts/review.py",
 )
 FX = "tests/prose_edit/fixtures/"
 DOCS: dict[str, str | None] = {
@@ -193,9 +195,13 @@ def verdict(kind: str, events: list[Obj], c: Obj, new_work_dirs: list[str]) -> t
         ok = refused and not dispatched and not writes and not new_work_dirs and c["denied"] == 0
         return ("PASS" if ok else "FAIL"), f"parse-refused={refused} dispatched={dispatched} writes={len(writes)} new-work-dirs={len(new_work_dirs)}"
     if kind == "stdin":
+        # The turn ends with the question to the author, so one work directory is waiting for the answer.
         filtered = any('"edits"' in v and '"dropped"' in v for v in results.values())
-        ok = dispatched and filtered and not new_work_dirs and c["denied"] == 0 and not c["off_list_bash"]
-        return ("PASS" if ok else "FAIL"), f"dispatched={dispatched} filtered={filtered} new-work-dirs={len(new_work_dirs)} denied={c['denied']}"
+        rendered = any('"copy"' in v and '"opened"' in v for v in results.values())
+        ok = (dispatched and filtered and rendered and len(new_work_dirs) <= 1 and c["denied"] == 0
+              and not c["off_list_bash"])
+        return ("PASS" if ok else "FAIL"), (f"dispatched={dispatched} filtered={filtered} rendered={rendered} "
+                                            f"new-work-dirs={len(new_work_dirs)} denied={c['denied']}")
     reply = editor_reply(events)
     if reply is None:
         return "FAIL", "no editor reply"
@@ -221,7 +227,9 @@ def main(argv: list[str]) -> int:
         doc = DOCS.get(kind)
         doc_text = (root / doc).read_text(encoding="utf-8") if doc and (root / doc).exists() else None
         c = compliance(events, doc_text)
-        v, note = verdict(kind, events, c, new_dirs)
+        raw = (out_dir / f"{name}.jsonl").read_text(encoding="utf-8")
+        own_dirs = [d for d in new_dirs if d in raw]  # a directory the stdin run is holding for its answer is not another run's
+        v, note = verdict(kind, events, c, own_dirs)
         fails += v == "FAIL"
         counts = {k: (len(val) if isinstance(val, list) else val) for k, val in c.items()}
         for k, val in counts.items():

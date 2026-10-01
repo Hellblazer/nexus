@@ -555,7 +555,7 @@ def test_filter_applies_a_stored_rejection_through_memory_py(prose: Prose, repo:
              edit(2, "genuinely uncertain claim", "uncertain claim")]
     got = json.loads(brief_ok(prose, "filter", "docs/sample.md", stdin=fenced(proposal(edits))))
     assert [e["n"] for e in got["edits"]] == [2]
-    assert got["dropped"] == [{"n": 1, "old": "very unnecessary qualifier", "cause": "rejected"}]
+    assert got["dropped"] == [{"n": 1, "old": "very unnecessary qualifier", "new": "qualifier", "cause": "rejected"}]
 
 
 def test_filter_passes_memory_pys_validation_failure_on_and_prints_nothing(
@@ -577,7 +577,7 @@ def test_a_stdin_run_filters_against_the_input_file_with_no_document_record(
     edits = [edit(1, "really quite well", "well"), edit(2, "not in the input", "x")]
     got = json.loads(brief_ok(prose, "filter", "-", "--file", str(src), stdin=fenced(proposal(edits))))
     assert [e["n"] for e in got["edits"]] == [1]
-    assert got["dropped"] == [{"n": 2, "old": "not in the input", "cause": "not-found"}]
+    assert got["dropped"] == [{"n": 2, "old": "not in the input", "new": "x", "cause": "not-found"}]
     assert run_brief(prose, "filter", "-", stdin=fenced(proposal(edits))).returncode == 1
 
 
