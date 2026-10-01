@@ -162,6 +162,34 @@ class TestFlushWritesNothingForAnIdentityLessFile:
         assert drops[0]["batch_size"] == 1
         assert [f["file"] for f in drops[0]["files"]] == [str(tmp_path / "no_id.py")]
 
+    def test_mixed_flush_warns_and_fails_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """nexus-wbfpw.34: a flush where only SOME files lack a document used to
+        lose them silently (INFO log, no drop counter, exit 0). The drop must be
+        recorded for the run's exit code AND logged at WARNING, in the mixed
+        case as in the all-identity-less one."""
+        import click
+
+        from nexus.commands._helpers import raise_identity_drop_exception
+
+        keep, drop = "a1" * 32, "b2" * 32
+        fctx = [
+            (str(tmp_path / "has_id.py"), _ctx([keep], "1.1.7")),
+            (str(tmp_path / "no_id.py"), _ctx([drop], "")),
+        ]
+        with structlog.testing.capture_logs() as logs:
+            _flush(fctx, monkeypatch=monkeypatch, tmp_path=tmp_path)
+
+        ev = [e for e in logs if e.get("event") == "combined_write_identity_less_files_dropped"]
+        assert len(ev) == 1
+        assert ev[0]["log_level"] == "warning"
+        # The counter the run's exit code reads is non-empty ...
+        with pytest.raises(click.ClickException) as exc:
+            raise_identity_drop_exception(subject="file")
+        # ... and its remedy says nothing was written, not "reconcile".
+        assert "no chunk of the affected files was written" in str(exc.value)
+
     def test_all_identity_less_flush_makes_no_write_at_all(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ) -> None:

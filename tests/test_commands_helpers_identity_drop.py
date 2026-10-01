@@ -534,6 +534,23 @@ def test_raise_identity_drop_exception_for_file_names_file_and_remedy(tmp_path):
     assert "orphaned" in msg.lower()
 
 
+def test_raise_identity_drop_exception_for_file_says_nothing_was_written_for_a_refusal(tmp_path):
+    """nexus-wbfpw.34: since RDR-223 (nexus-z0o2p.20) a file with no catalog
+    document writes no chunk. The single-file message used to say its chunks
+    "landed and are searchable", which is false for that drop."""
+    from nexus.mcp_infra import _record_manifest_identity_drop
+
+    target = tmp_path / "refused.pdf"
+    _record_manifest_identity_drop("docs__x", 7, written=False)
+    with pytest.raises(click.ClickException) as exc_info:
+        raise_identity_drop_exception_for_file(target, chunks=7)
+    msg = str(exc_info.value)
+    assert str(target) in msg
+    assert "nothing was written" in msg
+    assert "searchable" not in msg
+    assert "was indexed" not in msg
+
+
 def test_resolve_confirmed_write_failure_doc_ids_empty_when_nothing_failed():
     assert resolve_confirmed_write_failure_doc_ids() == frozenset()
 

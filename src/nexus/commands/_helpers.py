@@ -881,21 +881,36 @@ def raise_identity_drop_exception_for_file(path: Path, *, chunks: int) -> None:
     command (``nx index pdf <file>`` / ``nx index md <file>``) whose
     catalog registration failed this run (nexus-7f5qj).
 
-    For a one-file command a register failure means THIS document is
-    orphaned: its chunks landed and are searchable (over-work-never-
-    under-work — nothing was lost), but no catalog Document/tumbler
-    exists for them, so it is invisible to every catalog-aware query.
-    Distinct wording from :func:`raise_identity_drop_exception` (a batch
-    run's generic count) — names the file and the remedy directly. Call
-    only after :func:`emit_identity_drop_summary` returned ``True``.
+    For a one-file command a register failure means THIS document has no
+    catalog Document/tumbler. Two shapes, told apart by the drop collector
+    (nexus-wbfpw.34): a drop recorded with ``written=False`` (RDR-223,
+    nexus-z0o2p.20: no document to own the chunks, so NOTHING was written)
+    and the older shape where chunks landed but their manifest did not
+    (written, hidden by live(c) until reconciled). Distinct wording from
+    :func:`raise_identity_drop_exception` (a batch run's generic count) —
+    names the file and the remedy directly. Call only after
+    :func:`emit_identity_drop_summary` returned ``True``.
     """
     import click  # noqa: PLC0415 — deliberate function-local import: avoids click dependency at module import time
 
+    from nexus.mcp_infra import get_manifest_identity_drops  # noqa: PLC0415 — deliberate function-local import: rare branch, only reached on a fail-loud exit
+
+    drops = get_manifest_identity_drops()
+    if drops and all(not d.get("written", True) for d in drops):
+        raise click.ClickException(
+            f"{path} was NOT indexed: its catalog document identity failed to "
+            f"register this run, so there was no document to own its "
+            f"{chunks} chunk(s) and nothing was written — see the WARNING "
+            f"line(s) above. Re-run once the engine/catalog is reachable "
+            f"(see the 'catalog_hook_register_failed' or "
+            f"'preflight_register_failed' log event)."
+        )
     raise click.ClickException(
         f"{path} was indexed ({chunks} chunk(s) written) but its catalog "
         f"document identity failed to register this run — see the "
-        f"WARNING line(s) above. The chunks are searchable but orphaned "
-        f"(no tumbler, invisible to catalog-aware queries). Re-run once "
+        f"WARNING line(s) above. The chunks are orphaned: with no "
+        f"manifest owner they are hidden from search and every "
+        f"catalog-aware query until repaired. Re-run once "
         f"the engine/catalog is reachable — the write is idempotent and "
         f"the chunks reconcile via upsert identity — or run 'nx catalog "
         f"reconcile' to repair without re-indexing."
