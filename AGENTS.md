@@ -280,8 +280,10 @@ runs, a `WSLInterop` binfmt handler is enabled, a `/mnt/<letter>` directory is
 mounted and listable, or a `/mnt/<drive>` entry is on the job's `PATH`. The
 fix is host-side, in `/etc/wsl.conf` (`[interop] enabled=false`,
 `appendWindowsPath=false`, `[automount] enabled=false`, then `wsl --shutdown`),
-and it is pending with Sam. Unset `QWEN_CI_PUSH_RUNNER` means `qwen-linux`, so
-until the fix is applied and a probe run is green, the variable must be
+and it was applied on the host on 2026-10-01 (reported by the host's operator;
+its three checks were run by hand from an `nxtest` ssh session and passed, which
+is not the workflow run as `ghci`). Unset `QWEN_CI_PUSH_RUNNER` means `qwen-linux`,
+so until a `qwen-linux-isolation-probe` run is green, the variable must be
 `ubuntu-latest` (stated above under CI pytest routing too).
 Until a run is green, read this runner's isolation as "intended", with docker as the known hole; a
 separate or rootless Docker for `ghci` is the remedy if Sam wants it closed. `qwen-linux` keeps state between
