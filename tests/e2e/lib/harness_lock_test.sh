@@ -344,7 +344,7 @@ for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox; 
     for fake in 31337 42424; do
         # shellcheck disable=SC2086
         outu="$(cd "$REPO_ROOT" && PATH="$SHIM_DIR:$PATH" NX_FAKE_UID="$fake" NX_E2E_LOCK_SELFTEST=1 bash "$script" $args 2>&1)"
-        seen[$fake]="$(printf '%s\n' "$outu" | sed -n 's/.*lock acquired: \(.*\) (pid .*/\1/p' | head -1)"
+        seen[$fake]="$(printf '%s\n' "$outu" | sed -n 's/.*lock acquired: \(.*\) (pid .*/\1/p')"
     done
     if [[ -n "${seen[31337]}" && -n "${seen[42424]}" && "${seen[31337]}" != "${seen[42424]}" \
           && "${seen[31337]}" == *"-31337/"* && "${seen[42424]}" == *"-42424/"* ]]; then
