@@ -6653,9 +6653,11 @@ def _run_index(
                    if _lock_wait_s else "")
             )
         _batch_failures = _batcher.failed_files
-        _batch_throttled = _batcher.throttled_files
-        _batch_throttle_retry_after = _batcher.throttle_retry_after
-        _batch_throttle_breaker_open = _batcher.throttle_breaker_open
+        # getattr, like the drain-progress read of ``failed_files`` above: a duck-typed batcher
+        # stand-in that predates the throttle properties reports "nothing throttled".
+        _batch_throttled = dict(getattr(_batcher, "throttled_files", None) or {})
+        _batch_throttle_retry_after = getattr(_batcher, "throttle_retry_after", None)
+        _batch_throttle_breaker_open = bool(getattr(_batcher, "throttle_breaker_open", False))
         # Rejected = failed and not throttled; the throttled ones get their own line below.
         _rejected = {p: e for p, e in _batch_failures.items() if p not in _batch_throttled}
         if _rejected:
