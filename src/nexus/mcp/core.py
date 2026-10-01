@@ -5539,9 +5539,9 @@ def store_put(
         # A stamp the engine refuses, or that fails, leaves it 'indexing' too and is worded like any
         # other uncertain outcome.
         outcome = stamp_note(outcome)
-        message = failure_message(outcome, subject="content", check="store_get")
-        if message is not None:
-            return f"Error: store_put: {message}"
+        # The note is stored and its chains fired whatever the stamp did, so the relevance log and the
+        # tier write below are recorded either way; only the reply differs.
+        stamp_message = failure_message(outcome, subject="content", check="store_get")
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.
@@ -5564,8 +5564,10 @@ def store_put(
             tool="store_put", tier="T3",
             target_title=title or doc_id,
         )
-        # A failed or uncertain write already returned above, before any of
-        # this post-store work ran.
+        # A write that did not store returned above, before any of this post-store work ran; a note
+        # whose STAMP failed is stored, so it is recorded above and reported here.
+        if stamp_message is not None:
+            return f"Error: store_put: {stamp_message}"
         split_note = (
             f" ({len(pieces)} chunks, split to the embedding model's token window)"
             if len(pieces) > 1 else ""

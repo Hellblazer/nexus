@@ -287,14 +287,21 @@ def write_one_request(
             out.dropped = [str(c) for c in dropped_map[doc_id]]
     else:
         counts = resp.get("dropped_count")
-        if (not isinstance(dropped_map, dict) or doc_id not in dropped_map
-                or not isinstance(counts, dict) or doc_id not in counts):
-            # An engine that predates the drop list answers without it. Not a corrupt answer: the
-            # remedy is an upgrade, so say so instead of failing the same cryptic way per record.
+        if "dropped_chashes" not in resp or "dropped_count" not in resp:
+            # An engine that predates the drop list answers without the keys. Not a corrupt answer:
+            # the remedy is an upgrade, so say so instead of failing the same cryptic way per record.
             raise EngineOlderThanClientError(
                 f"multi-batch write of {doc_id!r} failed at batch {batch}: the write_many response "
                 "carried neither dropped_chashes and dropped_count entries nor a dropped_unknown "
                 "marker for the document")
+        if (not isinstance(dropped_map, dict) or doc_id not in dropped_map
+                or not isinstance(counts, dict) or doc_id not in counts):
+            # The keys are there and the answer is wrong (a wrong type, or no entry for this
+            # document): a corrupt answer, which an upgrade does not fix.
+            raise BatchWriteFailedError(
+                doc_id=doc_id, batch=batch,
+                reason="the write_many response carried dropped_chashes and dropped_count but not a "
+                       "well-formed entry for the document, and no dropped_unknown marker")
         listed = list(dropped_map[doc_id] or ())
         if int(counts[doc_id]) != len(listed):
             raise BatchWriteFailedError(
@@ -627,8 +634,9 @@ class MultiBatchDocumentWriter:
                 detail = ("begin_index_run(snapshot_manifest=True) returned no usable "
                           f"pre-run manifest (prior_chashes={type(prior).__name__}, "
                           f"prior_count={count!r})")
-                if not isinstance(prior, list) or isinstance(count, bool) or not isinstance(count, int):
-                    # The snapshot fields are absent or untyped: an engine that predates them.
+                if "prior_chashes" not in resp or "prior_count" not in resp:
+                    # The snapshot fields are ABSENT: an engine that predates them. (Present but
+                    # wrongly typed is a corrupt answer, below.)
                     raise EngineOlderThanClientError(
                         f"multi-batch write of {self._doc_id!r} failed at batch 1: {detail}")
                 raise self._fail(1, detail)   # present but self-contradicting: a corrupt answer

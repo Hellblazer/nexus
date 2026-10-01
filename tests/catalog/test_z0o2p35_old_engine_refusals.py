@@ -169,3 +169,120 @@ def test_a_pre_send_check_is_a_value_error_the_classifier_calls_unsent(monkeypat
         c.write_manifest_many([("1.1.1", [])], collection="")
     assert isinstance(exc.value, ValueError) and rec.calls == []
     assert judge(exc.value)[0] == "unsent"
+
+
+# ── EngineOlderThanClientError is for a genuinely MISSING field only (nexus-z0o2p.34 round) ──────
+#
+# The remedy it carries is "upgrade the engine". A field that is PRESENT but wrong (a false echo, the
+# wrong type, a non-object body) is a corrupt or contradicting answer, which an upgrade does not fix,
+# so it stays a BatchWriteFailedError and says so.
+
+
+def _not_older(call) -> None:
+    from nexus.errors import BatchWriteFailedError
+
+    with pytest.raises(BatchWriteFailedError) as exc:
+        call()
+    assert not isinstance(exc.value, EngineOlderThanClientError)
+    assert "Upgrade the local engine" not in str(exc.value)
+
+
+def test_a_false_metadata_merge_echo_is_a_corrupt_answer_not_an_old_engine(monkeypatch) -> None:
+    c, _ = _client(monkeypatch, {"failed_doc_ids": [], "chunks_written": 1, "metadata_merge": False})
+    _not_older(lambda: c.write_manifest_many(
+        [("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION, metadata_merge=True))
+    c, _ = _client(monkeypatch, {"ok": True, "count": 1, "chunks_written": 1, "metadata_merge": "yes"})
+    _not_older(lambda: c.append_manifest_chunks(
+        "1.1.1", [_row(_A, 0)], chunk_payload=[_chunk(_A)], collection=_COLLECTION, metadata_merge=True))
+
+
+@pytest.mark.parametrize("body", [["not", "an", "object"], "ok"], ids=["list", "string"])
+def test_a_non_object_answer_is_a_corrupt_answer_not_an_old_engine(monkeypatch, body) -> None:
+    c, _ = _client(monkeypatch, body)
+    _not_older(lambda: c.write_manifest_many(
+        [("1.1.1", [_row(_A, 0)])], complete={"1.1.1": "h"}, chunks=[_chunk(_A)], collection=_COLLECTION))
+    c, _ = _client(monkeypatch, body)
+    _not_older(lambda: c.append_manifest_chunks(
+        "1.1.1", [_row(_A, 0)], chunk_payload=[_chunk(_A)], collection=_COLLECTION, metadata_merge=True))
+    c, _ = _client(monkeypatch, body)
+    _not_older(lambda: c.append_manifest_many(
+        [("1.1.1", [_row(_A, 0)])], chunks=[_chunk(_A)], collection=_COLLECTION, metadata_merge=True))
+
+
+class _SnapshotCat:
+    """A catalog writer whose begin answers with the given snapshot fields."""
+
+    def __init__(self, **snapshot: Any) -> None:
+        self._snapshot = snapshot
+
+    def begin_index_run(self, doc_id, content_hash, run_id, collection, *, snapshot_manifest=False):
+        return {"ok": True, **self._snapshot}
+
+
+def _writer_run(cat: Any) -> None:
+    from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter
+
+    w = MultiBatchDocumentWriter(cat, doc_id="1.1.1", collection=_COLLECTION, content_hash="h")
+    w.add_batch([_row(_A, 0)], [_chunk(_A)])
+    w.finish()
+
+
+def test_a_snapshot_with_the_wrong_types_is_corrupt_but_one_with_no_fields_is_an_old_engine() -> None:
+    _not_older(lambda: _writer_run(_SnapshotCat(prior_chashes="abc", prior_count=3)))
+    _not_older(lambda: _writer_run(_SnapshotCat(prior_chashes=[], prior_count="3")))
+    _raises_older(lambda: _writer_run(_SnapshotCat()), match="pre-run manifest")
+
+
+class _DropListCat:
+    """A catalog writer whose write_many answers with the given drop-list fields."""
+
+    def __init__(self, **fields: Any) -> None:
+        self._fields = fields
+
+    def write_manifest_many(self, docs, complete=None, **kw):
+        return {"failed_doc_ids": [], "chunks_written": 1, **self._fields}
+
+
+def _one_request(**fields: Any) -> None:
+    from nexus.catalog.multi_batch_write import write_one_request
+
+    write_one_request(_DropListCat(**fields), doc_id="1.1.1", collection=_COLLECTION,
+                      rows=[_row(_A, 0)], chunks=[_chunk(_A)], dropped="required")
+
+
+def test_a_drop_list_of_the_wrong_shape_is_corrupt_but_an_absent_one_is_an_old_engine() -> None:
+    _raises_older(lambda: _one_request(), match="dropped_chashes")
+    _not_older(lambda: _one_request(dropped_chashes=["x"], dropped_count={"1.1.1": 0}))
+    _not_older(lambda: _one_request(dropped_chashes={"1.1.2": []}, dropped_count={"1.1.2": 0}))
+
+
+def test_every_pre_send_argument_check_precedes_the_first_post() -> None:
+    """nexus-z0o2p.34 (N4): ``judge`` calls a ``PreSendArgumentError`` unsent, which is only true if
+    nothing was sent. In every HttpCatalogClient method that can raise one (directly or through its
+    helpers), the last such check comes before the first request."""
+    import ast
+    import inspect
+
+    import nexus.catalog.http_catalog_client as hcc
+
+    tree = ast.parse(inspect.getsource(hcc))
+    helpers = {"_metadata_mode_fields", "_check_sweep_chashes", "_check_supplied_vectors"}
+    sends = {"_post", "_post_embedding_write", "_get"}
+    checked: set[str] = set()
+    problems: list[str] = []
+    for fn in (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)):
+        pre = [n.lineno for n in ast.walk(fn)
+               if (isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+                   and getattr(n.exc.func, "id", "") == "PreSendArgumentError")
+               or (isinstance(n, ast.Call) and getattr(n.func, "id", "") in helpers)]
+        post = [n.lineno for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr in sends and getattr(n.func.value, "id", "") == "self"]
+        if not pre or not post or fn.name in helpers:
+            continue
+        checked.add(fn.name)
+        if max(pre) > min(post):
+            problems.append(f"{fn.name}: a pre-send check at line {max(pre)} follows a request at line {min(post)}")
+    assert checked >= {"write_manifest_many", "append_manifest_chunks", "append_manifest_many"}, (
+        f"non-vacuity: the methods with a pre-send check are {sorted(checked)}")
+    assert not problems, problems

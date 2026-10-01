@@ -292,17 +292,43 @@ chunk owned.
    2026-09-30 (T2 `nexus/rdr-223-stamp-last-every-path-decision-2026-09-30`,
    bead nexus-z0o2p.34), extending the PDF and markdown decision of the same
    day.* A document is stamped `index_state='complete'` only AFTER the
-   post-store hooks of its write have run: chash, taxonomy assignment, aspect
+   post-store hooks of its write have RUN: chash, taxonomy assignment, aspect
    enqueue and catalog enrichment (title, author, year, chunk count). The
    staleness check skips a complete document whose hash matches, so a stamp
    that rode the write left a document that read complete after a process
    killed in a hook, and nothing would fire the hooks for it again. With the
-   stamp last, a kill in a hook leaves the fence `indexing`, and the next run
-   redoes the write and fires the hooks again (at-least-once). The chunks and
-   owner rows still land in ONE request; only the stamp moves, at the cost of
-   one extra stamp-only request per document (per page that finishes a
-   document, for the import; per flush, for the repo-index batcher). Every
-   writer path:
+   stamp last, a kill in a hook leaves the fence `indexing` and the next run
+   redoes the write and fires the hooks again (at-least-once).
+
+   The property is "the hooks ran, or the process was killed before the
+   stamp", not "the hooks succeeded". The hook registry isolates each hook's
+   failure (a taxonomy service that is down, an aspect enqueue that errors):
+   such a failure is recorded in T2 `hook_failures`, the document is still
+   stamped, and a later assign or enqueue run heals it, as before. A hook
+   chain that raises out of the registry (the ChunkBatcher's flush-grain
+   chain) skips the stamp for that flush. A stamp that itself fails (a
+   transport error, a lost acknowledgement) leaves the fence `indexing` on
+   every path, never `failed`: it may have committed, and `failed` would flip
+   a `complete` document. A document the engine failed in place on a flush
+   write (`failed_doc_ids`) is never stamped: the stamp-only request verifies
+   only the row count and that no chunk is missing, so an edit that keeps the
+   chunk count would read `complete` with the new hash over the old content.
+
+   The chunks and owner rows still land in ONE request; only the stamp moves.
+   Cost, measured by request count and not yet by throughput (Phase 2
+   measurement, nexus-z0o2p.26): one stamp request per ChunkBatcher flush
+   (at most `MANIFEST_APPEND_MANY_MAX_DOCS`, 1000, documents), one per import
+   page that finishes a document, and one `complete_index_run` per oversize
+   file, PDF or note. Recovery differs by path: a repo, PDF, markdown or
+   import run reruns with its command and finds the document `indexing`. A
+   NOTE has no rerun: MCP `store_put`, `nx store put`, `nx memory promote` and
+   the recovery import are single calls, so a note killed in a chain, or whose
+   stamp failed, stays `indexing` until it is put again.
+   `nx catalog reconcile-fences` is deliberately not the remedy (it would
+   stamp the note complete without firing the chains that never ran); the
+   `nx doctor` row "stale index-run fences" names such notes after six hours
+   and says to re-put them (an idempotent re-write that fires the chains and
+   stamps the note). Every writer path:
    - `nx index md`/`rdr` (`_index_document`), the small and incremental PDF
      paths and the streaming PDF pipeline: the writer's `defer_completion`,
      with the stamp after the hooks and after the catalog enrichment

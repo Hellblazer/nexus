@@ -24,6 +24,7 @@ import dataclasses
 import pytest
 
 import nexus.catalog.http_catalog_client as hcc
+import nexus.exporter as exporter_mod
 from nexus.catalog.factory import make_catalog_reader
 from nexus.catalog.multi_document_write import MultiDocumentImportWriter
 from nexus.db.http_vector_client import HttpVectorClient
@@ -83,6 +84,8 @@ def test_a_kill_in_a_page_chain_leaves_the_documents_last_page_indexing_and_the_
     # A SIGKILL runs no cleanup: the importer's own failure handling (which marks its open documents
     # ``failed`` on an exception) must not run, so the fences stay as the kill left them.
     monkeypatch.setattr(MultiDocumentImportWriter, "abort", lambda self, error: None)
+    # Nor does the removal of the documents the import registered and never wrote.
+    monkeypatch.setattr(exporter_mod._OwnerImport, "compensate_minted", lambda self: 0)
     state = {"calls": 0, "armed": True}
 
     def _chain(*a, **kw):

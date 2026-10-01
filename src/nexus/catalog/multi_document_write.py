@@ -209,9 +209,12 @@ class MultiDocumentImportWriter:
         self._rows_landed = 0
         self._sweep_skipped = 0
         self._finished = False
-        #: The exception the last failed request raised, so a caller that must undo what it
-        #: registered can tell a definitive refusal from a request that may have committed.
-        self._last_request_error: BaseException | None = None
+        #: Every exception any ATTEMPT of a DATA request (one that carries rows or chunks) raised, so
+        #: a caller that must undo what it registered can tell a definitive refusal from a request
+        #: that may have committed. A begin, a stamp-only request and a sweep-only request carry no
+        #: rows, so they cannot create the zero-chunk registration the caller undoes and are not
+        #: recorded here.
+        self._data_request_errors: list[BaseException] = []
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -253,13 +256,14 @@ class MultiDocumentImportWriter:
         return bool(st and (st.written or st.received))
 
     def request_may_have_written(self) -> bool:
-        """True when the last failed request is in flight under the shared classifier
+        """True when any attempt of a failed data request is in flight under the shared classifier
         (:func:`nexus.catalog.write_outcome.may_have_written`): it may have reached the engine and
-        committed, so nothing registered for it may be undone. False when no request failed."""
+        committed, so nothing registered for it may be undone. Every attempt is judged, not only the
+        last one the retry wrapper re-raises: a dropped connection followed by refused reconnects is
+        one request that may have committed. False when no data request failed."""
         from nexus.catalog.write_outcome import may_have_written  # noqa: PLC0415 — deferred: keeps this module's import light
 
-        err = self._last_request_error
-        return err is not None and may_have_written(err)
+        return any(may_have_written(e) for e in self._data_request_errors)
 
     def discard(self, doc_id: str) -> None:
         """Forget *doc_id*: the caller removed its catalog row (nothing had landed on it), so there
@@ -385,14 +389,19 @@ class MultiDocumentImportWriter:
         :attr:`ABORT_FENCE_CAP` fence calls (each is one request, and a multi-chunk document is open
         for most of a run) and stops at the first one that fails (the engine is the likely cause). A
         document not marked stays ``indexing``, which the next run of the same file resumes exactly as
-        it resumes a ``failed`` one. A no-op once :meth:`finish` returned."""
+        it resumes a ``failed`` one. A document whose last request landed and whose stamp is owed
+        (``defer_completion``: :meth:`complete_documents` may have sent it) is NOT marked, whatever
+        failed: the stamp may have committed and lost its ack, and ``failed`` would flip a ``complete``.
+        It stays ``indexing`` and the next run of the same file resumes it. A no-op once
+        :meth:`finish` returned."""
         if self._finished:
             return
         sent = 0
         unmarked = 0
         stop = False
         for doc_id, st in self._docs.items():
-            if not st.begun or st.stamped or st.refusal is not None or st.failed is not None:
+            if (not st.begun or st.stamped or st.refusal is not None or st.failed is not None
+                    or st.awaiting):
                 continue
             st.failed = error
             st.release()
@@ -414,15 +423,22 @@ class MultiDocumentImportWriter:
         if self._finished:
             raise ValueError("MultiDocumentImportWriter: already finished")
 
-    def _retrying(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    def _retrying(self, fn: Callable[..., Any], *args: Any, data: bool = True, **kwargs: Any) -> Any:
         """nexus.retry's bounded manifest-write retry: connectivity errors, and a rate-limit answer
-        paces the shared brake. A ``CombinedWriteEmbedTimeoutError`` is never retried."""
+        paces the shared brake. A ``CombinedWriteEmbedTimeoutError`` is never retried. With
+        *data* (the default) every failed attempt is recorded for :meth:`request_may_have_written`;
+        pass ``data=False`` for a request that carries no rows (a begin, a stamp, a sweep)."""
         from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
-        try:
-            return _manifest_write_with_retry(fn, *args, **kwargs)
-        except BaseException as exc:
-            self._last_request_error = exc
-            raise
+
+        def attempt(*a: Any, **kw: Any) -> Any:
+            try:
+                return fn(*a, **kw)
+            except BaseException as exc:
+                if data:
+                    self._data_request_errors.append(exc)
+                raise
+
+        return _manifest_write_with_retry(attempt, *args, **kwargs)
 
     def _fail_doc(self, doc_id: str, reason: str, result: PageWriteResult | None = None) -> None:
         st = self._docs[doc_id]
@@ -453,7 +469,7 @@ class MultiDocumentImportWriter:
             resp = self._retrying(
                 self._cat.begin_index_run_many,
                 [{"doc_id": d, "content_hash": self._content_hash, "run_id": self._run_id} for d in todo],
-                self._collection, snapshot_manifest=snapshot)
+                self._collection, snapshot_manifest=snapshot, data=False)
         except EngineOlderThanClientError:
             # The engine answered without the snapshot AFTER stamping every document of the call
             # `indexing`: they are fenced, so abort() must be able to mark them.
@@ -707,7 +723,7 @@ class MultiDocumentImportWriter:
                         stamps[d] = (self._content_hash, st.received)
             resp = self._retrying(
                 self._cat.append_manifest_many, [(d, []) for d, _ in batch], collection=self._collection,
-                sweep_chashes=sweeps, complete=stamps or None)
+                sweep_chashes=sweeps, complete=stamps or None, data=False)
             resp = resp if isinstance(resp, dict) else {}
             failed = {str(d) for d in (resp.get("failed_doc_ids") or ())}
             refused = self._refused_map(resp)
@@ -756,7 +772,7 @@ class MultiDocumentImportWriter:
             stamps = {d: (self._content_hash, self._docs[d].received) for d in batch}
             resp = self._retrying(
                 self._cat.append_manifest_many, [(d, []) for d in batch], collection=self._collection,
-                complete=stamps)
+                complete=stamps, data=False)
             resp = resp if isinstance(resp, dict) else {}
             failed = {str(d) for d in (resp.get("failed_doc_ids") or ())}
             refused = self._refused_map(resp)

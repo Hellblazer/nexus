@@ -36,7 +36,8 @@ Outcomes of :func:`write_note`, so a caller never treats every raise the same wa
    lost acknowledgement, a timeout, a gateway 5xx) but a retried read of the document's manifest
    shows exactly the ``(position, chash)`` rows this call wrote. The content is there but the request
    may never have committed, so it is resent once (it is idempotent: changed tags, ttl or category on
-   unchanged content are applied, and the completion stamp rides it) and the resend's answer is the
+   unchanged content are applied; the request carries no completion stamp, which is sent last by
+   :func:`stamp_note`) and the resend's answer is the
    outcome (``recovered=True``); a resend that fails is "unknown" (3), never a landed note the fence
    calls unfinished. Every attempt's error counts: if any was in flight the request is settled from
    the manifest, never called "unsent". The resend is a whole new request, so a concurrent writer of
@@ -161,15 +162,10 @@ class StampRefusedError(ManifestVerifyUncertainError):
 
 class LandedUnconfirmedError(ManifestVerifyUncertainError):
     """A read of the document's manifest shows the note's rows, so the request committed, but the
-    resend that applies its metadata and stamp failed. The note exists and may already be stamped
-    complete by the first attempt, so the caller must not fail the fence: ``failIndexRun`` is
-    unconditional and would flip a complete note to ``failed`` (nexus-z0o2p.35, M2). Same rule as
-    :class:`StampRefusedError`."""
-
-
-class _UnstampedError(ManifestVerifyUncertainError):
-    """The write landed and the response said the document was not stamped complete, with no engine
-    refusal to name (contrast :class:`StampRefusedError`). The note exists; its state is unconfirmed."""
+    resend that applies its metadata failed. The note exists, whole and owned, and the fence stays as
+    ``put_note`` left it (``indexing``): the caller does not fail it (nexus-z0o2p.35, M2; the write
+    carries no stamp since nexus-z0o2p.34, so this is no longer about flipping a ``complete`` note,
+    only about not rewriting a state that is already right). Same rule as :class:`StampRefusedError`."""
 
 
 class _AttemptRecorder:
@@ -449,7 +445,7 @@ def is_anticipated_failure(exc: BaseException) -> bool:
     production fault stays diagnosable."""
     known = (
         httpx.HTTPError, CombinedWriteEmbedTimeoutError, BatchWriteFailedError, IndexRunVerifyRefused,
-        StampRefusedError, LandedUnconfirmedError, _UnstampedError, *client_side_refusals(),
+        StampRefusedError, LandedUnconfirmedError, *client_side_refusals(),
     )
     seen: set[int] = set()
     pending: list[BaseException] = [exc]
@@ -638,7 +634,7 @@ def put_note(
        leaves the fence ``indexing``, and a stamp the engine refused is never flipped to failed; the refusal was recorded by
        :func:`write_note`, and nothing is rolled back.
        On :class:`LandedUnconfirmedError` (the manifest shows the note, the resend failed): UNCERTAIN
-       and NO ``_fence_fail``, for the same reason: the first attempt may have stamped it (M2).
+       and NO ``_fence_fail``: the note landed whole and the fence is already ``indexing`` (M2).
        On any other :class:`~nexus.catalog.store_hook.ManifestVerifyUncertainError`, or a landed
        note the fence could not be told about: ``_fence_fail`` and nothing else, since the note may
        exist.
@@ -702,10 +698,9 @@ def put_note(
         return out
     except ManifestVerifyUncertainError as exc:
         out.status, out.reason = UNCERTAIN, str(exc)
-        out.unstamped = isinstance(exc, _UnstampedError)
         if not isinstance(exc, LandedUnconfirmedError):
-            # The manifest showing the note means it landed, perhaps stamped complete by the first
-            # attempt; failing the fence now could flip a complete note to failed (M2).
+            # The manifest showing the note means it landed whole and owned; the fence is already
+            # 'indexing' (the write carries no stamp), so there is nothing to record (M2).
             _fence_fail(doc, out.reason)
         # No traceback for an anticipated failure, like the NOT_LANDED line below: the CLI prints
         # these warnings to the operator's terminal and the caller words the outcome itself. The

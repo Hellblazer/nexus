@@ -232,9 +232,9 @@ def complete_oversize_write(pending: Any) -> None:
     ``pending.close()`` (idempotent). A refused stamp (``IndexRunVerifyRefused``) is logged and
     absorbed, as :func:`write_oversize_file` always did: the chunks landed with their owner rows,
     the fence stays ``indexing`` and the writer already recorded the refusal for the run summary.
-    A stamp that fails any other way fails the fence, then is judged as a failed write is: a
-    transient condition defers the file to the next run (:class:`OversizeWriteDeferred`), anything
-    else propagates.
+    A stamp that fails any other way leaves the fence ``indexing`` (never ``failed``: the stamp may
+    have committed and lost its ack) and is judged as a failed write is: a transient condition defers
+    the file to the next run (:class:`OversizeWriteDeferred`), anything else propagates.
     """
     doc_id = pending.doc_id
     try:
@@ -242,8 +242,8 @@ def complete_oversize_write(pending: Any) -> None:
     except IndexRunVerifyRefused:
         _log.warning("oversize_write_complete_refused", doc_id=doc_id)
     except Exception as exc:  # noqa: BLE001 — classify a stamp outcome; anything not transient re-raises below
-        # Fail the fence either way, as a failed write does: the next run redoes the file.
-        pending.writer.abort(f"{type(exc).__name__}: {exc}")
+        # The fence is NOT failed: a stamp that committed and lost its ack must not be flipped from
+        # complete to failed. It stays 'indexing' and the next run redoes the file.
         if _is_transient_write_error(exc):
             raise OversizeWriteDeferred(
                 doc_id=doc_id, collection=getattr(pending.writer, "_collection", ""), cause=exc) from exc

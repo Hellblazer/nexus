@@ -723,6 +723,22 @@ class TestChunkMetadata:
         assert meta["tags"] == "new", "the key the note sets is refreshed"
         assert (meta["bib_year"], meta["bib_venue"]) == (2024, "VLDB"), "a key another writer set is kept"
 
+    def test_a_permanent_reput_of_a_ttld_note_drops_its_ttl(self, vec, real_cat):
+        """nexus-z0o2p.34 (critique 5b): the merge keeps a stored key the incoming metadata omits. A
+        re-put that makes a TTL'd note PERMANENT sends no ``ttl_days``, so under a bare merge the old
+        TTL would survive and the note would still expire (data loss). The note's own keys must
+        therefore be overwritten by a re-put, absent ones included."""
+        pieces = _pieces("meta-ttl", 1)
+        doc = _register("z0o2p34-meta-ttl", pieces)
+        chash = _chash(pieces[0])
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, ttl_days=5, cat=real_cat)
+        assert self._meta(vec, chash)["ttl_days"] == 5, "control: the TTL is stored"
+
+        write_note(catalog_doc_id=doc, collection=_COLLECTION, pieces=pieces, cat=real_cat)    # permanent
+        meta = self._meta(vec, chash)
+        assert meta.get("ttl_days") in (None, 0), f"the permanent re-put must drop the stored TTL: {meta}"
+        assert meta.get("expires_at") in (None, ""), "and any expiry derived from it"
+
     def test_the_request_asks_the_engine_to_merge(self, vec, real_cat):
         seen: list[dict] = []
 
@@ -876,9 +892,9 @@ class TestPutNote:
                              else ["rollback", "restore-stamp", "fence-fail"]), order
 
     def test_a_landed_note_whose_resend_failed_does_not_fail_the_fence(self, vec):
-        """M2: the manifest showed the note, so attempt 1 committed (and may have stamped it). A resend
-        that then fails is UNCERTAIN, and ``_fence_fail`` (which flips the document to ``failed``
-        unconditionally) must not run, exactly as for a refused stamp."""
+        """M2: the manifest showed the note, so attempt 1 committed (without a stamp: the write
+        carries none, nexus-z0o2p.34). A resend that then fails is UNCERTAIN, and ``_fence_fail`` must
+        not run: the note is whole and its fence already reads ``indexing``."""
         import nexus.catalog.note_write as nw
         from unittest.mock import patch
 

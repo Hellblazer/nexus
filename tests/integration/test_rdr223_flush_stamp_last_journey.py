@@ -144,3 +144,56 @@ def test_a_stamp_the_flush_cannot_send_leaves_the_documents_indexing_and_is_reco
     for name in ("a.md", "b.md"):
         assert _index_state(_docs_by_file(docs_col)[name][0]) == "complete"
     assert mcp_infra.get_complete_refusals() == []
+
+
+def test_a_document_the_engine_fails_in_place_is_not_stamped_and_its_flush_mate_is(
+    flush_repo, monkeypatch,
+) -> None:
+    """The stamp-only request verifies only that the manifest has the claimed number of rows and no
+    missing chunk, not that THIS run wrote them. A document the write failed in place (its
+    transaction rolled back, the old manifest and chunks intact) of an edit that keeps its chunk
+    count would verify and read ``complete`` with the NEW hash over the OLD content, and the next
+    run would skip it as fresh. ``_batch_flush`` therefore hands the write's ``failed_doc_ids`` to
+    the stamp, which leaves those documents ``indexing`` while the flush's other document completes."""
+    from nexus.indexer import _run_index
+
+    repo, reg = flush_repo
+    _run_index(repo, reg, force=False)                # registers the repo's owner
+    with _traffic() as base:
+        _run_index(repo, reg, force=True)
+    written = {b["collection"] for p, b, _ in base if p == "/manifest/write_many"}
+    (docs_col,) = [c for c in written if c.startswith("docs__")]
+    before = _docs_by_file(docs_col)
+    a_doc, a_old = before["a.md"]
+    b_doc, _b_old = before["b.md"]
+    assert a_old and _index_state(a_doc) == "complete"
+
+    # Edit both files without changing their chunk counts (same number of paragraphs).
+    (repo / "a.md").write_text((repo / "a.md").read_text().replace("Alpha", "Alphabet"))
+    (repo / "b.md").write_text((repo / "b.md").read_text().replace("Bravo", "Bravura"))
+
+    real = HttpCatalogClient.write_manifest_many
+
+    def _fail_a_in_place(self, docs, *args, **kw):
+        # A row naming a chunk that is not in the request: the engine rolls that document's
+        # transaction back (the foreign key), and answers with it in failed_doc_ids.
+        patched = [
+            (d, [*rows, {"chash": "f" * 64, "position": len(rows)}] if d == a_doc else rows)
+            for d, rows in docs]
+        return real(self, patched, *args, **kw)
+
+    monkeypatch.setattr(HttpCatalogClient, "write_manifest_many", _fail_a_in_place)
+    with _traffic() as log:
+        _run_index(repo, reg, force=False)
+    resp = [r for p, b, r in log if p == "/manifest/write_many" and b["collection"] == docs_col]
+    assert len(resp) == 1 and resp[0].get("failed_doc_ids") == [a_doc], (
+        "non-vacuity: the engine failed a.md in place, in the same flush as b.md")
+
+    after = _docs_by_file(docs_col)
+    assert after["a.md"][1] == a_old, "a.md's old manifest is intact"
+    assert _index_state(a_doc) != "complete", "a.md must not be stamped complete over its OLD chunks"
+    assert _index_state(a_doc) == "indexing"
+    assert _index_state(b_doc) == "complete", "its flush mate landed and is stamped"
+    stamped = {e["doc_id"] for p, b, _ in log if p == "/manifest/append_many"
+               for e in b["docs"] if "complete" in e}
+    assert stamped == {b_doc}, "the stamp request named only the document that landed"

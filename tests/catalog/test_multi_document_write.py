@@ -424,6 +424,98 @@ def test_the_writer_totals_the_engines_sweep_skips_over_the_run():
     assert w.sweep_skipped == 3          # write_many of the multi group, of the single group, one append
 
 
+# ── request_may_have_written: every ATTEMPT of a DATA request, nothing else (nexus-z0o2p.34) ───────
+
+
+class _FlakyCat(FakeCat):
+    """A FakeCat whose named operation raises the given exceptions, one per call, before it answers."""
+
+    def __init__(self, op: str, *errors: BaseException, **kw):
+        super().__init__(**kw)
+        self._op, self._errors = op, list(errors)
+
+    def _maybe(self, op: str) -> None:
+        if op == self._op and self._errors:
+            raise self._errors.pop(0)
+
+    def begin_index_run_many(self, docs, collection, *, snapshot_manifest=False):
+        self._maybe("begin")
+        return super().begin_index_run_many(docs, collection, snapshot_manifest=snapshot_manifest)
+
+    def write_manifest_many(self, docs, complete=None, **kw):
+        self._maybe("write")
+        return super().write_manifest_many(docs, complete, **kw)
+
+    def append_manifest_many(self, docs, **kw):
+        self._maybe("append")
+        return super().append_manifest_many(docs, **kw)
+
+
+def _httpx_errors():
+    import httpx
+
+    req = httpx.Request("POST", "http://engine.invalid/v1/catalog/manifest/write_many")
+    return httpx.ReadError("dropped", request=req), httpx.ConnectError("refused", request=req)
+
+
+def test_every_attempt_of_a_data_request_is_judged_not_only_the_last(monkeypatch):
+    """A dropped connection followed by refused reconnects is one request that may have reached the
+    engine: the retry wrapper re-raises only the LAST error (a connect error, 'never made'), so the
+    writer must have seen the first attempt's in-flight error itself."""
+    import pytest as _pytest
+
+    monkeypatch.setattr("nexus.retry.time.sleep", lambda s: None)
+    read_error, connect_error = _httpx_errors()
+    cat = _FlakyCat("write", read_error, connect_error, connect_error, connect_error, connect_error)
+    w = _writer(cat)
+    _doc(w, "1.1.1", 1)
+    with _pytest.raises(Exception):
+        w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert w.request_may_have_written() is True
+
+
+def test_a_request_that_never_left_does_not_count_as_in_flight(monkeypatch):
+    import pytest as _pytest
+
+    monkeypatch.setattr("nexus.retry.time.sleep", lambda s: None)
+    _read_error, connect_error = _httpx_errors()
+    cat = _FlakyCat("write", *[connect_error] * 8)
+    w = _writer(cat)
+    _doc(w, "1.1.1", 1)
+    with _pytest.raises(Exception):
+        w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert w.request_may_have_written() is False
+
+
+def test_a_begin_the_old_engine_failed_after_answering_wrote_nothing_so_phantoms_may_go():
+    """EngineOlderThanClientError from begin_index_run_many is raised after the engine answered, which
+    the classifier calls in flight; but a begin carries no rows or chunks, so nothing can have been
+    written and the documents the import registered must be removable."""
+    import pytest as _pytest
+
+    cat = _FlakyCat("begin", EngineOlderThanClientError("begin_index_run_many: the engine predates the snapshot"))
+    w = _writer(cat)
+    _doc(w, "1.1.1", 1)
+    with _pytest.raises(EngineOlderThanClientError):
+        w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert w.request_may_have_written() is False
+
+
+def test_a_failed_stamp_only_request_does_not_make_the_run_look_in_flight(monkeypatch):
+    """A stamp-only append_many carries no rows, so it cannot have created a phantom document."""
+    import pytest as _pytest
+
+    monkeypatch.setattr("nexus.retry.time.sleep", lambda s: None)
+    read_error, _connect = _httpx_errors()
+    cat = _FlakyCat("append", *[read_error] * 8)
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    with _pytest.raises(Exception):
+        w.complete_documents(res.landed)
+    assert w.request_may_have_written() is False
+
+
 # ── defer_completion (nexus-z0o2p.34): the stamp is the caller's, after its hooks ─────────────────
 
 
@@ -499,15 +591,17 @@ def test_a_deferred_stamp_the_engine_fails_in_place_leaves_the_document_indexing
     assert not [c for op, c in cat.calls if op == "fail"]
 
 
-def test_a_document_whose_stamp_was_never_sent_is_reported_by_finish_and_marked_failed_by_abort():
+def test_a_document_whose_stamp_is_owed_is_reported_by_finish_and_never_failed_by_abort():
+    """A stamp that may have committed and lost its ack must not be flipped to failed: abort() leaves
+    a document whose last request landed (stamp owed) ``indexing``, and still fails an open one."""
     cat = FakeCat()
     w = _writer(cat, defer_completion=True)
     _doc(w, "1.1.1", 1)
-    _doc(w, "1.1.2", 1)
+    _doc(w, "1.1.2", 2)
     w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1))), "1.1.2": _rows(w, "1.1.2", (0, _c(2)))},
                  {_c(1): _chunk(_c(1)), _c(2): _chunk(_c(2))})
-    w.abort("boom")                                   # an exception in the hooks: the open documents fail
-    assert sorted(c["doc"] for op, c in cat.calls if op == "fail") == ["1.1.1", "1.1.2"]
+    w.abort("boom")                       # 1.1.1 landed fully (stamp owed); 1.1.2 is still open
+    assert [c["doc"] for op, c in cat.calls if op == "fail"] == ["1.1.2"]
     cat2 = FakeCat()
     w2 = _writer(cat2, defer_completion=True)
     _doc(w2, "1.1.1", 1)

@@ -840,6 +840,22 @@ class TestOnBatchStamp:
         assert rec.completed == ["a.py"] and rec.failed == []
         assert b.failed_files == {}
 
+    def test_a_flush_grain_hook_that_raises_leaves_the_flush_unstamped(self) -> None:
+        """The same rule as a raising ``on_file_complete``: a hook that did not finish is not a hook that
+        ran, so the documents stay ``indexing`` and the next run redoes them and fires it again."""
+        rec = Recorder()
+        stamped: list[str] = []
+
+        def boom(*a) -> None:
+            raise RuntimeError("taxonomy down")
+
+        b = _batcher(rec, on_batch_complete=boom, on_batch_stamp=lambda coll, *a: stamped.append(coll),
+                     max_chunks=100)
+        b.add("a.py", "code__x", *_mk(2, "a"))
+        b.drain()
+        assert rec.completed == ["a.py"], "the files still settle (the hook failure is contained)"
+        assert stamped == []
+
     def test_a_failed_flush_never_stamps(self) -> None:
         rec = Recorder(fail_batches={0})
         stamped: list[str] = []

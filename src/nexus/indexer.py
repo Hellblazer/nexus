@@ -5778,6 +5778,15 @@ def _run_index(
     if isinstance(db, HttpVectorClient):
         from nexus.chunk_batcher import ChunkBatcher  # noqa: PLC0415 — deferred to avoid circular import
 
+        # Documents the engine answered with in ``failed_doc_ids`` on a flush's write (their
+        # transaction rolled back, the old manifest and chunks intact), keyed by doc id until that
+        # flush's stamp step consumes them. Doc ids are unique across the concurrent flushes (a file
+        # is staged once, whole), so one dict serves every flush. A document in it is NOT stamped:
+        # the stamp-only request verifies only the row count and that no chunk is missing, so a
+        # re-indexed file with an unchanged chunk count would read ``complete`` with the NEW hash
+        # over the OLD content and the next run would skip it as fresh.
+        _flush_failed_docs: dict[str, None] = {}
+
         def _batch_flush(
             collection: str, _ids: list, _docs: list, _metas: list,
             _file_contexts: list,
@@ -5878,6 +5887,8 @@ def _run_index(
             from nexus.metadata_schema import rewrite_delete_keys  # noqa: PLC0415 — circular-dep avoidance (nexus.metadata_schema)
             _merge_delete_keys = rewrite_delete_keys([c["metadata"] for c in chunks_payload])
 
+            for _d, _r in full_docs:
+                _flush_failed_docs.pop(_d, None)          # a bisect retry starts from a clean slate
             cat = get_catalog_writer()
             try:
                 # Bounded backoff against a flapping connection, matching
@@ -5918,6 +5929,8 @@ def _run_index(
                     for _d, _chunks in full_docs
                 },
             )
+            for _failed in (res.get("failed_doc_ids") or ()) if isinstance(res, dict) else ():
+                _flush_failed_docs[str(_failed)] = None
 
         # nexus-duoak follow-up: split "file" into its 3 constituent calls
         # for diagnosis. manifest_write_batch_hook/taxonomy_assign_batch_hook
@@ -6209,9 +6222,17 @@ def _run_index(
 
             _p, _full_docs, _complete_map, _o = _build_combined_write_payload(
                 _ids, _docs, _metas, _file_contexts)
+            # The write's own failed documents are never stamped (see _flush_failed_docs); popping
+            # consumes the flush's entries, so a stale one cannot leak into a later flush.
+            _write_failed = {_d for _d, _r in _full_docs if _flush_failed_docs.pop(_d, 0) is None}
             owed = [
-                (_d, _complete_map[_d], len(_rows)) for _d, _rows in _full_docs if _d in _complete_map
+                (_d, _complete_map[_d], len(_rows)) for _d, _rows in _full_docs
+                if _d in _complete_map and _d not in _write_failed
             ]
+            if _write_failed:
+                _log.warning(
+                    "flush_stamp_skipped_failed_documents", collection=collection,
+                    documents=sorted(_write_failed))
             if not owed:
                 return
             cat = get_catalog_writer()

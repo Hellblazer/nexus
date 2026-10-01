@@ -431,7 +431,11 @@ def test_a_transient_write_error_defers_the_file_and_marks_the_fence_failed(
     assert out == 0
     assert transient_upsert_deferred_count() == 1
     assert transient_upsert_deferred_paths() == ["big.md"]
-    if where != "begin_index_run":                    # nothing was begun, so there is nothing to fail
+    if where == "complete_index_run":
+        # A stamp that fails leaves the fence 'indexing', never 'failed': it may have committed and
+        # lost its ack (nexus-z0o2p.34). The file is still deferred, and the next run redoes it.
+        assert rec.kinds().count("fail") == 0
+    elif where != "begin_index_run":                  # nothing was begun, so there is nothing to fail
         assert rec.kinds().count("fail") == 1
 
 

@@ -95,7 +95,8 @@ class ChunkBatcher:
     ``on_batch_stamp(collection, ids, documents, metadatas, file_contexts)``
     fires once per successful flush after BOTH the flush-grain hooks
     (``on_batch_complete``) and every file's ``on_file_complete``: the
-    completion stamp comes last (RDR-223, nexus-z0o2p.34).
+    completion stamp comes last (RDR-223, nexus-z0o2p.34). It does not fire for a
+    flush whose ``on_batch_complete`` raised.
     """
 
     def __init__(
@@ -522,6 +523,7 @@ class ChunkBatcher:
         upload_elapsed = time.monotonic() - t0
 
         flush_hook_elapsed = 0.0
+        flush_hooks_ran = False
         if error is None:
             _hook_t0 = time.monotonic()
             try:
@@ -529,6 +531,7 @@ class ChunkBatcher:
                     collection, pend.ids, pend.documents, pend.metadatas,
                     file_contexts,
                 )
+                flush_hooks_ran = True
             except Exception:  # noqa: BLE001 — flush-grain hooks are best-effort, never fail the batch
                 _log.warning(
                     "chunk_batch_complete_callback_failed",
@@ -565,7 +568,10 @@ class ChunkBatcher:
         # The completion stamp, LAST (nexus-z0o2p.34): after the flush-grain hooks and every file's
         # completion callback of this flush have run.
         stamp_elapsed = 0.0
-        if error is None:
+        # A flush-grain hook that raised did not run to the end, so the flush is not stamped (the same
+        # rule as a raising on_file_complete, which propagates before this point): the documents stay
+        # 'indexing' and the next run redoes them and fires the hook again.
+        if error is None and flush_hooks_ran:
             _stamp_t0 = time.monotonic()
             try:
                 self._on_batch_stamp(

@@ -1859,6 +1859,7 @@ def _index_document(
     # above) precede the writer and stay fence-untouched by construction —
     # they are outside this try block.
     pending: "_DeferredOwnerWrite | None" = None
+    _stamping = False       # True while the completion stamp is in flight (see the except below)
     try:
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(documents, target_model)
@@ -1930,6 +1931,7 @@ def _index_document(
         # The stamp, LAST (D2): a hook that dies with the process leaves the fence 'indexing', so
         # the next run redoes the document and fires the hooks again.
         if pending_stamp is None:
+            _stamping = True
             pending.complete()
         else:
             # The caller stamps, after the catalog enrichment it runs (nexus-z0o2p.34); it closes
@@ -1954,8 +1956,10 @@ def _index_document(
         raise
     except Exception as exc:
         # _fence_fail never raises, so the original exception always
-        # propagates unmasked.
-        _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        # propagates unmasked. A failed STAMP leaves the fence 'indexing', never 'failed': failing
+        # it could flip a stamp that committed and lost its ack (nexus-z0o2p.34).
+        if not _stamping:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
     finally:
         if pending is not None:
@@ -2120,6 +2124,7 @@ def _index_pdf_incremental(
         _raise_identity_missing(file_path, collection_name, len(ids_all))
 
     pending: "_DeferredOwnerWrite | None" = None
+    _stamping = False       # True while the completion stamp is in flight (see the except below)
     try:
         # Embed per batch, as the loop this replaced did. The write below discards client
         # vectors (the service embeds server-side); they feed the post-store hooks and a dry
@@ -2207,6 +2212,7 @@ def _index_pdf_incremental(
                     hooks.fire_single(_did, collection_name, _doc)
         if pending is not None:
             if pending_stamp is None:
+                _stamping = True
                 pending.complete()
             else:
                 # The caller stamps, after the document-grain hooks it fires; it closes the write.
@@ -2226,7 +2232,8 @@ def _index_pdf_incremental(
         # propagates unmasked (nexus-5xn3k.4 review follow-up). Over-work,
         # never under-work: every request the writer sent before the failure
         # carried its chunks' owner rows, so there is nothing to heal.
-        if _catalog_doc_id_for_batch:
+        # A failed STAMP leaves the fence 'indexing' (nexus-z0o2p.34, see _index_document).
+        if _catalog_doc_id_for_batch and not _stamping:
             _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
     finally:
@@ -3107,6 +3114,7 @@ def index_pdf(
             install_default_hooks(hooks)
         # The write's completion stamp is sent below, after the document-grain hook (RDR-223, D2).
         _stamps: "list[_DeferredOwnerWrite]" = []
+        _stamping = False   # True while the completion stamp is in flight (see the except below)
         try:
             try:
                 count = _index_pdf_incremental(
@@ -3146,6 +3154,7 @@ def index_pdf(
                     )
                 # The stamp, LAST (D2): a kill in any hook above leaves the fence 'indexing', so
                 # the next run redoes the document and fires the hooks again.
+                _stamping = True
                 for _pending in _stamps:
                     _pending.complete()
             except IndexRunVerifyRefused as exc:
@@ -3158,8 +3167,10 @@ def index_pdf(
                 _rollback_if_freshly_minted(exc)
                 raise
             except Exception as exc:
-                for _pending in _stamps:
-                    _fence_fail(_pending.doc_id, str(exc))
+                # A failed STAMP leaves the fence 'indexing' (nexus-z0o2p.34, see _index_document).
+                if not _stamping:
+                    for _pending in _stamps:
+                        _fence_fail(_pending.doc_id, str(exc))
                 _rollback_if_freshly_minted(exc)
                 raise
         finally:
@@ -3228,6 +3239,7 @@ def index_pdf(
                 raise
 
     pending: "_DeferredOwnerWrite | None" = None
+    _stamping = False       # True while the completion stamp is in flight (see the except below)
     try:
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(documents, target_model)
@@ -3300,6 +3312,7 @@ def index_pdf(
         # The stamp, LAST (D2): a kill in a hook above leaves the fence 'indexing', so the next
         # run redoes the document and fires the hooks again.
         if pending is not None:
+            _stamping = True
             pending.complete()
     except IndexRunVerifyRefused as exc:
         # The engine refused the completion stamp (recorded by the writer; the fence stays
@@ -3313,7 +3326,8 @@ def index_pdf(
     except Exception as exc:
         # _fence_fail never raises, so the original exception always
         # propagates unmasked.
-        if _catalog_doc_id_for_batch:
+        # A failed STAMP leaves the fence 'indexing' (nexus-z0o2p.34, see _index_document).
+        if _catalog_doc_id_for_batch and not _stamping:
             _fence_fail(_catalog_doc_id_for_batch, str(exc))
         # nexus-uxg4u round 2 (substantive-critic ship-blocker): this
         # except path re-raises DIRECTLY out of index_pdf -- unlike the
@@ -3790,10 +3804,8 @@ def index_markdown(
             for _pending in _stamps:
                 discard_deferred_superseded_vectors(_pending.doc_id)
             raise
-        except Exception as exc:
-            for _pending in _stamps:
-                _fence_fail(_pending.doc_id, str(exc))
-            raise
+        # Any other failure of the stamp leaves the fence 'indexing', never 'failed': a stamp that
+        # committed and lost its ack must not be flipped (nexus-z0o2p.34); it propagates.
 
     try:
         if not return_metadata:

@@ -962,6 +962,11 @@ def _flush_wiring_problems(tree: ast.Module) -> list[str]:
              if k.arg == "on_batch_stamp" and isinstance(k.value, ast.Name) and k.value.id == "_stamp_flush_documents"]
     if len(batchers) != 1 or len(wired) != 1:
         problems.append("the ChunkBatcher built by _run_index must be given on_batch_stamp=_stamp_flush_documents")
+    # A document the write failed in place must never be stamped: the write records failed_doc_ids
+    # in _flush_failed_docs and the stamp consults (and consumes) it.
+    for fn, role in ((flush, "_batch_flush records"), (stamp, "_stamp_flush_documents consults")):
+        if not [n for n in ast.walk(fn) if isinstance(n, ast.Name) and n.id == "_flush_failed_docs"]:
+            problems.append(f"{role} the flush's failed_doc_ids through _flush_failed_docs (a failed document must not be stamped)")
     return problems
 
 
@@ -1084,7 +1089,9 @@ def test_the_stamp_last_gate_is_red_when_the_real_source_loses_a_stamp_a_deferra
 @pytest.mark.parametrize("label,old,new", [
     ("flush writes with the stamp", "                    complete=None,\n", "                    complete=complete_map or None,\n"),
     ("flush batcher not wired to the stamp", "            on_batch_stamp=_stamp_flush_documents,\n", ""),
-    ("stamp request carries chunks", "                            complete={_d: (_h, _n) for _d, _h, _n in group},\n",
+    ("stamp ignores the failed documents", "            _write_failed = {_d for _d, _r in _full_docs if _flush_failed_docs.pop(_d, 0) is None}\n",
+     "            _write_failed = set()\n"),
+    ("stamp request carries chunks","                            complete={_d: (_h, _n) for _d, _h, _n in group},\n",
      "                            complete={_d: (_h, _n) for _d, _h, _n in group}, chunks=[],\n"),
 ])
 def test_the_flush_wiring_leg_is_red_when_the_flush_stamps_with_its_write_or_is_not_wired(

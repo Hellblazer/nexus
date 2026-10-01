@@ -293,17 +293,46 @@ def _metadata_mode_fields(
     return out
 
 
+def _answer_object(what: str, raw: Any) -> dict:
+    """The engine's answer as an object. An empty body reads as ``{}`` (a missing field is then the
+    caller's to name); anything else that is not a JSON object is a CORRUPT answer, which an engine
+    upgrade does not fix, so it is a :class:`~nexus.errors.BatchWriteFailedError`, never "engine older"."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        from nexus.errors import BatchWriteFailedError  # noqa: PLC0415 — deferred: only the corrupt-answer path needs it
+
+        raise BatchWriteFailedError(
+            doc_id="", batch=0,
+            reason=f"{what}: the engine's answer is not a JSON object ({type(raw).__name__}); "
+                   "the write's outcome cannot be trusted")
+    return raw
+
+
 def _check_metadata_merge_echo(what: str, merge_fields: dict, result: "dict | None") -> None:
     """ACK-ECHO for the metadata write mode (RDR-223, nexus-z0o2p.13): a request that asked for
     ``metadata_merge`` is answered with ``metadata_merge: true`` by an engine that applied it. An
     engine that predates the field ignores it and REPLACES the stored metadata (clearing ``bib_*``
-    enrichment), so its answer carries no echo and this raises rather than let the caller carry on;
-    client and engine are released as a pair, there is no old-engine fallback."""
-    if merge_fields and not (isinstance(result, dict) and result.get("metadata_merge") is True):
+    enrichment), so its answer carries NO such key and this raises
+    :class:`~nexus.errors.EngineOlderThanClientError`; client and engine are released as a pair,
+    there is no old-engine fallback. A key that is PRESENT and not true, or an answer that is not an
+    object, is a contradicting answer an upgrade does not fix: a
+    :class:`~nexus.errors.BatchWriteFailedError`."""
+    if not merge_fields:
+        return
+    result = _answer_object(what, result)
+    if "metadata_merge" not in result:
         raise EngineOlderThanClientError(
             f"{what}: asked for metadata_merge but the response did not echo it; the engine "
             "predates the metadata write mode and REPLACED the stored chunk metadata"
         )
+    if result["metadata_merge"] is not True:
+        from nexus.errors import BatchWriteFailedError  # noqa: PLC0415 — deferred: only the corrupt-answer path needs it
+
+        raise BatchWriteFailedError(
+            doc_id="", batch=0,
+            reason=f"{what}: asked for metadata_merge and the response echoed "
+                   f"{result['metadata_merge']!r}; whether the stored metadata was merged is unknown")
 
 
 def _check_sweep_chashes(what: str, sweep_chashes: "list[str] | None") -> None:
@@ -3632,7 +3661,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             body.update(merge_fields)
             result = self._post_embedding_write(
                 "/manifest/append", body, collection=collection, chunk_count=len(chunk_payload))
-        out: dict = dict(result) if isinstance(result, dict) else {}
+        out: dict = dict(_answer_object("append_manifest_chunks", result))
         if chunk_payload is not None:
             _check_metadata_merge_echo("append_manifest_chunks", merge_fields, out)
         if chunk_payload is not None and "chunks_written" not in out:
@@ -3761,7 +3790,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 raise ManifestAppendManyUnsupportedError(
                     collection=collection, doc_count=len(docs)) from exc
             raise
-        out: dict = dict(result) if isinstance(result, dict) else {}
+        out: dict = dict(_answer_object("append_manifest_many", result))
         if chunks is not None:
             _check_metadata_merge_echo("append_manifest_many", merge_fields, out)
         if chunks is not None and "chunks_written" not in out:
@@ -4449,7 +4478,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                     chunk_count=len(chunks) if chunks else 0)
             else:
                 result = self._post("/manifest/write_many", body)
-            result = result if isinstance(result, dict) else {}
+            result = _answer_object("write_manifest_many", result)
             if page_complete and "complete_refused_count" not in result:
                 # ACK-ECHO for the completion stamp (nexus-z0o2p.35): an engine that ignored
                 # ``complete`` answers without ``complete_refused_count`` (the key is always present
