@@ -42,6 +42,7 @@ _PASS_LINE = {
     "pluginls": "PLUGIN-LOCKSTEP GATE PASSED",
     "hookskew": "HOOK-CLI SKEW GATE PASSED",
     "janitor": "CREDENTIAL JANITOR PASSED",
+    "pins": "MANDATORY PINS GATE PASSED",
     "shakeout": "CANDIDATE SHAKEOUT PASSED",
 }
 #: engine leg -> which artifacts-manifest engine it serves, and the control it sends itself.
@@ -51,16 +52,16 @@ _ENGINE_LEGS = {
 }
 _CONTROLS = {"lsg": 1}  # local-service-gate.sh sends the engine one deliberate ownerless write
 _GROUP_AND_ALONE = ("shakedown", "lsg", "pkgup", "candmig", "mvv", "dtok", "smoke", "upshakeout",
-                    "genflip", "pluginls", "hookskew", "janitor", "shakeout")
+                    "genflip", "pluginls", "hookskew", "janitor", "pins", "shakeout")
 
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _engine_lines(leg: str, art: Path, *, mode: str = "enforce") -> str:
+def _engine_lines(leg: str, art: Path, *, mode: str = "enforce", controls: int | None = None) -> str:
     sha = _sha(art)
-    controls = _CONTROLS.get(leg, 0)
+    controls = _CONTROLS.get(leg, 0) if controls is None else controls
     refused = controls if mode == "enforce" else 0
     would = controls if mode == "log-only" else 0
     return (
@@ -117,6 +118,7 @@ class _Battery:
             ("tests/e2e/gen-flip-live-holder.sh", "genflip"),
             ("tests/e2e/plugin-lockstep-gate.sh", "pluginls"),
             ("tests/e2e/hook-cli-skew/run.sh", "hookskew"),
+            ("tests/e2e/mandatory-pins-gate.sh", "pins"),
         ):
             self._stub(rel, f'k={key}\n{self._leg_body()}')
         self._stub("tests/e2e/release-sandbox.sh", f'k="$1"\n{self._leg_body()}')
@@ -191,7 +193,8 @@ def test_a_clean_cut_run_with_every_leg_reading_its_own_control_passes(battery: 
     assert r.returncode == 0, (r.stdout, r.stderr)
     assert r.stdout.rstrip().splitlines()[-1] == "RELEASE BATTERY PASSED", r.stdout
     assert battery.ran_legs() >= set(_GROUP_AND_ALONE), "every leg ran"
-    assert "controls=1" in (battery.out / "lsg.out").read_text()
+    # (an assertion that the stub's own file says controls=1 used to sit here and could not fail: the
+    # test wrote it. What reads the control is the battery, and the two tests below hold it to it.)
 
 
 def test_a_cut_run_whose_lsg_reads_zero_for_its_own_control_is_red(battery: _Battery) -> None:
@@ -203,6 +206,53 @@ def test_a_cut_run_whose_lsg_reads_zero_for_its_own_control_is_red(battery: _Bat
     r = battery.run("--cut")
     assert r.returncode == 1 and "RELEASE BATTERY FAILED: 1 red leg(s)" in r.stdout, (r.stdout, r.stderr)
     assert "VACUOUS in cut mode" in _row(r.stdout, "lsg")
+
+
+def test_a_cut_run_whose_lsg_dropped_its_control_is_red_though_its_reading_is_clean(battery: _Battery) -> None:
+    """nexus-0kmat critique S1. lsg declares controls=0 and reads 0/0/0: every per-line check agrees,
+    and nothing in the battery has shown the counter can see a refusal. The battery must hold lsg, and only
+    lsg, to declaring at least one control. Mutation (drop ``$cargs`` from cut_mode_vacuity, or the lsg arm of
+    cut_leg_controls_args): the run ends RELEASE BATTERY PASSED."""
+    battery.serve_candidate()
+    battery.set_leg("lsg", _engine_lines("lsg", battery.jar, controls=0) + _PASS_LINE["lsg"] + "\n", 0)
+    r = battery.run("--cut")
+    assert r.returncode == 1 and "RELEASE BATTERY FAILED: 1 red leg(s)" in r.stdout, (r.stdout, r.stderr)
+    assert "VACUOUS in cut mode" in _row(r.stdout, "lsg") and "controls>=1" in _row(r.stdout, "lsg")
+
+
+def test_a_cut_run_whose_other_leg_bumps_its_own_declared_control_is_red(battery: _Battery) -> None:
+    """Round 3 review M1 / N1l. dtok declares controls=1 and reads refused_total=1 log_lines=1: internally
+    consistent, so the per-line check passes, and it is how a stray writer's refusal turns green. The
+    battery's own table says every engine leg but lsg declares 0. Mutation (default arm of
+    cut_leg_controls_args empty): the run ends RELEASE BATTERY PASSED."""
+    battery.serve_candidate()
+    battery.set_leg("dtok", _engine_lines("dtok", battery.jar, controls=1) + _PASS_LINE["dtok"] + "\n", 0)
+    r = battery.run("--cut")
+    assert r.returncode == 1 and "RELEASE BATTERY FAILED: 1 red leg(s)" in r.stdout, (r.stdout, r.stderr)
+    assert "VACUOUS in cut mode" in _row(r.stdout, "dtok") and "controls<=0" in _row(r.stdout, "dtok")
+
+
+def test_a_cut_run_refuses_the_knob_that_drops_lsgs_positive_control_before_any_leg_runs(battery: _Battery) -> None:
+    """nexus-0kmat critique S1, the env path through the real script. NEXUS_GATE_NO_VECTOR_SMOKE=1 would
+    drop lsg's deliberate ownerless write (and with it the control); cut mode refuses it up front, exit 2,
+    no leg started. Mutation (delete the refusal): the legs run and the run ends on lsg's own anchor, so this
+    test also pins WHERE it is refused. A non-cut run is untouched."""
+    battery.serve_candidate()
+    r = battery.run("--cut", env={"NEXUS_GATE_NO_VECTOR_SMOKE": "1"})
+    assert r.returncode == 2 and "NEXUS_GATE_NO_VECTOR_SMOKE" in r.stderr, (r.stdout, r.stderr)
+    assert battery.ran_legs() == set(), f"legs ran before the refusal: {battery.ran_legs()}"
+    plain = battery.run(env={"NEXUS_GATE_NO_VECTOR_SMOKE": "1"})
+    assert plain.returncode == 0, (plain.stdout, plain.stderr)
+
+
+def test_the_mandatory_pins_leg_is_a_leg_and_its_red_is_a_red(battery: _Battery) -> None:
+    """nexus-z0o2p.41. The GitHub-backed pins left lsg and run as battery leg `pins`; a red there ends the
+    battery FAILED. Mutation (drop the define_leg): the stub never runs and the row is missing."""
+    battery.serve_candidate()
+    battery.set_leg("pins", "[pins] skipped over the budget\nMANDATORY PINS GATE FAILED\n", 1)
+    r = battery.run("--cut")
+    assert r.returncode == 1 and "pins" in battery.ran_legs(), (r.stdout, r.stderr)
+    assert _row(r.stdout, "pins").startswith("FAILED")
 
 
 def test_the_none_escape_in_cut_mode_ends_partial_never_final(battery: _Battery) -> None:

@@ -197,8 +197,10 @@ SUITES = [
     # sentinel, start-count guard), sourced from the real script.
     _Suite("tests/e2e/two_walk_check_decisions_test.sh", 15),
     # nexus-0kmat: the candidate-engine plumbing the cut battery's gates share;
-    # 44 is the passed count measured 2026-10-01.
-    _Suite("tests/e2e/lib/candidate_engine_test.sh", 44),
+    # 59 is the passed count measured 2026-10-01 (44 when this line was first written; round 3 took it to
+    # 55 without moving the floor, so 11 assertions could have vanished unseen; round 4 added 4 and the
+    # floor now equals the real count, nexus-0kmat critique S3).
+    _Suite("tests/e2e/lib/candidate_engine_test.sh", 59),
 ]
 
 

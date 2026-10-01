@@ -108,6 +108,9 @@ if [ "$CUT_MODE" != 1 ]; then
   fi
   unset NX_CANDIDATE_ENGINE
 else
+  # nexus-0kmat critique S1: lsg is the one leg that sends its engine a deliberate ownerless write, so
+  # it carries the positive control every other leg's zero reading rests on. This knob drops it.
+  [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ] || { echo "NEXUS_GATE_NO_VECTOR_SMOKE is set: it drops local-service-gate.sh's vector leg, which carries the cut battery's only positive control (the deliberate ownerless write). Cut mode refuses it; unset it." >&2; exit 2; }
   [ -z "$EXPECTED_ENGINE_LAG" ] || { echo "--expected-engine-lag is for the PINNED engine; cut mode gates the candidate and a lag ack there would hide the red it exists to find" >&2; exit 2; }
   if [ -n "$CANDIDATE_ENGINE" ]; then
     [ -f "$CANDIDATE_ENGINE" ] || { echo "--candidate-engine: $CANDIDATE_ENGINE is not a file" >&2; exit 2; }
@@ -287,6 +290,9 @@ define_leg hookskew   group  "HOOK-CLI SKEW GATE (PASSED|FAILED|UNVERIFIED)"   t
 # under a harness-owned root. Fails on any find; the token/expiry status
 # check it also runs only ever warns, never fails this leg.
 define_leg janitor    group  "CREDENTIAL JANITOR (PASSED|FAILED)"        python3 scripts/credential_janitor.py
+# nexus-z0o2p.41: the GitHub-backed mandatory_regression_pin tests, moved out of lsg (whose fenced HOME
+# has no gh auth) to run here under the operator's real HOME at a zero skip budget. Not an engine leg.
+define_leg pins       group  "MANDATORY PINS GATE (PASSED|FAILED)"     tests/e2e/mandatory-pins-gate.sh
 define_leg shakeout   alone  "CANDIDATE SHAKEOUT (PASSED|FAILED)"                tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --shakeout
 
 if [ "$CUT_MODE" != 1 ] && [[ ",$ONLY," != *",dtok,"* ]]; then LEG_STATUS[dtok]="SKIPPED(cut mode only)"; fi
@@ -329,6 +335,18 @@ declare -A LEG_PID
 # here: it package-upgrades an old install and converges to the PUBLISHED engine,
 # so it never runs the candidate and has no ownerless-write reading to give.
 CUT_ENGINE_LEGS=" mvv smoke shakedown dtok lsg shakeout candmig "
+# How many DELIBERATE ownerless writes each engine leg may declare (candidate_engine.py
+# --min-controls / --max-controls), held by the battery rather than by the count a leg prints about
+# itself. Only lsg sends one (its smoke leg's negative control): it must declare at least 1, or nothing
+# in the battery has shown the counter and the log can see a refusal and every other leg's 0/0/0 rests
+# on nothing. Every other engine leg declares exactly 0: a leg that bumped its own declared count would
+# turn a stray-writer red green (round 3 review M1).
+cut_leg_controls_args() {  # cut_leg_controls_args <leg>
+  case "$1" in
+    lsg) printf '%s' "--min-controls 1" ;;
+    *)   printf '%s' "--max-controls 0" ;;
+  esac
+}
 # The engine FILE a leg is expected to have served (judged by sha256).
 cut_leg_candidate() {  # cut_leg_candidate <leg>
   case "$1" in
@@ -344,10 +362,11 @@ cut_leg_candidate() {  # cut_leg_candidate <leg>
 cut_mode_vacuity() {  # cut_mode_vacuity <leg>
   [ "${CUT_MODE:-0}" = 1 ] || return 0
   [[ "${CUT_ENGINE_LEGS:-}" == *" $1 "* ]] || return 0
-  local out rc cand
+  local out rc cand cargs
   cand="$(cut_leg_candidate "$1")"
+  cargs="$(cut_leg_controls_args "$1")"
   [ -n "$cand" ] || { printf '%s: cut mode, but no candidate engine file is known for this leg' "$1"; return 0; }
-  out="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" cut-assert-log "$LOGS/$1.log" "$1" --candidate "$cand" 2>&1)"; rc=$?
+  out="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" cut-assert-log "$LOGS/$1.log" "$1" --candidate "$cand" $cargs 2>&1)"; rc=$?
   [ "$rc" -ne 0 ] || return 0
   [ -n "$out" ] || out="$1: cut-assert-log exited $rc with no output"
   printf '%s' "${out%%$'\n'*}"
@@ -382,22 +401,23 @@ cut_resolve_candidate() {
   return 0
 }
 # The pinned engine predates develop's client (nexus-0kmat): the named, acknowledged
-# lag. Prints the reason when a FAILED engine-bearing leg's OWN failing step carries the
-# signature; empty = a real red. The failing step is what candidate_engine.py
-# failed-step-evidence returns: the FAILED verdict line, the log files that line names
+# lag. Prints the reason when EVERY failing step of a FAILED engine-bearing leg carries the
+# signature; empty = a real red (candidate_engine.py failed-step-lag). A failing step is each
+# [FAIL] marker's block (the sandbox legs print one per failed step), or, where the log has no
+# marker, the FAILED verdict line's own evidence: the log files that line names
 # (data-token-cli-gate fails at "store put ... failed (see <dir>/store-put.log / .stderr.log)"
-# and the error text lives only in the stderr file), and the stretch of the leg log that ends
+# and the error text lives only in the stderr file) and the stretch of the leg log that ends
 # at the failure and begins after the previous step boundary. Not the last N lines of the log,
 # and not the newest file in some evidence directory: a tolerated early mention followed by an
-# unrelated red stays red.
+# unrelated red stays red, and so does a leg with one lag step and one unrelated red step.
 ENGINE_LAG_LEGS=" mvv smoke shakedown dtok "
 ENGINE_LAG_SIGNATURE='EngineOlderThanClientError|The engine is older than this client'
 engine_lag_verdict() {  # engine_lag_verdict <leg> <failed-verdict-line>
   [ -n "${LAG_BEAD:-}" ] || return 0
   [[ "${ENGINE_LAG_LEGS}" == *" $1 "* ]] || return 0
-  local evidence
-  evidence="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" failed-step-evidence "$LOGS/$1.log" "${2:-}" 2>/dev/null || true)"
-  [[ "$evidence" =~ $ENGINE_LAG_SIGNATURE ]] || return 0
+  # Every failing step must carry the signature, so one lag step beside an unrelated red stays red
+  # (round 3 review M2); the reader's own exit status decides, a crash is no ack.
+  python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" failed-step-lag "$LOGS/$1.log" "${2:-}" "$ENGINE_LAG_SIGNATURE" >/dev/null 2>&1 || return 0
   printf 'EXPECTED-LAG(%s): the pinned engine %s predates this client'"'"'s metadata_merge write mode (EngineOlderThanClientError)' "$LAG_BEAD" "${LAG_ENGINE:-?}"
 }
 # The closing lines, and the battery's exit status. Reads RED, ONLY_SKIPPED,

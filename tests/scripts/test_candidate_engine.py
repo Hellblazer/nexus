@@ -486,6 +486,39 @@ def test_cut_mode_holds_the_end_reading_to_the_gates_own_control(
     assert f"controls={controls} mode={mode}" in line
 
 
+@pytest.mark.parametrize(
+    "refused, would, log_lines, phrase",
+    [
+        # counter below the log: the engine restarted after the write (counters are in memory, the log is a file)
+        (0, 0, 1, "restarted"),
+        # counter saw the control, the log did not: the log half of the oracle reads the wrong thing
+        (1, 0, 0, "the counter saw the write and the log did not"),
+        # neither saw it: a dead oracle
+        (0, 0, 0, "neither saw the gate's own control"),
+        # more than the control: a stranger wrote
+        (2, 0, 2, "More than the control"),
+        # right counts, wrong counter for the mode
+        (0, 1, 1, "wrong counter"),
+    ],
+)
+def test_the_red_message_says_which_half_of_the_reading_is_missing(
+    tmp_path: Path, jar: Path, engine, refused: int, would: int, log_lines: int, phrase: str,
+) -> None:
+    """nexus-0kmat critique S4: an engine restart inside lsg's pytest selection resets the in-memory
+    counter while the log persists. The exact-equality read stays red (a restarted engine cannot
+    be trusted to have counted), but it must say RESTART, not 'dead counter', or the operator
+    chases a writer that is not there. Each reading gets its own cause. Mutation (collapse the
+    branches back into the single 'fewer' message): the restart and counter-without-log rows lose
+    their phrases."""
+    stub = engine(status={"ownerless_write_mode": "enforce", "ownerless_writes_refused_total": refused,
+                          "ownerless_writes_would_refuse_total": would})
+    cfg = tmp_path / "cfg"
+    _lease(cfg, stub.port, jar)
+    _engine_log(cfg, jar, "INFO boot\n" + "WARN event=ownerless_chunk_write_refused source_path=/x\n" * log_lines)
+    _line, failure = ce.refusals(str(cfg), "lsg", _cut(jar), controls=1)
+    assert failure is not None and phrase in failure, failure
+
+
 def test_cut_mode_fails_a_mode_that_flipped_by_the_end_of_the_journey(tmp_path: Path, jar: Path, engine) -> None:
     stub = engine(status={"ownerless_write_mode": "log-only", "ownerless_writes_refused_total": 0,
                           "ownerless_writes_would_refuse_total": 0})
@@ -597,6 +630,30 @@ def test_assert_log_holds_the_reading_to_the_control_the_line_declares(
     extra = {"NX_CANDIDATE_EXPECT_OWNERLESS_MODE": mode}
     reason = _assert_log(tmp_path, jar, _id("yes", jar), _ref(jar, **kwargs), **extra)
     assert (reason is None) is ok, reason
+
+
+def test_assert_log_with_min_controls_fails_a_leg_that_declared_none(tmp_path: Path, jar: Path) -> None:
+    """nexus-0kmat critique S1: a leg that carries the battery's positive control must DECLARE one. A
+    gate that dropped its control (NEXUS_GATE_NO_VECTOR_SMOKE=1) prints controls=0 and a clean 0/0/0
+    reading, which the per-line check accepts. Mutation (ignore min_controls): the controls=0 line passes."""
+    log = tmp_path / "leg.log"
+    log.write_text(_id("yes", jar) + "\n" + _ref(jar) + "\nLOCAL-SERVICE GATE PASSED\n")
+    reason = ce.cut_assert_log(str(log), "lsg", _cut(jar), min_controls=1)
+    assert reason is not None and "controls>=1" in reason, reason
+    assert ce.cut_assert_log(str(log), "lsg", _cut(jar), min_controls=0) is None
+    log.write_text(_id("yes", jar) + "\n" + _ref(jar, controls="1", refused="1", lines="1") + "\nLOCAL-SERVICE GATE PASSED\n")
+    assert ce.cut_assert_log(str(log), "lsg", _cut(jar), min_controls=1) is None
+
+
+def test_cli_cut_assert_log_takes_min_controls(tmp_path: Path, jar: Path) -> None:
+    log = tmp_path / "leg.log"
+    log.write_text(_id("yes", jar) + "\n" + _ref(jar) + "\nPASSED\n")
+    ok = _cli("cut-assert-log", str(log), "lsg", "--candidate", str(jar), env=_cut(jar))
+    assert ok.returncode == 0, ok.stderr
+    red = _cli("cut-assert-log", str(log), "lsg", "--candidate", str(jar), "--min-controls", "1", env=_cut(jar))
+    assert red.returncode == 1 and "controls>=1" in red.stderr
+    bad = _cli("cut-assert-log", str(log), "lsg", "--min-controls", "x", env=_cut(jar))
+    assert bad.returncode == 2
 
 
 def test_assert_log_takes_the_candidate_a_container_leg_ran(tmp_path: Path, jar: Path, pinned: Path) -> None:
@@ -883,7 +940,7 @@ def _finish(tmp_path: Path, log_text: str, *, cut: bool, cand: Path | None, leg:
             root: Path | None = None) -> tuple[str, str, str]:
     text = BATTERY.read_text()
     funcs = "\n".join(_extract_function(text, n) for n in (
-        "cut_leg_candidate", "cut_mode_vacuity", "engine_lag_verdict", "finish_leg"))
+        "cut_leg_candidate", "cut_leg_controls_args", "cut_mode_vacuity", "engine_lag_verdict", "finish_leg"))
     grab = lambda prefix: text[text.index(prefix):].splitlines()[0]  # noqa: E731
     logs = tmp_path / "logs"
     logs.mkdir(exist_ok=True)
@@ -951,13 +1008,46 @@ def test_battery_judges_each_engine_leg_against_its_own_candidate(
     served = jar if which == "jar" else pinned
     elsewhere = tmp_path / "elsewhere.jar"
     elsewhere.write_bytes(b"not either")
-    log = _id("yes", served) + "\n" + _ref(served) + "\nPASSED\n"
+    own = {"controls": "1", "refused": "1", "lines": "1"} if leg == "lsg" else {}  # lsg declares its control
+    log = _id("yes", served) + "\n" + _ref(served, **own) + "\nPASSED\n"
     status, _n, line = _finish(tmp_path, log, cut=True, cand=elsewhere, leg=leg, cut_jar=jar, cut_native=pinned)
     assert status == "PASSED", line
     other = pinned if which == "jar" else jar
-    bad = _id("yes", other) + "\n" + _ref(other) + "\nPASSED\n"
+    bad = _id("yes", other) + "\n" + _ref(other, **own) + "\nPASSED\n"
     status, _n, _line = _finish(tmp_path, bad, cut=True, cand=elsewhere, leg=leg, cut_jar=jar, cut_native=pinned)
     assert status == "FAILED"
+
+
+@pytest.mark.parametrize("leg", ["mvv", "smoke", "shakedown", "dtok"])
+def test_battery_holds_each_engine_leg_to_its_own_control_count(tmp_path: Path, jar: Path, leg: str) -> None:
+    """nexus-0kmat critique S1 and round 3 review M1. lsg is the one leg that sends its engine a deliberate
+    ownerless write: a green lsg that declares controls=0 has no positive control in the whole battery, and
+    every other leg's 0/0/0 rests on nothing. And every OTHER engine leg declares exactly 0: a leg whose
+    literal were bumped to 1 would excuse the one refusal it reads, which is how a stray writer turns green
+    (mutation N1l, round 3: dtok declaring 1 survived 85 tests). The battery holds the table, not the count
+    a leg prints about itself. Mutations: drop ``$cargs`` from cut_mode_vacuity, or make the table's default
+    arm empty, and the bumped leg reads PASSED; drop the lsg arm and the control-less lsg reads PASSED."""
+    none = _id("yes", jar) + "\n" + _ref(jar) + "\nPASSED\n"
+    one = _id("yes", jar) + "\n" + _ref(jar, controls="1", refused="1", lines="1") + "\nPASSED\n"
+    status, _n, line = _finish(tmp_path, none, cut=True, cand=jar, leg="lsg", cut_jar=jar)
+    assert status == "FAILED" and "VACUOUS in cut mode" in line and "controls>=1" in line, (status, line)
+    status, _n, line = _finish(tmp_path, one, cut=True, cand=jar, leg="lsg", cut_jar=jar)
+    assert status == "PASSED", line
+    status, _n, line = _finish(tmp_path, none, cut=True, cand=jar, leg=leg)
+    assert status == "PASSED", line
+    status, _n, line = _finish(tmp_path, one, cut=True, cand=jar, leg=leg)
+    assert status == "FAILED" and "controls<=0" in line, (status, line)
+
+
+def test_assert_log_with_max_controls_fails_a_leg_that_declared_one(tmp_path: Path, jar: Path) -> None:
+    log = tmp_path / "leg.log"
+    log.write_text(_id("yes", jar) + "\n" + _ref(jar, controls="1", refused="1", lines="1") + "\nPASSED\n")
+    reason = ce.cut_assert_log(str(log), "dtok", _cut(jar), max_controls=0)
+    assert reason is not None and "controls<=0" in reason, reason
+    assert ce.cut_assert_log(str(log), "dtok", _cut(jar), max_controls=1) is None
+    assert ce.cut_assert_log(str(log), "dtok", _cut(jar)) is None
+    red = _cli("cut-assert-log", str(log), "dtok", "--candidate", str(jar), "--max-controls", "0", env=_cut(jar))
+    assert red.returncode == 1 and "controls<=0" in red.stderr
 
 
 def test_battery_does_not_police_a_leg_that_provisions_no_engine(tmp_path: Path, jar: Path) -> None:
@@ -1060,6 +1150,55 @@ def test_expected_lag_reads_the_step_block_before_a_fail_marker(tmp_path: Path) 
     assert status == "FAILED"
 
 
+_LAG = "EngineOlderThanClientError: the engine is older than this client"
+
+
+def test_expected_lag_needs_every_failing_step_to_be_the_lag(tmp_path: Path) -> None:
+    """Round 3 review M2 (probe n3probe.py: ACKED). The pinned-engine lag makes MANY sandbox steps fail, so
+    a leg with one step on the lag and another on an unrelated KeyError must stay red: the ack covers the
+    lag, never a different red beside it. Mutation (evidence = union of all [FAIL] blocks, the round 3 shape,
+    or ``any`` for ``all`` in failed_step_lag): the mixed leg reads EXPECTED-LAG."""
+    def sandbox(second: str) -> str:
+        return (
+            "  nx plan reseed (seeds plan library):\n"
+            f"    {_LAG}\n    [FAIL] -- exit non-zero\n"
+            "  nx index repo:\n"
+            f"    {second}\n    [FAIL] -- exit non-zero\n"
+            "SMOKE FAILED: 2 step(s) exited non-zero:\n"
+        )
+
+    both = _finish(tmp_path, sandbox(_LAG), cut=False, cand=None, rc=1, lag=True, leg="smoke")
+    assert both[0] == "EXPECTED-LAG" and both[1] == "1", both
+    mixed = _finish(tmp_path, sandbox("KeyError: 'collection'"), cut=False, cand=None, rc=1, lag=True, leg="smoke")
+    assert mixed[0] == "FAILED" and mixed[1] == "0", mixed
+
+
+def test_expected_lag_stops_at_a_passed_marker_and_at_a_step_header(tmp_path: Path) -> None:
+    """Round 3 review L2: the ``[pass]`` boundary and the ``  nx ...:`` header each survived deletion because
+    the other covered the one fixture. Here each is the ONLY boundary between a tolerated mention and the
+    failing step, and the verdict line sits where the ``FAILED`` line of dtok sits (not at the log's end).
+    Mutation (drop either alternative from _STEP_BOUNDARY_RE): the earlier mention leaks into the failing
+    step's block and the leg is acked."""
+    for boundary in ("    [pass]", "  nx doctor --check-schema:", "== next step", "── next step"):
+        log = f"{_LAG} (tolerated, an earlier step)\n{boundary}\nunrelated output\nDATA-TOKEN CLI GATE FAILED: boom\n"
+        status, _n, line = _finish(tmp_path, log, cut=False, cand=None, rc=1, lag=True, leg="dtok")
+        assert status == "FAILED", (boundary, line)
+        own = f"{boundary}\n{_LAG}\nDATA-TOKEN CLI GATE FAILED: boom\n"
+        status, _n, line = _finish(tmp_path, own, cut=False, cand=None, rc=1, lag=True, leg="dtok")
+        assert status == "EXPECTED-LAG", (boundary, line)
+
+
+def test_expected_lag_finds_the_verdict_line_when_it_is_not_the_last_line(tmp_path: Path) -> None:
+    """Round 3 review L2 (N3e: failed-line locator replaced by the last line). dtok prints FAILURE EVIDENCE
+    PRESERVED, and more, after its verdict line. The failing step is the stretch that ENDS at the verdict
+    line; with a long trailer, a locator that took the log's last line would read the trailer instead.
+    Mutation (point = the last line): the lag mention is out of reach and the leg reads FAILED."""
+    trailer = "".join(f"evidence line {i}\n" for i in range(40))
+    log = f"  nx store put:\n    {_LAG}\nDATA-TOKEN CLI GATE FAILED: store put failed\n{trailer}"
+    status, _n, line = _finish(tmp_path, log, cut=False, cand=None, rc=1, lag=True, leg="dtok")
+    assert status == "EXPECTED-LAG", line
+
+
 def test_expected_lag_never_applies_in_cut_mode_or_to_other_legs(tmp_path: Path, jar: Path) -> None:
     status, _n, _line = _finish(tmp_path, _LAG_TAIL, cut=True, cand=jar, rc=1, lag=True)
     assert status == "FAILED"
@@ -1102,6 +1241,36 @@ def test_battery_refuses_a_lag_ack_in_cut_mode_for_the_wrong_engine_or_a_bad_sha
     assert r.returncode == 2 and "the pin moved" in r.stderr
     r = _battery("--plan", "--expected-engine-lag", "nonsense")
     assert r.returncode == 2 and "<bead>@<engine-version>" in r.stderr
+
+
+def test_cut_mode_refuses_the_knob_that_drops_the_positive_control() -> None:
+    """nexus-0kmat critique S1, the env path: NEXUS_GATE_NO_VECTOR_SMOKE=1 drops lsg's vector leg and
+    with it the only deliberate ownerless write. The static check that lsg declares its control where
+    it sends it does not see this knob; the battery must refuse it in cut mode (any non-empty value, as
+    the gate reads it) and leave a non-cut run alone. Mutation (delete the refusal): rc 0."""
+    for val in ("1", "yes"):
+        r = _battery("--plan", "--cut", env={"NEXUS_GATE_NO_VECTOR_SMOKE": val})
+        assert r.returncode == 2 and "NEXUS_GATE_NO_VECTOR_SMOKE" in r.stderr and "positive control" in r.stderr, (val, r.stderr)
+    assert _battery("--plan", "--cut", env={"NEXUS_GATE_NO_VECTOR_SMOKE": ""}).returncode == 0
+    assert _battery("--plan", env={"NEXUS_GATE_NO_VECTOR_SMOKE": "1"}).returncode == 0
+
+
+def test_lsg_itself_refuses_that_knob_in_cut_mode_and_only_there(tmp_path: Path) -> None:
+    """Run through the battery the knob is refused before lsg starts; run by hand (`NX_CUT_MODE=1
+    tests/e2e/local-service-gate.sh`, as Step 3 does) lsg must refuse it itself. The real block is
+    extracted and run: starting the real gate here would provision an engine."""
+    text = (REPO_ROOT / "tests" / "e2e" / "local-service-gate.sh").read_text()
+    m = re.search(r'^if \[ "\$\{NX_CUT_MODE:-0\}" = 1 \] && \[ -n "\$\{NEXUS_GATE_NO_VECTOR_SMOKE:-\}" \]; then\n.*?^fi\n', text, re.M | re.S)
+    assert m, "the cut-mode refusal block is gone from local-service-gate.sh"
+    script = "set -euo pipefail\n" + m.group(0) + "echo PROCEEDED\n"
+
+    def run(**env: str) -> subprocess.CompletedProcess[str]:
+        return _bash(script, tmp_path, env=env)
+
+    r = run(NX_CUT_MODE="1", NEXUS_GATE_NO_VECTOR_SMOKE="1")
+    assert r.returncode == 2 and "PROCEEDED" not in r.stdout and "positive control" in r.stderr, (r.stdout, r.stderr)
+    assert "PROCEEDED" in run(NX_CUT_MODE="1").stdout
+    assert "PROCEEDED" in run(NX_CUT_MODE="0", NEXUS_GATE_NO_VECTOR_SMOKE="1").stdout
 
 
 def test_battery_plan_runs_dtok_in_cut_mode_or_when_named_only() -> None:

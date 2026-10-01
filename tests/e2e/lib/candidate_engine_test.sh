@@ -180,11 +180,16 @@ cut_refusals 1; expect_rc "enforce, one control, 1 refused 0 would 1 log line" 0
 expect_has "the line declares the control" "$WORKDIR/o10" "controls=1 mode=enforce"
 cut_refusals 0; expect_rc "enforce, no control declared but one refusal read" 1 "$?"
 expect_has "...is a writer nobody intended" "$WORKDIR/e10" "fix the writer before tagging"
+set_status enforce 0 0; printf 'INFO boot\n' >"$CFG/logs/storage_service_jar.log"
+cut_refusals 1; expect_rc "enforce, control declared but the counter and the log read nothing (dead oracle)" 1 "$?"
+expect_has "...says neither saw its own control" "$WORKDIR/e10" "neither saw the gate's own control"
 set_status enforce 0 0; control_log ownerless_chunk_write_refused
-cut_refusals 1; expect_rc "enforce, control declared but the counter reads 0 (dead counter)" 1 "$?"
-expect_has "...says the counter did not see its own control" "$WORKDIR/e10" "did not see the gate's own control"
+cut_refusals 1; expect_rc "enforce, counter 0 but the log carries the line (the engine restarted)" 1 "$?"
+expect_has "...says the engine restarted, not that a writer misbehaved" "$WORKDIR/e10" "the engine restarted after those writes"
+expect_has "...and not to read it as a writer bug" "$WORKDIR/e10" "do not read this as a writer bug"
 set_status enforce 1 0; printf 'INFO boot\n' >"$CFG/logs/storage_service_jar.log"
 cut_refusals 1; expect_rc "enforce, counter 1 but no log line" 1 "$?"
+expect_has "...says the counter saw it and the log did not" "$WORKDIR/e10" "the counter saw the write and the log did not"
 set_status enforce 2 0; control_log ownerless_chunk_write_refused
 cut_refusals 1; expect_rc "enforce, a second refusal beyond the control" 1 "$?"
 set_status enforce 1 1; control_log ownerless_chunk_write_refused

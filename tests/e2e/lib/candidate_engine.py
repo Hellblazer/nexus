@@ -81,7 +81,7 @@ python3 with a scrubbed environment):
     route, tenant and collection per minute, so a gate that declares more than
     one control per key would read fewer lines than counted: declare one.
 
-``cut-assert-log <logfile> <label> [--candidate PATH]``
+``cut-assert-log <logfile> <label> [--candidate PATH] [--min-controls N] [--max-controls N]``
     Battery side. In cut mode, exit 1 unless the leg's log carries BOTH an
     ``ENGINE IDENTITY`` line and an ``ENGINE OWNERLESS REFUSALS`` line, every
     one naming the candidate by sha256 (``--candidate`` overrides
@@ -90,6 +90,12 @@ python3 with a scrubbed environment):
     zero counters and zero log hits and the mode the run expects. A leg whose
     own checks went green but which never reported an engine, never read the
     refusal counters, or reported the pinned engine, is not a pass.
+    ``--min-controls N`` also fails a leg whose refusals lines declare fewer than N
+    deliberate ownerless writes, ``--max-controls N`` one that declares more. The battery
+    holds each leg to its OWN table, not to the count the leg prints about itself: lsg at
+    least 1 (it carries the positive control; one that dropped it cannot pass) and every
+    other engine leg exactly 0 (so a leg cannot turn a stray-writer red green by bumping
+    its own declared control).
 
 ``failed-step-evidence <leg-log> <failed-line>``
     Battery side, for ``--expected-engine-lag`` (non-cut). Print the text that belongs to the
@@ -100,6 +106,15 @@ python3 with a scrubbed environment):
     (a ``── `` or ``== `` banner, a ``[pass]`` line, a ``  nx ...:`` step header), at most 30
     lines. An early mention of an error in a step that passed, or in the newest of some other
     log, is not in it. Two steps with no boundary between them are not told apart.
+
+``failed-step-lag <leg-log> <failed-line> <regex>``
+    Battery side, the verdict ``--expected-engine-lag`` acts on. Exit 0 only when EVERY failing
+    step carries the signature, 1 when any does not (or none can be found). A failing step is each
+    ``[FAIL]`` marker's block (the sandbox legs print one per failed step, then a generic summary
+    verdict), or, in a log with no marker, the verdict line's own block with the files it names
+    (``fresh-install-mvv`` and ``data-token-cli-gate`` end on one ``_fail``). A leg with one step
+    on the tolerated lag and another on an unrelated error is therefore NOT acknowledged: the
+    ack covers the lag, never a different red beside it.
 
 ``manifest-artifact <artifacts-dir> jar|native`` / ``candidate-in-manifest <artifacts-dir> <path>``
     Battery side. Print the manifest's path for an artifact; say which
@@ -378,17 +393,41 @@ def _counter_mismatch(
             f"manifest owner: fix the writer before tagging ({reading}; engine log: "
             f"{', '.join(logs) or 'none'})."
         )
-    over = refused + would > controls or log_hits > controls
+    counter = refused + would
+    if counter < log_hits:
+        return (
+            f"cut mode: the engine's counter reads {counter} but its log carries {log_hits} refusal "
+            f"line(s) ({reading}; expected {expected}). The counter is in memory and the log is a "
+            "file, so a counter BELOW the log means the engine restarted after those writes: this "
+            "gate's exact reading cannot be trusted across a restart. Find what restarted the "
+            "engine inside this journey (a test that stops or respawns the service, a supervisor "
+            "self-heal; see the engine log) and rerun; do not read this as a writer bug."
+        )
+    if counter > controls or log_hits > controls:
+        return (
+            f"cut mode: this gate sent {controls} deliberate ownerless write(s) (its own control) and "
+            f"the engine ({_fmt(mode)}) read {reading}, expected {expected}. More than the control: "
+            "a writer the gate did not intend wrote a chunk with no manifest owner; fix the writer "
+            "before tagging."
+        )
+    if log_hits < counter:
+        return (
+            f"cut mode: the engine's counter reads {counter} but its log carries only {log_hits} "
+            f"refusal line(s) ({reading}; expected {expected}): the counter saw the write and the "
+            "log did not. The log half of the oracle is not reading what the engine writes "
+            "(wrong file, a rotated log, a changed event name)."
+        )
+    if counter == controls and log_hits == controls:
+        return (
+            f"cut mode: the engine ({_fmt(mode)}) counted the gate's {controls} control(s) in the "
+            f"wrong counter ({reading}; expected {expected}): enforce counts a refusal in "
+            "refused_total, log-only in would_refuse_total, so the mode and the counter disagree."
+        )
     return (
         f"cut mode: this gate sent {controls} deliberate ownerless write(s) (its own control) and "
-        f"the engine ({_fmt(mode)}) read {reading}, expected {expected}. "
-        + (
-            "More than the control: a writer the gate did not intend wrote a chunk with no manifest "
-            "owner; fix the writer before tagging."
-            if over else
-            "Fewer than the control: the counter or the log did not see the gate's own control, so a "
-            "zero from this engine proves nothing about its writers."
-        )
+        f"the engine ({_fmt(mode)}) read {reading}, expected {expected}. Fewer than the control, in "
+        "the counter and in the log alike: neither saw the gate's own control, so a zero from this "
+        "engine proves nothing about its writers."
     )
 
 
@@ -457,6 +496,7 @@ _REFUSALS_RE = re.compile(
 
 def cut_assert_log(
     logfile: str, label: str, environ: dict[str, str] | None = None, candidate: str = "",
+    min_controls: int = 0, max_controls: int | None = None,
 ) -> str | None:
     env = os.environ if environ is None else environ
     if not cut_mode(env):
@@ -506,6 +546,22 @@ def cut_assert_log(
         bad = _counter_mismatch(int(controls), mode, int(refused), int(would), int(log_lines), [])
         if bad:
             return f"{label}: {bad}"
+    declared = max(int(c) for *_rest, c, _mode in refs)
+    if max_controls is not None and declared > max_controls:
+        return (
+            f"{label}: cut mode allows this leg to declare controls<={max_controls} (it declares "
+            f"controls={declared}): the leg claims to send the engine a deliberate ownerless write, "
+            "which excuses that many refusals it reads. Only the gate that carries the positive "
+            "control may declare one; for any other leg the refusal is a writer nobody intended"
+        )
+    if declared < min_controls:
+        return (
+            f"{label}: cut mode requires this leg to declare controls>={min_controls} (it declares "
+            f"controls={declared}): the leg sends the engine no deliberate ownerless write, so no "
+            "leg of this battery has shown the counter and the log can see one, and every other "
+            "leg's zero reading rests on nothing (a gate that dropped its control, for instance "
+            "with NEXUS_GATE_NO_VECTOR_SMOKE=1, ends here)"
+        )
     return None
 
 
@@ -532,10 +588,7 @@ def failed_step_evidence(log_text: str, failed_line: str) -> str:
     points.update(i for i, ln in enumerate(lines) if "[FAIL]" in ln)
     out = [failed]
     for p in sorted(points):
-        lo = p
-        while lo > 0 and p - lo < LAG_STEP_MAX_LINES and not _STEP_BOUNDARY_RE.match(lines[lo - 1]):
-            lo -= 1
-        out.extend(lines[lo:p + 1])
+        out.extend(_step_block(lines, p))
     for named in _NAMED_LOG_RE.findall(failed):
         candidates = [named]
         if named.endswith(".log") and not named.endswith(".stderr.log"):
@@ -547,6 +600,30 @@ def failed_step_evidence(log_text: str, failed_line: str) -> str:
             except OSError:
                 continue
     return "\n".join(out)
+
+
+def _step_block(lines: list[str], p: int) -> list[str]:
+    """The stretch of *lines* that ends at index *p* and starts after the previous step boundary."""
+    lo = p
+    while lo > 0 and p - lo < LAG_STEP_MAX_LINES and not _STEP_BOUNDARY_RE.match(lines[lo - 1]):
+        lo -= 1
+    return lines[lo:p + 1]
+
+
+def failing_step_blocks(log_text: str, failed_line: str) -> list[str]:
+    """One text block per FAILING STEP of the leg (see ``failed-step-lag``)."""
+    lines = _ANSI_RE.sub("", log_text).splitlines()
+    markers = [i for i, ln in enumerate(lines) if "[FAIL]" in ln]
+    if markers:
+        return ["\n".join(_step_block(lines, p)) for p in markers]
+    # No marker: the verdict line is the one failing step, so its own evidence is the block.
+    return [failed_step_evidence(log_text, failed_line)]
+
+
+def failed_step_lag(log_text: str, failed_line: str, signature: str) -> bool:
+    """True when the leg failed and EVERY failing step's block carries *signature*."""
+    blocks = failing_step_blocks(log_text, failed_line)
+    return bool(blocks) and all(re.search(signature, b) for b in blocks)
 
 
 def _manifest(artifacts_dir: str) -> dict:
@@ -592,6 +669,27 @@ def _options(rest: list[str]) -> tuple[str, int | None]:
     return label, controls
 
 
+def _cut_assert_options(rest: list[str]) -> tuple[str, int, int | None]:
+    """``(candidate, min_controls, max_controls)`` from ``--candidate PATH`` / ``--min-controls N`` /
+    ``--max-controls N``, in any order."""
+    candidate, min_controls, max_controls = "", 0, None
+    i = 0
+    while i < len(rest):
+        flag, val = rest[i], rest[i + 1] if i + 1 < len(rest) else None
+        if flag == "--candidate" and val:
+            candidate = val
+        elif flag == "--min-controls" and val is not None and val.isdigit():
+            min_controls = int(val)
+        elif flag == "--max-controls" and val is not None and val.isdigit():
+            max_controls = int(val)
+        else:
+            raise CandidateError(
+                f"unusable argument {flag!r} (want --candidate PATH, --min-controls N, --max-controls N)"
+            )
+        i += 2
+    return candidate, min_controls, max_controls
+
+
 def main(argv: list[str]) -> int:
     cmd, args = (argv[0], argv[1:]) if argv else ("", [])
     try:
@@ -616,8 +714,11 @@ def main(argv: list[str]) -> int:
                 )
             else:
                 line, failure = refusals(config_dir, label, controls=controls)
-        elif cmd == "cut-assert-log" and len(args) in (2, 4) and (len(args) == 2 or args[2] == "--candidate"):
-            failure = cut_assert_log(args[0], args[1], candidate=args[3] if len(args) == 4 else "")
+        elif cmd == "cut-assert-log" and len(args) >= 2:
+            candidate, min_controls, max_controls = _cut_assert_options(args[2:])
+            failure = cut_assert_log(
+                args[0], args[1], candidate=candidate, min_controls=min_controls, max_controls=max_controls,
+            )
             if failure:
                 print(f"CANDIDATE ENGINE CHECK FAILED: {failure}", file=sys.stderr)
                 return 1
@@ -630,6 +731,16 @@ def main(argv: list[str]) -> int:
                 raise CandidateError(f"cannot read {args[0]}: {exc}") from exc
             print(failed_step_evidence(text, args[1]))
             return 0
+        elif cmd == "failed-step-lag" and len(args) == 3:
+            try:
+                with open(args[0], encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+                lag = failed_step_lag(text, args[1], args[2])
+            except OSError as exc:
+                raise CandidateError(f"cannot read {args[0]}: {exc}") from exc
+            except re.error as exc:
+                raise CandidateError(f"unusable signature {args[2]!r}: {exc}") from exc
+            return 0 if lag else 1
         elif cmd == "manifest-artifact" and len(args) == 2 and args[1] in ("jar", "native"):
             print(manifest_artifact(args[0], args[1]))
             return 0

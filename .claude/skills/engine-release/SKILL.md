@@ -433,8 +433,16 @@ under a 70-minute run), and a detached worktree holds no branch at all.
 ```bash
 git worktree add --detach ../nexus-wt/engine-cut-<sha7> <sha-you-will-tag>
 cd ../nexus-wt/engine-cut-<sha7>          # a plain cd; the battery reads this tree's identity
-tests/e2e/release-battery.sh --cut --only mvv,smoke,shakedown,dtok,lsg
+tests/e2e/release-battery.sh --cut --only mvv,smoke,shakedown,dtok,lsg,pins
 ```
+
+Run it from a shell whose HOME has `gh` authenticated (`gh auth status` exits 0): the `pins`
+leg needs it, and a leg that skips for want of it is red, not skipped (see **Why these legs**).
+If another pytest holds the machine suite lease, `lsg` exits 75 at its pytest start; set
+`NX_SUITE_LEASE_WAIT=1800` for the run so it waits instead of reading as a red gate.
+Do not set `NEXUS_GATE_NO_VECTOR_SMOKE`: the battery refuses it in cut mode (exit 2), as does
+`lsg` run by hand with `NX_CUT_MODE=1`, because it drops `lsg`'s vector leg and with it the
+battery's only positive control.
 
 `NX_BATTERY_ALLOW_DEVELOP=1` in the primary is the fallback only when nothing
 else on the box pushes `develop` for the length of the run; a peer's push reds
@@ -448,7 +456,13 @@ is not byte-identical to the artifacts manifest's jar or native binary would
 put two engines in one green run, so it is refused unless you also pass
 `--accept-candidate-mismatch`, which makes the verdict PARTIAL.
 
-**Why these legs.** `fresh-install-mvv.sh`, `data-token-cli-gate.sh` and
+**Why these legs.** `pins` is not an engine leg. It runs the four GitHub-backed
+`mandatory_regression_pin` tests (`tests/e2e/mandatory-pins-gate.sh`) under the real HOME at a zero
+skip budget, with a non-vacuity read of the junit file (exactly the declared count reported, none
+skipped, at least one run). They used to run inside `lsg`, whose fenced HOME never mirrors
+`~/.config/gh` (`tests/e2e/lib/fence_home.sh`, kept on purpose), so they skipped there and read the
+gate FAILED on every run (nexus-z0o2p.41, Sam's decision: move them out; keep the fence and the zero
+budget). The nightly workflow runs the same script as its own step. `fresh-install-mvv.sh`, `data-token-cli-gate.sh` and
 `release-sandbox.sh` (battery legs `mvv`, `dtok`, `smoke`, `shakedown`) run
 `nx init`, which downloads the PINNED PUBLISHED engine
 (`REQUIRED_ENGINE_VERSION`). That engine predates the change you are about to
@@ -476,7 +490,7 @@ native binary again anyway.
 
 **Reading the result.** `--only` always ends `RELEASE BATTERY PASSED (PARTIAL:
 n leg(s) skipped by --only ...)`: that is the expected last line here, never a
-release verdict by itself. The evidence is the table: all five legs PASSED, none
+release verdict by itself. The evidence is the table: all six legs PASSED, none
 `VACUOUS in cut mode`, no `CUT MODE` abort line, and no other PARTIAL reason.
 What the cut mode adds, all in `tests/e2e/lib/candidate_engine.py`:
 
@@ -505,26 +519,61 @@ What the cut mode adds, all in `tests/e2e/lib/candidate_engine.py`:
   log_lines=<controls>`; in log-only, `refused_total=0
   would_refuse_total=<controls>`. More than the control is a writer nobody
   intended: it writes a chunk with no manifest owner, so fix the writer before
-  tagging. Fewer is red too: the counter or the log did not see the gate's own
-  control, so a zero from that engine proves nothing. A gate states its count
-  next to the control it sends and cannot omit it.
+  tagging. Fewer is red too, and the message names which half is missing: both
+  zero is a dead oracle, a counter below the log lines means the engine
+  RESTARTED after the write (the counter is in memory, the log is a file; the
+  exact-equality read cannot be trusted across a restart, so find what restarted
+  the engine inside `lsg`'s pytest selection and rerun, it is not a writer bug),
+  and a counter above the log lines means the log half reads the wrong file or
+  event. A gate states its count next to the control it sends and cannot omit it.
+- The battery anchors the control: in cut mode `lsg` must declare `controls>=1`
+  (`candidate_engine.py cut-assert-log --min-controls 1`), or its row reads
+  `VACUOUS in cut mode`. Every other leg's zero reading rests on `lsg` having
+  shown, on this same engine build, that the counter and the log see a refusal.
 - Each gate stages a private copy of the candidate: the supervisor finds its
   engine by argv, so two parallel gates on one jar path stop each other's
   engines (measured 2026-10-01: exit 143). The copies are removed on every exit.
 
-**The mode variable, and one that is not there yet.**
+**The mode variables, and what each proves.**
 `NX_CANDIDATE_EXPECT_OWNERLESS_MODE` (this step) is an ASSERTION: the mode the
 engine serving a cut leg must report, default `enforce`. Setting it to anything
 else (`none` drops the mode assert, `log-only` expects log-only) relaxes that
 one assert only: identity, reachability, counters, the log and the control
 count are still required. The battery prints a `CUT MODE WARNING` banner and
-ends PARTIAL, as `--only` does; it is never the final cut. A second variable,
-`NX_GATE_OWNERLESS_WRITE_MODE`, is planned as an INPUT to
+ends PARTIAL, as `--only` does; it is never the final cut.
+`NX_OWNERLESS_WRITE_MODE` is the INPUT the engine itself reads (`enforce`, the
+default, or `log-only`); the engine `lsg` provisions inherits it, so exporting
+it before `lsg` starts runs the whole gate against a log-only engine.
+A third variable, `NX_GATE_OWNERLESS_WRITE_MODE`, is an INPUT to
 `published-client-write-gate.sh` (Step 3c: the mode that gate starts the
-candidate in, so it can prove the refusal in both modes). It is added by
-nexus-9a6io, which was open on 2026-10-01, and `published-client-write-gate.sh`
-reads nothing by that name on develop until that bead lands. Check the script
-before relying on it.
+candidate in, so it can prove the refusal in both modes). It arrives with
+nexus-9a6io; whether `published-client-write-gate.sh` in your tree reads it
+depends on whether that bead has landed here, so grep the script for the name
+before relying on it. Nothing in this step depends on it.
+
+**Log-only has no cut-time leg on a real candidate except two.** Log-only
+(counts the write, allows it) is the first production posture, and the
+enforce run above proves nothing about it: the engine counts a would-refuse
+instead of a refusal and logs `ownerless_chunk_write_would_refuse`. The
+legs that exercise it on a real candidate are (1) one `lsg` run in log-only,
+below, and (2) the cut-prep published-client gate (Step 3c, per mode, when
+nexus-9a6io has landed). The Java tests cover the engine's own branches but
+not the built candidate. The other six legs read an engine in enforce and say
+nothing about log-only. Run the `lsg` step once per cut, after the enforce run:
+
+```bash
+NX_OWNERLESS_WRITE_MODE=log-only NX_CANDIDATE_EXPECT_OWNERLESS_MODE=log-only \
+  tests/e2e/release-battery.sh --cut --only lsg
+```
+
+It ends `RELEASE BATTERY PASSED (PARTIAL: ... NX_CANDIDATE_EXPECT_OWNERLESS_MODE=log-only ...)`,
+by construction, and is evidence only when its `lsg` row is PASSED and the leg log
+carries `ENGINE IDENTITY [local-service-gate]` with `ownerless_write_mode=log-only` and
+`ENGINE OWNERLESS REFUSALS [local-service-gate]` with `refused_total=0 would_refuse_total=1
+log_lines=1 controls=1 mode=log-only`. Setting only `NX_CANDIDATE_EXPECT_OWNERLESS_MODE=log-only`
+without `NX_OWNERLESS_WRITE_MODE` just relaxes the assert against an enforce engine and fails
+on the counters. If nothing but `lsg` ran, no leg read the other writers in log-only; the
+writer census a log-only soak gives in production is not replaced by this.
 
 Still NOT covered: writers outside this repo (other machines, hooks, the WSL
 appliance, hellmini), which only production traffic exercises (T2
@@ -548,14 +597,17 @@ as an unexplained failure, name it:
 tests/e2e/release-battery.sh --expected-engine-lag nexus-z0o2p.9@0.1.142 ...   # <bead>@<REQUIRED_ENGINE_VERSION>
 ```
 
-A red `mvv`/`smoke`/`shakedown`/`dtok` leg whose failing STEP carries the
+A red `mvv`/`smoke`/`shakedown`/`dtok` leg in which EVERY failing step carries the
 `EngineOlderThanClientError` signature then reads `EXPECTED-LAG(<bead>)`, is
-counted, and ends the battery PARTIAL (never a release verdict). The failing step
-is the failed verdict line, the log files that line names (and the `.stderr.log`
-beside a named `.log`), and the stretch of the leg log that ends at the failure
-and starts after the previous step boundary, at most 30 lines. A tolerated
-mention of the error in an earlier step does not count, and neither does the
-newest log in some evidence directory. Any other red stays red. The ack refuses
+counted, and ends the battery PARTIAL (never a release verdict). The sandbox legs
+print a `[FAIL]` marker per failed step; each marker's block (the stretch that ends at
+it and starts after the previous step boundary, at most 30 lines) must carry the
+signature, so a leg with one lag step and one unrelated `KeyError` step stays red.
+A log with no marker (`mvv`, `dtok`) has one failing step: the failed verdict line,
+the log files it names (and the `.stderr.log` beside a named `.log`), and the stretch
+of the leg log that ends at it. A tolerated mention of the error in an earlier step
+does not count, and neither does the newest log in some evidence directory. Any other
+red stays red. The ack refuses
 to run once `REQUIRED_ENGINE_VERSION` is no longer the version it names, and in
 cut mode it is an error (cut mode gates the candidate, where a lag ack would
 hide the red it exists to find). `dtok` is a leg in cut mode, and in a non-cut

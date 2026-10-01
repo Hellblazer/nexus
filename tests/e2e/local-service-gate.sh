@@ -115,6 +115,14 @@ set -euo pipefail
 # anonymous install ping must not count them (tests/test_e2e_no_telemetry_lint.py).
 export NX_NO_TELEMETRY=1
 
+# nexus-0kmat critique S1: the vector leg below carries the cut battery's only positive control (one
+# deliberate ownerless write the engine must count and log). The knob that drops it would leave a green
+# cut gate with no control, so cut mode refuses it up front rather than after a 20-minute run.
+if [ "${NX_CUT_MODE:-0}" = 1 ] && [ -n "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
+  echo "[gate] NEXUS_GATE_NO_VECTOR_SMOKE is set in cut mode: it drops the vector leg's deliberate ownerless write, the only positive control for the engine's refusal counters (nexus-0kmat). Unset it." >&2
+  exit 2
+fi
+
 
 # ── Vacuity-guard summary-line parser (nexus-edwlp Task 6) ──────────────────
 # Extracts a count (e.g. "77" from "77 passed") out of a pytest -q summary
@@ -936,6 +944,21 @@ if [ "$CLOUD_MODE_COUNT" -ne "$CLOUD_MODE_EXPECTED" ]; then
   exit 1
 fi
 
+# The mandatory_regression_pin carve-out (nexus-z0o2p.41). The GitHub-backed pins skip under this
+# gate's fenced HOME (the fence never mirrors ~/.config/gh), and conftest holds a skipped pin to a zero
+# budget, so they read this gate FAILED on every run. They run in tests/e2e/mandatory-pins-gate.sh,
+# under a real HOME. Same exact-count discipline as the carve-outs above, same reason: the marker
+# must never become a place to park a red test, and a pin that left this selection must still exist.
+# The selection expression and the count live in tests/e2e/lib/mandatory_pins.sh, shared with that gate.
+# shellcheck source=lib/mandatory_pins.sh
+. "$REPO_ROOT/tests/e2e/lib/mandatory_pins.sh"
+MANDATORY_PIN_COUNT="$(NX_TEST_T2_SUBSTRATE=none uv run pytest -m "$MANDATORY_PIN_MARK_EXPR" --collect-only -q 2>/dev/null | grep -cE '::' || true)"
+if [ "$MANDATORY_PIN_COUNT" -ne "$MANDATORY_PIN_EXPECTED" ]; then
+  echo "[gate] VACUITY GUARD TRIPPED: mandatory_regression_pin carve-out is $MANDATORY_PIN_COUNT tests, expected exactly $MANDATORY_PIN_EXPECTED" >&2
+  echo "[gate] (a new pin must bump MANDATORY_PIN_EXPECTED in tests/e2e/lib/mandatory_pins.sh; it runs in tests/e2e/mandatory-pins-gate.sh, not here)" >&2
+  exit 1
+fi
+
 set +e
 # NEXUS_CONFIG_DIR pinned to the scratch dir (2026-07-13): without it,
 # get_credential()'s config.yml fallback read the OPERATOR's real
@@ -981,7 +1004,7 @@ NX_SERVICE_HOST=127.0.0.1 NX_SERVICE_PORT="$SERVICE_PORT" NX_SERVICE_TOKEN="$SER
   NX_GATE_SERVICE_EXPECTED=1 \
   NX_GATE_SERVICE_HOST=127.0.0.1 NX_GATE_SERVICE_PORT="$SERVICE_PORT" NX_GATE_SERVICE_TOKEN="$SERVICE_TOKEN" \
   NEXUS_CONFIG_DIR="$SCRATCH" \
-  uv run pytest -m "integration and not lived_in and not cloud_mode" -q -rs --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
+  uv run pytest -m "$LSG_PYTEST_MARK_EXPR" -q -rs --color=no "$@" 2>&1 | tee "$SCRATCH/pytest.out"
 STATUS=${PIPESTATUS[0]}
 set -e
 

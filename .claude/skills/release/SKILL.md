@@ -169,6 +169,7 @@ tests/e2e/release-battery.sh         # nexus-mfage: every E2E gate below (and 1b
 scripts/pins-preflight.sh            # step 0: every cheap pin at once
 uv run pytest -n auto && uv run pytest -m lint   # unit suite and the lint bucket (two runs)
 tests/e2e/local-service-gate.sh      # integration incl. the local-service functional gate
+tests/e2e/mandatory-pins-gate.sh     # the GitHub-backed mandatory_regression_pin tests, real HOME with gh auth, zero skip budget (nexus-z0o2p.41: moved out of the gate above, whose fenced HOME has no gh); a battery leg (pins)
 tests/e2e/migration-rehearsal/run.sh --package-upgrade   # ONE-engine convergence MVV (nexus-cfgo9)
 tests/e2e/migration-rehearsal/run.sh --candidate-migration   # REQUIRED when the tree carries a changeset (nexus-z0ylb)
 tests/e2e/fresh-install-mvv.sh       # VIRGIN-journey gate (nexus-nolqs) — see below
