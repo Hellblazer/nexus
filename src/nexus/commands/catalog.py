@@ -1200,6 +1200,18 @@ def _backfill_repos(
     return count, claimed
 
 
+def _stored_chunk_count(collection_row: dict) -> int:
+    """Chunks a collection PHYSICALLY holds, from a ``list_collections`` row.
+
+    ``count`` there is the live count (RDR-192 Step 5): a collection whose chunks
+    are all unowned reads ``count=0`` and ``stored_count=N``. A backfill exists to
+    find exactly those, so it filters on the stored count (nexus-wbfpw.35). An
+    engine older than the amendment omits ``stored_count``; ``count`` then stands
+    for both.
+    """
+    return int(collection_row.get("stored_count", collection_row.get("count", 0)) or 0)
+
+
 def _backfill_knowledge(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: object = None) -> int:
     """Register knowledge__* collections in catalog."""
     # RDR-204 Phase 3 (nexus-ft04v.26), class (d): this command's entire
@@ -1247,7 +1259,11 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
 
     w = writer if writer is not None else cat
     collections = t3.list_collections()
-    rdr_cols = [c for c in collections if split_candidate_collection_name(c["name"])[0] == "rdr" and c["count"] > 0]
+    rdr_cols = [
+        c for c in collections
+        if split_candidate_collection_name(c["name"])[0] == "rdr"
+        and _stored_chunk_count(c) > 0
+    ]
     count = 0
     unreadable: list[str] = []
 
@@ -1266,7 +1282,12 @@ def _backfill_rdrs(cat: "CatalogReader", t3: object, dry_run: bool, *, writer: o
             use_doc_id: bool | None = None
             offset = 0
             while True:
-                result = col.get(include=["metadatas"], limit=200, offset=offset)
+                # RDR-192 / nexus-wbfpw.35: discovery reads STORED chunks. A chunk
+                # with no live owner is exactly what a backfill exists to register.
+                result = col.get(
+                    include=["metadatas"], limit=200, offset=offset,
+                    include_non_live=True,
+                )
                 metas = result.get("metadatas", [])
                 if metas and use_doc_id is None:
                     use_doc_id = any(
@@ -1403,7 +1424,7 @@ def _backfill_papers(
     paper_cols = [
         c for c in collections
         if split_candidate_collection_name(c["name"])[0] == "docs"
-        and c["count"] > 0
+        and _stored_chunk_count(c) > 0
         and c["name"] not in repo_cols
     ]
     count = 0
@@ -1420,7 +1441,7 @@ def _backfill_papers(
 
         try:
             col = t3.get_or_create_collection(col_name)
-            result = col.get(limit=1, include=["metadatas"])
+            result = col.get(limit=1, include=["metadatas"], include_non_live=True)
             if result.get("ids") and result.get("metadatas"):
                 meta = result["metadatas"][0]
                 title = meta.get("title", "") or title
@@ -1599,6 +1620,7 @@ def _backfill_per_file_from_t3(
     while True:
         page = col.get(
             include=["metadatas"], limit=page_size, offset=offset,
+            include_non_live=True,
         )
         ids = page.get("ids") or []
         if not ids:

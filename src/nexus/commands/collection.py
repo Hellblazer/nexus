@@ -960,7 +960,13 @@ def reindex_cmd(name: str, force: bool) -> None:
     except Exception:  # noqa: BLE001 — best-effort chash index probe; falls through to per-chunk path
         pass
     while True:
-        batch = col.get(limit=300, offset=offset, include=["metadatas"])
+        # include_non_live (RDR-192 / nexus-wbfpw.35): the scan guards a DELETE,
+        # so it reads every stored chunk. before_count is the stored count, and a
+        # live-only read made a collection of unowned chunks look empty here,
+        # which skipped the "would destroy every chunk" refusal below.
+        batch = col.get(
+            limit=300, offset=offset, include=["metadatas"], include_non_live=True,
+        )
         # nexus-vn48: page-batch chash -> doc_id resolution to amortise
         # SQLite calls across the page rather than per-chunk.
         page_chashes = [
