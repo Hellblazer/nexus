@@ -1,0 +1,331 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-192 Step 9, Day-2 (bead nexus-2x9xa, Sam's ruling 2026-10-01): nexus.quarantine_restore_chunks, the one
+    SQL statement the quarantine RESTORE verb (nx t3 quarantine restore) moves chunks back with.
+
+    WHY THIS EXISTS. Until now the only way out of a quarantine- sibling was gc_restore_rereferenced
+    (catalog-023, catalog-042, catalog-043), and it restores a chunk only when the origin's manifest names it
+    again. A chunk the reaper moved WRONGLY has no manifest row in the origin by definition (that is why the
+    reaper took it: a manifest defect, matrix row R8, a live legacy note with no manifest), so re-reference
+    cannot bring it back and the only recovery was hand SQL from the gc_audit chash list. This function is the
+    deliberate, operator-driven way back: it restores chunks the caller NAMES, with no manifest row required.
+    (A manifest row naming (origin, chash) cannot exist while the chunk is only in quarantine: the manifest's
+    foreign key to nexus.chunks needs the origin row. So a chunk this function restores never has a manifest
+    row, and the result says so; see r_no_manifest below.)
+
+    WHAT IT TAKES. A tenant, the ORIGIN collection, its quarantine SIBLING, up to 5000 chashes (64 hex,
+    lowercase) to restore, an actor for the audit row, the gc_audit id the chashes came from (recorded, never read
+    here; the Java caller resolves an audit id, or a quarantined_at window, into a chash list), and a dry-run flag.
+    It returns ONE ROW PER DISTINCT REQUESTED CHASH, in request order.
+
+    OUTCOMES (r_outcome).
+      restored       the chunk left the sibling and is now a row of the origin
+      would_restore  dry run only: it would
+      present        the origin already has a row for this chash, whatever the sibling holds. The origin row is
+                     NEVER overwritten (catalog-043's live-origin-wins rule, for the same reason: a row that
+                     exists in the origin is at least as new as anything in quarantine) and a quarantine copy,
+                     if there is one, is LEFT where it is for gc_expire_quarantine. A re-run of a restore that
+                     already succeeded reads present for every chash, which is the correct, idempotent answer.
+      dim_conflict   as present, and the origin row and the quarantine copy hold embeddings of DIFFERENT widths
+                     (vectors-004's N7 cross-dimension collision, which gc_restore_rereferenced raises on). This
+                     function never overwrites, so nothing can be corrupted and it does not raise: it skips the
+                     chash and reports the collision under its own name, because two embedding spaces for one
+                     chash in one collection means the collection's model identity needs a look.
+      missing        neither the sibling (for THIS origin) nor the origin has the chash. A chash quarantined
+                     from some other origin reads missing here: the sibling's metadata.origin_collection must
+                     name p_origin_collection, the same guard gc_restore_rereferenced carries.
+
+    THE STATEMENT. One statement, vectors-024's reaper_quarantine_chunks in reverse: DELETE ... RETURNING from
+    the sibling feeds an INSERT into the origin, so a chunk is never in both places and never in neither (a MOVE,
+    not a copy). The DELETE's own WHERE carries the not-already-in-the-origin test, so a present chunk is not
+    deleted in the first place. A client write that lands the same chash in the origin between that test and the
+    INSERT makes the INSERT's ON CONFLICT DO NOTHING skip it; the chash then reports present (the origin has a
+    row, written by that client, and no data is lost) and its quarantine copy is gone. That window is a single
+    statement wide.
+
+    THE GATE. The exclusive per-collection sweep gate (RDR-191), the same advisory lock the reaper and the
+    post-commit sweep take. A manifest writer holding it shared makes this wait up to lock_timeout (2 s) and then
+    fail with lock_not_available, and nothing moves. gc_expire_quarantine (catalog-027) takes the same lock, so a
+    restore and an expiry of the same collection are ordered, never interleaved. A dry run takes no gate and
+    writes nothing. The caller sets the statement bound as its own statement first (the in-body set_config is
+    inert for the statement already running it; see PgSession#setGcQuarantineBoundedBounds).
+
+    NOT IMMEDIATELY REAPABLE AFTER A RESTORE (the reason last_written_at is set explicitly). A restored,
+    manifest-less chunk is exactly what nexus.chunk_is_reapable selects once it is old: no owner row, and the
+    later of last_written_at and orphaned_at older than the grace. The row the INSERT creates is a new row of the
+    origin, so it has no orphaned_at record (chunk_orphaned_at's foreign key cascaded the origin's record away when
+    the reaper moved the chunk), and its last_written_at would be whatever the INSERT supplies. Two values are
+    wrong. Copying the quarantine copy's last_written_at is the move time and shortens the grace by the time spent
+    in quarantine (up to 14 days of the 30). Deriving it from created_at, which the restore carries through, is
+    a chunk that is 40 or 90 days old by the reaper's clock and reapable at the very next hourly pass, which undoes
+    the restore. So the INSERT stamps last_written_at = now(): the restore starts a fresh 30 day grace, after which
+    the chunk is reapable again exactly as before UNLESS it was given an owner in the meantime, which is what the
+    grace is for. Chosen over writing a fresh chunk_orphaned_at record because the INSERT already sets the column
+    (no extra table, no extra row, nothing to cascade or drift) and because "restored at T, so protected until
+    T + grace" reads straight off one column. It is the value the column default already gives a new row; it is
+    written out so that a change to the default cannot silently change this behaviour, and so a test can pin it.
+    created_at is carried through, as in the restore functions.
+
+    THE DATE IT BECOMES REAPABLE AGAIN. A restored chunk has no manifest row (see above), so the reaper will
+    take it again at restore + the grace unless an owner row is repaired first. r_no_manifest says whether the
+    restored chunk has no own-collection manifest row and r_reapable_after is that date, now() plus
+    v_default_grace below, so the operator is told rather than left to find out. v_default_grace restates the
+    default grace inside nexus.chunk_is_reapable (interval '30 days'); the predicate is the one definition, this is
+    its reading for the report, and QuarantineRestoreIntegrationTest pins the two equal.
+
+    METADATA. The quarantine stamp ('quarantined_at', 'origin_collection') is removed from the restored row,
+    as catalog-043 removes it. The origin is the registered catalog_collections row of p_origin_collection, never a
+    name parse: an origin that is not registered is a loud error and nothing moves.
+
+    AUDIT. One gc_audit row per call that restores anything, in the same transaction as the move: operation
+    'quarantine_restore', collection the ORIGIN (so a lookup of "what happened to this collection" finds the
+    reaper's row and the restore beside each other), actor the caller's, chashes the FULL list of restored chashes
+    (a call restores at most 5000, gc_audit's own ceiling), and details quarantine_collection, source_audit_id
+    (null when the chashes were named directly or selected by window), the requested / restored / present /
+    dim_conflict / missing counts with those chashes, no_manifest and reapable_again_after. A call that restores
+    nothing and a dry run write no row.
+
+    SECURITY. SECURITY INVOKER, as every function in the changelog is: it runs under the caller's FORCE RLS and
+    tenant GUC, and every statement also names tenant_id, so a tenant-A call never reads or moves a tenant-B row.
+
+    PRECONDITIONS, each a loud error and nothing moved: between 1 and 5000 chashes, each 64 lowercase hex; the
+    origin is registered and is not a quarantine- collection; the sibling is registered with lifecycle_state
+    'quarantine'. The Java caller checks the same things first and answers 400; these are the backstop for a
+    direct SQL caller.
+
+    ROW TYPES. RETURNS TABLE adds one generated jOOQ record (QuarantineRestoreChunksRecord);
+    JooqRecordReflectionFeatureTest's count moves by +1.
+
+    No DATA EFFECT: a function; no existing row changes at deploy. Placed after vectors-024 (the reaper's move;
+    vectors-023 belongs to another branch) and before the grants blocks.
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="vectors-025-1" author="nexus-2x9xa">
+        <comment>nexus.quarantine_restore_chunks: the quarantine restore verb's move. DELETE ... RETURNING from the quarantine sibling into an INSERT into the origin in one statement under the exclusive sweep gate, for chashes the caller names (no manifest row needed); a chash already in the origin is skipped, never overwritten (a different embedding width is reported as dim_conflict); the restored row takes last_written_at = now() so it is not immediately reapable and the result says on what date it is again; one quarantine_restore gc_audit row with the full chash list per call that restores anything; one result row per requested chash (restored, would_restore, present, dim_conflict, missing). Dry-run form classifies only.</comment>
+        <sql splitStatements="false" stripComments="false"><![CDATA[
+CREATE OR REPLACE FUNCTION nexus.quarantine_restore_chunks(
+    p_tenant_id              text,
+    p_origin_collection      text,
+    p_quarantine_collection  text,
+    p_chashes                text[],
+    p_actor                  text,
+    p_source_audit_id        bigint,
+    p_dry_run                boolean
+)
+RETURNS TABLE(r_chash text, r_outcome text, r_audit_id bigint, r_no_manifest boolean, r_reapable_after timestamptz)
+LANGUAGE plpgsql
+SECURITY INVOKER
+AS $$
+DECLARE
+    -- The default grace of the reapable predicate (vectors-021-2), for the report only; see the header.
+    v_default_grace  CONSTANT interval := interval '30 days';
+    v_now            timestamptz := now();
+    v_requested      text[];
+    v_restored       text[] := '{}'::text[];
+    v_present        text[];
+    v_dim_conflict   text[];
+    v_missing        text[];
+    v_no_manifest    text[];
+    v_audit_id       bigint;
+    v_actor          text;
+BEGIN
+    IF p_chashes IS NULL OR cardinality(p_chashes) = 0 THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: at least one chash is required'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF cardinality(p_chashes) > 5000 THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: at most 5000 chashes per call, got %', cardinality(p_chashes)
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF EXISTS (SELECT 1 FROM unnest(p_chashes) h WHERE h IS NULL OR h !~ '^[0-9a-f]{64}$') THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: every chash must be 64 lowercase hex characters'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF p_origin_collection IS NULL OR p_origin_collection = ''
+       OR left(p_origin_collection, 11) = 'quarantine-' THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: the origin collection must be a non-quarantine collection, got %',
+            p_origin_collection
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections cc
+                    WHERE cc.tenant_id = p_tenant_id AND cc.name = p_origin_collection) THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: origin collection % is not registered for tenant % -- a chunk is restored into a registered collection, never into a name',
+            p_origin_collection, p_tenant_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM nexus.catalog_collections cc
+                    WHERE cc.tenant_id = p_tenant_id AND cc.name = p_quarantine_collection
+                      AND cc.lifecycle_state = 'quarantine') THEN
+        RAISE EXCEPTION 'quarantine_restore_chunks: % is not a registered quarantine collection for tenant %',
+            p_quarantine_collection, p_tenant_id
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- The distinct requested chashes in first-seen order: the result carries one row per chash.
+    SELECT array_agg(x.h ORDER BY x.ord)
+      INTO v_requested
+      FROM (SELECT u.h, min(u.ord) AS ord
+              FROM unnest(p_chashes) WITH ORDINALITY AS u(h, ord)
+             GROUP BY u.h) x;
+
+    IF p_dry_run THEN
+        RETURN QUERY
+        SELECT r.h,
+               CASE
+                   WHEN o.chash IS NOT NULL AND q.chash IS NOT NULL
+                        AND (CASE WHEN o.embedding_384 IS NOT NULL THEN 384
+                                  WHEN o.embedding_768 IS NOT NULL THEN 768
+                                  WHEN o.embedding_1024 IS NOT NULL THEN 1024 END)
+                            IS DISTINCT FROM
+                            (CASE WHEN q.embedding_384 IS NOT NULL THEN 384
+                                  WHEN q.embedding_768 IS NOT NULL THEN 768
+                                  WHEN q.embedding_1024 IS NOT NULL THEN 1024 END) THEN 'dim_conflict'
+                   WHEN o.chash IS NOT NULL THEN 'present'
+                   WHEN q.chash IS NOT NULL THEN 'would_restore'
+                   ELSE 'missing'
+               END,
+               NULL::bigint, NULL::boolean, NULL::timestamptz
+          FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+          LEFT JOIN nexus.chunks o
+            ON o.tenant_id = p_tenant_id AND o.collection = p_origin_collection AND o.chash = decode(r.h, 'hex')
+          LEFT JOIN nexus.chunks q
+            ON q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection AND q.chash = decode(r.h, 'hex')
+           AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+         ORDER BY r.ord;
+        RETURN;
+    END IF;
+
+    PERFORM set_config('lock_timeout', '2000', true);
+    BEGIN
+        PERFORM pg_advisory_xact_lock(hashtext('sweepgate:' || p_tenant_id || '/' || p_origin_collection));
+    EXCEPTION
+        WHEN lock_not_available THEN
+            RAISE EXCEPTION
+                'quarantine_restore_chunks: timed out acquiring the RDR-191 sweep gate for tenant=%, collection=% -- a manifest writer holds it; retry',
+                p_tenant_id, p_origin_collection
+                USING ERRCODE = 'lock_not_available';
+    END;
+
+    -- THE MOVE: one statement, vectors-024's reaper_quarantine_chunks in reverse. The DELETE's WHERE skips a chash
+    -- the origin already has (it is not deleted, so it stays in quarantine); the INSERT takes last_written_at = now()
+    -- (see the header) and the carried created_at; ON CONFLICT DO NOTHING is the single-statement race's backstop.
+    WITH req AS (
+        SELECT decode(r.h, 'hex') AS chash FROM unnest(v_requested) AS r(h)
+    ),
+    del AS (
+        DELETE FROM nexus.chunks q
+         USING req
+         WHERE q.tenant_id  = p_tenant_id
+           AND q.collection = p_quarantine_collection
+           AND q.chash      = req.chash
+           AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+           AND NOT EXISTS (SELECT 1 FROM nexus.chunks o
+                            WHERE o.tenant_id  = p_tenant_id
+                              AND o.collection = p_origin_collection
+                              AND o.chash      = q.chash)
+        RETURNING q.chash, q.chunk_text, q.embedding_384, q.embedding_768, q.embedding_1024,
+                  q.metadata, q.created_at
+    ),
+    ins AS (
+        INSERT INTO nexus.chunks (tenant_id, collection, chash, chunk_text,
+                                   embedding_384, embedding_768, embedding_1024,
+                                   metadata, created_at, last_written_at)
+        SELECT p_tenant_id, p_origin_collection, d.chash, d.chunk_text,
+               d.embedding_384, d.embedding_768, d.embedding_1024,
+               (COALESCE(d.metadata, '{}'::jsonb) - 'quarantined_at' - 'origin_collection'),
+               d.created_at, v_now
+          FROM del d
+        ON CONFLICT (tenant_id, collection, chash) DO NOTHING
+        RETURNING chash
+    )
+    SELECT COALESCE(array_agg(encode(i.chash, 'hex') ORDER BY i.chash), '{}'::text[])
+      INTO v_restored
+      FROM ins i;
+
+    -- Everything not restored is already in the origin (present, or dim_conflict when the quarantine copy is still
+    -- there and holds a different width) or nowhere (missing).
+    SELECT COALESCE(array_agg(c.h ORDER BY c.ord) FILTER (WHERE c.has_o AND NOT c.dim_differs), '{}'::text[]),
+           COALESCE(array_agg(c.h ORDER BY c.ord) FILTER (WHERE c.has_o AND c.dim_differs), '{}'::text[]),
+           COALESCE(array_agg(c.h ORDER BY c.ord) FILTER (WHERE NOT c.has_o), '{}'::text[])
+      INTO v_present, v_dim_conflict, v_missing
+      FROM (
+        SELECT r.h, r.ord,
+               o.chash IS NOT NULL AS has_o,
+               (o.chash IS NOT NULL AND q.chash IS NOT NULL
+                AND (CASE WHEN o.embedding_384 IS NOT NULL THEN 384
+                          WHEN o.embedding_768 IS NOT NULL THEN 768
+                          WHEN o.embedding_1024 IS NOT NULL THEN 1024 END)
+                    IS DISTINCT FROM
+                    (CASE WHEN q.embedding_384 IS NOT NULL THEN 384
+                          WHEN q.embedding_768 IS NOT NULL THEN 768
+                          WHEN q.embedding_1024 IS NOT NULL THEN 1024 END)) AS dim_differs
+          FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+          LEFT JOIN nexus.chunks o
+            ON o.tenant_id = p_tenant_id AND o.collection = p_origin_collection AND o.chash = decode(r.h, 'hex')
+          LEFT JOIN nexus.chunks q
+            ON q.tenant_id = p_tenant_id AND q.collection = p_quarantine_collection AND q.chash = decode(r.h, 'hex')
+           AND COALESCE(q.metadata->>'origin_collection', p_origin_collection) = p_origin_collection
+         WHERE NOT (r.h = ANY (v_restored))
+      ) c;
+
+    -- Restored chunks with no own-collection manifest row: reapable again at v_now + the default grace.
+    SELECT COALESCE(array_agg(r.h ORDER BY r.h), '{}'::text[])
+      INTO v_no_manifest
+      FROM unnest(v_restored) AS r(h)
+     WHERE NOT EXISTS (SELECT 1 FROM nexus.catalog_document_chunks m
+                        WHERE m.tenant_id  = p_tenant_id
+                          AND m.collection = p_origin_collection
+                          AND m.chash      = decode(r.h, 'hex'));
+
+    v_actor := COALESCE(NULLIF(left(btrim(p_actor), 256), ''), 'operator');
+
+    IF cardinality(v_restored) > 0 THEN
+        INSERT INTO nexus.gc_audit
+            (tenant_id, operation, collection, actor, dry_run, chash_count, chashes, details)
+        VALUES (
+            p_tenant_id, 'quarantine_restore', p_origin_collection, v_actor, false,
+            cardinality(v_restored), to_jsonb(v_restored),
+            jsonb_build_object(
+                'quarantine_collection', p_quarantine_collection,
+                'source_audit_id', p_source_audit_id,
+                'requested', cardinality(v_requested),
+                'restored', cardinality(v_restored),
+                'present', cardinality(v_present),
+                'dim_conflict', cardinality(v_dim_conflict),
+                'missing', cardinality(v_missing),
+                'present_chashes', to_jsonb(v_present),
+                'dim_conflict_chashes', to_jsonb(v_dim_conflict),
+                'missing_chashes', to_jsonb(v_missing),
+                'no_manifest', cardinality(v_no_manifest),
+                'reapable_again_after', to_char(v_now + v_default_grace, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')))
+        RETURNING id INTO v_audit_id;
+    END IF;
+
+    RETURN QUERY
+    SELECT r.h,
+           CASE WHEN r.h = ANY (v_restored)      THEN 'restored'
+                WHEN r.h = ANY (v_dim_conflict)  THEN 'dim_conflict'
+                WHEN r.h = ANY (v_present)       THEN 'present'
+                ELSE 'missing' END,
+           v_audit_id,
+           CASE WHEN r.h = ANY (v_restored) THEN r.h = ANY (v_no_manifest) END,
+           CASE WHEN r.h = ANY (v_no_manifest) THEN v_now + v_default_grace END
+      FROM unnest(v_requested) WITH ORDINALITY AS r(h, ord)
+     ORDER BY r.ord;
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION nexus.quarantine_restore_chunks(text, text, text, text[], text, bigint, boolean) TO nexus_svc;
+]]>
+        </sql>
+        <rollback>
+            <sql splitStatements="false" stripComments="false">DROP FUNCTION IF EXISTS nexus.quarantine_restore_chunks(text, text, text, text[], text, bigint, boolean);</sql>
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

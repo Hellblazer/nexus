@@ -1693,6 +1693,15 @@
     <include file="db/changelog/vectors-024-reaper-quarantine-chunks.xml"/>
 
     <!--
+        nexus-2x9xa (RDR-192 Step 9 Day-2): nexus.quarantine_restore_chunks, the quarantine RESTORE verb's
+        move: the named chashes go from the quarantine sibling back to the origin with no manifest row
+        required, under the exclusive sweep gate, in one statement, with a fresh last_written_at so the
+        restored chunk is not immediately reapable and a quarantine_restore gc_audit row. Placed after
+        vectors-024 (vectors-023 belongs to another branch), before the grants blocks.
+    -->
+    <include file="db/changelog/vectors-025-quarantine-restore-chunks.xml"/>
+
+    <!--
         nexus-2x9xa: the other half of the symmetric expiry split. gc_expire_quarantine
         (a released function, catalog-033-3) skips the rows the reaper tagged, so the
         client expires only what the client moved and the engine only what it moved.

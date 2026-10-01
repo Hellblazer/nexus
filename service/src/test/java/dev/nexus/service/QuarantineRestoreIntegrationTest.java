@@ -1,0 +1,661 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service;
+
+import dev.nexus.service.ChunkReaper.RunResult;
+import dev.nexus.service.ChunkReaper.Settings;
+import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.LadderRepository;
+import dev.nexus.service.db.Rdr192BackfillGate;
+import dev.nexus.service.vectors.PgVectorRepository;
+import dev.nexus.service.vectors.PgVectorRepository.QuarantineRestoreOutcome;
+import dev.nexus.service.vectors.ReaperRepository;
+import org.jooq.DSLContext;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
+import org.jooq.impl.SQLDataType;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import java.sql.Connection;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Map;
+
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
+import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+/**
+ * RDR-192 Step 9 Day-2 (bead nexus-2x9xa, Sam's ruling 2026-10-01): the quarantine RESTORE verb's engine half,
+ * {@code nexus.quarantine_restore_chunks} (vectors-025) through {@link PgVectorRepository#quarantineRestore}. Drives
+ * the real reaper against a real PostgreSQL substrate to put chunks in quarantine, then restores them, never a mock.
+ *
+ * <p>The chunks are seeded manifest-less, which is the case that has no other way back: {@code gc_restore_rereferenced}
+ * needs a manifest row in the origin, and a chunk the reaper moved wrongly (a manifest defect, the R8 shape) has none.
+ *
+ * <p>Each test works in its own tenant.
+ */
+class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
+
+    private static final Clock CLOCK = Clock.fixed(Instant.parse("2026-10-01T12:00:00Z"), ZoneOffset.UTC);
+    private static final String ACTOR = "test-operator";
+
+    private PgVectorRepository vectors;
+    private ReaperRepository store;
+    private LadderRepository ladder;
+    private Rdr192BackfillGate gate;
+
+    @BeforeAll
+    void wire() {
+        vectors = new PgVectorRepository(tenantScope, embedder, embedder);
+        store = new ReaperRepository(tenantScope);
+        ladder = new LadderRepository(tenantScope);
+        gate = new Rdr192BackfillGate(ladder);
+    }
+
+    // ── fixtures ─────────────────────────────────────────────────────────────
+
+    private String newTenant() {
+        return "qr" + seq.incrementAndGet();
+    }
+
+    private void openGate(String tenant) {
+        ladder.record(tenant, Rdr192BackfillGate.RUNG_NAME, "7.99.0", "");
+    }
+
+    private String col(String prefix) {
+        return prefix + "__qr" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+    }
+
+    private static String quarantineOf(String collection) {
+        return "quarantine-" + collection;
+    }
+
+    private ChunkReaper reaper(String... tenants) {
+        return new ChunkReaper(store, vectors, repo, gate, () -> List.of(tenants), Settings.defaults(), CLOCK);
+    }
+
+    private String orphan(String tenant, String collection, String seed, Map<String, Object> metadata) throws Exception {
+        String hex = Chash.ofText(collection + "/" + seed).toHex();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+            PgContainerHelper.insertChunks(ctx, tenant, collection, List.of(hex), List.of(seed + " text"),
+                List.of(new float[384]), List.of(metadata));
+        }
+        return hex;
+    }
+
+    private String orphan(String tenant, String collection, String seed) throws Exception {
+        return orphan(tenant, collection, seed, Map.of("title", seed));
+    }
+
+    /** Seeds {@code seeds} as manifest-less chunks and lets the real reaper move them into quarantine. */
+    private List<String> quarantined(String tenant, String collection, String... seeds) throws Exception {
+        openGate(tenant);
+        List<String> hexes = new java.util.ArrayList<>();
+        for (String s : seeds) hexes.add(orphan(tenant, collection, s));
+        RunResult run = reaper(tenant).runOnce(Duration.ZERO);
+        assertThat(run.tenant(tenant).collection(collection).moved()).as("fixture: the reaper moved them")
+            .isEqualTo(seeds.length);
+        for (String h : hexes) {
+            assertThat(inCollection(tenant, quarantineOf(collection), h)).isTrue();
+            assertThat(inCollection(tenant, collection, h)).isFalse();
+        }
+        return hexes;
+    }
+
+    /** Makes the quarantined copies look long-lived: written 90 days ago, moved 10 days ago. */
+    private void ageQuarantined(String tenant, String collection) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.CREATED_AT, OffsetDateTime.now().minusDays(90))
+                .set(CHUNKS.LAST_WRITTEN_AT, OffsetDateTime.now().minusDays(10))
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineOf(collection)))).execute();
+        }
+    }
+
+    private boolean inCollection(String tenant, String collection, String hex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(DSL.selectOne().from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
+                       .and(CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes()))));
+        }
+    }
+
+    private record ChunkState(String text, String metadata, OffsetDateTime createdAt, OffsetDateTime lastWrittenAt) {}
+
+    private ChunkState chunk(String tenant, String collection, String hex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(CHUNKS.CHUNK_TEXT, DSL.field(DSL.name("chunks", "metadata"), String.class),
+                        CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT)
+                .from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
+                       .and(CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes())))
+                .fetchOne(r -> new ChunkState(r.value1(), r.value2(), r.value3(), r.value4()));
+        }
+    }
+
+    private record AuditRow(long id, String operation, String actor, String collection, int chashCount,
+                            String chashes, String details) {}
+
+    private List<AuditRow> audit(String tenant, String operation) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).selectFrom(GC_AUDIT)
+                .where(GC_AUDIT.TENANT_ID.eq(tenant).and(GC_AUDIT.OPERATION.eq(operation))).orderBy(GC_AUDIT.ID)
+                .fetch(r -> new AuditRow(r.getId(), r.getOperation(), r.getActor(), r.getCollection(),
+                    r.getChashCount(), r.getChashes().data(), r.getDetails() == null ? "" : r.getDetails().data()));
+        }
+    }
+
+    // ── the round trip, and the grace ────────────────────────────────────────
+
+    @Test
+    void aWronglyMovedManifestLessChunkComesBack_andTheNextPassDoesNotMoveItAgain() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "wrongly-moved").get(0);
+        ageQuarantined(t, c);
+
+        QuarantineRestoreOutcome out =
+            vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        assertThat(out.restored()).containsExactly(h);
+        assertThat(inCollection(t, c, h)).as("back in the origin").isTrue();
+        assertThat(inCollection(t, quarantineOf(c), h)).as("and gone from quarantine").isFalse();
+        // The next hourly pass, with the production grace (30 days), leaves it alone. It is manifest-less with no
+        // orphaning record, so only the grace stands between it and the reaper.
+        RunResult next = reaper(t).runOnce(null);
+        assertThat(next.tenant(t).collection(c).moved()).as("not immediately reapable").isZero();
+        assertThat(inCollection(t, c, h)).isTrue();
+    }
+
+    @Test
+    void aRestoredChunkIsReapableAgainOnlyAfterTheGraceWindow() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "grace").get(0);
+        ageQuarantined(t, c);
+        vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        // A day-long grace: the chunk was restored seconds ago, so it is inside the window.
+        assertThat(reaper(t).runOnce(Duration.ofDays(1)).tenant(t).collection(c).moved()).isZero();
+
+        // Age it past the window and the same pass takes it again: the restore bought a fresh grace, not immunity.
+        ReapableFixtures.agePastGrace(pg, t, c);
+        assertThat(reaper(t).runOnce(null).tenant(t).collection(c).moved()).isEqualTo(1);
+        assertThat(inCollection(t, quarantineOf(c), h)).as("quarantined once more, reversibly").isTrue();
+    }
+
+    @Test
+    void theRestoredRowKeepsItsContentAndCreatedAt_dropsTheQuarantineStamp_andTakesAFreshWriteTime() throws Exception {
+        String t = newTenant();
+        String c = col("docs");
+        String h = quarantined(t, c, "stamps").get(0);
+        // Make the chunk look old: written, quarantined and left there for a long time.
+        OffsetDateTime old = OffsetDateTime.now().minusDays(90);
+        OffsetDateTime movedAt = OffsetDateTime.now().minusDays(10);
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CHUNKS)
+                .set(CHUNKS.CREATED_AT, old).set(CHUNKS.LAST_WRITTEN_AT, movedAt)
+                .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(quarantineOf(c)))).execute();
+        }
+        ChunkState before = chunk(t, quarantineOf(c), h);
+        assertThat(before.metadata()).contains("quarantined_at").contains("origin_collection");
+
+        vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        ChunkState after = chunk(t, c, h);
+        assertThat(after.text()).isEqualTo("stamps text");
+        assertThat(after.metadata()).contains("\"title\": \"stamps\"")
+            .doesNotContain("quarantined_at").doesNotContain("origin_collection");
+        assertThat(after.createdAt().toInstant()).as("created_at is carried through").isEqualTo(old.toInstant());
+        // Neither the quarantine row's last_written_at (10 days ago: copying it would shorten the grace by the time
+        // spent in quarantine) nor anything derived from created_at (90 days ago: reapable at the very next pass).
+        assertThat(after.lastWrittenAt()).as("last_written_at restarts the grace: now, not copied, not derived")
+            .isAfter(OffsetDateTime.now().minusMinutes(5));
+    }
+
+    // ── collisions, missing chashes, idempotence ─────────────────────────────
+
+    @Test
+    void aChunkAlreadyInTheOriginIsSkippedNeverOverwritten_andItsQuarantineCopyStays() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "collide").get(0);
+        // A newer write of the same chash landed in the origin meanwhile, with different text.
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertChunks(ctx, t, c, List.of(h), List.of("newer live text"),
+                List.of(new float[384]), List.of(Map.<String, Object>of("title", "live")));
+        }
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        assertThat(out.restored()).isEmpty();
+        assertThat(out.present()).containsExactly(h);
+        assertThat(chunk(t, c, h).text()).as("the live row is untouched").isEqualTo("newer live text");
+        assertThat(inCollection(t, quarantineOf(c), h)).as("the quarantine copy is left for expiry").isTrue();
+        assertThat(out.auditId()).as("nothing moved, so no audit row").isNull();
+        assertThat(audit(t, "quarantine_restore")).isEmpty();
+    }
+
+    @Test
+    void aChashNotInTheQuarantineSiblingIsReportedMissing_andTheRestWithinTheCallStillRestore() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "have-a", "have-b");
+        String nowhere = Chash.ofText("never-existed").toHex();
+        // Quarantined for ANOTHER origin: its sibling name is not this origin's, so it must read missing too.
+        String other = col("knowledge");
+        String foreign = quarantined(t, other, "foreign").get(0);
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c),
+            List.of(hs.get(0), nowhere, foreign, hs.get(1)), ACTOR, false);
+
+        assertThat(out.restored()).containsExactlyInAnyOrder(hs.get(0), hs.get(1));
+        assertThat(out.missing()).containsExactlyInAnyOrder(nowhere, foreign);
+        assertThat(inCollection(t, quarantineOf(other), foreign)).as("the other origin's quarantine is untouched").isTrue();
+        assertThat(out.rows()).extracting(QuarantineRestoreOutcome.Row::chash)
+            .as("one row per requested chash, in request order")
+            .containsExactly(hs.get(0), nowhere, foreign, hs.get(1));
+    }
+
+    @Test
+    void aSecondRestoreOfTheSameChashesIsAnIdempotentReportOfAlreadyPresent() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "twice").get(0);
+        vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        QuarantineRestoreOutcome again = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        assertThat(again.restored()).isEmpty();
+        assertThat(again.present()).containsExactly(h);
+        assertThat(again.missing()).isEmpty();
+        assertThat(audit(t, "quarantine_restore")).as("one audit row, for the call that moved something").hasSize(1);
+    }
+
+    @Test
+    void aRepeatedChashInOneRequestIsRestoredOnce() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "dup").get(0);
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h, h), ACTOR, false);
+
+        assertThat(out.restored()).containsExactly(h);
+        assertThat(out.rows()).hasSize(1);
+    }
+
+    // ── dry run ──────────────────────────────────────────────────────────────
+
+    @Test
+    void aDryRunReportsWhatWouldMove_movesNothing_andWritesNoAuditRow() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "dry-a", "dry-b");
+        String nowhere = Chash.ofText("dry-missing").toHex();
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c),
+            List.of(hs.get(0), hs.get(1), nowhere), ACTOR, true);
+
+        assertThat(out.dryRun()).isTrue();
+        assertThat(out.wouldRestore()).containsExactlyInAnyOrder(hs.get(0), hs.get(1));
+        assertThat(out.restored()).isEmpty();
+        assertThat(out.missing()).containsExactly(nowhere);
+        assertThat(inCollection(t, quarantineOf(c), hs.get(0))).isTrue();
+        assertThat(inCollection(t, c, hs.get(0))).isFalse();
+        assertThat(audit(t, "quarantine_restore")).isEmpty();
+    }
+
+    // ── what the report tells the operator ──────────────────────────────────
+
+    @Test
+    void aRestoredChunkReportsThatItHasNoManifestRowAndTheDateTheReaperMayTakeItAgain() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "reapable-again").get(0);
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        var row = out.rows().get(0);
+        assertThat(row.outcome()).isEqualTo("restored");
+        assertThat(row.noManifest()).as("a restored chunk has no manifest row: the manifest's FK needs the origin row").isTrue();
+        OffsetDateTime written = chunk(t, c, h).lastWrittenAt();
+        assertThat(Instant.parse(row.reapableAfter()))
+            .as("restore time plus the grace").isBetween(written.plusDays(30).minusHours(1).toInstant(),
+                                                         written.plusDays(30).plusHours(1).toInstant());
+        assertThat(audit(t, "quarantine_restore")).singleElement()
+            .satisfies(a -> assertThat(a.details()).contains("reapable_again_after").contains("\"no_manifest\": 1"));
+        // A chash that was not restored carries neither.
+        QuarantineRestoreOutcome again = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+        assertThat(again.rows().get(0).noManifest()).isNull();
+        assertThat(again.rows().get(0).reapableAfter()).isNull();
+    }
+
+    @Test
+    void theGraceTheReportReadsIsTheGraceThePredicateUses() throws Exception {
+        // vectors-025 restates chunk_is_reapable's default grace (30 days) for the report. This pins the two together:
+        // a chunk last written 30 days and a minute ago is reapable under the default, one written 30 days less a
+        // minute ago is not. If the predicate's default moves, this fails and points at vectors-025's v_default_grace.
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = orphan(t, c, "grace-pin");
+        Instant now = Instant.now();
+        assertThat(reapableUnderDefaultGrace(t, c, h, now.minus(Duration.ofDays(30)).minus(Duration.ofMinutes(1)))).isTrue();
+        assertThat(reapableUnderDefaultGrace(t, c, h, now.minus(Duration.ofDays(30)).plus(Duration.ofMinutes(1)))).isFalse();
+    }
+
+    private boolean reapableUnderDefaultGrace(String tenant, String collection, String hex, Instant lastWrittenAt)
+            throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
+                DSL.val(tenant), DSL.val(collection), DSL.val(Chash.fromHex(hex).toBytes()),
+                DSL.val(lastWrittenAt.atOffset(ZoneOffset.UTC)),
+                DSL.castNull(SQLDataType.INTERVAL))));
+        }
+    }
+
+    @Test
+    void aChunkWhoseOriginRowHoldsAnotherEmbeddingWidthIsReportedAsADimConflictAndLeftAlone() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "dim-clash").get(0);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), t, c, List.of(h), List.of("origin 768 text"),
+                List.of(new float[768]), List.of(Map.<String, Object>of()));
+        }
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        assertThat(out.dimConflict()).containsExactly(h);
+        assertThat(out.restored()).isEmpty();
+        assertThat(chunk(t, c, h).text()).as("never overwritten").isEqualTo("origin 768 text");
+        assertThat(inCollection(t, quarantineOf(c), h)).as("the quarantine copy stays").isTrue();
+    }
+
+    // ── audit row ────────────────────────────────────────────────────────────
+
+    @Test
+    void everyRestoreWritesOneAuditRowNamingTheActorTheChashesAndThePlaceTheyWent() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "aud-a", "aud-b");
+        String nowhere = Chash.ofText("aud-missing").toHex();
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c),
+            List.of(hs.get(0), hs.get(1), nowhere), ACTOR, false);
+
+        assertThat(audit(t, "quarantine_restore")).singleElement().satisfies(a -> {
+            assertThat(a.id()).isEqualTo(out.auditId());
+            assertThat(a.actor()).isEqualTo(ACTOR);
+            assertThat(a.collection()).as("keyed by the origin, like the reaper's own row").isEqualTo(c);
+            assertThat(a.chashCount()).isEqualTo(2);
+            assertThat(a.chashes()).contains(hs.get(0)).contains(hs.get(1)).doesNotContain(nowhere);
+            assertThat(a.details()).contains(quarantineOf(c)).contains(nowhere);
+        });
+    }
+
+    // ── the audit id as the source ───────────────────────────────────────────
+
+    @Test
+    void anAuditIdNamesTheChashesTheReaperMoved_andTheRestoreRecordsWhereItCameFrom() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "src-a", "src-b", "src-c");
+        long reaperAuditId = audit(t, "reaper_quarantine").get(0).id();
+
+        QuarantineRestoreOutcome out =
+            vectors.quarantineRestoreFromAudit(t, c, quarantineOf(c), reaperAuditId, 0, 1000, ACTOR, false);
+
+        assertThat(out.restored()).containsExactlyInAnyOrderElementsOf(hs);
+        assertThat(out.source()).isNotNull();
+        assertThat(out.source().auditId()).isEqualTo(reaperAuditId);
+        assertThat(out.source().operation()).isEqualTo("reaper_quarantine");
+        assertThat(out.source().chashCount()).isEqualTo(3);
+        assertThat(out.source().nextOffset()).isNull();
+        assertThat(audit(t, "quarantine_restore")).singleElement()
+            .satisfies(a -> assertThat(a.details()).contains("\"source_audit_id\": " + reaperAuditId));
+    }
+
+    @Test
+    void anAuditIdIsPagedByOffsetAndLimit() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "pg-a", "pg-b", "pg-c");
+        long id = audit(t, "reaper_quarantine").get(0).id();
+
+        QuarantineRestoreOutcome first = vectors.quarantineRestoreFromAudit(t, c, quarantineOf(c), id, 0, 2, ACTOR, false);
+        assertThat(first.restored()).hasSize(2);
+        assertThat(first.source().nextOffset()).isEqualTo(2);
+
+        QuarantineRestoreOutcome second = vectors.quarantineRestoreFromAudit(t, c, quarantineOf(c), id, 2, 2, ACTOR, false);
+        assertThat(second.restored()).hasSize(1);
+        assertThat(second.source().nextOffset()).isNull();
+        assertThat(java.util.stream.Stream.concat(first.restored().stream(), second.restored().stream()))
+            .containsExactlyInAnyOrderElementsOf(hs);
+    }
+
+    @Test
+    void anAuditIdThatIsNotAQuarantineMove_orNamesAnotherCollection_orAnotherTenant_isRefused() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "scope").get(0);
+        long reaperId = audit(t, "reaper_quarantine").get(0).id();
+        vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+        long restoreId = audit(t, "quarantine_restore").get(0).id();
+
+        // A restore row lists chashes that moved the other way: not a source.
+        assertThatThrownBy(() -> vectors.quarantineRestoreFromAudit(t, c, quarantineOf(c), restoreId, 0, 10, ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("quarantine_restore");
+        // Another collection's row.
+        String otherCol = col("knowledge");
+        orphan(t, otherCol, "x");
+        assertThatThrownBy(() -> vectors.quarantineRestoreFromAudit(t, otherCol, quarantineOf(otherCol), reaperId, 0, 10, ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(c);
+        // No such row.
+        assertThatThrownBy(() -> vectors.quarantineRestoreFromAudit(t, c, quarantineOf(c), 987_654_321L, 0, 10, ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("987654321");
+        // Another tenant's row: RLS hides it, so it reads as no such row.
+        String t2 = newTenant();
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), t2, c);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), t2, quarantineOf(c));
+        }
+        assertThatThrownBy(() -> vectors.quarantineRestoreFromAudit(t2, c, quarantineOf(c), reaperId, 0, 10, ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining(Long.toString(reaperId));
+    }
+
+    // ── selecting from the quarantine sibling itself ─────────────────────────
+
+    private void stamp(String tenant, String collection, String hex, String quarantinedAt) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            String json = ctx.select(DSL.field(DSL.name("chunks", "metadata"), String.class)).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineOf(collection)))
+                       .and(CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes()))).fetchOne().value1();
+            @SuppressWarnings("unchecked")
+            Map<String, Object> meta = new com.fasterxml.jackson.databind.ObjectMapper().readValue(json, Map.class);
+            meta.put("quarantined_at", quarantinedAt);
+            ctx.update(CHUNKS).set(CHUNKS.METADATA,
+                    org.jooq.JSONB.jsonb(new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(meta)))
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineOf(collection)))
+                      .and(CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes()))).execute();
+        }
+    }
+
+    @Test
+    void chunksAreSelectedFromTheSiblingByTheirQuarantinedAtWindow() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "w-a", "w-b", "w-c", "w-d");
+        stamp(t, c, hs.get(0), "2026-09-01T00:00:00Z");
+        stamp(t, c, hs.get(1), "2026-09-02T00:00:00Z");
+        stamp(t, c, hs.get(2), "2026-09-15T00:00:00Z");
+        stamp(t, c, hs.get(3), "2026-09-29T12:00:00.123456Z");   // the engine's fractional form
+
+        // before 09-10: the two September chunks
+        var early = vectors.quarantineRestoreSelected(t, c, quarantineOf(c), null, Instant.parse("2026-09-10T00:00:00Z"),
+            null, 100, ACTOR, true);
+        assertThat(early.wouldRestore()).containsExactlyInAnyOrder(hs.get(0), hs.get(1));
+        assertThat(early.dryRun()).isTrue();
+        assertThat(inCollection(t, quarantineOf(c), hs.get(0))).as("a dry run moves nothing").isTrue();
+
+        // since 09-10 before 09-20: exactly the mid one
+        var mid = vectors.quarantineRestoreSelected(t, c, quarantineOf(c), Instant.parse("2026-09-10T00:00:00Z"),
+            Instant.parse("2026-09-20T00:00:00Z"), null, 100, ACTOR, false);
+        assertThat(mid.restored()).containsExactly(hs.get(2));
+
+        // since 09-29T12:00:00Z: the fractional-second stamp is inside the window
+        var late = vectors.quarantineRestoreSelected(t, c, quarantineOf(c), Instant.parse("2026-09-29T12:00:00Z"), null,
+            null, 100, ACTOR, false);
+        assertThat(late.restored()).containsExactly(hs.get(3));
+        assertThat(inCollection(t, quarantineOf(c), hs.get(0))).as("outside both windows: untouched").isTrue();
+        assertThat(audit(t, "quarantine_restore")).hasSize(2);
+    }
+
+    @Test
+    void aSelectionIsPagedByChashAndNamesTheNextCursor() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantined(t, c, "pg-1", "pg-2", "pg-3");
+        Instant since = Instant.parse("2026-01-01T00:00:00Z");
+
+        var first = vectors.quarantineRestoreSelected(t, c, quarantineOf(c), since, null, null, 2, ACTOR, false);
+        assertThat(first.restored()).hasSize(2);
+        assertThat(first.nextAfter()).as("a full page names where the next one starts").isNotNull();
+
+        var second = vectors.quarantineRestoreSelected(t, c, quarantineOf(c), since, null, first.nextAfter(), 2, ACTOR, false);
+        assertThat(second.restored()).hasSize(1);
+        assertThat(second.nextAfter()).as("a short page is the last").isNull();
+        assertThat(java.util.stream.Stream.concat(first.restored().stream(), second.restored().stream()))
+            .containsExactlyInAnyOrderElementsOf(hs);
+    }
+
+    @Test
+    void aSelectionNeedsAWindow_andOnlyTakesChunksQuarantinedFromThisOrigin() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "scoped").get(0);
+
+        assertThatThrownBy(() -> vectors.quarantineRestoreSelected(t, c, quarantineOf(c), null, null, null, 10, ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("quarantined_since");
+        assertThatThrownBy(() -> vectors.quarantineRestoreSelected(t, c, quarantineOf(c),
+                Instant.parse("2026-02-01T00:00:00Z"), Instant.parse("2026-01-01T00:00:00Z"), null, 10, ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class);
+
+        // The same sibling name, asked for as another origin: the chunk's origin_collection stamp excludes it.
+        String other = col("knowledge");
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), t, other);
+        }
+        var none = vectors.quarantineRestoreSelected(t, other, quarantineOf(c), Instant.parse("2026-01-01T00:00:00Z"),
+            null, null, 10, ACTOR, false);
+        assertThat(none.rows()).isEmpty();
+        assertThat(inCollection(t, quarantineOf(c), h)).isTrue();
+    }
+
+    @Test
+    void aGcQuarantineOrphansAuditRowIsOnlyASample_soItIsRefusedAndTheSelectionIsTheWayBack() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String a = orphan(t, c, "gq-a");
+        String b = orphan(t, c, "gq-b");
+        ReapableFixtures.agePastGrace(pg, t, c);
+        // The route nx index repo and nx t3 gc quarantine through: it audits a SAMPLE (here 1 of the 2 it moved).
+        var moved = vectors.quarantineOrphans(t, c, quarantineOf(c), "2026-10-01T12:00:00Z", 1);
+        assertThat(moved.moved()).isEqualTo(2);
+        long auditId = audit(t, "gc_quarantine_orphans").get(0).id();
+
+        assertThatThrownBy(() -> vectors.quarantineRestoreFromAudit(t, c, quarantineOf(c), auditId, 0, 10, ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("sample").hasMessageContaining("quarantined_since");
+        assertThat(inCollection(t, quarantineOf(c), a)).as("nothing moved").isTrue();
+
+        var out = vectors.quarantineRestoreSelected(t, c, quarantineOf(c), Instant.parse("2026-10-01T00:00:00Z"), null,
+            null, 100, ACTOR, false);
+        assertThat(out.restored()).containsExactlyInAnyOrder(a, b);
+    }
+
+    // ── tenant scope ─────────────────────────────────────────────────────────
+
+    @Test
+    void aTenantCannotRestoreAnotherTenantsQuarantinedChunk() throws Exception {
+        String a = newTenant();
+        String b = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(a, c, "tenant-a-only").get(0);
+        // Tenant B has the same two collections, registered and empty.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), b, c);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), b, quarantineOf(c));
+        }
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(b, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        assertThat(out.missing()).containsExactly(h);
+        assertThat(inCollection(a, quarantineOf(c), h)).as("tenant A's quarantine is untouched").isTrue();
+        assertThat(inCollection(b, c, h)).isFalse();
+        assertThat(audit(a, "quarantine_restore")).isEmpty();
+        assertThat(audit(b, "quarantine_restore")).isEmpty();
+    }
+
+    // ── the exclusive sweep gate ─────────────────────────────────────────────
+
+    @Test
+    void theMoveTakesTheExclusiveSweepGate_soAManifestWriterHoldingItSharedBlocksIt() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "gated").get(0);
+
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock_shared",
+                SQLDataType.OTHER, DSL.function("hashtext", SQLDataType.INTEGER,
+                    DSL.val("sweepgate:" + t + "/" + c)))).execute();
+            assertThatThrownBy(() -> vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false))
+                .hasStackTraceContaining("sweep gate");
+            holder.rollback();
+        }
+        assertThat(inCollection(t, quarantineOf(c), h)).as("a refused restore moved nothing").isTrue();
+        // And once the gate is free it goes through.
+        assertThat(vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false).restored()).containsExactly(h);
+    }
+
+    // ── refusals before any move ─────────────────────────────────────────────
+
+    @Test
+    void theArgumentsAreValidatedBeforeAnythingMoves() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "args").get(0);
+        String q = quarantineOf(c);
+
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, q, q, List.of(h), ACTOR, false))
+            .as("the origin may not itself be a quarantine collection")
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("quarantine");
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, c, c, List.of(h), ACTOR, false))
+            .as("the sibling must be a quarantine collection")
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, c, "quarantine-" + col("knowledge"), List.of(h), ACTOR, false))
+            .as("an unregistered sibling")
+            .isInstanceOf(RuntimeException.class);
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, c, q, List.of(), ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, c, q, List.of("not-a-chash"), ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, c, q,
+                java.util.Collections.nCopies(PgVectorRepository.MAX_QUARANTINE_RESTORE_CHASHES + 1, h), ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("at most");
+        assertThat(inCollection(t, q, h)).isTrue();
+    }
+}

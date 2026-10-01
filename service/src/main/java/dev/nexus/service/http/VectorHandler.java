@@ -223,6 +223,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/gc/quarantine-orphans"  -> handleGcQuarantineOrphans(exchange, method);   // RDR-191 P1
                 case "/gc/restore-rereferenced" -> handleGcRestoreRereferenced(exchange, method); // RDR-191 P1
                 case "/gc/expire-quarantine"   -> handleGcExpireQuarantine(exchange, method);     // RDR-191 P1
+                case "/gc/quarantine-restore"  -> handleGcQuarantineRestore(exchange, method);    // RDR-192 S9 Day-2
                 case "/manifest-less-census"   -> handleManifestLessCensus(exchange, method);     // RDR-192 S2
                 case "/reapable"               -> handleReapable(exchange, method);               // RDR-192 S8
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
@@ -1284,6 +1285,140 @@ public final class VectorHandler implements HttpHandler {
         var outcome = repo.expireQuarantine(tenant, quarantineCollection, originCollection,
                 cutoff, floorFraction, floorMinChunks, force);
         HttpUtil.send(ex, 200, json(Map.of("expired", outcome.expired(), "refused", outcome.refused())));
+    }
+
+    /**
+     * Most chashes one {@code /v1/vectors/gc/quarantine-restore} call takes, from any source. The repository's own
+     * ceiling is {@link PgVectorRepository#MAX_QUARANTINE_RESTORE_CHASHES} (5000, gc_audit's chash ceiling); one
+     * HTTP call stays well inside the edge's ~30 s deadline at 1000 rows with three vector columns each, and the
+     * client pages with {@code next_after} / {@code source.next_offset}.
+     */
+    static final int MAX_QUARANTINE_RESTORE_PER_CALL = 1000;
+
+    /**
+     * POST /v1/vectors/gc/quarantine-restore (RDR-192 Step 9 Day-2, bead nexus-2x9xa; serves
+     * {@code nx t3 quarantine restore})
+     *
+     * <p>Moves chunks from {@code quarantine_collection} (the origin's {@code quarantine-} sibling) back to
+     * {@code origin_collection}, with no manifest row required, in one statement under the exclusive sweep gate
+     * ({@code nexus.quarantine_restore_chunks}, vectors-025). A chash the origin already has is skipped, never
+     * overwritten; the restored row takes a fresh {@code last_written_at}, so the reaper does not take it at its
+     * next pass; one {@code quarantine_restore} gc_audit row records the full list of restored chashes.
+     * Tenant-scoped under RLS.
+     *
+     * <p>Request: {@code origin_collection} and {@code quarantine_collection}, and EXACTLY ONE source:
+     * <pre>
+     * { "chashes": ["64-hex", ...] }                                 // 1 to 1000 named chashes
+     * { "audit_id": 123, "offset": 0, "limit": 1000 }                // the chash list of a gc_audit row
+     * { "quarantined_since": "2026-09-01T00:00:00Z",                 // chunks quarantined from the origin in a
+     *   "quarantined_before": "2026-09-08T00:00:00Z",                // window; one bound or both
+     *   "after_chash": "64-hex", "limit": 1000 }
+     * </pre>
+     * plus optional {@code dry_run} (classify only: no gate, no move, no audit row) and {@code actor} (recorded on
+     * the audit row; default {@code operator}). An {@code audit_id} row must be this tenant's, name the origin, be
+     * an operation that quarantined chunks, and list every chash it moved: a {@code gc_quarantine_orphans} row lists
+     * only a sample and is refused with 400, the way back for those is the {@code quarantined_since} window.
+     *
+     * <p>Response 200: {@code {"origin_collection", "quarantine_collection", "dry_run", "audit_id": N|null,
+     * "restored": n, "would_restore": n, "present": n, "dim_conflict": n, "missing": n, "rows": [{"chash",
+     * "outcome", "no_manifest": bool|null, "reapable_after": ISO-8601|null}, ...], "source": {...}|null,
+     * "next_after": "64-hex"|null}}. {@code rows} has one entry per distinct requested chash, in request order.
+     * {@code outcome} is {@code restored}, {@code would_restore} (dry run), {@code present} (the origin has it),
+     * {@code dim_conflict} (as present, with a different embedding width in the quarantine copy) or {@code missing}.
+     * For a {@code restored} row {@code no_manifest} says the chunk has no own-collection manifest row and
+     * {@code reapable_after} is when the reaper may take it again unless an owner row is repaired first. Page by
+     * sending {@code next_after} back as {@code after_chash} (window source) or {@code source.next_offset} back
+     * as {@code offset} (audit source) while it is not null.
+     */
+    private void handleGcQuarantineRestore(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String origin     = requireString(body, "origin_collection");
+        String quarantine = requireString(body, "quarantine_collection");
+        boolean dryRun = optBool(body, "dry_run", false);
+        String actor = java.util.Objects.requireNonNullElse(optString(body, "actor"), "operator");
+
+        List<String> chashes = body.get("chashes") == null ? null : requireStringList(body, "chashes");
+        Object auditRaw = body.get("audit_id");
+        String sinceRaw = optString(body, "quarantined_since");
+        String beforeRaw = optString(body, "quarantined_before");
+        int sources = (chashes != null ? 1 : 0) + (auditRaw != null ? 1 : 0)
+                    + (sinceRaw != null || beforeRaw != null ? 1 : 0);
+        if (sources != 1) {
+            throw new IllegalArgumentException("name exactly one source: chashes, audit_id, or "
+                + "quarantined_since / quarantined_before (got " + sources + ")");
+        }
+        int limit = Math.max(1, Math.min(optInt(body, "limit", MAX_QUARANTINE_RESTORE_PER_CALL),
+                                         MAX_QUARANTINE_RESTORE_PER_CALL));
+
+        PgVectorRepository.QuarantineRestoreOutcome result;
+        if (chashes != null) {
+            if (chashes.size() > MAX_QUARANTINE_RESTORE_PER_CALL) {
+                throw new IllegalArgumentException("at most " + MAX_QUARANTINE_RESTORE_PER_CALL
+                    + " chashes per call, got " + chashes.size());
+            }
+            result = repo.quarantineRestore(tenant, origin, quarantine, chashes, actor, dryRun);
+        } else if (auditRaw != null) {
+            long auditId;
+            try {
+                auditId = auditRaw instanceof Number n ? n.longValue() : Long.parseLong(auditRaw.toString());
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("field 'audit_id' must be an integer");
+            }
+            int offset = Math.max(0, optInt(body, "offset", 0));
+            result = repo.quarantineRestoreFromAudit(tenant, origin, quarantine, auditId, offset, limit, actor, dryRun);
+        } else {
+            result = repo.quarantineRestoreSelected(tenant, origin, quarantine,
+                parseInstant("quarantined_since", sinceRaw), parseInstant("quarantined_before", beforeRaw),
+                parseAfterChash(body.get("after_chash")), limit, actor, dryRun);
+        }
+
+        var rows = new ArrayList<Map<String, Object>>(result.rows().size());
+        for (var r : result.rows()) {
+            var item = new LinkedHashMap<String, Object>();
+            item.put("chash", r.chash());
+            item.put("outcome", r.outcome());
+            item.put("no_manifest", r.noManifest());
+            item.put("reapable_after", r.reapableAfter());
+            rows.add(item);
+        }
+        Map<String, Object> source = null;
+        if (result.source() != null) {
+            source = new LinkedHashMap<>();
+            source.put("audit_id", result.source().auditId());
+            source.put("operation", result.source().operation());
+            source.put("chash_count", result.source().chashCount());
+            source.put("chashes_listed", result.source().chashesListed());
+            source.put("offset", result.source().offset());
+            source.put("next_offset", result.source().nextOffset());
+        }
+        var out = new LinkedHashMap<String, Object>();
+        out.put("origin_collection", origin);
+        out.put("quarantine_collection", quarantine);
+        out.put("dry_run", dryRun);
+        out.put("audit_id", result.auditId());
+        out.put("restored", result.restored().size());
+        out.put("would_restore", result.wouldRestore().size());
+        out.put("present", result.present().size());
+        out.put("dim_conflict", result.dimConflict().size());
+        out.put("missing", result.missing().size());
+        out.put("rows", rows);
+        out.put("source", source);
+        out.put("next_after", result.nextAfter());
+        HttpUtil.send(ex, 200, json(out));
+    }
+
+    /** An optional ISO-8601 UTC instant field of {@code /gc/quarantine-restore}: null stays null. */
+    static java.time.Instant parseInstant(String field, String raw) {
+        if (raw == null) return null;
+        try {
+            return java.time.Instant.parse(raw);
+        } catch (java.time.format.DateTimeParseException e) {
+            throw new IllegalArgumentException("field '" + field
+                + "' must be an ISO-8601 UTC instant such as 2026-09-01T00:00:00Z, got: " + raw);
+        }
     }
 
     /**
