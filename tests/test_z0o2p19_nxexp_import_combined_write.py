@@ -1030,8 +1030,11 @@ def _record_minted(monkeypatch) -> list[str]:
     real = exporter_mod._resolve_owner_document
 
     def _spy(group, *a, **kw):
-        kw["minted_out"] = minted
-        return real(group, *a, **kw)
+        own = kw["minted_out"]                  # the importer's own list: it must keep what is registered
+        before = len(own)
+        out = real(group, *a, **kw)
+        minted.extend(own[before:])
+        return out
 
     monkeypatch.setattr(exporter_mod, "_resolve_owner_document", _spy)
     return minted

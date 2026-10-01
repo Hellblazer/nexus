@@ -609,18 +609,21 @@ def put_note(
        nothing can be, since a note is never written ownerless.
     3. ``doc_indexer._fence_begin`` (advisory), then :func:`write_note` with the whole note's hash so
        the completion stamp rides the request.
-    4. On :class:`NoteWriteError`: ``_fence_fail``; remove the row this call minted, but only when
-       its manifest is empty (a concurrent writer's version means the row is no longer ours), or,
-       for a row this call reconciled onto, put back the identity stamp it changed; a minted row
-       whose removal fails has its stamp cleared instead.
+    4. On :class:`NoteWriteError`: remove the row this call minted, but only when its manifest is
+       empty (a concurrent writer's version means the row is no longer ours), or, for a row this call
+       reconciled onto, put back the identity stamp it changed; a minted row whose removal fails has
+       its stamp cleared instead; THEN ``_fence_fail``. The removal runs before the fence write so the
+       read-then-delete window in ``rollback_minted_catalog_entry`` is not widened (nexus-z0o2p.35, M1).
        On :class:`StampRefusedError` (the engine accepted the write and refused the completion
        stamp): UNCERTAIN with ``stamp_refused`` set, and NO ``_fence_fail``: the writer's rule
        leaves the fence ``indexing``, and a stamp the engine refused is never flipped to failed; the refusal was recorded by
        :func:`write_note`, and nothing is rolled back.
+       On :class:`LandedUnconfirmedError` (the manifest shows the note, the resend failed): UNCERTAIN
+       and NO ``_fence_fail``, for the same reason: the first attempt may have stamped it (M2).
        On any other :class:`~nexus.catalog.store_hook.ManifestVerifyUncertainError`, or a landed
        note the fence could not be told about: ``_fence_fail`` and nothing else, since the note may
        exist.
-       On any other exception: ``_fence_fail``, remove a minted row, re-raise.
+       On any other exception: remove a minted row (or restore the stamp), ``_fence_fail``, re-raise.
 
     *collection* is the full T3 collection name. Raises ``PutOversizedError`` for an over-quota
     note and ``ValueError`` for empty *content* or a bad ``ttl_days``, all before any side effect.
@@ -707,30 +710,24 @@ def put_note(
         # The minted row goes FIRST (M1): rollback_minted_catalog_entry reads the manifest and then
         # deletes the document unconditionally, and every call between the read and the delete is a
         # window for a concurrent writer of the same (collection, title) to land its note on the row
-        # about to be deleted. A removed row has no fence left to fail.
-        removed = False
+        # about to be deleted. The fence is failed after (Decision 5 keeps both).
         if out.minted and exc.manifest_empty:
-            removed = bool(sh.rollback_minted_catalog_entry(doc, original_error=out.reason))
-            if not removed:
+            if not sh.rollback_minted_catalog_entry(doc, original_error=out.reason):
                 # The row this call minted could not be removed and survives with meta.doc_id naming
                 # the first chash of a chunk that was never written: clear it (a minted row had no
                 # prior identity), or live_note_chashes treats it as a manifest-less note.
                 sh.restore_pre_call_stamp(doc, "", out.doc_id)
         elif not out.minted:
             sh.restore_pre_call_stamp(doc, pre_call.get("doc_id", ""), out.doc_id)
-        if not removed:
-            _fence_fail(doc, out.reason)
+        _fence_fail(doc, out.reason)
         return out
     except Exception as exc:
-        removed = False
         if out.minted:
-            removed = bool(sh.rollback_minted_catalog_entry(doc, original_error=str(exc)))
-            if not removed:
+            if not sh.rollback_minted_catalog_entry(doc, original_error=str(exc)):
                 sh.restore_pre_call_stamp(doc, "", out.doc_id)
         else:
             sh.restore_pre_call_stamp(doc, pre_call.get("doc_id", ""), out.doc_id)
-        if not removed:
-            _fence_fail(doc, str(exc))
+        _fence_fail(doc, str(exc))
         raise
     out.status, out.write = STORED, write
     _warn_if_sweep_skipped(out, write)

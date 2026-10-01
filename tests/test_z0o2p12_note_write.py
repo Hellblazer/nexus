@@ -805,14 +805,12 @@ class TestPutNote:
                            title=f"z0o2p12-minted-{manifest_empty}")
         assert out.status == nw.NOT_LANDED and out.minted is True
         assert rollback.call_count == (1 if manifest_empty else 0)
-        # A row that was removed has no fence worth failing (nexus-z0o2p.35, M1); a row left alone
-        # because another writer owns its manifest still gets the fence failed, as before.
-        assert fail.call_count == (0 if manifest_empty else 1)
+        assert fail.call_count == 1                      # both still fire (Decision 5)
 
     def test_a_minted_row_is_removed_before_the_fence_is_failed(self, vec):
         """M1: the read-then-delete window in ``rollback_minted_catalog_entry`` must not be widened by
-        the fence write, so the removal runs FIRST; a row that could not be removed has its stamp
-        cleared and then the fence failed."""
+        the fence write, so the removal runs FIRST and the fence is failed after (Decision 5 keeps
+        both); a row that could not be removed has its stamp cleared in between."""
         import nexus.catalog.note_write as nw
         from unittest.mock import patch
 
@@ -833,7 +831,8 @@ class TestPutNote:
                 out = put_note(content=f"z0o2p35 minted order {removed}", collection=_COLLECTION,
                                title=f"z0o2p35-minted-order-{removed}")
             assert out.status == nw.NOT_LANDED
-            assert order == (["rollback"] if removed else ["rollback", "restore-stamp", "fence-fail"]), order
+            assert order == (["rollback", "fence-fail"] if removed
+                             else ["rollback", "restore-stamp", "fence-fail"]), order
 
     def test_a_landed_note_whose_resend_failed_does_not_fail_the_fence(self, vec):
         """M2: the manifest showed the note, so attempt 1 committed (and may have stamped it). A resend
