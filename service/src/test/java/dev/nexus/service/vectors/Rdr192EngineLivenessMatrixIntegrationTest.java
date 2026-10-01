@@ -693,6 +693,62 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertExistencePredicate(tenant, fx, "P7");
     }
 
+    /**
+     * RDR-192 Step 8 (nexus-wbfpw.16): P7 selects with reapable(c), so it honours the
+     * grace window. Every row of a freshly seeded fixture is younger than 30 days, so
+     * not one of the four orphans (R1, R4, R6, R8) moves; before Step 8 it moved all four.
+     */
+    @Test
+    void p7_freshOrphans_areNotQuarantined_graceWindowApplies_unbounded() throws Exception {
+        String tenant = "wbfpw1-p7uf";
+        Fixture fx = seedLivenessFixture(tenant);
+        String quarantineCollection = "quarantine-knowledge__wbfpw1-p7uf-a__minilm-l6-v2-384__v1";
+
+        var outcome = vecRepo.quarantineOrphans(tenant, COLLECTION_A, quarantineCollection,
+            "2026-09-26T00:00:00Z", 100);
+
+        assertThat(outcome.moved()).as("nothing has aged past the grace window").isZero();
+        for (String row : ROWS) {
+            assertThat(chunkExistsInCollection(tenant, COLLECTION_A, chashForRow(fx, row)))
+                .as("%s stays in A: fresh", row).isTrue();
+        }
+    }
+
+    @Test
+    void p7_freshOrphans_areNotQuarantined_graceWindowApplies_bounded() throws Exception {
+        String tenant = "wbfpw1-p7bf";
+        Fixture fx = seedLivenessFixture(tenant);
+        String quarantineCollection = "quarantine-knowledge__wbfpw1-p7bf-a__minilm-l6-v2-384__v1";
+
+        var outcome = vecRepo.quarantineOrphansBounded(tenant, COLLECTION_A, quarantineCollection,
+            "2026-09-26T00:00:00Z", 100, 100);
+
+        assertThat(outcome.moved()).isZero();
+        assertThat(outcome.remaining()).as("the bounded form's remaining count is reapable(c) too").isZero();
+        for (String row : ROWS) {
+            assertThat(chunkExistsInCollection(tenant, COLLECTION_A, chashForRow(fx, row)))
+                .as("%s stays in A: fresh", row).isTrue();
+        }
+    }
+
+    /** A mixed population: one aged orphan moves, a fresh orphan of the identical shape does not. */
+    @Test
+    void p7_agedOrphanMoves_whileAFreshOrphanOfTheSameShapeStays() throws Exception {
+        String tenant = "wbfpw1-p7m";
+        Fixture fx = seedLivenessFixture(tenant);
+        ageTenantChunks(tenant);
+        String freshR1 = ch(tenant + "-r1-fresh");
+        vecRepo.upsertChunks(tenant, COLLECTION_A, List.of(freshR1), List.of("r1 fresh text"), List.of(Map.of()));
+        String quarantineCollection = "quarantine-knowledge__wbfpw1-p7m-a__minilm-l6-v2-384__v1";
+
+        var outcome = vecRepo.quarantineOrphans(tenant, COLLECTION_A, quarantineCollection,
+            "2026-09-26T00:00:00Z", 100);
+
+        assertThat(outcome.moved()).as("R1, R4, R6, R8 aged; the fresh R1 twin is not").isEqualTo(4);
+        assertExistencePredicate(tenant, fx, "P7");
+        assertThat(chunkExistsInCollection(tenant, COLLECTION_A, freshR1)).as("fresh R1 stays").isTrue();
+    }
+
     // ── REAP: EXISTS(nexus.chunk_is_reapable(...)) (RDR-192 Step 7, bead nexus-wbfpw.15) ──
 
     /** Pushes every chunk of {@code tenant} 40 days into the past (past the 30 day default grace). */

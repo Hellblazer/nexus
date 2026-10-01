@@ -1278,7 +1278,12 @@ class RawSqlGateTest {
         // through a NOSUPERUSER NOBYPASSRLS connection (jOOQ's explain() cannot ANALYZE),
         // and the pg_stat_user_tables HOT counters. Same reasons as
         // ManifestLessCensusNotesGuardIndexPlanShapeTest's entry above.
-        Map.entry("dev/nexus/service/vectors/ChunkIsReapablePlanIntegrationTest.java", 16)
+        Map.entry("dev/nexus/service/vectors/ChunkIsReapablePlanIntegrationTest.java", 16),
+        // RDR-192 Step 8 (bead nexus-wbfpw.16): 1 raw-JDBC site -- waitsOnARowLock's
+        // pg_stat_activity probe (no jOOQ DSL form), the same reason as
+        // ChunkIsReapableIntegrationTest above. The gc calls and every fixture write go
+        // through the repository and typed DSL.
+        Map.entry("dev/nexus/service/vectors/GcQuarantineReapableIntegrationTest.java", 1)
     );
 
     /**
@@ -1661,7 +1666,9 @@ class RawSqlGateTest {
     // comment).
     // RDR-192 Step 7 (bead nexus-wbfpw.15): 979 -> 996 (+17: ChunkIsReapableIntegrationTest.java
     // new at 1 and ChunkIsReapablePlanIntegrationTest.java new at 16 -- see their entries).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 996;
+    // RDR-192 Step 8 (bead nexus-wbfpw.16): 996 -> 997 (+1: GcQuarantineReapableIntegrationTest.java
+    // new at 1 -- see its entry).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 997;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

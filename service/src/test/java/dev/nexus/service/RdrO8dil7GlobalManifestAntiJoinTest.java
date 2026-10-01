@@ -727,6 +727,8 @@ class RdrO8dil7GlobalManifestAntiJoinTest {
                 .isEqualTo(orphanContent);
         }
 
+        // RDR-192 Step 8: the sweep honours the 30 day grace window.
+        ReapableFixtures.agePastGrace(pg, TENANT, coll);
         var outcome = vectorRepo.quarantineOrphans(TENANT, coll, quarantineColl,
             "2026-08-13T00:00:00Z", 10);
         assertThat(outcome.moved())
