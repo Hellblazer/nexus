@@ -520,8 +520,11 @@ class ChunkBatcher:
         (only it fails). Depth is naturally log2(files). Throttles are the exception
         (nexus-eoido, see ``_throttle_signal``): a 429 or a 503 with Retry-After is never
         bisected, the batch fails as one; an engine deadline abort is bisected ONCE (``bisected``
-        marks a half), so the size self-tuning of ``per_collection_chunk_cap`` survives without
-        the 1+2+4... request multiplication. Every throttle trips the shared brake, and
+        marks a half), which bounds the retry traffic to 1+2 requests instead of 1+2+4....
+        ``per_collection_chunk_cap`` is static and the bisect never feeds it, so nothing here
+        shrinks future batches: a batch bigger than twice the embed budget still fails whole on
+        every run (the residual accepted under Sam's option b, nexus-eoido). Every throttle
+        trips the shared brake, and
         ``throttle_breaker_threshold`` consecutive ones open the breaker (below).
 
         Emits ONE ``chunk_flush_complete`` structlog event per completed

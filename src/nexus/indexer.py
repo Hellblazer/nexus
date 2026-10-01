@@ -6017,10 +6017,14 @@ def _run_index(
             # here, batch-mates included, because the service refused the
             # request as a whole; the next run's staleness check retries
             # them. The begin stamp
-            # for this file already landed via ``_fire_flush_grain_begin``
-            # (``on_batch_begin``, before the upload) — without this arm
+            # for this file normally landed via ``_fire_flush_grain_begin``
+            # (``on_batch_begin``, before the upload), so without this arm
             # the fence wedged at 'indexing' forever on a flush failure
-            # (the gap this bead closes). ``_fence_fail`` never raises.
+            # (the gap this bead closes). A file whose flush the throttle
+            # breaker deferred never got a begin stamp (the begin hook is
+            # skipped); the failed stamp here is unconditional and
+            # CatalogRepository.failIndexRun accepts it with no prior begin.
+            # ``_fence_fail`` never raises.
             if isinstance(_context, dict):
                 _cdid = _context.get("catalog_doc_id")
                 if _cdid:
@@ -6653,11 +6657,9 @@ def _run_index(
                    if _lock_wait_s else "")
             )
         _batch_failures = _batcher.failed_files
-        # getattr, like the drain-progress read of ``failed_files`` above: a duck-typed batcher
-        # stand-in that predates the throttle properties reports "nothing throttled".
-        _batch_throttled = dict(getattr(_batcher, "throttled_files", None) or {})
-        _batch_throttle_retry_after = getattr(_batcher, "throttle_retry_after", None)
-        _batch_throttle_breaker_open = bool(getattr(_batcher, "throttle_breaker_open", False))
+        _batch_throttled = dict(_batcher.throttled_files)
+        _batch_throttle_retry_after = _batcher.throttle_retry_after
+        _batch_throttle_breaker_open = bool(_batcher.throttle_breaker_open)
         # Rejected = failed and not throttled; the throttled ones get their own line below.
         _rejected = {p: e for p, e in _batch_failures.items() if p not in _batch_throttled}
         if _rejected:
