@@ -967,6 +967,15 @@ def _flush_wiring_problems(tree: ast.Module) -> list[str]:
     for fn, role in ((flush, "_batch_flush records"), (stamp, "_stamp_flush_documents consults")):
         if not [n for n in ast.walk(fn) if isinstance(n, ast.Name) and n.id == "_flush_failed_docs"]:
             problems.append(f"{role} the flush's failed_doc_ids through _flush_failed_docs (a failed document must not be stamped)")
+    # Consulting the dict is not enough: the failed set must FILTER the owed set. Dropping the
+    # exclusion while keeping the pop leaves every name above present (nexus-ioauc, the Phase 2
+    # gate's M3 mutation), so the assignment to ``owed`` must itself name the failed-document set.
+    owed_assigns = [n for n in ast.walk(stamp)
+                    if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "owed" for t in n.targets)]
+    if len(owed_assigns) != 1 or not [
+        n for n in ast.walk(owed_assigns[0].value) if isinstance(n, ast.Name) and n.id == "_write_failed"
+    ]:
+        problems.append("_stamp_flush_documents' owed-set filter must exclude _write_failed (a failed document must not be stamped)")
     return problems
 
 
@@ -1091,6 +1100,9 @@ def test_the_stamp_last_gate_is_red_when_the_real_source_loses_a_stamp_a_deferra
     ("flush batcher not wired to the stamp", "            on_batch_stamp=_stamp_flush_documents,\n", ""),
     ("stamp ignores the failed documents", "            _write_failed = {_d for _d, _r in _full_docs if _flush_failed_docs.pop(_d, 0) is None}\n",
      "            _write_failed = set()\n"),
+    ("owed filter drops the failed-document exclusion (nexus-ioauc, M3)",
+     "                if _d in _complete_map and _d not in _write_failed\n",
+     "                if _d in _complete_map\n"),
     ("stamp request carries chunks","                            complete={_d: (_h, _n) for _d, _h, _n in group},\n",
      "                            complete={_d: (_h, _n) for _d, _h, _n in group}, chunks=[],\n"),
 ])
