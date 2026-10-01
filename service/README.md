@@ -75,6 +75,16 @@ would disable the bound and is refused at boot. The shutdown hook also
 terminates this process's own backends (`BackendReaper`, keyed on a
 per-boot `application_name`) before closing the pool, since a CPU-bound
 backend never notices a closed socket.
+`NX_OWNERLESS_WRITE_MODE` (RDR-223 Phase 3 Step 2) is `enforce` or `log-only`;
+**unset or blank means `log-only`**, so only an explicit `enforce` refuses a
+`/v1/vectors/upsert-chunks` or `/store-put` write whose chashes have no live
+manifest row (422, `reason: ownerless_chunk_write`). In `log-only` the write
+proceeds, and the engine logs `ownerless_chunk_write_would_refuse` (once per
+route, tenant and collection per minute, with the request's `User-Agent` and
+`X-Nexus-Client-Version`, `absent` for a client older than the cut that sends
+it) and counts it. Any other value fails the service AT BOOT. `GET /v1/status`
+carries `ownerless_write_mode`, `ownerless_writes_refused_total` and
+`ownerless_writes_would_refuse_total`. The local engine launch sets `enforce`.
 `NX_TAXONOMY_ASSIGN_STATEMENT_TIMEOUT_MS` (default 30000) and
 `NX_TAXONOMY_ASSIGN_LOCK_TIMEOUT_MS` (default 5000), both range 1..600000,
 bound the taxonomy assign transaction (`assign_from_chashes_<dim>`) the

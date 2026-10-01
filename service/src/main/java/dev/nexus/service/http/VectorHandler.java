@@ -13,6 +13,9 @@ import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedResult;
 import dev.nexus.service.vectors.EmbedderRouter;
 import dev.nexus.service.vectors.EmbeddingModelUnavailableException;
+import dev.nexus.service.vectors.OwnerlessChunkWriteException;
+import dev.nexus.service.vectors.OwnerlessWritePolicy;
+import dev.nexus.service.vectors.OwnershipGuard;
 import dev.nexus.service.vectors.PgVectorRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,7 +33,7 @@ import java.util.Map;
  * <p>Routes (all under {@code /v1/vectors/}):
  * <pre>
  *   POST /v1/vectors/upsert-chunks   server-side embed + pgvector write
- *   POST /v1/vectors/upsert-reference-only  precomputed-vector, NULL-content upsert (RDR-169 G4)
+ *   POST /v1/vectors/upsert-reference-only  410 Gone (retired, RDR-223 Phase 3 Step 2, nexus-z0o2p.24)
  *   POST /v1/vectors/search          embed query server-side + cosine rank (multi-collection)
  *   POST /v1/vectors/query           alias for search (mirrors MCP query tool)
  *   POST /v1/vectors/hybrid-search   pgvector hybrid fusion (tsvector+pg_trgm gate, vector rank) — RDR-155 P3
@@ -142,6 +145,7 @@ public final class VectorHandler implements HttpHandler {
     private final EmbedderRouter      embedderRouter;
     private final PgVectorRepository  pgRepo;
     private final RerankStage         rerankStage;
+    private final OwnerlessWritePolicy ownerlessWritePolicy;
 
     /**
      * @param embedderRouter collection-aware embedder router for /embed (may be null —
@@ -166,9 +170,22 @@ public final class VectorHandler implements HttpHandler {
      */
     public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
                          dev.nexus.service.vectors.Reranker reranker) {
+        this(embedderRouter, pgRepo, reranker, OwnerlessWritePolicy.fromEnv());
+    }
+
+    /**
+     * Full wiring plus the ownerless-write policy (RDR-223 Phase 3 Step 2, nexus-z0o2p.24).
+     *
+     * @param ownerlessWritePolicy what {@code upsert-chunks} and {@code store-put} do with a chash that
+     *                             has no live manifest row: refuse it (the default) or log and count it
+     */
+    public VectorHandler(EmbedderRouter embedderRouter, PgVectorRepository pgRepo,
+                         dev.nexus.service.vectors.Reranker reranker,
+                         OwnerlessWritePolicy ownerlessWritePolicy) {
         this.embedderRouter = embedderRouter;
         this.pgRepo         = pgRepo;
         this.rerankStage    = new RerankStage(reranker);
+        this.ownerlessWritePolicy = ownerlessWritePolicy;
     }
 
     @Override
@@ -181,7 +198,7 @@ public final class VectorHandler implements HttpHandler {
         try {
             switch (op) {
                 case "/upsert-chunks" -> handleUpsertChunks(exchange, method);
-                case "/upsert-reference-only" -> handleUpsertReferenceOnlyChunk(exchange, method); // RDR-169 G4
+                case "/upsert-reference-only" -> handleUpsertReferenceOnlyGone(exchange); // RDR-223 P3.2: retired
                 case "/search"        -> handleSearch(exchange, method);
                 case "/query"         -> handleSearch(exchange, method);   // alias
                 case "/hybrid-search" -> handleHybridSearch(exchange, method);  // RDR-155 P3
@@ -281,14 +298,24 @@ public final class VectorHandler implements HttpHandler {
             // so the request is retried against the restarted engine.
             log.info("event=vector_refused_shutting_down op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 503, json(Map.of("error", e.getMessage())));
+        } catch (OwnerlessChunkWriteException e) {
+            // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the write names a chash no live document
+            // owns. 422 (well-formed, refused), with a reason a client can branch on and the first
+            // few offending chashes; not one of the client's gateway retry codes, since resending
+            // the identical write is refused identically. The repository logged the refusal.
+            HttpUtil.send(exchange, 422, json(Map.of(
+                "error", e.getMessage(),
+                "reason", HttpUtil.OWNERLESS_CHUNK_WRITE_REASON,
+                "unowned_count", e.unownedCount(),
+                "requested_count", e.requestedCount(),
+                "unowned_chashes", e.unownedSample())));
         } catch (IllegalArgumentException e) {
             log.debug("event=vector_bad_request op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 400, json(Map.of("error", e.getMessage())));
         } catch (IllegalStateException e) {
             // Shared arm for every well-formed-but-rejected request across routes:
             // get-all-metadata's row-count cap (too big for the single-round-trip
-            // fast path) and upsert-reference-only's full→reference-only transition
-            // guard (RDR-169 §Re-index PROHIBITS, bead nexus-zw2em) both land here.
+            // fast path) and the repository's own state guards land here.
             // 422 distinguishes this from a malformed request (400) or a real
             // server error (500); the Python client falls back to paginated /get
             // (or surfaces the error) on any non-2xx, so the exact code just needs
@@ -307,6 +334,29 @@ public final class VectorHandler implements HttpHandler {
     }
 
     // ── Per-request guards ────────────────────────────────────────────────────
+
+    /**
+     * The ownership check a chunk-write route asks the repository for (RDR-223 Phase 3 Step 2,
+     * nexus-z0o2p.24): every chash in the request must have a live manifest row in the collection.
+     * The policy decides whether a miss refuses the request or is only logged and counted.
+     */
+    private OwnershipGuard ownershipGuard(HttpExchange ex, String route) {
+        var headers = ex.getRequestHeaders();
+        return new OwnershipGuard(ownerlessWritePolicy.mode(), route,
+                headers.getFirst("User-Agent"), headers.getFirst(CLIENT_VERSION_HEADER));
+    }
+
+    /**
+     * Header the final-cut client sends on every engine request (RDR-223 Phase 3 Step 2,
+     * nexus-z0o2p.24): the conexus version. The ownerless-write log line carries it, and its
+     * absence names a client older than the cut.
+     */
+    public static final String CLIENT_VERSION_HEADER = "X-Nexus-Client-Version";
+
+    /** The policy this handler applies to ownerless chunk writes; the test seam and the status source. */
+    public OwnerlessWritePolicy ownerlessWritePolicy() {
+        return ownerlessWritePolicy;
+    }
 
     /**
      * 503 + skip when no pgvector repository is wired (matches the /embed
@@ -429,78 +479,36 @@ public final class VectorHandler implements HttpHandler {
                         "embeddings length " + embeddings.size() + " != ids length " + ids.size());
             }
             repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas,
-                    deleteKeys);
+                    deleteKeys, ownershipGuard(ex, "upsert-chunks"));
             emitTokenUsage(ex, 0L);
             HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size(), "tokens", 0)));
             return;
         }
 
         var upsertResult = repo.upsertChunksWithTokens(
-                tenant, collection, ids, documents, metadatas, forceReEmbed, deleteKeys);
+                tenant, collection, ids, documents, metadatas, forceReEmbed, deleteKeys,
+                ownershipGuard(ex, "upsert-chunks"));
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, upsertResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
     }
 
     /**
-     * POST /v1/vectors/upsert-reference-only  (RDR-169 G4, embed-without-store; Gap 4's
-     * option (b) route, bead nexus-zw2em landed the schema this route needs).
+     * POST /v1/vectors/upsert-reference-only: RETIRED (RDR-223 Phase 3 Step 2, nexus-z0o2p.24).
      *
-     * <p>Request:
-     * <pre>
-     * {
-     *   "collection": "knowledge__owner__voyage-context-3__v1",
-     *   "chash":      "&lt;64-hex sha256&gt;",
-     *   "embedding":  [0.1, 0.2, ...],      // precomputed vector, dim must match collection
-     *   "metadata":   {"source_uri": "obsidian://vault/note#heading", ...}  // optional
-     * }
-     * </pre>
-     *
-     * <p>Stores {@code chunk_text=NULL} + {@code retention='reference-only'} with the
-     * caller-supplied vector verbatim — no embedder call, token usage always 0. Rejects
-     * (422, {@link IllegalStateException}) overwriting a chash that already carries full
-     * content (RDR-169 §Re-index PROHIBITS a full→reference-only transition); the caller
-     * must explicitly delete + re-insert to change retention.
-     *
-     * <p>Response 200: {@code {"upserted": true}}.
+     * <p>The route wrote a chunk with no manifest row, which is the ownerless write this phase
+     * refuses everywhere, and it could never write a NEW chunk once the refusal applied (the
+     * manifest FK wants the chunk first, the refusal wants the manifest first). It had no client
+     * caller, and the production edge log showed no request to it in its whole life (Sam,
+     * 2026-10-01, WAF logs 2026-07-03 to 2026-10-01). 410 Gone, as {@code ChashHandler} answers its retired
+     * routes; a reference-only chunk, if RDR-169 G4 is ever built, is written through the combined
+     * routes.
      */
-    private void handleUpsertReferenceOnlyChunk(HttpExchange ex, String method) throws IOException {
-        requireMethod(ex, method, "POST");
-        var repo   = requirePgRepo(ex);
-        var tenant = requireTenant(ex);
-        Map<String, Object> body = readBody(ex);
-        String collection = requireString(body, "collection");
-        String chash       = requireString(body, "chash");
-        dev.nexus.service.db.Chash.requireCanonical(chash, "chash");
-        float[] embedding = requireFloatArray(body, "embedding");
-        Map<String, Object> metadata = optMap(body, "metadata");
-        if (metadata == null) metadata = Map.of();
-
-        repo.upsertReferenceOnlyChunk(tenant, collection, chash, embedding, metadata);
-        emitTokenUsage(ex, 0L);
-        HttpUtil.send(ex, 200, json(Map.of("upserted", true)));
-    }
-
-    /**
-     * Required single-vector field (as opposed to {@link #optEmbeddingsList}'s array of
-     * vectors) — the reference-only route accepts exactly one precomputed embedding per
-     * request. Malformed shapes fail loud, mirroring {@link #optEmbeddingsList}'s row
-     * parsing.
-     */
-    private float[] requireFloatArray(Map<String, Object> body, String key) {
-        Object val = body.get(key);
-        if (!(val instanceof List<?> nums)) {
-            throw new IllegalArgumentException("field '" + key + "' must be an array of numbers");
-        }
-        float[] vec = new float[nums.size()];
-        for (int i = 0; i < nums.size(); i++) {
-            Object n = nums.get(i);
-            if (!(n instanceof Number num)) {
-                throw new IllegalArgumentException("field '" + key + "' contains a non-numeric component");
-            }
-            vec[i] = num.floatValue();
-        }
-        return vec;
+    private void handleUpsertReferenceOnlyGone(HttpExchange ex) throws IOException {
+        HttpUtil.send(ex, 410, json(Map.of(
+            "error", "POST /v1/vectors/upsert-reference-only is retired: it wrote chunks no document owns. "
+                + "Write chunks and their manifest rows together through POST /v1/catalog/manifest/write_many "
+                + "and POST /v1/catalog/manifest/append")));
     }
 
     /**
@@ -747,11 +755,15 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String collection  = requireString(body, "collection");
         String docId       = requireString(body, "doc_id");
+        // RDR-223 P3.2: a non-canonical id is a 400 BEFORE the repository resolves the collection or
+        // asks about ownership, as on upsert-chunks (the id IS the chash).
+        dev.nexus.service.db.Chash.requireCanonical(docId, "doc_id");
         String content     = requireString(body, "content");
         Map<String, Object> metadata = optMap(body, "metadata");
         if (metadata == null) metadata = Map.of();
 
-        var putResult = repo.putWithTokens(tenant, collection, docId, content, metadata);
+        var putResult = repo.putWithTokens(tenant, collection, docId, content, metadata,
+                ownershipGuard(ex, "store-put"));
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, putResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("id", putResult.value())));

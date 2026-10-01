@@ -20,6 +20,12 @@ from typing import Any
 #: ``collection`` and ``remedy``.
 UNREGISTERED_COLLECTION_REASON: str = "unregistered_collection"
 
+#: ``upsert-chunks`` or ``store-put`` asked to write a chash with no live
+#: manifest row in the collection (HTTP 422, RDR-223 Phase 3 Step 2). Also
+#: carries ``unowned_count``, ``requested_count`` and ``unowned_chashes`` (a
+#: sample of at most eight). The remedy is the combined write, never a retry.
+OWNERLESS_CHUNK_WRITE_REASON: str = "ownerless_chunk_write"
+
 
 def error_reason(body: Any) -> str | None:
     """The ``reason`` of a decoded error body, or None when it has none.

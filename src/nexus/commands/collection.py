@@ -1608,6 +1608,57 @@ _REEMBED_SUPPORTED_MODELS = ("voyage-3", "voyage-code-3", "voyage-context-3")
 #: request. 100 keeps one wave's worth of margin.
 _REEMBED_UPSERT_BATCH = 100
 
+#: Resends of one re-embed batch after the engine refused it as ownerless
+#: (RDR-223 Phase 3 Step 2). Each resend follows a live re-read that dropped at
+#: least the chunks that lost their owner, so a batch converges in one or two;
+#: the bound is only for a refusal the re-read cannot explain.
+_REEMBED_OWNER_RETRIES = 3
+
+
+def _upsert_reembed_batch(
+    db, col, col_name: str,
+    ids: list[str], docs: list[str], metas: list,
+) -> tuple[list[str], list[str], list, int]:
+    """Write one re-embed batch; returns ``(ids, docs, metas, dropped)`` of what was written.
+
+    RDR-223 Phase 3 Step 2: the engine refuses a whole ``upsert-chunks`` request when any
+    chash in it has no live manifest row. A chunk can lose its owner between this command's
+    live read of the page and this write (a note superseded, a document deleted, by another
+    process), which would abort the command on the first such race with no way to resume.
+    On that refusal the batch is re-read through the live-filtered get and only the chashes
+    still owned are resent; the ones that vanished are counted in ``dropped`` and are not
+    written, so no ownerless chunk is recreated for them.
+
+    Any other failure propagates. A refusal the re-read cannot explain (every chash still
+    reads live) is retried a bounded number of times, then raised.
+    """
+    from nexus.db.engine_reasons import OWNERLESS_CHUNK_WRITE_REASON  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+    from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred to avoid import cycle / CLI startup cost
+
+    dropped = 0
+    for attempt in range(_REEMBED_OWNER_RETRIES + 1):
+        if not ids:
+            return [], [], [], dropped
+        try:
+            db.upsert_chunks(col_name, ids, docs, metadatas=metas, force_re_embed=True)
+            return ids, docs, metas, dropped
+        except VectorServiceError as exc:
+            if exc.reason != OWNERLESS_CHUNK_WRITE_REASON or attempt == _REEMBED_OWNER_RETRIES:
+                raise
+            live = set((col.get(ids=ids, include=[]).get("ids")) or [])
+            keep = [i for i, cid in enumerate(ids) if cid in live]
+            lost = len(ids) - len(keep)
+            _log.warning(
+                "reembed_batch_refused_ownerless",
+                collection=col_name, requested=len(ids), still_owned=len(keep),
+                lost_owner=lost, attempt=attempt + 1,
+            )
+            dropped += lost
+            ids = [ids[i] for i in keep]
+            docs = [docs[i] for i in keep]
+            metas = [metas[i] for i in keep]
+    return [], [], [], dropped  # unreachable: the loop returns or raises
+
 
 def _reembed_collection(
     db,
@@ -1701,13 +1752,24 @@ def _reembed_collection(
             # server re-embeds with the correct model. force_re_embed=True
             # bypasses the existence-partition skip so every chash is
             # genuinely recomputed, not treated as already-current.
+            # RDR-223 Phase 3 Step 2: a batch the engine refuses as ownerless (a chunk
+            # lost its owner since the page was read) is narrowed to the chunks still
+            # owned and resent; ``written_*`` is what actually landed.
+            written_ids: list[str] = []
+            written_docs: list[str] = []
+            written_metas: list = []
             for s in range(0, len(v_ids), _REEMBED_UPSERT_BATCH):
-                db.upsert_chunks(
-                    col_name, v_ids[s:s + _REEMBED_UPSERT_BATCH],
+                b_ids, b_docs, b_metas, b_dropped = _upsert_reembed_batch(
+                    db, col, col_name,
+                    v_ids[s:s + _REEMBED_UPSERT_BATCH],
                     v_docs[s:s + _REEMBED_UPSERT_BATCH],
-                    metadatas=v_metas[s:s + _REEMBED_UPSERT_BATCH],
-                    force_re_embed=True,
+                    v_metas[s:s + _REEMBED_UPSERT_BATCH],
                 )
+                written_ids += b_ids
+                written_docs += b_docs
+                written_metas += b_metas
+                skipped += b_dropped
+            v_ids, v_docs, v_metas = written_ids, written_docs, written_metas
             # nexus-bw65 / nexus-9099: fire post-store chains so the
             # invariant 'every CLI T3 write also fires the chain'
             # (test_every_cli_t3_write_function_fires_store_chains)
@@ -1720,19 +1782,20 @@ def _reembed_collection(
                 hooks = HookRegistry()
                 install_default_hooks(hooks)
 
-            hooks.fire_store_chains(
-                v_ids, col_name, v_docs,
-                source_paths=[
-                    (m.get("source_path", "") if isinstance(m, dict) else "")
-                    for m in v_metas
-                ],
-                # nexus-sghyo: no client-computed vector to pass — the
-                # server (or test EF) computed it inside upsert_chunks
-                # above.
-                embeddings=None,
-                metadatas=v_metas,
-                catalog_doc_id="",
-            )
+            if v_ids:  # every chunk of the page may have lost its owner
+                hooks.fire_store_chains(
+                    v_ids, col_name, v_docs,
+                    source_paths=[
+                        (m.get("source_path", "") if isinstance(m, dict) else "")
+                        for m in v_metas
+                    ],
+                    # nexus-sghyo: no client-computed vector to pass — the
+                    # server (or test EF) computed it inside upsert_chunks
+                    # above.
+                    embeddings=None,
+                    metadatas=v_metas,
+                    catalog_doc_id="",
+                )
 
         processed += len(v_ids)
         if on_progress is not None:
@@ -1837,7 +1900,8 @@ def reembed_cmd(
         )
     click.echo(
         f"re-embedded {processed} chunk(s) in {name!r} with "
-        f"{target_model!r}; skipped {skipped} empty-document row(s)."
+        f"{target_model!r}; skipped {skipped} row(s) (empty document, or no "
+        f"longer owned by a live document when the write reached the engine)."
     )
 
 
