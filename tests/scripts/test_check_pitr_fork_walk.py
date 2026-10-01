@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -124,6 +125,42 @@ def test_a_complete_line_missing_a_count_is_unverifiable() -> None:
         cw.check_walk("event=schema_migration_complete new_changesets=0", None, None, True, 12)
 
 
+def test_a_counts_unavailable_line_is_unreadable_not_an_identity_mismatch() -> None:
+    """The engine logs -1 for the three counts it could not compute (counts_unavailable=true).
+    That is evidence that cannot be read (exit 2), not a count identity that failed (exit 1)."""
+    text = (
+        "event=schema_migration_start changelog=x\n"
+        + "2026-10-01T10:00:00Z INFO " + SESSION.format(role="nexus_admin") + "\n"
+        + "event=schema_migration_complete new_changesets=-1 reexecuted_changesets=-1 "
+        "pending_at_start=17 mark_ran_changesets=-1 counts_unavailable=true"
+    )
+    with pytest.raises(cw.Unverifiable, match="counts_unavailable"):
+        cw.check_walk(text, "nexus_admin", None, False, 12)
+
+
+def test_a_counts_unavailable_walk_exits_2_through_main(tmp_path: Path) -> None:
+    log = tmp_path / "engine.log"
+    log.write_text(
+        "event=schema_migration_complete new_changesets=-1 reexecuted_changesets=-1 "
+        "pending_at_start=17 mark_ran_changesets=-1 counts_unavailable=true"
+    )
+    assert cw.main(["walk", "--engine-log", str(log), "--migration-role", "nexus_admin"]) == 2
+
+
+def test_an_empty_migration_role_on_walk_is_exit_2_not_a_pass(tmp_path: Path) -> None:
+    """The skill passes "$NX_DB_ADMIN_USER", which is "" when that variable is unset."""
+    log = tmp_path / "engine.log"
+    log.write_text(_log(new=0, rex=12))
+    assert cw.main(["walk", "--engine-log", str(log), "--noop", "--migration-role", ""]) == 2
+    assert cw.main(["walk", "--engine-log", str(log), "--noop", "--migration-role", "  "]) == 2
+
+
+def test_an_omitted_walk_role_is_taken_from_the_log_and_says_so() -> None:
+    rc, lines = cw.check_walk(_log(new=0, rex=12, role="nexus_admin"), None, None, True, 12)
+    assert rc == 0, lines
+    assert any("taken from the engine log" in line for line in lines)
+
+
 # --- schema -----------------------------------------------------------------
 
 class FakeDb:
@@ -189,10 +226,11 @@ def test_a_role_equal_to_any_schema_fails() -> None:
     assert any("equals an existing schema" in line for line in lines)
 
 
-def test_without_a_role_the_check_says_it_did_not_run() -> None:
-    rc, lines = cw.check_schema(FakeDb(), None, None)
-    assert rc == 0
-    assert any("role-name check was NOT run" in line for line in lines)
+@pytest.mark.parametrize("role", [None, "", "   "])
+def test_without_a_role_the_schema_check_is_unverifiable_not_a_pass(role: str | None) -> None:
+    """An empty role used to skip the role-name check and still end PASSED (vacuous)."""
+    with pytest.raises(cw.Unverifiable, match="--migration-role"):
+        cw.check_schema(FakeDb(), role, None)
 
 
 def test_the_row_count_pin_catches_a_walk_that_added_rows() -> None:
@@ -208,6 +246,67 @@ def test_role_and_database_settings_are_reported_and_a_search_path_is_noted() ->
     assert any(line.startswith("note") for line in lines)
 
 
+def test_the_settings_baseline_is_saved_then_compared(tmp_path: Path) -> None:
+    saved = tmp_path / "settings.json"
+    before = FakeDb(settings=[("nexus_admin", "(all databases)", "search_path=public")])
+    rc, lines = cw.check_schema(before, "nexus_admin", None, save_settings=saved)
+    assert rc == 0 and saved.exists(), lines
+    assert cw.check_schema(before, "nexus_admin", None, compare_settings=saved)[0] == 0
+
+
+def test_a_settings_change_after_the_baseline_fails(tmp_path: Path) -> None:
+    saved = tmp_path / "settings.json"
+    cw.check_schema(FakeDb(settings=[("nexus_admin", "(all databases)", "search_path=public")]),
+                    "nexus_admin", None, save_settings=saved)
+    after = FakeDb(settings=[("nexus_admin", "(all databases)", "search_path=nexus")])
+    rc, lines = cw.check_schema(after, "nexus_admin", None, compare_settings=saved)
+    assert rc == 1
+    assert any("pg_db_role_setting changed" in line for line in lines)
+    # a row appearing where there was none
+    cw.check_schema(FakeDb(), "nexus_admin", None, save_settings=saved)
+    assert cw.check_schema(after, "nexus_admin", None, compare_settings=saved)[0] == 1
+
+
+def test_a_missing_settings_baseline_is_unverifiable(tmp_path: Path) -> None:
+    with pytest.raises(cw.Unverifiable, match="--compare-settings"):
+        cw.check_schema(FakeDb(), "nexus_admin", None, compare_settings=tmp_path / "absent.json")
+
+
+# --- the runAlways count ------------------------------------------------------
+
+def _count_run_always_changesets() -> int:
+    """<changeSet runAlways="true"> across the files the master changelog includes."""
+    changelog = REPO_ROOT / "service" / "src" / "main" / "resources" / "db" / "changelog"
+    master = ET.parse(changelog / "db.changelog-master.xml").getroot()
+    included = [
+        e.get("file", "") for e in master.iter() if e.tag.rsplit("}", 1)[-1] == "include"
+    ]
+    assert len(included) > 100, "the master changelog's includes were not read"
+    total = 0
+    for name in included:
+        root = ET.parse(REPO_ROOT / "service" / "src" / "main" / "resources" / name).getroot()
+        total += sum(
+            1 for e in root.iter()
+            if e.tag.rsplit("}", 1)[-1] == "changeSet" and e.get("runAlways") == "true"
+        )
+    return total
+
+
+def test_default_reexecuted_is_the_changelogs_run_always_count() -> None:
+    """DEFAULT_REEXECUTED is defined once, in the checker, and pinned here to the changelog by
+    XML parse: a new runAlways changeset fails this test instead of failing a fork rehearsal."""
+    assert cw.DEFAULT_REEXECUTED == _count_run_always_changesets()
+
+
+def test_nothing_else_hardcodes_the_run_always_count() -> None:
+    """two-walk-check.sh and the skill defer to the checker's default."""
+    script = (REPO_ROOT / "tests" / "e2e" / "two-walk-check.sh").read_text()
+    assert f":-{cw.DEFAULT_REEXECUTED}}}" not in script
+    assert "TWO_WALK_EXPECTED_REEXECUTED" in script
+    skill = SKILL.read_text()
+    assert f"({cw.DEFAULT_REEXECUTED} on develop" not in skill
+
+
 # --- CLI --------------------------------------------------------------------
 
 def test_main_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -220,12 +319,14 @@ def test_main_exit_codes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> 
     assert cw.main(["walk", "--engine-log", str(log), "--noop"]) == 2
     assert cw.main(["walk", "--engine-log", str(tmp_path / "absent.log"), "--noop"]) == 2
     assert cw.main(["schema", "--migration-role", "nexus_admin"], runner=FakeDb()) == 0
+    assert cw.main(["schema", "--migration-role", ""], runner=FakeDb()) == 2
+    assert cw.main(["schema"], runner=FakeDb()) == 2
     assert cw.main(["schema", "--migration-role", "nexus_admin"], runner=FakeDb(history=("nexus",))) == 1
     capsys.readouterr()
 
 
 def test_a_psql_that_cannot_run_is_unverifiable(capsys: pytest.CaptureFixture[str]) -> None:
-    assert cw.main(["schema", "--psql", "/nonexistent/psql"]) == 2
+    assert cw.main(["schema", "--psql", "/nonexistent/psql", "--migration-role", "nexus_admin"]) == 2
     capsys.readouterr()
 
 
@@ -238,6 +339,7 @@ def test_the_local_rehearsal_runs_the_same_assertions_on_two_boots() -> None:
     assert "--noop" in text
     assert "NX_DB_ADMIN_USER" in text
     assert '--expect-rows "$ROWS_AFTER_1"' in text
+    assert "--save-settings" in text and text.count("--compare-settings") == 2
 
 
 def test_the_engine_release_skill_names_the_script() -> None:

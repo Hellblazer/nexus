@@ -23,7 +23,12 @@
 #
 # Usage:
 #   tests/e2e/two-walk-check.sh
-#   TWO_WALK_EXPECTED_REEXECUTED=13 tests/e2e/two-walk-check.sh   # the changelog's runAlways count
+#   TWO_WALK_EXPECTED_REEXECUTED=13 tests/e2e/two-walk-check.sh   # override only to probe the checker
+#
+# The runAlways count the second walk must re-execute is DEFAULT_REEXECUTED in
+# scripts/check_pitr_fork_walk.py, defined once and pinned to the changelog by
+# tests/scripts/test_check_pitr_fork_walk.py; this script passes no number unless
+# the variable above is set.
 #
 # Last line: "TWO-WALK CHECK PASSED" (exit 0) or "TWO-WALK CHECK FAILED" (exit 1).
 # Cost: a gate-jar build when service/ is not cached, then three engine boots.
@@ -37,7 +42,10 @@ cd "$REPO_ROOT"
 # published-client-write-gate.sh (nexus-jspsn).
 export NX_ALLOW_PROD_WRITE="two-walk-check: provisions a throwaway engine via this checkout's own nx, against its own scratch NEXUS_CONFIG_DIR, never production (nexus-k9fs1)"
 
-EXPECTED_REEXECUTED="${TWO_WALK_EXPECTED_REEXECUTED:-12}"
+REEXECUTED_ARGS=()
+if [ -n "${TWO_WALK_EXPECTED_REEXECUTED:-}" ]; then
+  REEXECUTED_ARGS=(--expect-reexecuted "$TWO_WALK_EXPECTED_REEXECUTED")
+fi
 CHECK="scripts/check_pitr_fork_walk.py"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/nx-twowalk.XXXXXX")"
@@ -87,6 +95,9 @@ PG_PORT="$(_cred PG_PORT)"
 [ -n "$MIGRATION_ROLE" ] && [ -n "$PG_PORT" ] || _fail "pg_credentials lacks NX_DB_ADMIN_USER or PG_PORT"
 echo "[twowalk] migration role (from the engine's credentials file): $MIGRATION_ROLE"
 
+# pg_db_role_setting rows: saved by the first schema check, compared by the rest.
+SETTINGS_FILE="$WORK/pg_db_role_setting.json"
+
 _check_schema() {
   # $1 = label, rest = extra args. PGPASSWORD is set on this process only.
   local label="$1"; shift
@@ -103,7 +114,7 @@ _walk_rows() {
     "$PG_BIN/psql" --no-psqlrc -X -At -c "select count(*) from public.databasechangelog"
 }
 
-_check_schema "after the pinned engine's walk"
+_check_schema "after the pinned engine's walk" --save-settings "$SETTINGS_FILE"
 
 echo "── 2/4 Walk 1: the working-tree dev jar upgrades the database ──"
 ./scripts/build-gate-jar.sh 2>&1 | tee "$LOGS/build-gate-jar.log" \
@@ -119,8 +130,8 @@ cp "$SVC_LOG" "$LOGS/walk1.engine.log"
 
 echo "[twowalk] walk 1 assertions"
 uv run python "$CHECK" walk --engine-log "$LOGS/walk1.engine.log" --migration-role "$MIGRATION_ROLE" \
-  --expect-reexecuted "$EXPECTED_REEXECUTED" || _fail "walk 1 assertions failed"
-_check_schema "after walk 1"
+  ${REEXECUTED_ARGS[@]+"${REEXECUTED_ARGS[@]}"} || _fail "walk 1 assertions failed"
+_check_schema "after walk 1" --compare-settings "$SETTINGS_FILE"
 ROWS_AFTER_1="$(_walk_rows)"
 echo "[twowalk] public.databasechangelog rows after walk 1: $ROWS_AFTER_1"
 
@@ -133,8 +144,8 @@ cp "$SVC_LOG" "$LOGS/walk2.engine.log"
 
 echo "[twowalk] walk 2 assertions (--noop)"
 uv run python "$CHECK" walk --engine-log "$LOGS/walk2.engine.log" --migration-role "$MIGRATION_ROLE" \
-  --noop --expect-reexecuted "$EXPECTED_REEXECUTED" || _fail "walk 2 is not a no-op"
-_check_schema "after walk 2 (row count unchanged)" --expect-rows "$ROWS_AFTER_1"
+  --noop ${REEXECUTED_ARGS[@]+"${REEXECUTED_ARGS[@]}"} || _fail "walk 2 is not a no-op"
+_check_schema "after walk 2 (row count unchanged)" --expect-rows "$ROWS_AFTER_1" --compare-settings "$SETTINGS_FILE"
 
 echo "── 4/4 Verdict ──"
 GATE_OK=1

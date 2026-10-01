@@ -19,12 +19,18 @@ evidence cannot be read (never a pass: an empty log, a psql that does not run).
       in the whole database, both in ``public`` (pg_class, not
       information_schema, so a table the role cannot read still counts);
     * the changelog lock is not left held;
-    * ``--migration-role`` (read it from the engine's env, never from records;
-      cloud and local: the value of ``NX_DB_ADMIN_USER``) is not ``nexus``,
+    * ``--migration-role`` is REQUIRED and must be non-empty (an empty value is
+      exit 2, never a pass: ``--migration-role "$NX_DB_ADMIN_USER"`` expands to
+      "" when that variable is unset). Take it from the engine's env, never from
+      records: ``NX_DB_ADMIN_USER``, else ``NX_DB_USER`` (the engine defaults
+      the admin user to the service user, Main.java). It is not ``nexus``,
       ``t1`` or ``staging`` and does not equal any schema in the database,
       the collision that split the history in the first place;
     * it prints every ``pg_db_role_setting`` row for the role and the database,
       because a role-level ``search_path`` is invisible from the changelog;
+      ``--save-settings FILE`` records them (the BEFORE-the-walk run) and
+      ``--compare-settings FILE`` fails when they differ (the AFTER-walk runs),
+      so a walk that changes a role or database setting is caught;
     * ``--expect-rows N`` pins ``public.databasechangelog``'s row count (pass
       the count after walk 1 when checking after walk 2: a no-op walk adds none).
 
@@ -36,12 +42,17 @@ evidence cannot be read (never a pass: an empty log, a psql that does not run).
       pending_at_start`` (the identity SchemaMigrator logs the anomaly for);
     * ``schema_migration_session`` is present (proof the q81g7 engine ran, so
       a pre-fix engine cannot pass vacuously) and its role equals
-      ``--migration-role`` when given;
+      ``--migration-role`` when given; when the option is omitted the role is
+      taken from that line (and reported as taken from the log), and an explicit
+      empty value is exit 2;
+    * a ``counts_unavailable=true`` line (the engine logs -1 for the three
+      counts it could not compute) is exit 2: the counts cannot be read;
     * ``--expect-new N`` pins ``new_changesets``; ``--noop`` is the second-walk
       property: ``new_changesets == 0``, ``mark_ran_changesets == 0`` and
       ``reexecuted_changesets == pending_at_start``, which is
-      ``--expect-reexecuted`` (default 12, the ``runAlways`` changesets of this
-      changelog; pass the real count if the changelog has grown).
+      ``--expect-reexecuted`` (default :data:`DEFAULT_REEXECUTED`, the
+      ``runAlways`` changesets of this changelog; a test counts them by XML parse
+      so the constant cannot drift silently).
 
 The connection comes from libpq's own environment (``PGHOST``, ``PGPORT``,
 ``PGUSER``, ``PGDATABASE``, ``PGPASSWORD`` or a service file) so no password is
@@ -51,6 +62,7 @@ environment.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import subprocess
 import sys
@@ -61,7 +73,10 @@ from pathlib import Path
 #: not be one of them (review-q81g7-critique S4).
 FORBIDDEN_ROLES: frozenset[str] = frozenset({"nexus", "t1", "staging"})
 
-#: ``runAlways`` changesets in this changelog when the bead was written.
+#: ``runAlways`` changesets the engine's changelog carries: the number a no-op
+#: walk re-executes. Defined HERE, once; ``tests/scripts/test_check_pitr_fork_walk.py``
+#: counts ``<changeSet runAlways="true">`` across the master changelog's includes
+#: by XML parse and fails when this drifts, so bump it with the changelog.
 DEFAULT_REEXECUTED = 12
 
 HISTORY_TABLES: tuple[str, ...] = ("databasechangelog", "databasechangeloglock")
@@ -98,11 +113,24 @@ def psql_runner(psql: str) -> Runner:
     return run
 
 
+def _require_role(migration_role: str | None) -> str:
+    if migration_role is None or not migration_role.strip():
+        raise Unverifiable(
+            "--migration-role is empty or missing: the role-name check cannot run. "
+            "Pass the engine's NX_DB_ADMIN_USER, else NX_DB_USER "
+            "(an unset variable expands to an empty string)"
+        )
+    return migration_role.strip()
+
+
 def check_schema(
     run: Runner,
     migration_role: str | None,
     expect_rows: int | None,
+    save_settings: Path | None = None,
+    compare_settings: Path | None = None,
 ) -> tuple[int, list[str]]:
+    migration_role = _require_role(migration_role)
     lines: list[str] = []
     fails: list[str] = []
 
@@ -132,21 +160,18 @@ def check_schema(
     if expect_rows is not None and count != expect_rows:
         fails.append(f"public.databasechangelog has {count} rows, expected {expect_rows} (a no-op walk adds none)")
 
-    if migration_role:
-        user_schemas = {
-            r[0] for r in run(
-                "select nspname from pg_catalog.pg_namespace "
-                "where nspname not like 'pg\\_%' and nspname <> 'information_schema'"
-            )
-        }
-        if migration_role in FORBIDDEN_ROLES:
-            fails.append(f"migration role {migration_role!r} is one of {sorted(FORBIDDEN_ROLES)}")
-        elif migration_role in user_schemas:
-            fails.append(f"migration role {migration_role!r} equals an existing schema {sorted(user_schemas)}")
-        else:
-            lines.append(f"ok       migration role {migration_role!r} names no schema")
+    user_schemas = {
+        r[0] for r in run(
+            "select nspname from pg_catalog.pg_namespace "
+            "where nspname not like 'pg\\_%' and nspname <> 'information_schema'"
+        )
+    }
+    if migration_role in FORBIDDEN_ROLES:
+        fails.append(f"migration role {migration_role!r} is one of {sorted(FORBIDDEN_ROLES)}")
+    elif migration_role in user_schemas:
+        fails.append(f"migration role {migration_role!r} equals an existing schema {sorted(user_schemas)}")
     else:
-        lines.append("info     no --migration-role given; the role-name check was NOT run")
+        lines.append(f"ok       migration role {migration_role!r} names no schema")
 
     settings = run(
         "select coalesce(r.rolname, '(all roles)'), coalesce(d.datname, '(all databases)'), "
@@ -164,6 +189,26 @@ def check_schema(
     else:
         lines.append("info     no pg_db_role_setting rows")
 
+    # Canonical, order-stable form for the before/after comparison.
+    canonical = sorted(list(map(str, row)) for row in settings)
+    if save_settings is not None:
+        try:
+            save_settings.write_text(json.dumps(canonical))
+        except OSError as exc:
+            raise Unverifiable(f"cannot write --save-settings {save_settings}: {exc}") from exc
+        lines.append(f"info     pg_db_role_setting rows saved to {save_settings} ({len(canonical)} row(s))")
+    if compare_settings is not None:
+        try:
+            before = json.loads(compare_settings.read_text())
+        except (OSError, ValueError) as exc:
+            raise Unverifiable(f"cannot read --compare-settings {compare_settings}: {exc}") from exc
+        if before == canonical:
+            lines.append(f"ok       pg_db_role_setting rows unchanged since {compare_settings}")
+        else:
+            fails.append(
+                f"pg_db_role_setting changed since {compare_settings}: before={before} now={canonical}"
+            )
+
     return _verdict(lines, fails)
 
 
@@ -171,12 +216,13 @@ def parse_walk(log_text: str) -> dict[str, object]:
     """Counts and flags from the LAST walk in ``log_text``."""
     complete: dict[str, int] | None = None
     session: re.Match[str] | None = None
-    anomaly = failed = False
+    anomaly = failed = unavailable = False
     for line in log_text.splitlines():
         if "event=schema_migration_start" in line:
-            complete, session, anomaly, failed = None, None, False, False
+            complete, session, anomaly, failed, unavailable = None, None, False, False, False
         if "event=schema_migration_complete" in line:
             complete = {k: int(v) for k, v in _KV.findall(line)}
+            unavailable = "counts_unavailable=true" in line
         if "event=schema_migration_count_anomaly" in line:
             anomaly = True
         if "event=schema_migration_failed" in line:
@@ -184,7 +230,10 @@ def parse_walk(log_text: str) -> dict[str, object]:
         m = _SESSION.search(line)
         if m:
             session = m
-    return {"complete": complete, "session": session, "anomaly": anomaly, "failed": failed}
+    return {
+        "complete": complete, "session": session, "anomaly": anomaly, "failed": failed,
+        "counts_unavailable": unavailable,
+    }
 
 
 def check_walk(
@@ -210,6 +259,12 @@ def check_walk(
     if None in (new, rex, mark, pending):
         raise Unverifiable(f"schema_migration_complete lacks a count field: {complete}")
     assert new is not None and rex is not None and mark is not None and pending is not None
+    if parsed["counts_unavailable"] or min(new, rex, mark) < 0:
+        raise Unverifiable(
+            "the engine logged counts_unavailable (new/reexecuted/mark_ran = "
+            f"{new}/{rex}/{mark}, the -1 sentinel): the walk's counts cannot be read, "
+            "so the identity cannot be checked"
+        )
     lines.append(f"info     walk: new={new} reexecuted={rex} mark_ran={mark} pending_at_start={pending}")
 
     if new + rex + mark == pending:
@@ -232,7 +287,12 @@ def check_walk(
             f"info     session: role={session['role']} current_schema={session['schema']} "
             f"search_path={session['path']} pg_db_role_setting={session['settings']}"
         )
-        if migration_role and session["role"] != migration_role:
+        if migration_role is None:
+            lines.append(
+                f"info     --migration-role omitted: the role {session['role']!r} is taken from the engine log, "
+                "so only the forbidden-name check applies to it"
+            )
+        elif session["role"] != migration_role:
             fails.append(f"the engine's session role {session['role']!r} != --migration-role {migration_role!r}")
         if session["role"] in FORBIDDEN_ROLES:
             fails.append(f"the engine's session role {session['role']!r} is one of {sorted(FORBIDDEN_ROLES)}")
@@ -271,6 +331,10 @@ def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
     s.add_argument("--psql", default="psql")
     s.add_argument("--migration-role", default=None)
     s.add_argument("--expect-rows", type=int, default=None)
+    s.add_argument("--save-settings", type=Path, default=None,
+                   help="write the pg_db_role_setting rows to FILE (run before the walk)")
+    s.add_argument("--compare-settings", type=Path, default=None,
+                   help="fail when the pg_db_role_setting rows differ from FILE (run after a walk)")
     w = sub.add_parser("walk", help="the counts and events of one walk, from the engine log")
     w.add_argument("--engine-log", required=True, help="a file holding that boot's log, or - for stdin")
     w.add_argument("--migration-role", default=None)
@@ -281,8 +345,13 @@ def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
 
     try:
         if args.cmd == "schema":
-            rc, lines = check_schema(runner or psql_runner(args.psql), args.migration_role, args.expect_rows)
+            rc, lines = check_schema(
+                runner or psql_runner(args.psql), args.migration_role, args.expect_rows,
+                args.save_settings, args.compare_settings,
+            )
         else:
+            if args.migration_role is not None:
+                _require_role(args.migration_role)
             text = sys.stdin.read() if args.engine_log == "-" else Path(args.engine_log).read_text()
             rc, lines = check_walk(text, args.migration_role, args.expect_new, args.noop, args.expect_reexecuted)
     except (Unverifiable, OSError) as exc:
