@@ -1731,6 +1731,11 @@ def _index_document(
     the registered one (nexus-y8qtj, reproduced inside its own fix).
     *source_uri* is forwarded only when this function must register
     fresh (``doc_id`` empty).
+
+    *pending_stamp* (RDR-223, nexus-z0o2p.34): without it the completion stamp is sent here, last,
+    after the post-store hooks. With a list the stamp is NOT sent: the write is appended to it and
+    the caller sends it (``complete()``, then ``close()``) after the catalog enrichment it runs
+    (``index_markdown``'s ``_catalog_markdown_hook``), so a kill there leaves the fence ``indexing``.
     """
     from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
 
