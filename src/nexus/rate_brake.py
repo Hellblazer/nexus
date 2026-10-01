@@ -114,13 +114,20 @@ class RateLimitBrake:
 
     Clock/sleep/jitter are constructor-injected so tests never sleep for
     real; production code uses the real-time defaults via :func:`get_brake`.
+
+    ``clock`` and ``sleep`` default to ``None``, meaning "``time.monotonic`` /
+    ``time.sleep``, looked up when USED" (nexus-q81g7). They were bound as default
+    arguments at definition time, which made the seam the retry tests patch
+    (``nexus.retry.time.sleep`` is the global ``time`` module) invisible to the
+    brake: ``wait()`` kept sleeping on the real functions for a widened 429's whole
+    182 s schedule.
     """
 
     def __init__(
         self,
         *,
-        clock: Callable[[], float] = time.monotonic,
-        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] | None = None,
+        sleep: Callable[[float], None] | None = None,
         jitter: Callable[[], float] = random.random,
         wait_slice_seconds: float = _WAIT_SLICE_SECONDS,
         base_delay_seconds: float = _BASE_DELAY_SECONDS,
@@ -182,7 +189,7 @@ class RateLimitBrake:
         server, not evidence of a sustained unknown-duration outage.
         """
         with self._lock:
-            now = self._clock()
+            now = self._now()
             if retry_after is not None:
                 delay = max(0.0, retry_after)
             else:
@@ -210,6 +217,12 @@ class RateLimitBrake:
         )
         return delay
 
+    def _now(self) -> float:
+        return (self._clock if self._clock is not None else time.monotonic)()
+
+    def _pause(self, seconds: float) -> None:
+        (self._sleep if self._sleep is not None else time.sleep)(seconds)
+
     def release(self) -> None:
         """Call on a successful attempt: resets the escalation counter so
         the NEXT trip (if any) starts back at the base delay rather than
@@ -230,14 +243,21 @@ class RateLimitBrake:
         """
         waited = 0.0
         last_delay = 0.0
+        started = self._now()
         while True:
             with self._lock:
-                remaining = self._resume_at - self._clock()
+                # The later of the clock and what this call has itself slept.
+                # A sleep that RETURNED has elapsed whether or not the clock saw
+                # it: a caller that replaced ``time.sleep`` with a no-op (every
+                # retry test) would otherwise spin here on the real clock for the
+                # whole delay (nexus-q81g7). With real sleep and clock the two
+                # agree, so production behaviour is unchanged.
+                remaining = self._resume_at - max(self._now(), started + waited)
                 last_delay = self._last_delay
             if remaining <= 0:
                 break
             slice_for = min(remaining, self._wait_slice_seconds)
-            self._sleep(slice_for)
+            self._pause(slice_for)
             waited += slice_for
         if waited > 0:
             # nexus-cy9u7: small per-worker jitter on wake so every worker
@@ -245,7 +265,7 @@ class RateLimitBrake:
             # upstream limit in the same instant.
             jitter_extra = last_delay * (self._jitter() * _WAKE_JITTER_FRACTION)
             if jitter_extra > 0:
-                self._sleep(jitter_extra)
+                self._pause(jitter_extra)
                 waited += jitter_extra
             with self._lock:
                 self.seconds_paused += waited

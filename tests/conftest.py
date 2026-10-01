@@ -1,7 +1,6 @@
 import contextlib
 import logging
 import os
-import threading
 import unittest.mock
 import warnings
 
@@ -2267,23 +2266,6 @@ def _service_manager_tripwire():
         yield
 
 
-class _VirtualClock:
-    """A monotonic clock whose ``sleep`` advances it. Thread-safe: brake waiters
-    on several threads each advance it, which only makes time pass faster."""
-
-    def __init__(self) -> None:
-        self._now = 0.0
-        self._lock = threading.Lock()
-
-    def time(self) -> float:
-        with self._lock:
-            return self._now
-
-    def sleep(self, seconds: float) -> None:
-        with self._lock:
-            self._now += max(0.0, seconds)
-
-
 @pytest.fixture(autouse=True)
 def _fresh_rate_limit_brake():
     """The shared ``RateLimitBrake`` is process-global and escalates on
@@ -2294,39 +2276,19 @@ def _fresh_rate_limit_brake():
     and 108s each, 14s for the first. A fresh brake per test keeps one
     test's retries out of the next test's wall time.
 
-    The fresh brake also runs on a VIRTUAL clock (nexus-q81g7).
-    ``RateLimitBrake.__init__`` binds ``clock=time.monotonic`` and
-    ``sleep=time.sleep`` as defaults at definition time, so a test that patches
-    ``nexus.retry.time.sleep`` still made ``wait()`` spin on the real monotonic
-    clock until the 2+4+8+16+32+60+60 s schedule of a widened 429 elapsed:
-    203 s for ``test_rdr223_oversize_fallback.py::...[append-429]`` and 138 s for
-    ``TestSettlingFromEveryAttempt::test_a_resend_that_fails_is_unknown``, on CI
-    and every box. ``get_brake()`` / ``reset_brake()`` look ``RateLimitBrake``
-    up in ``nexus.rate_brake`` at call time, so substituting a subclass there
-    that defaults ``clock``/``sleep`` to a virtual pair covers every default
-    brake, including one a test builds mid-run by calling ``reset_brake()``.
-    Tests import ``RateLimitBrake`` at module load, before this runs, so a brake
-    they build themselves (with their own clock, as the brake-behaviour tests
-    do) is the real class and is untouched."""
-    from nexus import rate_brake
+    This used to ALSO substitute a virtual-clock subclass (nexus-q81g7), to hide
+    that the brake bound ``time.monotonic`` / ``time.sleep`` as definition-time
+    defaults, which made the seam the retry tests patch
+    (``nexus.retry.time.sleep``) invisible to it (203 s for the
+    ``[append-429]`` case, 138 s for ``test_a_resend_that_fails_is_unknown``).
+    The brake now resolves both when used, and ``wait()`` counts a returned sleep
+    as elapsed, so the fixture is back to its original job and the real default
+    wiring is exercised by ``tests/test_rate_brake_default_is_virtual.py``."""
+    from nexus.rate_brake import reset_brake
 
-    clock = _VirtualClock()
-
-    class _VirtualRateLimitBrake(rate_brake.RateLimitBrake):
-        def __init__(self, **kwargs) -> None:
-            kwargs.setdefault("clock", clock.time)
-            kwargs.setdefault("sleep", clock.sleep)
-            super().__init__(**kwargs)
-
-    # A private patch context, never the test's own ``monkeypatch`` fixture:
-    # undoing that one here would also undo patches other fixtures made.
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(rate_brake, "RateLimitBrake", _VirtualRateLimitBrake)
-        rate_brake.reset_brake()
-        yield
-    # The substitution is undone; the brake left behind for whatever runs
-    # between tests is a plain real-clock one, not ours.
-    rate_brake.reset_brake()
+    reset_brake()
+    yield
+    reset_brake()
 
 
 @pytest.fixture(autouse=True)
