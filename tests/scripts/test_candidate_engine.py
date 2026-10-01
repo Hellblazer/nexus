@@ -453,11 +453,54 @@ def test_cut_mode_with_no_counters_cannot_have_seen_a_refusal(
     assert failure is not None and "no ownerless-write counters" in failure
 
 
+@pytest.mark.parametrize(
+    "mode, refused, would, log_event, controls, ok",
+    [
+        ("enforce", 1, 0, "ownerless_chunk_write_refused", 1, True),
+        ("enforce", 0, 0, "ownerless_chunk_write_refused", 1, False),   # dead counter
+        ("enforce", 1, 0, None, 1, False),                              # counter, no log line
+        ("enforce", 2, 0, "ownerless_chunk_write_refused", 1, False),
+        ("enforce", 1, 1, "ownerless_chunk_write_refused", 1, False),
+        ("enforce", 1, 0, "ownerless_chunk_write_refused", 0, False),   # no control declared
+        ("enforce", 0, 0, None, 0, True),
+        ("log-only", 0, 1, "ownerless_chunk_write_would_refuse", 1, True),
+        ("log-only", 1, 0, "ownerless_chunk_write_would_refuse", 1, False),
+        ("log-only", 0, 1, "ownerless_chunk_write_refused", 1, True),   # the log event name is not the mode
+    ],
+)
+def test_cut_mode_holds_the_end_reading_to_the_gates_own_control(
+    tmp_path: Path, jar: Path, engine, mode: str, refused: int, would: int, log_event: str | None,
+    controls: int, ok: bool,
+) -> None:
+    """lsg sends one deliberate ownerless write to the engine it then reads (nexus-z0o2p.24's
+    negative leg). The read must find exactly that one, in the counter the engine's mode moves and
+    in the log, so a zero from a dead counter or a missing log cannot pass. Mutation (compare to
+    zero, as round 2 did): the lsg rows go red against a real refusing engine."""
+    stub = engine(status={"ownerless_write_mode": mode, "ownerless_writes_refused_total": refused,
+                          "ownerless_writes_would_refuse_total": would})
+    cfg = tmp_path / "cfg"
+    _lease(cfg, stub.port, jar)
+    _engine_log(cfg, jar, "INFO boot\n" + (f"WARN event={log_event} source_path=/x\n" if log_event else ""))
+    line, failure = ce.refusals(str(cfg), "lsg", _cut(jar, NX_CANDIDATE_EXPECT_OWNERLESS_MODE=mode), controls=controls)
+    assert (failure is None) is ok, (line, failure)
+    assert f"controls={controls} mode={mode}" in line
+
+
+def test_cut_mode_fails_a_mode_that_flipped_by_the_end_of_the_journey(tmp_path: Path, jar: Path, engine) -> None:
+    stub = engine(status={"ownerless_write_mode": "log-only", "ownerless_writes_refused_total": 0,
+                          "ownerless_writes_would_refuse_total": 0})
+    cfg = tmp_path / "cfg"
+    _lease(cfg, stub.port, jar)
+    _engine_log(cfg, jar)
+    _line, failure = ce.refusals(str(cfg), "mvv", _cut(jar))
+    assert failure is not None and "expected enforce" in failure
+
+
 # ── cut-assert-log ──────────────────────────────────────────────────────────
 
 _ID = "ENGINE IDENTITY [smoke]: candidate={flag} kind=jar artifact={art} sha256={sha} release_version=0.1.142 build_ref=x ownerless_write_mode=enforce"
 _REF = ("ENGINE OWNERLESS REFUSALS [smoke]: candidate={flag} sha256={sha} refused_total={refused} "
-        "would_refuse_total={would} log_lines={lines} log=storage_service_jar.log mode={mode}")
+        "would_refuse_total={would} log_lines={lines} log=storage_service_jar.log controls={controls} mode={mode}")
 
 
 def _id(flag: str, art: Path, sha: str | None = None) -> str:
@@ -465,9 +508,9 @@ def _id(flag: str, art: Path, sha: str | None = None) -> str:
 
 
 def _ref(art: Path, *, flag: str = "yes", sha: str | None = None, refused: str = "0", would: str = "0",
-         lines: str = "0", mode: str = "enforce") -> str:
+         lines: str = "0", controls: str = "0", mode: str = "enforce") -> str:
     return _REF.format(flag=flag, sha=sha or ce._sha256(str(art)), refused=refused, would=would,
-                       lines=lines, mode=mode)
+                       lines=lines, controls=controls, mode=mode)
 
 
 def _assert_log(tmp_path: Path, jar: Path, *lines: str, candidate: str = "", **extra: str) -> str | None:
@@ -513,7 +556,8 @@ def test_assert_log_checks_the_sha_on_the_refusals_line_too(tmp_path: Path, jar:
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"refused": "1"}, {"would": "2"}, {"lines": "3"}, {"refused": "none"}, {"would": "none"}, {"lines": "none"}],
+    [{"refused": "1"}, {"would": "2"}, {"lines": "3"}, {"refused": "none"}, {"would": "none"}, {"lines": "none"},
+     {"controls": "none"}, {"controls": "x"}],
 )
 def test_assert_log_fails_a_refusal_or_an_unreadable_counter(tmp_path: Path, jar: Path, kwargs: dict) -> None:
     reason = _assert_log(tmp_path, jar, _id("yes", jar), _ref(jar, **kwargs))
@@ -525,6 +569,34 @@ def test_assert_log_fails_the_wrong_mode_unless_the_escape_names_it(tmp_path: Pa
     assert _assert_log(tmp_path, jar, *lines) is not None
     assert _assert_log(tmp_path, jar, *lines, NX_CANDIDATE_EXPECT_OWNERLESS_MODE="none") is None
     assert _assert_log(tmp_path, jar, *lines, NX_CANDIDATE_EXPECT_OWNERLESS_MODE="log-only") is None
+
+
+@pytest.mark.parametrize(
+    "kwargs, ok",
+    [
+        # lsg's own control, enforce: exactly one refused, no would-refuse, one log line
+        ({"controls": "1", "refused": "1", "lines": "1"}, True),
+        ({"controls": "1", "refused": "0", "lines": "0"}, False),  # a dead counter and log: zero proves nothing
+        ({"controls": "1", "refused": "1", "lines": "0"}, False),  # counter without its log line
+        ({"controls": "1", "refused": "0", "lines": "1"}, False),  # log line without its counter
+        ({"controls": "1", "refused": "2", "lines": "2"}, False),  # a writer beyond the control
+        ({"controls": "1", "refused": "1", "would": "1", "lines": "1"}, False),
+        ({"controls": "0", "refused": "1", "lines": "1"}, False),  # no control declared: one is a stranger
+        ({"controls": "0"}, True),
+        # log-only: the control is counted as would-refuse
+        ({"controls": "1", "would": "1", "lines": "1", "mode": "log-only"}, True),
+        ({"controls": "1", "refused": "1", "lines": "1", "mode": "log-only"}, False),
+    ],
+)
+def test_assert_log_holds_the_reading_to_the_control_the_line_declares(
+    tmp_path: Path, jar: Path, kwargs: dict, ok: bool,
+) -> None:
+    """The battery re-checks every refusals line against the control count that line declares, in
+    the mode the line reports. Mutation (compare to zero again): the lsg control reads as a refusal."""
+    mode = kwargs.get("mode", "enforce")
+    extra = {"NX_CANDIDATE_EXPECT_OWNERLESS_MODE": mode}
+    reason = _assert_log(tmp_path, jar, _id("yes", jar), _ref(jar, **kwargs), **extra)
+    assert (reason is None) is ok, reason
 
 
 def test_assert_log_takes_the_candidate_a_container_leg_ran(tmp_path: Path, jar: Path, pinned: Path) -> None:
@@ -567,8 +639,14 @@ def test_cli_identity_and_refusals_exit_codes(tmp_path: Path, jar: Path, pinned:
     _engine_log(cfg, jar)
     good = _cli("identity", str(cfg), "--label", "x", env=env)
     assert good.returncode == 0 and "candidate=yes" in good.stdout
-    end = _cli("refusals", str(cfg), "--label", "x", env=env)
+    end = _cli("refusals", str(cfg), "--label", "x", "--controls", "0", env=env)
     assert end.returncode == 0 and "ENGINE OWNERLESS REFUSALS [x]: candidate=yes" in end.stdout
+    assert "controls=0 mode=enforce" in end.stdout
+    unsaid = _cli("refusals", str(cfg), "--label", "x", env=env)
+    assert unsaid.returncode == 2 and "--controls N" in unsaid.stderr, "a gate must declare its controls"
+    assert _cli("refusals", str(cfg), "--controls", "one", env=env).returncode == 2
+    # identity accepts the flag (the container journeys pass one argument list to both reads)
+    assert _cli("identity", str(cfg), "--label", "x", "--controls", "0", env=env).returncode == 0
     _lease(cfg, stub.port, pinned)
     bad = _cli("identity", str(cfg), "--label", "x", env=env)
     assert bad.returncode == 1 and "CANDIDATE ENGINE CHECK FAILED" in bad.stderr
@@ -902,23 +980,24 @@ def test_expected_lag_names_a_red_against_the_pinned_engine(tmp_path: Path) -> N
     assert "EXPECTED-LAG(nexus-x)" in line and "pinned engine 0.1.142" in line and "FRESH-INSTALL MVV FAILED" in line
 
 
-def test_expected_lag_reads_the_evidence_dir_a_gate_preserves(tmp_path: Path) -> None:
-    """data-token-cli-gate fails at ``store put ... failed (see <dir>/store-put.stderr.log)``: the
-    error text is in that file and not in the leg log, which is what a first measurement of the
-    real pinned-engine red showed (2026-10-01). The newest log in the preserved evidence dir is read."""
+def test_expected_lag_reads_the_log_the_failed_line_names(tmp_path: Path) -> None:
+    """data-token-cli-gate fails at ``store put ... failed (see <dir>/store-put.log / .stderr.log)``:
+    the error text is in the stderr file, not the leg log (measured 2026-10-01). The evidence is the
+    log the FAILED line names and its ``.stderr.log`` sibling. Another, newer log in the same
+    evidence directory that names the signature is not the failing step's, and decides nothing."""
     ev = tmp_path / "evidence" / "logs"
     ev.mkdir(parents=True)
-    older, newest = ev / "init.log", ev / "store-put.stderr.log"
-    older.write_text("EngineOlderThanClientError (an earlier, tolerated mention)\n")
-    newest.write_text("Error: asked for metadata_merge but the response did not echo it. The engine is older than this client.\n")
-    os.utime(older, (1_000_000, 1_000_000))
-    leg_log = (f"DATA-TOKEN CLI GATE FAILED: store put via self-minted data token failed (see {ev}/store-put.log)\n"
+    stderr, other = ev / "store-put.stderr.log", ev / "init.log"
+    stderr.write_text("Error: asked for metadata_merge but the response did not echo it. The engine is older than this client.\n")
+    other.write_text("EngineOlderThanClientError (an earlier, tolerated mention)\n")
+    leg_log = (f"DATA-TOKEN CLI GATE FAILED: store put via self-minted data token failed (see {ev}/store-put.log / .stderr.log)\n"
                f"FAILURE EVIDENCE PRESERVED: {ev} (home: {tmp_path}/home)\n")
     status, count, line = _finish(tmp_path, leg_log, cut=False, cand=None, rc=1, lag=True, leg="dtok")
     assert status == "EXPECTED-LAG" and count == "1" and "EXPECTED-LAG(nexus-x)" in line
-    # The newest log decides: an unrelated failing output there keeps the leg red even though an
-    # older log in the same directory names the signature.
-    newest.write_text("Error: doctor warned about something else\n")
+    # The named log decides: an unrelated failing output there keeps the leg red even though the
+    # newest log in the same directory names the signature (the old rule read the newest log).
+    stderr.write_text("Error: doctor warned about something else\n")
+    os.utime(other, None)
     status, _n, _line = _finish(tmp_path, leg_log, cut=False, cand=None, rc=1, lag=True, leg="dtok")
     assert status == "FAILED"
 
@@ -937,6 +1016,47 @@ def test_expected_lag_looks_at_the_tail_only(tmp_path: Path) -> None:
     """A tolerated early mention of the error followed by an unrelated red stays red."""
     log = "EngineOlderThanClientError (tolerated)\n" + "noise\n" * 200 + "FRESH-INSTALL MVV FAILED: doctor warned\n"
     status, _n, _line = _finish(tmp_path, log, cut=False, cand=None, rc=1, lag=True)
+    assert status == "FAILED"
+
+
+def test_expected_lag_is_tied_to_the_failing_step_not_to_the_last_80_lines(tmp_path: Path) -> None:
+    """The reviewer's case (nexus/review-0kmat-round2-verify N3): a step that PASSED tolerated the
+    error early, and a DIFFERENT step failed a few lines later, well inside the old 80-line tail.
+    Mutation (read the last 80 lines of the log again): this is acked as lag."""
+    log = (
+        "── 3/10 nx init ──\n"
+        "EngineOlderThanClientError: tolerated here, the step retried and passed\n"
+        "init ok\n"
+        + "filler\n" * 20
+        + "── 4/10 doctor ──\n"
+        "doctor warned about the taxonomy\n"
+        "FRESH-INSTALL MVV FAILED: doctor warned\n"
+    )
+    status, count, _line = _finish(tmp_path, log, cut=False, cand=None, rc=1, lag=True)
+    assert status == "FAILED" and count == "0"
+    # The same mention inside the failing step is the lag: acked.
+    own = log.replace("doctor warned about the taxonomy", "EngineOlderThanClientError: the engine is older than this client")
+    status, count, _line = _finish(tmp_path, own, cut=False, cand=None, rc=1, lag=True)
+    assert status == "EXPECTED-LAG" and count == "1"
+
+
+def test_expected_lag_reads_the_step_block_before_a_fail_marker(tmp_path: Path) -> None:
+    """release-sandbox.sh smoke/shakedown print the failing step's output under a ``  nx ...:``
+    header, then ``[FAIL]``, and only at the very end the summary verdict line."""
+    sandbox = (
+        "  nx doctor --check-schema:\n    [pass]\n"
+        "  nx plan reseed (seeds plan library):\n"
+        "    EngineOlderThanClientError: the engine is older than this client\n"
+        "    [FAIL] -- exit non-zero\n"
+        "  nx doctor --check-taxonomy:\n    [pass]\n"
+        "[done] Sandbox state at /x. Run 'reset' to tear down.\n"
+        "SMOKE FAILED: 1 step(s) exited non-zero:\n"
+    )
+    status, count, _line = _finish(tmp_path, sandbox, cut=False, cand=None, rc=1, lag=True, leg="smoke")
+    assert status == "EXPECTED-LAG" and count == "1"
+    other = sandbox.replace("EngineOlderThanClientError: the engine is older than this client", "boom: unrelated")
+    other = "EngineOlderThanClientError (tolerated, an earlier step)\n  nx index:\n    [pass]\n" + other
+    status, _n, _line = _finish(tmp_path, other, cut=False, cand=None, rc=1, lag=True, leg="smoke")
     assert status == "FAILED"
 
 
@@ -1154,10 +1274,10 @@ def test_lsg_reads_the_engine_and_fails_a_cut_run_on_a_refusal(tmp_path: Path, j
     (arts / "jar").mkdir(parents=True)
     shutil.copy(jar, arts / "jar" / "svc.jar")
 
-    def run(cfg: Path, cut: str) -> subprocess.CompletedProcess[str]:
+    def run(cfg: Path, cut: str, controls: int = 0) -> subprocess.CompletedProcess[str]:
         script = f"""#!/bin/bash
 set -uo pipefail
-REPO_ROOT={REPO_ROOT}; SCRATCH={cfg}; STATUS=0
+REPO_ROOT={REPO_ROOT}; SCRATCH={cfg}; STATUS=0; GATE_OWNERLESS_CONTROLS={controls}
 NX_GATE_ARTIFACTS={arts}; GATE_JAR_REL=jar/svc.jar
 export NX_CUT_MODE={cut}
 unset NX_CANDIDATE_ENGINE
@@ -1174,6 +1294,60 @@ echo "STATUS=$STATUS"
     assert "STATUS=1" in r.stdout and "CANDIDATE ENGINE CHECK FAILED" in r.stderr, (r.stdout, r.stderr)
     r = run(refused, "0")
     assert "STATUS=0" in r.stdout and "log_lines=1" in r.stdout  # reported, not failed, outside cut mode
+
+
+_REFUSING = {"ownerless_write_mode": "enforce", "ownerless_writes_refused_total": 1,
+             "ownerless_writes_would_refuse_total": 0}
+
+
+def test_lsg_expects_exactly_its_own_deliberate_ownerless_write(tmp_path: Path, jar: Path, engine) -> None:
+    """nexus-z0o2p.24 added a negative control to the smoke leg: one ownerless upsert-chunks sent to
+    the same engine whose counters this block reads. Round 2 failed any hit, so a cut run on a tree
+    with both was red by construction. The block now takes GATE_OWNERLESS_CONTROLS and requires the
+    engine to have counted exactly that. Mutations: compare to zero (the first case goes red);
+    ignore the count (the dead-counter case passes)."""
+    block = _read_block(E2E / "local-service-gate.sh", "GATE_CAND_ENV=()", "\nSUMMARY_LINE=")
+    arts = tmp_path / "arts"
+    (arts / "jar").mkdir(parents=True)
+    shutil.copy(jar, arts / "jar" / "svc.jar")
+
+    def run(name: str, controls: int, status: dict, log: str) -> str:
+        cfg = _serving(tmp_path / name, jar, engine, status=status, log=log)
+        script = f"""#!/bin/bash
+set -uo pipefail
+REPO_ROOT={REPO_ROOT}; SCRATCH={cfg}; STATUS=0; GATE_OWNERLESS_CONTROLS={controls}
+NX_GATE_ARTIFACTS={arts}; GATE_JAR_REL=jar/svc.jar
+export NX_CUT_MODE=1
+unset NX_CANDIDATE_ENGINE
+{block}
+echo "STATUS=$STATUS"
+"""
+        return _bash(script, tmp_path).stdout
+
+    line = "INFO boot\nWARN event=ownerless_chunk_write_refused route=upsert-chunks\n"
+    assert "STATUS=0" in run("own-control", 1, _REFUSING, line)
+    assert "STATUS=1" in run("dead-counter", 1, {**_REFUSING, "ownerless_writes_refused_total": 0}, line)
+    assert "STATUS=1" in run("no-log-line", 1, _REFUSING, "INFO boot\n")
+    assert "STATUS=1" in run("a-stranger", 1, {**_REFUSING, "ownerless_writes_refused_total": 2}, line)
+    assert "STATUS=1" in run("undeclared", 0, _REFUSING, line)
+
+
+def test_lsg_declares_its_control_where_it_sends_it(tmp_path: Path) -> None:
+    """GATE_OWNERLESS_CONTROLS is bumped on the line after the one deliberate ownerless
+    upsert-chunks the smoke leg sends, inside the vector leg NEXUS_GATE_NO_VECTOR_SMOKE drops, and
+    the end-of-journey read passes it. Static, honestly: the leg needs a live engine to run. The
+    declaration and the bump are run for real below to read the value they produce."""
+    text = (E2E / "local-service-gate.sh").read_text()
+    lines = text.splitlines()
+    idx = [i for i, ln in enumerate(lines) if "GATE_OWNERLESS_CONTROLS=$((GATE_OWNERLESS_CONTROLS + 1))" in ln]
+    assert len(idx) == 1, "exactly one control is declared"
+    send = max(i for i in range(idx[0]) if "smoke_request POST /v1/vectors/upsert-chunks" in lines[i])
+    assert "SMOKE_ORPHAN" in " ".join(lines[send:idx[0]]), "the bump follows the ownerless request"
+    opened = max(i for i in range(idx[0]) if lines[i].startswith('if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]'))
+    assert lines[opened - 1] == "GATE_OWNERLESS_CONTROLS=0", "declared at zero right before the vector leg"
+    assert '--controls "$GATE_OWNERLESS_CONTROLS"' in text, "the end-of-journey read passes the declared count"
+    value = _bash(f"{lines[opened - 1]}\n{lines[idx[0]].strip().split('#')[0]}\necho $GATE_OWNERLESS_CONTROLS", tmp_path)
+    assert value.stdout.strip() == "1"
 
 
 _CONTAINER_START = "# ── Engine identity + ownerless-write refusals (nexus-0kmat)"

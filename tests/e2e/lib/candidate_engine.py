@@ -55,17 +55,31 @@ python3 with a scrubbed environment):
     for a candidate run in a mode other than enforce: the engine must still
     be reachable and still carry the counters).
 
-``refusals <config-dir> [--label L]``
+``refusals <config-dir> --controls N [--label L]``
     End of journey. Re-check that the engine STILL serving is the candidate
     (a swap mid-journey is caught here), print the ownerless-write counters,
     and count ``ownerless_chunk_write_refused`` / ``..._would_refuse`` lines in
     the engine log the lease's launch kind names (``storage_service_jar.log``
     for a jar, ``storage_service_native.log`` for a native binary, plus
-    rotations). In cut mode exit 1 on any refusal or would-refuse (a red gate
-    IS the oracle: a writer this journey exercises wrote a chunk with no
-    manifest owner; fix the writer before tagging), on an unreachable
-    ``/v1/status``, on both counters reading absent, and on a missing engine
-    log (the engine ran, so its log exists).
+    rotations).
+
+    ``--controls N`` is the number of DELIBERATE ownerless writes the gate
+    itself sent this engine as a negative control (``local-service-gate.sh``
+    sends one; every other gate sends none). It is required, so a gate cannot
+    leave it unsaid, and the gate computes it next to the control it counts.
+    In cut mode the reading must equal the control EXACTLY: in enforce
+    ``refused_total=N would_refuse_total=0 log_lines=N``, in log-only
+    ``refused_total=0 would_refuse_total=N log_lines=N`` (the mode is what
+    ``/v1/status`` reports). Anything else is exit 1: more means a writer the
+    gate did not intend wrote a chunk with no manifest owner (fix the writer
+    before tagging); fewer means the counter or the log did not see the
+    gate's own control, so a zero from the same engine proves nothing. That
+    makes the control a positive control for the counter. Also exit 1 in cut
+    mode on an unreachable ``/v1/status``, on both counters reading absent, on
+    a mode other than the expected one, and on a missing engine log (the
+    engine ran, so its log exists). The log line limiter keeps one line per
+    route, tenant and collection per minute, so a gate that declares more than
+    one control per key would read fewer lines than counted: declare one.
 
 ``cut-assert-log <logfile> <label> [--candidate PATH]``
     Battery side. In cut mode, exit 1 unless the leg's log carries BOTH an
@@ -76,6 +90,16 @@ python3 with a scrubbed environment):
     zero counters and zero log hits and the mode the run expects. A leg whose
     own checks went green but which never reported an engine, never read the
     refusal counters, or reported the pinned engine, is not a pass.
+
+``failed-step-evidence <leg-log> <failed-line>``
+    Battery side, for ``--expected-engine-lag`` (non-cut). Print the text that belongs to the
+    step the leg FAILED at, and only that: the failed verdict line, the log files that line
+    names (a ``<x>.log`` also names its ``<x>.stderr.log``: ``data-token-cli-gate`` says ``see
+    store-put.log / .stderr.log``), and the stretch of the leg log that ends at the failure (the
+    verdict line itself, and each ``[FAIL]`` marker) and starts after the previous step boundary
+    (a ``── `` or ``== `` banner, a ``[pass]`` line, a ``  nx ...:`` step header), at most 30
+    lines. An early mention of an error in a step that passed, or in the newest of some other
+    log, is not in it. Two steps with no boundary between them are not told apart.
 
 ``manifest-artifact <artifacts-dir> jar|native`` / ``candidate-in-manifest <artifacts-dir> <path>``
     Battery side. Print the manifest's path for an artifact; say which
@@ -323,13 +347,61 @@ def _engine_logs(config_dir: str, ep: dict) -> list[str]:
     return sorted(p for p in glob.glob(pattern) if os.path.isfile(p))
 
 
-def refusals(config_dir: str, label: str, environ: dict[str, str] | None = None) -> tuple[str, str | None]:
+def _expected_counters(mode: object, controls: int) -> tuple[int, int] | None:
+    """``(refused_total, would_refuse_total)`` a gate that sent *controls* deliberate ownerless
+    writes must read: enforce counts them as refused, log-only as would-refuse. None when the
+    mode is neither and controls were sent, so nothing can say which counter they moved."""
+    if mode == "enforce":
+        return controls, 0
+    if mode == "log-only":
+        return 0, controls
+    return (0, 0) if controls == 0 else None
+
+
+def _counter_mismatch(
+    controls: int, mode: object, refused: int, would: int, log_hits: int, logs: list[str],
+) -> str | None:
+    want = _expected_counters(mode, controls)
+    if want is None:
+        return (
+            f"cut mode: the gate declares {controls} deliberate ownerless write(s) but /v1/status "
+            f"reports ownerless_write_mode={_fmt(mode)}, so no counter can be said to have moved"
+        )
+    if (refused, would, log_hits) == (want[0], want[1], controls):
+        return None
+    reading = f"refused_total={refused} would_refuse_total={would} log_lines={log_hits}"
+    expected = f"refused_total={want[0]} would_refuse_total={want[1]} log_lines={controls}"
+    if controls == 0:
+        return (
+            "cut mode: the engine refused (or would refuse) an ownerless chunk write "
+            "during this journey. A writer this gate exercises writes a chunk with no "
+            f"manifest owner: fix the writer before tagging ({reading}; engine log: "
+            f"{', '.join(logs) or 'none'})."
+        )
+    over = refused + would > controls or log_hits > controls
+    return (
+        f"cut mode: this gate sent {controls} deliberate ownerless write(s) (its own control) and "
+        f"the engine ({_fmt(mode)}) read {reading}, expected {expected}. "
+        + (
+            "More than the control: a writer the gate did not intend wrote a chunk with no manifest "
+            "owner; fix the writer before tagging."
+            if over else
+            "Fewer than the control: the counter or the log did not see the gate's own control, so a "
+            "zero from this engine proves nothing about its writers."
+        )
+    )
+
+
+def refusals(
+    config_dir: str, label: str, environ: dict[str, str] | None = None, controls: int = 0,
+) -> tuple[str, str | None]:
     env = os.environ if environ is None else environ
     ep, _version, status = _engine_probe(config_dir)
     is_candidate, _kind, sha, artifact = _artifact_facts(ep, env)
     status_d = status or {}
     refused = status_d.get("ownerless_writes_refused_total")
     would = status_d.get("ownerless_writes_would_refuse_total")
+    mode = status_d.get("ownerless_write_mode")
     logs = _engine_logs(config_dir, ep)
     log_hits = 0
     for path in logs:
@@ -339,8 +411,8 @@ def refusals(config_dir: str, label: str, environ: dict[str, str] | None = None)
     line = (
         f"{REFUSALS_PREFIX} [{label}]: candidate={'yes' if is_candidate else 'no'} sha256={sha} "
         f"refused_total={_fmt(refused)} would_refuse_total={_fmt(would)} "
-        f"log_lines={log_hits if logs else 'none'} log={log_cell} "
-        f"mode={_fmt(status_d.get('ownerless_write_mode'))}"
+        f"log_lines={log_hits if logs else 'none'} log={log_cell} controls={controls} "
+        f"mode={_fmt(mode)}"
     )
     if not cut_mode(env):
         return line, None
@@ -359,20 +431,19 @@ def refusals(config_dir: str, label: str, environ: dict[str, str] | None = None)
             "cut mode: /v1/status carries no ownerless-write counters, so a refusal "
             "could not have been seen"
         )
-    if (refused or 0) > 0 or (would or 0) > 0 or log_hits > 0:
-        return line, (
-            "cut mode: the engine refused (or would refuse) an ownerless chunk write "
-            "during this journey. A writer this gate exercises writes a chunk with no "
-            "manifest owner: fix the writer before tagging "
-            f"(engine log: {', '.join(logs) or 'none'})."
-        )
     if not logs:
         return line, (
             f"cut mode: no engine log under {os.path.join(config_dir, 'logs')} for the lease's "
             "launch kind, so the log half of the refusal oracle read nothing (the engine ran, "
             "so its log exists; the counters alone do not survive an engine restart)"
         )
-    return line, None
+    expect = expected_mode(env)
+    if expect != "none" and mode != expect:
+        return line, (
+            f"cut mode: /v1/status reports ownerless_write_mode={_fmt(mode)} at the end of the "
+            f"journey, expected {expect}"
+        )
+    return line, _counter_mismatch(controls, mode, refused or 0, would or 0, log_hits, logs)
 
 
 _IDENTITY_RE = re.compile(
@@ -380,7 +451,7 @@ _IDENTITY_RE = re.compile(
 )
 _REFUSALS_RE = re.compile(
     rf"^\s*{REFUSALS_PREFIX} \[[^\]]*\]: candidate=(yes|no) sha256=(\w+) "
-    r"refused_total=(\S+) would_refuse_total=(\S+) log_lines=(\S+) log=\S+ mode=(\S+)", re.M
+    r"refused_total=(\S+) would_refuse_total=(\S+) log_lines=(\S+) log=\S+ controls=(\S+) mode=(\S+)", re.M
 )
 
 
@@ -418,27 +489,64 @@ def cut_assert_log(
             "never read the engine's ownerless-write counters and log at the end of its journey"
         )
     expect = expected_mode(env)
-    for flag, sha, refused, would, log_lines, mode in refs:
+    for flag, sha, refused, would, log_lines, controls, mode in refs:
         if flag != "yes" or sha != want:
             return (
                 f"{label}: cut mode, but the engine at the END of the journey was not the "
                 f"candidate {cand} (swapped mid-journey?)"
             )
-        if not (refused.isdigit() and would.isdigit() and log_lines.isdigit()):
+        if not (refused.isdigit() and would.isdigit() and log_lines.isdigit() and controls.isdigit()):
             return (
                 f"{label}: cut mode, but the refusals line has no usable reading "
-                f"(refused_total={refused} would_refuse_total={would} log_lines={log_lines}): "
-                "a refusal could not have been seen"
-            )
-        if int(refused) or int(would) or int(log_lines):
-            return (
-                f"{label}: cut mode, but the engine refused (or would refuse) an ownerless "
-                f"chunk write (refused_total={refused} would_refuse_total={would} "
-                f"log_lines={log_lines})"
+                f"(refused_total={refused} would_refuse_total={would} log_lines={log_lines} "
+                f"controls={controls}): a refusal could not have been seen"
             )
         if expect != "none" and mode != expect:
             return f"{label}: cut mode, but the engine reported ownerless_write_mode={mode}, expected {expect}"
+        bad = _counter_mismatch(int(controls), mode, int(refused), int(would), int(log_lines), [])
+        if bad:
+            return f"{label}: {bad}"
     return None
+
+
+#: A line that ends the previous step: a banner, a passed marker, a step header.
+_STEP_BOUNDARY_RE = re.compile(r"^(?:── |== |\s*\[pass\]\s*$|\s{2}nx \S.*:\s*$)")
+_NAMED_LOG_RE = re.compile(r"(/[^\s()|'\":]+\.(?:log|out|err))")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+LAG_STEP_MAX_LINES = 30
+LAG_NAMED_FILE_TAIL_LINES = 200
+
+
+def failed_step_evidence(log_text: str, failed_line: str) -> str:
+    """The output that belongs to the step a leg failed at (see ``failed-step-evidence``)."""
+    lines = _ANSI_RE.sub("", log_text).splitlines()
+    failed = _ANSI_RE.sub("", failed_line)
+    points: set[int] = set()
+    for i in range(len(lines) - 1, -1, -1):
+        if len(lines[i].strip()) >= 12 and lines[i].strip() in failed:
+            points.add(i)
+            break
+    else:
+        if lines:
+            points.add(len(lines) - 1)
+    points.update(i for i, ln in enumerate(lines) if "[FAIL]" in ln)
+    out = [failed]
+    for p in sorted(points):
+        lo = p
+        while lo > 0 and p - lo < LAG_STEP_MAX_LINES and not _STEP_BOUNDARY_RE.match(lines[lo - 1]):
+            lo -= 1
+        out.extend(lines[lo:p + 1])
+    for named in _NAMED_LOG_RE.findall(failed):
+        candidates = [named]
+        if named.endswith(".log") and not named.endswith(".stderr.log"):
+            candidates.append(named[: -len(".log")] + ".stderr.log")
+        for path in candidates:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    out.extend(_ANSI_RE.sub("", ln.rstrip("\n")) for ln in fh.readlines()[-LAG_NAMED_FILE_TAIL_LINES:])
+            except OSError:
+                continue
+    return "\n".join(out)
 
 
 def _manifest(artifacts_dir: str) -> dict:
@@ -467,8 +575,21 @@ def candidate_in_manifest(artifacts_dir: str, candidate: str) -> str:
     return "none"
 
 
-def _label(rest: list[str]) -> str:
-    return rest[1] if rest[:1] == ["--label"] and len(rest) > 1 else "gate"
+def _options(rest: list[str]) -> tuple[str, int | None]:
+    """``(label, controls)`` from ``--label L`` / ``--controls N`` in either order; controls is
+    None when absent. Anything else is a usage error."""
+    label, controls = "gate", None
+    i = 0
+    while i < len(rest):
+        flag, val = rest[i], rest[i + 1] if i + 1 < len(rest) else None
+        if flag == "--label" and val is not None:
+            label = val
+        elif flag == "--controls" and val is not None and val.isdigit():
+            controls = int(val)
+        else:
+            raise CandidateError(f"unusable argument {flag!r} (want --label L, --controls N)")
+        i += 2
+    return label, controls
 
 
 def main(argv: list[str]) -> int:
@@ -483,13 +604,31 @@ def main(argv: list[str]) -> int:
                 print(line)
             return 0
         if cmd in ("identity", "refusals") and args:
-            config_dir, label = args[0], _label(args[1:])
-            line, failure = (identity if cmd == "identity" else refusals)(config_dir, label)
+            config_dir = args[0]
+            label, controls = _options(args[1:])
+            if cmd == "identity":
+                line, failure = identity(config_dir, label)  # controls is a refusals input; ignored here
+            elif controls is None:
+                raise CandidateError(
+                    "refusals needs --controls N: how many deliberate ownerless writes this gate "
+                    "sent the engine (0 for a gate that sends none). A gate that does not say "
+                    "cannot be held to an exact reading."
+                )
+            else:
+                line, failure = refusals(config_dir, label, controls=controls)
         elif cmd == "cut-assert-log" and len(args) in (2, 4) and (len(args) == 2 or args[2] == "--candidate"):
             failure = cut_assert_log(args[0], args[1], candidate=args[3] if len(args) == 4 else "")
             if failure:
                 print(f"CANDIDATE ENGINE CHECK FAILED: {failure}", file=sys.stderr)
                 return 1
+            return 0
+        elif cmd == "failed-step-evidence" and len(args) == 2:
+            try:
+                with open(args[0], encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError as exc:
+                raise CandidateError(f"cannot read {args[0]}: {exc}") from exc
+            print(failed_step_evidence(text, args[1]))
             return 0
         elif cmd == "manifest-artifact" and len(args) == 2 and args[1] in ("jar", "native"):
             print(manifest_artifact(args[0], args[1]))

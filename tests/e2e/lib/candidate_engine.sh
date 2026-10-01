@@ -12,7 +12,7 @@
 #         nx init ...
 #     candidate_engine_identity "$HOME_DIR/.config/nexus" mvv || _fail ...
 #     ...journey...
-#     candidate_engine_refusals "$HOME_DIR/.config/nexus" mvv || _fail ...
+#     candidate_engine_refusals "$HOME_DIR/.config/nexus" mvv 0 || _fail ...
 #
 # CAND_ENV_ARGS is empty when no candidate is set and cut mode is off, so the
 # default (pinned published engine) path is unchanged.
@@ -60,7 +60,15 @@ candidate_engine_identity() {  # <config-dir> <label>
     python3 "$CAND_ENGINE_LIB_DIR/candidate_engine.py" identity "$1" --label "$2"
 }
 
-# End of journey: ownerless-write counters and engine log; in cut mode fail on any refusal.
-candidate_engine_refusals() {  # <config-dir> <label>
-    python3 "$CAND_ENGINE_LIB_DIR/candidate_engine.py" refusals "$1" --label "$2"
+# End of journey: ownerless-write counters and engine log. <controls> is how many DELIBERATE
+# ownerless writes this gate itself sent the engine (0 for a gate that sends none; the gate
+# computes it next to the control it counts, local-service-gate.sh is the only one that sends
+# any). In cut mode the reading must equal the control exactly, so the argument is required:
+# a gate that leaves it unsaid cannot be held to a reading.
+candidate_engine_refusals() {  # <config-dir> <label> <controls>
+    if [ -z "${3:-}" ]; then
+        echo "candidate_engine_refusals: <controls> is required (0 for a gate that sends no deliberate ownerless write)" >&2
+        return 2
+    fi
+    python3 "$CAND_ENGINE_LIB_DIR/candidate_engine.py" refusals "$1" --label "$2" --controls "$3"
 }

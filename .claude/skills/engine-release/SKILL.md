@@ -84,10 +84,14 @@ Must end `PASSED`. A fix that is on develop does not ride a tag placed on an old
 > is part of the post-deploy cloud gate (Step 6).
 
 ```bash
-tests/e2e/migration-rehearsal/run.sh --shakeout
+NX_CUT_MODE=1 tests/e2e/migration-rehearsal/run.sh --shakeout
 ```
 
-Must end `CANDIDATE SHAKEOUT PASSED`.
+Must end `CANDIDATE SHAKEOUT PASSED`. `NX_CUT_MODE=1` is the cut-mode switch of
+Step 3f: with it, the journey also prints `ENGINE IDENTITY` and `ENGINE
+OWNERLESS REFUSALS` for the native binary it served and fails on a refusal. For
+this pre-tag run, always set it. Without it the two lines print and nothing
+fails on them.
 
 **Phase F now runs `service/native-smoke.sh`'s own probe set too (nexus-l8xnz,
 2026-08-17).** The raw-curl probe set (taxonomy/assignments/details' 64-hex
@@ -139,13 +143,15 @@ changeset is safe in every dimension" — read the coverage statement below
 before treating a green run as exhaustive:
 
 ```bash
-tests/e2e/migration-rehearsal/run.sh --candidate-migration
+NX_CUT_MODE=1 tests/e2e/migration-rehearsal/run.sh --candidate-migration
 # a cut whose changeset count is known ahead of time pins it instead of
 # merely reporting it, e.g. a cut adding exactly 3 new changesets:
-EXPECT_NEW_CHANGESETS=3 tests/e2e/migration-rehearsal/run.sh --candidate-migration
+NX_CUT_MODE=1 EXPECT_NEW_CHANGESETS=3 tests/e2e/migration-rehearsal/run.sh --candidate-migration
 ```
 
-Must end `CANDIDATE-MIGRATION REHEARSAL PASSED`. Reports (never asserts to
+Must end `CANDIDATE-MIGRATION REHEARSAL PASSED`. `NX_CUT_MODE=1` is the same
+cut-mode switch as for `--shakeout` above (Step 3f): the journey reads the
+candidate engine's ownerless-write counters and log and fails on a refusal. Reports (never asserts to
 an exact value unless `EXPECT_NEW_CHANGESETS` is set) the changeset delta
 between the floor's post-init `DATABASECHANGELOG` count and the candidate's
 post-boot count — `delta=0` is a legitimate, explicitly-stated outcome (it
@@ -452,10 +458,16 @@ engine has no ownership check. The pin moves only after the tag is immutable,
 so a missed writer costs a re-cut. `lsg` serves the artifacts jar and is
 included. Two more legs run the candidate NATIVE binary inside a container:
 `shakeout` (Step 3's `--shakeout`) and `candmig` (Step 3's
-`--candidate-migration`). Run those two in Step 3 with `NX_CUT_MODE=1` exported
-and they read the engine's refusals too, so the battery does not repeat them.
-`pkgup` is not an engine leg: it converges an old install to the PUBLISHED
-engine and never runs the candidate.
+`--candidate-migration`). Step 3's commands for those two carry `NX_CUT_MODE=1`,
+so they read the engine's refusals too. The `--only` list above leaves them out
+(the battery would only repeat them), so the battery's table says nothing about
+them: **their evidence is Step 3's console output.** Look there for `ENGINE
+IDENTITY [shakeout]` and `ENGINE OWNERLESS REFUSALS [shakeout]`, and the same two
+lines labelled `candidate-migration`, each naming the native binary by sha256
+with `controls=0` and zero counters. A Step 3 run that printed neither pair did
+not read the engine, whatever its verdict line says. `pkgup` is not an engine
+leg: it converges an old install to the PUBLISHED engine and never runs the
+candidate.
 
 **The native `-Ob` proof stays with Step 3 `--shakeout`.** It is the only
 gate on the binary that ships. The jar these legs take is a JVM build of the
@@ -474,32 +486,45 @@ What the cut mode adds, all in `tests/e2e/lib/candidate_engine.py`:
 - Every leg prints `ENGINE IDENTITY [leg]: candidate=yes|no kind= artifact=
   sha256= release_version= build_ref= ownerless_write_mode=` and, at the end of
   its journey, `ENGINE OWNERLESS REFUSALS [leg]: candidate= sha256=
-  refused_total= would_refuse_total= log_lines= log= mode=`. `release_version`
-  alone cannot tell a dev jar from the pinned release (the jar bakes the same
-  floor value); read `build_ref` and `sha256`.
+  refused_total= would_refuse_total= log_lines= log= controls= mode=`.
+  `release_version` alone cannot tell a dev jar from the pinned release (the jar
+  bakes the same floor value); read `build_ref` and `sha256`.
 - In cut mode the leg itself fails, and the battery fails a leg whose log lacks
   EITHER line, when the engine is not the candidate (by sha256, at the start AND
   at the end of the journey), when `/v1/status` is unreachable (the probe uses
   no proxy), lacks `ownerless_write_mode=enforce`, or lacks both counters, when
-  any counter or engine-log line shows a refusal or would-refuse, or when the
-  engine log is missing. The log read is the one the lease's launch kind names
-  (`storage_service_jar.log` for a jar, `storage_service_native.log` for a
-  native binary); it is the half that survives an engine restart mid-journey.
-  A red here is the oracle: a writer this journey exercises writes a chunk with
-  no manifest owner. Fix the writer before tagging.
+  the counters and the engine log do not read EXACTLY the gate's own declared
+  control, or when the engine log is missing. The log read is the one the lease's
+  launch kind names (`storage_service_jar.log` for a jar,
+  `storage_service_native.log` for a native binary); it is the half that
+  survives an engine restart mid-journey.
+- `controls=` is how many DELIBERATE ownerless writes the gate itself sent that
+  engine: 1 for `lsg` (its smoke leg sends one ownerless `upsert-chunks`, the
+  negative leg of nexus-z0o2p.24) and 0 for every other leg. In enforce the
+  reading must be `refused_total=<controls> would_refuse_total=0
+  log_lines=<controls>`; in log-only, `refused_total=0
+  would_refuse_total=<controls>`. More than the control is a writer nobody
+  intended: it writes a chunk with no manifest owner, so fix the writer before
+  tagging. Fewer is red too: the counter or the log did not see the gate's own
+  control, so a zero from that engine proves nothing. A gate states its count
+  next to the control it sends and cannot omit it.
 - Each gate stages a private copy of the candidate: the supervisor finds its
   engine by argv, so two parallel gates on one jar path stop each other's
   engines (measured 2026-10-01: exit 143). The copies are removed on every exit.
 
-**Two variables, two jobs.** `NX_GATE_OWNERLESS_WRITE_MODE` (nexus-9a6io; it lands in Step 3c,
-`published-client-write-gate.sh`) is an INPUT: the mode that gate
-STARTS the candidate in, so it can prove the refusal in both modes.
+**The mode variable, and one that is not there yet.**
 `NX_CANDIDATE_EXPECT_OWNERLESS_MODE` (this step) is an ASSERTION: the mode the
 engine serving a cut leg must report, default `enforce`. Setting it to anything
 else (`none` drops the mode assert, `log-only` expects log-only) relaxes that
-one assert only: identity, reachability, counters and the log are still
-required. The battery prints a `CUT MODE WARNING` banner and ends PARTIAL, as
-`--only` does; it is never the final cut.
+one assert only: identity, reachability, counters, the log and the control
+count are still required. The battery prints a `CUT MODE WARNING` banner and
+ends PARTIAL, as `--only` does; it is never the final cut. A second variable,
+`NX_GATE_OWNERLESS_WRITE_MODE`, is planned as an INPUT to
+`published-client-write-gate.sh` (Step 3c: the mode that gate starts the
+candidate in, so it can prove the refusal in both modes). It is added by
+nexus-9a6io, which was open on 2026-10-01, and `published-client-write-gate.sh`
+reads nothing by that name on develop until that bead lands. Check the script
+before relying on it.
 
 Still NOT covered: writers outside this repo (other machines, hooks, the WSL
 appliance, hellmini), which only production traffic exercises (T2
@@ -523,13 +548,18 @@ as an unexplained failure, name it:
 tests/e2e/release-battery.sh --expected-engine-lag nexus-z0o2p.9@0.1.142 ...   # <bead>@<REQUIRED_ENGINE_VERSION>
 ```
 
-A red `mvv`/`smoke`/`shakedown`/`dtok` leg whose failing output carries the
+A red `mvv`/`smoke`/`shakedown`/`dtok` leg whose failing STEP carries the
 `EngineOlderThanClientError` signature then reads `EXPECTED-LAG(<bead>)`, is
-counted, and ends the battery PARTIAL (never a release verdict). Any other red
-stays red. The ack refuses to run once `REQUIRED_ENGINE_VERSION` is no longer the
-version it names, and in cut mode it is an error (cut mode gates the candidate,
-where a lag ack would hide the red it exists to find). `dtok` is a leg in cut
-mode, and in a non-cut run only when named: `--only dtok`.
+counted, and ends the battery PARTIAL (never a release verdict). The failing step
+is the failed verdict line, the log files that line names (and the `.stderr.log`
+beside a named `.log`), and the stretch of the leg log that ends at the failure
+and starts after the previous step boundary, at most 30 lines. A tolerated
+mention of the error in an earlier step does not count, and neither does the
+newest log in some evidence directory. Any other red stays red. The ack refuses
+to run once `REQUIRED_ENGINE_VERSION` is no longer the version it names, and in
+cut mode it is an error (cut mode gates the candidate, where a lag ack would
+hide the red it exists to find). `dtok` is a leg in cut mode, and in a non-cut
+run when you name it: `--only dtok`.
 
 ### 4. Push the tag (human, or AI when explicitly authorized)
 

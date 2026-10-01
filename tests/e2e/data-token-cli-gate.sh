@@ -502,7 +502,8 @@ done
 echo "  fan-out: $FANOUT_N/$FANOUT_N succeeded, $FANOUT_MINT_COUNT total mint(s)"
 
 echo "── engine refusals (nexus-0kmat) ──"
-candidate_engine_refusals "$HOME_DIR/.config/nexus" data-token-cli-gate 2>&1 | tee "$LOGS/engine-refusals.log" \
+# The 0 is this gate's declared control count: it sends the engine no deliberate ownerless write.
+candidate_engine_refusals "$HOME_DIR/.config/nexus" data-token-cli-gate 0 2>&1 | tee "$LOGS/engine-refusals.log" \
     || _fail "the end-of-journey engine read failed: a refusal, an unreadable counter or log, or an engine that is not the candidate (see CANDIDATE ENGINE CHECK FAILED above)"
 
 echo "── non-vacuity ──"

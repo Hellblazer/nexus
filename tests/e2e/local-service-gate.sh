@@ -771,6 +771,13 @@ smoke_check "GET /v1/catalog/show -> index_state==failed (fence round-trip)" "d.
 # prior local-mode use already has it (verified present on this box; no
 # download is triggered by this leg). NEXUS_GATE_NO_VECTOR_SMOKE=1 drops the
 # leg (and SMOKE_EXPECTED with it) if that assumption stops holding somewhere.
+#
+# GATE_OWNERLESS_CONTROLS counts the DELIBERATE ownerless writes this gate sends its engine (the
+# negative control below, one per run, none when the vector leg is dropped). The end-of-journey
+# engine read (candidate_engine.py refusals --controls) must find EXACTLY that many refusals in
+# the counters and the engine log, so the control doubles as a positive control for both. Bump it
+# next to any control added here, never at the read.
+GATE_OWNERLESS_CONTROLS=0
 if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   SMOKE_CHASH="$(python3 -c "import hashlib;print(hashlib.sha256(b'gate-smoke-chunk-$SMOKE_UID').hexdigest())")"
   SMOKE_VEC_COLLECTION="knowledge__gate-smoke__bge-base-en-v15-768__v1"
@@ -820,6 +827,7 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   fi
   smoke_request POST /v1/vectors/upsert-chunks \
     "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_ORPHAN'],'documents':['gate smoke orphan chunk $SMOKE_UID'],'metadatas':[{}]}))")"
+  GATE_OWNERLESS_CONTROLS=$((GATE_OWNERLESS_CONTROLS + 1))   # the one deliberate ownerless write (see the declaration above)
   if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
     [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash, log-only) want 200"
     smoke_request GET /v1/status
@@ -1000,7 +1008,9 @@ BUDGET="${NX_GATE_BUDGET:-40}"
 # half this read adds. The candidate here is the artifacts jar this gate copied
 # in (NX_GATE_ARTIFACTS), judged by sha256, so a battery cut that names a
 # different --candidate-engine cannot make this leg pass against the wrong
-# bytes. Outside cut mode the two lines are printed and never fail the gate.
+# bytes. Outside cut mode the two lines are printed and never fail the gate. In cut mode the reading must
+# equal this gate's own declared control (GATE_OWNERLESS_CONTROLS), not zero: the smoke leg sent one
+# deliberate ownerless write to this same engine, so a zero would mean the counter is dead.
 GATE_CAND_ENV=()
 [ -z "${NX_GATE_ARTIFACTS:-}" ] || [ -z "${GATE_JAR_REL:-}" ] \
   || GATE_CAND_ENV=("NX_CANDIDATE_ENGINE=$NX_GATE_ARTIFACTS/$GATE_JAR_REL")
@@ -1008,6 +1018,7 @@ GATE_ENGINE_FAIL=0
 for _cand_cmd in identity refusals; do
   env ${GATE_CAND_ENV[@]+"${GATE_CAND_ENV[@]}"} \
     python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" "$_cand_cmd" "$SCRATCH" --label local-service-gate \
+      --controls "$GATE_OWNERLESS_CONTROLS" \
     || GATE_ENGINE_FAIL=1
 done
 if [ "$GATE_ENGINE_FAIL" = 1 ] && [ "${NX_CUT_MODE:-0}" = 1 ]; then

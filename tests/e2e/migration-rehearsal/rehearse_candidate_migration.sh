@@ -1087,10 +1087,13 @@ fi
 # mode the two lines print and never fail the journey; in cut mode (NX_CUT_MODE=1,
 # forwarded by run.sh) a missing module is itself a failure.
 say "Engine — candidate identity + ownerless-write refusals (nexus-0kmat)"
+# The lease engine's declared control count: this journey sends the engine no deliberate
+# ownerless write.
+ENGINE_CONTROLS=0
 ENGINE_READ_PY="$HOME/lib/candidate_engine.py"
 if [ -f "$ENGINE_READ_PY" ]; then
   for engine_cmd in identity refusals; do
-    if NX_CANDIDATE_ENGINE="$SVC_NATIVE_DIR/nexus-service" python3 "$ENGINE_READ_PY" "$engine_cmd" "$HOME/.config/nexus" --label candidate-migration; then
+    if NX_CANDIDATE_ENGINE="$SVC_NATIVE_DIR/nexus-service" python3 "$ENGINE_READ_PY" "$engine_cmd" "$HOME/.config/nexus" --label candidate-migration --controls "$ENGINE_CONTROLS"; then
       ok "engine $engine_cmd"
     elif [ "${NX_CUT_MODE:-0}" = 1 ]; then
       bad "engine $engine_cmd failed in cut mode (see CANDIDATE ENGINE CHECK FAILED above)"

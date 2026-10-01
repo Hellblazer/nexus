@@ -879,7 +879,8 @@ case "$MODE" in
         done
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
         # nexus-0kmat: in cut mode an ownerless-write refusal during the run is a red.
-        candidate_engine_refusals "$HOME/.config/nexus" smoke 2>&1 | sed 's/^/  /' \
+        # The 0 is this mode's declared control count: it sends no deliberate ownerless write.
+        candidate_engine_refusals "$HOME/.config/nexus" smoke 0 2>&1 | sed 's/^/  /' \
             || SMOKE_FAILED+=("engine end-of-journey read: a refusal, an unreadable counter or log, or an engine that is not the candidate (see CANDIDATE ENGINE CHECK FAILED above)")
         if (( ${#SMOKE_FAILED[@]} )); then
             echo >&2
@@ -1484,7 +1485,8 @@ case "$MODE" in
         echo
         echo "[done] Sandbox state at $SANDBOX. Run '$0 reset' to tear down."
         # nexus-0kmat: in cut mode an ownerless-write refusal during the run is a red.
-        candidate_engine_refusals "$HOME/.config/nexus" shakedown 2>&1 | sed 's/^/  /' \
+        # The 0 is this mode's declared control count: it sends no deliberate ownerless write.
+        candidate_engine_refusals "$HOME/.config/nexus" shakedown 0 2>&1 | sed 's/^/  /' \
             || SHAKEDOWN_FAILED+=("engine end-of-journey read: a refusal, an unreadable counter or log, or an engine that is not the candidate (see CANDIDATE ENGINE CHECK FAILED above)")
         if (( ${#SHAKEDOWN_SOFT[@]} )); then
             echo

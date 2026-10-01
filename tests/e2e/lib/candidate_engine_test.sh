@@ -105,26 +105,7 @@ expect_has "gate b's variables name its own copy" "$WORKDIR/o7b" "stage-b"
 if [ -f "$WORKDIR/stage-a/engine candidate.jar" ] && [ -f "$WORKDIR/stage-b/engine candidate.jar" ]; then ok "both copies exist"; else bad "a staged copy is missing"; fi
 
 echo "Test 8: identity + refusals against a stub engine (candidate, then the pinned binary)"
-python3 - "$WORKDIR" >"$WORKDIR/stub.out" 2>&1 <<'PY' &
-import http.server, json, sys, threading
-workdir = sys.argv[1]
-class H(http.server.BaseHTTPRequestHandler):
-    def log_message(self, *a): pass
-    def do_GET(self):
-        if self.path == "/version":
-            body = {"release_version": "0.1.142", "build_ref": "abc1234+99"}
-        elif self.path == "/v1/status":
-            body = {"ownerless_write_mode": "enforce", "ownerless_writes_refused_total": 0,
-                    "ownerless_writes_would_refuse_total": 0}
-        else:
-            self.send_response(404); self.end_headers(); return
-        data = json.dumps(body).encode()
-        self.send_response(200); self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
-srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
-open(workdir + "/stub.port", "w").write(str(srv.server_address[1]))
-srv.serve_forever()
-PY
+python3 "$HERE/candidate_engine_stub.py" "$WORKDIR" >"$WORKDIR/stub.out" 2>&1 &
 STUB_PID=$!
 for _ in $(seq 1 50); do [ -s "$WORKDIR/stub.port" ] && break; sleep 0.1; done
 if [ -s "$WORKDIR/stub.port" ]; then ok "stub engine up on an ephemeral port"; else bad "stub engine did not start: $(cat "$WORKDIR/stub.out")"; fi
@@ -152,7 +133,7 @@ expect_has "failure names the vacuity" "$WORKDIR/e8b" "ran against the pinned pu
 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_identity "$CFG" t8 >"$WORKDIR/o8c" 2>/dev/null; rc=$?
 expect_rc "not cut mode: a pinned engine is reported, not failed" 0 "$rc"
 
-candidate_engine_refusals "$CFG" t8 >"$WORKDIR/o8d" 2>/dev/null; rc=$?
+candidate_engine_refusals "$CFG" t8 0 >"$WORKDIR/o8d" 2>/dev/null; rc=$?
 expect_rc "refusals line prints without cut mode" 0 "$rc"
 expect_has "refusals line carries the counters" "$WORKDIR/o8d" "refused_total=0 would_refuse_total=0"
 
@@ -165,24 +146,54 @@ write_lease_kind() {  # <artifact> <launch_kind>
 write_lease_kind "$JAR" jar
 mkdir -p "$CFG/logs"
 printf 'INFO boot\nWARN event=ownerless_chunk_write_refused source_path=/x\n' >"$CFG/logs/storage_service_jar.log"
-NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9" 2>"$WORKDIR/e9"; rc=$?
+NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 0 >"$WORKDIR/o9" 2>"$WORKDIR/e9"; rc=$?
 expect_rc "cut mode: a refusal in storage_service_jar.log is a failure" 1 "$rc"
 expect_has "the refusals line counts it" "$WORKDIR/o9" "log_lines=1 log=storage_service_jar.log"
 printf 'INFO boot\nWARN event=ownerless_chunk_write_would_refuse source_path=/x\n' >"$CFG/logs/storage_service_jar.log"
-NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9b" 2>/dev/null; rc=$?
+NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 0 >"$WORKDIR/o9b" 2>/dev/null; rc=$?
 expect_rc "cut mode: a would-refuse line (log-only) is a failure too" 1 "$rc"
 printf 'INFO boot\n' >"$CFG/logs/storage_service_jar.log"
-NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9c" 2>/dev/null; rc=$?
+NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 0 >"$WORKDIR/o9c" 2>/dev/null; rc=$?
 expect_rc "cut mode: a clean jar log passes" 0 "$rc"
 rm -f "$CFG/logs/storage_service_jar.log"
-NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9d" 2>"$WORKDIR/e9d"; rc=$?
+NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 0 >"$WORKDIR/o9d" 2>"$WORKDIR/e9d"; rc=$?
 expect_rc "cut mode: a MISSING engine log is a failure" 1 "$rc"
 expect_has "the refusals line says there was no log" "$WORKDIR/o9d" "log=none"
 printf 'INFO boot\n' >"$CFG/logs/storage_service_jar.log"
 HTTP_PROXY="http://127.0.0.1:1" http_proxy="http://127.0.0.1:1" ALL_PROXY="http://127.0.0.1:1" \
-    NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9e" 2>/dev/null; rc=$?
+    NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 0 >"$WORKDIR/o9e" 2>/dev/null; rc=$?
 expect_rc "an ambient proxy does not break the loopback probe" 0 "$rc"
 expect_has "the counters were read through the proxy setting" "$WORKDIR/o9e" "refused_total=0 would_refuse_total=0 log_lines=0"
+
+echo "Test 10: a gate's own control must read EXACTLY (enforce: refused, log-only: would-refuse); anything else fails"
+set_status() {  # <mode> <refused> <would>
+    printf '{"ownerless_write_mode":"%s","ownerless_writes_refused_total":%s,"ownerless_writes_would_refuse_total":%s}' "$1" "$2" "$3" >"$WORKDIR/stub.status.json"
+}
+control_log() {  # <event> -- one engine log line carrying it
+    printf 'INFO boot\nWARN event=%s source_path=/x\n' "$1" >"$CFG/logs/storage_service_jar.log"
+}
+cut_refusals() {  # <controls> -> rc of the end-of-journey read in cut mode
+    NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t10 "$1" >"$WORKDIR/o10" 2>"$WORKDIR/e10"
+}
+set_status enforce 1 0; control_log ownerless_chunk_write_refused
+cut_refusals 1; expect_rc "enforce, one control, 1 refused 0 would 1 log line" 0 "$?"
+expect_has "the line declares the control" "$WORKDIR/o10" "controls=1 mode=enforce"
+cut_refusals 0; expect_rc "enforce, no control declared but one refusal read" 1 "$?"
+expect_has "...is a writer nobody intended" "$WORKDIR/e10" "fix the writer before tagging"
+set_status enforce 0 0; control_log ownerless_chunk_write_refused
+cut_refusals 1; expect_rc "enforce, control declared but the counter reads 0 (dead counter)" 1 "$?"
+expect_has "...says the counter did not see its own control" "$WORKDIR/e10" "did not see the gate's own control"
+set_status enforce 1 0; printf 'INFO boot\n' >"$CFG/logs/storage_service_jar.log"
+cut_refusals 1; expect_rc "enforce, counter 1 but no log line" 1 "$?"
+set_status enforce 2 0; control_log ownerless_chunk_write_refused
+cut_refusals 1; expect_rc "enforce, a second refusal beyond the control" 1 "$?"
+set_status enforce 1 1; control_log ownerless_chunk_write_refused
+cut_refusals 1; expect_rc "enforce, a would-refuse beside the control" 1 "$?"
+set_status log-only 0 1; control_log ownerless_chunk_write_would_refuse
+NX_CANDIDATE_EXPECT_OWNERLESS_MODE=log-only cut_refusals 1; expect_rc "log-only, one control, 0 refused 1 would 1 log line" 0 "$?"
+set_status log-only 1 0; control_log ownerless_chunk_write_would_refuse
+NX_CANDIDATE_EXPECT_OWNERLESS_MODE=log-only cut_refusals 1; expect_rc "log-only, the control counted as refused" 1 "$?"
+rm -f "$WORKDIR/stub.status.json"
 
 echo
 echo "candidate_engine_test.sh: $PASS passed, $FAIL failed"

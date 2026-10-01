@@ -29,10 +29,12 @@
 # mode, the pinned engine does not echo it, so mvv/smoke/shakedown/dtok go red
 # against the pinned engine with EngineOlderThanClientError until the pin moves.
 # --expected-engine-lag <bead>@<REQUIRED_ENGINE_VERSION> (or NX_EXPECTED_ENGINE_LAG)
-# names that state: a red engine-bearing leg whose log tail carries the
-# EngineOlderThanClientError signature reads EXPECTED-LAG(<bead>) instead of
-# FAILED, the verdict is PARTIAL, and the ack REFUSES to run once the pin has
-# moved off the version it names. Any other red stays red.
+# names that state: a red engine-bearing leg whose FAILING STEP (the failed verdict
+# line, the log files it names, the stretch of the leg log that ends at the failure)
+# carries the EngineOlderThanClientError signature reads EXPECTED-LAG(<bead>) instead
+# of FAILED, the verdict is PARTIAL, and the ack REFUSES to run once the pin has
+# moved off the version it names. Any other red stays red, including one that follows
+# a tolerated mention of the error in a step that passed.
 #
 # Leg 0, serial: build every artifact ONCE (tests/e2e/migration-rehearsal/
 # build-artifacts.sh — wheel, stamped dev jar, linux native candidate, plus
@@ -380,25 +382,21 @@ cut_resolve_candidate() {
   return 0
 }
 # The pinned engine predates develop's client (nexus-0kmat): the named, acknowledged
-# lag. Prints the reason when a FAILED engine-bearing leg's own failing output
-# carries the signature; empty = a real red. That output is the TAIL of the leg
-# log, plus the tail of the newest log in the evidence directory a gate preserves
-# on failure ("FAILURE EVIDENCE PRESERVED: <dir>"): data-token-cli-gate fails at
-# "store put ... failed (see <dir>/store-put.stderr.log)" and the error text lives
-# only in that file. The tail and the newest file, not the whole journey, so a
-# tolerated early mention followed by an unrelated red stays red.
+# lag. Prints the reason when a FAILED engine-bearing leg's OWN failing step carries the
+# signature; empty = a real red. The failing step is what candidate_engine.py
+# failed-step-evidence returns: the FAILED verdict line, the log files that line names
+# (data-token-cli-gate fails at "store put ... failed (see <dir>/store-put.log / .stderr.log)"
+# and the error text lives only in the stderr file), and the stretch of the leg log that ends
+# at the failure and begins after the previous step boundary. Not the last N lines of the log,
+# and not the newest file in some evidence directory: a tolerated early mention followed by an
+# unrelated red stays red.
 ENGINE_LAG_LEGS=" mvv smoke shakedown dtok "
 ENGINE_LAG_SIGNATURE='EngineOlderThanClientError|The engine is older than this client'
-engine_lag_verdict() {  # engine_lag_verdict <leg>
+engine_lag_verdict() {  # engine_lag_verdict <leg> <failed-verdict-line>
   [ -n "${LAG_BEAD:-}" ] || return 0
   [[ "${ENGINE_LAG_LEGS}" == *" $1 "* ]] || return 0
-  local evidence ev newest
-  evidence="$(tail -n 80 "$LOGS/$1.log" | sed -e 's/\x1b\[[0-9;]*m//g')"
-  ev="$(sed -n 's/^FAILURE EVIDENCE PRESERVED: \([^ ]*\).*/\1/p' "$LOGS/$1.log" | tail -n 1)"
-  if [ -n "$ev" ] && [ -d "$ev" ]; then
-    newest="$(ls -t "$ev"/*.log 2>/dev/null || true)"; newest="${newest%%$'\n'*}"
-    [ -z "$newest" ] || evidence="$evidence"$'\n'"$(tail -n 80 "$newest" | sed -e 's/\x1b\[[0-9;]*m//g')"
-  fi
+  local evidence
+  evidence="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" failed-step-evidence "$LOGS/$1.log" "${2:-}" 2>/dev/null || true)"
   [[ "$evidence" =~ $ENGINE_LAG_SIGNATURE ]] || return 0
   printf 'EXPECTED-LAG(%s): the pinned engine %s predates this client'"'"'s metadata_merge write mode (EngineOlderThanClientError)' "$LAG_BEAD" "${LAG_ENGINE:-?}"
 }
@@ -445,7 +443,7 @@ finish_leg() {  # finish_leg <leg> <rc>
   # nexus-0kmat: a red against the PINNED engine that is the acknowledged lag is
   # named, counted and PARTIAL; it is never a pass and never an unexplained red.
   if [ "${LEG_STATUS[$leg]}" = FAILED ] && [ "${CUT_MODE:-0}" != 1 ]; then
-    vac="$(engine_lag_verdict "$leg")"
+    vac="$(engine_lag_verdict "$leg" "$line")"
     if [ -n "$vac" ]; then LEG_STATUS[$leg]="EXPECTED-LAG"; line="$vac | $line"; LAG_COUNT=$((LAG_COUNT+1)); fi
   fi
   # nexus-tt5vm review round 2 (Sam's data-point goal): fresh-install-mvv's
