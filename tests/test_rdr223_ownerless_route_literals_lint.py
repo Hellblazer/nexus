@@ -71,6 +71,7 @@ _ALLOWED: dict[str, str] = {
     "tests/test_vector_retry.py": _STUBBED,
     "tests/test_z0o2p16_store_put_note_writer.py": _SPY,
     "tests/test_z0o2p19_nxexp_import_combined_write.py": _SPY,
+    "tests/test_z0o2p24_reembed_concurrent_supersede.py": _OWNED + "; the one chash that loses its owner mid-run is refused by the engine by design and the client resends the rest (a fake db covers the other branches)",
     "tests/test_znwc2_response_shape_trust.py": _STUBBED,
 }
 

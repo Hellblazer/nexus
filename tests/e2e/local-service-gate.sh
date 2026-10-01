@@ -800,14 +800,24 @@ if [ -z "${NEXUS_GATE_NO_VECTOR_SMOKE:-}" ]; then
   [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (owned chash)"
   smoke_check "POST /v1/vectors/upsert-chunks (owned chash) -> upserted=1" "d.get('upserted')==1"
 
-  # RDR-223 P3.2 (nexus-z0o2p.24): the NEGATIVE leg. A chash no manifest row owns is refused 422
-  # with the typed reason a client keys on, naming the combined routes that replace the write.
+  # RDR-223 P3.2 (nexus-z0o2p.24): the NEGATIVE leg. In the default enforce mode a chash no manifest
+  # row owns is refused 422 with the typed reason a client keys on, naming the combined routes.
+  # NX_OWNERLESS_WRITE_MODE=log-only (the engine inherits it) is the writer-census posture: the same
+  # write is accepted and /v1/status counts it, so the pytest legs after this one can run and list
+  # every ownerless writer in the engine log.
   SMOKE_ORPHAN="$(python3 -c "import hashlib;print(hashlib.sha256(b'gate-smoke-orphan-$SMOKE_UID').hexdigest())")"
   smoke_request POST /v1/vectors/upsert-chunks \
     "$(python3 -c "import json;print(json.dumps({'collection':'$SMOKE_VEC_COLLECTION','ids':['$SMOKE_ORPHAN'],'documents':['gate smoke orphan chunk $SMOKE_UID'],'metadatas':[{}]}))")"
-  [ "$SMOKE_CODE" = "422" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash) want 422"
-  smoke_check "POST /v1/vectors/upsert-chunks (ownerless chash) -> 422 ownerless_chunk_write naming write_many and append" \
-    "d.get('reason')=='ownerless_chunk_write' and '/v1/catalog/manifest/write_many' in d.get('error','') and '/v1/catalog/manifest/append' in d.get('error','')"
+  if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
+    [ "$SMOKE_CODE" = "200" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash, log-only) want 200"
+    smoke_request GET /v1/status
+    smoke_check "GET /v1/status -> log-only counted the ownerless write" \
+      "d.get('ownerless_write_mode')=='log-only' and d.get('ownerless_writes_would_refuse_total',0)>=1"
+  else
+    [ "$SMOKE_CODE" = "422" ] || smoke_fail "POST /v1/vectors/upsert-chunks (ownerless chash) want 422"
+    smoke_check "POST /v1/vectors/upsert-chunks (ownerless chash) -> 422 ownerless_chunk_write naming write_many and append" \
+      "d.get('reason')=='ownerless_chunk_write' and '/v1/catalog/manifest/write_many' in d.get('error','') and '/v1/catalog/manifest/append' in d.get('error','')"
+  fi
 
   smoke_request POST /v1/vectors/search \
     "$(python3 -c "import json;print(json.dumps({'query':'$SMOKE_CHUNK_TEXT','collections':['$SMOKE_VEC_COLLECTION'],'n_results':5}))")"

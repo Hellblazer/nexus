@@ -529,7 +529,11 @@ json.dump({'collection': e['RCOL'], 'doc_id': e['ORPHAN'], 'content': 'an ownerl
       --data-binary "@$SMOKE_TMP/ns-orphan-sp.in" "$U/v1/vectors/store-put")
     for leg in up sp; do
       ocode=$([ "$leg" = up ] && echo "$oup" || echo "$osp")
-      if [ "$ocode" = "422" ] && OLEG="$leg" python3 -c "
+      if [ "${NX_OWNERLESS_WRITE_MODE:-enforce}" = "log-only" ]; then
+        # Writer-census posture: the engine inherits the mode and accepts the write.
+        if [ "$ocode" = "200" ]; then echo "  ok   $leg ownerless chash -> 200 (log-only)"; else
+          echo "  FAIL $leg ownerless chash (want 200 in log-only) -> $ocode"; fail=1; fi
+      elif [ "$ocode" = "422" ] && OLEG="$leg" python3 -c "
 import json, os, sys
 b = json.load(open(os.environ['SMOKE_TMP'] + '/ns-orphan-' + os.environ['OLEG'] + '.out'))
 sys.exit(0 if b.get('reason') == 'ownerless_chunk_write' and '/v1/catalog/manifest/write_many' in b['error'] and '/v1/catalog/manifest/append' in b['error'] else 1)" 2>/dev/null; then
