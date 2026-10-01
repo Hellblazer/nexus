@@ -3089,15 +3089,6 @@ _MODE_LINT_EXCLUDE_NODEIDS: frozenset[str] = frozenset({
     "tests/test_catalog_collection_name.py::test_canonical_embedding_models_includes_voyage_context_3",
     "tests/test_catalog_collection_name.py::test_canonical_embedding_models_includes_voyage_code_3",
     #
-    # Reason class "string-literal-as-name": _is_same_model_passthrough
-    # checks membership in the real _PASSTHROUGH_MODELS set
-    # ({"bge-base-en-v15-768"} | _VOYAGE_MODELS); this test's SECOND
-    # assertion specifically proves a voyage model is ALSO wired
-    # passthrough (complementing the sibling bge case in the same file,
-    # already covered with no voyage token) -- swapping to a neutral
-    # token would move it out of the real set and invert the assertion.
-    "tests/db/test_collection_parse_funnel_slice2.py::TestIsSameModelPassthrough::test_same_name_wired_model_is_passthrough",
-    #
     # Reason class "string-literal-as-name": embedding_model_for_
     # collection's real legacy-2-segment fallback (voyage_model_for_
     # collection, mode-independent prefix dispatch) -- same class as
