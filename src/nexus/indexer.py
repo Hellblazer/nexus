@@ -4132,8 +4132,8 @@ def _prune_collection_serverside(
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     # NX_GC_FLOOR_FRACTION gates THIS step, the hard delete of quarantined chunks
     # past their window, and nothing before it: the move into quarantine above
-    # (gc_quarantine_orphans) has no fraction floor. The reaper's move needs
-    # one (RDR-192 / nexus-2x9xa), and it is not built here.
+    # (gc_quarantine_orphans) has no fraction floor. The engine reaper's own move
+    # carries one (RDR-192 / nexus-2x9xa, NX_REAPER_FLOOR_FRACTION); this path does not.
     expired = expire_quarantine_serverside(
         db, quarantine_name, collection_name, cutoff,
         floor_fraction=_gc_floor_fraction(), floor_min_chunks=_GC_FLOOR_MIN_CHUNKS,

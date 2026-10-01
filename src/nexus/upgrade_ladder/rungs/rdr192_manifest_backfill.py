@@ -10,8 +10,8 @@ nexus-b6enc, so it has a catalog document but never got a manifest row) by
 hand, on the operator tenant only (nexus-wbfpw.6/.7/.32). Every other
 install took the engine with the client pin, got ``live(c)`` at once, and was
 never censused: its legacy notes went dark, and once the reaper
-(nexus-2x9xa, ``reapable(c)``) ships it would DELETE them after the grace
-window. Nothing at upgrade time repaired that.
+(nexus-2x9xa, ``reapable(c)``) ships it would MOVE them to quarantine after the
+grace window (30 days, then deleted 14 days later). Nothing at upgrade time repaired that.
 
 The upgrade ladder (RDR-185) is the standing mechanism for a data transition
 that must converge on every install: ``nx upgrade`` walks it after the

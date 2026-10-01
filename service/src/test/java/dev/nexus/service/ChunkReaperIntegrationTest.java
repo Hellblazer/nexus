@@ -89,11 +89,18 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     }
 
     private static Settings settings(int batch, double fraction, int minChunks) {
-        return new Settings(true, Duration.ofHours(1), batch, fraction, minChunks, Duration.ofMinutes(10));
+        return new Settings(true, Duration.ofHours(1), batch, fraction, minChunks, Duration.ofMinutes(10),
+            Duration.ofSeconds(60));
     }
 
     private ChunkReaper reaper(Settings s, String... tenants) {
-        return new ChunkReaper(store, vectors, gate, () -> List.of(tenants), s, CLOCK);
+        return new ChunkReaper(store, vectors, repo, gate, () -> List.of(tenants), s, CLOCK);
+    }
+
+    /** A reaper whose census and monotonic clock a test supplies (a census the SQL cannot produce, a clock that jumps). */
+    private ChunkReaper reaper(Settings s, ChunkReaper.Census census, java.util.function.LongSupplier nanos,
+                               String... tenants) {
+        return new ChunkReaper(store, vectors, repo, gate, () -> List.of(tenants), s, CLOCK, census, nanos);
     }
 
     private ChunkReaper reaper(String... tenants) {
@@ -165,10 +172,20 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
     private record AuditRow(String operation, String actor, String collection, int chashCount, String chashes,
                             String details) {}
 
+    /** The reaper's MOVE rows ({@code reaper_quarantine}): what a pass that moved something writes. */
     private List<AuditRow> auditRows(String tenant) throws Exception {
+        return auditRows(tenant, ChunkReaper.AUDIT_MOVED);
+    }
+
+    /** The reaper's durable REFUSAL rows ({@code reaper_refused}). */
+    private List<AuditRow> refusedRows(String tenant) throws Exception {
+        return auditRows(tenant, ChunkReaper.AUDIT_REFUSED);
+    }
+
+    private List<AuditRow> auditRows(String tenant, String operation) throws Exception {
         try (Connection su = pg.createConnection("")) {
             return DSL.using(su, SQLDialect.POSTGRES).selectFrom(GC_AUDIT)
-                .where(GC_AUDIT.TENANT_ID.eq(tenant)).orderBy(GC_AUDIT.ID)
+                .where(GC_AUDIT.TENANT_ID.eq(tenant).and(GC_AUDIT.OPERATION.eq(operation))).orderBy(GC_AUDIT.ID)
                 .fetch(r -> new AuditRow(r.getOperation(), r.getActor(), r.getCollection(), r.getChashCount(),
                     r.getChashes().data(), r.getDetails() == null ? "" : r.getDetails().data()));
         }
@@ -622,6 +639,625 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
 
         assertThat(movedBetween).as("the reaper ran between batches and took nothing").containsExactly(0L, 0L);
         assertThat(chunkSet(t, c)).contains(h(c, "a4"), h(c, "a5"));
+    }
+
+    // ── the floor is judged on the whole reapable set ────────────────────────
+
+    /**
+     * {@code n} chunks in ONE connection (a 5000-chunk fixture must not pay a connection per chunk), the first
+     * {@code owned} owned by a manifest row, the rest ownerless. {@code metas} supplies each chunk's metadata.
+     */
+    private List<String> bulkFast(String tenant, String collection, int n, int owned,
+                                  java.util.function.IntFunction<Map<String, Object>> metas) throws Exception {
+        List<String> hexes = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<float[]> vectors = new ArrayList<>();
+        List<Map<String, Object>> metadata = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            hexes.add(Chash.ofText(collection + "/bulk" + i).toHex());
+            texts.add("bulk" + i + " text");
+            vectors.add(new float[384]);
+            metadata.add(metas.apply(i));
+        }
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+            PgContainerHelper.insertChunks(ctx, tenant, collection, hexes, texts, vectors, metadata);
+            if (owned > 0) {
+                PgContainerHelper.ownChunks(ctx, tenant, collection, hexes.subList(0, owned).toArray(new String[0]));
+            }
+        }
+        return hexes;
+    }
+
+    @Test
+    void theFloorIsJudgedOnTheWholeReapableSet_1500OfA5000ChunkCollectionIsRefusedAtQuarter() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        // 1500 reapable of 5000 = 0.30 of the collection, over 0.25. A pass moves at most 300 chunks, and 300 of
+        // 5000 is 0.06: judged on the BATCH the floor never trips on a collection past 1200 chunks, which is
+        // exactly the mass-orphaning (a manifest TRUNCATE, the deploy+30d cliff) it exists to refuse.
+        bulkFast(t, c, 5000, 3500, i -> Map.of());
+
+        CollectionResult cr = reaper(t).runOnce(Duration.ZERO).tenant(t).collection(c);
+
+        assertThat(cr.refusal()).isEqualTo(Refusal.FLOOR_EXCEEDED);
+        assertThat(cr.candidates()).as("the whole reapable set, not the 300 one pass would take").isEqualTo(1500);
+        assertThat(cr.total()).isEqualTo(5000);
+        assertThat(cr.moved()).isZero();
+        assertThat(countIn(t, c)).isEqualTo(5000);
+        assertThat(countIn(t, quarantineOf(c))).isZero();
+    }
+
+    @Test
+    void theMoveFunctionItselfRefusesOnTheWholeSet_notOnlyTheJavaPreJudgement() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        bulkFast(t, c, 5000, 3500, i -> Map.of());
+
+        // Straight to the SQL function, bypassing the Java pre-judgement: it re-judges under the sweep gate.
+        ReaperRepository.Pass pass = store.move(t, c, quarantineOf(c), "2026-10-01T12:00:00Z", 300, Duration.ZERO,
+            0.25, 100, 25_000, 2_000);
+
+        assertThat(pass.refused()).isTrue();
+        assertThat(pass.reapable()).isEqualTo(1500);
+        assertThat(pass.moved()).isZero();
+        assertThat(countIn(t, c)).isEqualTo(5000);
+    }
+
+    @Test
+    void aFloorRefusedCollectionDoesNotPayForACensus() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String refused = col("knowledge");
+        String fine = col("knowledge");
+        bulkFast(t, refused, 300, 200, i -> Map.of());   // 100 of 300: refused by the floor
+        orphan(t, fine, "x");
+        List<String> censused = new ArrayList<>();
+        ChunkReaper.Census counting = (tenant, collection, limit, timeout) -> {
+            censused.add(collection);
+            return vectors.manifestLessCensusBounded(tenant, collection, limit, 0, timeout);
+        };
+
+        RunResult run = reaper(Settings.defaults(), counting, System::nanoTime, t).runOnce(Duration.ZERO);
+
+        assertThat(run.tenant(t).collection(refused).refusal()).isEqualTo(Refusal.FLOOR_EXCEEDED);
+        assertThat(run.tenant(t).collection(fine).moved()).isEqualTo(1);
+        assertThat(censused).as("the census ran for the collection that would move, and only for it")
+            .containsExactly(fine);
+    }
+
+    // ── the census: bounded, non-vacuous, unclassified is a refusal ──────────
+
+    /** A census result the SQL could not produce, to drive the gates that guard against its failure modes. */
+    private static PgVectorRepository.ManifestLessCensusResult censusOf(long scope, Map<String, Long> totals) {
+        Map<String, Long> all = new LinkedHashMap<>();
+        for (String b : List.of("superseded", "legacy-unmanifested", "dead-owner", "no-owner", "unclassified")) {
+            all.put(b, 0L);
+        }
+        all.putAll(totals);
+        return new PgVectorRepository.ManifestLessCensusResult(0, new LinkedHashMap<>(), new LinkedHashMap<>(), all,
+            scope);
+    }
+
+    @Test
+    void anUnclassifiedChunkRefusesTheCollection_theBucketIsUnreachableInTheSqlToday_andTheGateIsPinned() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String h = orphan(t, c, "x");
+        // The census SQL's ELSE branch is unreachable today (every case above it is exhaustive), so no real
+        // data produces this. The gate stays, because the SQL's own header promises the bucket is "reported,
+        // never dropped" and a future branch must not open the move by silence. Pinned with a census the
+        // SQL cannot yet produce.
+        ChunkReaper.Census unclassified = (tenant, collection, limit, timeout) ->
+            censusOf(1, Map.of("unclassified", 1L));
+
+        CollectionResult cr = reaper(Settings.defaults(), unclassified, System::nanoTime, t).runOnce(Duration.ZERO)
+            .tenant(t).collection(c);
+
+        assertThat(cr.refusal()).isEqualTo(Refusal.CENSUS_UNCLASSIFIED);
+        assertThat(cr.moved()).isZero();
+        assertThat(inCollection(t, c, h)).isTrue();
+    }
+
+    @Test
+    void aCensusThatReadADifferentSetThanTheOneJudged_isNotTakenForACleanCollection() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String h = orphan(t, c, "x");
+        // The false zero the SQL header warns of: a wrong tenant or an unset RLS GUC reads scope 0 and every
+        // bucket 0, which is indistinguishable from a clean collection unless the scope total is compared.
+        ChunkReaper.Census falseZero = (tenant, collection, limit, timeout) -> censusOf(0, Map.of());
+
+        CollectionResult cr = reaper(Settings.defaults(), falseZero, System::nanoTime, t).runOnce(Duration.ZERO)
+            .tenant(t).collection(c);
+
+        assertThat(cr.refusal()).isEqualTo(Refusal.CENSUS_SCOPE_MISMATCH);
+        assertThat(cr.moved()).isZero();
+        assertThat(inCollection(t, c, h)).as("a census that read nothing is not evidence of a clean collection").isTrue();
+    }
+
+    @Test
+    void aCensusCancelledByItsStatementBoundIsARefusal_notAZero() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String h = orphan(t, c, "x");
+        ChunkReaper.Census cancelled = (tenant, collection, limit, timeout) -> {
+            throw new org.jooq.exception.DataAccessException("canceling statement due to statement timeout",
+                new java.sql.SQLException("canceling statement due to statement timeout", "57014"));
+        };
+
+        CollectionResult cr = reaper(Settings.defaults(), cancelled, System::nanoTime, t).runOnce(Duration.ZERO)
+            .tenant(t).collection(c);
+
+        assertThat(cr.refusal()).isEqualTo(Refusal.CENSUS_TIMED_OUT);
+        assertThat(cr.moved()).isZero();
+        assertThat(inCollection(t, c, h)).isTrue();
+        assertThat(refusedRows(t)).singleElement().satisfies(a -> assertThat(a.details()).contains("CENSUS_TIMED_OUT"));
+    }
+
+    @Test
+    void theCensusStatementIsReallyBounded_aOneMillisecondBoundCancelsItWithSqlState57014() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        bulkFast(t, c, 2000, 1000, i -> Map.of());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                () -> vectors.manifestLessCensusBounded(t, c, 1, 0, Duration.ofMillis(1)))
+            .satisfies(e -> {
+                Throwable x = e;
+                String state = null;
+                for (int i = 0; x != null && i < 32; i++, x = x.getCause()) {
+                    if (x instanceof java.sql.SQLException se) state = se.getSQLState();
+                }
+                assertThat(state).as("statement_timeout cancel").isEqualTo("57014");
+            });
+        assertThat(vectors.manifestLessCensusBounded(t, c, 1, 0, Duration.ofSeconds(60)).scopeChunkTotal())
+            .as("and an adequate bound reads the whole collection").isEqualTo(2000);
+    }
+
+    // ── wall clock ───────────────────────────────────────────────────────────
+
+    private static String colNamed(String prefix, int n, String tag) {
+        return prefix + "__wc" + n + tag + "__minilm-l6-v2-384__v1";
+    }
+
+    private static Settings budgetOf(Duration budget) {
+        return new Settings(true, Duration.ofHours(1), 300, 0.25, 100, budget, Duration.ofSeconds(60));
+    }
+
+    @Test
+    void aWallClockCutInsideTheLastTenantIsReported_asOnASingleTenantLocalInstall() throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        int n = seq.incrementAndGet();
+        String first = colNamed("knowledge", n, "a");
+        String second = colNamed("knowledge", n, "b");
+        String hFirst = orphan(t, first, "x");
+        String hSecond = orphan(t, second, "x");
+        java.util.concurrent.atomic.AtomicLong fakeNanos = new java.util.concurrent.atomic.AtomicLong();
+        // The first collection's census takes 20 s of a 10 s budget.
+        ChunkReaper.Census slow = (tenant, collection, limit, timeout) -> {
+            fakeNanos.addAndGet(Duration.ofSeconds(20).toNanos());
+            return vectors.manifestLessCensusBounded(tenant, collection, limit, 0, timeout);
+        };
+
+        RunResult[] run = new RunResult[1];
+        List<String> logs = captureLogs(() ->
+            run[0] = reaper(budgetOf(Duration.ofSeconds(10)), slow, fakeNanos::get, t).runOnce(Duration.ZERO));
+
+        assertThat(run[0].wallClockCut()).as("a cut inside the only tenant is a cut").isTrue();
+        assertThat(run[0].tenant(t).wallClockCut()).isTrue();
+        assertThat(run[0].tenant(t).collection(first).moved()).as("the first collection was done").isEqualTo(1);
+        assertThat(run[0].tenant(t).collection(second)).as("the second was not visited").isNull();
+        assertThat(inCollection(t, first, hFirst)).isFalse();
+        assertThat(inCollection(t, second, hSecond)).isTrue();
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_pass") && l.contains("tenant=" + t)
+            && l.contains("wall_clock_cut=true"));
+        assertThat(logs).anyMatch(l -> l.contains("event=reaper_run") && l.contains("wall_clock_cut=true"));
+    }
+
+    @Test
+    void aWallClockCutAtATenantBoundaryLeavesTheLaterTenantsUnvisited() throws Exception {
+        String t1 = newTenant();
+        String t2 = newTenant();
+        openGate(t1);
+        openGate(t2);
+        String c1 = col("knowledge");
+        String c2 = col("knowledge");
+        orphan(t1, c1, "x");
+        String h2 = orphan(t2, c2, "x");
+        java.util.concurrent.atomic.AtomicLong fakeNanos = new java.util.concurrent.atomic.AtomicLong();
+        ChunkReaper.Census slow = (tenant, collection, limit, timeout) -> {
+            fakeNanos.addAndGet(Duration.ofSeconds(20).toNanos());
+            return vectors.manifestLessCensusBounded(tenant, collection, limit, 0, timeout);
+        };
+
+        RunResult run = reaper(budgetOf(Duration.ofSeconds(10)), slow, fakeNanos::get, t1, t2).runOnce(Duration.ZERO);
+
+        assertThat(run.wallClockCut()).isTrue();
+        assertThat(run.tenant(t1)).isNotNull();
+        assertThat(run.tenant(t2)).as("never reached").isNull();
+        assertThat(inCollection(t2, c2, h2)).isTrue();
+    }
+
+    // ── refusals are durable ─────────────────────────────────────────────────
+
+    private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
+
+    @Test
+    void aFloorRefusalWritesOneAuditRowWithASample_andNotAnotherUntilTheStateChanges() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        // 100 reapable of 300, each with a title and a source path the operator can recognise.
+        bulkFast(t, c, 300, 200, i -> Map.of("title", "Doc " + i, "source_path", "/src/file" + i + ".md"));
+        ChunkReaper r = reaper(t);
+
+        r.runOnce(Duration.ZERO);
+        r.runOnce(Duration.ZERO);
+        reaper(t).runOnce(Duration.ZERO);   // a fresh reaper (a restart) reads the state from gc_audit, not memory
+
+        assertThat(refusedRows(t)).as("written once per state change, not once a pass").singleElement().satisfies(a -> {
+            assertThat(a.actor()).isEqualTo(ChunkReaper.ACTOR);
+            assertThat(a.collection()).isEqualTo(c);
+            var d = readJson(a.details());
+            assertThat(d.get("reason").asText()).isEqualTo("FLOOR_EXCEEDED");
+            assertThat(d.get("candidates").asLong()).isEqualTo(100);
+            assertThat(d.get("total").asLong()).isEqualTo(300);
+            assertThat(d.get("sample")).as("up to five title/source_path rows").hasSize(5);
+            for (var row : d.get("sample")) {
+                assertThat(row.get("title").asText()).startsWith("Doc ");
+                assertThat(row.get("source_path").asText()).startsWith("/src/file");
+            }
+        });
+
+        // The state changes: the collection leaves `live`. A new reason is a new row.
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+               .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t).and(CATALOG_COLLECTIONS.NAME.eq(c))).execute();
+        }
+        r.runOnce(Duration.ZERO);
+        r.runOnce(Duration.ZERO);
+        assertThat(refusedRows(t)).hasSize(2).last().satisfies(a ->
+            assertThat(a.details()).contains("COLLECTION_NOT_LIVE"));
+    }
+
+    private static com.fasterxml.jackson.databind.JsonNode readJson(String json) {
+        try {
+            return JSON.readTree(json);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    @Test
+    void aCensusRefusalAuditRowNamesTheLegacyChunksByTitleAndSourcePath() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String doc = "rp.legacy." + seq.incrementAndGet();
+        registerNote(t, doc, c, null);
+        orphan(t, c, "legacy", Map.of("catalog_doc_id", doc, "title", "Legacy note", "source_path", "/notes/legacy.md"));
+        orphan(t, c, "debris");
+
+        reaper(t).runOnce(Duration.ZERO);
+
+        assertThat(refusedRows(t)).singleElement().satisfies(a -> {
+            var d = readJson(a.details());
+            assertThat(d.get("reason").asText()).isEqualTo("CENSUS_LEGACY_UNMANIFESTED");
+            assertThat(d.get("sample")).hasSize(1);
+            assertThat(d.get("sample").get(0).get("title").asText()).isEqualTo("Legacy note");
+            assertThat(d.get("sample").get(0).get("source_path").asText()).isEqualTo("/notes/legacy.md");
+        });
+    }
+
+    @Test
+    void aTenantRefusalIsAuditedOncePerStateToo() throws Exception {
+        String t = newTenant();   // no backfill record
+        ChunkReaper r = reaper(t);
+
+        r.runOnce(Duration.ZERO);
+        r.runOnce(Duration.ZERO);
+
+        assertThat(refusedRows(t)).singleElement().satisfies(a -> {
+            assertThat(a.collection()).isEmpty();
+            assertThat(a.details()).contains("BACKFILL_INCOMPLETE");
+        });
+        assertThat(r.refusedTotal()).as("counted every time, audited once").isEqualTo(2);
+    }
+
+    // ── a busy gate and a lock timeout are skips, not refusals ───────────────
+
+    @Test
+    void aBusyGateIsCountedOnItsOwn_notAsARefusal_andIsNeverAudited() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        orphan(t, c, "x");
+        ChunkReaper r = reaper(t);
+        try (Connection writer = pg.createConnection("")) {
+            writer.setAutoCommit(false);
+            DSL.using(writer, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock_shared",
+                SQLDataType.OTHER, DSL.function("hashtext", SQLDataType.INTEGER,
+                    DSL.val("sweepgate:" + t + "/" + c)))).execute();
+            assertThat(r.runOnce(Duration.ZERO).tenant(t).collection(c).refusal()).isEqualTo(Refusal.GATE_BUSY);
+            writer.rollback();
+        }
+
+        assertThat(r.gateBusyTotal()).isEqualTo(1);
+        assertThat(r.lockTimeoutTotal()).isZero();
+        assertThat(r.refusedTotal()).as("routine contention is not a refusal").isZero();
+        assertThat(refusedRows(t)).isEmpty();
+    }
+
+    @Test
+    void aRowLockTimeoutIsLabelledAsOne_notAsABusyGate() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String raced = orphan(t, c, "raced");
+        ChunkReaper r = reaper(t);
+        try (Connection writer = svcDs.getConnection()) {
+            writer.setAutoCommit(false);
+            PgContainerHelper.setTenant(writer, TenantScope.DEFAULT_TENANT_GUC, t, true);
+            // A client holding an uncommitted refresh of the chunk for longer than the move's 2 s lock bound.
+            DSL.using(writer, SQLDialect.POSTGRES).update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, OffsetDateTime.now())
+               .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(c))
+                      .and(CHUNKS.CHASH.eq(Chash.fromHex(raced).toBytes()))).execute();
+
+            CollectionResult cr = r.runOnce(Duration.ZERO).tenant(t).collection(c);
+
+            assertThat(cr.refusal()).isEqualTo(Refusal.LOCK_TIMEOUT);
+            writer.rollback();
+        }
+        assertThat(r.lockTimeoutTotal()).isEqualTo(1);
+        assertThat(r.gateBusyTotal()).as("the gate was free; a row lock was not").isZero();
+        assertThat(r.refusedTotal()).isZero();
+        assertThat(inCollection(t, c, raced)).isTrue();
+    }
+
+    // ── the move stamps whole seconds ────────────────────────────────────────
+
+    @Test
+    void quarantinedAtIsWholeSeconds_theShapeGcExpireQuarantineCompares() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String h = orphan(t, c, "x");
+        Clock fractional = Clock.fixed(Instant.parse("2026-10-01T12:00:00.987654321Z"), ZoneOffset.UTC);
+        ChunkReaper r = new ChunkReaper(store, vectors, repo, gate, () -> List.of(t), Settings.defaults(), fractional);
+
+        assertThat(r.runOnce(Duration.ZERO).tenant(t).collection(c).moved()).isEqualTo(1);
+
+        try (Connection su = pg.createConnection("")) {
+            String stamp = DSL.using(su, SQLDialect.POSTGRES)
+                .select(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "quarantined_at")).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(quarantineOf(c)))
+                       .and(CHUNKS.CHASH.eq(Chash.fromHex(h).toBytes())))
+                .fetchOne(0, String.class);
+            assertThat(stamp).isEqualTo("2026-10-01T12:00:00Z");
+        }
+    }
+
+    // ── the pass expires the quarantine it fills ─────────────────────────────
+
+    /** {@code n} chunks in the quarantine sibling of {@code origin}, each stamped {@code ageDays} before CLOCK. */
+    private List<String> quarantined(String tenant, String origin, String tag, int n, int ageDays,
+                                     boolean registerOrigin) throws Exception {
+        String stamp = CLOCK.instant().minus(Duration.ofDays(ageDays)).truncatedTo(java.time.temporal.ChronoUnit.SECONDS)
+            .toString();
+        String q = quarantineOf(origin);
+        List<String> hexes = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        List<float[]> vecs = new ArrayList<>();
+        List<Map<String, Object>> metas = new ArrayList<>();
+        for (int i = 0; i < n; i++) {
+            hexes.add(Chash.ofText(q + "/" + tag + i).toHex());
+            texts.add(tag + i);
+            vecs.add(new float[384]);
+            metas.add(Map.of("quarantined_at", stamp, "origin_collection", origin));
+        }
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            if (registerOrigin) PgContainerHelper.insertCollection(ctx, tenant, origin);
+            PgContainerHelper.insertCollection(ctx, tenant, q);
+            PgContainerHelper.insertChunks(ctx, tenant, q, hexes, texts, vecs, metas);
+        }
+        return hexes;
+    }
+
+    @Test
+    void aPassExpiresQuarantineOlderThan14Days_andKeepsTheRest_andTheExpiryIsAudited() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        List<String> old = quarantined(t, origin, "old", 3, 15, true);
+        List<String> recent = quarantined(t, origin, "recent", 2, 5, false);
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(result.expiry(quarantineOf(origin)).expired()).isEqualTo(3);
+        for (String h : old) assertThat(inCollection(t, quarantineOf(origin), h)).as("15 days old: expired").isFalse();
+        for (String h : recent) assertThat(inCollection(t, quarantineOf(origin), h)).as("5 days old: kept").isTrue();
+        assertThat(auditRows(t, "gc_expire_quarantine")).as("gc_expire_quarantine audits its own delete")
+            .singleElement().satisfies(a -> assertThat(a.chashCount()).isEqualTo(3));
+    }
+
+    @Test
+    void theExpiryFloorRefusesAMassExpiry_visibly_andNeverForces() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        List<String> old = quarantined(t, origin, "old", 150, 15, true);
+        quarantined(t, origin, "recent", 50, 1, false);   // 150 of 200 expire: over 0.25 and at least 100
+        ChunkReaper r = reaper(t);
+
+        ChunkReaper.TenantResult result = r.runOnce(null).tenant(t);
+        r.runOnce(null);
+
+        assertThat(result.expiry(quarantineOf(origin)).refusal()).isEqualTo(Refusal.EXPIRY_REFUSED);
+        assertThat(result.expiry(quarantineOf(origin)).expired()).isZero();
+        assertThat(countIn(t, quarantineOf(origin))).as("nothing deleted").isEqualTo(200);
+        assertThat(inCollection(t, quarantineOf(origin), old.get(0))).isTrue();
+        assertThat(refusedRows(t)).as("once, not every hour").singleElement().satisfies(a -> {
+            assertThat(a.collection()).isEqualTo(quarantineOf(origin));
+            assertThat(a.details()).contains("EXPIRY_REFUSED");
+        });
+    }
+
+    @Test
+    void anAgedQuarantineChunkAManifestRowStillNames_isNeverExpired() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        String named = orphan(t, origin, "named");
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.ownChunks(ctx, t, origin, named);
+            PgContainerHelper.insertCollection(ctx, t, q);
+            PgContainerHelper.insertChunks(ctx, t, q, List.of(named), List.of("named text"),
+                List.of(new float[384]), List.of(Map.of("quarantined_at", "2026-09-01T00:00:00Z",
+                    "origin_collection", origin)));
+        }
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(inCollection(t, q, named)).as("a chunk a live manifest row names is not hard-deleted").isTrue();
+        assertThat(result.expiry(q).expired()).isZero();
+        assertThat(result.expiry(q).refusal()).isEqualTo(Refusal.EXPIRY_REFUSED);
+    }
+
+    @Test
+    void aSiblingWhoseOriginIsNotRegisteredIsLeftAlone() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        // quarantined(..., registerOrigin=false) never registers the origin here.
+        List<String> old = quarantined(t, origin, "old", 3, 40, false);
+
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(result.expiry(quarantineOf(origin)).expired()).isZero();
+        assertThat(inCollection(t, quarantineOf(origin), old.get(0))).isTrue();
+    }
+
+    // ── a multi-batch re-index through the REAL combined writer ──────────────
+
+    private void registerDocsDocument(String tenant, String docId, String collection) {
+        repo.upsertDocument(tenant, Map.of(
+            "tumbler", docId, "title", "reaper-" + docId, "content_type", "docs", "corpus", "docs",
+            "physical_collection", collection, "chunk_count", 0));
+    }
+
+    private static String textHash(String text) {
+        return Chash.ofText(text).toHex();
+    }
+
+    private static Map<String, Object> wireChunk(String text) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("chash", textHash(text));
+        m.put("text", text);
+        m.put("metadata", Map.of());
+        return m;
+    }
+
+    private static Map<String, Object> wireRow(String text, int position) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("position", position);
+        m.put("chash", textHash(text));
+        m.put("chunk_index", position);
+        return m;
+    }
+
+    /** A chunk written long ago by a run that crashed: it exists, with a vector, and nothing owns it. */
+    private String agedOwnerless(String tenant, String collection, String text) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+            PgContainerHelper.insertChunks(ctx, tenant, collection, List.of(textHash(text)), List.of(text),
+                List.of(new float[384]), List.of(Map.of()));
+        }
+        makeOld(tenant, collection);
+        return textHash(text);
+    }
+
+    @Test
+    void anAgedOwnerlessChunkReAddedByALaterBatch_survivesAPassBetweenBatches_andTheRunCompletes() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("docs");
+        String docId = "rp.doc." + seq.incrementAndGet();
+        registerDocsDocument(t, docId, c);
+        String x = agedOwnerless(t, c, "crashed-run tail");   // old, ownerless: reapable the moment a pass looks
+
+        // Batch 1 through the real combined writer: replaces the manifest, sweep off.
+        svc.writeManyCombined(t, c, List.of(wireChunk("a1"), wireChunk("a2")),
+            List.of(Map.of("doc_id", docId, "rows", List.of(wireRow("a1", 0), wireRow("a2", 1)))),
+            null, false, false);
+
+        // The reaper passes between batch 1 and batch 2 and takes the aged ownerless chunk: it is garbage at
+        // that instant, by the predicate. The run has not finished, and batch 2 is about to want it back.
+        CollectionResult between = reaper(t).runOnce(null).tenant(t).collection(c);
+        assertThat(between.error()).isNull();
+        assertThat(between.moved()).as("aged and ownerless: the pass takes it").isEqualTo(1);
+        assertThat(inCollection(t, c, x)).isFalse();
+
+        // Batch 2 re-adds it: absent now, so the writer re-embeds and re-inserts it. The run must COMPLETE.
+        var append = svc.appendCombined(t, c, docId, List.of(wireRow("crashed-run tail", 2)),
+            List.of(wireChunk("crashed-run tail")), false, null);
+
+        assertThat(append.response().get("ok")).isEqualTo(true);
+        assertThat(inCollection(t, c, x)).as("the run completed and the chunk it re-added is live").isTrue();
+        assertThat(manifestHas(t, docId, x)).isTrue();
+        assertThat(reaper(t).runOnce(null).tenant(t).collection(c).moved()).as("and nothing further to take").isZero();
+        assertThat(inCollection(t, c, x)).isTrue();
+    }
+
+    @Test
+    void anAgedOwnerlessChunkReAddedByALaterBatch_isNotTakenByAPassAfterTheExistencePartitionRefreshedIt()
+            throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("docs");
+        String docId = "rp.doc." + seq.incrementAndGet();
+        registerDocsDocument(t, docId, c);
+        String x = agedOwnerless(t, c, "crashed-run tail");
+        svc.writeManyCombined(t, c, List.of(wireChunk("a1")),
+            List.of(Map.of("doc_id", docId, "rows", List.of(wireRow("a1", 0)))), null, false, false);
+
+        // A pass in the window AFTER batch 2's existence partition committed (the chunk exists, so the partition
+        // refreshed its metadata and with it last_written_at) and BEFORE its insert transaction.
+        List<Long> movedInWindow = new ArrayList<>();
+        svc.setAfterNeedEmbedResolvedHookForTests(() -> {
+            CollectionResult cr = reaper(t).runOnce(null).tenant(t).collection(c);
+            movedInWindow.add(cr == null ? -1L : cr.moved());
+        });
+        try {
+            svc.appendCombined(t, c, docId, List.of(wireRow("crashed-run tail", 1)),
+                List.of(wireChunk("crashed-run tail")), false, null);
+        } finally {
+            svc.setAfterNeedEmbedResolvedHookForTests(null);
+        }
+
+        assertThat(movedInWindow).as("the hook fired, so the window was exercised").hasSize(1);
+        assertThat(movedInWindow.get(0)).as("the refreshed chunk is inside its grace: nothing to take").isZero();
+        assertThat(inCollection(t, c, x)).isTrue();
+        assertThat(inCollection(t, quarantineOf(c), x)).isFalse();
+        assertThat(manifestHas(t, docId, x)).as("the run completed").isTrue();
+    }
+
+    private boolean manifestHas(String tenant, String docId, String chashHex) {
+        for (var r : repo.getManifest(tenant, docId)) {
+            if (chashHex.equals(String.valueOf(r.get("chash")))) return true;
+        }
+        return false;
     }
 
     // ── helpers for the journey ──────────────────────────────────────────────

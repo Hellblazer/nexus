@@ -42,11 +42,61 @@ class ChunkReaperSettingsTest {
     }
 
     @Test
-    void theKillSwitchTurnsItOff() {
-        for (String off : new String[] {"false", "FALSE", "0", "off", "no"}) {
+    void theKillSwitchTakesAnExplicitTrueOrFalse() {
+        for (String off : new String[] {"false", "FALSE", " False ", "0", "off", "no"}) {
             assertThat(of(Map.of(ChunkReaper.ENABLED_ENV, off)).enabled()).as(off).isFalse();
         }
-        assertThat(of(Map.of(ChunkReaper.ENABLED_ENV, "true")).enabled()).isTrue();
+        for (String on : new String[] {"true", "TRUE", "1", "on", "yes"}) {
+            assertThat(of(Map.of(ChunkReaper.ENABLED_ENV, on)).enabled()).as(on).isTrue();
+        }
+    }
+
+    @Test
+    void aKillSwitchValueThatIsNeitherTrueNorFalse_warns_andLeavesTheReaperOnTheDefault() throws Throwable {
+        // The old rule disabled only on false/0/off/no, so "disabled", "disable" and "n" left it ON in silence.
+        for (String typo : new String[] {"disabled", "disable", "n", "of", "nope", "2"}) {
+            ch.qos.logback.classic.Logger root =
+                (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(org.slf4j.Logger.ROOT_LOGGER_NAME);
+            ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> logs =
+                new ch.qos.logback.core.read.ListAppender<>();
+            logs.start();
+            root.addAppender(logs);
+            try {
+                assertThat(of(Map.of(ChunkReaper.ENABLED_ENV, typo)).enabled()).as(typo).isTrue();
+            } finally {
+                root.detachAppender(logs);
+                logs.stop();
+            }
+            assertThat(logs.list).as("a WARN for %s", typo).anyMatch(e ->
+                e.getLevel() == ch.qos.logback.classic.Level.WARN
+                    && e.getFormattedMessage().contains("event=reaper_setting_invalid")
+                    && e.getFormattedMessage().contains(ChunkReaper.ENABLED_ENV));
+        }
+        assertThat(of(Map.of()).enabled()).as("unset: the default, on").isTrue();
+        assertThat(of(Map.of(ChunkReaper.ENABLED_ENV, "  ")).enabled()).as("blank: the default, on").isTrue();
+    }
+
+    @Test
+    void theIntervalFloorsAtSixtySeconds() {
+        assertThat(of(Map.of(ChunkReaper.INTERVAL_SECONDS_ENV, "1")).interval()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(of(Map.of(ChunkReaper.INTERVAL_SECONDS_ENV, "59")).interval()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(of(Map.of(ChunkReaper.INTERVAL_SECONDS_ENV, "60")).interval()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(of(Map.of(ChunkReaper.INTERVAL_SECONDS_ENV, "61")).interval()).isEqualTo(Duration.ofSeconds(61));
+    }
+
+    @Test
+    void theCensusTimeoutDefaultsToAMinute_andIsConfigurable() {
+        assertThat(of(Map.of()).censusTimeout()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(of(Map.of(ChunkReaper.CENSUS_TIMEOUT_SECONDS_ENV, "5")).censusTimeout())
+            .isEqualTo(Duration.ofSeconds(5));
+        assertThat(of(Map.of(ChunkReaper.CENSUS_TIMEOUT_SECONDS_ENV, "0")).censusTimeout())
+            .as("0 would disable the bound").isEqualTo(Duration.ofSeconds(60));
+    }
+
+    @Test
+    void theFirstPassIsShortlyAfterBoot_notOneIntervalAfterIt() {
+        assertThat(ChunkReaper.INITIAL_DELAY).isLessThanOrEqualTo(Duration.ofMinutes(2));
+        assertThat(ChunkReaper.INITIAL_DELAY).isLessThanOrEqualTo(ChunkReaper.MIN_INTERVAL);
     }
 
     @Test

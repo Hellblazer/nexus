@@ -109,6 +109,16 @@ class ReapableConsumersScanTest {
         return out;
     }
 
+    /**
+     * Whether an allowlisted consumer's violation is waived: exactly the call text {@code p_grace} in the grace
+     * position, the injectable parameter the reaper passes straight through (production passes NULL). A clamp such as
+     * {@code GREATEST(p_grace, ...)}, a {@code make_interval(...)} or any other expression is NOT waived: that is a
+     * decision to make in review, not an exemption the allowlist grants by unit.
+     */
+    static boolean waivable(String violation) {
+        return violation.contains("is called with grace 'p_grace', not a literal NULL");
+    }
+
     /** Why {@code body} (one function, procedure or DO block) breaks the obligations, or an empty list. */
     static List<String> violations(String unitName, String body) {
         List<String> out = new ArrayList<>();
@@ -177,8 +187,9 @@ class ReapableConsumersScanTest {
                         found.add(id);
                         boolean allowlisted = SQL_CONSUMERS.containsKey(id);
                         for (String v : violations(id, unit.getValue())) {
-                            // An allowlisted consumer is exempt from the NULL-grace rule only, never from the gate.
-                            if (!(allowlisted && v.contains("not a literal NULL"))) problems.add(v);
+                            // An allowlisted consumer is exempt from the NULL-grace rule for the bare parameter
+                            // `p_grace` ONLY, never from the gate, and never for a clamp or any other expression.
+                            if (!(allowlisted && waivable(v))) problems.add(v);
                         }
                     }
                 }
@@ -239,6 +250,20 @@ class ReapableConsumersScanTest {
     void theScannerFlagsADeleteWithoutTheGate() {
         assertThat(violations("bad", DELETE + "(c.tenant_id, c.collection, c.chash, c.last_written_at, NULL))"))
             .anyMatch(v -> v.contains("without taking the exclusive sweep gate"));
+    }
+
+    @Test
+    void theAllowlistWaivesTheBareParameterOnly_aClampOrAnyOtherExpressionIsStillAViolation() {
+        List<String> bare = violations("u",
+            GATED + DELETE + "(c.tenant_id, c.collection, c.chash, c.last_written_at, p_grace))");
+        assertThat(bare).isNotEmpty().allMatch(ReapableConsumersScanTest::waivable);
+
+        for (String grace : List.of("GREATEST(p_grace, interval '1 day')", "make_interval(days => 1)", "p_grace * 2",
+                                    "p_grace2", "interval '0'")) {
+            List<String> v = violations("u",
+                GATED + DELETE + "(c.tenant_id, c.collection, c.chash, c.last_written_at, " + grace + "))");
+            assertThat(v).as(grace).isNotEmpty().noneMatch(ReapableConsumersScanTest::waivable);
+        }
     }
 
     @Test

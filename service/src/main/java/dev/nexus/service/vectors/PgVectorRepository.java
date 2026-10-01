@@ -3182,14 +3182,33 @@ FROM scope s
     // query from the hand-runnable psql copy Sam's ruling requires.
     public ManifestLessCensusResult manifestLessCensus(
             String tenant, String collection, int limit, int offset) {
+        return manifestLessCensusBounded(tenant, collection, limit, offset, null);
+    }
+
+    /**
+     * {@link #manifestLessCensus(String, String, int, int)} bounded by {@code statementTimeout} (null: no bound, the
+     * route's own behaviour). This is the method that runs the sanctioned statement; the four-argument form
+     * delegates here with no bound. The reaper's per-pass census runs on the shared scheduler thread, so it must not run
+     * unbounded: the statement is a per-chunk LATERAL join whose cost grows with the manifest size of each chunk's
+     * owner, and one document owning 79,900 of 80,000 chunks read 112 to 152 seconds under the application role
+     * (T2 nexus/reaper-2x9xa-round2). The bound is its OWN statement before the census, so it is real. A census
+     * cancelled by it throws with SQLSTATE 57014; the caller must treat that as "not read", never as clean.
+     */
+    public ManifestLessCensusResult manifestLessCensusBounded(
+            String tenant, String collection, int limit, int offset, java.time.Duration statementTimeout) {
         // Six positional binds, in the SQL text's own left-to-right order (see the
         // SQL header's "substituting each positional placeholder" list): tenant and
         // collection for live_notes' scope, then tenant and collection again for
         // base's own scope, then limit/offset (round 3, the live_notes/rev_candidates
         // rewrite adds the second tenant+collection pair).
-        Result<Record> rows = tenantScope.withTenant(tenant, ctx ->
-            ctx.resultQuery(MANIFEST_LESS_CENSUS_SQL, tenant, collection, tenant, collection, limit, offset)
-               .fetch());
+        Result<Record> rows = tenantScope.withTenant(tenant, ctx -> {
+            if (statementTimeout != null) {
+                PgSession.setStatementAndLockBounds(ctx, (int) Math.min(statementTimeout.toMillis(), Integer.MAX_VALUE),
+                    2_000);
+            }
+            return ctx.resultQuery(MANIFEST_LESS_CENSUS_SQL, tenant, collection, tenant, collection, limit, offset)
+               .fetch();
+        });
 
         Map<String, List<String>> chashes = new LinkedHashMap<>();
         Map<String, Map<String, String>> owners = new LinkedHashMap<>();
@@ -3232,7 +3251,7 @@ FROM scope s
 
     /** One chunk {@code reapable(c)} selects (RDR-192 Step 8, bead nexus-wbfpw.17). */
     public record ReapableChunk(String chash, String createdAt, String lastWrittenAt, String title,
-                                String catalogDocId) {}
+                                String catalogDocId, String sourcePath) {}
 
     /**
      * Read-only listing of the chunks {@code nexus.chunk_is_reapable} (vectors-021) selects in
@@ -3264,6 +3283,7 @@ FROM scope s
         Field<org.jooq.types.YearToSecond> grace = DSL.val(
             graceSeconds == null ? null : exactSeconds(graceSeconds), SQLDataType.INTERVAL);
         Field<String> title = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");
+        Field<String> sourcePath = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "source_path");
         // The predicate no longer reads metadata; this is the document the chunk says wrote it, for
         // display only: catalog_doc_id, falling back to the legacy doc_id.
         Field<String> catalogDocId = DSL.coalesce(
@@ -3272,7 +3292,8 @@ FROM scope s
         org.jooq.Condition after = afterChash == null
             ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(afterChash).toBytes());
         return tenantScope.withTenant(tenant, ctx ->
-            ctx.select(ChashHex.hex(CHUNKS.CHASH), CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, title, catalogDocId)
+            ctx.select(ChashHex.hex(CHUNKS.CHASH), CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, title, catalogDocId,
+                       sourcePath)
                .from(CHUNKS)
                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)))
                .and(after)
@@ -3282,7 +3303,7 @@ FROM scope s
                .limit(limit).offset(offset)
                .fetch(r -> new ReapableChunk(
                    r.value1(), r.value2().toInstant().toString(), r.value3().toInstant().toString(),
-                   blankToNull(r.value4()), blankToNull(r.value5()))));
+                   blankToNull(r.value4()), blankToNull(r.value5()), blankToNull(r.value6()))));
     }
 
     /**
@@ -3734,12 +3755,29 @@ FROM scope s
     public ExpireOutcome expireQuarantine(String tenant, String quarantineCollection, String originCollection,
                                            String cutoff, double floorFraction, int floorMinChunks,
                                            boolean force) {
+        return expireQuarantine(tenant, quarantineCollection, originCollection, cutoff, floorFraction,
+                                floorMinChunks, force, 0);
+    }
+
+    /**
+     * {@link #expireQuarantine(String, String, String, String, double, int, boolean)} with a statement bound
+     * ({@code statementTimeoutMs > 0}; 0 is no bound), set as its own statement before the call. The periodic
+     * reaper calls this on the shared scheduler thread, where an unbounded scan of a large quarantine sibling must
+     * not stall the rest of the sweep.
+     */
+    public ExpireOutcome expireQuarantine(String tenant, String quarantineCollection, String originCollection,
+                                           String cutoff, double floorFraction, int floorMinChunks,
+                                           boolean force, int statementTimeoutMs) {
         int dim = dimForCollection(tenant, originCollection);
-        var rec = tenantScope.withTenant(tenant, ctx ->
-            ctx.selectFrom(GC_EXPIRE_QUARANTINE.call(
+        var rec = tenantScope.withTenant(tenant, ctx -> {
+            if (statementTimeoutMs > 0) {
+                PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
+            }
+            return ctx.selectFrom(GC_EXPIRE_QUARANTINE.call(
                     dim, tenant, quarantineCollection, originCollection, cutoff,
                     floorFraction, floorMinChunks, force))
-               .fetchOne());
+               .fetchOne();
+        });
         return new ExpireOutcome(rec.get(GC_EXPIRE_QUARANTINE.EXPIRED), rec.get(GC_EXPIRE_QUARANTINE.REFUSED));
     }
 

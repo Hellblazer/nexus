@@ -5,7 +5,11 @@ package dev.nexus.service.vectors;
 import dev.nexus.service.db.PgSession;
 import dev.nexus.service.db.TenantScope;
 
+import org.jooq.Field;
+import org.jooq.impl.DSL;
+
 import java.time.Duration;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,6 +71,29 @@ public final class ReaperRepository {
                .forEach(r -> out.put(r.value1(), r.value2() == null ? "" : r.value2()));
             return out;
         });
+    }
+
+    /** A chunk named by its chash, with the two fields an operator recognises it by. Either may be null. */
+    public record ChunkLabel(String chash, String title, String sourcePath) {}
+
+    /**
+     * The {@code title} and {@code source_path} the chunk's own metadata carries, for the chunks of {@code collection}
+     * named by {@code chashHex}. Display only: a refusal's audit row names a handful of what it refused to move, so
+     * an operator can tell a stale index from a mass orphaning without a database shell. A chash that is no longer
+     * stored is simply absent.
+     */
+    public List<ChunkLabel> describe(String tenant, String collection, List<String> chashHex) {
+        if (chashHex.isEmpty()) return List.of();
+        List<byte[]> keys = chashHex.stream().map(h -> dev.nexus.service.db.Chash.fromHex(h).toBytes()).toList();
+        Field<String> title = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");
+        Field<String> sourcePath = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "source_path");
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(CHUNKS.CHASH, title, sourcePath).from(CHUNKS)
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)).and(CHUNKS.CHASH.in(keys)))
+               .orderBy(CHUNKS.CHASH)
+               .fetch(r -> new ChunkLabel(HexFormat.of().formatHex(r.value1()),
+                   r.value2() == null || r.value2().isEmpty() ? null : r.value2(),
+                   r.value3() == null || r.value3().isEmpty() ? null : r.value3())));
     }
 
     /**

@@ -235,6 +235,9 @@ public final class NexusService {
      */
     private final ChunkReaper chunkReaper;
 
+    /** The exact {@link Runnable} handed to {@link #sweepScheduler} for the reaper, or null when none was wired. */
+    private final Runnable reaperScheduledTask;
+
     /**
      * RDR-169 G3 (bead nexus-aphki): the {@code https://} handler owns a real
      * {@link java.net.http.HttpClient} that must be closed on shutdown — held here
@@ -679,34 +682,49 @@ public final class NexusService {
         // fail-open paths and keeps no drop set. It quarantines, never hard-deletes. Tenants are the ones the T1
         // sweep visits: the default tenant plus every token-bearing tenant (nexus.chunks is FORCE RLS, so a
         // tenant cannot be enumerated from the chunks table itself).
+        // The same pass also expires the quarantine it fills (gc_expire_quarantine, 14 days), so ONE kill switch
+        // (NX_REAPER_ENABLED) and ONE wall-clock budget cover both. The first pass runs ChunkReaper.INITIAL_DELAY
+        // after boot, not a full interval: an engine that restarts more often than hourly must still reap.
         ChunkReaper.Settings reaperSettings = ChunkReaper.Settings.fromEnv(System::getenv);
         if (pgVectorRepository != null && reaperSettings.enabled()) {
             ChunkReaper reaper = new ChunkReaper(
-                new dev.nexus.service.vectors.ReaperRepository(tenantScope), pgVectorRepository,
+                new dev.nexus.service.vectors.ReaperRepository(tenantScope), pgVectorRepository, catalogRepo,
                 new dev.nexus.service.db.Rdr192BackfillGate(ladderRepo), this::reaperTenants, reaperSettings,
                 java.time.Clock.systemUTC());
             this.chunkReaper = reaper;
+            // The Runnable the scheduler runs, held in a field so a test runs THAT object and not a copy of its
+            // body: a test that called reaper.run() directly stayed green with the schedule turned into a no-op.
+            this.reaperScheduledTask = () -> {
+                try {
+                    reaper.run();
+                } catch (Exception ex) {
+                    log.warn("event=reaper_scheduled_run_failed error={}", ex.getMessage(), ex);
+                }
+            };
             this.sweepScheduler.scheduleWithFixedDelay(
-                () -> {
-                    try {
-                        reaper.run();
-                    } catch (Exception ex) {
-                        log.warn("event=reaper_scheduled_run_failed error={}", ex.getMessage(), ex);
-                    }
-                },
-                reaperSettings.interval().toSeconds(), reaperSettings.interval().toSeconds(), TimeUnit.SECONDS
+                this.reaperScheduledTask,
+                ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(), TimeUnit.SECONDS
             );
-            log.info("event=reaper_scheduled interval_seconds={} batch_size={} floor_fraction={} floor_min_chunks={}",
-                reaperSettings.interval().toSeconds(), reaperSettings.batchSize(),
-                reaperSettings.floorFraction(), reaperSettings.floorMinChunks());
+            log.info("event=reaper_scheduled initial_delay_seconds={} interval_seconds={} batch_size={} "
+                    + "floor_fraction={} floor_min_chunks={} census_timeout_seconds={} wall_clock_budget_seconds={}",
+                ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(),
+                reaperSettings.batchSize(), reaperSettings.floorFraction(), reaperSettings.floorMinChunks(),
+                reaperSettings.censusTimeout().toSeconds(), reaperSettings.wallClockBudget().toSeconds());
         } else {
             this.chunkReaper = null;
+            this.reaperScheduledTask = null;
             log.info("event=reaper_not_scheduled has_pgvector={} enabled={}",
                 pgVectorRepository != null, reaperSettings.enabled());
         }
     }
 
-    /** The reaper's tenants: the default tenant plus every token-bearing tenant, as {@link #runScheduledSweep}. */
+    /**
+     * The reaper's tenants: the default tenant plus every tenant that holds a row in {@code service_tokens}, as
+     * {@link #runScheduledSweep}. {@code nexus.chunks} is FORCE RLS, so a tenant cannot be enumerated from the chunks
+     * table itself. A tenant with chunks and no {@code service_tokens} row (a scope=data JIT token row is deleted 7
+     * days after it expires, so an idle cloud tenant can lose its last one) is NOT visited until it holds a token
+     * again: the safe direction, a liveness gap, never a wrong deletion.
+     */
     private List<String> reaperTenants() {
         var out = new java.util.LinkedHashSet<String>();
         out.add(DEFAULT_TENANT);
@@ -717,6 +735,19 @@ public final class NexusService {
     /** The scheduled reaper, or null when none was wired. Package-private for the wiring test. */
     ChunkReaper chunkReaper() {
         return chunkReaper;
+    }
+
+    /**
+     * The very {@link Runnable} the scheduler runs for the reaper, or null when none was wired. Package-private: the
+     * wiring test runs THIS object, so a schedule turned into a no-op fails it.
+     */
+    Runnable reaperScheduledTask() {
+        return reaperScheduledTask;
+    }
+
+    /** The tenant set the scheduled reaper visits. Package-private for the wiring test. */
+    List<String> reaperTenantsForTests() {
+        return reaperTenants();
     }
 
     /** Start the HTTP server (non-blocking). */

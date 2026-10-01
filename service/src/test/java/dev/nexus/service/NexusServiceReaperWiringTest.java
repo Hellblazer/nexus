@@ -4,8 +4,14 @@ package dev.nexus.service;
 
 import dev.nexus.service.ChunkReaper.Refusal;
 import dev.nexus.service.ChunkReaper.RunResult;
+import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.LadderRepository;
+import dev.nexus.service.db.Rdr192BackfillGate;
 import dev.nexus.service.db.TenantScope;
+import dev.nexus.service.db.TokenStore;
 import dev.nexus.service.vectors.PgVectorRepository;
+import org.jooq.SQLDialect;
+import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -13,7 +19,15 @@ import org.junit.jupiter.api.TestInstance;
 import org.testcontainers.containers.PostgreSQLContainer;
 
 import java.sql.Connection;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -89,5 +103,81 @@ class NexusServiceReaperWiringTest {
         assertThat(run.tenant("default")).as("the default tenant is always visited").isNotNull();
         assertThat(run.tenant("default").tenantRefusal()).isEqualTo(Refusal.BACKFILL_INCOMPLETE);
         assertThat(withVectors.chunkReaper().refusedTotal()).isGreaterThanOrEqualTo(1);
+    }
+
+    // ── the SCHEDULED task body, not a copy of it ────────────────────────────
+
+    private final AtomicInteger seq = new AtomicInteger();
+
+    private String col(String prefix) {
+        return prefix + "__wire" + seq.incrementAndGet() + "__minilm-l6-v2-384__v1";
+    }
+
+    /** Inserts one chunk by substrate SQL and returns its chash (hex). */
+    private String insertChunk(String tenant, String collection, String seed, Map<String, Object> metadata,
+                               OffsetDateTime lastWritten) throws Exception {
+        String hex = Chash.ofText(collection + "/" + seed).toHex();
+        try (Connection su = pg.createConnection("")) {
+            var ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, collection);
+            PgContainerHelper.insertChunks(ctx, tenant, collection, List.of(hex),
+                List.of(seed + " text"), List.of(new float[384]), List.of(metadata));
+            if (lastWritten != null) {
+                ctx.update(CHUNKS).set(CHUNKS.CREATED_AT, lastWritten).set(CHUNKS.LAST_WRITTEN_AT, lastWritten)
+                   .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))).execute();
+            }
+        }
+        return hex;
+    }
+
+    private boolean stored(String tenant, String collection, String hex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES).fetchExists(CHUNKS,
+                CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection))
+                    .and(CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes())));
+        }
+    }
+
+    @Test
+    void theScheduledTaskItselfReapsATokenBearingTenant_andExpiresItsQuarantine() throws Exception {
+        String tenant = "wire-tenant-" + seq.incrementAndGet();
+        new TokenStore(ds, Clock.systemUTC()).issueToken(tenant, "wiring", null);
+        new LadderRepository(new TenantScope(ds)).record(tenant, Rdr192BackfillGate.RUNG_NAME, "7.99.0", "");
+
+        // A chunk nothing owns, last written 40 days ago: reapable under the 30 day default the schedule runs.
+        String origin = col("knowledge");
+        String debris = insertChunk(tenant, origin, "debris", Map.of(), OffsetDateTime.now().minusDays(40));
+        // A chunk the previous passes quarantined 15 days ago: past the 14 day retention.
+        String stamp = Instant.now().minus(15, ChronoUnit.DAYS).truncatedTo(ChronoUnit.SECONDS).toString();
+        String other = col("knowledge");
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, other);
+        }
+        String old = insertChunk(tenant, "quarantine-" + other, "old",
+            Map.of("quarantined_at", stamp, "origin_collection", other), null);
+
+        assertThat(withVectors.reaperTenantsForTests()).as("the default tenant plus every token-bearing one")
+            .contains("default", tenant);
+        RunResult before = withVectors.chunkReaper().lastRun();   // other tests on this instance may have run a pass
+
+        // THE object the scheduler runs. A schedule turned into a no-op leaves every assertion below red.
+        withVectors.reaperScheduledTask().run();
+
+        RunResult run = withVectors.chunkReaper().lastRun();
+        assertThat(run).as("the scheduled task ran a pass").isNotNull().isNotSameAs(before);
+        assertThat(run.tenant("default")).isNotNull();
+        assertThat(run.tenant(tenant)).as("a tenant that only holds a token is visited").isNotNull();
+        assertThat(run.tenant(tenant).collection(origin).moved()).isEqualTo(1);
+        assertThat(stored(tenant, origin, debris)).as("moved out of the collection").isFalse();
+        assertThat(stored(tenant, "quarantine-" + origin, debris)).as("into quarantine").isTrue();
+        assertThat(run.tenant(tenant).expiry("quarantine-" + other).expired())
+            .as("the same task expires the quarantine it fills").isEqualTo(1);
+        assertThat(stored(tenant, "quarantine-" + other, old)).isFalse();
+    }
+
+    @Test
+    void theSchedulerHoldsTheVerySameTask_notACopyOfIts_body() {
+        assertThat(withVectors.reaperScheduledTask()).isNotNull();
+        assertThat(withoutVectors.reaperScheduledTask()).as("nothing to reap, nothing scheduled").isNull();
     }
 }

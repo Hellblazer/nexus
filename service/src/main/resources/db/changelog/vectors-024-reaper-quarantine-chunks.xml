@@ -31,9 +31,15 @@
     cliff at deploy + 30 days, all named in RDR-192's consequence table); measured on the batch, it could
     never trip on a collection past 1200 chunks. A collection that is legitimately more than a quarter
     garbage is cleared by a hand run (nx t3 gc) or by raising NX_REAPER_FLOOR_FRACTION, never silently.
+    The Java caller (ChunkReaper) judges the SAME rule first, on the dry run's counts and before it pays for
+    the manifest-less census, so a floor-refused collection costs one count an hour and no census; this
+    function re-judges it under the gate, on the counts that are true while no manifest writer can move
+    the ground. ChunkReaperIntegrationTest pins both against a batch-judged floor.
 
     DRY RUN. p_dry_run = true counts and returns without taking the gate or moving anything; the reaper
-    uses it to decide whether a collection needs the census at all (nothing reapable, nothing at risk).
+    uses it to decide whether a collection needs the census at all (nothing reapable, nothing at risk),
+    to judge the floor before the census, and to check the census read the same number of chunks
+    (scope_chunk_total = total_count).
 
     GRACE. p_grace is passed straight to chunk_is_reapable, so this function is a consumer whose grace is not
     a literal NULL, and ReapableConsumersScanTest carries it in SQL_CONSUMERS with the reason. NULL is the

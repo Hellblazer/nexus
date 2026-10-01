@@ -2643,9 +2643,9 @@ def _apply_combined_write_response(
 # only, by design: an interrupted run loses its pending entry rather than
 # risking deletion of a row a later batch was about to re-append -- no sweep
 # beats a wrong sweep. Superseded rows left unswept this way stay in T3
-# until an operator runs ``nx t3 gc`` (manual, the only backstop that exists
-# today); the automatic reaper is planned in RDR-192 Phase 3 (nexus-2x9xa,
-# OPEN) and is not built.
+# until an operator runs ``nx t3 gc`` (manual) or the engine's hourly reaper
+# (RDR-192 Step 9, nexus-2x9xa) quarantines them 30 days after they lose
+# their owner.
 #
 # Concurrent runs on one doc_id in one process share this entry (keyed on
 # doc_id alone, no run epoch). Epoch fencing does NOT cover it: the fence
