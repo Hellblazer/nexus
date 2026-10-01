@@ -336,7 +336,8 @@ class TestCli:
             _hidden_row(b, reapable_after="2026-10-31T12:00:00Z"),
         ])])
         result = _run(runner, stub, "--chash", a, "--chash", b, "--json")
-        assert _doc(result.stdout)["reapable_again_after"] == "2026-10-31T12:00:00Z"
+        assert _doc(result.stdout)["reapable_again_after"] == "2026-10-31T12:00:00Z", \
+            "the string sort would pick the fractional one"
 
     def test_an_engine_without_the_route_exits_4_and_a_refusal_exits_5_never_a_traceback(self, runner) -> None:
         no_route = _run(runner, _Stub(error=VectorServiceError("not found", code=404)), "--chash", _chash("a"))
@@ -356,7 +357,8 @@ class TestCli:
             "a manifest writer or an index run holds the collection's lock; nothing was moved, attached or audited",
             code=503, reason="quarantine_restore_busy")
         result = _run(runner, _Stub(error=busy), "--chash", _chash("a"))
-        assert result.exit_code == t3_quarantine.EXIT_BUSY, result.output
+        assert result.exit_code == 6 == t3_quarantine.EXIT_BUSY, \
+            "the documented literal: docs and scripts depend on the number, not the constant\n" + result.output
         assert "busy" in result.output and "nothing moved" in result.output and "again" in result.output
         assert "refused by the engine" not in result.output
         # A 503 that is NOT the typed busy answer is still an engine failure.

@@ -407,9 +407,10 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
     except Exception as exc:  # noqa: BLE001 — every engine failure is reported with what was committed before it
         failure = _error_for(exc, pages_done)
 
-    reapable = sorted((_parse_instant(r["reapable_after"]) for r in rows
-                       if r.get("outcome") == "restored" and r.get("no_manifest") and r.get("reapable_after")))
-    earliest = reapable[0].astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if reapable else None
+    reapable = sorted(((_parse_instant(r["reapable_after"]), r["reapable_after"]) for r in rows
+                       if r.get("outcome") == "restored" and r.get("no_manifest") and r.get("reapable_after")),
+                      key=lambda pair: pair[0])
+    earliest = reapable[0][1] if reapable else None
     unrestored = totals["missing"] + totals["dim_conflict"]
 
     if as_json:
