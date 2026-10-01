@@ -175,6 +175,8 @@ def _retired_sqlite_message(env_key: str) -> str:
     unmigrated SQLite data is a round-trip through the last migration-capable
     release, never unset-and-continue.
     """
+    from nexus.stranded_install import LOCAL_ENGINE_CLAUSE  # noqa: PLC0415 — stdlib-only leaf, deferred so this module stays import-light
+
     return (
         f"{env_key}=sqlite selects the retired SQLite storage backend. "
         f"The SQLite T2 stores and the local SQLite catalog were deleted "
@@ -185,10 +187,11 @@ def _retired_sqlite_message(env_key: str) -> str:
         f"If this install still holds unmigrated SQLite data (memory.db / "
         f"catalog/.catalog.db under ~/.config/nexus), do NOT just unset the "
         f"variable and continue on this version: install the last "
-        f"migration-capable 6.x release, run `nx upgrade` there (the ladder "
-        f"migrates copy-not-move; the SQLite files stay behind as rollback "
-        f"sources), then upgrade back. `nx doctor` runs the stranded-install "
-        f"detector and names the exact pinned release."
+        f"migration-capable 6.x release, run `nx upgrade` there "
+        f"({LOCAL_ENGINE_CLAUSE}; the ladder migrates copy-not-move; the "
+        f"SQLite files stay behind as rollback sources), then upgrade "
+        f"back. `nx doctor` runs the stranded-install detector and names the "
+        f"exact pinned release."
     )
 
 

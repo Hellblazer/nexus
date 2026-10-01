@@ -200,8 +200,7 @@ public final class AspectHandler implements HttpHandler {
         // reaching the repository and aborting mid-transaction as a class-22
         // SQLSTATE — the decision recorded on the bead ("400 at the handler, not a
         // 422 from the SQLSTATE branch"). Any write path that bypasses this method
-        // (e.g. a direct repository call from a test, or the StagingPromoteOps
-        // staged-row promote, which has its own fail-loud cast at promote time)
+        // (e.g. a direct repository call from a test)
         // still falls back to the existing class-22 SQLSTATE 422 branch
         // (HttpUtil.sendTypedDbError) as documented there — this handler check is
         // the primary signal, not the only one.

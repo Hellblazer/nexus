@@ -39,7 +39,7 @@
     <changeSet id="test-admin-role-1-bootstrap" author="nexus-4a8pn" runAlways="true">
         <comment>
             Create ${adminRole} (NOSUPERUSER NOBYPASSRLS LOGIN) if absent, grant it
-            the same nexus+staging DML/sequence access bootstrapServiceRole gives
+            the same nexus DML/sequence access bootstrapServiceRole gives
             svcRole (it still needs to read/write ordinary rows through normal
             grants), then transfer OWNERSHIP of nexus.topic_assignments to it --
             the one authority a plain DML role cannot get, and the one

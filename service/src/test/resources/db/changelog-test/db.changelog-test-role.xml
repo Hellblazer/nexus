@@ -9,8 +9,8 @@
     throwaway service role (plus a redundant CREATE ROLE for nexus_svc,
     harmless: role-001-nexus-svc.xml already creates nexus_svc as part of the
     master changelog itself, so this second creation is always a no-op
-    IF-NOT-EXISTS) and GRANT USAGE/DML/sequence access on the nexus and
-    staging schemas. This changelog consolidates that block into ONE reusable
+    IF-NOT-EXISTS) and GRANT USAGE/DML/sequence access on the nexus
+    schema. This changelog consolidates that block into ONE reusable
     Liquibase artifact, parameterized by ${svcRole}/${svcPass}, applied via
     PgContainerHelper#bootstrapServiceRole. It DELIBERATELY does not set a
     role-level search_path (Sam's directive, nexus-zrcj7, 2026-09-05: no
@@ -26,7 +26,7 @@
 
     ORDERING CONTRACT: PgContainerHelper#applyProductSchema (the master
     changelog) MUST run before this changeset — the GRANT ... ON ALL TABLES /
-    ALL SEQUENCES statements below require the nexus/staging schemas and their
+    ALL SEQUENCES statements below require the nexus schema and its
     tables to already exist (PostgreSQL errors "schema does not exist"
     otherwise, and a bulk ON ALL TABLES with a schema present but zero tables
     silently grants nothing). bootstrapServiceRole's own javadoc documents this
@@ -36,7 +36,7 @@
     class): the same GH #1402 hazard grants-nexus-svc.xml guards against —
     bulk GRANT/REVOKE ON ALL {TABLES,SEQUENCES,FUNCTIONS} hard-errors on any
     relation the acting role does not own. Every relation nexus_admin (the
-    migration role) creates under nexus/staging is owned by nexus_admin, so
+    migration role) creates under nexus is owned by nexus_admin, so
     this bulk form is safe here for the SAME reason it is safe in
     grants-nexus-svc.xml's own comment — no foreign-owned relation exists in
     the schemas this changeset targets at test-bootstrap time. This file is
@@ -57,7 +57,7 @@
         <comment>
             Test-only per-class service-role bootstrap: create ${svcRole} (and,
             redundantly/idempotently, nexus_svc) if absent, then grant ${svcRole}
-            the same nexus+staging DML/sequence access PgContainerHelper#
+            the same nexus DML/sequence access PgContainerHelper#
             grantServiceSchemaAccess already gave production-shaped test roles.
             Parameters set via Liquibase#setChangeLogParameter before update().
         </comment>
@@ -91,9 +91,6 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA nexus TO ${svcRole};
 -- test in the repo relies on this sequence's UPDATE being ABSENT, so it is
 -- safe to widen here once instead of per-class.
 GRANT UPDATE ON SEQUENCE nexus.topics_id_seq TO ${svcRole};
-
-GRANT USAGE ON SCHEMA staging TO ${svcRole};
-GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA staging TO ${svcRole};
 
 -- nexus-cbo4a batch 13 (fts_matches): the Plans/Memory schema tests probe a
 -- table's fts_vector THROUGH TenantScope.withTenant, i.e. as ${svcRole}, and

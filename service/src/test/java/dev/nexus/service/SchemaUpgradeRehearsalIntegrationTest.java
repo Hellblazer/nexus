@@ -2182,24 +2182,22 @@ class SchemaUpgradeRehearsalIntegrationTest {
                             + "telemetry-006-1's own toggle-wrap")
                         .isEqualTo(1);
 
-                    // telemetry-006-2 leg (nexus-tk070.p6b): staging.frecency has NO
-                    // fresh seed data (see the SEED-COVERAGE contract block's own note
-                    // above) -- staging-001-landing-tables.xml creates the table fresh
-                    // EARLIER in this SAME hop and nothing populates it before
-                    // telemetry-006-2 runs, so its UPDATE structurally operates over
-                    // zero rows in this rehearsal (not merely un-seeded). Effect-
-                    // asserted the same minimal way as fk-004-0-reconcile-precount /
-                    // taxonomy-011-1 above: the changeset EXECUTES (doesNotThrowAny
-                    // Exception already covers this), the table still exists with the
-                    // DROP DEFAULT/DROP NOT NULL shape landed, and -- unlike
-                    // telemetry-006-1 -- carries NO CHECK (staging stays typeless).
-                    assertThat(columnMatches(DSL.using(su, SQLDialect.POSTGRES), "staging", "frecency", "ttl_days", col -> col != null && "YES".equals(col.isNullable()) && col.columnDefault() == null))
-                        .as("staging.frecency.ttl_days must be nullable with no default at HEAD")
-                        .isEqualTo(1);
-                    assertThat(PgCatalogProbes.constraintCountByType(DSL.using(su, SQLDialect.POSTGRES), "staging", "frecency", "c"))
-                        .as("staging.frecency must carry NO CHECK constraint -- typeless "
-                            + "landing by design, matching legacy-001-3's identical exemption")
-                        .isEqualTo(0);
+                    // telemetry-006-2 leg (nexus-tk070.p6b) + staging-6-drop-landing-schema
+                    // (nexus-z0o2p.27): staging.frecency has NO fresh seed data (see the
+                    // SEED-COVERAGE contract block's own note above) -- staging-001-
+                    // landing-tables.xml creates the table fresh EARLIER in this SAME hop
+                    // and nothing populates it before telemetry-006-2 runs, so its UPDATE
+                    // structurally operates over zero rows in this rehearsal. The changeset
+                    // EXECUTES (doesNotThrowAnyException already covers this); and the same
+                    // hop then DROPS the whole staging schema (the /v1/staging routes were
+                    // retired), so at HEAD there is nothing left of it to inspect. That
+                    // absence IS the effect assertion for both: the drop ran over the
+                    // post-telemetry-006-2 shape and the runAlways grants that name
+                    // staging (staging-4, grants-nexus-diag-3) did not abort the walk.
+                    assertThat(PgCatalogProbes.tablesInSchema(DSL.using(su, SQLDialect.POSTGRES), "staging"))
+                        .as("the staging landing schema must be gone at HEAD "
+                            + "(staging-6-drop-landing-schema)")
+                        .isEmpty();
 
                     // catalog-034-0 leg (nexus-v3w9n, tumbler-grammar data
                     // remediation, seed-coverage lint follow-up): the seeded

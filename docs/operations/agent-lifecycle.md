@@ -111,7 +111,8 @@ source files needed (RDR-185). That engine was RDR-159's, inherited; the
 demoted internal primitives and then **deleted outright by RDR-155 P4b — not
 present in this release.** On the current release, a pre-PG install is
 redirected to the pinned last migration-capable release instead, where it runs
-`nx upgrade` to perform the move described above, then upgrades forward. See
+`nx upgrade` to perform the move described above (against a local engine, never
+a managed endpoint), then upgrades forward. See
 [migration-runbook.md](../migration-runbook.md) for the operator's manual
 order of operations.
 

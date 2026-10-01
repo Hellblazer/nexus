@@ -364,8 +364,7 @@ public final class TenantScope {
      *                          per-table permission skip, which is reported, not thrown)
      */
     // SANCTIONED RAW (nexus-0ys55): VACUUM is PostgreSQL maintenance syntax, not DML —
-    // jOOQ has no typed DSL form for it at all (same category as ChashSqlIdioms'
-    // refreshAliasStats ANALYZE call, RawSqlGateTest.SANCTIONED_METHODS). Table names
+    // jOOQ has no typed DSL form for it at all (see RawSqlGateTest.SANCTIONED_METHODS). Table names
     // are validated against VACUUM_ALLOWED_TABLES above BEFORE this string is built, so
     // this is not an injection surface despite the concatenation.
     public Map<String, TableVacuumResult> vacuumAnalyze(List<String> qualifiedTableNames) {
