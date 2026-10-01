@@ -95,8 +95,12 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     static final int TOPIC_CHUNKS = 2_000;
     static final int TIMED_RUNS = 5;
     private static final String TOPIC_LABEL = "rdr192-explain-topic";
-    private static final String RARE_TOKEN = "rdr192rare";
-    private static final String COMMON_TOKEN = "rdr192common";
+    // Tokens share no trigram with the filler text ("rdr192 explain fixture chunk N alpha bravo"): a
+    // token that did (the first cut used "rdr192rare") puts its trigrams in every row, the GIN trigram
+    // index then cannot narrow the candidate set, and the probe's selective-gate plan is a sequential
+    // scan that says nothing about the indexed case.
+    private static final String RARE_TOKEN = "qzvkwx";
+    private static final String COMMON_TOKEN = "jmpthy";
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
