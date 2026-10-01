@@ -33,8 +33,11 @@ SANDBOX="${NEXUS_SANDBOX_HOME:-$HOME/nexus-sandbox}"
 # the first mutation, same pattern as the other guarded harnesses.
 # shellcheck source=./lib/lock.sh disable=SC1091
 source "$SCRIPT_DIR/lib/lock.sh"
-LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox.lock"
-[[ -n "${NEXUS_SANDBOX_HOME:-}" ]] && LOCKDIR="/tmp/nexus-e2e-locks/release-sandbox-$(printf '%s' "$SANDBOX" | shasum -a 256 | cut -c1-12).lock"
+# Per-USER root (nexus-c6lsu): the uid is in the name, because /tmp is shared across Unix users and a
+# root another user created is unwritable here (lock_acquire fails). $(id -u) is context-independent,
+# so the cross-context contention above is unchanged for one user.
+LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/release-sandbox.lock"
+[[ -n "${NEXUS_SANDBOX_HOME:-}" ]] && LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/release-sandbox-$(printf '%s' "$SANDBOX" | shasum -a 256 | cut -c1-12).lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 # Held-by-parent seam: release-sandbox.sh already holds this exact lock when
 # it invokes us on its fresh-sandbox path — the lock is non-reentrant, so a

@@ -1911,8 +1911,8 @@ def index_repo_cmd(
                 f"for the affected path(s) and reason(s)."
             )
         # nexus-4s1ww / GH #1432: when every (or some) file's chunk-batch
-        # flush permanently fails (post bisect-retry — ChunkBatcher.
-        # failed_files, see indexer._run_index), the write path silently
+        # flush is rejected (after its bisect-retry — ChunkBatcher.
+        # failed_files minus the throttled ones, see indexer._run_index), the write path silently
         # dropped chunks while the run still printed "Done." and exited 0.
         # A stdout WARNING (click.echo(), plain — never print(), never
         # structlog for the user-facing line) plus a non-zero exit close
@@ -1941,6 +1941,48 @@ def index_repo_cmd(
                 + (f" and {_more} more" if _more > 0 else "")
                 + ". Re-run 'nx index repo' to retry."
             )
+        # nexus-eoido: files whose flush the SERVICE THROTTLED (429, 503 with Retry-After, an engine
+        # deadline abort), or that the throttle breaker deferred unsent after consecutive throttled
+        # flushes. Reported apart from rejected files: nothing is wrong with the file, the remedy is
+        # to wait and re-run. Same channel-and-shape as the blocks around it (stdout Warning, bounded
+        # path list, non-zero exit after the rest of the run completed).
+        chunk_flush_throttled_files = (stats or {}).get("chunk_flush_throttled_files", 0)
+        _throttle_failure: click.ClickException | None = None
+        if chunk_flush_throttled_files:
+            _throttled_paths = list((stats or {}).get("chunk_flush_throttled_paths") or [])
+            _shown = _throttled_paths[:10]
+            _more = len(_throttled_paths) - len(_shown)
+            _retry_after = (stats or {}).get("chunk_flush_throttle_retry_after")
+            _breaker_open = bool((stats or {}).get("chunk_flush_throttle_breaker_open", False))
+            _wait = (
+                f"the service asked for a {_retry_after:g}s wait (Retry-After)"
+                if _retry_after is not None else "the service gave no Retry-After"
+            )
+            click.echo(
+                f"Warning: {chunk_flush_throttled_files}/{n} file(s) throttled by the service "
+                f"(nothing was indexed for them this run): "
+                + (", ".join(_shown) if _shown else "paths not recorded")
+                + (f" and {_more} more" if _more > 0 else "")
+                + f"; {_wait}"
+                + (
+                    "; stopped sending after consecutive throttled flushes and deferred the "
+                    "rest of the run"
+                    if _breaker_open else ""
+                )
+                + ". Wait, then re-run 'nx index repo' to retry."
+            )
+            _throttle_failure = click.ClickException(
+                f"the service throttled this run's writes (nexus-eoido): "
+                f"{chunk_flush_throttled_files} file(s) not indexed, {_wait}"
+                + (
+                    "; stopped sending after consecutive throttled flushes"
+                    if _breaker_open else ""
+                )
+                + ". Wait, then re-run 'nx index repo'."
+            )
+            if _breaker_open:
+                # The run was cut short: that is the headline, ahead of any per-file failure below.
+                _run_failure = _run_failure or _throttle_failure
         chunk_flush_failed_files = (stats or {}).get("chunk_flush_failed_files", 0)
         if chunk_flush_failed_files:
             click.echo(
@@ -1956,6 +1998,8 @@ def index_repo_cmd(
                 f"uploads this run (nexus-4s1ww) — see the WARNING line "
                 f"above."
             )
+        if _throttle_failure is not None:
+            _run_failure = _run_failure or _throttle_failure
 
         if transient_upsert_deferred_files:
             _run_failure = _run_failure or click.ClickException(

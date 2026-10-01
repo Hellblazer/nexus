@@ -340,6 +340,32 @@ def test_head_hash_not_updated_when_files_permanently_failed(
     mock_set.assert_not_called()
 
 
+def test_head_hash_not_updated_when_files_throttled(
+    tmp_path: Path, registry, lock_home: Path,
+) -> None:
+    """A file the service throttled (429, 503+Retry-After, an engine deadline
+    abort, or a flush the throttle breaker refused to send) is counted in
+    chunk_flush_throttled_files and NOT in chunk_flush_failed_files (rejected
+    only). The throttled count is the only thing holding the --since-head base
+    back for it: advancing past it means the next diff never re-offers the file
+    (nexus-eoido). Pins the ``chunk_flush_throttled_files`` term in the hold."""
+    import structlog.testing
+
+    with structlog.testing.capture_logs() as logs, patch(
+        "nexus.indexer._run_index",
+        return_value={"chunk_flush_failed_files": 0, "chunk_flush_throttled_files": 1},
+    ), patch("nexus.indexer._current_head", return_value="abc"), patch(
+        "nexus.indexer._set_owner_head_hash",
+    ) as mock_set:
+        index_repository(tmp_path, registry)
+
+    mock_set.assert_not_called()
+    held = [e for e in logs if e.get("event") == "since_head_base_not_advanced"]
+    assert held and held[0]["log_level"] == "warning", logs
+    assert held[0]["chunk_flush_throttled_files"] == 1
+    assert held[0]["chunk_flush_failed_files"] == 0
+
+
 def test_head_hash_updated_when_no_files_deferred_or_failed(
     tmp_path: Path, registry, lock_home: Path,
 ) -> None:

@@ -138,9 +138,14 @@ class _FakeBatcherWithFailures:
     from "does ChunkBatcher compute it correctly" (the latter is
     tests/test_chunk_batcher.py's job)."""
 
-    def __init__(self, *, flush, failed=None, **_kw):
+    def __init__(self, *, flush, failed=None, throttled=None, retry_after=None, breaker_open=False, **_kw):
         self._flush = flush
         self._failed = dict(failed or {})
+        # nexus-eoido: the throttled subset is part of failed_files, as on the real batcher
+        self._throttled = dict(throttled or {})
+        self._failed.update(self._throttled)
+        self._retry_after = retry_after
+        self._breaker_open = breaker_open
 
     def add(self, *_a, **_kw):
         return False  # never staged -- file-level indexers are stubbed anyway
@@ -157,11 +162,23 @@ class _FakeBatcherWithFailures:
         return dict(self._failed)
 
     @property
+    def throttled_files(self) -> dict:
+        return dict(self._throttled)
+
+    @property
+    def throttle_retry_after(self):
+        return self._retry_after
+
+    @property
+    def throttle_breaker_open(self) -> bool:
+        return self._breaker_open
+
+    @property
     def stats(self) -> dict:
         return {"flushes": 0.0, "flush_seconds": 0.0, "upload_seconds": 0.0}
 
 
-def _run_index_with_fake_batcher(tmp_path, monkeypatch, *, failed_files):
+def _run_index_with_fake_batcher(tmp_path, monkeypatch, *, failed_files, **batcher_kw):
     from nexus.db.http_vector_client import HttpVectorClient
     from nexus.indexer import _run_index
 
@@ -178,7 +195,7 @@ def _run_index_with_fake_batcher(tmp_path, monkeypatch, *, failed_files):
     db = MagicMock(spec=HttpVectorClient)
 
     def _batcher_factory(*, flush, **kw):
-        return _FakeBatcherWithFailures(flush=flush, failed=failed_files, **kw)
+        return _FakeBatcherWithFailures(flush=flush, failed=failed_files, **batcher_kw, **kw)
 
     with _service_mode_patches(db), patch(
         "nexus.chunk_batcher.ChunkBatcher", _batcher_factory,
@@ -205,6 +222,30 @@ def test_run_index_partial_chunk_flush_failure_reported(tmp_path, monkeypatch):
         failed_files={"only_one.py": "boom"},
     )
     assert stats["chunk_flush_failed_files"] == 1
+
+
+def test_run_index_counts_throttled_files_apart_from_rejected_ones(tmp_path, monkeypatch):
+    """nexus-eoido: a throttled file is not a poisoned one. chunk_flush_failed_files counts only the
+    rejected files; the throttled ones get their own count, paths and Retry-After."""
+    stats = _run_index_with_fake_batcher(
+        tmp_path, monkeypatch,
+        failed_files={"bad.py": "400 from engine"},
+        throttled={"t2.py": "429", "t1.py": "429"},
+        retry_after=17.0, breaker_open=True,
+    )
+    assert stats["chunk_flush_failed_files"] == 1
+    assert stats["chunk_flush_throttled_files"] == 2
+    assert stats["chunk_flush_throttled_paths"] == ["t1.py", "t2.py"]
+    assert stats["chunk_flush_throttle_retry_after"] == 17.0
+    assert stats["chunk_flush_throttle_breaker_open"] is True
+
+
+def test_run_index_with_no_throttle_reports_zero_throttled_files(tmp_path, monkeypatch):
+    stats = _run_index_with_fake_batcher(tmp_path, monkeypatch, failed_files={"bad.py": "boom"})
+    assert stats["chunk_flush_throttled_files"] == 0
+    assert stats["chunk_flush_throttled_paths"] == []
+    assert stats["chunk_flush_throttle_retry_after"] is None
+    assert stats["chunk_flush_throttle_breaker_open"] is False
 
 
 def test_run_index_zero_chunk_flush_failures_reports_zero(tmp_path, monkeypatch):
@@ -368,6 +409,66 @@ def test_index_repo_deferred_and_chunk_flush_failures_both_print(runner, repo_di
     assert result.exit_code != 0
     assert re.search(r"1/\d+ file\(s\) deferred on a transient write error", result.stdout), result.stdout
     assert re.search(r"1/\d+ file\(s\) failed to flush chunk uploads", result.stdout), result.stdout
+
+
+def test_index_repo_throttled_files_are_named_with_retry_after_and_fail_the_run(runner, repo_dir, mock_reg):
+    """nexus-eoido: files the service throttled are reported AS throttled (not as a failed flush),
+    with their paths and the Retry-After, and the run still exits non-zero."""
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "files_changed": 3, "chunk_flush_throttled_files": 2,
+            "chunk_flush_throttled_paths": ["src/big.py", "docs/huge.md"],
+            "chunk_flush_throttle_retry_after": 30.0,
+        },
+    )
+    assert result.exit_code != 0, result.output
+    assert re.search(r"2/\d+ file\(s\) throttled by the service", result.stdout), result.stdout
+    assert "src/big.py" in result.stdout and "docs/huge.md" in result.stdout, result.stdout
+    assert "Retry-After" in result.stdout and "30s" in result.stdout, result.stdout
+    assert "failed to flush chunk uploads" not in result.stdout, result.stdout   # not counted as poisoned
+    assert "throttled" in result.output.split("Error:")[-1], result.output
+    assert "Done." in result.output
+
+
+def test_index_repo_throttled_paths_are_truncated_to_ten(runner, repo_dir, mock_reg):
+    paths = [f"f{i}.py" for i in range(13)]
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"chunk_flush_throttled_files": 13, "chunk_flush_throttled_paths": paths},
+    )
+    assert result.exit_code != 0
+    assert "f9.py" in result.stdout and "f10.py" not in result.stdout, result.stdout
+    assert "and 3 more" in result.stdout, result.stdout
+
+
+def test_index_repo_open_throttle_breaker_is_the_one_clear_error_message(runner, repo_dir, mock_reg):
+    """nexus-eoido: when the breaker cut the run short the exit message names the throttle and the
+    breaker, ahead of a per-file failure that also happened this run."""
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={
+            "chunk_flush_failed_files": 1,
+            "chunk_flush_throttled_files": 40, "chunk_flush_throttled_paths": ["a.py"],
+            "chunk_flush_throttle_retry_after": 300.0, "chunk_flush_throttle_breaker_open": True,
+        },
+    )
+    assert result.exit_code != 0, result.output
+    assert result.output.count("Error:") == 1, result.output
+    error_line = next(line for line in result.output.splitlines() if line.startswith("Error:"))
+    assert "throttled" in error_line and "consecutive throttled flushes" in error_line, error_line
+    assert "300s" in error_line, error_line
+    assert re.search(r"1/\d+ file\(s\) failed to flush chunk uploads", result.stdout), result.stdout
+
+
+def test_index_repo_no_throttled_files_exit_zero(runner, repo_dir, mock_reg):
+    result, _ = _invoke_repo(
+        runner, [str(repo_dir)], mock_reg,
+        index_return={"files_changed": 3, "chunk_flush_throttled_files": 0,
+                      "chunk_flush_throttled_paths": []},
+    )
+    assert result.exit_code == 0, result.output
+    assert "throttled by the service" not in result.stdout
 
 
 _DEFERRED = {"transient_upsert_deferred_files": 2, "transient_upsert_deferred_paths": ["a.py", "b.md"]}

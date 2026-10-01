@@ -2336,6 +2336,49 @@ def _restore_manifest_fk_after_dangling_seed():
         ops.restore_fk_after_dangling_seeds()
 
 
+def _reset_index_run_collectors_if_loaded() -> None:
+    import sys as _sys  # noqa: PLC0415 — local, matches this file's convention
+
+    infra = _sys.modules.get("nexus.mcp_infra")
+    if infra is None:
+        return
+    infra.reset_manifest_write_failures()
+    infra.reset_manifest_identity_drops()
+    infra.reset_complete_refusals()
+    infra.reset_manifest_partial_doc_skips()
+    infra.reset_superseded_sweep_stats()
+    infra.reset_reconciled_collections_count()
+    infra.reset_ephemeral_registration_skips()
+    # The resets above ARM recording; a fresh process starts disarmed.
+    infra._identity_drop_collectors_active = False
+
+
+@pytest.fixture(autouse=True)
+def _isolate_index_run_collectors():
+    """Give every test the per-run collectors of a fresh process.
+
+    ``nexus.mcp_infra`` keeps process-global, per-run collectors (manifest
+    write failures, identity drops and the files they name, completion
+    refusals, ...) behind a flag that only a CLI run's
+    ``reset_identity_drop_collectors()`` arms, and nothing ever disarms.
+    In production one CLI process resets them before its one
+    ``index_repository()`` call, so they are per-run correct. In this suite
+    every test shares one process, so the first test that drives
+    ``nx index repo`` through ``CliRunner`` armed recording for the rest of
+    the worker, later ``_run_index`` tests recorded identity drops into it,
+    and a still-later ``_run_index`` read those stale drops back through
+    ``get_identity_dropped_files()`` and wrote them as its own failure rows
+    (tests/test_deyd5_systemic_skip_run_level.py saw a second
+    ``record_index_failures_batch`` call carrying other tests' files).
+
+    Reads ``sys.modules`` instead of importing, so a test that never loaded
+    ``nexus.mcp_infra`` imports nothing.
+    """
+    _reset_index_run_collectors_if_loaded()
+    yield
+    _reset_index_run_collectors_if_loaded()
+
+
 @pytest.fixture(autouse=True)
 def _isolate_collection_registration_cache() -> None:
     """Clear ``nexus.corpus``'s per-process "known registered" cache
