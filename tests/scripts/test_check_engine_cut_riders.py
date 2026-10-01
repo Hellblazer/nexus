@@ -164,6 +164,51 @@ def test_main_reads_a_saved_release_and_overrides_a_ceiling(tmp_path: Path, caps
     capsys.readouterr()
 
 
+def _stub_release_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ok: bool) -> Path:
+    """A fake release CLI first on PATH: records its argv, answers with release JSON or fails."""
+    import os
+    import stat
+
+    bindir = tmp_path / "stubbin"
+    bindir.mkdir()
+    log = tmp_path / "calls.log"
+    body = json.dumps({"assets": _assets(150, 148, 154)})
+    stub = bindir / "gh"
+    stub.write_text(
+        "#!/usr/bin/env bash\n"
+        f"echo \"$*\" >> '{log}'\n"
+        + (f"printf '%s' '{body}'\n" if ok else "echo 'HTTP 502' >&2; exit 1\n")
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    return log
+
+
+def test_repo_is_passed_through_to_the_release_view(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`sizes --repo OWNER/REPO` reaches the release CLI as `--repo OWNER/REPO`: the promote script
+    runs from a checkout that is not necessarily the release's repo."""
+    log = _stub_release_cli(tmp_path, monkeypatch, ok=True)
+    assert cr.main(["sizes", "engine-service-vX", "--repo", "owner/repo"]) == 0
+    call = log.read_text().strip()
+    assert call == "release view engine-service-vX --repo owner/repo --json assets", call
+
+
+def test_without_repo_no_repo_flag_is_passed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    log = _stub_release_cli(tmp_path, monkeypatch, ok=True)
+    assert cr.main(["sizes", "engine-service-vX"]) == 0
+    assert "--repo" not in log.read_text()
+
+
+def test_a_failing_release_view_is_unverifiable_not_a_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_release_cli(tmp_path, monkeypatch, ok=False)
+    assert cr.main(["sizes", "engine-service-vX", "--repo", "owner/repo"]) == 2
+    err = capsys.readouterr().err
+    assert "UNVERIFIABLE" in err
+    assert "HTTP 502" in err, "the failure names the release CLI's own error, not a downstream JSON parse error"
+
+
 def test_the_engine_release_skill_runs_both_subcommands() -> None:
     text = SKILL.read_text()
     assert "scripts/check_engine_cut_riders.py ancestry" in text

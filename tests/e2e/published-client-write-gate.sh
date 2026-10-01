@@ -129,6 +129,18 @@
 #       and BOTH name the refusal, so a failure that is not the ownerless
 #       refusal (one journey refused, the other broken for another reason)
 #       cannot ride the ack.
+#       MEASURED 2026-10-01 against published conexus 7.67.0 (the classifier's
+#       match was a static prediction until this run): exit 2, the engine
+#       counted refused_total=2, and each journey's own output carries the
+#       engine's prose "refusing an ownerless chunk write on <route>": `nx store
+#       put` prints it inside a store_put_ghost_register_compensated warning's
+#       original_error, `nx index md` prints "Error: the nexus service returned an
+#       error: POST /v1/vectors/upsert-chunks -> HTTP 422: refusing an ownerless
+#       chunk write on upsert-chunks: ...". The match is that sentence or the
+#       reason token ownerless_chunk_write, never a bare "ownerless", and the gate
+#       prints each journey's deciding line ("refusal line:"). Both captured lines
+#       are fixtures in tests/e2e/published_client_write_gate_verdict_test.sh.
+#       Re-measure when the client's error rendering changes.
 #
 # NX_GATE_OWNERLESS_WRITE_MODE=log-only|enforce starts the candidate engine
 # with that value and turns the status oracle on; the engine-release skill
@@ -447,11 +459,35 @@ STORE_REFUSED=0
 MD_REFUSED=0
 FAIL_REASONS=()
 
+# The engine's 422 carries two strings: the prose in `error` ("refusing an
+# ownerless chunk write on <route>: ...", OwnerlessChunkWriteException) and the
+# `reason` ownerless_chunk_write. A 7.67.0 client copies the `error` prose into
+# its exception message (http_vector_client.py), so a refused journey's output
+# carries it; the reason token alone is accepted too. Deliberately NOT a bare
+# "ownerless": a Phase 2+ client's own messages and docs use the word without a
+# refusal behind it. The function is sourced by the real test
+# (tests/e2e/published_client_write_gate_verdict_test.sh), not copied.
 _names_ownerless_refusal() {
   case "$1" in
-    *ownerless_chunk_write*|*[Oo]wnerless*) return 0 ;;
+    *"refusing an ownerless chunk write"*|*ownerless_chunk_write*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# The line of a journey's own output that decided its classification, printed to
+# the console so a run's evidence survives the scratch directory (removed on an
+# acknowledged pass): the line that names the refusal when there is one, else the
+# last non-empty line. Prints nothing for an empty output.
+_journey_evidence() {
+  local label="$1" out="$2" line=""
+  if _names_ownerless_refusal "$out"; then
+    line="$(printf '%s\n' "$out" | { grep -E 'refusing an ownerless chunk write|ownerless_chunk_write' || true; } | head -n 1)"
+    [ -n "$line" ] && echo "[gate] $label: refusal line: ${line:0:300}"
+  else
+    line="$(printf '%s\n' "$out" | { grep -v '^[[:space:]]*$' || true; } | tail -n 1)"
+    [ -n "$line" ] && echo "[gate] $label: no refusal named; last output line: ${line:0:300}"
+  fi
+  return 0
 }
 
 # -- a. store put: one tiny fixture, deterministically ONE chunk. -----------
@@ -461,6 +497,7 @@ STORE_PUT_OUT="$(printf 'published-client-write-gate probe %s\n' "$RUN_ID" \
   | _client_nx store put - --title "$STORE_TITLE" --collection pcwg 2>&1)" || true
 printf '%s\n' "$STORE_PUT_OUT" | sed 's/^/       /' | tee "$LOGS/store-put.log" >/dev/null
 if _names_ownerless_refusal "$STORE_PUT_OUT"; then STORE_REFUSED=1; fi
+_journey_evidence "store put" "$STORE_PUT_OUT"
 STORE_SHOW_JSON="$(_provisioner_nx catalog show "$STORE_TITLE" --json 2>/dev/null)" || STORE_SHOW_JSON=""
 if [ -n "$STORE_SHOW_JSON" ]; then
   STORE_TUMBLER="$(printf '%s' "$STORE_SHOW_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('tumbler',''))" 2>/dev/null)"
@@ -494,6 +531,7 @@ echo "[gate] index md: title=$MD_TITLE path=$MD_FIXTURE"
 MD_OUT="$(_client_nx index md "$MD_FIXTURE" --corpus pcwg-gate 2>&1)" || true
 printf '%s\n' "$MD_OUT" | sed 's/^/       /' | tee "$LOGS/index-md.log" >/dev/null
 if _names_ownerless_refusal "$MD_OUT"; then MD_REFUSED=1; fi
+_journey_evidence "index md" "$MD_OUT"
 MD_SHOW_JSON="$(_provisioner_nx catalog show "$MD_TITLE" --json 2>/dev/null)" || MD_SHOW_JSON=""
 if [ -n "$MD_SHOW_JSON" ]; then
   MD_TUMBLER="$(printf '%s' "$MD_SHOW_JSON" | python3 -c "import sys,json;print(json.load(sys.stdin).get('tumbler',''))" 2>/dev/null)"
@@ -546,6 +584,22 @@ print('|'.join([f('ownerless_write_mode'), f('ownerless_writes_refused_total'), 
 " 2>/dev/null)" || OW_FIELDS="||"
 IFS='|' read -r OW_MODE OW_REFUSED OW_WOULD <<<"$OW_FIELDS"
 echo "[gate] engine ownerless-write status: mode=${OW_MODE:-(not reported)} refused_total=${OW_REFUSED:-(n/a)} would_refuse_total=${OW_WOULD:-(n/a)}"
+
+# A counter is a non-negative integer or absent. `[ "$x" -lt 2 ]` on anything else
+# errors INSIDE an `if`, evaluates false, and adds no gap: the ack would pass on a
+# counter nobody could read (reproduced with 2.0). Refuse it loudly instead, and
+# not acknowledgeable: the oracle cannot say what the engine counted.
+for _ow in "$OW_REFUSED" "$OW_WOULD"; do
+  case "$_ow" in
+    ""|*[!0-9]*)
+      if [ -n "$_ow" ]; then
+        echo "PUBLISHED-CLIENT WRITE GATE FAILED — the engine reported an ownerless-write counter that is not a non-negative integer ('$_ow'): refused_total='${OW_REFUSED}' would_refuse_total='${OW_WOULD}'; the oracle cannot read it, not acknowledgeable" >&2
+        echo "PUBLISHED-CLIENT WRITE GATE FAILED — non-integer ownerless-write counter from /v1/status (refused_total='${OW_REFUSED}' would_refuse_total='${OW_WOULD}')"
+        exit 1
+      fi
+      ;;
+  esac
+done
 
 ORACLE_FAILS=()
 if [ -n "$NX_GATE_OWNERLESS_WRITE_MODE" ]; then

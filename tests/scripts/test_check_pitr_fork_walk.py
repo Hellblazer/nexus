@@ -62,7 +62,7 @@ def test_a_second_walk_that_replans_the_world_fails() -> None:
 
 def test_the_v0_1_118_shape_fails_the_count_identity() -> None:
     """new=5 pending=17 reexecuted=25 (the duplicate-row overcount, nexus-jl08t)."""
-    rc, lines = cw.check_walk(_log(new=5, rex=25, pending=17), "nexus_admin", None, False, 12)
+    rc, lines = cw.check_walk(_log(new=5, rex=25, pending=17), "nexus_admin", 5, False, 12)
     assert rc == 1
     assert any("!= pending_at_start 17" in line for line in lines)
 
@@ -108,9 +108,51 @@ def test_a_schema_named_session_role_fails(role: str) -> None:
     assert rc == 1
 
 
-def test_only_the_last_walk_in_the_log_counts() -> None:
+def test_a_log_holding_two_boots_is_unverifiable_not_read_as_the_last_one() -> None:
+    """The last-boot reading hid boot 1: a walk1.log that also held boot 2 passed on boot 2's counts."""
     log = _log(new=140, rex=12) + "\n" + _log(new=0, rex=12)
-    rc, _ = cw.check_walk(log, None, None, True, 12)
+    with pytest.raises(cw.Unverifiable, match="2 boots"):
+        cw.check_walk(log, None, None, True, 12)
+
+
+def test_a_log_holding_two_boots_exits_2_through_main(tmp_path: Path) -> None:
+    log = tmp_path / "walk1.log"
+    log.write_text(_log(new=0, rex=12) + "\n" + _log(new=0, rex=12))
+    assert cw.main(["walk", "--engine-log", str(log), "--noop"]) == 2
+
+
+def test_walk_with_neither_expect_new_nor_noop_is_unverifiable() -> None:
+    """A no-op boot of the new image is self-consistent; without --expect-new it would pass walk 1."""
+    with pytest.raises(cw.Unverifiable, match="neither --expect-new"):
+        cw.check_walk(_log(new=0, rex=12), "nexus_admin", None, False, 12)
+
+
+def test_a_no_op_boot_fails_walk_1_of_a_schema_carrying_tag() -> None:
+    rc, lines = cw.check_walk(_log(new=0, rex=12), "nexus_admin", 3, False, 12)
+    assert rc == 1
+    assert any("new_changesets = 0, expected 3" in line for line in lines)
+
+
+def test_expect_new_zero_without_noop_is_unverifiable() -> None:
+    with pytest.raises(cw.Unverifiable, match="expect-new 0"):
+        cw.check_walk(_log(new=0, rex=12), "nexus_admin", 0, False, 12)
+
+
+def test_the_cli_requires_one_of_expect_new_or_noop(tmp_path: Path) -> None:
+    log = tmp_path / "walk1.log"
+    log.write_text(_log(new=5, rex=12))
+    assert cw.main(["walk", "--engine-log", str(log), "--migration-role", "nexus_admin"]) == 2
+    assert cw.main(["walk", "--engine-log", str(log), "--migration-role", "nexus_admin", "--expect-new", "5"]) == 0
+    assert cw.main(["walk", "--engine-log", str(log), "--migration-role", "nexus_admin", "--expect-new", "4"]) == 1
+    assert cw.main(["walk", "--engine-log", str(log), "--migration-role", "nexus_admin", "--expect-new", "0"]) == 2
+
+
+def test_a_padded_migration_role_compares_stripped(tmp_path: Path) -> None:
+    """main validated the stripped role but passed the padded one on, so " nexus_admin " mismatched the log."""
+    log = tmp_path / "walk.log"
+    log.write_text(_log(new=0, rex=12, role="nexus_admin"))
+    assert cw.main(["walk", "--engine-log", str(log), "--noop", "--migration-role", " nexus_admin "]) == 0
+    rc, _ = cw.check_walk(_log(new=0, rex=12, role="nexus_admin"), " nexus_admin ", None, True, 12)
     assert rc == 0
 
 
@@ -304,7 +346,12 @@ def test_nothing_else_hardcodes_the_run_always_count() -> None:
     assert f":-{cw.DEFAULT_REEXECUTED}}}" not in script
     assert "TWO_WALK_EXPECTED_REEXECUTED" in script
     skill = SKILL.read_text()
-    assert f"({cw.DEFAULT_REEXECUTED} on develop" not in skill
+    # Any literal number next to "runAlways", in either order and whatever the phrasing: a stale
+    # hardcode of an OLD count would otherwise survive a bump of DEFAULT_REEXECUTED.
+    import re
+    near = re.compile(r"\b\d+\b[^.\n]{0,40}runAlways|runAlways[^.\n]{0,40}\b\d+\b")
+    assert not near.findall(skill), near.findall(skill)
+    assert near.search("the 12 runAlways changesets"), "the pattern must see a hardcoded count"
 
 
 # --- CLI --------------------------------------------------------------------
@@ -340,6 +387,9 @@ def test_the_local_rehearsal_runs_the_same_assertions_on_two_boots() -> None:
     assert "NX_DB_ADMIN_USER" in text
     assert '--expect-rows "$ROWS_AFTER_1"' in text
     assert "--save-settings" in text and text.count("--compare-settings") == 2
+    # the engine appends every boot to one log; the checker refuses two boots in a file
+    assert "_boot_slice" in text and text.count("_boot_slice \"$SVC_LOG\"") == 2
+    assert "--expect-new" in text and "--noop" in text
 
 
 def test_the_engine_release_skill_names_the_script() -> None:

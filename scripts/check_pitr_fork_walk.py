@@ -47,6 +47,15 @@ evidence cannot be read (never a pass: an empty log, a psql that does not run).
       empty value is exit 2;
     * a ``counts_unavailable=true`` line (the engine logs -1 for the three
       counts it could not compute) is exit 2: the counts cannot be read;
+    * the log passed must hold exactly ONE boot (one ``schema_migration_start``): a
+      file holding two boots would check only the second and hide the first, so more
+      than one is exit 2;
+    * one of ``--expect-new N`` or ``--noop`` is REQUIRED (neither is exit 2): a walk
+      checked against neither proves only that the log is self-consistent, and a
+      no-op boot of the new image passes that. Walk 1 of a tag that carries a
+      changeset takes ``--expect-new N`` with N > 0 (``--expect-new 0`` is exit 2:
+      that is ``--noop``, the second-walk property). Size N from the cloud's live
+      ``release_version``, since the walk is cumulative;
     * ``--expect-new N`` pins ``new_changesets``; ``--noop`` is the second-walk
       property: ``new_changesets == 0``, ``mark_ran_changesets == 0`` and
       ``reexecuted_changesets == pending_at_start``, which is
@@ -213,12 +222,14 @@ def check_schema(
 
 
 def parse_walk(log_text: str) -> dict[str, object]:
-    """Counts and flags from the LAST walk in ``log_text``."""
+    """Counts and flags from the LAST walk in ``log_text``, plus how many walks it holds."""
     complete: dict[str, int] | None = None
     session: re.Match[str] | None = None
     anomaly = failed = unavailable = False
+    starts = 0
     for line in log_text.splitlines():
         if "event=schema_migration_start" in line:
+            starts += 1
             complete, session, anomaly, failed, unavailable = None, None, False, False, False
         if "event=schema_migration_complete" in line:
             complete = {k: int(v) for k, v in _KV.findall(line)}
@@ -232,7 +243,7 @@ def parse_walk(log_text: str) -> dict[str, object]:
             session = m
     return {
         "complete": complete, "session": session, "anomaly": anomaly, "failed": failed,
-        "counts_unavailable": unavailable,
+        "counts_unavailable": unavailable, "starts": starts,
     }
 
 
@@ -245,7 +256,16 @@ def check_walk(
 ) -> tuple[int, list[str]]:
     if not log_text.strip():
         raise Unverifiable("the engine log is empty")
+    if migration_role is not None:
+        migration_role = migration_role.strip()
     parsed = parse_walk(log_text)
+    starts = parsed["starts"]
+    assert isinstance(starts, int)
+    if starts > 1:
+        raise Unverifiable(
+            f"the engine log holds {starts} boots (event=schema_migration_start x {starts}): "
+            "pass ONE boot's log per file, or the check reads only the last boot and hides the others"
+        )
     complete = parsed["complete"]
     if complete is None:
         raise Unverifiable("no event=schema_migration_complete line: the walk did not finish or the log is not the engine's")
@@ -264,6 +284,17 @@ def check_walk(
             "the engine logged counts_unavailable (new/reexecuted/mark_ran = "
             f"{new}/{rex}/{mark}, the -1 sentinel): the walk's counts cannot be read, "
             "so the identity cannot be checked"
+        )
+    if expect_new is None and not noop:
+        raise Unverifiable(
+            "neither --expect-new N nor --noop was given: a walk checked against neither would pass a "
+            "no-op boot of the new image. Walk 1 of a tag that carries a changeset takes --expect-new N "
+            "(N > 0, sized from the cloud's live release_version); walk 2 takes --noop"
+        )
+    if expect_new is not None and expect_new <= 0 and not noop:
+        raise Unverifiable(
+            f"--expect-new {expect_new} asserts a walk that applies nothing, which is --noop; walk 1 of a "
+            "schema-carrying tag must expect N > 0"
         )
     lines.append(f"info     walk: new={new} reexecuted={rex} mark_ran={mark} pending_at_start={pending}")
 
@@ -351,7 +382,7 @@ def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
             )
         else:
             if args.migration_role is not None:
-                _require_role(args.migration_role)
+                args.migration_role = _require_role(args.migration_role)
             text = sys.stdin.read() if args.engine_log == "-" else Path(args.engine_log).read_text()
             rc, lines = check_walk(text, args.migration_role, args.expect_new, args.noop, args.expect_reexecuted)
     except (Unverifiable, OSError) as exc:

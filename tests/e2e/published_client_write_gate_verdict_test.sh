@@ -142,5 +142,65 @@ run_case "mode unset, journeys fail, ack, engine reports a refusal -> EXPECTED-I
 run_case "mode unset, journeys fail, ack, engine reports no refusal -> ack refused (1)" \
   1 "no evidence" "$OLD" "" 0 0 "$LAG" "$S_NONE"
 
+# --- non-integer counters: refused loudly, never read as "no gap" ------------
+# `[ "$x" -lt 2 ]` on "2.0" errors inside an `if`, is false, and let the ack pass.
+S_ENF_FLOAT='{"ownerless_write_mode":"enforce","ownerless_writes_refused_total":2.0,"ownerless_writes_would_refuse_total":0}'
+S_ENF_WORD='{"ownerless_write_mode":"enforce","ownerless_writes_refused_total":"unknown","ownerless_writes_would_refuse_total":0}'
+S_LOG_FLOAT='{"ownerless_write_mode":"log-only","ownerless_writes_refused_total":0,"ownerless_writes_would_refuse_total":1.0}'
+run_case "enforce + ack, refused_total is 2.0 (a float) -> FAILED (1), not an ack pass" \
+  1 "not a non-negative integer" "$OLD" enforce 0 0 "$LAG" "$S_ENF_FLOAT"
+run_case "enforce + ack, refused_total is a word -> FAILED (1)" \
+  1 "not a non-negative integer" "$OLD" enforce 0 0 "$LAG" "$S_ENF_WORD"
+run_case "log-only, would_refuse_total is 1.0 -> FAILED (1), not a read of the -lt 1 oracle" \
+  1 "not a non-negative integer" "$OLD" log-only 1 1 "" "$S_LOG_FLOAT"
+run_case "mode unset, counters absent -> still PASSED (0): absent is not non-integer" \
+  0 "PUBLISHED-CLIENT WRITE GATE PASSED" "$OLD" "" 1 1 "" "$S_NONE"
+
+# --- the refusal classifier, sourced from the REAL script ---------------------
+# _names_ownerless_refusal is what lets the ack tell "the engine refused this
+# journey" from "this journey broke for another reason". The cases above inject
+# STORE_REFUSED / MD_REFUSED directly, so they could not see it: breaking the
+# pattern left them green. This section sources the function from the script and
+# feeds it canned client output.
+sed -n '/^_names_ownerless_refusal() {/,/^}/p' "$GATE" > "$TMP/classifier.sh"
+if [ "$(wc -l < "$TMP/classifier.sh")" -lt 4 ]; then
+  FAIL=$((FAIL + 1)); echo "[FAIL] _names_ownerless_refusal not found in $GATE"
+fi
+
+# classify <label> <want: yes|no> <canned client output>
+classify() {
+  local label="$1" want="$2" text="$3" got
+  if ( source "$TMP/classifier.sh"; _names_ownerless_refusal "$text" ); then got=yes; else got=no; fi
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS + 1)); echo "[ok]   classifier: $label"
+  else
+    FAIL=$((FAIL + 1)); echo "[FAIL] classifier: $label: want $want, got $got"
+  fi
+}
+
+# MEASURED 2026-10-01: published conexus 7.67.0 against the z0o2p.24 candidate in
+# enforce mode (NX_PUBLISHED_CLIENT_VERSION=7.67.0 NX_GATE_OWNERLESS_WRITE_MODE=enforce
+# NX_EXPECTED_CLIENT_LAG=nexus-z0o2p.24, exit 2). These are the two real journey lines,
+# trimmed of the collection name and chash tail (the gate prints them as "refusal line").
+# `nx store put` surfaces the engine's 422 inside a structlog compensation warning, not a
+# traceback, and `nx index md` prints a one-line Error; both carry the engine's prose.
+STORE_PUT_7_67_0="event='store_put_ghost_register_compensated' timestamp='2026-10-01T21:46:58.203348Z' level='warning' tumbler='1.1.1' deleted=True original_error=\"POST /v1/vectors/store-put → HTTP 422: refusing an ownerless chunk write on store-put: 1 of 1 chashes have no live manifest row in collection 'knowledge__pcwg"
+INDEX_MD_7_67_0="Error: the nexus service returned an error: POST /v1/vectors/upsert-chunks → HTTP 422: refusing an ownerless chunk write on upsert-chunks: 1 of 1 chashes have no live manifest row in collection 'docs__pcwg-gate__bge-base-en-v15-768__v1' (e.g. d00e344f6ee625b0adf314b72e56d781fad7322be97f2f58f71db3a19"
+classify "7.67.0 store put output (measured) -> refusal" yes "$STORE_PUT_7_67_0"
+classify "7.67.0 index md output (measured) -> refusal" yes "$INDEX_MD_7_67_0"
+classify "a traceback ending in the engine's 422 prose -> refusal" yes 'Traceback (most recent call last):
+  File "nexus/db/http_vector_client.py", line 1674, in _request
+nexus.errors.ServiceError: POST /v1/vectors/store-put → HTTP 422: refusing an ownerless chunk write on store-put: 1 of 1 chashes have no live manifest row'
+classify "the reason token alone (ownerless_chunk_write) -> refusal" yes 'error: 422 {"reason": "ownerless_chunk_write"}'
+classify "HTTP 500 from the engine -> not a refusal" no 'nexus.errors.ServiceError: POST /v1/vectors/store-put failed: HTTP 500: internal error'
+classify "connection refused -> not a refusal" no 'httpx.ConnectError: [Errno 61] Connection refused'
+classify "a 422 for another reason -> not a refusal" no 'ServiceError: POST /v1/vectors/upsert-chunks failed: HTTP 422: invalid collection name'
+classify "empty output -> not a refusal" no ''
+# A Phase 2+ client's own message may use the word without a refusal behind it
+# (errors.py DryRunStoreError: the engine's client would take the same ownerless
+# upsert-chunks request as a real write); a bare "ownerless" must not ride the ack.
+classify "a client's own 'ownerless' prose, no engine refusal -> not a refusal" no \
+  'DryRunStoreError: a dry run was handed a store that is not a throwaway one; an ownerless upsert-chunks request would be refused'
+
 echo "$NAME: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

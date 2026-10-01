@@ -29,8 +29,15 @@ The engine reads `NX_OWNERLESS_WRITE_MODE` once, at boot:
 
 The last row matters for the cloud environment file: a typo there is an outage, and the
 emergency lever is one of the two accepted values, never a third. `deploy/engine/image-smoke.sh`
-(conexus repo) must boot the image with the production value so a bad value fails before
-the push, not at the redeploy.
+(conexus repo) booting the image with the production value catches only an INVALID value,
+which fails before the push instead of at the redeploy. It does not catch a valid but wrong
+one: `enforce` on the first deploy boots fine and refuses every legacy write. For that, the
+conexus relay and arming checklist for the first deploy carries an assertion, run against the
+booted image or the staged parameter before the push: `/v1/status` `ownerless_write_mode`
+must equal `log-only`. The code default (unset or blank is `log-only`) is pinned by the
+engine's own test (`OwnerlessWriteRefusalTest`, `anUnsetModeBootsLogOnly_andAnExplicitEnforceBootsEnforce`);
+what only the deployment can show is what conexus wired, so the check belongs on the
+deployment's own `/v1/status`.
 
 Local installs enforce from the first boot: the local launcher (`nx daemon service start`)
 sets `NX_OWNERLESS_WRITE_MODE=enforce` itself unless the variable is already set, so a
@@ -50,9 +57,12 @@ conexus-55's census of `POST /v1/vectors/store-put` and `/upsert-chunks` over
 2026-09-01 to 2026-10-01: every request was WAF ALLOW, from **two source IP addresses**
 (the operator's and one other), `Python-urllib/3.12` and `python-httpx/0.28.1`. Two
 addresses is a floor on the machines, not the machine count. NAT can put several machines
-behind one address: the Mac mini, the WSL appliance and qwentescence share one egress, and
-each can run its own `nx-mcp` servers and hook-spawned `nx`. The population to upgrade and restart is every machine behind those two addresses, so
-inventory machines and not addresses.
+behind one address, and each machine can run its own `nx-mcp` servers and hook-spawned `nx`.
+Which machines share an address is **unverified**: nothing in this repo records the egress of
+the Mac mini, the WSL appliance or qwentescence, so do not assume they share one or that they
+do not; confirm each machine's public address against the two in the census. The population
+to upgrade and restart is every machine behind those two addresses, so inventory machines and
+not addresses.
 
 The census also shows what the version header cannot tell you. The user agent carries no
 client version, so `X-Nexus-Client-Version` is the only soak signal, and the final-cut nexus
@@ -68,9 +78,11 @@ never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` 
    Terraform parameter in the engine-redeploy SSM document (conexus-3jue's parameter),
    defaulting to `log-only`, next to the `NX_HNSW_MAX_SCAN_TUPLES` rollback lever. The
    engine's environment file is rendered at boot, so a hand edit on the host is lost.
-   Confirm the live mode with the gate in the previous section: `ownerless_write_mode` must
-   read `log-only`, because a mis-wired parameter that reads `enforce` refuses every legacy
-   write from every host at the first deploy.
+   Assert the mode BEFORE the push (the `/v1/status` check in the previous section, in
+   conexus's relay and arming checklist) and again after the deploy with the gate:
+   `ownerless_write_mode` must read `log-only`, because a mis-wired parameter that reads
+   `enforce` refuses every legacy write from every host at the first deploy, and only
+   the pre-push check can stop that before it happens.
 2. **Upgrade and restart every client.** On each machine behind the two addresses: upgrade
    conexus to the paired release, then restart every long-lived process that holds the old
    code. Upgrading the package on disk does not change a running process.
@@ -81,8 +93,11 @@ never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` 
    - Check with `nx doctor`: the `Process freshness` row must be green, and the
      `Ownerless writes` row shows the engine's counters.
 3. **Soak, and disposition every caller.** Read `ownerless_writes_would_refuse_total` and the
-   engine log (CloudWatch group `/conexus/dev/engine`, filter
-   `event=ownerless_chunk_write_would_refuse`). Each line names the route, the tenant, the
+   engine log (filter `event=ownerless_chunk_write_would_refuse`; **the CloudWatch log group
+   is unverified**, confirm its name with conexus: `/conexus/dev/engine` appears in this repo
+   only as an SSM parameter prefix, `docs/release-arming/README.md`, not as a log group. A
+   wrong group errors loudly, but a wrong filter returns nothing and reads as "soak
+   drained", which is why step 4 requires a positive control). Each line names the route, the tenant, the
    collection, the `user_agent` and `client_version`. The count stops moving once every
    writer is upgraded and restarted, **or** is a caller that cannot be fixed by an upgrade.
    Collect every distinct `(user_agent, client_version)` pair that appears during the soak

@@ -41,6 +41,7 @@ FIXED_SIZES_MIB = {"linux-amd64": 150, "linux-arm64": 147, "mac-arm64": 154}
 
 def _stub_gh(
     tmp_path: Path, assets: list[str], sizes_mib: dict[str, float] | None = None,
+    *, json_view_fails: bool = False,
 ) -> tuple[Path, Path]:
     """A fake ``gh`` that answers ``release view`` with *assets* (names, via ``--jq``) or
     their JSON with sizes (``--json assets``), and records every call to a log file."""
@@ -63,7 +64,11 @@ def _stub_gh(
         "  'release view')\n"
         "    case \"$*\" in\n"
         f"      *--jq*) printf '%s\\n' '{asset_lines}' ;;\n"
-        f"      *) cat '{tmp_path / 'assets.json'}' ;;\n"
+        + (
+            "      *) echo 'gh: HTTP 502 from the release API' >&2; exit 1 ;;\n"
+            if json_view_fails
+            else f"      *) cat '{tmp_path / 'assets.json'}' ;;\n"
+        ) +
         "    esac ;;\n"
         "  'release edit') exit 0 ;;\n"
         "  *) echo \"unexpected gh $*\" >&2; exit 99 ;;\n"
@@ -125,6 +130,19 @@ def test_unreadable_sizes_leave_the_draft(tmp_path: Path) -> None:
     r = _run(bindir)
     assert r.returncode == 1, r.stdout + r.stderr
     assert not any(c.startswith("release edit") for c in log.read_text().splitlines())
+
+
+def test_a_failing_json_release_view_fails_closed_and_leaves_the_draft(tmp_path: Path) -> None:
+    """All 21 names are present, then the second `gh release view --json assets` (the one that
+    carries the sizes) fails: the draft must stay, because the sizes were never read."""
+    bindir, log = _stub_gh(tmp_path, _all_assets(), json_view_fails=True)
+    r = _run(bindir)
+    assert r.returncode != 0, r.stdout + r.stderr
+    calls = log.read_text().splitlines()
+    assert sum(c.startswith("release view") for c in calls) == 2, calls
+    assert not any(c.startswith("release edit") for c in calls), (
+        "a release whose sizes could not be fetched must never be promoted"
+    )
 
 
 def test_zero_assets_fails_cleanly(tmp_path: Path) -> None:

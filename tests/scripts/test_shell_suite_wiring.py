@@ -178,8 +178,12 @@ SUITES = [
     _Suite("scripts/mvnw-leased_test.sh", 22),
     # nexus-9a6io: the published-client gate's verdict section (RDR-223 P3.2
     # ownerless-write modes), extracted from the real script and run against
-    # canned /v1/status bodies. 22 cases (18 + 4 ack-evidence cases, nexus-9a6io fix round).
-    _Suite("tests/e2e/published_client_write_gate_verdict_test.sh", 22),
+    # canned /v1/status bodies. 35 cases (18 + 4 ack-evidence, nexus-9a6io fix round; +4 non-integer
+    # counter, +9 refusal-classifier cases sourced from the real script, round 3).
+    _Suite("tests/e2e/published_client_write_gate_verdict_test.sh", 35),
+    # nexus-20onx round 3: leg B3's compare logic, sourced from the real cloud
+    # gate script and fed canned /v1/status bodies (11 cases + 3 wiring checks).
+    _Suite("tests/e2e/cloud_client_path_gate_b3_test.sh", 14),
 ]
 
 
