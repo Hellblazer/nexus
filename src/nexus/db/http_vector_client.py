@@ -5006,7 +5006,7 @@ class HttpVectorClient:
         Keys returned: ``name``, ``count``, ``embedding_model`` (query-time
         model), ``index_model`` (index-time model, may differ for CCE
         collections). Raises ``KeyError`` if the collection does not exist
-        — on pgvector, zero live rows is indistinguishable from absent
+        — on pgvector, zero stored rows is indistinguishable from absent
         (:meth:`collection_info` semantics, RDR-156 Decision 6).
         """
         from nexus.corpus import (  # noqa: PLC0415 — circular-dep avoidance (corpus imports config)

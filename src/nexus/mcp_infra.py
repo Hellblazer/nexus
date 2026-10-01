@@ -982,8 +982,10 @@ def get_collection_row(name: str, *, refresh: bool = True) -> dict | None:
     ``None`` covers two cases the caller cannot tell apart from here alone
     (and does not need to: both mean "this name is not a live, registered
     collection with catalog attributes"): the name was never registered,
-    or it is registered but owns zero live chunks and so never appears in
-    the ``/v1/vectors/stats`` response at all (see
+    or it is registered but holds no stored chunk at all and so never
+    appears in the ``/v1/vectors/stats`` response (that response has a row
+    for every collection that physically holds any chunk, live(c) or not,
+    RDR-192 Step 5 amendment; see
     :func:`_refresh_collections_cache_if_stale`'s docstring on the
     stats-route population). A caller reading an EXISTING collection's
     attributes and getting ``None`` back should fail loud rather than

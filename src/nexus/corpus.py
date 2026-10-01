@@ -937,7 +937,7 @@ def collection_content_type(name: str) -> str:
     if row is None:
         raise CollectionNotRegisteredError(
             f"collection_content_type: {name!r} has no catalog row -- it is "
-            "either unregistered or owns no live chunks. This function "
+            "either unregistered or holds no stored chunks. This function "
             "reads the catalog row, never the name; register the "
             "collection (or use a candidate-name parser) before calling it."
         )
@@ -955,7 +955,7 @@ def collection_owner(name: str) -> str:
     if row is None:
         raise CollectionNotRegisteredError(
             f"collection_owner: {name!r} has no catalog row -- it is either "
-            "unregistered or owns no live chunks. This function reads the "
+            "unregistered or holds no stored chunks. This function reads the "
             "catalog row, never the name; register the collection (or use "
             "a candidate-name parser) before calling it."
         )
@@ -973,7 +973,7 @@ def collection_model(name: str) -> str:
     if row is None:
         raise CollectionNotRegisteredError(
             f"collection_model: {name!r} has no catalog row -- it is either "
-            "unregistered or owns no live chunks. This function reads the "
+            "unregistered or holds no stored chunks. This function reads the "
             "catalog row, never the name; register the collection (or use "
             "a candidate-name parser) before calling it."
         )
