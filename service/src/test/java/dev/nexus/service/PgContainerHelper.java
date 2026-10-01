@@ -824,6 +824,29 @@ public final class PgContainerHelper {
     }
 
     /**
+     * Seed OWNED chunks for a test that POSTs to {@code /v1/vectors/upsert-chunks} to exercise
+     * something other than an ownerless first write (RDR-223 P3.1, nexus-z0o2p.23). From Phase 3
+     * the engine refuses that route for a chash with no live manifest row, so such a test
+     * pre-seeds the chash with an owner and POSTs with {@code force_re_embed} (an owned chash
+     * with a stored vector skips the embedder otherwise, and the embedder is what these tests
+     * reach for).
+     *
+     * <p>Each chunk gets a zero vector of {@code dim} (the width the collection's registered
+     * model routes to) and the text {@code "seed"}; {@link #insertChunks} and {@link #ownChunks}
+     * do the rest, so it runs as whatever role {@code ctx} carries (the superuser, in the callers)
+     * and the collection must already be registered ({@link #insertCollection}).
+     */
+    public static void insertOwnedChunks(DSLContext ctx, String tenant, String collection, int dim,
+                                         String... chashHex) {
+        var hex = java.util.List.of(chashHex);
+        insertChunks(ctx, tenant, collection, hex,
+            hex.stream().map(h -> "seed").toList(),
+            hex.stream().map(h -> new float[dim]).toList(),
+            hex.stream().map(h -> Map.<String, Object>of()).toList());
+        ownChunks(ctx, tenant, collection, chashHex);
+    }
+
+    /**
      * Allowlist of GUC names {@link #setTenant} may stamp — the same two names {@link
      * TenantScope#PERMITTED_GUCS} enforces (that field is package-private inside {@code
      * dev.nexus.service.db}, unreachable from this package, so this is a second copy of

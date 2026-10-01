@@ -108,7 +108,13 @@ class VectorHandlerUpstreamRateLimitedTest {
         http.send(warmup, HttpResponse.BodyHandlers.ofString());
 
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION);
+            // RDR-223 P3.1 (nexus-z0o2p.23): own the chash the test POSTs (the engine refuses an
+            // ownerless upsert-chunks write from Phase 3) and POST with force_re_embed so the
+            // throwing embedder is still reached for it.
+            PgContainerHelper.insertOwnedChunks(dsl, TENANT, COLLECTION, 1024,
+                Chash.ofText("url429-c1").toHex());
         }
     }
 
@@ -135,7 +141,8 @@ class VectorHandlerUpstreamRateLimitedTest {
             "collection", COLLECTION,
             "ids",        List.of(Chash.ofText("url429-c1").toHex()),
             "documents",  List.of("chunk that will hit the simulated RPM ceiling"),
-            "metadatas",  List.of(Map.of())));
+            "metadatas",  List.of(Map.of()),
+            "force_re_embed", true));
 
         assertThat(resp.statusCode())
             .as("must be the honest 429 — never the opaque 500 the 2026-08-15"

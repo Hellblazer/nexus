@@ -44,6 +44,13 @@ import static org.assertj.core.api.Assertions.assertThat;
  * the 5-arg {@link NexusService} overload, port 0, {@code PER_CLASS}. Two
  * tenants (two bearer tokens, one shared service role/datasource -- RLS,
  * not connection separation, is what is under test for isolation).
+ *
+ * <p>RDR-223 P3.2 (nexus-z0o2p.24), decided in P3.1 (nexus-z0o2p.23): the SUBJECT here is the
+ * route itself, so these tests are not moved onto a seeding helper and stay as they are until
+ * P3.2. The route has no client caller, and after the ownerless-write refusal it cannot insert a
+ * NEW chunk at all (the manifest FK needs the chunk first, the refusal needs the manifest
+ * first), so P3.2 retires the route and deletes this class with it, unless RDR-169 G4 needs it,
+ * in which case the tests that write a new chunk flip into 422 refusal assertions.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class VectorHandlerUpsertReferenceOnlyTest {

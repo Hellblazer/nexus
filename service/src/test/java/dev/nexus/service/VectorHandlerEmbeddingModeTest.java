@@ -127,6 +127,17 @@ class VectorHandlerEmbeddingModeTest {
             // Must still be REGISTERED, or dispatch fails on the earlier "not
             // registered" 422 instead of this test's intended "unservable model" 422.
             PgContainerHelper.insertCollection(dsl, TENANT, "knowledge__nexus__voyage-context-3__v1");
+            // RDR-223 P3.1 (nexus-z0o2p.23): the engine refuses an ownerless write on upsert-chunks
+            // from Phase 3. The tests below that POST to it exercise embedder dispatch and vector
+            // parsing, not the ownership rule, so each chash they POST is owned up front; the ones
+            // that must reach the embedder carry force_re_embed (an owned chash with a stored vector
+            // skips it otherwise).
+            PgContainerHelper.insertOwnedChunks(dsl, TENANT, "knowledge__pebfx2__minilm-l6-v2-384__v1", 384,
+                dev.nexus.service.db.Chash.ofText("pthttp384").toHex(),
+                dev.nexus.service.db.Chash.ofText("ptbaddimhttp").toHex(),
+                dev.nexus.service.db.Chash.ofText("pebfx2-ok1").toHex());
+            PgContainerHelper.insertOwnedChunks(dsl, TENANT, "knowledge__nexus__voyage-context-3__v1", 1024,
+                dev.nexus.service.db.Chash.ofText("pebfx2-c1").toHex());
         }
     }
 
@@ -213,7 +224,8 @@ class VectorHandlerEmbeddingModeTest {
             "collection", "knowledge__nexus__voyage-context-3__v1",
             "ids",        List.of(dev.nexus.service.db.Chash.ofText("pebfx2-c1").toHex()),
             "documents",  List.of("some text"),
-            "metadatas",  List.of(Map.of())));
+            "metadatas",  List.of(Map.of()),
+            "force_re_embed", true));
         assertThat(resp.statusCode())
             .as("unservable model must be 422, not 400/500 (got body: %s)", resp.body())
             .isEqualTo(422);
@@ -275,6 +287,11 @@ class VectorHandlerEmbeddingModeTest {
 
     @Test
     void unregisteredCollection_staysA422_distinguishableFrom400() throws Exception {
+        // RDR-223 P3.2 (nexus-z0o2p.24), decided in P3.1 (nexus-z0o2p.23): this test's subject is
+        // the route's own refusal order, so it is not moved onto a seeded chunk (a chunk cannot
+        // be seeded into a collection that is not registered, which is the case under test).
+        // P3.2 must either keep the unregistered-collection 422 AHEAD of the ownership 422, so
+        // the assertion below still holds, or move this body onto the refusal's own message.
         // RDR-204 Phase 2 (bead nexus-ft04v.16): dispatch is by the registered ROW
         // now, never a name-segment parse -- a non-conformant, never-registered name
         // is no longer distinguishable from any other unregistered collection at the
@@ -338,22 +355,18 @@ class VectorHandlerEmbeddingModeTest {
         // distinct from startAll's -- chunks_collection_fk is a REAL, always-
         // enforced FK now, and TENANT's ghost sweep already ran (in startAll's
         // warmup), so a plain registration here is safe.
+        // RDR-223 P3.1 (nexus-z0o2p.23): the chunks go in with substrate SQL, their vectors from
+        // the real embedder (what the upsert-chunks route computed), because the engine refuses
+        // an ownerless write on that route from Phase 3. RDR-192 Step 5 (nexus-wbfpw.10):
+        // getEmbeddings requires a live own-collection manifest owner, so they are owned too.
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES),
-                TENANT, "knowledge__pebfx7__minilm-l6-v2-384__v1");
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, "knowledge__pebfx7__minilm-l6-v2-384__v1");
+            PgContainerHelper.insertChunks(dsl, TENANT, "knowledge__pebfx7__minilm-l6-v2-384__v1",
+                List.of(embB, embA), List.of("second text", "first text"),
+                List.of(Map.<String, Object>of(), Map.<String, Object>of()), onnx);
+            PgContainerHelper.ownChunks(dsl, TENANT, "knowledge__pebfx7__minilm-l6-v2-384__v1", embA, embB);
         }
-        var up = post("/v1/vectors/upsert-chunks", Map.of(
-            "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",
-            "ids",        List.of(embB, embA),
-            "documents",  List.of("second text", "first text"),
-            "metadatas",  List.of(Map.of(), Map.of())));
-        assertThat(up.statusCode()).isEqualTo(200);
-        // RDR-192 Step 5 (nexus-wbfpw.10): getEmbeddings requires a live
-        // own-collection manifest owner.
-        new TenantScope(svcDs).withTenant(TENANT, ctx -> {
-            PgContainerHelper.ownChunks(ctx, TENANT, "knowledge__pebfx7__minilm-l6-v2-384__v1", embA, embB);
-            return null;
-        });
 
         var resp = post("/v1/vectors/get-embeddings", Map.of(
             "collection", "knowledge__pebfx7__minilm-l6-v2-384__v1",
@@ -379,7 +392,8 @@ class VectorHandlerEmbeddingModeTest {
             "collection", "knowledge__pebfx2__minilm-l6-v2-384__v1",
             "ids",        List.of(dev.nexus.service.db.Chash.ofText("pebfx2-ok1").toHex()),
             "documents",  List.of("a servable chunk"),
-            "metadatas",  List.of(Map.of())));
+            "metadatas",  List.of(Map.of()),
+            "force_re_embed", true));
         assertThat(resp.statusCode())
             .as("refusal must not over-trigger: minilm is servable in onnx-local "
                 + "mode (got body: %s)", resp.body())

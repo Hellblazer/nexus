@@ -104,6 +104,7 @@ class PgVectorServingContractTest {
     HikariDataSource svcDs;
     TenantScope tenantScope;
     PgVectorRepository pgRepo;
+    PgVectorRepositoryContractTest.FakeEmbedder embedder;
     NexusService service;
     HttpClient http;
 
@@ -132,7 +133,7 @@ class PgVectorServingContractTest {
         svcDs = new HikariDataSource(cfg);
         tenantScope = new TenantScope(svcDs);
 
-        var embedder = new PgVectorRepositoryContractTest.FakeEmbedder(1024);
+        embedder = new PgVectorRepositoryContractTest.FakeEmbedder(1024);
         embedder.register(Q, 1.0f, 0.0f);
         embedder.register("the tenant isolation policy guards every row",     1.0f, 0.0f);
         embedder.register("tenant isolation policy enforcement in postgres",  0.8f, 0.6f);
@@ -230,6 +231,23 @@ class PgVectorServingContractTest {
     }
 
     /**
+     * Seed {@code ids} as OWNED chunks of {@code COL} for {@code tenant}, with the vectors the
+     * fake embedder gives {@code texts}, through substrate SQL (RDR-223 P3.1, nexus-z0o2p.23).
+     * From Phase 3 the engine refuses an ownerless write on upsert-chunks and store-put, so
+     * the tests below that POST to those routes POST a chunk that already has an owner (a
+     * re-upsert: same text, so the existence partition keeps the stored vector and refreshes
+     * the metadata) instead of making the route insert it.
+     */
+    private void seedOwned(String tenant, List<String> ids, List<String> texts,
+                           List<Map<String, Object>> metas) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertChunks(dsl, tenant, COL, ids, texts, metas, embedder);
+            PgContainerHelper.ownChunks(dsl, tenant, COL, ids.toArray(new String[0]));
+        }
+    }
+
+    /**
      * Remove {@code ids}' manifest rows in {@code COL} for {@code TENANT_A} — the
      * counterpart to {@link #own}. {@link PgVectorRepository#delete} refuses to
      * delete a still-referenced (manifest-owned) chunk regardless of its owning
@@ -258,6 +276,11 @@ class PgVectorServingContractTest {
     @Test
     @Order(1)
     void upsertChunks_servesFromPgvector() throws Exception {
+        seedOwned(TENANT_A, List.of(C1, C2, C3),
+            List.of("the tenant isolation policy guards every row",
+                    "tenant isolation policy enforcement in postgres",
+                    "a tenant isolation policy for vector chunks"),
+            List.of(Map.of("lang", "java"), Map.of("lang", "py"), Map.of("lang", "java")));
         Map<String, Object> resp = postOk("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
             "collection", COL,
             "ids",        List.of(C1, C2, C3),
@@ -285,7 +308,6 @@ class PgVectorServingContractTest {
                     .isEqualTo(3L);
             }
         }
-        own(C1, C2, C3);
     }
 
     @Test
@@ -335,6 +357,8 @@ class PgVectorServingContractTest {
     @Test
     @Order(3)
     void storePut_singleChunk() throws Exception {
+        seedOwned(TENANT_A, List.of(PUT1), List.of("single put chunk about tenant isolation policy"),
+            List.of(Map.of()));
         Map<String, Object> resp = postOk("/v1/vectors/store-put", TOKEN_A, Map.of(
             "collection", COL,
             "doc_id",     PUT1,
@@ -343,7 +367,6 @@ class PgVectorServingContractTest {
         assertThat(resp.get("id"))
             .as("store-put envelope {\"id\": ...} preserved")
             .isEqualTo(PUT1);
-        own(PUT1);
     }
 
     @Test
@@ -705,6 +728,11 @@ class PgVectorServingContractTest {
         // a separate path from the SELECT USING policy the read tests exercise.
         // TOKEN_B may write to the SAME collection name — the row must land in
         // tenant-B's partition and tenant-A's rows must be untouched.
+        // RDR-223 P3.1: B1 is tenant-B's OWNED chunk first (the engine refuses an ownerless
+        // write from Phase 3), so this POST is the RLS-gated re-upsert of a tenant-B row; the
+        // INSERT-side WITH CHECK is exercised by the combined write (ChunksRlsBehavioralTest).
+        seedOwned(TENANT_B, List.of(B1), List.of("the tenant isolation policy guards every row"),
+            List.of(Map.of("owner", "b")));
         Map<String, Object> resp = postOk("/v1/vectors/upsert-chunks", TOKEN_B, Map.of(
             "collection", COL,
             "ids",        List.of(B1),
@@ -754,6 +782,8 @@ class PgVectorServingContractTest {
         // every count/stats assertion above.
         String chash = "60" + "0".repeat(62);
         String text = "delete keys wire probe chunk";
+        seedOwned(TENANT_A, List.of(chash), List.of(text),
+            List.of(Map.of("lang", "java", "quality_gate_overridden", true)));
         postOk("/v1/vectors/upsert-chunks", TOKEN_A, Map.of(
             "collection", COL, "ids", List.of(chash), "documents", List.of(text),
             "metadatas", List.of(Map.of("lang", "java", "quality_gate_overridden", true))));

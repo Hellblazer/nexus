@@ -118,7 +118,15 @@ class VectorHandlerDeadlineMappingTest {
         http.send(warmup, HttpResponse.BodyHandlers.ofString());
 
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION);
+            // RDR-223 P3.1 (nexus-z0o2p.23): the engine refuses an ownerless write on
+            // upsert-chunks from Phase 3, and this class tests the embed-failure mapping, not
+            // the ownership rule. Each chash the tests POST is therefore owned up front, and the
+            // POSTs carry force_re_embed so the (throwing) embedder is still reached for it.
+            PgContainerHelper.insertOwnedChunks(dsl, TENANT, COLLECTION, 1024,
+                Chash.ofText("rdln-c1").toHex(), Chash.ofText("rdln-c2").toHex(),
+                Chash.ofText("rdln-c3").toHex());
         }
     }
 
@@ -147,7 +155,8 @@ class VectorHandlerDeadlineMappingTest {
             "collection", COLLECTION,
             "ids",        List.of(Chash.ofText("rdln-c1").toHex()),
             "documents",  List.of("chunk that will simulate an expired write-path deadline"),
-            "metadatas",  List.of(Map.of())));
+            "metadatas",  List.of(Map.of()),
+            "force_re_embed", true));
 
         assertThat(resp.statusCode())
             .as("must be 503 (an honest slow-server signal, one of the client's"
@@ -181,7 +190,8 @@ class VectorHandlerDeadlineMappingTest {
                 "collection", COLLECTION,
                 "ids",        List.of(Chash.ofText("rdln-c2").toHex()),
                 "documents",  List.of("chunk refused before any embedding"),
-                "metadatas",  List.of(Map.of())));
+                "metadatas",  List.of(Map.of()),
+                "force_re_embed", true));
             assertThat(resp.statusCode()).isEqualTo(503);
             assertThat(resp.headers().firstValue("X-Nexus-Deadline-Outcome")).contains("refused");
             @SuppressWarnings("unchecked")
@@ -204,7 +214,8 @@ class VectorHandlerDeadlineMappingTest {
                 "collection", COLLECTION,
                 "ids",        List.of(Chash.ofText("rdln-c3").toHex()),
                 "documents",  List.of("chunk refused because the engine is exiting"),
-                "metadatas",  List.of(Map.of())));
+                "metadatas",  List.of(Map.of()),
+                "force_re_embed", true));
             assertThat(resp.statusCode())
                 .as("shutdown refusal must be 503, not 422 (body: %s)", resp.body())
                 .isEqualTo(503);
