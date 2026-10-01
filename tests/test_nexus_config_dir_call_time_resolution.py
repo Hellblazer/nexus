@@ -123,6 +123,10 @@ def test_daemon_restart_stale_config_dir_resolves_at_call_time_not_import_time(
             "nexus.upgrade_finish.heal_diag_view", return_value=[],
         ), patch(
             "nexus.upgrade_finish.unload_stale_t2_launchagent", return_value=[],
+        ), patch(
+            # nexus-q81g7: the human convergence path rewrites and re-enables
+            # the autostart unit against the real service manager.
+            "nexus.upgrade_finish.converge_service_autostart_unit", return_value=[],
         ):
             runner = CliRunner()
             result = runner.invoke(daemon_mod.daemon_group, ["restart-stale"])

@@ -14,11 +14,31 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from click.testing import CliRunner
 
 from nexus.commands.daemon import daemon_group
 from nexus.engine_version import REQUIRED_ENGINE_VERSION
 from nexus.upgrade_finish import EngineConvergence, SkewReport
+
+
+@pytest.fixture(autouse=True)
+def _autostart_convergence_never_runs_for_real():
+    """nexus-q81g7: ``restart-stale`` is the HUMAN convergence path. Unpatched,
+    ``converge_service_autostart_unit`` backs up the installed autostart unit,
+    runs ``nx daemon service stop``, disables the unit, rewrites it and enables
+    it against the box's service manager -- which destroyed a real unit on
+    qwentescence when this file ran against the operator's real HOME. Every
+    case here is about the OTHER legs, so this one is a stub, yielded so a test
+    can assert the CLI still calls it. ``unload_stale_t2_launchagent`` is the
+    same class (``launchctl bootout`` / ``systemctl disable`` of an installed
+    unit) and is stubbed for the cases that do not name it."""
+    with patch(
+        "nexus.upgrade_finish.converge_service_autostart_unit", return_value=[],
+    ) as converge_unit, patch(
+        "nexus.upgrade_finish.unload_stale_t2_launchagent", return_value=[],
+    ):
+        yield converge_unit
 
 
 def _invoke(
@@ -183,6 +203,20 @@ class TestRestartStaleEngineConvergence:
         assert "healed: nexus_diag lacked SELECT" in result.output
         converge.assert_called_once_with(tmp_path, dry_run=False)
         heal.assert_called_once_with(tmp_path)
+
+
+class TestRestartStaleAutostartLeg:
+    def test_the_cli_calls_the_autostart_convergence_leg_once(
+        self, tmp_path: Path, _autostart_convergence_never_runs_for_real,
+    ) -> None:
+        """Non-vacuity for the autouse stub above: it replaces the name the
+        CLI actually resolves, so the leg ran (against the stub) and not for
+        real."""
+        result, _c, _h, _u = _invoke(tmp_path, engine_actions=[])
+        assert result.exit_code == 0, result.output
+        _autostart_convergence_never_runs_for_real.assert_called_once_with(
+            tmp_path, dry_run=False,
+        )
 
 
 class TestRestartStaleDiagViewHeal:

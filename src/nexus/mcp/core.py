@@ -5453,9 +5453,11 @@ def store_put(
         # unconditionally (not just on the catalog-present path) since
         # fire_batch below needs real metadatas regardless of catalog_doc_id.
         from nexus.catalog.note_write import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            UNCERTAIN,
             failure_message,
             fire_note_chains,
             put_note,
+            stamp_note,
         )
 
         # RDR-223 P2.2 (nexus-z0o2p.12): a note's pieces and its manifest
@@ -5482,6 +5484,12 @@ def store_put(
         # not know is never "Stored".
         message = failure_message(outcome, subject="content", check="store_get")
         if message is not None:
+            if outcome.status == UNCERTAIN:
+                # An uncertain note may have landed, or may still commit: a cached page burst or
+                # collection list built before it is stale for as long as the note exists, whether or
+                # not this call could confirm it (nexus-z0o2p.35, M5). A refusal changes nothing.
+                _page_cache_invalidate()
+                _invalidate_collections_cache()
             return f"Error: store_put: {message}"
 
         # A committed write makes any cached page burst stale — drop it so a
@@ -5519,13 +5527,21 @@ def store_put(
         # follow-up) via the process-local ``_hooks`` registry constructed at module load, through
         # the one firing every note producer shares (note_write.fire_note_chains): fire_single per
         # piece; fire_batch over every piece without the manifest hook (the one request above
-        # already wrote the manifest and the completion stamp); fire_document once with the whole
+        # already wrote the manifest; the completion stamp follows the chains); fire_document once with the whole
         # content and the CATALOG tumbler (nexus-w8lg1 / RDR-172: the aspect queue's doc_id carries a
         # composite FK to catalog_documents(tumbler), so a chunk hash would 500 the service enqueue
         # and the best-effort hook would swallow it). It is a plain synchronous call: store_put is
         # `def`, the offload comes from _sdk_patches._patch_sync_tool_offload wrapping what gets
         # REGISTERED (nexus-dgvsz), never from an await or asyncio.to_thread here (RDR-089).
         fire_note_chains(outcome, content, hooks=_hooks)
+        # The completion stamp, LAST (RDR-223, nexus-z0o2p.34): a kill in a chain above leaves the
+        # fence 'indexing', so the next put of the note redoes the write and fires the chains again.
+        # A stamp the engine refuses, or that fails, leaves it 'indexing' too and is worded like any
+        # other uncertain outcome.
+        outcome = stamp_note(outcome)
+        # The note is stored and its chains fired whatever the stamp did, so the relevance log and the
+        # tier write below are recorded either way; only the reply differs.
+        stamp_message = failure_message(outcome, subject="content", check="store_get")
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.
@@ -5548,8 +5564,10 @@ def store_put(
             tool="store_put", tier="T3",
             target_title=title or doc_id,
         )
-        # A failed or uncertain write already returned above, before any of
-        # this post-store work ran.
+        # A write that did not store returned above, before any of this post-store work ran; a note
+        # whose STAMP failed is stored, so it is recorded above and reported here.
+        if stamp_message is not None:
+            return f"Error: store_put: {stamp_message}"
         split_note = (
             f" ({len(pieces)} chunks, split to the embedding model's token window)"
             if len(pieces) > 1 else ""

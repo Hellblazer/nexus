@@ -139,6 +139,56 @@ _FIXTURE_CACHE_PREFIXES: tuple[str, ...] = (
 _REAL_CONFIG_DIR_ENV_OVERRIDE = "NX_REAL_CONFIG_DIR_FOR_GUARD_TEST"
 
 
+#: The operator's real home and the fence this session installed, captured ONCE
+#: in ``pytest_sessionstart`` (every process: a worker inherits both env vars
+#: from the controller before its own sessionstart runs) and never recomputed
+#: from the environment afterwards. The guards run at SESSION FINISH, long after
+#: any test has had a chance to leak ``NX_FENCED_HOME`` / ``NX_REAL_HOME``
+#: through an unrestored ``install_fence``: with the env as the source of truth
+#: the finish-time comparison ``Path.home() == fenced`` failed, the guards read
+#: the fenced mirror and reported thousands of phantom REMOVED paths against an
+#: intact real home (reproduced serially, nexus-q81g7 review).
+_session_real_home: Path | None = None
+_session_fenced_home: Path | None = None
+
+
+def _capture_session_homes() -> None:
+    """Record the real home and the installed fence, once per process."""
+    global _session_real_home, _session_fenced_home
+    if _session_real_home is not None:
+        return
+    from tests._fence_home import (  # noqa: PLC0415 — test-only helper
+        FENCED_HOME_ENV,
+        REAL_HOME_ENV,
+    )
+    real = os.environ.get(REAL_HOME_ENV, "").strip()
+    fenced = os.environ.get(FENCED_HOME_ENV, "").strip()
+    if real and fenced:
+        _session_real_home = Path(real)
+        _session_fenced_home = Path(fenced)
+
+
+def _real_home_for_guard() -> Path:
+    """The operator's REAL home as the session guards see it: the
+    ``_REAL_CONFIG_DIR_ENV_OVERRIDE``-named tmp dir when the wiring tests' seam
+    is set, else ``Path.home()`` -- or, when ``Path.home()`` is the fence this
+    session installed, the real home captured at session start."""
+    override = os.environ.get(_REAL_CONFIG_DIR_ENV_OVERRIDE, "").strip()
+    if override:
+        return Path(override)
+    # nexus-pfuns: once the suite is fenced, ``Path.home()`` IS the
+    # throwaway mirror, and a guard pointed at it would watch a directory
+    # nothing cares about while reporting green.
+    home = Path.home()
+    # Substitute ONLY when Path.home() is the fence this session installed. A
+    # test that monkeypatches Path.home is asking a question about ITS tmp dir,
+    # and an unconditional substitution answers a different one -- that
+    # broke 6 guard tests before this check existed.
+    if _session_real_home is not None and str(home) == str(_session_fenced_home):
+        return _session_real_home
+    return home
+
+
 def _real_config_dir_for_guard() -> Path:
     """The directory both real-config-dir guards scan: ``Path.home() /
     ".config" / "nexus"``, or the ``_REAL_CONFIG_DIR_ENV_OVERRIDE``-named
@@ -146,29 +196,7 @@ def _real_config_dir_for_guard() -> Path:
     ``nexus_config_dir()`` -- bypassing any test-time ``NEXUS_CONFIG_DIR``
     override IS the point (the leak being guarded against is precisely a
     test hitting the real path despite that override existing)."""
-    override = os.environ.get(_REAL_CONFIG_DIR_ENV_OVERRIDE, "").strip()
-    if override:
-        home = Path(override)
-    else:
-        # nexus-pfuns: once the suite is fenced, ``Path.home()`` IS the
-        # throwaway mirror, and a guard pointed at it would watch a directory
-        # nothing cares about while reporting green. REAL_HOME_ENV carries the
-        # operator's actual home across the fence and into xdist workers, which
-        # inherit the fenced HOME and would otherwise compute the wrong root.
-        from tests._fence_home import (  # noqa: PLC0415 — test-only helper
-            FENCED_HOME_ENV,
-            REAL_HOME_ENV,
-        )
-        home = Path.home()
-        real = os.environ.get(REAL_HOME_ENV, "").strip()
-        fenced = os.environ.get(FENCED_HOME_ENV, "").strip()
-        # Substitute ONLY when Path.home() is the fence we installed. A test
-        # that monkeypatches Path.home is asking a question about ITS tmp dir,
-        # and an unconditional substitution answers a different one -- that
-        # broke 6 guard tests before this check existed.
-        if real and fenced and str(home) == fenced:
-            home = Path(real)
-    return home / ".config" / "nexus"
+    return _real_home_for_guard() / ".config" / "nexus"
 
 
 def _scan_fixture_cache_files() -> set[Path]:
@@ -451,8 +479,13 @@ def pytest_sessionstart(session):
     that will actually enforce.
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
+    global _real_autostart_baseline, _real_manager_baseline
     global _this_session_conexus_version, _last_seen_version_baseline_content
     _is_controller_or_serial = not _is_xdist_worker(session)
+    # BEFORE the fence below replaces them: the guard's read-only manager probe
+    # must ask the operator's real manager.
+    if _is_controller_or_serial:
+        _capture_real_manager_env()
     if _is_controller_or_serial:
         _gate_on_build_lease()
         _take_suite_lease()
@@ -476,6 +509,7 @@ def pytest_sessionstart(session):
         from tests._fence_home import install_fence  # noqa: PLC0415 — test-only helper
 
         install_fence(Path(tempfile.mkdtemp(prefix="nx-suite-home-")))
+    _capture_session_homes()
 
     # A test that moves HOME again (tests/test_scratch.py's t1 fixture sets HOME
     # to its tmp_path) resolved the MiniLM model cache under that empty dir and
@@ -499,6 +533,8 @@ def pytest_sessionstart(session):
         # regardless of xdist mode.
         _fixture_cache_baseline = _scan_fixture_cache_files()
         _real_config_dir_baseline = _snapshot_real_config_dir()
+        _real_autostart_baseline = _snapshot_real_autostart_units()
+        _real_manager_baseline = _snapshot_manager_state()
         _this_session_conexus_version = _resolve_this_session_conexus_version()
         _last_seen_version_baseline_content = _snapshot_last_seen_version_content()
     _warn_if_service_jar_is_stale()
@@ -574,6 +610,7 @@ def pytest_sessionfinish(session, exitstatus):
     _check_scenario_non_vacuity(session)
     _check_mandatory_pin_non_vacuity(session)
     _check_real_config_dir_mutations(session)
+    _check_real_autostart_unit_mutations(session)
 
 
 # ── real-config-dir mutation guard (nexus-pfuns, 2026-08-20) ────────────────
@@ -1391,6 +1428,244 @@ def _check_real_config_dir_mutations(session) -> None:
     )
 
 
+# ── real autostart-unit guard (nexus-q81g7, 2026-09-30) ─────────────────────
+#
+# The HOME fence hides the operator's autostart units from a test; this is the
+# backstop for a fence ESCAPE (a test writing the absolute real path, or a
+# subprocess that scrubbed HOME). The incident it exists for: restart-stale
+# tests ran the human convergence path against the operator's REAL
+# ``~/.config/systemd/user/nexus-service.service`` and destroyed it, and the
+# suite reported the failures as unrelated assertion errors rather than as the
+# unit having been rewritten.
+
+#: The unit files watched, relative to the real home: the storage-service unit
+#: and the LEGACY T2 unit (``unload_stale_t2_launchagent`` and
+#: ``uninstall_autostart(tier="t2")`` act on those). Drop-ins are enumerated at
+#: snapshot time.
+_REAL_AUTOSTART_UNIT_FILES: tuple[str, ...] = (
+    ".config/systemd/user/nexus-service.service",
+    ".config/systemd/user/nexus-t2.service",
+    "Library/LaunchAgents/com.nexus.service.plist",
+    "Library/LaunchAgents/com.nexus.t2.plist",
+)
+_REAL_AUTOSTART_DROPIN_DIRS: tuple[str, ...] = (
+    ".config/systemd/user/nexus-service.service.d",
+    ".config/systemd/user/nexus-t2.service.d",
+)
+#: ``systemctl --user enable`` / ``disable`` create and remove these symlinks,
+#: so a disable that leaves the unit FILE intact (the incident's first step) is
+#: still visible. Snapshotted by link target, never followed.
+_REAL_AUTOSTART_ENABLE_LINKS: tuple[str, ...] = (
+    ".config/systemd/user/default.target.wants/nexus-service.service",
+    ".config/systemd/user/default.target.wants/nexus-t2.service",
+)
+
+
+def _snapshot_real_autostart_units() -> dict[str, tuple[int, int, str]]:
+    """``{relative_posix_path: (mtime_ns, size, sha256)}`` for the operator's
+    real service and legacy-T2 autostart units, their systemd drop-ins, the
+    ``default.target.wants`` enable symlinks and the launchd plists.
+
+    The sha256 is there because mtime+size misses a same-length rewrite with a
+    preserved mtime (``cp -p`` of a backup over the unit). Content is hashed,
+    never kept or printed: a unit's ``Environment=`` lines can carry secrets.
+    An enable symlink is recorded by ``readlink`` text, not followed."""
+    import hashlib  # noqa: PLC0415 — session-guard only
+
+    home = _real_home_for_guard()
+    candidates = [home / rel for rel in _REAL_AUTOSTART_UNIT_FILES]
+    for rel in _REAL_AUTOSTART_DROPIN_DIRS:
+        dropin_dir = home / rel
+        if dropin_dir.is_dir():
+            candidates.extend(sorted(p for p in dropin_dir.rglob("*") if p.is_file()))
+    snapshot: dict[str, tuple[int, int, str]] = {}
+    for p in candidates:
+        try:
+            if not p.is_file():
+                continue
+            st = p.stat()
+            digest = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue  # raced a live manager touching it; the next scan sees it
+        snapshot[p.relative_to(home).as_posix()] = (st.st_mtime_ns, st.st_size, digest)
+    for rel in _REAL_AUTOSTART_ENABLE_LINKS:
+        link = home / rel
+        try:
+            if not link.is_symlink():
+                continue
+            st = link.lstat()
+            digest = hashlib.sha256(("link:" + os.readlink(link)).encode()).hexdigest()
+        except OSError:
+            continue
+        snapshot[rel] = (st.st_mtime_ns, 0, digest)
+    return snapshot
+
+
+def _diff_autostart_snapshots(
+    before: dict[str, tuple[int, int, str]],
+    after: dict[str, tuple[int, int, str]],
+) -> list[str]:
+    """``REMOVED``/``ADDED``/``MODIFIED <path>`` entries, in that order."""
+    removed = [f"REMOVED {k}" for k in sorted(before.keys() - after.keys())]
+    added = [f"ADDED {k}" for k in sorted(after.keys() - before.keys())]
+    modified = [
+        f"MODIFIED {k}" for k in sorted(before.keys() & after.keys()) if before[k] != after[k]
+    ]
+    return removed + added + modified
+
+
+_real_autostart_baseline: dict[str, tuple[int, int, str]] = {}
+
+#: The REAL manager environment (``XDG_RUNTIME_DIR`` / ``DBUS_SESSION_BUS_ADDRESS``),
+#: captured in ``pytest_sessionstart`` BEFORE the fence replaces them, so the
+#: read-only probes below ask the operator's real manager, not the fenced void.
+_real_manager_env: dict[str, str] = {}
+_real_manager_baseline: dict[str, str] = {}
+
+#: Opt-out for a box where even a read-only ``systemctl --user show`` /
+#: ``launchctl print`` is unwelcome (an agent worktree session on a host with a
+#: real nexus unit). Never set by CI.
+_MANAGER_PROBE_OPT_OUT = "NX_NO_MANAGER_STATE_PROBE"
+
+
+def _capture_real_manager_env() -> None:
+    """Record the manager-locating env as it is BEFORE the fence. Once."""
+    if _real_manager_env:
+        return
+    for key in ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"):
+        value = os.environ.get(key)
+        if value:
+            _real_manager_env[key] = value
+
+
+def _snapshot_manager_state() -> dict[str, str]:
+    """Read-only state of the operator's real ``nexus-service`` unit, as the
+    service MANAGER reports it, which a file hash cannot see: ``bootout`` and
+    ``disable --now`` leave the unit file intact.
+
+    systemd: ``systemctl --user show nexus-service.service -p
+    NRestarts,UnitFileState,FragmentPath``. launchd: ``launchctl print
+    gui/<uid>/com.nexus.service`` (loaded or not, and its ``state``). Both are
+    read-only verbs. Absence (no manager, no user bus, label not loaded) is a
+    value, not an error: ``{"systemd": "unavailable"}`` before and after is no
+    change, and "tolerated if absent" is the contract."""
+    import shutil  # noqa: PLC0415 — session-guard only
+    import subprocess  # noqa: PLC0415 — session-guard only
+
+    if os.environ.get(_MANAGER_PROBE_OPT_OUT):
+        return {}
+    env = dict(os.environ)
+    env.update(_real_manager_env)
+    state: dict[str, str] = {}
+    if shutil.which("systemctl", path=env.get("PATH")):
+        try:
+            r = subprocess.run(
+                ["systemctl", "--user", "show", "nexus-service.service",
+                 "-p", "NRestarts,UnitFileState,FragmentPath"],
+                capture_output=True, text=True, timeout=10, env=env, check=False,
+            )
+            if r.returncode == 0:
+                for line in r.stdout.splitlines():
+                    key, _, value = line.partition("=")
+                    if key in ("NRestarts", "UnitFileState", "FragmentPath"):
+                        state[f"systemd:{key}"] = value
+            if not any(k.startswith("systemd:") for k in state):
+                state["systemd"] = "unavailable"
+        except (OSError, subprocess.SubprocessError):
+            state["systemd"] = "unavailable"
+    if shutil.which("launchctl", path=env.get("PATH")):
+        try:
+            r = subprocess.run(
+                ["launchctl", "print", f"gui/{os.getuid()}/com.nexus.service"],
+                capture_output=True, text=True, timeout=10, env=env, check=False,
+            )
+            if r.returncode != 0:
+                state["launchd"] = "absent"
+            else:
+                state["launchd"] = "loaded"
+                for line in r.stdout.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("state = "):
+                        state["launchd:state"] = stripped[len("state = "):]
+                        break
+        except (OSError, subprocess.SubprocessError):
+            state["launchd"] = "unavailable"
+    return state
+
+
+def _diff_manager_state(
+    before: dict[str, str], after: dict[str, str],
+) -> tuple[list[str], list[str]]:
+    """``(changes, notes)``. A changed ``UnitFileState`` / ``FragmentPath`` /
+    loaded-or-not / launchd ``state`` is a CHANGE. A rising ``NRestarts`` is only
+    a NOTE: a unit that was already crash-looping when the session started (the
+    qwentescence unit, restarting every 5 s) keeps counting for reasons that are
+    not this session's, so failing the run on it would be wrong, but the
+    number is exactly what pointed at the hijacked unit and is worth printing."""
+    changes: list[str] = []
+    notes: list[str] = []
+    for key in sorted(before.keys() | after.keys()):
+        b, a = before.get(key), after.get(key)
+        if b == a:
+            continue
+        if key == "systemd:NRestarts":
+            notes.append(f"{key} {b} -> {a}")
+        else:
+            changes.append(f"{key} {b!r} -> {a!r}")
+    return changes, notes
+
+
+def _check_real_autostart_unit_mutations(session) -> None:
+    """Fail the run when the operator's real autostart unit, or what the service
+    manager says about it, changed during it.
+
+    Controller/serial only, for the reason ``_check_real_config_dir_mutations``
+    documents at length: a worker's ``session.exitstatus`` mutation never
+    reaches the controller, and the unit is one machine-global file the
+    controller can re-scan itself once every worker has finished. Not
+    destructive and not allowlisted: there is no benign way for a unit test to
+    change this file. A legitimate peer (the operator running ``nx daemon
+    service install`` in another terminal mid-run) would also trip it; that is
+    a rerun, and cheaper than a destroyed unit.
+
+    DETECTIVE ONLY, and blind to a run whose ``pytest_sessionfinish`` never
+    fires (execnet ``os._exit``, SIGKILL, a timeout): the preventive layers are
+    the fence and ``installer._run_manager``'s refusal / the suite tripwire.
+    """
+    if not _is_controller_or_serial:
+        return
+    changed = _diff_autostart_snapshots(
+        _real_autostart_baseline, _snapshot_real_autostart_units(),
+    )
+    state_changes, state_notes = _diff_manager_state(
+        _real_manager_baseline, _snapshot_manager_state(),
+    )
+    if state_notes:
+        print(
+            f"\n\nNOTE: nexus-q81g7 — the real nexus-service unit's manager "
+            f"state moved during the session: {', '.join(state_notes)}. A rising "
+            f"restart count on a unit that was already restarting is not this "
+            f"session's doing; one that was stable is.\n",
+            flush=True,
+        )
+    changed = changed + [f"MANAGER {c}" for c in state_changes]
+    if not changed:
+        return
+    session.exitstatus = 1
+    print(
+        f"\n\nFAIL: nexus-q81g7 real autostart-unit guard caught "
+        f"{len(changed)} change(s) to the operator's REAL service autostart "
+        f"unit during the session: {', '.join(changed)}\n"
+        f"  A test reached the real ~/.config/systemd/user, "
+        f"~/Library/LaunchAgents or the user service manager instead of the "
+        f"fenced HOME (tests/_fence_home.py), or the operator changed the unit "
+        f"by hand mid-run. Inspect the unit and its pre-convergence backups "
+        f"before re-running: `nx daemon restart-stale` backs up and rewrites "
+        f"it.\n",
+        flush=True,
+    )
+
+
 # ── `scenario` marker non-vacuity guard (test-suite-compression P2-reduced,
 # nexus-test-cleanup 2026-08-05; redesigned same-day after substantive-critic
 # reproduced it as VACUOUS under xdist — T2
@@ -1946,6 +2221,52 @@ def _no_engine_restart_taxonomy_deferral(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _service_manager_tripwire():
+    """nexus-q81g7: no test reaches a REAL service manager with a mutating verb.
+
+    HOME does not isolate launchd or systemd (T2
+    ``project_home_does_not_isolate_launchd``, recorded 2026-08-11, recurred
+    2026-09-30): ``launchctl bootout gui/<uid>/<label>`` and ``systemctl --user
+    disable --now <unit>`` are addressed by label / over the bus, so the HOME
+    fence only hides the unit file. ``nexus.daemon.installer._run_manager`` is
+    the single funnel for every manager call, so this wraps it and RAISES on a
+    mutating verb (``installer.is_mutating_manager_cmd``) when the call would
+    really spawn: the test has not replaced the spawn (``installer.run_bounded``,
+    the module's documented seam) and the binary exists. A test that replaces
+    ``_run_manager`` itself is not wrapped (the patch lands over this one), and
+    one that strips PATH to prove the no-manager branch keeps its
+    ``FileNotFoundError``. Read-only probes (``print-disabled``, ``is-enabled``,
+    ``show``) pass through.
+
+    A raise, not a skip: the next test that forgets to patch fails by name
+    instead of mutating the operator's box. The product-side twin
+    (``ManagerRefusedUnderFence``) covers real ``nx`` children, which a conftest
+    patch cannot reach."""
+    from nexus.daemon import installer
+
+    original = installer._run_manager
+
+    def guarded(cmd, *, timeout, **kwargs):
+        if (
+            installer.run_bounded is installer._REAL_RUN_BOUNDED
+            and installer.is_service_manager_cmd(cmd)
+            and installer.is_mutating_manager_cmd(cmd)
+            and installer._manager_found(cmd[0])
+        ):
+            raise AssertionError(
+                f"nexus-q81g7 service-manager tripwire: {' '.join(cmd)!r} would run "
+                "against a REAL launchd/systemd. HOME does not isolate a service "
+                "manager. Patch nexus.daemon.installer.run_bounded (or _run_manager) "
+                "in this test; read-only verbs are allowed."
+            )
+        return original(cmd, timeout=timeout, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(installer, "_run_manager", guarded)
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _fresh_rate_limit_brake():
     """The shared ``RateLimitBrake`` is process-global and escalates on
     every retried failure toward a 60s cap, so a test whose writes fail
@@ -1953,7 +2274,16 @@ def _fresh_rate_limit_brake():
     process paying that escalation. Measured on CI shard 3 (runs
     36250371264 onward): three ``nx memory promote`` tests at 180s, 180s
     and 108s each, 14s for the first. A fresh brake per test keeps one
-    test's retries out of the next test's wall time."""
+    test's retries out of the next test's wall time.
+
+    This used to ALSO substitute a virtual-clock subclass (nexus-q81g7), to hide
+    that the brake bound ``time.monotonic`` / ``time.sleep`` as definition-time
+    defaults, which made the seam the retry tests patch
+    (``nexus.retry.time.sleep``) invisible to it (203 s for the
+    ``[append-429]`` case, 138 s for ``test_a_resend_that_fails_is_unknown``).
+    The brake now resolves both when used, and ``wait()`` counts a returned sleep
+    as elapsed, so the fixture is back to its original job and the real default
+    wiring is exercised by ``tests/test_rate_brake_default_is_virtual.py``."""
     from nexus.rate_brake import reset_brake
 
     reset_brake()

@@ -21,6 +21,7 @@ import httpx
 import pytest
 
 from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog
+from nexus.catalog.write_outcome import PreSendArgumentError
 from nexus.errors import CombinedWriteEmbedTimeoutError
 
 _REQ = httpx.Request("POST", "http://engine/v1/catalog/manifest/write_many")
@@ -51,8 +52,7 @@ _OUTCOMES = {
     "connect-error": (httpx.ConnectError("connection refused"), False),
     "connect-timeout": (httpx.ConnectTimeout("connect timed out"), False),
     "pool-timeout": (httpx.PoolTimeout("no connection free"), False),
-    "argument-check": (ValueError("write_manifest_many: 'collection' is required"), False),
-    "type-error": (TypeError("bad argument"), False),
+    "argument-check": (PreSendArgumentError("write_manifest_many: 'collection' is required"), False),
     # refused by the engine
     "400": (_status(400), False),
     "409": (_status(409), False),
@@ -71,6 +71,10 @@ _OUTCOMES = {
     "embed-timeout": (CombinedWriteEmbedTimeoutError(collection="c", chunk_count=3, original="x"), True),
     "ack-mismatch": (RuntimeError("write_many ack mismatch: no 'chunks_written'"), True),
     "unparseable-answer": (json.JSONDecodeError("Expecting value", "", 0), True),
+    # a failure while reading the answer is NOT a pre-send check: the engine already committed
+    # (the full matrix, run against every caller, is tests/catalog/test_write_outcome_matrix.py)
+    "plain-value-error": (ValueError("invalid literal for int()"), True),
+    "type-error": (TypeError("bad argument"), True),
 }
 
 

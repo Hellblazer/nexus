@@ -532,25 +532,22 @@ def _fence_begin_many(pairs: list[tuple[str, str]], collection: str) -> None:
             close()
 
 
-def _fence_fail(doc_id: str, error: str, *, heal: bool = True) -> None:
+def _fence_fail(doc_id: str, error: str) -> None:
     """Advisory: stamp ``index_state='failed'``. Never raises — the caller's
     own exception (the reason this is being called) must always propagate
     unmasked.
-
-    *heal* False skips the manifest rebuild below. The PDF paths pass it (RDR-223): their
-    writer replaces the manifest with its first request and every chunk it sends carries an
-    owner row, so a failed PDF run has no ownerless stored chunk to give an owner, and the
-    rebuild's premise (no manifest yet) is false for it: on a failed RE-index the entry keeps
-    the previous version's ``chunk_count`` while the manifest holds the new run's partial rows,
-    which reads as a gap, and the rebuild would replace the manifest with a fragment rebuilt
-    from chunks found by the OLD content hash.
 
     Also discards any superseded-vector sweep ``_manifest_write_loop``
     deferred for *doc_id* (nexus-4pj54): a failed run's manifest is not
     complete, so its held candidates are dropped, never swept.
 
-    Then rebuilds *doc_id*'s manifest from any chunks the failed run did
-    store (:func:`_heal_failed_document`, nexus-0ntxj)."""
+    There is no manifest rebuild here (nexus-z0o2p.35 retired ``_heal_failed_document``,
+    nexus-0ntxj's stopgap). A failed run used to leave chunks stored with no owner row, and the
+    rebuild gave them one. Every writer now sends a chunk and its owner row in one request
+    (RDR-223), so a failed run has no ownerless chunk to give an owner. The rebuild could only do
+    harm: it found chunks by content hash, so it could graft ANOTHER document's identical chunk
+    onto the failed one, and on a failed re-index it replaced the manifest with a fragment found
+    by the OLD content hash."""
     from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
     from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
 
@@ -563,79 +560,6 @@ def _fence_fail(doc_id: str, error: str, *, heal: bool = True) -> None:
         _log.warning("index_run_fail_write_failed", doc_id=doc_id)
     finally:
         close = getattr(w, "close", None)
-        if close is not None:
-            close()
-    if heal:
-        _heal_failed_document(doc_id)
-
-
-def _heal_failed_document(doc_id: str) -> None:
-    """Give a failed run's stored chunks their owner rows (nexus-0ntxj).
-
-    Every index path upserts chunks before it writes their manifest rows. A
-    run that fails between the two leaves chunks with no manifest owner,
-    and engine v0.1.137's live(c) hides such chunks from every read: the
-    content is stored and unreachable (shakeout 7.64.1, FootPrintRAGVA
-    1.82.146/147, 395 chunks). ``nx index repo``'s end-of-run self-heal
-    repairs this only when the run reaches it and only for that verb.
-
-    This runs the same :func:`~nexus.catalog.manifest_heal.heal_manifest_gaps`
-    core on the one document, so its stored chunks stay readable. The
-    document stays ``failed`` and the next run re-indexes it; a run that
-    stored only part of a file leaves that part readable until then.
-
-    Scope: a document whose FIRST run failed (no manifest yet). A failed
-    re-index of a document that completed before is left alone on
-    purpose: its old manifest still makes the old content readable, and
-    rebuilding the manifest from the new run's chunks would replace a
-    whole document with a possibly partial one. The new run's orphaned
-    chunks stay hidden until the next run writes them again; the source
-    is still on disk, so nothing readable is lost.
-
-    Stopgap until RDR-223 writes chunks and owner rows in one request
-    (nexus-z0o2p.13/.14 and siblings); when those land this has nothing to
-    heal and can be retired. The PDF paths have landed and no longer call it
-    (``_fence_fail(..., heal=False)``).
-
-    Never raises: it runs inside a failure path whose own exception must
-    propagate unmasked.
-    """
-    reader = None
-    try:
-        from nexus.catalog.factory import make_catalog_reader, make_catalog_writer  # noqa: PLC0415 — deferred import; test patch target
-        from nexus.catalog.manifest_heal import heal_manifest_gaps  # noqa: PLC0415 — deferred: manifest_heal imports the indexer
-        from nexus.db import make_t3  # noqa: PLC0415 — deferred import
-
-        reader = make_catalog_reader()
-        if reader is None:
-            return
-        entry = reader.resolve(doc_id)
-        if entry is None:
-            return
-        result = heal_manifest_gaps([entry], reader, make_t3, make_catalog_writer)
-        if result.reconciled or result.write_failed:
-            # short_of_chunk_count: the rebuild found fewer chunks than the
-            # document's recorded count, so a partial run is now readable
-            # as a partial document. index_state stays 'failed', which is
-            # what makes the next run redo it.
-            _log.warning(
-                "index_run_fail_healed_stored_chunks",
-                doc_id=doc_id, reconciled=result.reconciled,
-                write_failed=result.write_failed,
-                short_of_chunk_count=bool(result.dup_collapsed),
-            )
-    except Exception as exc:  # noqa: BLE001 — boundary catch: the heal is advisory; must never mask the original failure
-        # No exc_info: the CLI prints WARNING logs to the terminal, and this
-        # runs inside a failure path whose own error is what the user acts on.
-        # A heal that fails for the same reason the write did (a profile
-        # mismatch, a stopped service) would otherwise print a traceback
-        # beside a clean "Error:" line (nexus-z0o2p.16).
-        _log.warning(
-            "index_run_fail_heal_failed",
-            doc_id=doc_id, error_class=type(exc).__name__, error=str(exc)[:500],
-        )
-    finally:
-        close = getattr(reader, "close", None)
         if close is not None:
             close()
 
@@ -1690,6 +1614,7 @@ def _index_document(
     doc_id: str = "",
     source_uri: str = "",
     doc_just_created: bool = False,
+    pending_stamp: "list[_DeferredOwnerWrite] | None" = None,
 ) -> int | list[dict]:
     """Shared indexing pipeline: credential check, staleness, then one write of the chunks with their owner rows.
 
@@ -1730,6 +1655,11 @@ def _index_document(
     the registered one (nexus-y8qtj, reproduced inside its own fix).
     *source_uri* is forwarded only when this function must register
     fresh (``doc_id`` empty).
+
+    *pending_stamp* (RDR-223, nexus-z0o2p.34): without it the completion stamp is sent here, last,
+    after the post-store hooks. With a list the stamp is NOT sent: the write is appended to it and
+    the caller sends it (``complete()``, then ``close()``) after the catalog enrichment it runs
+    (``index_markdown``'s ``_catalog_markdown_hook``), so a kill there leaves the fence ``indexing``.
     """
     from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
 
@@ -1929,6 +1859,7 @@ def _index_document(
     # above) precede the writer and stay fence-untouched by construction —
     # they are outside this try block.
     pending: "_DeferredOwnerWrite | None" = None
+    _stamping = False       # True while the completion stamp is in flight (see the except below)
     try:
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(documents, target_model)
@@ -1936,8 +1867,9 @@ def _index_document(
             from nexus.db.http_vector_client import is_vector_service_mode  # noqa: PLC0415 — circular-dep avoidance (nexus.db.http_vector_client)
             if is_vector_service_mode():
                 # RDR-152 Seam B (nexus-gmiaf.22): service embeds server-side.
-                # Pass empty embeddings; HttpVectorClient.upsert_chunks_with_embeddings
-                # ignores them and routes to /v1/vectors/upsert-chunks (JVM embeds).
+                # Pass empty embeddings: the writer below sends text only, and the engine's
+                # combined chunk-plus-owner route (/v1/catalog/manifest/write_many, RDR-223)
+                # embeds it (JVM). This write no longer goes to /v1/vectors/upsert-chunks.
                 embeddings = [[]] * len(documents)
                 actual_model = target_model
             else:
@@ -1998,7 +1930,14 @@ def _index_document(
         )
         # The stamp, LAST (D2): a hook that dies with the process leaves the fence 'indexing', so
         # the next run redoes the document and fires the hooks again.
-        pending.complete()
+        if pending_stamp is None:
+            _stamping = True
+            pending.complete()
+        else:
+            # The caller stamps, after the catalog enrichment it runs (nexus-z0o2p.34); it closes
+            # the write.
+            pending_stamp.append(pending)
+            pending = None
     except IndexRunVerifyRefused:
         # The engine refused the completion stamp: the manifest is NOT verified
         # complete. The writer deliberately leaves the fence 'indexing' after a
@@ -2017,8 +1956,10 @@ def _index_document(
         raise
     except Exception as exc:
         # _fence_fail never raises, so the original exception always
-        # propagates unmasked.
-        _fence_fail(_catalog_doc_id_for_batch, str(exc))
+        # propagates unmasked. A failed STAMP leaves the fence 'indexing', never 'failed': failing
+        # it could flip a stamp that committed and lost its ack (nexus-z0o2p.34).
+        if not _stamping:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
     finally:
         if pending is not None:
@@ -2183,6 +2124,7 @@ def _index_pdf_incremental(
         _raise_identity_missing(file_path, collection_name, len(ids_all))
 
     pending: "_DeferredOwnerWrite | None" = None
+    _stamping = False       # True while the completion stamp is in flight (see the except below)
     try:
         # Embed per batch, as the loop this replaced did. The write below discards client
         # vectors (the service embeds server-side); they feed the post-store hooks and a dry
@@ -2270,6 +2212,7 @@ def _index_pdf_incremental(
                     hooks.fire_single(_did, collection_name, _doc)
         if pending is not None:
             if pending_stamp is None:
+                _stamping = True
                 pending.complete()
             else:
                 # The caller stamps, after the document-grain hooks it fires; it closes the write.
@@ -2289,8 +2232,9 @@ def _index_pdf_incremental(
         # propagates unmasked (nexus-5xn3k.4 review follow-up). Over-work,
         # never under-work: every request the writer sent before the failure
         # carried its chunks' owner rows, so there is nothing to heal.
-        if _catalog_doc_id_for_batch:
-            _fence_fail(_catalog_doc_id_for_batch, str(exc), heal=False)
+        # A failed STAMP leaves the fence 'indexing' (nexus-z0o2p.34, see _index_document).
+        if _catalog_doc_id_for_batch and not _stamping:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
         raise
     finally:
         if pending is not None:
@@ -3170,6 +3114,7 @@ def index_pdf(
             install_default_hooks(hooks)
         # The write's completion stamp is sent below, after the document-grain hook (RDR-223, D2).
         _stamps: "list[_DeferredOwnerWrite]" = []
+        _stamping = False   # True while the completion stamp is in flight (see the except below)
         try:
             try:
                 count = _index_pdf_incremental(
@@ -3209,6 +3154,7 @@ def index_pdf(
                     )
                 # The stamp, LAST (D2): a kill in any hook above leaves the fence 'indexing', so
                 # the next run redoes the document and fires the hooks again.
+                _stamping = True
                 for _pending in _stamps:
                     _pending.complete()
             except IndexRunVerifyRefused as exc:
@@ -3221,8 +3167,10 @@ def index_pdf(
                 _rollback_if_freshly_minted(exc)
                 raise
             except Exception as exc:
-                for _pending in _stamps:
-                    _fence_fail(_pending.doc_id, str(exc), heal=False)
+                # A failed STAMP leaves the fence 'indexing' (nexus-z0o2p.34, see _index_document).
+                if not _stamping:
+                    for _pending in _stamps:
+                        _fence_fail(_pending.doc_id, str(exc))
                 _rollback_if_freshly_minted(exc)
                 raise
         finally:
@@ -3291,6 +3239,7 @@ def index_pdf(
                 raise
 
     pending: "_DeferredOwnerWrite | None" = None
+    _stamping = False       # True while the completion stamp is in flight (see the except below)
     try:
         if embed_fn is not None:
             embeddings, actual_model = embed_fn(documents, target_model)
@@ -3356,9 +3305,14 @@ def index_pdf(
                 str(pdf_path), col_name, "",
                 doc_id=_catalog_doc_id_for_batch,
             )
+        # The catalog enrichment (title, author, year, chunk count) is part of the work the stamp
+        # vouches for (nexus-z0o2p.34): a kill in it must leave the fence 'indexing' so the next
+        # run redoes it. It swallows its own exceptions, so only a kill reaches the stamp late.
+        _register_in_catalog(metadatas_list, len(metadatas_list))
         # The stamp, LAST (D2): a kill in a hook above leaves the fence 'indexing', so the next
         # run redoes the document and fires the hooks again.
         if pending is not None:
+            _stamping = True
             pending.complete()
     except IndexRunVerifyRefused as exc:
         # The engine refused the completion stamp (recorded by the writer; the fence stays
@@ -3372,8 +3326,9 @@ def index_pdf(
     except Exception as exc:
         # _fence_fail never raises, so the original exception always
         # propagates unmasked.
-        if _catalog_doc_id_for_batch:
-            _fence_fail(_catalog_doc_id_for_batch, str(exc), heal=False)
+        # A failed STAMP leaves the fence 'indexing' (nexus-z0o2p.34, see _index_document).
+        if _catalog_doc_id_for_batch and not _stamping:
+            _fence_fail(_catalog_doc_id_for_batch, str(exc))
         # nexus-uxg4u round 2 (substantive-critic ship-blocker): this
         # except path re-raises DIRECTLY out of index_pdf -- unlike the
         # streaming/incremental branches (each a separate function
@@ -3394,9 +3349,7 @@ def index_pdf(
     # blocks. Replacement protection (RDR-223) is the engine's own sweep inside the write; nx t3
     # gc is the manual backstop. Full evidence: _identity_where's docstring above.
 
-    # The completion stamp was sent above (RDR-223, D2), so a refusal never reaches
-    # _register_in_catalog for this run.
-    _register_in_catalog(metadatas_list, len(metadatas_list))
+    # _register_in_catalog ran above, ahead of the stamp (RDR-223, nexus-z0o2p.34).
 
     # nexus-y8qtj: end-of-run fork check (see the streaming branch above).
     _forks = _check_document_fork(doc_id, col_name)
@@ -3821,6 +3774,9 @@ def index_markdown(
         _markdown_chunks, doc_id=doc_id, extraction_source=extraction_source,
     )
     source_key = make_relative(md_path, base_path) if base_path else None
+    # The write's completion stamp is sent below, after the catalog enrichment (RDR-223,
+    # nexus-z0o2p.34): _index_document hands it back instead of sending it.
+    _stamps: "list[_DeferredOwnerWrite]" = []
     raw = _index_document(
         md_path, corpus, chunk_fn, t3=t3,
         collection_name=collection_name, embed_fn=embed_fn,
@@ -3830,27 +3786,53 @@ def index_markdown(
         doc_id=doc_id,
         source_uri=source_uri,
         doc_just_created=_doc_just_created,
+        pending_stamp=_stamps,
     )
-    if not return_metadata:
-        assert isinstance(raw, int)
-        count = raw
-        if count > 0:
-            _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri)
-            # nexus-y8qtj: end-of-run fork check (see index_pdf for rationale).
+
+    def _stamp_last() -> None:
+        """The stamp, LAST: a kill in the enrichment above leaves the fence 'indexing', so the next
+        run redoes the document and its enrichment."""
+        from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+
+        try:
+            for _pending in _stamps:
+                _pending.complete()
+        except IndexRunVerifyRefused:
+            from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+
+            # Recorded by the writer; the fence stays 'indexing' and the next run redoes it.
+            for _pending in _stamps:
+                discard_deferred_superseded_vectors(_pending.doc_id)
+            raise
+        # Any other failure of the stamp leaves the fence 'indexing', never 'failed': a stamp that
+        # committed and lost its ack must not be flipped (nexus-z0o2p.34); it propagates.
+
+    try:
+        if not return_metadata:
+            assert isinstance(raw, int)
+            count = raw
+            if count > 0:
+                _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri)
+                _stamp_last()
+                # nexus-y8qtj: end-of-run fork check (see index_pdf for rationale).
+                _forks = _check_document_fork(doc_id, col_name)
+                if on_fork_detected is not None:
+                    on_fork_detected(_forks)
+            return count
+        if not isinstance(raw, list):
+            return {"chunks": 0, "sections": 0}
+        metadatas: list[dict] = raw
+        sections = sum(1 for m in metadatas if m.get("section_title", ""))
+        if metadatas:
+            _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri)
+            _stamp_last()
             _forks = _check_document_fork(doc_id, col_name)
             if on_fork_detected is not None:
                 on_fork_detected(_forks)
-        return count
-    if not isinstance(raw, list):
-        return {"chunks": 0, "sections": 0}
-    metadatas: list[dict] = raw
-    sections = sum(1 for m in metadatas if m.get("section_title", ""))
-    if metadatas:
-        _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri)
-        _forks = _check_document_fork(doc_id, col_name)
-        if on_fork_detected is not None:
-            on_fork_detected(_forks)
-    return {"chunks": len(metadatas), "sections": sections}
+        return {"chunks": len(metadatas), "sections": sections}
+    finally:
+        for _pending in _stamps:
+            _pending.close()
 
 
 def batch_index_pdfs(

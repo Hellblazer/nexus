@@ -1076,7 +1076,10 @@ class RawSqlGateTest {
         // .from(DSL.role(...))) -- the same revoke/grant shape
         // ScratchSchemaLiquibaseTest and StagingPromoteOpsIntegrationTest
         // already use. Net raw-SQL count for this file: unchanged, still 55.
-        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 55),
+        // nexus-q81g7: 55 -> 52. The new role-named-for-a-schema tests share ONE
+        // multi-statement bootstrapRole helper (1 site), and the jl08t aged-box
+        // test's own 5-statement role bootstrap now calls it too (-5 +1 +1 ALTER).
+        Map.entry("dev/nexus/service/SchemaMigratorIntegrationTest.java", 52),
         // nexus-cbo4a batch 9 item 0: 32 -> 37 (extension-ownership-transfer dance);
         // round 2 (T2 nexus/critique-nexus-cbo4a-batch-9-gated IMPORTANT 1): 37 -> 39 (REVOKE EXECUTE ... FROM PUBLIC hardening on both SECURITY DEFINER mirrors).
         // nexus-cbo4a batch 12: 39 -> 16. Converted seed inserts (10 sites: HEAD-schema
@@ -1647,10 +1650,10 @@ class RawSqlGateTest {
     // nexus-wbfpw.44/.45/.46: 979 -> 981 (+2: new test file
     // vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java at 2 -- see that entry's own
     // comment).
-    // nexus-z0o2p.27: 979 -> 972 (-7: CatalogManifestSweepRepositoryTest.java 23 -> 17,
-    // its staging-guard seeds and plan-shape pin deleted; Tk070P6bTtlDaysCountedUpdateTest.java
-    // 2 -> 1, its staging.frecency leg deleted).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 972;
+    // nexus-z0o2p.27: -11 against develop's 976 (StagingHandlerJourneyTest.java 4 removed,
+    // CatalogManifestSweepRepositoryTest.java 23 -> 17, Tk070P6bTtlDaysCountedUpdateTest.java
+    // 2 -> 1), set to the measured per-file sum so the ceiling carries no slack.
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 965;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans

@@ -200,7 +200,7 @@ class TestStored:
         assert kw["ttl_days"] in (9, 10), "the remaining window of a 10-day entry, never a reset or 0"
 
     def test_the_post_store_chains_fire_once_and_skip_the_manifest_hook(self, t2, local_t3, monkeypatch):
-        """The request wrote the manifest and the stamp, so the batch chain must not write them again."""
+        """The request wrote the manifest, so the batch chain must not write it again; the stamp follows the chains."""
         from nexus import hook_registry as hr
         from nexus.mcp_infra import manifest_write_batch_hook
 
@@ -232,7 +232,7 @@ class TestStored:
         assert single == [_chash(content)]
         ((ids, manifest_complete, skip),) = batch
         assert ids == [_chash(content)]
-        assert manifest_complete is None, "the stamp rode the one request"
+        assert manifest_complete is None, "the stamp is stamp_note's, sent after the chains"
         assert skip and manifest_write_batch_hook in skip
         ((source, catalog_doc),) = doc
         assert source == _chash(content) and catalog_doc, "the document chain carries the catalog tumbler"

@@ -587,6 +587,7 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             failure_message,
             fire_note_chains,
             put_note,
+            stamp_note,
         )
         from nexus.errors import PutOversizedError  # noqa: PLC0415 — deliberate function-local import: only needed on promote path
 
@@ -606,11 +607,18 @@ def promote_cmd(entry_id: int, collection: str, tags: str, remove: bool) -> None
             raise click.ClickException(f"{message} The T2 entry was left in place, even with --remove.")
 
         # nexus-9099: fire post-store chains so the promoted T3 row reaches taxonomy / aspect queue
-        # (RDR-095 symmetric-fire). fire_note_chains is the shared firing: the manifest and the
-        # completion stamp were written by the one request above, so the batch chain runs without the
-        # manifest hook, and the document chain carries the CATALOG doc_id, never a chunk id
+        # (RDR-095 symmetric-fire). fire_note_chains is the shared firing: the manifest was written
+        # by the one request above (the completion stamp follows the chains), so the batch chain
+        # runs without the manifest hook, and the document chain carries the CATALOG doc_id, never a chunk id
         # (nexus-w8lg1: the aspect queue's composite FK).
         fire_note_chains(outcome, entry["content"])
+        # The completion stamp, LAST (RDR-223, nexus-z0o2p.34): a kill in a chain above leaves the
+        # fence 'indexing' and the T2 entry in place. The T2 entry is removed only after the stamp,
+        # so a promote the engine would not stamp never deletes its source.
+        outcome = stamp_note(outcome)
+        message = failure_message(outcome, subject=repr(entry["title"]), check="'nx store list'")
+        if message is not None:
+            raise click.ClickException(f"{message} The T2 entry was left in place, even with --remove.")
         doc_id = outcome.doc_id
 
         split_note = f", {len(outcome.pieces)} chunks" if len(outcome.pieces) > 1 else ""

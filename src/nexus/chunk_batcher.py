@@ -92,6 +92,11 @@ class ChunkBatcher:
     ``on_file_complete(path, context)`` fires after the file's batch
     flushes successfully; ``on_file_failed(path, error, context)`` after
     its batch fails. Both run WITHOUT the internal lock held.
+    ``on_batch_stamp(collection, ids, documents, metadatas, file_contexts)``
+    fires once per successful flush after BOTH the flush-grain hooks
+    (``on_batch_complete``) and every file's ``on_file_complete``: the
+    completion stamp comes last (RDR-223, nexus-z0o2p.34). It does not fire for a
+    flush whose ``on_batch_complete`` raised.
     """
 
     def __init__(
@@ -102,6 +107,7 @@ class ChunkBatcher:
         on_file_failed: Callable[[str, str, object], None] | None = None,
         on_batch_complete: "Callable[[str, list[str], list[str], list[dict], list[tuple[str, object]]], None] | None" = None,
         on_batch_begin: "Callable[[str, list[tuple[str, object]]], None] | None" = None,
+        on_batch_stamp: "Callable[[str, list[str], list[str], list[dict], list[tuple[str, object]]], None] | None" = None,
         on_flush: "Callable[[int, int, str, float, str | None], None] | None" = None,
         max_chunks: "int | Callable[[str], int]" = DEFAULT_MAX_CHUNKS,
         max_bytes: int | None = None,
@@ -126,6 +132,14 @@ class ChunkBatcher:
         #: per-file ``catalog_doc_id`` / ``content_hash`` pair from either.
         #: Best-effort: a failure here must never block the actual upload.
         self._on_batch_begin = on_batch_begin or (lambda _c, _fc: None)
+        #: RDR-223 (nexus-z0o2p.34, Sam 2026-09-30: the completion stamp comes AFTER the post-store
+        #: hooks on every writer path): fired once per SUCCESSFUL flush, after the flush-grain hooks
+        #: (``on_batch_complete``) AND the per-file completion callbacks (``on_file_complete``) have
+        #: run, with the same arguments as ``on_batch_complete``. The seam for the documents'
+        #: completion stamp: a process killed in a hook leaves every document of the flush
+        #: ``indexing``, so the next run redoes them and fires the hooks again. Best-effort: a
+        #: failure is logged and the documents stay ``indexing``.
+        self._on_batch_stamp = on_batch_stamp or (lambda _c, _i, _d, _m, _fc: None)
         #: nexus-rhwg5 / GH #1432 ask 3 residue: fired once per SETTLED
         #: flush (never a bisect attempt -- same contract as the
         #: ``chunk_flush_complete`` structlog event below) with
@@ -173,6 +187,8 @@ class ChunkBatcher:
         #: which is why the flush-grain split could not be made to sum.
         #: Same class of gap ``settle_seconds`` closed in lde88 round 2.
         self._begin_hook_seconds = 0.0
+        #: The ``on_batch_stamp`` callback (the completion stamp, a real round trip after the hooks).
+        self._stamp_seconds = 0.0
         #: duoak follow-up: >1 dispatches flushes to a bounded pool so
         #: neither staging workers nor drain() serialize the network
         #: calls. 1 (default) = synchronous v1 behavior. Ceiling should
@@ -226,6 +242,7 @@ class ChunkBatcher:
                 "upload_seconds": self._upload_seconds,
                 "settle_seconds": self._settle_seconds,
                 "begin_hook_seconds": self._begin_hook_seconds,
+                "stamp_seconds": self._stamp_seconds,
             }
 
     @property
@@ -506,6 +523,7 @@ class ChunkBatcher:
         upload_elapsed = time.monotonic() - t0
 
         flush_hook_elapsed = 0.0
+        flush_hooks_ran = False
         if error is None:
             _hook_t0 = time.monotonic()
             try:
@@ -513,6 +531,7 @@ class ChunkBatcher:
                     collection, pend.ids, pend.documents, pend.metadatas,
                     file_contexts,
                 )
+                flush_hooks_ran = True
             except Exception:  # noqa: BLE001 — flush-grain hooks are best-effort, never fail the batch
                 _log.warning(
                     "chunk_batch_complete_callback_failed",
@@ -546,13 +565,35 @@ class ChunkBatcher:
         self._invoke_callbacks(settled)
         file_hook_elapsed = time.monotonic() - _file_hook_t0
 
+        # The completion stamp, LAST (nexus-z0o2p.34): after the flush-grain hooks and every file's
+        # completion callback of this flush have run.
+        stamp_elapsed = 0.0
+        # A flush-grain hook that raised did not run to the end, so the flush is not stamped (the same
+        # rule as a raising on_file_complete, which propagates before this point): the documents stay
+        # 'indexing' and the next run redoes them and fires the hook again.
+        if error is None and flush_hooks_ran:
+            _stamp_t0 = time.monotonic()
+            try:
+                self._on_batch_stamp(
+                    collection, pend.ids, pend.documents, pend.metadatas, file_contexts,
+                )
+            except Exception:  # noqa: BLE001 — a stamp that fails leaves the documents 'indexing': over-work on the next run, never a failed flush
+                _log.warning(
+                    "chunk_batch_stamp_callback_failed",
+                    collection=collection,
+                    chunks=len(pend.ids),
+                    exc_info=True,
+                )
+            stamp_elapsed = time.monotonic() - _stamp_t0
+
         with self._lock:
             self._upload_seconds += upload_elapsed
             self._settle_seconds += settle_elapsed
             self._begin_hook_seconds += begin_hook_elapsed
+            self._stamp_seconds += stamp_elapsed
             self._flush_seconds += (
                 begin_hook_elapsed + upload_elapsed + flush_hook_elapsed
-                + settle_elapsed + file_hook_elapsed
+                + settle_elapsed + file_hook_elapsed + stamp_elapsed
             )
 
         _log.info(
@@ -565,6 +606,7 @@ class ChunkBatcher:
             flush_hook_s=round(flush_hook_elapsed, 3),
             settle_s=round(settle_elapsed, 3),
             file_hook_s=round(file_hook_elapsed, 3),
+            stamp_s=round(stamp_elapsed, 3),
         )
 
         # nexus-rhwg5: mirrors the log event above exactly (same settled-
@@ -573,7 +615,7 @@ class ChunkBatcher:
         if self._on_flush is not None and not _draining:
             _total_elapsed = (
                 begin_hook_elapsed + upload_elapsed + flush_hook_elapsed
-                + settle_elapsed + file_hook_elapsed
+                + settle_elapsed + file_hook_elapsed + stamp_elapsed
             )
             try:
                 self._on_flush(
