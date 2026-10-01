@@ -545,7 +545,9 @@ def _boot_semaphore_slot(
     duration of the context.
 
     Bounds how many PG boot sequences (initdb + pg_ctl start) can run
-    CONCURRENTLY across every pytest process on the machine (nexus-ui654)
+    CONCURRENTLY across every pytest process of THIS Unix user (the lock directory is
+    per uid, nexus-c6lsu; the SysV shm budget it protects is machine-wide, so N users
+    can each hold ``max_concurrent`` slots) (nexus-ui654)
     -- deliberately NOT the substrate's full session lifetime; callers
     wrap only the shm-heavy initdb/pg_ctl-start window and release
     immediately after, so a booted-and-running substrate never occupies a

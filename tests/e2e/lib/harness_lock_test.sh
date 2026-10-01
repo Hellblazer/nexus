@@ -355,6 +355,33 @@ for name in migration-rehearsal gc-ab release-sandbox upgrade-shakeout sandbox; 
     unset seen
 done
 rm -rf "${SHIM_DIR:?}"
+# The shim runs above create /tmp/nexus-e2e-locks-<fake uid> roots (the harnesses mkdir them).
+# They are empty once every lock is released; remove them so a test run leaves nothing behind.
+rm -rf "/tmp/nexus-e2e-locks-31337" "/tmp/nexus-e2e-locks-42424"
+
+# ── no harness may still name the shared (uid-less) lock root ─────────────
+# migration-rehearsal's --artifacts per-leg lock is only reached after a manifest-verified
+# artifact directory exists, so the self-test seam above cannot drive it. Scan the sources
+# instead: any lock path under the bare "/tmp/nexus-e2e-locks/" root (no uid) is the
+# permission failure nexus-c6lsu fixed, and the review found one such line left. Non-vacuity:
+# the per-leg line must be present (a scan that matched nothing proves nothing).
+echo
+echo "=== no harness names the shared lock root ==="
+shared_root_hits=""
+for name in "${!HARNESS_SCRIPT[@]}"; do
+    hits="$(grep -nE '/tmp/nexus-e2e-locks/' "$REPO_ROOT/${HARNESS_SCRIPT[$name]}" | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+    [[ -n "$hits" ]] && shared_root_hits+="${HARNESS_SCRIPT[$name]}: $hits"$'\n'
+done
+if [[ -z "$shared_root_hits" ]]; then
+    ok "no harness script assigns a lock path under the uid-less /tmp/nexus-e2e-locks/ root"
+else
+    bad "harness(es) still use the shared uid-less lock root: $shared_root_hits"
+fi
+if grep -qE 'LOCKDIR="/tmp/nexus-e2e-locks-\$\(id -u\)/migration-rehearsal-\$\{LEG\}\.lock"' "$REPO_ROOT/tests/e2e/migration-rehearsal/run.sh"; then
+    ok "migration-rehearsal --artifacts per-leg lock is per-user"
+else
+    bad "migration-rehearsal --artifacts per-leg LOCKDIR is missing or not per-user (non-vacuity guard tripped)"
+fi
 
 echo
 echo "harness_lock_test.sh: ${PASS} passed, ${FAIL} failed"

@@ -56,35 +56,52 @@ FlushFn = Callable[[str, list[str], list[str], list[dict], "list[tuple[str, obje
 _Settled = tuple[str, "str | None", object]
 
 
+#: nexus-eoido: consecutive THROTTLED flushes after which the batcher stops issuing flushes and
+#: defers the rest of the run. Three, because a throttled flush has already spent its whole retry
+#: budget before it reaches the batcher: ``_manifest_write_with_retry`` makes up to 8 attempts, each
+#: floored by the shared brake, which is minutes of waiting per flush. One refused flush after that
+#: could be a single bad window and two in a row could be bad luck, but three in a row means the
+#: service is throttling this run's traffic and each further flush costs another full budget for
+#: the same answer. Larger N only lengthens the worst case (N budgets); N=2 would trip on noise.
+THROTTLE_BREAKER_THRESHOLD: int = 3
+
+
 @dataclass(frozen=True)
 class _ThrottleSignal:
     """A flush failure that says "send less", not "this batch is bad" (nexus-eoido)."""
 
-    #: seconds the upstream asked us to wait, when it said
+    #: seconds the upstream asked us to wait, when it said (already clamped by ``parse_retry_after``)
     retry_after: float | None
-    #: whether the shared brake should be tripped: False for a CLIENT-side call deadline, which
-    #: says nothing about the upstream
-    pace: bool
+    #: an engine request-deadline abort (``X-Nexus-Deadline-Outcome: aborted``): the embed budget
+    #: ran out, which is also what a batch too big for it looks like, so it is bisected once
+    deadline_abort: bool
+
+
+class _ThrottleBreakerOpen(Exception):
+    """Raised inside ``_flush_batch`` instead of issuing a flush once the breaker is open."""
 
 
 def _throttle_signal(exc: BaseException) -> _ThrottleSignal | None:
-    """Classify a flush failure as a throttle or a request deadline, or ``None`` for anything else.
+    """Classify a flush failure as a throttle, or ``None`` for anything else.
 
-    A 429, a 503 carrying Retry-After and an engine deadline abort (``X-Nexus-Deadline-Outcome:
-    aborted``) come from the same classifiers the write-retry wrappers use
-    (``nexus.retry._rate_limit_signal`` / ``_deadline_aborted``), so this cannot disagree with them
-    about what a throttle is. ``call_deadline.DeadlineExceeded`` is the client's own deadline.
+    A 429, a 503 carrying Retry-After and an engine deadline abort come from the same classifiers
+    the write-retry wrappers use (``nexus.retry.rate_limit_signal`` / ``deadline_aborted``), so
+    this cannot disagree with them about what a throttle is. Both transports are covered: the
+    classifiers walk the exception chain to an ``httpx.HTTPStatusError`` or a
+    ``urllib.error.HTTPError`` (which is what ``VectorServiceError`` chains from).
+
+    Deliberately NOT a throttle: a client-side read/connect timeout. Nothing says the upstream is
+    refusing traffic, and a batch too big to finish inside the gateway timeout looks exactly
+    like that, so those keep bisecting.
     """
-    from nexus.call_deadline import DeadlineExceeded  # noqa: PLC0415 — leaf module, only on the failure arm
-    from nexus.retry import _deadline_aborted, _rate_limit_signal  # noqa: PLC0415 — deferred: nexus.retry is heavy and the failure arm is rare
+    from nexus.retry import deadline_aborted, rate_limit_signal  # noqa: PLC0415 — deferred: nexus.retry is heavy and the failure arm is rare
 
-    signal = _rate_limit_signal(exc)
+    signal = rate_limit_signal(exc)
+    retry_after = None if signal is None else signal.retry_after
+    if deadline_aborted(exc):
+        return _ThrottleSignal(retry_after, deadline_abort=True)
     if signal is not None:
-        return _ThrottleSignal(signal.retry_after, pace=True)
-    if _deadline_aborted(exc):
-        return _ThrottleSignal(None, pace=True)
-    if isinstance(exc, DeadlineExceeded):
-        return _ThrottleSignal(None, pace=False)
+        return _ThrottleSignal(retry_after, deadline_abort=False)
     return None
 
 
@@ -106,6 +123,9 @@ class _FileState:
 
     outstanding: int = 0
     failed: str | None = None
+    #: the failure in ``failed`` was a throttle (or a deferral caused by one), not a bad file
+    #: (nexus-eoido): the run summary reports the two separately
+    failed_throttled: bool = False
     finished_adding: bool = False
     #: opaque caller payload handed back on completion/failure (e.g. the
     #: deferred post-store hook arguments for this file)
@@ -144,9 +164,12 @@ class ChunkBatcher:
         max_chunks: "int | Callable[[str], int]" = DEFAULT_MAX_CHUNKS,
         max_bytes: int | None = None,
         flush_concurrency: int = 1,
+        throttle_breaker_threshold: int = THROTTLE_BREAKER_THRESHOLD,
     ) -> None:
         if isinstance(max_chunks, int) and max_chunks < 1:
             raise ValueError("max_chunks must be >= 1")
+        if throttle_breaker_threshold < 1:
+            raise ValueError("throttle_breaker_threshold must be >= 1")
         self._flush = flush
         self._on_complete = on_file_complete or (lambda _p, _c=None: None)
         self._on_failed = on_file_failed or (lambda _p, _e, _c=None: None)
@@ -194,6 +217,14 @@ class ChunkBatcher:
         self._pending: dict[str, _Pending] = {}
         self._files: dict[str, _FileState] = {}
         self._failed_files: dict[str, str] = {}
+        #: nexus-eoido: the subset of ``_failed_files`` that failed because the service throttled
+        #: the run (or because the breaker deferred them), path -> error
+        self._throttled_files: dict[str, str] = {}
+        self._throttle_breaker_threshold = throttle_breaker_threshold
+        self._consecutive_throttled = 0
+        self._throttle_breaker_open = False
+        #: the longest Retry-After any throttled flush carried (seconds), None if none did
+        self._throttle_retry_after: float | None = None
         self._flush_count = 0
         #: FULL flush wall: upload (self._flush) + on_batch_complete
         #: (flush-grain hooks) + the per-file callback chain
@@ -249,6 +280,26 @@ class ChunkBatcher:
         """file path -> error message, for end-of-run reporting."""
         with self._lock:
             return dict(self._failed_files)
+
+    @property
+    def throttled_files(self) -> dict[str, str]:
+        """file path -> error, for the files in ``failed_files`` the service throttled (or that the
+        breaker deferred) rather than rejected. Their next run retries them like any failed file."""
+        with self._lock:
+            return dict(self._throttled_files)
+
+    @property
+    def throttle_retry_after(self) -> float | None:
+        """The longest Retry-After (seconds) a throttled flush carried, or ``None``."""
+        with self._lock:
+            return self._throttle_retry_after
+
+    @property
+    def throttle_breaker_open(self) -> bool:
+        """True once ``throttle_breaker_threshold`` consecutive flushes were throttled: every later
+        flush is deferred without being sent."""
+        with self._lock:
+            return self._throttle_breaker_open
 
     @property
     def stats(self) -> dict[str, float]:
@@ -460,14 +511,18 @@ class ChunkBatcher:
             ]
             self._futures.append(fut)
 
-    def _flush_batch(self, collection: str, pend: _Pending) -> None:
+    def _flush_batch(self, collection: str, pend: _Pending, *, bisected: bool = False) -> None:
         """Network flush with the lock RELEASED; settle + callbacks after.
 
         On failure with >= 2 files, BISECT: split by files and flush each
         half independently. A batch too big for the gateway timeout
         self-tunes down; a genuinely poisoned file is isolated to itself
-        (only it fails). Depth is naturally log2(files). A 429 or request-deadline
-        failure is the exception: it is never bisected (see ``_throttle_signal``).
+        (only it fails). Depth is naturally log2(files). Throttles are the exception
+        (nexus-eoido, see ``_throttle_signal``): a 429 or a 503 with Retry-After is never
+        bisected, the batch fails as one; an engine deadline abort is bisected ONCE (``bisected``
+        marks a half), so the size self-tuning of ``per_collection_chunk_cap`` survives without
+        the 1+2+4... request multiplication. Every throttle trips the shared brake, and
+        ``throttle_breaker_threshold`` consecutive ones open the breaker (below).
 
         Emits ONE ``chunk_flush_complete`` structlog event per completed
         flush (nexus-lde88 G1) with complete per-flush attribution —
@@ -503,7 +558,11 @@ class ChunkBatcher:
         # _begin_hook_seconds. Measured before ``t0`` so it is not
         # mis-billed as upload.
         begin_hook_elapsed = 0.0
-        if file_contexts:
+        with self._lock:
+            breaker_open = self._throttle_breaker_open
+        # An open breaker sends nothing, so the begin stamp (a round trip) is skipped too: the
+        # files settle failed below and the next run restamps them.
+        if file_contexts and not breaker_open:
             _begin_t0 = time.monotonic()
             try:
                 self._on_batch_begin(collection, file_contexts)
@@ -517,31 +576,47 @@ class ChunkBatcher:
             begin_hook_elapsed = time.monotonic() - _begin_t0
 
         error: str | None = None
+        throttle: _ThrottleSignal | None = None
+        deferred_by_breaker = False
         t0 = time.monotonic()
         try:
+            if breaker_open:
+                raise _ThrottleBreakerOpen
             self._flush(
                 collection, pend.ids, pend.documents, pend.metadatas,
                 file_contexts,
             )
+        except _ThrottleBreakerOpen:
+            deferred_by_breaker = True
+            error = (
+                f"deferred without being sent: {self._throttle_breaker_threshold} consecutive "
+                f"flushes were throttled by the service (nexus-eoido)"
+            )
         except Exception as exc:  # noqa: BLE001 — attribution boundary: convert to per-file failure or bisect
-            # nexus-eoido: a 429 or an engine request-deadline abort is NOT bisected. The upstream
-            # asked for less traffic (or already discarded and billed the embeds); halving the batch
-            # and retrying each half with a full budget turns one refused request into 1+2+4... of
-            # them. The batch fails as one: its files settle failed through the same per-file path a
-            # single-file batch takes (the next run's staleness check retries them), and Retry-After
-            # is handed to the shared brake so every later write pauses for it.
+            # nexus-eoido: a throttle is NOT bisected like a poisoned file. The upstream asked
+            # for less traffic, and halving the batch and retrying each half with a full budget
+            # turns one refused request into 1+2+4... of them. 429 and 503+Retry-After fail the
+            # batch as one: its files settle failed through the per-file path a single-file batch
+            # takes (the next run's staleness check retries them). An engine deadline abort
+            # (Sam, 2026-10-01) bisects ONCE, because a batch too big for the embed budget looks the
+            # same and the halving is what per_collection_chunk_cap's sizing relies on; a half that
+            # aborts again fails as one. Every throttle hands its Retry-After to the shared brake.
             throttle = _throttle_signal(exc)
-            if throttle is not None and throttle.pace:
+            if throttle is not None:
                 from nexus.rate_brake import get_brake  # noqa: PLC0415 — leaf module, only on the throttle arm
 
                 get_brake().trip(throttle.retry_after, source="chunk_batcher")
-            if len(pend.file_counts) >= 2 and throttle is None:
+            bisect = len(pend.file_counts) >= 2 and (
+                throttle is None or (throttle.deadline_abort and not bisected)
+            )
+            if bisect:
                 _log.warning(
                     "chunk_batch_flush_bisect",
                     collection=collection,
                     chunks=len(pend.ids),
                     files=len(pend.file_counts),
                     error=str(exc),
+                    throttled=throttle is not None,
                 )
                 upload_elapsed = time.monotonic() - t0
                 with self._lock:
@@ -550,7 +625,7 @@ class ChunkBatcher:
                     self._begin_hook_seconds += begin_hook_elapsed
                     self._flush_seconds += upload_elapsed + begin_hook_elapsed
                 for half in self._split(pend):
-                    self._flush_batch(collection, half)
+                    self._flush_batch(collection, half, bisected=bisected or throttle is not None)
                 return
             error = str(exc)
             _log.warning(
@@ -562,6 +637,7 @@ class ChunkBatcher:
                 throttled=throttle is not None,
                 retry_after=None if throttle is None else throttle.retry_after,
             )
+        throttled = throttle is not None or deferred_by_breaker
         # nexus-lde88 G3: upload_elapsed is the network write ALONE, stopping
         # here — BEFORE the hooks below. This used to be the only number
         # tracked (as "flush_seconds"), under-reporting true flush cost by
@@ -604,7 +680,11 @@ class ChunkBatcher:
                 state.outstanding -= count
                 if error is not None and state.failed is None:
                     state.failed = error
+                    state.failed_throttled = throttled
                 self._settle_file_locked(path, settled)
+            self._count_throttle_locked(
+                collection, error, throttle, deferred_by_breaker=deferred_by_breaker,
+            )
         settle_elapsed = time.monotonic() - _settle_t0
 
         _file_hook_t0 = time.monotonic()
@@ -696,6 +776,41 @@ class ChunkBatcher:
             offset += n
         return [h for h in halves if h.ids]
 
+    def _count_throttle_locked(
+        self,
+        collection: str,
+        error: str | None,
+        throttle: _ThrottleSignal | None,
+        *,
+        deferred_by_breaker: bool,
+    ) -> None:
+        """Track consecutive throttled flushes and open the breaker (caller holds the lock).
+
+        A flush that completed, or failed for any reason other than a throttle, ends the streak.
+        A flush the open breaker refused to send neither extends nor ends it. With
+        ``flush_concurrency > 1`` the flushes already in flight when the breaker opens still
+        complete (they cannot be recalled), so up to ``flush_concurrency - 1`` more requests
+        than the threshold can be sent; every flush issued after that is deferred.
+        """
+        if deferred_by_breaker:
+            return
+        if error is None or throttle is None:
+            self._consecutive_throttled = 0
+            return
+        self._consecutive_throttled += 1
+        if throttle.retry_after is not None and (
+            self._throttle_retry_after is None or throttle.retry_after > self._throttle_retry_after
+        ):
+            self._throttle_retry_after = throttle.retry_after
+        if self._consecutive_throttled >= self._throttle_breaker_threshold and not self._throttle_breaker_open:
+            self._throttle_breaker_open = True
+            _log.error(
+                "chunk_batch_throttle_breaker_open",
+                collection=collection,
+                consecutive_throttled_flushes=self._consecutive_throttled,
+                retry_after=self._throttle_retry_after,
+            )
+
     def _settle_file_locked(self, path: str, settled: list[_Settled]) -> None:
         state = self._files.get(path)
         if state is None or not state.finished_adding or state.outstanding > 0:
@@ -703,6 +818,8 @@ class ChunkBatcher:
         del self._files[path]
         if state.failed is not None:
             self._failed_files[path] = state.failed
+            if state.failed_throttled:
+                self._throttled_files[path] = state.failed
         settled.append((path, state.failed, state.context))
 
     def _invoke_callbacks(self, settled: list[_Settled]) -> None:

@@ -306,20 +306,24 @@ class TestBootSemaphoreDirIsPerUser:
 
         assert sub._BOOT_SEMAPHORE_DIR == sub._boot_semaphore_dir(Path(tempfile.gettempdir()), uid=os.getuid())
 
-    def test_a_second_users_directory_is_never_the_first_users(self, tmp_path) -> None:
-        """End to end on the real primitive: user A's directory is made unwritable to
-        everyone else (as it is on a real box), and user B's directory still works."""
+    def test_a_second_users_directory_is_never_the_first_users(self, tmp_path, monkeypatch) -> None:
+        """End to end through the DEFAULT uid resolution (no explicit ``uid=``): as user A
+        take a slot, make A's directory unwritable to everyone else (as it is on a real box),
+        then become user B and take a slot in the directory B's default resolves to."""
         import os
         import stat
 
         from tests._engine_substrate import _boot_semaphore_dir
 
-        a = _boot_semaphore_dir(tmp_path, uid=1001)
-        b = _boot_semaphore_dir(tmp_path, uid=1002)
+        monkeypatch.setattr(os, "getuid", lambda: 1001)
+        a = _boot_semaphore_dir(tmp_path)
         with _boot_semaphore_slot(lock_dir=a):
             pass
         os.chmod(a, stat.S_IRUSR | stat.S_IXUSR)  # a peer-owned directory this user cannot write
         try:
+            monkeypatch.setattr(os, "getuid", lambda: 1002)
+            b = _boot_semaphore_dir(tmp_path)
+            assert b != a
             with _boot_semaphore_slot(lock_dir=b):
                 assert b.is_dir()
         finally:

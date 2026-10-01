@@ -350,10 +350,12 @@ else
     # a property of how the suite was launched. exec the sleep from an interpreter that sets the
     # disposition to the default first: the probe then tests the primitive, not the launch shape.
     _sleep_with_default_sigint() {
-        if command -v python3 >/dev/null 2>&1; then
-            python3 -c 'import os, signal; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp("sleep", ["sleep", "30"])' &
-        elif command -v perl >/dev/null 2>&1; then
+        # perl first: its startup is a few ms against python3's tens, and the window between process
+        # start and the disposition reset must stay well inside the 0.2 s settle below.
+        if command -v perl >/dev/null 2>&1; then
             perl -e '$SIG{INT} = "DEFAULT"; exec "sleep", "30"' &
+        elif command -v python3 >/dev/null 2>&1; then
+            python3 -c 'import os, signal; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp("sleep", ["sleep", "30"])' &
         else
             sleep 30 &
         fi
