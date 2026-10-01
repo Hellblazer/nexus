@@ -685,6 +685,26 @@ class ChunkIsReapableIntegrationTest {
         assertThat(isReapable(t, renamed, hex)).isTrue();
     }
 
+    /**
+     * The record rides the chunk through the REAL rename route (CatalogRepository.renameCollection), not only
+     * a hand-written UPDATE: tests/catalog/test_collection_scoped_tables_schema_parity.py documents the table
+     * as carried by nexus.chunks' ON UPDATE CASCADE instead of registering it, and this is that claim.
+     */
+    @Test
+    void aRecordFollowsItsChunkThroughTheRenameRoute() throws Exception {
+        String t = "reap-record-rename-route";
+        String from = "knowledge__reap-rn-from__minilm-l6-v2-384__v1";
+        String to = "knowledge__reap-rn-to__minilm-l6-v2-384__v1";
+        register(t, from);
+        String hex = orphan(t, from, "renamed", DAYS_40);
+        recordOrphaning(t, from, hex, DAYS_40);
+
+        new dev.nexus.service.db.CatalogRepository(tenantScope).renameCollection(t, from, to);
+
+        assertThat(orphanedAt(t, from, hex)).as("nothing left under the old name").isNull();
+        assertThat(orphanedAt(t, to, hex)).as("the record moved with its chunk").isNotNull();
+    }
+
     /** A stale record of a chunk that is owned again can never make it reapable: condition 2 fails. */
     @Test
     void aStaleRecordOfAReOwnedChunkIsHarmless() throws Exception {
