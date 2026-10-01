@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -94,17 +95,22 @@ def test_install_fence_is_idempotent_and_records_the_real_home(
     from tests._fence_home import REAL_HOME_ENV, install_fence
 
     real = tmp_path / "real"; real.mkdir(); _seed(real)
-    monkeypatch.setenv("HOME", str(real))
-    monkeypatch.delenv(REAL_HOME_ENV, raising=False)
+    # ``patch.dict`` restores EVERY variable install_fence sets (NX_FENCED_HOME,
+    # XDG_RUNTIME_DIR, the DBUS pop, NX_TOOLS_DIR ...). monkeypatch restored only
+    # the two this test named, so the rest leaked into the session and the
+    # finish-time guards read the fenced mirror (nexus-q81g7 review).
+    with patch.dict(os.environ):
+        monkeypatch.setenv("HOME", str(real))
+        monkeypatch.delenv(REAL_HOME_ENV, raising=False)
 
-    first = install_fence(tmp_path / "f1")
-    assert first is not None
-    assert Path(os.environ[REAL_HOME_ENV]).resolve() == real.resolve()
-    assert Path(os.environ["HOME"]) == tmp_path / "f1"
+        first = install_fence(tmp_path / "f1")
+        assert first is not None
+        assert Path(os.environ[REAL_HOME_ENV]).resolve() == real.resolve()
+        assert Path(os.environ["HOME"]) == tmp_path / "f1"
 
-    second = install_fence(tmp_path / "f2")
-    assert second is None, "a second fence installed over an already-fenced HOME"
-    assert Path(os.environ["HOME"]) == tmp_path / "f1", "HOME was re-pointed"
+        second = install_fence(tmp_path / "f2")
+        assert second is None, "a second fence installed over an already-fenced HOME"
+        assert Path(os.environ["HOME"]) == tmp_path / "f1", "HOME was re-pointed"
 
 
 import os  # noqa: E402 — used by the idempotence test above

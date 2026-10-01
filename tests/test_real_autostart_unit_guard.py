@@ -164,3 +164,42 @@ def test_an_untouched_real_unit_does_not_redden_a_run(tmp_path: Path) -> None:
     rc, out = _run_inner(tmp_path, "none", "-p", "no:xdist")
     assert "FAIL: nexus-q81g7" not in out, out[-3000:]
     assert rc == 0, f"an untouched unit must not fail the run (rc={rc})\n{out[-3000:]}"
+
+
+# ── the real home is captured once, never recomputed from env at finish ─────
+
+
+def test_the_guards_real_home_survives_a_leaked_fence_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A test that installs a fence and fails to restore NX_FENCED_HOME used to
+    make the finish-time guards read the fenced mirror (3478 phantom REMOVED
+    paths against an intact real ~/.config/nexus). The session's own capture
+    wins over whatever the environment says by then."""
+    import tests.conftest as conftest_mod
+
+    real = tmp_path / "real"
+    fence = tmp_path / "fence"
+    real.mkdir()
+    fence.mkdir()
+    monkeypatch.setattr(conftest_mod, "_session_real_home", real)
+    monkeypatch.setattr(conftest_mod, "_session_fenced_home", fence)
+    monkeypatch.setenv("HOME", str(fence))
+    # the leak: env now names some OTHER fence and some OTHER real home
+    monkeypatch.setenv("NX_FENCED_HOME", str(tmp_path / "leaked-fence"))
+    monkeypatch.setenv("NX_REAL_HOME", str(tmp_path / "leaked-real"))
+    monkeypatch.delenv("NX_REAL_CONFIG_DIR_FOR_GUARD_TEST", raising=False)
+
+    assert conftest_mod._real_home_for_guard() == real
+
+
+def test_a_test_that_patches_path_home_still_gets_its_own_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tests.conftest as conftest_mod
+
+    monkeypatch.setattr(conftest_mod, "_session_real_home", tmp_path / "real")
+    monkeypatch.setattr(conftest_mod, "_session_fenced_home", tmp_path / "fence")
+    monkeypatch.delenv("NX_REAL_CONFIG_DIR_FOR_GUARD_TEST", raising=False)
+    with patch.object(Path, "home", return_value=tmp_path / "elsewhere"):
+        assert conftest_mod._real_home_for_guard() == tmp_path / "elsewhere"

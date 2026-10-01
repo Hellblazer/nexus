@@ -140,32 +140,53 @@ _FIXTURE_CACHE_PREFIXES: tuple[str, ...] = (
 _REAL_CONFIG_DIR_ENV_OVERRIDE = "NX_REAL_CONFIG_DIR_FOR_GUARD_TEST"
 
 
+#: The operator's real home and the fence this session installed, captured ONCE
+#: in ``pytest_sessionstart`` (every process: a worker inherits both env vars
+#: from the controller before its own sessionstart runs) and never recomputed
+#: from the environment afterwards. The guards run at SESSION FINISH, long after
+#: any test has had a chance to leak ``NX_FENCED_HOME`` / ``NX_REAL_HOME``
+#: through an unrestored ``install_fence``: with the env as the source of truth
+#: the finish-time comparison ``Path.home() == fenced`` failed, the guards read
+#: the fenced mirror and reported thousands of phantom REMOVED paths against an
+#: intact real home (reproduced serially, nexus-q81g7 review).
+_session_real_home: Path | None = None
+_session_fenced_home: Path | None = None
+
+
+def _capture_session_homes() -> None:
+    """Record the real home and the installed fence, once per process."""
+    global _session_real_home, _session_fenced_home
+    if _session_real_home is not None:
+        return
+    from tests._fence_home import (  # noqa: PLC0415 — test-only helper
+        FENCED_HOME_ENV,
+        REAL_HOME_ENV,
+    )
+    real = os.environ.get(REAL_HOME_ENV, "").strip()
+    fenced = os.environ.get(FENCED_HOME_ENV, "").strip()
+    if real and fenced:
+        _session_real_home = Path(real)
+        _session_fenced_home = Path(fenced)
+
+
 def _real_home_for_guard() -> Path:
     """The operator's REAL home as the session guards see it: the
     ``_REAL_CONFIG_DIR_ENV_OVERRIDE``-named tmp dir when the wiring tests' seam
     is set, else ``Path.home()`` -- or, when ``Path.home()`` is the fence this
-    process installed, the real home ``REAL_HOME_ENV`` recorded."""
+    session installed, the real home captured at session start."""
     override = os.environ.get(_REAL_CONFIG_DIR_ENV_OVERRIDE, "").strip()
     if override:
         return Path(override)
     # nexus-pfuns: once the suite is fenced, ``Path.home()`` IS the
     # throwaway mirror, and a guard pointed at it would watch a directory
-    # nothing cares about while reporting green. REAL_HOME_ENV carries the
-    # operator's actual home across the fence and into xdist workers, which
-    # inherit the fenced HOME and would otherwise compute the wrong root.
-    from tests._fence_home import (  # noqa: PLC0415 — test-only helper
-        FENCED_HOME_ENV,
-        REAL_HOME_ENV,
-    )
+    # nothing cares about while reporting green.
     home = Path.home()
-    real = os.environ.get(REAL_HOME_ENV, "").strip()
-    fenced = os.environ.get(FENCED_HOME_ENV, "").strip()
-    # Substitute ONLY when Path.home() is the fence we installed. A test
-    # that monkeypatches Path.home is asking a question about ITS tmp dir,
+    # Substitute ONLY when Path.home() is the fence this session installed. A
+    # test that monkeypatches Path.home is asking a question about ITS tmp dir,
     # and an unconditional substitution answers a different one -- that
     # broke 6 guard tests before this check existed.
-    if real and fenced and str(home) == fenced:
-        home = Path(real)
+    if _session_real_home is not None and str(home) == str(_session_fenced_home):
+        return _session_real_home
     return home
 
 
@@ -485,6 +506,7 @@ def pytest_sessionstart(session):
         from tests._fence_home import install_fence  # noqa: PLC0415 — test-only helper
 
         install_fence(Path(tempfile.mkdtemp(prefix="nx-suite-home-")))
+    _capture_session_homes()
 
     # A test that moves HOME again (tests/test_scratch.py's t1 fixture sets HOME
     # to its tmp_path) resolved the MiniLM model cache under that empty dir and
