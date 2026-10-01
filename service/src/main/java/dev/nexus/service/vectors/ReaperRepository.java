@@ -29,7 +29,7 @@ import static dev.nexus.service.jooq.nexus.Tables.REAPER_QUARANTINE_CHUNKS;
  * chunks and no catalog row is seen and refused rather than never listed), what lifecycle state each registered
  * collection is in, and the dry-run and move calls.
  */
-public final class ReaperRepository {
+public class ReaperRepository {   // not final: ChunkReaperIntegrationTest raises a statement timeout from a subclass
 
     /**
      * What one call to {@code reaper_quarantine_chunks} reports: {@code moved} chunks moved, the collection's whole
@@ -40,11 +40,11 @@ public final class ReaperRepository {
 
     /**
      * What one call to {@code reaper_expire_quarantine} reports: {@code expired} chunks deleted (counted from the
-     * DELETE's own RETURNING), {@code refused} chunks past the cutoff the floor held back (a decision the operator
-     * must hear about), and {@code protectedCount} chunks past the cutoff a manifest row of the origin still names
-     * (benign: re-referenced after the move, never deleted, nothing to act on).
+     * DELETE's own RETURNING) and {@code protectedCount} chunks past the cutoff a manifest row of the origin still
+     * names (benign: re-referenced after the move, never deleted, nothing to act on). There is no floor and so no
+     * refused count (Sam, 2026-10-01).
      */
-    public record Expiry(long expired, long refused, long protectedCount) {}
+    public record Expiry(long expired, long protectedCount) {}
 
     private final TenantScope tenantScope;
 
@@ -127,22 +127,43 @@ public final class ReaperRepository {
     }
 
     /**
-     * The engine's expiry, for the chunks the reaper itself moved and no others: deletes the tagged chunks of
-     * {@code quarantineCollection} (origin {@code originCollection}) stamped at or before {@code cutoff}
-     * ({@code YYYY-MM-DDTHH:MM:SSZ}), never one a manifest row of the origin names, and never more than the floor
-     * allows. Quarantine a client filled carries no tag and is not touched. Throws on a database error; a lock wait
-     * that times out surfaces as SQLSTATE 55P03.
+     * The origins of the chunks the reaper itself moved into {@code quarantineCollection}: the distinct
+     * {@code origin_collection} tags of its engine-owned rows (tag and both stamps agreeing, the same predicate the
+     * expiry function uses). The expiry reads the origin from the chunk, never by parsing the sibling's name, so a
+     * sibling whose name is not {@code quarantine-<origin>} (the Python client builds it from the origin's catalog
+     * row, which agrees with the name only for a conformant one) is still expired against the right manifest.
+     */
+    public List<String> taggedOrigins(String tenant, String quarantineCollection, int statementTimeoutMs) {
+        Field<String> by = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "quarantined_by");
+        Field<String> origin = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "origin_collection");
+        Field<String> stamp = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "quarantined_at");
+        Field<String> reaperStamp = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "reaper_quarantined_at");
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, 2_000);
+            // No ORDER BY: SELECT DISTINCT cannot order by an expression it rebinds. Sorted below instead.
+            return ctx.selectDistinct(origin).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(quarantineCollection))
+                    .and(by.eq("engine-reaper")).and(reaperStamp.eq(stamp)).and(origin.isNotNull()))
+                .fetch(origin).stream().sorted().toList();
+        });
+    }
+
+    /**
+     * The engine's expiry, for the chunks the reaper itself moved and no others: deletes at most {@code rowLimit}
+     * tagged chunks of {@code quarantineCollection} (origin {@code originCollection}) stamped at or before
+     * {@code cutoff} ({@code YYYY-MM-DDTHH:MM:SSZ}), never one a manifest row of the origin names. There is no
+     * fraction floor. Quarantine a client filled carries no tag and is not touched. Throws on a database error; a
+     * lock wait that times out surfaces as SQLSTATE 55P03 and a statement that hits its bound as 57014.
      */
     public Expiry expire(String tenant, String quarantineCollection, String originCollection, String cutoff,
-                         double floorFraction, int floorMinChunks, int statementTimeoutMs, int lockTimeoutMs) {
+                         int rowLimit, int statementTimeoutMs, int lockTimeoutMs) {
         var rec = tenantScope.withTenant(tenant, ctx -> {
             PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
             return ctx.selectFrom(REAPER_EXPIRE_QUARANTINE.call(
-                    tenant, quarantineCollection, originCollection, cutoff, floorFraction, floorMinChunks))
+                    tenant, quarantineCollection, originCollection, cutoff, rowLimit))
                .fetchOne();
         });
-        return new Expiry(rec.get(REAPER_EXPIRE_QUARANTINE.EXPIRED), rec.get(REAPER_EXPIRE_QUARANTINE.REFUSED),
-                          rec.get(REAPER_EXPIRE_QUARANTINE.PROTECTED_COUNT));
+        return new Expiry(rec.get(REAPER_EXPIRE_QUARANTINE.EXPIRED), rec.get(REAPER_EXPIRE_QUARANTINE.PROTECTED_COUNT));
     }
 
     private Pass call(String tenant, String collection, String quarantineCollection, String quarantinedAt,

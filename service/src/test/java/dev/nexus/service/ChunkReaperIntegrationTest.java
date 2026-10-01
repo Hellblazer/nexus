@@ -885,6 +885,30 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(inCollection(t2, c2, h2)).isTrue();
     }
 
+    /** Code L1: the supplier's order is the database's (SELECT DISTINCT has no ORDER BY); the reaper sorts. */
+    @Test
+    void tenantsAreVisitedInSortedOrder_whateverOrderTheSupplierReturnsThem() throws Exception {
+        String z = "zz" + seq.incrementAndGet();
+        String a = "aa" + seq.incrementAndGet();
+        openGate(z);
+        openGate(a);
+        String cz = col("knowledge");
+        String ca = col("knowledge");
+        orphan(z, cz, "x");
+        orphan(a, ca, "x");
+        java.util.concurrent.atomic.AtomicLong fakeNanos = new java.util.concurrent.atomic.AtomicLong();
+        ChunkReaper.Census slow = (tenant, collection, limit, timeout) -> {
+            fakeNanos.addAndGet(Duration.ofSeconds(20).toNanos());
+            return vectors.manifestLessCensusBounded(tenant, collection, limit, 0, timeout);
+        };
+
+        RunResult run = reaper(budgetOf(Duration.ofSeconds(10)), slow, fakeNanos::get, z, a).runOnce(Duration.ZERO);
+
+        assertThat(run.wallClockCut()).isTrue();
+        assertThat(run.tenant(a)).as("aa sorts first, so it is the one visited before the cut").isNotNull();
+        assertThat(run.tenant(z)).as("zz is the one left for the next pass").isNull();
+    }
+
     // ── refusals are durable ─────────────────────────────────────────────────
 
     private static final com.fasterxml.jackson.databind.ObjectMapper JSON = new com.fasterxml.jackson.databind.ObjectMapper();
@@ -1189,7 +1213,7 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         ChunkReaper.TenantResult result = r.runOnce(null).tenant(t);
 
         assertThat(result.expiry(q).expired()).isZero();
-        assertThat(result.expiry(q).refused()).isZero();
+        assertThat(result.expiry(q).refusal()).isNull();
         assertThat(result.expiry(q).protectedCount()).isZero();
         for (String h : clientMoved) assertThat(inCollection(t, q, h)).as("30 days old, client-moved: kept").isTrue();
         assertThat(auditRows(t, "reaper_expire_quarantine")).isEmpty();
@@ -1242,44 +1266,307 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(inCollection(t, q, thirtyOne.get(0))).as("outside it").isFalse();
     }
 
+    /**
+     * Sam, 2026-10-01: engine expiry has no fraction floor. 150 of 200 tagged chunks past the cutoff is what the
+     * old floor refused every hour forever; it must expire, audited, with no refusal anywhere.
+     */
     @Test
-    void theExpiryFloorRefusesAMassExpiry_visibly_andNeverForces() throws Exception {
+    void aMassExpiryOfTaggedChunksIsNotRefused_thereIsNoExpiryFloor() throws Exception {
         String t = newTenant();
         openGate(t);
         String origin = col("knowledge");
+        String q = quarantineOf(origin);
         List<String> old = quarantined(t, origin, "old", 150, 15, true);
-        quarantined(t, origin, "recent", 50, 1, false);   // 150 of 200 expire: over 0.25 and at least 100
+        List<String> recent = quarantined(t, origin, "recent", 50, 1, false);
         ChunkReaper r = reaper(t);
 
         ChunkReaper.TenantResult result = r.runOnce(null).tenant(t);
-        r.runOnce(null);
 
-        assertThat(result.expiry(quarantineOf(origin)).refusal()).isEqualTo(Refusal.EXPIRY_REFUSED);
-        assertThat(result.expiry(quarantineOf(origin)).expired()).isZero();
-        assertThat(result.expiry(quarantineOf(origin)).refused()).isEqualTo(150);
-        assertThat(countIn(t, quarantineOf(origin))).as("nothing deleted").isEqualTo(200);
-        assertThat(inCollection(t, quarantineOf(origin), old.get(0))).isTrue();
-        assertThat(refusedRows(t)).as("once, not every hour").singleElement().satisfies(a -> {
-            assertThat(a.collection()).isEqualTo(quarantineOf(origin));
-            assertThat(a.details()).contains("EXPIRY_REFUSED");
-        });
-        assertThat(r.refusedTotal()).as("counted each pass").isEqualTo(2);
+        assertThat(result.expiry(q).expired()).isEqualTo(150);
+        assertThat(result.expiry(q).refusal()).isNull();
+        assertThat(countIn(t, q)).as("the 50 recent chunks stay").isEqualTo(50);
+        for (String h : old) assertThat(inCollection(t, q, h)).isFalse();
+        for (String h : recent) assertThat(inCollection(t, q, h)).isTrue();
+        assertThat(refusedRows(t)).isEmpty();
+        assertThat(r.refusedTotal()).isZero();
+        assertThat(auditRows(t, "reaper_expire_quarantine")).singleElement().satisfies(a ->
+            assertThat(a.chashCount()).isEqualTo(150));
     }
 
+    /**
+     * The critique's S1 / code M1 test: a drain carried ALL THE WAY THROUGH to expiry. A collection that is 70%
+     * garbage is drained through the named move-floor exemption in three passes; fifteen days later the same
+     * engine expires every moved chunk in one pass, with nothing refused, and the origin keeps what it owns.
+     */
     @Test
-    void theExpiryFloorIsJudgedOnTheEnginesOwnRowsOnly_clientQuarantineDoesNotDiluteIt() throws Exception {
+    void aDrainCarriesAllTheWayThroughToExpiry_nothingWedgesAndEveryMovedChunkIsAudited() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String q = quarantineOf(c);
+        bulkFast(t, c, 1000, 300, i -> Map.of());   // 700 reapable of 1000, drained through the exemption
+        ChunkReaper drain = reaper(exempting(c), t);
+        assertThat(drain.runOnce(Duration.ZERO).tenant(t).collection(c).moved()).isEqualTo(300);
+        assertThat(drain.runOnce(Duration.ZERO).tenant(t).collection(c).moved()).isEqualTo(300);
+        assertThat(drain.runOnce(Duration.ZERO).tenant(t).collection(c).moved()).isEqualTo(100);
+        assertThat(countIn(t, q)).as("all 700 are in quarantine, tagged by the move").isEqualTo(700);
+        Instant fifteenDaysLater = CLOCK.instant().plus(Duration.ofDays(15));
+        ChunkReaper later = reaperAt(fifteenDaysLater, exempting(c), t);
+
+        ChunkReaper.TenantResult result = later.runOnce(Duration.ZERO).tenant(t);
+
+        assertThat(result.expiry(q).expired()).as("one pass takes all 700: no floor, no wedge").isEqualTo(700);
+        assertThat(result.expiry(q).refusal()).isNull();
+        assertThat(countIn(t, q)).isZero();
+        assertThat(countIn(t, c)).as("what the origin owns is untouched").isEqualTo(300);
+        assertThat(later.refusedTotal()).isZero();
+        assertThat(refusedRows(t)).isEmpty();
+        assertThat(auditRows(t, "reaper_expire_quarantine")).singleElement().satisfies(a -> {
+            assertThat(a.actor()).isEqualTo(ChunkReaper.ACTOR);
+            assertThat(a.chashCount()).isEqualTo(700);
+        });
+    }
+
+    /**
+     * Critique S6: the engine reads a chunk's origin from the chunk's own {@code origin_collection} tag. A sibling
+     * whose name is not {@code quarantine-<origin>} (the client builds names from the origin's catalog row, which
+     * agrees with the name only for a conformant one) is still expired against the right origin's manifest.
+     */
+    @Test
+    void theExpiryReadsTheOriginFromTheChunkTag_notFromTheSiblingsName() throws Exception {
         String t = newTenant();
         openGate(t);
         String origin = col("knowledge");
-        quarantined(t, origin, "old", 150, 15, true);
-        // 500 untagged rows would dilute 150/650 = 0.23 under the all-rows denominator and let the mass expiry
-        // through; the floor must see only the 150 + 0 recent tagged rows.
-        quarantined(t, origin, "client", 500, 1, false, false);
+        String sibling = "quarantine-" + col("knowledge");   // NOT quarantine-<origin>
+        String stamp = CLOCK.instant().minus(Duration.ofDays(15)).toString();
+        String hex = Chash.ofText(sibling + "/odd").toHex();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, origin);
+            PgContainerHelper.insertCollection(ctx, t, sibling);
+            PgContainerHelper.insertChunks(ctx, t, sibling, List.of(hex), List.of("odd"), List.of(new float[384]),
+                List.of(Map.of("quarantined_at", stamp, "origin_collection", origin,
+                    "quarantined_by", "engine-reaper", "reaper_quarantined_at", stamp)));
+        }
 
         ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
 
-        assertThat(result.expiry(quarantineOf(origin)).refusal()).isEqualTo(Refusal.EXPIRY_REFUSED);
-        assertThat(result.expiry(quarantineOf(origin)).expired()).isZero();
+        assertThat(result.expiry(sibling).expired()).isEqualTo(1);
+        assertThat(inCollection(t, sibling, hex)).isFalse();
+    }
+
+    /** Code L7: one expiry call is bounded; the rest wait for the next pass. */
+    @Test
+    void oneExpiryCallDeletesAtMostItsRowLimit_theRestWaitForTheNextCall() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        quarantined(t, origin, "old", 5, 15, true);
+        String cutoff = CLOCK.instant().minus(Duration.ofDays(14)).toString();
+
+        assertThat(store.expire(t, q, origin, cutoff, 2, 25_000, 2_000).expired()).isEqualTo(2);
+        assertThat(store.expire(t, q, origin, cutoff, 2, 25_000, 2_000).expired()).isEqualTo(2);
+        assertThat(store.expire(t, q, origin, cutoff, 2, 25_000, 2_000).expired()).isEqualTo(1);
+        assertThat(store.expire(t, q, origin, cutoff, 2, 25_000, 2_000).expired()).isZero();
+        assertThat(countIn(t, q)).isZero();
+    }
+
+    // ── the expiry DELETE re-checks every condition against the row's NEW version (code M3) ──
+
+    /**
+     * Run {@code store.expire} while a writer holds an uncommitted UPDATE on the one tagged, aged chunk (so the
+     * expiry's DELETE blocks on the row lock), then commit the writer: READ COMMITTED re-evaluates the DELETE's
+     * WHERE against the row's new version. Asserts the DELETE really was blocked (non-vacuity) and returns the
+     * outcome.
+     */
+    private ReaperRepository.Expiry expireWhileAWriterHolds(
+            String t, String origin, String hex,
+            java.util.function.Consumer<Map<String, Object>> mutateMetadata) throws Exception {
+        String cutoff = CLOCK.instant().minus(Duration.ofDays(14)).toString();
+        return whileAWriterHolds(t, origin, hex, mutateMetadata,
+            () -> store.expire(t, quarantineOf(origin), origin, cutoff, 100, 25_000, 5_000));
+    }
+
+    /** {@link #expireWhileAWriterHolds} for any call that deletes from the sibling. */
+    private <T> T whileAWriterHolds(String t, String origin, String hex,
+                                    java.util.function.Consumer<Map<String, Object>> mutateMetadata,
+                                    java.util.concurrent.Callable<T> call) throws Exception {
+        String q = quarantineOf(origin);
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try (Connection writer = svcDs.getConnection()) {
+            writer.setAutoCommit(false);
+            PgContainerHelper.setTenant(writer, TenantScope.DEFAULT_TENANT_GUC, t, true);
+            DSLContext w = DSL.using(writer, SQLDialect.POSTGRES);
+            var rowIs = CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(q))
+                .and(CHUNKS.CHASH.eq(Chash.fromHex(hex).toBytes()));
+            org.jooq.JSONB current = w.select(CHUNKS.METADATA).from(CHUNKS).where(rowIs).fetchOne(CHUNKS.METADATA);
+            Map<String, Object> metadata = JSON.readValue(current.data(),
+                new com.fasterxml.jackson.core.type.TypeReference<LinkedHashMap<String, Object>>() {});
+            mutateMetadata.accept(metadata);
+            w.update(CHUNKS).set(CHUNKS.METADATA, org.jooq.JSONB.jsonb(JSON.writeValueAsString(metadata)))
+                .where(rowIs).execute();
+            java.util.concurrent.Future<T> pending = pool.submit(call);
+            Thread.sleep(800);
+            assertThat(pending.isDone()).as("the DELETE is parked on the writer's row lock, not finished").isFalse();
+            writer.commit();
+            return pending.get(20, java.util.concurrent.TimeUnit.SECONDS);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void expiryRace_controlAWriterThatChangesNothingTheDeleteChecks_theChunkIsStillDeleted() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String hex = quarantined(t, origin, "x", 1, 15, true).get(0);
+
+        var out = expireWhileAWriterHolds(t, origin, hex, m -> m.put("note", "x"));
+
+        assertThat(out.expired()).as("the blocked DELETE proceeds after the commit").isEqualTo(1);
+        assertThat(inCollection(t, quarantineOf(origin), hex)).isFalse();
+    }
+
+    @Test
+    void expiryRace_aWriterThatRemovesTheTag_theChunkSurvives() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String hex = quarantined(t, origin, "x", 1, 15, true).get(0);
+
+        var out = expireWhileAWriterHolds(t, origin, hex, m -> m.remove("quarantined_by"));
+
+        assertThat(out.expired()).isZero();
+        assertThat(inCollection(t, quarantineOf(origin), hex)).as("no longer the engine's").isTrue();
+    }
+
+    @Test
+    void expiryRace_aWriterThatMakesTheStampsDisagree_theChunkSurvives() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String hex = quarantined(t, origin, "x", 1, 15, true).get(0);
+
+        var out = expireWhileAWriterHolds(t, origin, hex, m -> m.put("reaper_quarantined_at", "2026-09-30T00:00:00Z"));
+
+        assertThat(out.expired()).isZero();
+        assertThat(inCollection(t, quarantineOf(origin), hex)).isTrue();
+    }
+
+    @Test
+    void expiryRace_aWriterThatReMovesTheChunkAfterTheCutoff_theChunkSurvives() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String hex = quarantined(t, origin, "x", 1, 15, true).get(0);
+        String fresh = CLOCK.instant().toString();   // both stamps move together, as a reaper re-move writes them
+
+        var out = expireWhileAWriterHolds(t, origin, hex, m -> {
+            m.put("quarantined_at", fresh);
+            m.put("reaper_quarantined_at", fresh);
+        });
+
+        assertThat(out.expired()).isZero();
+        assertThat(inCollection(t, quarantineOf(origin), hex)).as("inside the retention window again").isTrue();
+    }
+
+    @Test
+    void expiryRace_aWriterThatChangesTheOrigin_theChunkSurvives() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String hex = quarantined(t, origin, "x", 1, 15, true).get(0);
+
+        String elsewhere = col("knowledge");
+        var out = expireWhileAWriterHolds(t, origin, hex, m -> m.put("origin_collection", elsewhere));
+
+        assertThat(out.expired()).isZero();
+        assertThat(inCollection(t, quarantineOf(origin), hex)).isTrue();
+    }
+
+    // ── the symmetric split: each side expires only what it moved (Sam, 2026-10-01) ──────
+
+    @Test
+    void eachSideExpiresOnlyWhatItMoved_theClientForceFlagCannotReachTheEnginesRows() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        List<String> engineMoved = quarantined(t, origin, "engine", 3, 40, true, true);
+        List<String> clientMoved = quarantined(t, origin, "client", 3, 40, false, false);
+        String clientCutoff = CLOCK.instant().minus(Duration.ofDays(30)).toString();
+
+        // The client's expiry, force and all: takes only the untagged rows.
+        var client = vectors.expireQuarantine(t, q, origin, clientCutoff, 0.25, 100, true);
+
+        assertThat(client.expired()).isEqualTo(3);
+        for (String h : clientMoved) assertThat(inCollection(t, q, h)).as("client-moved: the client's to expire").isFalse();
+        for (String h : engineMoved) assertThat(inCollection(t, q, h)).as("engine-moved: skipped by the client").isTrue();
+
+        // The engine's expiry: takes the tagged rows, and finds nothing else to take.
+        ChunkReaper.TenantResult result = reaper(t).runOnce(null).tenant(t);
+
+        assertThat(result.expiry(q).expired()).isEqualTo(3);
+        for (String h : engineMoved) assertThat(inCollection(t, q, h)).isFalse();
+        assertThat(countIn(t, q)).isZero();
+    }
+
+    /**
+     * The client's DELETE re-checks ownership too: a chunk the reaper (re-)moves between the client's read and its
+     * delete has fresh tags and is the engine's by the time the client's DELETE gets the row lock.
+     */
+    @Test
+    void theClientsDeleteRechecksOwnership_aChunkTheReaperTagsWhileItWaitsSurvives() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        String hex = quarantined(t, origin, "client", 1, 40, true, false).get(0);   // untagged: the client's to expire
+        String cutoff = CLOCK.instant().minus(Duration.ofDays(30)).toString();
+
+        var out = whileAWriterHolds(t, origin, hex, m -> {
+            m.put("quarantined_by", "engine-reaper");
+            m.put("reaper_quarantined_at", m.get("quarantined_at"));
+        }, () -> vectors.expireQuarantine(t, q, origin, cutoff, 0.99, 100, false));
+
+        assertThat(out.expired()).as("it was the client's when the client read it, the engine's by the delete").isZero();
+        assertThat(inCollection(t, q, hex)).isTrue();
+    }
+
+    @Test
+    void theClientsExpiryTreatsAStaleTagAsItsOwn_andItsFloorCountsOnlyItsOwnRows() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        // 9 engine-owned rows would hide a client mass-expiry under an all-rows denominator: 1 of 10 is 0.1, under
+        // the floor; 1 of 1 client rows is 1.0, over it.
+        quarantined(t, origin, "engine", 9, 40, true, true);
+        List<String> clientOne = quarantined(t, origin, "client", 1, 40, false, false);
+        String cutoff = CLOCK.instant().minus(Duration.ofDays(30)).toString();
+
+        var refused = vectors.expireQuarantine(t, q, origin, cutoff, 0.5, 1, false);
+
+        assertThat(refused.expired()).as("the floor judged the client's own 1 of 1").isZero();
+        assertThat(refused.refused()).isEqualTo(1);
+        assertThat(inCollection(t, q, clientOne.get(0))).isTrue();
+
+        // A stale tag (the stamps disagree: a client moved it again after the engine did) is the client's.
+        String stale = Chash.ofText(q + "/stale").toHex();
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), t, q, List.of(stale), List.of("stale"),
+                List.of(new float[384]), List.of(Map.of("quarantined_at", CLOCK.instant().minus(Duration.ofDays(35)).toString(),
+                    "origin_collection", origin, "quarantined_by", "engine-reaper",
+                    "reaper_quarantined_at", CLOCK.instant().minus(Duration.ofDays(50)).toString())));
+        }
+
+        var forced = vectors.expireQuarantine(t, q, origin, cutoff, 0.5, 1, true);
+
+        assertThat(forced.expired()).as("the untagged row and the stale-tagged row").isEqualTo(2);
+        assertThat(inCollection(t, q, stale)).isFalse();
+        assertThat(countIn(t, q)).as("the 9 engine-owned rows are all that is left").isEqualTo(9);
     }
 
     /** SIG-3: a past-cutoff chunk a manifest row still names is benign, and must not read as a refusal. */
@@ -1445,6 +1732,163 @@ class ChunkReaperIntegrationTest extends AtomicWriteTestBase {
         assertThat(r.runOnce(Duration.ZERO).tenant(t).collection(c).moved()).as("ceil(700 / 300) = 3 passes").isEqualTo(100);
         assertThat(countIn(t, c)).isEqualTo(300);
         assertThat(countIn(t, quarantineOf(c))).isEqualTo(700);
+    }
+
+    /** Code M2: collection names are per-tenant, so a bare name waives the floor everywhere; tenant/collection does not. */
+    @Test
+    void aTenantScopedExemptionWaivesTheFloorForThatTenantOnly_aBareNameWaivesItForEveryTenant() throws Throwable {
+        String a = newTenant();
+        String b = newTenant();
+        openGate(a);
+        openGate(b);
+        String c = col("knowledge");   // the SAME collection name in both tenants
+        bulkFast(a, c, 300, 200, i -> Map.of());
+        bulkFast(b, c, 300, 200, i -> Map.of());
+
+        RunResult scoped = reaper(exempting(a + "/" + c), a, b).runOnce(Duration.ZERO);
+
+        assertThat(scoped.tenant(a).collection(c).moved()).as("tenant a is named").isEqualTo(100);
+        assertThat(scoped.tenant(b).collection(c).refusal()).as("tenant b has the same name and is NOT exempt")
+            .isEqualTo(Refusal.FLOOR_EXCEEDED);
+        assertThat(countIn(b, c)).isEqualTo(300);
+
+        RunResult bare = reaper(exempting(c), a, b).runOnce(Duration.ZERO);
+
+        assertThat(bare.tenant(b).collection(c).moved()).as("a bare name waives it in every tenant").isEqualTo(100);
+    }
+
+    // ── a statement that hits its bound is a classified refusal, not a stack trace every hour (code review S8) ──
+
+    private static org.jooq.exception.DataAccessException statementTimeout() {
+        return new org.jooq.exception.DataAccessException("canceling statement due to statement timeout",
+            new java.sql.SQLException("canceling statement due to statement timeout", "57014"));
+    }
+
+    /** The real repository with the named statements replaced by one that raises a 57014 while {@code failing} says so. */
+    private ReaperRepository timingOutRepo(java.util.function.BooleanSupplier failing, String... statements) {
+        java.util.Set<String> which = java.util.Set.of(statements);
+        return new ReaperRepository(tenantScope) {
+            @Override
+            public Pass probe(String tenant, String collection, Duration grace, int statementTimeoutMs) {
+                if (which.contains("probe") && failing.getAsBoolean()) throw statementTimeout();
+                return super.probe(tenant, collection, grace, statementTimeoutMs);
+            }
+
+            @Override
+            public Pass move(String tenant, String collection, String quarantineCollection, String quarantinedAt,
+                             int rowLimit, Duration grace, double floorFraction, int floorMinChunks,
+                             int statementTimeoutMs, int lockTimeoutMs) {
+                if (which.contains("move") && failing.getAsBoolean()) throw statementTimeout();
+                return super.move(tenant, collection, quarantineCollection, quarantinedAt, rowLimit, grace,
+                    floorFraction, floorMinChunks, statementTimeoutMs, lockTimeoutMs);
+            }
+
+            @Override
+            public Expiry expire(String tenant, String quarantineCollection, String originCollection, String cutoff,
+                                 int rowLimit, int statementTimeoutMs, int lockTimeoutMs) {
+                if (which.contains("expire") && failing.getAsBoolean()) throw statementTimeout();
+                return super.expire(tenant, quarantineCollection, originCollection, cutoff, rowLimit,
+                    statementTimeoutMs, lockTimeoutMs);
+            }
+        };
+    }
+
+    private ChunkReaper reaperOver(ReaperRepository repository, String... tenants) {
+        return new ChunkReaper(repository, vectors, repo, gate, () -> List.of(tenants), Settings.defaults(), CLOCK);
+    }
+
+    private void assertTimeoutSequence(List<Refusal> seen) {
+        // Passes 1-3 time out (the third starts a 2 pass rest), 4-5 rest, 6 times out (4 pass rest).
+        assertThat(seen).containsExactly(
+            Refusal.STATEMENT_TIMED_OUT, Refusal.STATEMENT_TIMED_OUT, Refusal.STATEMENT_TIMED_OUT,
+            Refusal.STATEMENT_BACKOFF, Refusal.STATEMENT_BACKOFF, Refusal.STATEMENT_TIMED_OUT);
+    }
+
+    @Test
+    void aDryRunThatHitsItsBound_isARefusalWithTheCensusBackoff_notAnErrorEveryHour() throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String h = orphan(t, c, "x");
+        ChunkReaper r = reaperOver(timingOutRepo(() -> true, "probe"), t);
+
+        List<Refusal> seen = new ArrayList<>();
+        List<String> logs = captureLogs(() -> {
+            for (int i = 1; i <= 6; i++) seen.add(r.runOnce(Duration.ZERO).tenant(t).collection(c).refusal());
+        });
+
+        assertTimeoutSequence(seen);
+        assertThat(r.statementTimedOutTotal()).isEqualTo(4);
+        assertThat(r.statementBackoffTotal()).isEqualTo(2);
+        assertThat(r.refusedTotal()).as("a rest is a skip, not a refusal").isEqualTo(4);
+        assertThat(refusedRows(t)).as("one durable audit row for the state").singleElement().satisfies(a ->
+            assertThat(a.details()).contains("STATEMENT_TIMED_OUT").contains("probe"));
+        assertThat(logs).as("no collection_failed stack trace").noneMatch(l -> l.contains("event=reaper_collection_failed"));
+        assertThat(inCollection(t, c, h)).isTrue();
+    }
+
+    @Test
+    void aMoveThatHitsItsBound_isClassifiedTheSameWay() throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        String h = orphan(t, c, "x");
+        ChunkReaper r = reaperOver(timingOutRepo(() -> true, "move"), t);
+
+        List<Refusal> seen = new ArrayList<>();
+        List<String> logs = captureLogs(() -> {
+            for (int i = 1; i <= 6; i++) seen.add(r.runOnce(Duration.ZERO).tenant(t).collection(c).refusal());
+        });
+
+        assertTimeoutSequence(seen);
+        assertThat(refusedRows(t)).singleElement().satisfies(a -> assertThat(a.details()).contains("move"));
+        assertThat(logs).noneMatch(l -> l.contains("event=reaper_collection_failed"));
+        assertThat(inCollection(t, c, h)).as("nothing moved").isTrue();
+    }
+
+    @Test
+    void anExpiryThatHitsItsBound_isAClassifiedRefusalUnderTheSiblingsName_andRests() throws Throwable {
+        String t = newTenant();
+        openGate(t);
+        String origin = col("knowledge");
+        String q = quarantineOf(origin);
+        List<String> old = quarantined(t, origin, "old", 2, 15, true);
+        ChunkReaper r = reaperOver(timingOutRepo(() -> true, "expire"), t);
+
+        List<Refusal> seen = new ArrayList<>();
+        List<String> logs = captureLogs(() -> {
+            for (int i = 1; i <= 6; i++) seen.add(r.runOnce(null).tenant(t).expiry(q).refusal());
+        });
+
+        assertTimeoutSequence(seen);
+        assertThat(r.statementTimedOutTotal()).isEqualTo(4);
+        assertThat(r.statementBackoffTotal()).isEqualTo(2);
+        assertThat(refusedRows(t)).singleElement().satisfies(a -> {
+            assertThat(a.collection()).as("filed under the quarantine- name").isEqualTo(q);
+            assertThat(a.details()).contains("STATEMENT_TIMED_OUT");
+        });
+        assertThat(logs).noneMatch(l -> l.contains("event=reaper_expire_failed"));
+        assertThat(countIn(t, q)).as("nothing deleted").isEqualTo(2);
+        assertThat(inCollection(t, q, old.get(0))).isTrue();
+    }
+
+    @Test
+    void aStatementThatCompletesEndsItsTimeoutStreak() throws Exception {
+        String t = newTenant();
+        openGate(t);
+        String c = col("knowledge");
+        bulkFast(t, c, 3, 2, i -> Map.of());   // one orphan, and two owned chunks that keep the collection listed after it moves
+        java.util.concurrent.atomic.AtomicInteger n = new java.util.concurrent.atomic.AtomicInteger();
+        // Timeouts on passes 1, 2, 4 and 5; pass 3 completes. Without the reset the 4th would be the third in a row.
+        ChunkReaper r = reaperOver(timingOutRepo(() -> n.incrementAndGet() != 3, "probe"), t);
+
+        List<Refusal> seen = new ArrayList<>();
+        for (int i = 1; i <= 5; i++) seen.add(r.runOnce(Duration.ZERO).tenant(t).collection(c).refusal());
+
+        assertThat(seen).as("no rest was ever started").doesNotContain(Refusal.STATEMENT_BACKOFF);
+        assertThat(seen.get(0)).isEqualTo(Refusal.STATEMENT_TIMED_OUT);
+        assertThat(seen.get(3)).isEqualTo(Refusal.STATEMENT_TIMED_OUT);
+        assertThat(r.statementTimedOutTotal()).isEqualTo(4);
     }
 
     // ── census timeouts back off; a pathological collection cannot starve the rest ────────

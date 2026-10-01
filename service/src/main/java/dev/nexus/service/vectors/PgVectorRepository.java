@@ -3984,6 +3984,13 @@ FROM scope s
      * Carries the nexus-mr89x safety floor verbatim (see the catalog-023
      * changelog header): {@code refused &gt; 0} means the floor fired and
      * nothing was deleted.
+     *
+     * <p>This is the CLIENT's expiry (nx index repo). Since vectors-026 it skips
+     * the rows the engine reaper moved (metadata {@code quarantined_by =
+     * engine-reaper} with {@code reaper_quarantined_at} equal to
+     * {@code quarantined_at}) and judges its floor on the untagged rows only,
+     * {@code force} included; the engine expires its own rows with
+     * {@code reaper_expire_quarantine} (vectors-024-2).
      */
     public record ExpireOutcome(long expired, long refused) {}
 
@@ -3997,8 +4004,7 @@ FROM scope s
     /**
      * {@link #expireQuarantine(String, String, String, String, double, int, boolean)} with a statement bound
      * ({@code statementTimeoutMs > 0}; 0 is no bound), set as its own statement before the call. The periodic
-     * reaper calls this on the shared scheduler thread, where an unbounded scan of a large quarantine sibling must
-     * not stall the rest of the sweep.
+     * reaper no longer calls this (it expires with {@code reaper_expire_quarantine}); the HTTP route passes 0.
      */
     public ExpireOutcome expireQuarantine(String tenant, String quarantineCollection, String originCollection,
                                            String cutoff, double floorFraction, int floorMinChunks,

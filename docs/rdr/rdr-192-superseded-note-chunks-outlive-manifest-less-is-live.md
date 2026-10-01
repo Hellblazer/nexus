@@ -1241,10 +1241,11 @@ delete a chunk the run is about to reference. So:
 
 Amendment (Sam, 2026-10-01; T2 `nexus/rdr-192-reaper-quarantine-decision-2026-10-01`):
 the reaper QUARANTINES; it does not hard-delete. A reapable chunk moves to its
-quarantine sibling, restorable for 14 days and then expired by the existing
-`gc_expire_quarantine`, for every prefix. The reaper's statement carries
+quarantine sibling, restorable for 14 days and then expired (as built: by the engine's
+own `reaper_expire_quarantine`, not the existing `gc_expire_quarantine`; see "As built"
+below), for every prefix. The reaper's statement carries
 `chunk_is_reapable(..., NULL)` in its own predicate (no list-then-delete-by-id) and
-writes the `gc_audit` rows. Two requirements follow, and neither exists yet.
+writes the `gc_audit` rows. Two requirements follow; both are built (see "As built").
 
 - A FLOOR ON THE MOVE. A pass that would take more than a configured fraction of a
   collection is refused and reported, with `NX_GC_FLOOR_FRACTION` semantics (default
@@ -1259,6 +1260,44 @@ writes the `gc_audit` rows. Two requirements follow, and neither exists yet.
   sibling); measure the predicate scan at `code__1-1` scale and put a statement timeout
   on it before an hourly run; update the RDR-223 Day-2 baseline for the one-shot cliff at
   deploy + 30 days; and `nexus-z0o2p.27` (staging promote) lands in the same cut.
+
+As built (nexus-2x9xa, rounds 3 and 4; Sam's rulings of 2026-10-01; text only, no status
+change). Where this step says the reaper's quarantine is "expired by the existing
+`gc_expire_quarantine`", the design that shipped is:
+
+- Every chunk the reaper moves is tagged in its metadata, `quarantined_by =
+  'engine-reaper'` and `reaper_quarantined_at` equal to the `quarantined_at` stamp the
+  move wrote. The stamp is stored twice on purpose: the restore functions strip only
+  `quarantined_at` and `origin_collection`, and a client that moves a restored chunk
+  again writes a NEW `quarantined_at`, so the stamps disagree and the chunk is the
+  client's, not the engine's.
+- The engine expires with its own function, `nexus.reaper_expire_quarantine`
+  (`vectors-024-2`), and only chunks that carry a valid tag, after
+  `NX_REAPER_QUARANTINE_RETENTION_DAYS` (default 14, 1 to 3650). It rechecks the
+  manifest at expiry (a chunk a manifest row of the origin names is never deleted, and
+  is counted as `expiry_protected`), writes one `reaper_expire_quarantine` `gc_audit` row
+  naming the deleted chashes, and deletes at most 5,000 rows per origin per pass.
+- **There is NO fraction floor on engine expiry.** An earlier build judged a floor on
+  the tagged rows and it wedged every drain (a burst of 100 or more moved chunks ages out
+  together and is all of the tagged rows). The floor on the MOVE stays; what protects a
+  wrongly moved chunk is the manifest recheck, the retention window, the audit row and the
+  restore verb. This supersedes this step's "same floor semantics" for expiry.
+- **The split is symmetric** (`vectors-026`): the client's expiry, `gc_expire_quarantine`
+  (what `nx index repo` calls, and the `gc/expire-quarantine` route with or without
+  `force`), skips tagged rows and deletes only untagged, client-moved rows, with its floor
+  judged on those rows alone. Each side expires only what it moved.
+- Two settings beyond the interval: `NX_REAPER_QUARANTINE_RETENTION_DAYS`, and
+  `NX_REAPER_FLOOR_EXEMPT_COLLECTIONS` (`tenant/collection` entries, or a bare collection
+  name that matches in every tenant), which waives the MOVE floor for the named
+  collections only, logged at boot and on every pass that uses it, so a collection that is
+  legitimately mostly garbage can be drained at 300 chunks per pass.
+- The restore verb, `nx t3 quarantine restore`, is bead `nexus-wbfpw.49` and must be in
+  the deployed engine before the first drain at deploy + 30 days.
+- The decision on `nexus.chunks.last_written_at` (the 2026-09-30 comment's item 8, whether
+  to drop the column once `nexus-z0o2p.24` refuses ownerless writes): KEEP. It is the only
+  clock for a chunk that never had an owner (the debris of a crashed multi-request run,
+  which `nexus-z0o2p.24` does not prevent), and `chunk_is_reapable`'s grace is
+  `GREATEST(last_written_at, chunk_orphaned_at)`.
 
 The post-commit-sweep-failure debris the reaper exists for is therefore reaped 30 days
 after the failure, not on the next pass, and the MVV (b) reaper test injects a grace of
@@ -1284,7 +1323,7 @@ still return.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by `gc_expire_quarantine`) under a fraction floor on the move (Sam, 2026-10-01; Step 9) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk |
+| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by the engine's `reaper_expire_quarantine` for chunks the reaper moved and by the client's `gc_expire_quarantine` for chunks the client moved) under a fraction floor on the move and none on expiry (Sam, 2026-10-01; Step 9) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk |
 
 ### New Dependencies
 
@@ -1478,3 +1517,14 @@ To be completed at gate (Layer 3 AI critique).
   consequence table is added. (5) The listing route accepts an unclamped `grace_seconds`
   and is advisory below the default; its equality with the gc functions holds only when
   the grace is absent.
+- 2026-10-01: Step 9 widened to the reaper as built (nexus-2x9xa rounds 3 and 4; T2
+  `nexus/review-reaper-2x9xa-round3-critique` S4, `-round3-code` M1; Sam's two rulings of
+  2026-10-01; text only, no status change). The engine expires only the chunks it tagged,
+  with its own `reaper_expire_quarantine`, after `NX_REAPER_QUARANTINE_RETENTION_DAYS`; there
+  is NO fraction floor on that expiry (it wedged every drain), the floor on the move stays;
+  the client's `gc_expire_quarantine` skips tagged rows in turn (`vectors-026`), so each side
+  expires only what it moved; `NX_REAPER_FLOOR_EXEMPT_COLLECTIONS` waives the move floor for
+  named collections; the restore verb is `nexus-wbfpw.49`. The `last_written_at` column is
+  kept (the only clock for a chunk that never had an owner). The first line of Step 9 that
+  says the quarantine is "expired by the existing `gc_expire_quarantine`" and the Day-2
+  table row are corrected in place.

@@ -137,4 +137,19 @@ class ChunkReaperSettingsTest {
             " code__a__m__v1 , ,docs__b__m__v1,quarantine-code__a__m__v1 ")).floorExemptCollections())
             .containsExactlyInAnyOrder("code__a__m__v1", "docs__b__m__v1");
     }
+
+    /** Code M2: an entry may name its tenant, and then it waives the floor for that tenant only. */
+    @Test
+    void aFloorExemptionEntryMayNameItsTenant_andThenMatchesThatTenantOnly() {
+        ChunkReaper.Settings s = of(Map.of(ChunkReaper.FLOOR_EXEMPT_COLLECTIONS_ENV,
+            "t1/code__a__m__v1, docs__b__m__v1, t2/quarantine-code__a__m__v1, /code__c__m__v1, t3/"));
+
+        assertThat(s.floorExemptCollections())
+            .as("quarantine collections, an empty tenant and an empty collection are dropped")
+            .containsExactlyInAnyOrder("t1/code__a__m__v1", "docs__b__m__v1");
+        assertThat(s.isFloorExempt("t1", "code__a__m__v1")).isTrue();
+        assertThat(s.isFloorExempt("t2", "code__a__m__v1")).as("another tenant, same collection name").isFalse();
+        assertThat(s.isFloorExempt("t1", "docs__b__m__v1")).as("a bare name matches every tenant").isTrue();
+        assertThat(s.isFloorExempt("t9", "docs__b__m__v1")).isTrue();
+    }
 }

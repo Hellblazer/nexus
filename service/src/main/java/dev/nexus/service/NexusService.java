@@ -709,7 +709,8 @@ public final class NexusService {
         // fail-open paths and keeps no drop set. It quarantines, never hard-deletes. Tenants are the ones the T1
         // sweep visits: the default tenant plus every token-bearing tenant (nexus.chunks is FORCE RLS, so a
         // tenant cannot be enumerated from the chunks table itself).
-        // The same pass also expires the quarantine it fills (gc_expire_quarantine, 14 days), so ONE kill switch
+        // The same pass also expires the quarantine it filled (reaper_expire_quarantine, 14 days, only the chunks
+        // it tagged; the client's gc_expire_quarantine skips those in turn), so ONE kill switch
         // (NX_REAPER_ENABLED) and ONE wall-clock budget cover both. The first pass runs ChunkReaper.INITIAL_DELAY
         // after boot, not a full interval: an engine that restarts more often than hourly must still reap.
         ChunkReaper.Settings reaperSettings = ChunkReaper.Settings.fromEnv(System::getenv);

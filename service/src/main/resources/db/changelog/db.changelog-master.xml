@@ -1686,11 +1686,21 @@
         a fraction floor on the move, quarantine (never a hard delete), an
         actor 'engine-reaper' gc_audit row, and a quarantined_by tag on every moved
         chunk; and nexus.reaper_expire_quarantine, the engine's expiry of ONLY the
-        chunks that carry that tag. There is no vectors-023: the orphaning-stamp
+        chunks that carry that tag, with no fraction floor (Sam, 2026-10-01). There is no vectors-023: the orphaning-stamp
         rework (nexus-wbfpw.15) shipped as vectors-021 and vectors-022. Placed after
         vectors-022, before the grants blocks.
     -->
     <include file="db/changelog/vectors-024-reaper-quarantine-chunks.xml"/>
+
+    <!--
+        nexus-2x9xa: the other half of the symmetric expiry split. gc_expire_quarantine
+        (a released function, catalog-033-3) skips the rows the reaper tagged, so the
+        client expires only what the client moved and the engine only what it moved.
+        New changeset, never an edit of the released one. vectors-025 is the restore
+        verb's (nexus-wbfpw.49) and vectors-023 is reserved; this is 026. Placed after
+        vectors-024, before the grants blocks.
+    -->
+    <include file="db/changelog/vectors-026-gc-expire-quarantine-skips-engine-rows.xml"/>
 
     <!--
         RDR-223 Phase 3 step 2 (nexus-z0o2p.27): DROP the staging landing
