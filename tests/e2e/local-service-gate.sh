@@ -310,6 +310,10 @@ source "$REPO_ROOT/scripts/lib/release-props-lease.sh"   # nexus-56qvf: holds th
 GATE_HOME="$SCRATCH/home"
 fence_home "$REAL_HOME" "$GATE_HOME" ".config/nexus"
 export HOME="$GATE_HOME"
+# nexus-q81g7: the service manager is not isolated by HOME. Empty
+# XDG_RUNTIME_DIR / no bus address (Linux) and NX_FENCED_HOME, which makes every
+# `nx` this gate spawns refuse mutating launchctl/systemctl verbs.
+fence_home_env "$GATE_HOME"
 # uv resolves its cache off HOME at process start; pin it explicitly so the
 # mirror is not the only thing between this gate and a cold 250-package
 # resolve.

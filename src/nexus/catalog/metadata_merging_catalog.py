@@ -20,47 +20,11 @@ Every other attribute is the wrapped writer's.
 """
 from __future__ import annotations
 
-import json
 from typing import Any, Callable
 
+from nexus.catalog.write_outcome import may_have_written
+
 __all__ = ["MetadataMergingCatalog"]
-
-
-def _may_have_written(exc: BaseException) -> bool:
-    """False only when EVERY exception in *exc*'s cause/context chain positively means its attempt
-    wrote nothing; an unknown failure is treated as possibly written, since the cost of a wrong
-    "written" is a leftover failed registration a rerun heals, and the cost of a wrong "not written"
-    is a rollback of chunks that landed.
-
-    The whole chain is judged, not the outermost exception. The refreshable client retries once from
-    inside its own ``except`` block, so when attempt 1 committed and its response was reset, and the
-    retry then fails cleanly (a connect error while the service restarts, a 401), the exception that
-    propagates is the retry's, with attempt 1's as its ``__context__``. The retry's clean refusal says
-    nothing about attempt 1. Same rule as ``note_write._judge``."""
-    seen: set[int] = set()
-    pending: list[BaseException] = [exc]
-    while pending:
-        cur = pending.pop()
-        if id(cur) in seen:
-            continue
-        seen.add(id(cur))
-        if _attempt_may_have_written(cur):
-            return True
-        pending.extend(n for n in (cur.__cause__, cur.__context__) if n is not None)
-    return False
-
-
-def _attempt_may_have_written(exc: BaseException) -> bool:
-    """One exception on its own: False only for a failure that positively means nothing was written."""
-    import httpx  # noqa: PLC0415 — deferred: keeps the module import light
-
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)):
-        return False
-    if isinstance(exc, httpx.HTTPStatusError):
-        return not (400 <= exc.response.status_code < 500 and exc.response.status_code != 408)
-    if isinstance(exc, json.JSONDecodeError):  # a ValueError, but of the ANSWER: the write happened
-        return True
-    return not isinstance(exc, (ValueError, TypeError))
 
 
 class MetadataMergingCatalog:
@@ -107,7 +71,7 @@ class MetadataMergingCatalog:
         try:
             resp = send()
         except BaseException as exc:
-            if _may_have_written(exc):
+            if may_have_written(exc):
                 self._report()
             raise
         failed = set(resp.get("failed_doc_ids") or ()) if isinstance(resp, dict) else set()

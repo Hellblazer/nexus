@@ -26,6 +26,7 @@ cannot depend on a Python import.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 #: Set when a fence is installed, so xdist WORKERS (which inherit the fenced
@@ -42,35 +43,109 @@ REAL_HOME_ENV = "NX_REAL_HOME"
 FENCED_HOME_ENV = "NX_FENCED_HOME"
 
 
-def fence_home(real_home: Path, gate_home: Path, shadow: str = ".config/nexus") -> Path:
-    """Symlink every entry of *real_home* into *gate_home*, shadowing *shadow*.
+#: The OS autostart-unit directories (nexus-q81g7): ``~/.config/systemd`` (the
+#: user units, drop-ins included) and ``~/Library/LaunchAgents``. Passed
+#: through, a test's HOME resolves to the operator's REAL unit files, so
+#: ``upgrade_finish.converge_service_autostart_unit`` finds a real
+#: ``nexus-service.service`` / ``com.nexus.service.plist``, sees drift against
+#: the fenced render, and the human path (``nx daemon restart-stale``) backs it
+#: up, disables it, rewrites it and enables it against the real user manager.
+#: That destroyed qwentescence's real unit on 2026-09-30.
+AUTOSTART_SHADOWS: tuple[str, ...] = (".config/systemd", "Library/LaunchAgents")
 
-    The first component of *shadow* is recreated as a real directory whose own
-    entries are symlinked through except the leaf, which becomes a fresh empty
-    directory. Returns *gate_home*.
+#: Writers a mirrored entry would let a test reach (the q81g7 critique, S2):
+#: ``~/.local/state/nexus`` (hook ledgers, ``~/.local/state`` log dir),
+#: ``~/.claude/agents`` (``nx agents install`` writes ``worktree-developer.md``)
+#: and ``~/.claude/projects`` (``command_context`` memory). Two components.
+INTERIM_SHADOWS: tuple[str, ...] = (".local/state", ".claude/agents", ".claude/projects")
+
+#: Credential stores are NEVER mirrored, so a fenced run holds none of them:
+#: shadowed by an empty directory at the top level, or one level down for the
+#: two under ``.config``. (A separate bead inverts the whole fence to
+#: shadow-everything with a measured allowlist; this is the interim floor.)
+CREDENTIAL_SHADOWS: tuple[str, ...] = (
+    ".aws", ".gnupg", ".kube", ".ssh", ".config/gh", ".config/op",
+)
+
+#: Every shadow applied whatever the caller names. Both twins carry this list
+#: (``FENCE_ALWAYS_SHADOWS`` in ``fence_home.sh``); ``test_fence_home_twins_agree``
+#: pins the two together.
+ALWAYS_SHADOWS: tuple[str, ...] = (*AUTOSTART_SHADOWS, *INTERIM_SHADOWS, *CREDENTIAL_SHADOWS)
+
+
+def fence_home(real_home: Path, gate_home: Path, shadow: str = ".config/nexus") -> Path:
+    """Symlink every entry of *real_home* into *gate_home*, shadowing *shadow*
+    and :data:`ALWAYS_SHADOWS`.
+
+    A shadow is ``<top>/<leaf>`` or a bare ``<top>``. A bare ``top`` becomes an
+    empty real directory. For ``<top>/<leaf>`` the ``top`` is recreated as a
+    real directory whose own entries are symlinked through except the shadowed
+    leaves, which become fresh empty directories. Returns *gate_home*.
     """
-    shadow_top, _, shadow_leaf = shadow.partition("/")
+    whole: set[str] = set()
+    leaves_by_top: dict[str, set[str]] = {}
+    for rel in (shadow, *ALWAYS_SHADOWS):
+        top, sep, leaf = rel.partition("/")
+        if sep:
+            leaves_by_top.setdefault(top, set()).add(leaf)
+        else:
+            whole.add(top)
+
     gate_home.mkdir(parents=True, exist_ok=True)
-    (gate_home / shadow_top).mkdir(parents=True, exist_ok=True)
+    for top in (*whole, *leaves_by_top):
+        (gate_home / top).mkdir(parents=True, exist_ok=True)
 
     for entry in sorted(real_home.iterdir()):
-        if entry.name == shadow_top:
+        if entry.name in whole or entry.name in leaves_by_top:
             continue
         link = gate_home / entry.name
         if not link.exists() and not link.is_symlink():
             link.symlink_to(entry)
 
-    real_top = real_home / shadow_top
-    if real_top.is_dir():
-        for entry in sorted(real_top.iterdir()):
-            if entry.name == shadow_leaf:
-                continue
-            link = gate_home / shadow_top / entry.name
-            if not link.exists() and not link.is_symlink():
-                link.symlink_to(entry)
-
-    (gate_home / shadow).mkdir(parents=True, exist_ok=True)
+    for top, leaves in leaves_by_top.items():
+        real_top = real_home / top
+        if real_top.is_dir():
+            for entry in sorted(real_top.iterdir()):
+                if entry.name in leaves:
+                    continue
+                link = gate_home / top / entry.name
+                if not link.exists() and not link.is_symlink():
+                    link.symlink_to(entry)
+        for leaf in leaves:
+            (gate_home / top / leaf).mkdir(parents=True, exist_ok=True)
     return gate_home
+
+
+def fence_manager_env(gate_home: Path) -> None:
+    """Make the OS user service manager unreachable from this process tree.
+
+    ``systemctl --user`` finds the user manager through
+    ``$XDG_RUNTIME_DIR/systemd/private`` and ``$XDG_RUNTIME_DIR/bus``, or
+    ``$DBUS_SESSION_BUS_ADDRESS``. An empty runtime dir and no bus address make
+    every ``systemctl --user`` fail to connect, as on a CI runner. Set
+    unconditionally, not setdefault: an inherited real value is the hazard.
+
+    LINUX ONLY (the q81g7 critique, S6): macOS has no consumer of the variable
+    but ``_mineru_spawn``'s output root, which it would only redirect. Rootless
+    docker/podman keep their socket in ``$XDG_RUNTIME_DIR``, so a real
+    ``docker.sock`` there is pinned into ``DOCKER_HOST`` first (an existing
+    ``DOCKER_HOST`` is never touched) or Testcontainers would lose its daemon.
+    launchd has no env seam; on macOS the LaunchAgents shadow plus
+    ``nexus.daemon.installer``'s manager tripwire are the fence.
+
+    Twin of ``fence_home_env`` in ``tests/e2e/lib/fence_home.sh``.
+    """
+    os.environ.pop("DBUS_SESSION_BUS_ADDRESS", None)
+    if not sys.platform.startswith("linux"):
+        return
+    real_runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not os.environ.get("DOCKER_HOST") and real_runtime:
+        sock = Path(real_runtime) / "docker.sock"
+        if sock.is_socket():
+            os.environ["DOCKER_HOST"] = f"unix://{sock}"
+    runtime = gate_home / "xdg-runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    os.environ["XDG_RUNTIME_DIR"] = str(runtime)
 
 
 def install_fence(gate_home: Path, shadow: str = ".config/nexus") -> Path | None:
@@ -88,6 +163,7 @@ def install_fence(gate_home: Path, shadow: str = ".config/nexus") -> Path | None
     os.environ[REAL_HOME_ENV] = str(real_home)
     os.environ[FENCED_HOME_ENV] = str(gate_home)
     os.environ["HOME"] = str(gate_home)
+    fence_manager_env(gate_home)
     # THE INSTALL LAYOUT IS FENCED SEPARATELY. The wholesale `.local` link
     # below shares the REAL layout too: <real>/.local/share/nexus/tools (the
     # generations, since nexus-utpuw), <real>/.local/bin (the shims) and

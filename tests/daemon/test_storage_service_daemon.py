@@ -4002,7 +4002,7 @@ class TestStaleChangelogLockCleanup:
                     stdout="4242|t\n4343|t\n",
                     stderr="",
                 )
-            if "UPDATE databasechangeloglock" in sql:
+            if "UPDATE public.databasechangeloglock" in sql:
                 return _sp.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
             raise AssertionError(f"unexpected SQL: {sql}")
 

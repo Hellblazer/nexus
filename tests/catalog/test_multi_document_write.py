@@ -422,3 +422,212 @@ def test_the_writer_totals_the_engines_sweep_skips_over_the_run():
                  {_c(1): _chunk(_c(1)), _c(2): _chunk(_c(2))})
     w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(3)))}, {_c(3): _chunk(_c(3))})
     assert w.sweep_skipped == 3          # write_many of the multi group, of the single group, one append
+
+
+# ── request_may_have_written: every ATTEMPT of a DATA request, nothing else (nexus-z0o2p.34) ───────
+
+
+class _FlakyCat(FakeCat):
+    """A FakeCat whose named operation raises the given exceptions, one per call, before it answers."""
+
+    def __init__(self, op: str, *errors: BaseException, **kw):
+        super().__init__(**kw)
+        self._op, self._errors = op, list(errors)
+
+    def _maybe(self, op: str) -> None:
+        if op == self._op and self._errors:
+            raise self._errors.pop(0)
+
+    def begin_index_run_many(self, docs, collection, *, snapshot_manifest=False):
+        self._maybe("begin")
+        return super().begin_index_run_many(docs, collection, snapshot_manifest=snapshot_manifest)
+
+    def write_manifest_many(self, docs, complete=None, **kw):
+        self._maybe("write")
+        return super().write_manifest_many(docs, complete, **kw)
+
+    def append_manifest_many(self, docs, **kw):
+        self._maybe("append")
+        return super().append_manifest_many(docs, **kw)
+
+
+def _httpx_errors():
+    import httpx
+
+    req = httpx.Request("POST", "http://engine.invalid/v1/catalog/manifest/write_many")
+    return httpx.ReadError("dropped", request=req), httpx.ConnectError("refused", request=req)
+
+
+def test_every_attempt_of_a_data_request_is_judged_not_only_the_last(monkeypatch):
+    """A dropped connection followed by refused reconnects is one request that may have reached the
+    engine: the retry wrapper re-raises only the LAST error (a connect error, 'never made'), so the
+    writer must have seen the first attempt's in-flight error itself."""
+    import pytest as _pytest
+
+    monkeypatch.setattr("nexus.retry.time.sleep", lambda s: None)
+    read_error, connect_error = _httpx_errors()
+    cat = _FlakyCat("write", read_error, connect_error, connect_error, connect_error, connect_error)
+    w = _writer(cat)
+    _doc(w, "1.1.1", 1)
+    with _pytest.raises(Exception):
+        w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert w.request_may_have_written() is True
+
+
+def test_a_request_that_never_left_does_not_count_as_in_flight(monkeypatch):
+    import pytest as _pytest
+
+    monkeypatch.setattr("nexus.retry.time.sleep", lambda s: None)
+    _read_error, connect_error = _httpx_errors()
+    cat = _FlakyCat("write", *[connect_error] * 8)
+    w = _writer(cat)
+    _doc(w, "1.1.1", 1)
+    with _pytest.raises(Exception):
+        w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert w.request_may_have_written() is False
+
+
+def test_a_begin_the_old_engine_failed_after_answering_wrote_nothing_so_phantoms_may_go():
+    """EngineOlderThanClientError from begin_index_run_many is raised after the engine answered, which
+    the classifier calls in flight; but a begin carries no rows or chunks, so nothing can have been
+    written and the documents the import registered must be removable."""
+    import pytest as _pytest
+
+    cat = _FlakyCat("begin", EngineOlderThanClientError("begin_index_run_many: the engine predates the snapshot"))
+    w = _writer(cat)
+    _doc(w, "1.1.1", 1)
+    with _pytest.raises(EngineOlderThanClientError):
+        w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert w.request_may_have_written() is False
+
+
+def test_a_failed_stamp_only_request_does_not_make_the_run_look_in_flight(monkeypatch):
+    """A stamp-only append_many carries no rows, so it cannot have created a phantom document."""
+    import pytest as _pytest
+
+    monkeypatch.setattr("nexus.retry.time.sleep", lambda s: None)
+    read_error, _connect = _httpx_errors()
+    cat = _FlakyCat("append", *[read_error] * 8)
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    with _pytest.raises(Exception):
+        w.complete_documents(res.landed)
+    assert w.request_may_have_written() is False
+
+
+# ── defer_completion (nexus-z0o2p.34): the stamp is the caller's, after its hooks ─────────────────
+
+
+def test_a_deferred_writer_sends_no_stamp_with_a_data_request_and_lists_the_documents_it_owes():
+    cat = FakeCat(prior={"1.1.1": [_c(50)]})
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 2)
+    _doc(w, "1.1.2", 1)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(2))), "1.1.2": _rows(w, "1.1.2", (0, _c(3)))},
+                       {_c(2): _chunk(_c(2)), _c(3): _chunk(_c(3))})
+    # Neither the single-request document (write_many, sweep on) nor the last append stamped.
+    assert [c["complete"] for op, c in cat.calls if op in ("write_many", "append_many")] == [None, None, None]
+    assert sorted(res.landed) == ["1.1.1", "1.1.2"] and res.finished == []
+    # The last append still carried the deferred sweep; only the stamp waits.
+    assert [c for op, c in cat.calls if op == "append_many"][-1]["sweep_chashes"] == {"1.1.1": [_c(50)]}
+    assert w.progress() == (0, 2)
+
+
+def test_complete_documents_stamps_with_one_stamp_only_append_many_and_the_row_counts():
+    cat = FakeCat()
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 2)
+    _doc(w, "1.1.2", 1)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(2))), "1.1.2": _rows(w, "1.1.2", (0, _c(3)))},
+                       {_c(2): _chunk(_c(2)), _c(3): _chunk(_c(3))})
+    before = len(cat.calls)
+    done = w.complete_documents(res.landed)
+    assert [op for op, _ in cat.calls[before:]] == ["append_many"], "one stamp request for the page"
+    stamp = cat.calls[-1][1]
+    assert stamp["docs"] == {"1.1.1": [], "1.1.2": []} and not stamp["chunks"] and not stamp["sweep_chashes"]
+    assert stamp["complete"] == {"1.1.1": (_H, 2), "1.1.2": (_H, 1)}
+    assert sorted(done.finished) == ["1.1.1", "1.1.2"] and not done.failed
+    assert w.progress() == (2, 2)
+    assert sorted(w.finish().completed) == ["1.1.1", "1.1.2"]
+
+
+def test_a_second_complete_documents_call_has_nothing_owed():
+    cat = FakeCat()
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert w.complete_documents(res.landed).finished == ["1.1.1"]
+    before = len(cat.calls)
+    assert w.complete_documents(res.landed).finished == []
+    assert len(cat.calls) == before
+
+
+def test_a_deferred_stamp_the_engine_refuses_is_reported_and_leaves_the_fence_alone():
+    cat = FakeCat(refuse={"1.1.1"})
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    _doc(w, "1.1.2", 1)
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1))), "1.1.2": _rows(w, "1.1.2", (0, _c(2)))},
+                       {_c(1): _chunk(_c(1)), _c(2): _chunk(_c(2))})
+    done = w.complete_documents(res.landed)
+    assert done.finished == ["1.1.2"] and "refused" in done.failed["1.1.1"]
+    verdict = w.finish()
+    assert verdict.completed == ["1.1.2"] and "refused" in verdict.failed["1.1.1"]
+    assert not [c for op, c in cat.calls if op == "fail"]
+
+
+def test_a_deferred_stamp_the_engine_fails_in_place_leaves_the_document_indexing():
+    cat = FakeCat()
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    cat.fail_docs.add("1.1.1")                       # the stamp request fails for it, the write did not
+    done = w.complete_documents(res.landed)
+    assert done.finished == [] and "stays indexing" in done.failed["1.1.1"]
+    assert "stays indexing" in w.finish().failed["1.1.1"]
+    assert not [c for op, c in cat.calls if op == "fail"]
+
+
+def test_a_document_whose_stamp_is_owed_is_reported_by_finish_and_never_failed_by_abort():
+    """A stamp that may have committed and lost its ack must not be flipped to failed: abort() leaves
+    a document whose last request landed (stamp owed) ``indexing``, and still fails an open one."""
+    cat = FakeCat()
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    _doc(w, "1.1.2", 2)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1))), "1.1.2": _rows(w, "1.1.2", (0, _c(2)))},
+                 {_c(1): _chunk(_c(1)), _c(2): _chunk(_c(2))})
+    w.abort("boom")                       # 1.1.1 landed fully (stamp owed); 1.1.2 is still open
+    assert [c["doc"] for op, c in cat.calls if op == "fail"] == ["1.1.2"]
+    cat2 = FakeCat()
+    w2 = _writer(cat2, defer_completion=True)
+    _doc(w2, "1.1.1", 1)
+    w2.write_page({"1.1.1": _rows(w2, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert "completion stamp was never sent" in w2.finish().failed["1.1.1"]
+
+
+def test_complete_documents_is_for_a_deferred_writer_and_only_for_registered_documents():
+    plain = _writer(FakeCat())
+    with pytest.raises(ValueError, match="defer_completion"):
+        plain.complete_documents([])
+    w = _writer(FakeCat(), defer_completion=True)
+    with pytest.raises(ValueError, match="not registered"):
+        w.complete_documents(["9.9.9"])
+
+
+def test_a_deferred_trailing_sweep_chain_parks_the_document_after_its_last_sweep_without_a_stamp():
+    dropped = [_c(1000 + i) for i in range(650)]
+    cat = FakeCat(prior={"1.1.1": dropped})
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 2)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(2)))}, {_c(2): _chunk(_c(2))})
+    appends = [c for op, c in cat.calls if op == "append_many"]
+    assert [len(a["sweep_chashes"]["1.1.1"]) for a in appends] == [300, 300, 50]
+    assert [a["complete"] for a in appends] == [None, None, None]
+    assert res.landed == ["1.1.1"] and res.finished == []
+    assert w.complete_documents(res.landed).finished == ["1.1.1"]
+    assert cat.calls[-1][1]["complete"] == {"1.1.1": (_H, 2)}

@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-223 (nexus-z0o2p.11 / .15): a failed PDF run does not heal.
+"""RDR-223 (nexus-z0o2p.11 / .15 / .35): a failed run marks its fence and does nothing else.
 
-``_fence_fail`` stamps the document ``failed`` and then rebuilds its manifest from any chunks the
-run stored (``_heal_failed_document``, nexus-0ntxj). That rebuild exists for the paths that wrote
-chunks BEFORE their owner rows. A PDF run's writer replaces the manifest with its first request and
-every chunk it sends carries an owner row, so there is nothing to give an owner, and on a failed
-RE-index the rebuild would replace the manifest with a fragment rebuilt from chunks found by the OLD
-content hash. The PDF paths call ``_fence_fail(..., heal=False)``.
+``_fence_fail`` used to stamp the document ``failed`` and then rebuild its manifest from any chunks
+the run stored (``_heal_failed_document``, nexus-0ntxj). That rebuild existed for the paths that wrote
+chunks BEFORE their owner rows. Every writer now sends a chunk with its owner row in one request, so
+a failed run has no ownerless chunk to give an owner, and the rebuild could only do harm: it found
+chunks by content hash, so it could graft ANOTHER document's identical chunk onto the failed one, and
+on a failed RE-index it replaced the manifest with a fragment found by the OLD content hash. It is
+retired (nexus-z0o2p.35, M3), together with the ``heal`` parameter and its ``True`` default.
 """
 from __future__ import annotations
 
+import ast
+import inspect
+import pathlib
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -22,42 +26,41 @@ def cat():
         yield c
 
 
-@pytest.mark.parametrize("heal,expected", [(True, 1), (False, 0)], ids=["default-heals", "heal-off"])
-def test_fence_fail_heals_only_when_asked(cat, heal, expected) -> None:
+def test_fence_fail_marks_the_fence_and_rebuilds_nothing(cat) -> None:
     from nexus.doc_indexer import _fence_fail
 
-    with patch("nexus.doc_indexer._heal_failed_document") as healer:
-        _fence_fail("1.1.1", "boom", **({} if heal else {"heal": False}))
+    with patch("nexus.catalog.manifest_heal.heal_manifest_gaps") as healer:
+        _fence_fail("1.1.1", "boom")
 
     cat.fail_index_run.assert_called_once_with("1.1.1", "boom")
-    assert healer.call_count == expected
+    healer.assert_not_called()
 
 
-def test_the_default_still_heals_so_the_other_paths_are_unchanged(cat) -> None:
-    from nexus.doc_indexer import _fence_fail
+def test_the_failed_document_heal_and_its_parameter_are_gone() -> None:
+    import nexus.doc_indexer as di
 
-    with patch("nexus.doc_indexer._heal_failed_document") as healer:
-        _fence_fail("1.1.1", "boom")
-    healer.assert_called_once_with("1.1.1")
+    assert not hasattr(di, "_heal_failed_document")
+    assert list(inspect.signature(di._fence_fail).parameters) == ["doc_id", "error"]
 
 
-def test_a_failed_streaming_run_and_a_zero_chunk_run_do_not_heal() -> None:
-    """The two ``_fence_fail`` calls in ``pipeline_index_pdf`` pass ``heal=False`` (the journey
-    ``test_a_failed_second_request_leaves_the_freshly_minted_document_and_its_chunks`` shows the
-    heal never runs against the real engine; this pins the argument at each site)."""
-    import ast
-    import pathlib
+def test_no_fence_fail_call_site_passes_a_heal_argument() -> None:
+    """Every ``_fence_fail`` call in ``src/nexus`` is two positional arguments: a leftover
+    ``heal=...`` would be a TypeError on the failure path, which must never raise."""
+    root = pathlib.Path(inspect.getfile(inspect.getmodule(_fence_fail_ref()))).parent
+    seen = 0
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_fence_fail":
+                seen += 1
+                assert not n.keywords, f"{path.name}:{n.lineno} _fence_fail with keyword arguments"
+    assert seen >= 15, f"non-vacuity: expected to find the _fence_fail call sites, found {seen}"
 
-    import nexus.pipeline_stages as ps
 
-    tree = ast.parse(pathlib.Path(ps.__file__).read_text(encoding="utf-8"))
-    calls = [n for n in ast.walk(tree)
-             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_fence_fail"]
-    assert len(calls) == 2, "non-vacuity: the failure handler and the zero-chunk branch"
-    for c in calls:
-        heal = [k for k in c.keywords if k.arg == "heal"]
-        assert heal and isinstance(heal[0].value, ast.Constant) and heal[0].value.value is False, \
-            f"pipeline_stages.py:{c.lineno} _fence_fail without heal=False"
+def _fence_fail_ref():
+    from nexus import doc_indexer
+
+    return doc_indexer
 
 
 def test_a_progress_callback_that_raises_after_the_stamp_does_not_fail_the_write() -> None:

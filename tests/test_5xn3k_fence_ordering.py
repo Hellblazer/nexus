@@ -706,7 +706,9 @@ def test_client_pages_complete_entries_with_their_docs() -> None:
     docs = [(f"1.5.{i}", rows) for i in range(3)]
     complete = {f"1.5.{i}": CONTENT_HASH for i in range(3)}
 
-    client, posts = _client_with_response({"failed_doc_ids": []})
+    # An engine that stamps always answers with complete_refused_count (nexus-z0o2p.35: its
+    # absence is an engine that ignored ``complete`` and now raises EngineOlderThanClientError).
+    client, posts = _client_with_response({"failed_doc_ids": [], "complete_refused_count": 0})
     with patch.object(hcc, "_MANIFEST_GET_MANY_PAGE", 2):
         client.write_manifest_many(docs, complete=complete, collection=COLLECTION)
 

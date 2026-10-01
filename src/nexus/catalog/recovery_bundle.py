@@ -445,11 +445,14 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
     reads (:func:`~nexus.catalog.note_write.failure_message`):
 
     * landed and verified: returns, after the post-store hook chains
-      (:func:`~nexus.catalog.note_write.fire_note_chains`, the one firing every producer shares);
+      (:func:`~nexus.catalog.note_write.fire_note_chains`, the one firing every producer shares) and
+      the completion stamp (:func:`~nexus.catalog.note_write.stamp_note`, last: a kill in a chain
+      leaves the fence ``indexing`` and the next import redoes the note);
     * not landed, never catalogued, or an outcome this code does not know: raises ``RuntimeError``
       (a definitive failure, never an import);
-    * may have landed, or landed and was not stamped complete: raises :class:`ImportDocUncertain`,
-      and fires no hook.
+    * may have landed: raises :class:`ImportDocUncertain`, and fires no hook; landed but not
+      stamped (the engine refused the stamp, or it failed after the chains fired): raises
+      :class:`ImportDocUncertain` too, the document staying ``indexing``.
 
     Deferred imports: this module sits below ``commands/`` and the writer's pieces live in sibling
     modules with heavy import graphs. *t3* is used only to resolve the target collection.
@@ -459,6 +462,7 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
         failure_message,
         fire_note_chains,
         put_note,
+        stamp_note,
     )
 
     col_name = target_collection_for(rec["collection"], t3)
@@ -474,6 +478,12 @@ def _default_import_doc(t3: Any, rec: dict) -> None:
             raise ImportDocUncertain(message, stamp_refused=outcome.stamp_refused)
         raise RuntimeError(message)
     fire_note_chains(outcome, rec["content"])
+    # The completion stamp, LAST (RDR-223, nexus-z0o2p.34): a kill in a chain above leaves the fence
+    # 'indexing', so the next import of the note redoes the write and fires the chains again.
+    outcome = stamp_note(outcome)
+    message = failure_message(outcome, subject=repr(title))
+    if message is not None:
+        raise ImportDocUncertain(message, stamp_refused=outcome.stamp_refused)
 
 
 def _resolve_link_endpoint(reader: Any, t3: Any, uri: str) -> Any:
