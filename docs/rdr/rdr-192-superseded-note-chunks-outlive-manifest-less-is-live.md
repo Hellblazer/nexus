@@ -371,7 +371,9 @@ lands last, behind a completed backfill:
    predicates 7, 8, and 9's manifest-less handling with one rule, and backs
    a new state-derived reaper described below.
 3. **State-derived reaper**: replace the post-commit sweep's persisted
-   drop set with a state-derived engine reaper for `knowledge__*` (Gap 4; this is
+   drop set with a state-derived engine reaper for every collection prefix
+   (`knowledge__`, `docs__`, `code__`, `rdr__`; Sam, 2026-09-30, see the
+   amendment under Step 9) (Gap 4; this is
    `nexus-2x9xa`'s content — see that bead for the day-to-day tracking).
    Instead of trying harder to retry a specific failed sweep, recompute
    "manifest-less and `reapable`" from state at each reaper run, following
@@ -486,7 +488,8 @@ sweep transaction (`runSweepTransaction`, `CatalogRepository.java:5725-5773`)
 keeps its 2 s lock / 5 s statement bound and its advisory lock — those are
 correct and unrelated to this defect. What changes is what happens on
 failure: instead of the client recording only `{doc_id, reason}` and never
-retrying, a periodic engine-side reaper for `knowledge__*` collections
+retrying, a periodic engine-side reaper for every collection prefix (it
+said `knowledge__*` until Sam's 2026-09-30 decision, Step 9 amendment)
 queries `reapable(c)` directly against current state, with no dependency on
 which write transaction produced the manifest-less row or whether that
 transaction's sweep succeeded. This is the same shape `nexus-iygza` already
@@ -507,6 +510,15 @@ left open. Tracked day-to-day as `nexus-2x9xa`.
    already ignores manifest-less chunks — but should be re-read against
    `live(c)`'s definition once shipped, to confirm "has an own-collection
    manifest row" and "is live" agree for its purposes.
+   Amended 2026-10-01 (nexus-wbfpw.39; Phase 2 gate F4 and cross-walk row 9,
+   T2 `nexus/critique-rdr-192-phase2`): the re-read was done in
+   `nexus-wbfpw.10`, and the two do NOT agree. They differ on R3 (own-collection
+   manifest row whose owners are all tombstoned) and R9: predicate 9 counts
+   such a chunk because it checks manifest existence without a tombstone
+   check, `live(c)` does not. Predicate 9 was kept as is (`nexus-wbfpw.10`
+   close note): an assignment on a trashed chunk is invisible to
+   topic-scoped search, which now uses `live(c)`. The confirmation this item
+   asked for is replaced by that finding.
 4. Predicates 3, 4, 5, 6 keep their current shape (delete-time protection
    and the sweep transaction itself); only their notes-guard arms (4's
    union guard, 5) are deleted, in Phase 4, once the legacy-note backfill
@@ -528,7 +540,7 @@ its own phase below rather than folding into Phase 2.
 | --- | --- | --- |
 | `live(c)` predicate | `PgVectorRepository.liveChunksCondition`, `nexus.live_chunks` | Replace both with one shared, inlinable predicate; collection-scope `live_chunks` in the same change |
 | `reapable(c)` predicate | `indexer_utils.orphaned_chashes`, `gc_quarantine_orphans`, `nx t3 gc`'s candidate logic | Consolidate into one engine-side predicate; client tools call it rather than re-deriving it |
-| State-derived reaper | `CatalogRepository.sweepChunksQuery` / `runSweepTransaction` | Extend with a periodic `knowledge__*` pass driven by `reapable(c)` against current state, not the write transaction's drop set (`nexus-2x9xa`) |
+| State-derived reaper | `CatalogRepository.sweepChunksQuery` / `runSweepTransaction` | Extend with a periodic pass over every collection prefix (per-collection census gate, Step 9) driven by `reapable(c)` against current state, not the write transaction's drop set (`nexus-2x9xa`) |
 | Legacy-note backfill | `manifest_backfill` (client repair script) | Reuse; add a completion census gate before Phase 4 |
 | Silent-skip fix | `mcp_infra._sweep_superseded_vectors[_many]`, `store_hook._reap_superseded_note_chunks`, `CatalogRepository.runSweepTransaction` | Add an unconditional `kept`/`kept_notes` log line to all four sites — the engine sweep has the same gap, not a model to copy from |
 | Stale docs | `catalog-003-soft-delete.xml` comment, `mcp/core.py:4742-4747` | Rewrite to describe post-`b6enc`/`bb6n2` behavior |
@@ -642,6 +654,11 @@ grown.
   it is the same rule doing the same job everywhere — but it means the
   blast radius of Phase 2 onward is not scoped to notes the way the
   original filing assumed.
+  Amended 2026-10-01 (nexus-wbfpw.39, Phase 2 gate finding F4, T2
+  `nexus/critique-rdr-192-phase2`): since `nexus-wbfpw.31` an `.nxexp` import
+  registers an owner first, so `.nxexp` leftovers are reapable only for
+  pre-.31 imports and for the chunks a keep-existing import leaves unowned
+  (Sam, 2026-09-29, `nexus-wbfpw.40`; see the Step 5 amendment).
 - Predicate 8's clock changes from the metadata field `indexed_at` (which
   `nx t3 gc` skips a chunk for lacking) to the engine column `created_at`
   (which every chunk has and which is confirmed write-once — see Technical
@@ -684,6 +701,15 @@ grown.
   where the client-side reap can fail (`knowledge__*`, where
   `store_put`/`nx store put` write); it is a safety net for the failure
   case, not a replacement for the happy-path reap.
+  Amended 2026-10-01: the reaper now also covers `docs__`, `code__` and
+  `rdr__` (Sam, 2026-09-30, T2
+  `nexus/rdr-223-192-sam-decisions-2026-09-30-reaper-staging`). Those prefixes
+  are where RDR-223's multi-batch re-index leaves the previous version's
+  dropped chunks ownerless after a crash, so the reaper is their only
+  recovery short of `nx t3 gc`. It runs only on a collection that passes the
+  per-collection census gate (Step 9), and it takes the sweep gate exclusive
+  per collection so it cannot delete a chunk a running index run is about to
+  reference.
 
 ### Failure Modes
 
@@ -734,7 +760,12 @@ name, so the bucket's definition is broadened to cover a repointed owner as
 well as a tombstoned one. A `.nxexp` import lands in **no-owner**: its
 manifest hook short-circuited on an empty `doc_id` at import time
 (`exporter.py:201-215`), so no catalog document was ever registered to own
-it. Quarantine rows are **out of scope for this census entirely** — they
+it. Amended 2026-10-01 (nexus-wbfpw.39, Phase 2 gate F4): this holds for
+pre-`nexus-wbfpw.31` imports, and for the chunks a keep-existing import
+(`nexus-wbfpw.40`) leaves unowned. Since .31 an import registers an owner
+first, so a current import is not in the no-owner bucket. The Phase 1 census
+found the no-owner bucket to be two indexed run logs, not imports (Phase 1
+result below). Quarantine rows are **out of scope for this census entirely** — they
 live in their own `quarantine-*` physical collection, a deliberate sweep
 destination, never folded into a `knowledge__*` collection's own count.
 Run `manifest_backfill` against the legacy-unmanifested class until a
@@ -762,6 +793,12 @@ or `reapable(c)` gives the same answer for the same row.
 
 All four in scope; none deferred.
 
+Amended 2026-10-01 (nexus-wbfpw.39): (e) **Reaper between batches**. A
+multi-batch re-index of an existing document, with a reaper pass between
+batch 1 and the last batch: no chunk the run later writes or re-adds is
+deleted (Step 9, sweep gate exclusive per collection and the `indexing`
+skip).
+
 ### Phase 1: Census and legacy-note backfill (non-destructive)
 
 #### Step 1: Reproduction fixture and the fixture matrix from the MVV
@@ -773,6 +810,13 @@ dead-owner, or no-owner, per the producer-to-bucket mapping in the MVV above.
 Quarantine rows are out of scope by construction (a separate physical
 collection); `.nxexp` imports and rename-COPY leftovers are not overlooked
 by this census — they are the no-owner and dead-owner buckets respectively.
+Amended 2026-10-01 (nexus-wbfpw.39, `nexus-wbfpw.40` critique): for `.nxexp`
+that means pre-.31 imports, and the chunks a keep-existing import leaves
+unowned. A document whose manifest is non-empty but incomplete (an
+interrupted index run) is not made whole by an import any more; the repair
+is `heal_manifest_gaps`. So the claim in `nexus-wbfpw.32`'s comment that
+every chunk gets an owner holds for documents whose manifest is empty or
+complete, not for a partial one.
 
 #### Step 3: Run `manifest_backfill` against the legacy-unmanifested class
 
@@ -782,8 +826,8 @@ because it is re-run before Steps 5, 8, 9 and 11 (Sam, 2026-09-26). The
 route runs one standalone statement, `scripts/sql/manifest_less_census.sql`,
 byte-identical to the route's text. Sam decided (2026-09-26, option 1) that
 the production census and every pre-merge re-check run that statement
-directly, in psql as `nexus_svc`, until the final RDR-192 engine tag
-deploys; the route shipped in `engine-service-v0.1.133` and the verb
+directly, in psql as `nexus_svc`, until the final engine tag deploys (one
+tag shared with RDR-223, Sam 2026-09-30; see the Revision History); the route shipped in `engine-service-v0.1.133` and the verb
 (`nx t3 census-manifest-less`) is on `develop`, so later re-checks may use
 either.
 
@@ -869,6 +913,41 @@ An old client against this engine loses the presence probe and the
 emptiness check, so the pairing is not additive: the client release carrying
 these halves, and `nexus-wbfpw.31`, ships before this engine deploys.
 
+Amendment (2026-10-01, nexus-wbfpw.39; Phase 2 gate finding F4, T2
+`nexus/critique-rdr-192-phase2`): the `.nxexp` import design that shipped,
+which the Step 5 text above predates.
+
+- **Owner first (`nexus-wbfpw.31`, Sam 2026-09-27).** Export carries an
+  optional `owner` per record (`source_uri`, `title`, `content_type`,
+  `position` of the chunk's live own-collection owner); older importers
+  ignore it, so there is no `format_version` bump. Import finds or registers
+  the owner document by `source_uri` and writes one manifest per document
+  with the recorded positions. A legacy record with a `doc_id` in chunk
+  metadata keeps its live document, or gets one per `doc_id`. A record with
+  neither gets one document per import file, `nxexp://<target>/<file>`, with
+  positions in file order, so a re-import is idempotent and nothing lands
+  unowned.
+- **Copy, not move (Sam, 2026-09-27).** A cross-collection import copies; it
+  does not move the chunks or their documents.
+- **Owner resolution (`nexus-wbfpw.33`, shipped in 7.64.1).** 7.64.0 parsed
+  the owner from the collection name and aborted on slug owners, leaving
+  12,495 chunks in 15 `gate-xr789` collections non-live. The owner is now the
+  row's `owner_id` (or its hyphens-as-dots form) when the catalog confirms a
+  registered owner, else a live document's owner in the collection, else the
+  knowledge curator.
+- **Deploy census (`nexus-wbfpw.32`).** The deploy condition is the
+  `live(c)` census reading zero on every tenant, not the manifest-less census
+  (`scripts/sql/livec_census.sql`); chunks whose only owner is tombstoned are
+  let go (Sam, 2026-09-27, T2 `nexus/rdr-192-dispositions-2026-09-27`).
+- **Keep existing (`nexus-wbfpw.40`, Sam 2026-09-29).** An import never
+  replaces or extends the manifest of a document that already owns chunks.
+  That document's chunks in the file are skipped and counted, and the CLI
+  prints a runnable `nx store delete` line per affected document. The
+  per-batch manifest hook is off for imports. The limit: a document whose
+  manifest is non-empty but incomplete is not made whole by an import
+  (`heal_manifest_gaps` repairs it), so "every chunk gets an owner" holds for
+  empty or complete manifests only.
+
 #### Step 6: Close the silent skip (Gap 3) — log `kept`/`kept_notes` at every client site named above, **and** add an unconditional log line to the engine's `runSweepTransaction` (`CatalogRepository.java:5740-5742`), which has the same gate-on-`swept>0` gap
 
 ### Phase 3: `reapable(c)` and the state-derived reaper (destructive; gated on Phase 1)
@@ -877,11 +956,45 @@ these halves, and `nexus-wbfpw.31`, ships before this engine deploys.
 
 #### Step 8: Migrate predicates 7 and 8 (`gc_quarantine_orphans`, `nx t3 gc`) to `reapable(c)`
 
-#### Step 9: Ship the periodic `knowledge__*` engine reaper driven by `reapable(c)` against current state, writing `gc_audit` rows (`nexus-2x9xa`)
+#### Step 9: Ship the periodic engine reaper, over every collection prefix, driven by `reapable(c)` against current state, writing `gc_audit` rows (`nexus-2x9xa`)
 
 Defaults: the grace window is 30 days (the current `nx t3 gc
 --orphan-window`); the reaper runs hourly, at most 300 chunks per collection
 per pass.
+
+Amendment (Sam, 2026-09-30; T2
+`nexus/rdr-223-192-sam-decisions-2026-09-30-reaper-staging`, bead
+nexus-wbfpw.39): the reaper covers ALL prefixes: `knowledge__`, `docs__`,
+`code__` and `rdr__`. This step and the bead title said `knowledge__*` only
+(the bead title is `nexus-2x9xa`, now amended). The reason is RDR-223's
+multi-batch re-index: a client that dies after the first batch leaves the
+previous version's dropped chunks ownerless in `docs__`, `code__` or `rdr__`,
+and without the reaper they stay hidden until an operator runs `nx t3 gc`.
+Per-collection gate: the reaper visits a collection only when (a) the
+collection's `last_written_at` is older than the grace window and (b) an
+in-engine census of that collection reads `legacy-unmanifested == 0`. A
+collection that fails the gate is skipped with a visible refusal in the pass
+log, and nothing in it is deleted.
+
+Reaper requirements from the RDR-223 Phase 2 gate critique (T2
+`nexus/rdr-223-phase2-gate-critique` S2, 2026-09-30). "Ownerless past grace is
+garbage" is false while a multi-batch re-index is in flight: the old tail
+chunks that a later batch re-adds are ownerless for the whole run, a writer
+holds the sweep gate shared per request and not per document, and the
+existence partition runs before the transaction, so a pass between batches can
+delete a chunk the run is about to reference. So:
+
+- the reaper takes the sweep gate EXCLUSIVE per collection, as
+  `runSweepTransaction` does;
+- it skips a chunk whose owner document is in `index_state = 'indexing'`, with
+  a TTL so a document stuck `indexing` after a crash stops protecting its
+  chunks (this is the recency guard the Phase 2 gate also asked for in P3-3,
+  T2 `nexus/critique-rdr-192-phase2`, because `created_at` is write-once and
+  gives a re-upserted old chunk no fresh grace);
+- an MVV runs a reaper pass between batch 1 and batch k of a multi-batch
+  re-index and asserts that no chunk the run later references is deleted;
+- the bead states whether the existence-partition metadata refresh bumps
+  `last_written_at` (open when this note was written).
 
 #### Step 10: Ship `nx store list --reapable`, a read-only list of the chunks `reapable(c)` currently selects for a collection, so an operator can inspect what the reaper is about to remove before it runs
 
@@ -944,6 +1057,11 @@ None.
 - **Scenario**: A chunk shared across two collections, one of which has a
   live manifest row for it — **Verify**: `live_chunks` (now collection-scoped)
   agrees with `live(c)` for the collection that lacks the manifest row.
+- **Scenario** (added 2026-10-01): a reaper pass runs between batch 1 and the
+  last batch of a multi-batch re-index in a `docs__`, `code__` or `rdr__`
+  collection — **Verify**: the pass skips chunks owned by a document in
+  `index_state = 'indexing'`, and a collection that fails the census gate is
+  refused visibly with nothing deleted.
 
 ## Validation
 
@@ -1027,3 +1145,27 @@ To be completed at gate (Layer 3 AI critique).
   `store-get` gains an `include_non_live` presence probe used by
   `existing_ids`. `.nxexp` imports register an owner first
   (`nexus-wbfpw.31`).
+- 2026-09-29: Sam's keep-existing decision on `.nxexp` import
+  (`nexus-wbfpw.40`): an import never replaces or extends the manifest of a
+  document that already owns chunks. Recorded in the text on 2026-10-01
+  (nexus-wbfpw.39): Step 5 amendment, the MVV (a) and Step 2 `.nxexp`
+  passages, and the Trade-offs bullet on `.nxexp` leftovers.
+- 2026-10-01: Amended for the Phase 2 gate's text findings and Sam's
+  2026-09-30 decisions (bead nexus-wbfpw.39; T2
+  `nexus/critique-rdr-192-phase2` F4, `nexus/rdr-223-phase2-gate-critique`
+  S1 and S2, `nexus/rdr-223-192-sam-decisions-2026-09-30-reaper-staging`,
+  `nexus/rdr-223-192-single-cut-decision-2026-09-30`). (1) The reaper
+  (Approach item 3, Technical Design, Infrastructure Audit, Risks, Step 9)
+  covers every prefix, `knowledge__`, `docs__`, `code__` and `rdr__`, behind a
+  per-collection census gate; Step 9 records the three reaper requirements
+  from the RDR-223 Phase 2 gate (exclusive sweep gate per collection, skip
+  documents `indexing` with a TTL, an MVV with a reaper pass between
+  batches), and the MVV gains item (e). (2) Step 5 records the `.nxexp`
+  import design that shipped: `nexus-wbfpw.31` (owner first, copy not move),
+  `.33` (owner resolution), `.32` (the `live(c)` deploy census) and `.40`
+  (keep existing). (3) Migration order item 3 records that predicate 9 and
+  `live(c)` differ on R3 and R9. (4) One engine tag: the engine work still
+  open here, `reapable(c)` and the reaper, ships in one final engine tag and
+  one paired client release shared with RDR-223 (Sam, 2026-09-30); the
+  `live(c)` engine work had already been cut earlier, as v0.1.135 (never
+  deployed), v0.1.136 and v0.1.137.
