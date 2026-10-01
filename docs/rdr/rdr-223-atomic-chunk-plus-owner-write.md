@@ -312,9 +312,12 @@ chunk owned.
      read ahead of the embedder added so a refusal costs no embed.
      `OwnerlessWriteRefusalTest` pins the in-transaction check with the
      `afterNeedEmbedResolvedHookForTests` seam (it deletes the manifest row and the chunk
-     during the embed and asserts 422 and no chunk row), and pins both
-     scoping axes (a chash owned in another collection, or by another tenant,
-     authorises nothing).
+     during the embed and asserts 422 and no chunk row), pins the shared gate (a
+     hook holds the gate exclusive for 1.5 s and the write must wait for it),
+     and pins both scoping axes (a chash owned in another collection, or by
+     another tenant, authorises nothing; the tenant predicate has its own test
+     on a connection that bypasses row-level security, since RLS would hide it
+     on the service's connections).
    - *Order of the 4xx answers.* A wrong-width id is 400 (`Chash.requireCanonical`
      in the handler, before the repository is reached); an unregistered
      collection is the "register it first" 422 (`dimForCollection`, the first
@@ -341,7 +344,7 @@ chunk owned.
      `sample` (up to eight chashes), `user_agent`, `client_version`,
      `suppressed_since_last` and `first_chunk_meta` (the first unowned chunk's
      `source_path`, `title` and `source_agent`, 120 characters each). The line is
-     rate limited to one per route and collection per minute, with the number
+     rate limited to one per route, tenant and collection per minute, with the number
      suppressed since the last; the counters are not limited. The client names
      itself in `X-Nexus-Client-Version` on every engine request; the log records
      `absent` when it is missing, which marks a client older than the release that
@@ -496,8 +499,16 @@ nexus-b50zw closes.
 
 ### Consequences
 
-- Positive: once Phase 3 lands, no write inserts a chunk without an owner.
-  Chunks a supersede drops still lose their owner; they are swept at the
+- Positive: once Phase 3 lands and the engine runs in `enforce` mode,
+  `upsert-chunks` and `store-put` insert no chunk that lacks a live manifest
+  row in its collection. That is narrower than "no write inserts a chunk
+  without an owner". Not covered: (a) `log-only` mode, the default when
+  `NX_OWNERLESS_WRITE_MODE` is unset, which writes as before and only logs and
+  counts; (b) repository methods called without a guard (the contract and
+  fixture tests, the migration ingest, and `upsertReferenceOnlyChunk`, which no
+  handler calls since the route was retired); (c) the time after the write:
+  the check says the chash is owned when the write commits, not that it stays
+  owned (the next two sentences). Chunks a supersede drops still lose their owner; they are swept at the
   document's last batch. After a crash they stay ownerless until the RDR-192
   reaper removes them (nexus-2x9xa, all prefixes since Sam's 2026-09-30
   decision), or `nx t3 gc` does.
@@ -870,6 +881,10 @@ unless stated.
   counters, the client-version header and the rate-limited log line, the 410 on
   `upsert-reference-only`, the re-embed answer, and the cutover note (restart
   long-lived `nx-mcp` servers). Technical Design 5 gained an "As built" block.
+  Review round 3 narrowed the Consequences line "no write inserts a chunk
+  without an owner" to what is enforced (two routes, enforce mode, and the
+  residual cases listed there), added the tenant to the log limiter key, and
+  pinned the sweep gate and the tenant predicate.
 
 - 2026-09-30: Technical Design 6 added: the completion stamp goes after the
   post-store hooks on every writer path, not only the PDF and markdown paths
