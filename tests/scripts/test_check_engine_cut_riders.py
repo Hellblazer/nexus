@@ -79,8 +79,23 @@ def test_an_empty_rider_list_is_unverifiable(repo: dict[str, str]) -> None:
     assert rc == 2
 
 
+@pytest.mark.lint
 def test_the_shipped_riders_are_real_commits_of_this_repo() -> None:
-    """The list is a record of commits that exist; a typo'd sha would make every cut UNVERIFIABLE."""
+    """The list is a record of commits that exist; a typo'd sha would make every cut UNVERIFIABLE.
+
+    Lint-marked because it needs full history: CI's `test` job checks out at depth 1
+    (nexus-dhs30), where a rider this old is not in the clone, and the `test-lint`
+    job checks out with fetch-depth 0. The shallow assert is the non-vacuity guard:
+    a lint run on a shallow clone FAILS, it never skip-passes.
+    """
+    shallow = subprocess.run(
+        ["git", "rev-parse", "--is-shallow-repository"],
+        cwd=REPO_ROOT, capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    assert shallow != "true", (
+        "this check needs full history; deepen the clone (git fetch --unshallow) "
+        "rather than read a missing rider as a typo"
+    )
     assert len(cr.RIDERS) >= 2
     for sha, bead, _what in cr.RIDERS:
         assert bead.startswith("nexus-")
@@ -115,6 +130,15 @@ def test_one_regressed_binary_fails_alone() -> None:
     rc, lines = cr.check_sizes(_assets(150, 148, 193.3))
     assert rc == 1
     assert [line for line in lines if line.startswith("TOO BIG")][0].count("mac-arm64") == 1
+
+
+def test_linux_arm64_has_no_looser_ceiling_than_amd64() -> None:
+    """nexus-lhr6a never measured arm64; its ceiling follows amd64's logic, not a guess 40 MiB high.
+    A 189 MiB arm64 binary (a partial regression, ~40 MiB over the ~147 expected) passed the old 190."""
+    assert cr.SIZE_CEILINGS_MIB["nexus-service-linux-arm64"] <= cr.SIZE_CEILINGS_MIB["nexus-service-linux-amd64"]
+    rc, lines = cr.check_sizes(_assets(150, 189, 154))
+    assert rc == 1, lines
+    assert [line for line in lines if line.startswith("TOO BIG")][0].count("linux-arm64") == 1
 
 
 def test_a_missing_binary_is_a_failure_not_a_skip() -> None:

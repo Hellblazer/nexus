@@ -24,7 +24,11 @@ def _stub_sweep(monkeypatch, results: list[HealthResult]) -> None:
     )
     # The supplementary checks are real probes of the box; the exit code
     # under test is the main sweep's. Keep them out of the picture.
-    monkeypatch.setattr(doctor_mod, "_run_supplementary_checks", lambda: None)
+    # It takes the engine status the sweep already fetched, so the stub
+    # accepts whatever the caller passes (nexus-20onx).
+    monkeypatch.setattr(
+        doctor_mod, "_run_supplementary_checks", lambda *_a, **_kw: None,
+    )
 
 
 @pytest.mark.parametrize(
