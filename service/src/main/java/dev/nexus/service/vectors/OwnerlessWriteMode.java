@@ -16,9 +16,12 @@ import java.util.Locale;
  *       writer the refusal would break before switching it on.</li>
  * </ul>
  *
- * <p>The setting is the environment variable {@value #ENV}. The default is {@link #ENFORCE}:
- * log-only exists to prove the writer list empty (or dispositioned) and is not a posture to
- * run in. An unrecognised value fails the boot rather than silently choosing a mode.
+ * <p>The setting is the environment variable {@value #ENV}. An UNSET (or blank) value means
+ * {@link #LOG_ONLY}; only an explicit {@code enforce} enforces (conexus's condition for the first
+ * production deploy: the engine's first run against real traffic must not refuse anything until the
+ * would-refuse log has been read). Local installs enforce regardless, because the local engine
+ * launch path sets {@code enforce} explicitly ({@code nexus.daemon.storage_service_daemon}). An
+ * unrecognised value fails the boot rather than silently choosing a mode.
  */
 public enum OwnerlessWriteMode {
     LOG_ONLY("log-only"),
@@ -39,13 +42,13 @@ public enum OwnerlessWriteMode {
     }
 
     /**
-     * Parse the setting value. {@code null} or blank is the default ({@link #ENFORCE}).
+     * Parse the setting value. {@code null} or blank is the default ({@link #LOG_ONLY}).
      *
      * @throws IllegalArgumentException for any other unrecognised value
      */
     public static OwnerlessWriteMode parse(String raw) {
         if (raw == null || raw.isBlank()) {
-            return ENFORCE;
+            return LOG_ONLY;
         }
         String v = raw.strip().toLowerCase(Locale.ROOT).replace('_', '-');
         for (OwnerlessWriteMode m : values()) {
@@ -57,8 +60,16 @@ public enum OwnerlessWriteMode {
             ENV + " must be 'enforce' or 'log-only', got '" + raw + "'");
     }
 
+    /** Reads the setting; replaced by tests, which cannot change the real process environment. */
+    private static volatile java.util.function.Function<String, String> envReader = System::getenv;
+
+    /** Test seam: {@code null} restores the real environment. */
+    public static void setEnvReaderForTests(java.util.function.Function<String, String> reader) {
+        envReader = reader != null ? reader : System::getenv;
+    }
+
     /** The mode the process environment selects. */
     public static OwnerlessWriteMode fromEnv() {
-        return parse(System.getenv(ENV));
+        return parse(envReader.apply(ENV));
     }
 }

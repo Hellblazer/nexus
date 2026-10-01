@@ -51,6 +51,12 @@ class OwnerlessWriteRefusalTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static final String TOKEN    = "tok-owr-0123456789abcdef0123456789abcdef";
+    private static final String TOKEN_2  = "tok-owr2-0123456789abcdef0123456789abcde";
+    private static final String TENANT_2 = "owr-tenant-2";
+    private static final String COLLECTION_B = "knowledge__owr-owner-b__voyage-context-3__v1";
+    // The refusal log is rate limited per (route, collection), so each log test gets its own collection.
+    private static final String COLLECTION_LOG = "knowledge__owr-owner-log__voyage-context-3__v1";
+    private static final String COLLECTION_LOOP = "knowledge__owr-owner-loop__voyage-context-3__v1";
     private static final String SVC_ROLE = "svc_owr";
     private static final String SVC_PASS = "svc_owr_pass";
     private static final String TENANT   = "owr-tenant";
@@ -77,6 +83,8 @@ class OwnerlessWriteRefusalTest {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             PgContainerHelper.seedServiceToken(
                 DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "owr-test");
+            PgContainerHelper.seedServiceToken(
+                DSL.using(su, SQLDialect.POSTGRES), TOKEN_2, TENANT_2, "owr-test-2");
         }
         var cfg = new HikariConfig();
         cfg.setJdbcUrl(pg.getJdbcUrl());
@@ -94,11 +102,18 @@ class OwnerlessWriteRefusalTest {
 
         // Burn the per-tenant ghost sweep before registering the collection (see
         // VectorHandlerDeadlineMappingTest for the measured ordering trap).
-        http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
-            .header("Authorization", "Bearer " + TOKEN).GET().build(),
-            HttpResponse.BodyHandlers.ofString());
+        for (String token : List.of(TOKEN, TOKEN_2)) {
+            http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
+                .header("Authorization", "Bearer " + token).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        }
         try (Connection su = pg.createConnection("")) {
-            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
+            var dsl = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_B);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_LOG);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_LOOP);
+            PgContainerHelper.insertCollection(dsl, TENANT_2, COLLECTION);
         }
     }
 
@@ -114,15 +129,23 @@ class OwnerlessWriteRefusalTest {
         service.ownerlessWritePolicy().set(OwnerlessWriteMode.ENFORCE);
         embedder.calls.set(0);
         embedder.failWith = null;
+        repo.setAfterNeedEmbedResolvedHookForTests(null);
         OwnerlessWriteActivity.resetForTests();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private HttpResponse<String> post(String path, Object body) throws Exception {
-        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
-            .header("Authorization", "Bearer " + TOKEN)
-            .header("Content-Type", "application/json")
+        return post(TOKEN, path, body, Map.of());
+    }
+
+    private HttpResponse<String> post(String token, String path, Object body, Map<String, String> headers)
+            throws Exception {
+        var builder = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
+            .header("Authorization", "Bearer " + token)
+            .header("Content-Type", "application/json");
+        headers.forEach(builder::header);
+        var req = builder
             .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
             .build();
         return http.send(req, HttpResponse.BodyHandlers.ofString());
@@ -369,10 +392,16 @@ class OwnerlessWriteRefusalTest {
     // ── 3. the order of the three 4xx checks ─────────────────────────────────
 
     @Test
-    void order_aLegacy32CharIdIsStill400_aheadOfTheOwnershipCheck() throws Exception {
-        // Chash.requireCanonical runs first, in the handler, before the repository is reached.
-        var resp = upsert(COLLECTION, List.of("0123456789abcdef0123456789abcdef"), List.of("text"));
-        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(400);
+    void order_aLegacy32CharIdIsStill400_aheadOfEverythingTheRepositoryAsks() throws Exception {
+        // Chash.requireCanonical runs in the handler, before the repository resolves the collection or
+        // asks about ownership. The collection here is UNREGISTERED, so a request that reached the
+        // repository would answer 422 'register it first', not 400: this fails if the handler's check goes.
+        String legacy = "0123456789abcdef0123456789abcdef";
+        var up = upsert(UNREGISTERED, List.of(legacy), List.of("text"));
+        assertThat(up.statusCode()).as("upsert-chunks, body: %s", up.body()).isEqualTo(400);
+        var sp = post("/v1/vectors/store-put", Map.of(
+            "collection", UNREGISTERED, "doc_id", legacy, "content", "text", "metadata", Map.of()));
+        assertThat(sp.statusCode()).as("store-put, body: %s", sp.body()).isEqualTo(400);
         assertThat(OwnerlessWriteActivity.refusedTotal()).isZero();
     }
 
@@ -429,8 +458,10 @@ class OwnerlessWriteRefusalTest {
 
     @Test
     void theModeParsesFromTheSettingValue() {
-        assertThat(OwnerlessWriteMode.parse(null)).as("the default for the final cut").isEqualTo(OwnerlessWriteMode.ENFORCE);
-        assertThat(OwnerlessWriteMode.parse("")).isEqualTo(OwnerlessWriteMode.ENFORCE);
+        assertThat(OwnerlessWriteMode.parse(null)).as("unset means log-only: only an explicit enforce enforces")
+            .isEqualTo(OwnerlessWriteMode.LOG_ONLY);
+        assertThat(OwnerlessWriteMode.parse("")).isEqualTo(OwnerlessWriteMode.LOG_ONLY);
+        assertThat(OwnerlessWriteMode.parse("   ")).isEqualTo(OwnerlessWriteMode.LOG_ONLY);
         assertThat(OwnerlessWriteMode.parse("enforce")).isEqualTo(OwnerlessWriteMode.ENFORCE);
         assertThat(OwnerlessWriteMode.parse("log-only")).isEqualTo(OwnerlessWriteMode.LOG_ONLY);
         assertThat(OwnerlessWriteMode.parse(" LOG-ONLY ")).isEqualTo(OwnerlessWriteMode.LOG_ONLY);
@@ -451,6 +482,199 @@ class OwnerlessWriteRefusalTest {
         assertThat(((Number) body.get("ownerless_writes_refused_total")).longValue()).isEqualTo(1);
         assertThat(((Number) body.get("ownerless_writes_would_refuse_total")).longValue()).isEqualTo(1);
         assertThat(body.get("ownerless_write_mode")).isEqualTo("log-only");
+    }
+
+
+    // ── 6. pins that survived mutation in review ─────────────────────────────
+
+    /** Seed an ownerless chunk (stored text, vector and metadata, no manifest row) in COLLECTION. */
+    private void seedOwnerless(String hex, String text, Map<String, Object> metadata) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var v = new float[1024];
+            v[0] = 1f;
+            PgContainerHelper.insertChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION,
+                List.of(hex), List.of(text), List.of(v), List.of(metadata));
+        }
+    }
+
+    /** {@code [metadata json, last_written_at]} of the physical chunk row, or null when there is none. */
+    private Object[] physicalRow(String tenant, String collection, String hex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            var ch = dev.nexus.service.vectors.DimTables.CHUNKS.get(1024);
+            var rec = DSL.using(su, SQLDialect.POSTGRES)
+                .select(ch.metadata(), ch.lastWrittenAt())
+                .from(ch.table())
+                .where(ch.tenantId().eq(tenant).and(ch.collection().eq(collection)).and(ch.chash().eq(hex)))
+                .fetchOne();
+            return rec == null ? null : new Object[] {String.valueOf(rec.value1()), rec.value2()};
+        }
+    }
+
+    @Test
+    void checkRunsBeforeTheExistencePartition_aRefusedRequestChangesNoRow() throws Exception {
+        // An ownerless chunk that already holds a vector and the SAME text takes the partition's
+        // metadata-only UPDATE (committed before embedding). The ownership check must refuse first, so
+        // the marker is not applied and last_written_at (the reaper's grace anchor) is not restamped.
+        String text = "owr-ownerless-with-vector";
+        String h = chash(text);
+        seedOwnerless(h, text, Map.of("kept", "yes"));
+        Object[] before = physicalRow(TENANT, COLLECTION, h);
+        assertThat(before).isNotNull();
+
+        var resp = upsert(COLLECTION, List.of(h), List.of(text),
+            Map.of("metadatas", List.of(Map.of("marker", "must-not-land"))));
+        assertNamesTheCombinedRoutes(resp);
+
+        Object[] after = physicalRow(TENANT, COLLECTION, h);
+        assertThat((String) after[0]).as("no marker applied").doesNotContain("must-not-land").contains("kept");
+        assertThat(after[1]).as("last_written_at not restamped").isEqualTo(before[1]);
+    }
+
+    @Test
+    void ownedInAnotherCollection_doesNotAuthoriseAWriteHere() throws Exception {
+        // Chashes are content hashes, identical across collections: a chash owned in COLLECTION must
+        // not authorise an ownerless write into COLLECTION_B.
+        String h = owned("owr-owned-elsewhere");
+        var resp = upsert(COLLECTION_B, List.of(h), List.of("seed"));
+        assertNamesTheCombinedRoutes(resp);
+    }
+
+    @Test
+    void ownedByAnotherTenant_doesNotAuthoriseAWriteHere() throws Exception {
+        // Tenant 1 owns the chash in COLLECTION; tenant 2 registered the same collection name and
+        // writes the same chash. Tenant 2 has no manifest row of its own, so it is refused.
+        String h = owned("owr-owned-by-tenant-1");
+        var resp = post(TOKEN_2, "/v1/vectors/upsert-chunks", Map.of(
+            "collection", COLLECTION, "ids", List.of(h), "documents", List.of("seed"),
+            "metadatas", List.of(Map.of())), Map.of());
+        assertNamesTheCombinedRoutes(resp);
+    }
+
+    @Test
+    void aChashThatLosesItsOwnerAndItsChunkDuringTheEmbed_isRefusedInsideTheWriteTransaction() throws Exception {
+        // The pre-embed check passes (the chash is owned). Between it and the write, another client
+        // re-indexes the document without the chash and the post-commit sweep deletes the chunk row.
+        // Without a second check inside the write transaction the INSERT would create a NEW chunk with
+        // no owner. The seam fires after the existence partition and before the embed.
+        String h = owned("owr-loses-owner-mid-write");
+        repo.setAfterNeedEmbedResolvedHookForTests(() -> {
+            try (Connection su = pg.createConnection("")) {
+                var dsl = DSL.using(su, SQLDialect.POSTGRES);
+                dsl.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS)
+                    .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHASH.eq(
+                        Chash.fromHex(h).toBytes()))
+                    .execute();
+                var ch = dev.nexus.service.vectors.DimTables.CHUNKS.get(1024);
+                dsl.deleteFrom(ch.table())
+                    .where(ch.tenantId().eq(TENANT).and(ch.collection().eq(COLLECTION)).and(ch.chash().eq(h)))
+                    .execute();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+        // New text, so the chash takes the need-embed path and reaches the insert.
+        var resp = upsert(COLLECTION, List.of(h), List.of("text that differs from the stored seed"));
+        assertNamesTheCombinedRoutes(resp);
+        assertThat(embedder.calls.get()).as("the pre-embed check passed, so the embedder ran").isEqualTo(1);
+        assertThat(physicalRow(TENANT, COLLECTION, h)).as("no chunk row was created for it").isNull();
+        assertThat(OwnerlessWriteActivity.refusedTotal()).isEqualTo(1);
+    }
+
+    @Test
+    void aNewHandlerRouteCannotFailOpen_everyCallerPassesAGuard() throws Exception {
+        OwnershipGuardCoverageScan.assertEveryGuardedRepositoryCallPassesAGuard();
+    }
+
+    // ── 7. the log line ──────────────────────────────────────────────────────
+
+    private List<String> captureRepositoryWarnings(java.util.concurrent.Callable<Void> body) throws Exception {
+        var logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory.getLogger(PgVectorRepository.class);
+        var appender = new ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            body.call();
+        } finally {
+            logger.detachAppender(appender);
+        }
+        return appender.list.stream()
+            .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+            .filter(m -> m.contains("ownerless_chunk_write_"))
+            .toList();
+    }
+
+    @Test
+    void theLogLineNamesTheClient_andAnAbsentVersionHeaderMeansAnOldClient() throws Exception {
+        var lines = captureRepositoryWarnings(() -> {
+            var body = Map.<String, Object>of("collection", COLLECTION_LOG, "ids", List.of(chash("owr-log-1")),
+                "documents", List.of("t"), "metadatas", List.of(Map.of(
+                    "source_path", "/p/a.py", "title", "a.py:1-1", "source_agent", "indexer", "source_uri", "file:///secret")));
+            post(TOKEN, "/v1/vectors/upsert-chunks", body,
+                Map.of("User-Agent", "nx-test-agent/9", "X-Nexus-Client-Version", "7.99.0"));
+            return null;
+        });
+        assertThat(lines).hasSize(1);
+        String line = lines.get(0);
+        assertThat(line).contains("event=ownerless_chunk_write_refused")
+            .contains("route=upsert-chunks").contains("collection=" + COLLECTION_LOG)
+            .contains("phase=pre_embed").contains("unowned=1").contains("requested=1")
+            .contains("user_agent=\"nx-test-agent/9\"").contains("client_version=7.99.0")
+            .contains("suppressed_since_last=0")
+            .contains("source_path=/p/a.py;").contains("title=a.py:1-1;").contains("source_agent=indexer;")
+            .doesNotContain("file:///secret");
+
+        // The limiter is keyed on route|collection: use another route to get a fresh line, header absent.
+        var absent = captureRepositoryWarnings(() -> {
+            post(TOKEN, "/v1/vectors/store-put", Map.of("collection", COLLECTION_LOG,
+                "doc_id", chash("owr-log-2"), "content", "t", "metadata", Map.of()), Map.of("User-Agent", "old/1"));
+            return null;
+        });
+        assertThat(absent).hasSize(1);
+        assertThat(absent.get(0)).contains("route=store-put").contains("client_version=absent").contains("user_agent=\"old/1\"");
+    }
+
+    @Test
+    void aLoopingClientLogsOncePerMinutePerRouteAndCollection_butEveryRequestIsCounted() throws Exception {
+        var lines = captureRepositoryWarnings(() -> {
+            for (int i = 0; i < 4; i++) {
+                upsert(COLLECTION_LOOP, List.of(chash("owr-loop-" + i)), List.of("t"));
+            }
+            return null;
+        });
+        assertThat(lines).as("one WARN for four refused requests").hasSize(1);
+        assertThat(OwnerlessWriteActivity.refusedTotal()).as("the counter is not limited").isEqualTo(4);
+    }
+
+    @Test
+    void aBadModeValueFailsServiceConstruction() throws Exception {
+        OwnerlessWriteMode.setEnvReaderForTests(name -> OwnerlessWriteMode.ENV.equals(name) ? "off" : System.getenv(name));
+        try {
+            org.junit.jupiter.api.Assertions.assertThrows(IllegalArgumentException.class,
+                () -> new NexusService(0, TOKEN, svcDs, null, repo));
+        } finally {
+            OwnerlessWriteMode.setEnvReaderForTests(null);
+        }
+    }
+
+    @Test
+    void anUnsetModeBootsLogOnly_andAnExplicitEnforceBootsEnforce() throws Exception {
+        OwnerlessWriteMode.setEnvReaderForTests(name -> null);
+        NexusService unset = new NexusService(0, TOKEN, svcDs, null, repo);
+        try {
+            assertThat(unset.ownerlessWritePolicy().mode()).isEqualTo(OwnerlessWriteMode.LOG_ONLY);
+        } finally {
+            unset.stop();
+            OwnerlessWriteMode.setEnvReaderForTests(null);
+        }
+        OwnerlessWriteMode.setEnvReaderForTests(name -> OwnerlessWriteMode.ENV.equals(name) ? "enforce" : null);
+        NexusService enforce = new NexusService(0, TOKEN, svcDs, null, repo);
+        try {
+            assertThat(enforce.ownerlessWritePolicy().mode()).isEqualTo(OwnerlessWriteMode.ENFORCE);
+        } finally {
+            enforce.stop();
+            OwnerlessWriteMode.setEnvReaderForTests(null);
+        }
     }
 
     // ── fixtures ─────────────────────────────────────────────────────────────

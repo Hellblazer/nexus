@@ -657,89 +657,158 @@ public final class PgVectorRepository {
     /** Chashes per ownership-check query (well under the Bind-message parameter ceiling). */
     private static final int OWNERSHIP_CHECK_BATCH = 300;
 
-    /** Metadata keys a would-refuse / refused log line carries for the first unowned chunk, to name its writer. */
-    private static final List<String> OWNERSHIP_LOG_META_KEYS =
-            List.of("source_path", "source_uri", "title", "source_agent", "content_type", "store_type");
+    /**
+     * Metadata keys a refusal / would-refuse log line carries for the first unowned chunk, to name
+     * its writer. Deliberately no {@code source_uri} (a tenant-private URL) and no chunk text.
+     */
+    private static final List<String> OWNERSHIP_LOG_META_KEYS = List.of("source_path", "title", "source_agent");
+
+    /** Rate limit for the refusal / would-refuse WARN line: one per (route, collection) per minute. */
+    private final OwnerlessLogLimiter ownerlessLogLimiter = OwnerlessLogLimiter.system();
 
     /**
-     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): every chash in {@code ids} must already have a LIVE
-     * manifest row in {@code collection}, i.e. a {@code catalog_document_chunks} row whose
-     * document is not tombstoned (the same owner {@code nexus.chunk_live_owners} reports, so "owned"
-     * here is exactly "live(c)"). Anything else is an ownerless write: this route would put a chunk in
+     * The chashes of {@code distinctHex} that have a LIVE manifest row in {@code collection}: a
+     * {@code catalog_document_chunks} row whose document is not tombstoned, the same owner {@code
+     * nexus.chunk_live_owners} reports, so "owned" is exactly live(c). Scoped to the tenant AND the
+     * collection: a chash owned in another collection, or by another tenant, does not count. Runs on
+     * {@code ctx}, so the caller picks the transaction.
+     */
+    private static Set<String> liveOwnedChashes(DSLContext ctx, String tenant, String collection,
+                                                List<String> distinctHex) {
+        Set<String> owned = new HashSet<>(distinctHex.size() * 2);
+        for (int start = 0; start < distinctHex.size(); start += OWNERSHIP_CHECK_BATCH) {
+            List<byte[]> batch = new ArrayList<>(OWNERSHIP_CHECK_BATCH);
+            for (String hex : distinctHex.subList(start,
+                    Math.min(start + OWNERSHIP_CHECK_BATCH, distinctHex.size()))) {
+                batch.add(dev.nexus.service.db.Chash.fromHex(hex).toBytes());
+            }
+            owned.addAll(ctx.selectDistinct(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH))
+                .from(CATALOG_DOCUMENT_CHUNKS)
+                .join(CATALOG_DOCUMENTS)
+                    .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
+                        .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
+                    .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
+                    .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(batch))
+                    .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
+                .fetch(0, String.class));
+        }
+        return owned;
+    }
+
+    /**
+     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24), first of two ownership checks: every chash in
+     * {@code ids} must already have a live manifest row in {@code collection} (see {@link
+     * #liveOwnedChashes}). Anything else is an ownerless write: this route would put a chunk in
      * the collection that no document owns, which is what {@code /v1/catalog/manifest/write_many}
      * and {@code /append} exist to prevent.
      *
-     * <p>Runs in its own short read transaction BEFORE embedding. The embedder call must stay
-     * outside any transaction (RDR-181), so the check cannot share the write's transaction; a chash
-     * that loses its last owner between this read and the write is one a live document owned a
-     * moment earlier, and the write only rewrites that existing chunk row (it creates nothing a
-     * reaper would not already see), so the window is accepted.
+     * <p>This one runs in its own short read transaction BEFORE embedding and before every branch
+     * that could skip the embed or write first, so a refused request pays no embedder call and
+     * changes no row (not even the metadata-only refresh the existence partition commits for a chunk
+     * it already holds). It cannot be the only check: the embedder call must stay outside any
+     * transaction (RDR-181), so a chash can lose its last owner between this read and the write, and
+     * the post-commit sweep may then delete its chunk row, after which the write's {@code INSERT ...
+     * ON CONFLICT} would create a NEW ownerless row. The write transaction therefore checks again
+     * under the sweep gate (see {@link #recheckOwnershipInWriteTransaction}).
      *
      * <p>A supplied field naming a document or owner never satisfies the check: only a manifest
      * row does. Duplicate ids count once.
      *
+     * @return true when chashes were unowned and log-only let the request proceed (so the in-transaction
+     *         recheck does not count the same request twice)
      * @throws OwnerlessChunkWriteException under {@link OwnerlessWriteMode#ENFORCE} when any chash is unowned
      */
-    private void checkOwnership(String tenant, String collection, List<String> ids,
-                                List<Map<String, Object>> metadatas, OwnershipGuard guard) {
+    private boolean checkOwnership(String tenant, String collection, List<String> ids,
+                                   List<Map<String, Object>> metadatas, OwnershipGuard guard) {
         List<String> distinct = new ArrayList<>(new java.util.LinkedHashSet<>(ids));
-        Set<String> owned = new HashSet<>(distinct.size() * 2);
-        for (int start = 0; start < distinct.size(); start += OWNERSHIP_CHECK_BATCH) {
-            List<byte[]> batch = new ArrayList<>(OWNERSHIP_CHECK_BATCH);
-            for (String hex : distinct.subList(start, Math.min(start + OWNERSHIP_CHECK_BATCH, distinct.size()))) {
-                batch.add(dev.nexus.service.db.Chash.fromHex(hex).toBytes());
-            }
-            List<String> hits = tenantScope.withTenant(tenant, ctx ->
-                ctx.selectDistinct(ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH))
-                   .from(CATALOG_DOCUMENT_CHUNKS)
-                   .join(CATALOG_DOCUMENTS)
-                       .on(CATALOG_DOCUMENTS.TENANT_ID.eq(CATALOG_DOCUMENT_CHUNKS.TENANT_ID)
-                           .and(CATALOG_DOCUMENTS.TUMBLER.eq(CATALOG_DOCUMENT_CHUNKS.DOC_ID)))
-                   .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant)
-                       .and(CATALOG_DOCUMENT_CHUNKS.COLLECTION.eq(collection))
-                       .and(CATALOG_DOCUMENT_CHUNKS.CHASH.in(batch))
-                       .and(CATALOG_DOCUMENTS.DELETED_AT.isNull()))
-                   .fetch(0, String.class));
-            owned.addAll(hits);
-        }
+        Set<String> owned = tenantScope.withTenant(tenant, ctx ->
+            liveOwnedChashes(ctx, tenant, collection, distinct));
         List<String> unowned = new ArrayList<>();
         for (String hex : distinct) {
             if (!owned.contains(hex)) {
                 unowned.add(hex);
             }
         }
-        if (unowned.isEmpty()) {
-            return;
+        if (!unowned.isEmpty()) {
+            reportUnowned(tenant, collection, ids, metadatas, distinct.size(), unowned, guard, "pre_embed");
+            return true;   // only reached under log-only: enforce threw
         }
-        List<String> sample = unowned.subList(0, Math.min(8, unowned.size()));
-        // Name the writer: the first unowned chunk's own metadata (source_path, source_agent, ...) is
-        // what tells an operator which client sent it, since the request carries no client identity.
-        String writer = "";
-        int firstIdx = ids.indexOf(unowned.get(0));
-        if (metadatas != null && firstIdx >= 0 && firstIdx < metadatas.size() && metadatas.get(firstIdx) != null) {
-            Map<String, Object> meta = metadatas.get(firstIdx);
-            StringBuilder sb = new StringBuilder();
-            for (String key : OWNERSHIP_LOG_META_KEYS) {
-                Object v = meta.get(key);
-                if (v != null && !String.valueOf(v).isBlank()) {
-                    String text = String.valueOf(v).replaceAll("\\s+", " ");
-                    sb.append(key).append('=').append(text, 0, Math.min(120, text.length())).append(';');
-                }
+        return false;
+    }
+
+    /**
+     * Second ownership check, INSIDE the write transaction, after the embed and under the shared
+     * sweep gate ({@link CatalogRepository#acquireSweepGateShared}; the post-commit sweep takes it
+     * EXCLUSIVE, so it cannot delete a chunk row between this read and the insert that follows in the
+     * same transaction). Covers only the rows the insert will write: the chashes the existence
+     * partition already settled were updated in place and create nothing.
+     */
+    private void recheckOwnershipInWriteTransaction(DSLContext ctx, String tenant, String collection,
+                                                    List<String> insertChashes, List<String> allIds,
+                                                    List<Map<String, Object>> metadatas, OwnershipGuard guard) {
+        CatalogRepository.acquireSweepGateShared(ctx, tenant, collection);
+        List<String> distinct = new ArrayList<>(new java.util.LinkedHashSet<>(insertChashes));
+        Set<String> owned = liveOwnedChashes(ctx, tenant, collection, distinct);
+        List<String> unowned = new ArrayList<>();
+        for (String hex : distinct) {
+            if (!owned.contains(hex)) {
+                unowned.add(hex);
             }
-            writer = sb.toString();
         }
-        log.warn("event={} route={} tenant={} collection={} unowned={} requested={} sample={} first_chunk_meta=[{}]",
-                guard.mode() == OwnerlessWriteMode.ENFORCE
-                        ? "ownerless_chunk_write_refused" : "ownerless_chunk_write_would_refuse",
-                guard.route(), tenant, collection, unowned.size(), distinct.size(), String.join(",", sample),
-                writer);
-        if (guard.mode() == OwnerlessWriteMode.LOG_ONLY) {
+        if (!unowned.isEmpty()) {
+            reportUnowned(tenant, collection, allIds, metadatas, distinct.size(), unowned, guard, "in_tx");
+        }
+    }
+
+    /**
+     * Count, log (rate limited) and, under enforce, refuse a request that carries unowned chashes.
+     * The log line names the writer: the request's {@code User-Agent} and {@code
+     * X-Nexus-Client-Version} (absent = a client older than the cut that sends it) and the first
+     * unowned chunk's {@code source_path}/{@code title}/{@code source_agent}. The counters count every
+     * request; only the log line is limited.
+     */
+    private void reportUnowned(String tenant, String collection, List<String> ids,
+                               List<Map<String, Object>> metadatas, int requested, List<String> unowned,
+                               OwnershipGuard guard, String phase) {
+        List<String> sample = unowned.subList(0, Math.min(8, unowned.size()));
+        boolean enforce = guard.mode() == OwnerlessWriteMode.ENFORCE;
+        if (enforce) {
+            OwnerlessWriteActivity.recordRefused();
+        } else {
             OwnerlessWriteActivity.recordWouldRefuse();
-            return;
         }
-        OwnerlessWriteActivity.recordRefused();
-        throw new OwnerlessChunkWriteException(
-                guard.route(), collection, unowned.size(), distinct.size(), sample);
+        long suppressed = ownerlessLogLimiter.tryAcquire(guard.route() + "|" + collection);
+        if (suppressed >= 0) {
+            String writer = "";
+            int firstIdx = ids.indexOf(unowned.get(0));
+            if (metadatas != null && firstIdx >= 0 && firstIdx < metadatas.size()
+                    && metadatas.get(firstIdx) != null) {
+                Map<String, Object> meta = metadatas.get(firstIdx);
+                StringBuilder sb = new StringBuilder();
+                for (String key : OWNERSHIP_LOG_META_KEYS) {
+                    Object v = meta.get(key);
+                    if (v != null && !String.valueOf(v).isBlank()) {
+                        String text = String.valueOf(v).replaceAll("\\s+", " ");
+                        sb.append(key).append('=').append(text, 0, Math.min(120, text.length())).append(';');
+                    }
+                }
+                writer = sb.toString();
+            }
+            String clientVersion = guard.clientVersion() == null || guard.clientVersion().isBlank()
+                    ? "absent" : guard.clientVersion().strip();
+            String userAgent = guard.userAgent() == null || guard.userAgent().isBlank()
+                    ? "absent" : guard.userAgent().strip();
+            log.warn("event={} route={} tenant={} collection={} phase={} unowned={} requested={} sample={} "
+                            + "user_agent=\"{}\" client_version={} suppressed_since_last={} first_chunk_meta=[{}]",
+                    enforce ? "ownerless_chunk_write_refused" : "ownerless_chunk_write_would_refuse",
+                    guard.route(), tenant, collection, phase, unowned.size(), requested,
+                    String.join(",", sample), userAgent.replace('"', '\''), clientVersion, suppressed, writer);
+        }
+        if (enforce) {
+            throw new OwnerlessChunkWriteException(
+                    guard.route(), collection, unowned.size(), requested, sample);
+        }
     }
 
     private void upsertChunksInternal(String tenant, String collection,
@@ -758,9 +827,11 @@ public final class PgVectorRepository {
         // collection resolved (an unregistered collection answers 'register it first' ahead of
         // this) and BEFORE the force_re_embed / supplied-vector / existence-partition branches and
         // BEFORE embedding, so a refused write never pays the embedder and no branch skips it.
+        boolean ownershipReportedLogOnly = false;
         if (guard != null) {
-            checkOwnership(tenant, collection, ids, metadatas, guard);
+            ownershipReportedLogOnly = checkOwnership(tenant, collection, ids, metadatas, guard);
         }
+        final boolean recheckInTransaction = guard != null && !ownershipReportedLogOnly;
 
         // De-duplicate IDs (first-wins, matching T3Database._write_batch). Also required
         // for correctness: ON CONFLICT cannot affect the same row twice within one
@@ -1002,6 +1073,13 @@ public final class PgVectorRepository {
             DeadlockRetry.run(collection, () -> tenantScope.withTenant(tenant, ctx -> {
                 racedThisWrite.set(0);
                 racedChashSampleHolder[0] = new ArrayList<>();
+                // RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the second ownership check, in the
+                // write's own transaction, under the shared sweep gate, ahead of the insert.
+                if (recheckInTransaction) {
+                    List<String> insertChashes = new ArrayList<>(finalInsertIdx.size());
+                    for (int idx : finalInsertIdx) insertChashes.add(dedupIds.get(idx));
+                    recheckOwnershipInWriteTransaction(ctx, tenant, collection, insertChashes, ids, metadatas, guard);
+                }
                 // Bead nexus-h8rf6.2 (reduce per-request connection hold time): ONE
                 // multi-row INSERT ... ON CONFLICT instead of dedupIds.size() sequential
                 // round trips. The old per-row loop held this transaction's connection

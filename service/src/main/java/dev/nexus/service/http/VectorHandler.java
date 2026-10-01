@@ -340,9 +340,18 @@ public final class VectorHandler implements HttpHandler {
      * nexus-z0o2p.24): every chash in the request must have a live manifest row in the collection.
      * The policy decides whether a miss refuses the request or is only logged and counted.
      */
-    private OwnershipGuard ownershipGuard(String route) {
-        return new OwnershipGuard(ownerlessWritePolicy.mode(), route);
+    private OwnershipGuard ownershipGuard(HttpExchange ex, String route) {
+        var headers = ex.getRequestHeaders();
+        return new OwnershipGuard(ownerlessWritePolicy.mode(), route,
+                headers.getFirst("User-Agent"), headers.getFirst(CLIENT_VERSION_HEADER));
     }
+
+    /**
+     * Header the final-cut client sends on every engine request (RDR-223 Phase 3 Step 2,
+     * nexus-z0o2p.24): the conexus version. The ownerless-write log line carries it, and its
+     * absence names a client older than the cut.
+     */
+    public static final String CLIENT_VERSION_HEADER = "X-Nexus-Client-Version";
 
     /** The policy this handler applies to ownerless chunk writes; the test seam and the status source. */
     public OwnerlessWritePolicy ownerlessWritePolicy() {
@@ -470,7 +479,7 @@ public final class VectorHandler implements HttpHandler {
                         "embeddings length " + embeddings.size() + " != ids length " + ids.size());
             }
             repo.upsertChunksWithVectors(tenant, collection, ids, documents, embeddings, metadatas,
-                    deleteKeys, ownershipGuard("upsert-chunks"));
+                    deleteKeys, ownershipGuard(ex, "upsert-chunks"));
             emitTokenUsage(ex, 0L);
             HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size(), "tokens", 0)));
             return;
@@ -478,7 +487,7 @@ public final class VectorHandler implements HttpHandler {
 
         var upsertResult = repo.upsertChunksWithTokens(
                 tenant, collection, ids, documents, metadatas, forceReEmbed, deleteKeys,
-                ownershipGuard("upsert-chunks"));
+                ownershipGuard(ex, "upsert-chunks"));
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, upsertResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("upserted", ids.size())));
@@ -746,12 +755,15 @@ public final class VectorHandler implements HttpHandler {
         Map<String, Object> body = readBody(ex);
         String collection  = requireString(body, "collection");
         String docId       = requireString(body, "doc_id");
+        // RDR-223 P3.2: a non-canonical id is a 400 BEFORE the repository resolves the collection or
+        // asks about ownership, as on upsert-chunks (the id IS the chash).
+        dev.nexus.service.db.Chash.requireCanonical(docId, "doc_id");
         String content     = requireString(body, "content");
         Map<String, Object> metadata = optMap(body, "metadata");
         if (metadata == null) metadata = Map.of();
 
         var putResult = repo.putWithTokens(tenant, collection, docId, content, metadata,
-                ownershipGuard("store-put"));
+                ownershipGuard(ex, "store-put"));
         // Emit token count from the doc-embedding call (bead nexus-ehc4q).
         emitTokenUsage(ex, putResult.tokens());
         HttpUtil.send(ex, 200, json(Map.of("id", putResult.value())));

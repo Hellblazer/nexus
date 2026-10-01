@@ -25,7 +25,8 @@ public final class OwnerlessChunkWriteException extends RuntimeException {
             + "' (e.g. " + (unownedSample.isEmpty() ? "?" : unownedSample.get(0)) + "). Write a document's "
             + "chunks and its manifest rows in one request through POST /v1/catalog/manifest/write_many "
             + "(first batch) and POST /v1/catalog/manifest/append (later batches); this route only "
-            + "rewrites chunks that a live document already owns");
+            + "rewrites chunks that a live document already owns. If the nx client sent this, it is older "
+            + "than this engine expects: upgrade conexus and restart nx-mcp / Claude Code sessions");
         this.route = route;
         this.collection = collection;
         this.unownedCount = unownedCount;

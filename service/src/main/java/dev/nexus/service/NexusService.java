@@ -240,8 +240,9 @@ public final class NexusService {
 
     /**
      * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} and {@code store-put} do
-     * with a chash that has no live manifest row, from {@code NX_OWNERLESS_WRITE_MODE} (default
-     * enforce; an invalid value fails the boot). Mutable only through the holder, for tests.
+     * with a chash that has no live manifest row, from {@code NX_OWNERLESS_WRITE_MODE}: unset means
+     * log-only, only an explicit {@code enforce} enforces, an invalid value fails the boot (this field
+     * initialiser throws out of the constructor). Mutable only through the holder, for tests.
      */
     private final dev.nexus.service.vectors.OwnerlessWritePolicy ownerlessWritePolicy =
             dev.nexus.service.vectors.OwnerlessWritePolicy.fromEnv();
@@ -1431,14 +1432,14 @@ public final class NexusService {
         log.info("event=service_stopped");
     }
 
-    /**
-     * Actual bound port. Useful when constructed with port 0.
-     */
     /** The ownerless-write policy this service applies; tests flip it between enforce and log-only. */
     public dev.nexus.service.vectors.OwnerlessWritePolicy ownerlessWritePolicy() {
         return ownerlessWritePolicy;
     }
 
+    /**
+     * Actual bound port. Useful when constructed with port 0.
+     */
     public int getPort() {
         return server.getAddress().getPort();
     }

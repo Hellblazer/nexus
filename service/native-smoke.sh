@@ -46,6 +46,9 @@ fi
 
 SVCPORT=$(python3 -c "import socket;s=socket.socket();s.bind(('',0));print(s.getsockname()[1]);s.close()")
 export NX_SERVICE_PORT=$SVCPORT NX_SERVICE_TOKEN=smoketoken NX_EMBED_MODE=onnx
+# RDR-223 P3.2 (nexus-z0o2p.24): an unset NX_OWNERLESS_WRITE_MODE is log-only on the engine; the smoke
+# runs the posture the local launch ships (enforce) unless the caller asks for the log-only census.
+export NX_OWNERLESS_WRITE_MODE="${NX_OWNERLESS_WRITE_MODE:-enforce}"
 # The real-client probes below run `uv run python` from THIS checkout, which the
 # nexus-a2qhz production-write guard classifies as a dev checkout: every HTTP
 # write it makes needs the reason-bearing opt-in or it is refused (burned
