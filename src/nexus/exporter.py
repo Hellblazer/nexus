@@ -893,6 +893,9 @@ class _OwnerImport:
         self._import_writer = MultiDocumentImportWriter(
             self._writer, collection=self.collection_name, content_hash=self.file_hash,
             embedding_model=self.embedding_model, force_re_embed=True, metadata_merge=True,
+            # The stamp comes after the post-store chains of the page that finishes a document
+            # (RDR-223 decision of 2026-09-30, nexus-z0o2p.34).
+            defer_completion=True,
         )
 
     def close(self) -> None:
@@ -1015,6 +1018,14 @@ class _OwnerImport:
             _fire_store_chains_grouped_by_doc(
                 sent_ids, self.collection_name, sent_docs, sent_embs, sent_metas, self.hooks,
             )
+        # The stamp, LAST (nexus-z0o2p.34): a document whose last request landed in this page is
+        # stamped only after the page's chains fired, so a kill in a chain leaves it ``indexing``
+        # and the next run of the same file resumes it and fires the chains again. A refusal is
+        # recorded by the writer and reported in finish(); it does not stop the import.
+        if result.landed:
+            stamped = writer.complete_documents(result.landed)
+            result.finished.extend(stamped.finished)
+            result.failed.update(stamped.failed)
         _log.debug(
             "import_page_written", documents=len(result.written), finished=len(result.finished),
             failed=len(result.failed), chunks=len(sent_ids), total_so_far=self.imported_count,
@@ -1149,8 +1160,8 @@ class _OwnerImport:
     def finish(self) -> dict[str, Any]:
         """Collect the run's verdict and summarise. Returns ``owned_count``, ``unowned_count``,
         ``unowned_documents`` (each ``{tumbler, title, index_state, left_out}``) and
-        ``sweep_skipped``; failures are in :attr:`failures`. Every document was swept and stamped on
-        its own last page, so nothing is sent here."""
+        ``sweep_skipped``; failures are in :attr:`failures`. Every document was swept on its own last
+        page and stamped right after that page's chains, so nothing is sent here."""
         sweep_skipped = 0
         owned_count = 0
         if self._import_writer is not None:

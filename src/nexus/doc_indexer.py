@@ -1690,6 +1690,7 @@ def _index_document(
     doc_id: str = "",
     source_uri: str = "",
     doc_just_created: bool = False,
+    pending_stamp: "list[_DeferredOwnerWrite] | None" = None,
 ) -> int | list[dict]:
     """Shared indexing pipeline: credential check, staleness, then one write of the chunks with their owner rows.
 
@@ -1998,7 +1999,13 @@ def _index_document(
         )
         # The stamp, LAST (D2): a hook that dies with the process leaves the fence 'indexing', so
         # the next run redoes the document and fires the hooks again.
-        pending.complete()
+        if pending_stamp is None:
+            pending.complete()
+        else:
+            # The caller stamps, after the catalog enrichment it runs (nexus-z0o2p.34); it closes
+            # the write.
+            pending_stamp.append(pending)
+            pending = None
     except IndexRunVerifyRefused:
         # The engine refused the completion stamp: the manifest is NOT verified
         # complete. The writer deliberately leaves the fence 'indexing' after a
@@ -3356,6 +3363,10 @@ def index_pdf(
                 str(pdf_path), col_name, "",
                 doc_id=_catalog_doc_id_for_batch,
             )
+        # The catalog enrichment (title, author, year, chunk count) is part of the work the stamp
+        # vouches for (nexus-z0o2p.34): a kill in it must leave the fence 'indexing' so the next
+        # run redoes it. It swallows its own exceptions, so only a kill reaches the stamp late.
+        _register_in_catalog(metadatas_list, len(metadatas_list))
         # The stamp, LAST (D2): a kill in a hook above leaves the fence 'indexing', so the next
         # run redoes the document and fires the hooks again.
         if pending is not None:
@@ -3394,9 +3405,7 @@ def index_pdf(
     # blocks. Replacement protection (RDR-223) is the engine's own sweep inside the write; nx t3
     # gc is the manual backstop. Full evidence: _identity_where's docstring above.
 
-    # The completion stamp was sent above (RDR-223, D2), so a refusal never reaches
-    # _register_in_catalog for this run.
-    _register_in_catalog(metadatas_list, len(metadatas_list))
+    # _register_in_catalog ran above, ahead of the stamp (RDR-223, nexus-z0o2p.34).
 
     # nexus-y8qtj: end-of-run fork check (see the streaming branch above).
     _forks = _check_document_fork(doc_id, col_name)
@@ -3821,6 +3830,9 @@ def index_markdown(
         _markdown_chunks, doc_id=doc_id, extraction_source=extraction_source,
     )
     source_key = make_relative(md_path, base_path) if base_path else None
+    # The write's completion stamp is sent below, after the catalog enrichment (RDR-223,
+    # nexus-z0o2p.34): _index_document hands it back instead of sending it.
+    _stamps: "list[_DeferredOwnerWrite]" = []
     raw = _index_document(
         md_path, corpus, chunk_fn, t3=t3,
         collection_name=collection_name, embed_fn=embed_fn,
@@ -3830,27 +3842,55 @@ def index_markdown(
         doc_id=doc_id,
         source_uri=source_uri,
         doc_just_created=_doc_just_created,
+        pending_stamp=_stamps,
     )
-    if not return_metadata:
-        assert isinstance(raw, int)
-        count = raw
-        if count > 0:
-            _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri)
-            # nexus-y8qtj: end-of-run fork check (see index_pdf for rationale).
+
+    def _stamp_last() -> None:
+        """The stamp, LAST: a kill in the enrichment above leaves the fence 'indexing', so the next
+        run redoes the document and its enrichment."""
+        from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 — circular-dep avoidance (nexus.errors)
+
+        try:
+            for _pending in _stamps:
+                _pending.complete()
+        except IndexRunVerifyRefused:
+            from nexus.mcp_infra import discard_deferred_superseded_vectors  # noqa: PLC0415 — deferred import: avoids import cycle at module load
+
+            # Recorded by the writer; the fence stays 'indexing' and the next run redoes it.
+            for _pending in _stamps:
+                discard_deferred_superseded_vectors(_pending.doc_id)
+            raise
+        except Exception as exc:
+            for _pending in _stamps:
+                _fence_fail(_pending.doc_id, str(exc))
+            raise
+
+    try:
+        if not return_metadata:
+            assert isinstance(raw, int)
+            count = raw
+            if count > 0:
+                _catalog_markdown_hook(md_path, col_name, content_type, corpus, count, base_path=base_path, source_uri=source_uri)
+                _stamp_last()
+                # nexus-y8qtj: end-of-run fork check (see index_pdf for rationale).
+                _forks = _check_document_fork(doc_id, col_name)
+                if on_fork_detected is not None:
+                    on_fork_detected(_forks)
+            return count
+        if not isinstance(raw, list):
+            return {"chunks": 0, "sections": 0}
+        metadatas: list[dict] = raw
+        sections = sum(1 for m in metadatas if m.get("section_title", ""))
+        if metadatas:
+            _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri)
+            _stamp_last()
             _forks = _check_document_fork(doc_id, col_name)
             if on_fork_detected is not None:
                 on_fork_detected(_forks)
-        return count
-    if not isinstance(raw, list):
-        return {"chunks": 0, "sections": 0}
-    metadatas: list[dict] = raw
-    sections = sum(1 for m in metadatas if m.get("section_title", ""))
-    if metadatas:
-        _catalog_markdown_hook(md_path, col_name, content_type, corpus, len(metadatas), base_path=base_path, source_uri=source_uri)
-        _forks = _check_document_fork(doc_id, col_name)
-        if on_fork_detected is not None:
-            on_fork_detected(_forks)
-    return {"chunks": len(metadatas), "sections": sections}
+        return {"chunks": len(metadatas), "sections": sections}
+    finally:
+        for _pending in _stamps:
+            _pending.close()
 
 
 def batch_index_pdfs(

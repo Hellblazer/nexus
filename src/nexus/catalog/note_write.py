@@ -6,11 +6,20 @@ import) is one catalog document of a few pieces. It used to be written as one ``
 request per piece, then a separate manifest request, then compensation when a later step failed.
 Between the chunk requests and the manifest request a chunk existed with no owner row, and a client
 that died there left it behind. :func:`write_note` sends the pieces as the ``chunks`` array of a
-single ``write_manifest_many`` request for the one document, with ``sweep`` on and the completion
-stamp riding the same request. The engine writes the chunks and the owner rows in one transaction,
+single ``write_manifest_many`` request for the one document, with ``sweep`` on (the completion stamp
+is a request of its own, sent last; see below). The engine writes the chunks and the owner rows in one transaction,
 so a chunk of the note never lands without its owner and a failed request leaves the previous
 manifest exactly as it was. The superseded-chunk sweep follows in its own transaction after the
 commit, under the NOT EXISTS guard, so a chunk another document owns survives it.
+
+The completion stamp comes LAST (RDR-223 decision of 2026-09-30, nexus-z0o2p.34). :func:`put_note`
+sends the request WITHOUT a stamp; the producer fires the post-store chains
+(:func:`fire_note_chains`) and then calls :func:`stamp_note`, which sends the stamp. A process killed in
+a chain leaves the fence ``indexing`` with the note whole and owned, so the next put redoes the write
+and fires the chains again; with the stamp riding the request it would have left a note that read
+complete and whose chains nothing would fire. The cost is one extra request per note. A stamp the
+engine refuses, or one that fails, leaves the fence ``indexing`` as well (the writer's rule; see
+:class:`StampRefusedError`) and the note is reported as uncertain.
 
 Two layers:
 
@@ -79,6 +88,7 @@ import structlog
 from nexus.catalog.multi_batch_write import (
     DocumentFailedError,
     OneRequestResult,
+    complete_document,
     write_one_request,
 )
 from nexus.catalog.store_hook import (
@@ -276,6 +286,7 @@ def write_note(
     ttl_days: int | None = None,
     content_type: str | None = None,
     cat: Any = None,
+    stamp: bool = True,
 ) -> NoteWriteResult:
     """Write *pieces* as the chunks of *catalog_doc_id*, and its manifest, in one request.
 
@@ -283,7 +294,9 @@ def write_note(
     :func:`~nexus.catalog.store_hook.note_pieces`; the manifest rows are derived from them exactly
     as :func:`~nexus.catalog.store_hook.note_manifest_metadata` does. *content_hash* is the whole
     note's hash (:func:`~nexus.catalog.store_hook.note_content_hash`): given, the document is
-    stamped complete in the same request; ``None`` stamps nothing. *content_type* is the chunk
+    stamped complete in the same request; ``None`` stamps nothing. With ``stamp=False`` the request
+    carries no stamp even when *content_hash* is given, and the caller sends it later
+    (:func:`stamp_note`, after the post-store chains). *content_type* is the chunk
     metadata's content type, by default the one the collection prefix implies. *cat* is a catalog
     writer; by default one is made for the call and closed after it.
 
@@ -337,13 +350,13 @@ def write_note(
         try:
             out = write_one_request(
                 recorder, doc_id=catalog_doc_id, collection=collection, rows=rows, chunks=chunks,
-                content_hash=content_hash or None, sweep=True, dropped="optional")
+                content_hash=(content_hash or None) if stamp else None, sweep=True, dropped="optional")
         except DocumentFailedError as exc:
             if recorder.any_in_flight():
                 # An earlier attempt of this request may have committed before this one was refused.
                 return _settle_after_error(
                     result, expected, exc, recorder=recorder, cat=cat, rows=rows, chunks=chunks,
-                    content_hash=content_hash)
+                    content_hash=content_hash if stamp else None)
             raise NoteWriteError(
                 catalog_doc_id=catalog_doc_id, collection=collection,
                 reason=f"{exc.reason} (the engine's own log carries its reason, event manifest_write_many_doc_failed)",
@@ -357,7 +370,7 @@ def write_note(
         except Exception as exc:  # noqa: BLE001 — judged below from every attempt's error and the manifest
             return _settle_after_error(
                 result, expected, exc, recorder=recorder, cat=cat, rows=rows, chunks=chunks,
-                content_hash=content_hash)
+                content_hash=content_hash if stamp else None)
         _absorb(result, out)
         return result
     finally:
@@ -631,6 +644,11 @@ class PutNoteOutcome:
     stamp_detail: str = ""
     refusal: str = ""
     unstamped: bool = False
+    #: Set on a :data:`STORED` outcome whose completion stamp has not been sent yet: the producer
+    #: fires its chains and then calls :func:`stamp_note` (nexus-z0o2p.34). ``content_hash`` is what
+    #: the stamp claims.
+    stamp_pending: bool = False
+    content_hash: str = ""
 
     @property
     def doc_id(self) -> str:
@@ -657,8 +675,9 @@ def put_note(
     2. Register the catalog document (reconciling onto an existing (collection, title) row).
        Registration that yields no document is :data:`NO_CATALOG`: nothing has been written and
        nothing can be, since a note is never written ownerless.
-    3. ``doc_indexer._fence_begin`` (advisory), then :func:`write_note` with the whole note's hash so
-       the completion stamp rides the request.
+    3. ``doc_indexer._fence_begin`` (advisory), then :func:`write_note` WITHOUT the completion stamp
+       (the fence stays ``indexing``): the stamp is :func:`stamp_note`'s, sent after the producer has
+       fired its post-store chains (nexus-z0o2p.34).
     4. On :class:`NoteWriteError`: ``_fence_fail``; remove the row this call minted, but only when
        its manifest is empty (a concurrent writer's version means the row is no longer ours), or,
        for a row this call reconciled onto, put back the identity stamp it changed; a minted row
@@ -717,9 +736,8 @@ def put_note(
         write = write_note(
             catalog_doc_id=doc, collection=collection, pieces=pieces, content_hash=content_hash,
             title=title, tags=tags, category=category, session_id=session_id,
-            source_agent=source_agent, ttl_days=ttl_days, content_type=content_type, cat=cat)
-        if not write.completed:
-            raise _UnstampedError(f"note {doc} in {collection} landed but was not stamped complete")
+            source_agent=source_agent, ttl_days=ttl_days, content_type=content_type, cat=cat,
+            stamp=False)
     except StampRefusedError as exc:
         # The writer's rule: a refused stamp leaves the fence `indexing` (no _fence_fail, so no
         # failed-document heal); it is recorded and reported as unknown.
@@ -770,8 +788,67 @@ def put_note(
             sh.restore_pre_call_stamp(doc, pre_call.get("doc_id", ""), out.doc_id)
         raise
     out.status, out.write = STORED, write
+    out.stamp_pending, out.content_hash = True, content_hash
     _warn_if_sweep_skipped(out, write)
     return out
+
+
+def stamp_note(outcome: PutNoteOutcome, *, cat: Any = None) -> PutNoteOutcome:
+    """Send the completion stamp of a note :func:`put_note` STORED, AFTER its post-store chains.
+
+    Every producer calls this once, after :func:`fire_note_chains` (RDR-223, nexus-z0o2p.34). An
+    outcome with no stamp pending (one that did not store, or one already stamped) is returned as it
+    is. Otherwise the stamp is :func:`~nexus.catalog.multi_batch_write.complete_document` (retried
+    like every idempotent request) against the note's manifest ROW count, and *outcome* is updated
+    in place and returned:
+
+    * stamped: still :data:`STORED`, ``write.completed`` is True;
+    * refused by the engine: :data:`UNCERTAIN` with ``stamp_refused`` and ``stamp_detail``, the
+      refusal recorded for the record-level summary, exactly as a refusal that rode the write was;
+    * failed any other way (a transport error, an engine with no fence route): :data:`UNCERTAIN`
+      with ``unstamped``.
+
+    Neither failure fails the fence: the document stays ``indexing`` (the writer's rule), so the next
+    put of the note redoes the write and fires the chains again, and nothing is rolled back (the note
+    is whole and owned).
+    """
+    if outcome.status != STORED or not outcome.stamp_pending:
+        return outcome
+    doc = outcome.catalog_doc_id
+    rows = len(outcome.write.chunk_ids) if outcome.write is not None else len(outcome.chunk_ids)
+    owns_cat = cat is None
+    try:
+        if owns_cat:
+            from nexus.catalog.factory import make_catalog_writer  # noqa: PLC0415 — deferred to avoid circular import at module load
+
+            cat = make_catalog_writer(priority="interactive")
+        complete_document(cat, doc_id=doc, content_hash=outcome.content_hash, manifest_rows=rows)
+    except IndexRunVerifyRefused as exc:
+        refused = _stamp_refused(doc, outcome.collection, exc)
+        outcome.status, outcome.reason = UNCERTAIN, str(refused)
+        outcome.stamp_refused, outcome.stamp_detail = True, refused.detail
+        _log.warning(
+            "store_put_stamp_refused", doc_id=outcome.doc_id, catalog_doc_id=doc,
+            collection=outcome.collection, error=outcome.reason[:300])
+        return outcome
+    except Exception as exc:  # noqa: BLE001 — the note is stored; only its stamp failed, and the fence is left as the write left it
+        outcome.status, outcome.unstamped = UNCERTAIN, True
+        outcome.reason = f"the completion stamp failed: {exc}"
+        _log.warning(
+            "store_put_stamp_failed", doc_id=outcome.doc_id, catalog_doc_id=doc,
+            collection=outcome.collection, error=outcome.reason[:300], cause_chain=_cause_chain(exc),
+            **_stack_unless_anticipated(exc))
+        return outcome
+    finally:
+        if owns_cat:
+            try:
+                cat.close()
+            except Exception:  # noqa: BLE001 — best-effort handle cleanup
+                pass
+    outcome.stamp_pending = False
+    if outcome.write is not None:
+        outcome.write.completed = True
+    return outcome
 
 
 def _warn_if_sweep_skipped(out: PutNoteOutcome, write: NoteWriteResult) -> None:
@@ -836,8 +913,9 @@ def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -
                                           have succeeded; check before retrying
     UNCERTAIN, stamp refused              wrote it and the engine accepted it but refused to stamp it
                                           complete; stays 'indexing'; nothing rolled back
-    UNCERTAIN, landed but unstamped       wrote it, the document was not stamped complete; nothing
-                                          rolled back; a retry is an idempotent re-write
+    UNCERTAIN, landed but unstamped       wrote it, the document was not stamped complete; stays
+                                          'indexing'; nothing rolled back; a retry is an idempotent
+                                          re-write
     any other status                      unrecognised state; nothing confirmed stored
     ====================================  ============================================================
 
@@ -876,7 +954,7 @@ def failure_message(outcome: PutNoteOutcome, *, subject: str, check: str = "") -
         if outcome.unstamped:
             return (
                 f"wrote {doc_id} to {col}, but the document was not stamped complete. "
-                "Nothing was rolled back; a retry is an idempotent re-write.")
+                "The document stays 'indexing'. Nothing was rolled back; a retry is an idempotent re-write.")
         look = f"check with {check}" if check else "look for the note in the store"
         return (
             f"could not confirm that {subject} landed in {col}: {reason}. Nothing was rolled back: the "
@@ -893,9 +971,11 @@ def fire_note_chains(outcome: PutNoteOutcome, content: str, *, hooks: Any = None
     The sequence MCP ``store_put`` established (RDR-223 P2.2, nexus-z0o2p.12) and ``nx store put``,
     ``nx memory promote`` and the recovery import each hand-copied: ``fire_single`` per piece, one
     ``fire_batch`` over every piece, and ``fire_document`` once with the whole *content*, carrying the
-    CATALOG tumbler (nexus-w8lg1: the aspect queue's composite FK), never a chunk id. The manifest and
-    the completion stamp rode the write request, so the batch chain skips the manifest hook, the same
-    skip the flush-grain combined write makes. Per-hook failures are isolated by the registry.
+    CATALOG tumbler (nexus-w8lg1: the aspect queue's composite FK), never a chunk id. The manifest
+    rode the write request, so the batch chain skips the manifest hook, the same skip the flush-grain
+    combined write makes. Per-hook failures are isolated by the registry. The completion stamp is NOT
+    sent here: the producer calls :func:`stamp_note` after this returns, so a kill in a chain leaves
+    the fence ``indexing`` (nexus-z0o2p.34).
 
     *hooks* is the caller's registry (MCP keeps a process-local one); without it a default registry is
     built, as every CLI path did. Only a stored note fires: any other *outcome* raises ``ValueError``

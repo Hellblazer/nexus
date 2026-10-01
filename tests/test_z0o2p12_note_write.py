@@ -711,7 +711,7 @@ class TestChunkMetadata:
 
 
 class TestPutNote:
-    def test_put_note_begins_the_fence_before_the_write_and_stamps_it_complete(self, vec):
+    def test_put_note_begins_the_fence_before_the_write_and_leaves_the_stamp_to_stamp_note(self, vec):
         import nexus.catalog.note_write as nw
         import nexus.doc_indexer as di
         from unittest.mock import patch
@@ -732,9 +732,15 @@ class TestPutNote:
             out = put_note(content="z0o2p12 put_note fence order", collection=_COLLECTION,
                            title="z0o2p12-putnote-fence")
         assert order == ["fence-begin", "write"]
-        assert out.status == nw.STORED and out.write.completed
-        assert out.chunk_ids == [_chash("z0o2p12 put_note fence order")] and out.doc_id == out.chunk_ids[0]
+        assert out.status == nw.STORED and out.chunk_ids == [_chash("z0o2p12 put_note fence order")]
+        assert out.doc_id == out.chunk_ids[0]
+        # RDR-223 (nexus-z0o2p.34): the write carries no stamp; the producer stamps after its chains.
+        assert out.stamp_pending and not out.write.completed
+        assert _index_state(out.catalog_doc_id) == "indexing"
+        stamped = nw.stamp_note(out)
+        assert stamped is out and out.status == nw.STORED and out.write.completed and not out.stamp_pending
         assert _index_state(out.catalog_doc_id) == "complete"
+        assert nw.stamp_note(out) is out, "a second call has nothing to send"
 
     def test_no_document_means_nothing_is_written_and_no_fence_begins(self, vec):
         import nexus.catalog.note_write as nw
@@ -748,18 +754,53 @@ class TestPutNote:
         begin.assert_not_called()
         write.assert_not_called()
 
-    def test_a_landed_note_the_fence_was_not_told_about_is_unknown(self, vec):
+    def test_a_stamp_that_fails_after_the_chains_is_unknown_and_leaves_the_fence_indexing(self, vec):
+        """nexus-z0o2p.34: the stamp is sent after the post-store chains. One that fails (a transport
+        error, an engine with no fence route) reports the note as uncertain with ``unstamped`` and
+        leaves the document ``indexing``: nothing fails the fence, nothing is rolled back."""
+        import httpx
         import nexus.catalog.note_write as nw
         from unittest.mock import patch
 
-        unstamped = nw.NoteWriteResult(catalog_doc_id="x", collection=_COLLECTION, completed=False)
-        with patch("nexus.catalog.note_write.write_note", return_value=unstamped), \
+        out = put_note(content="z0o2p12 unstamped", collection=_COLLECTION, title="z0o2p12-unstamped")
+        assert out.status == nw.STORED and out.stamp_pending
+        with patch("nexus.catalog.note_write.complete_document",
+                   side_effect=httpx.ConnectError("refused")), \
              patch("nexus.doc_indexer._fence_fail") as fail, \
              patch("nexus.catalog.store_hook.rollback_minted_catalog_entry") as rollback:
-            out = put_note(content="z0o2p12 unstamped", collection=_COLLECTION, title="z0o2p12-unstamped")
-        assert out.status == nw.UNCERTAIN
-        assert fail.call_count == 1
+            stamped = nw.stamp_note(out)
+        assert stamped is out and out.status == nw.UNCERTAIN and out.unstamped and not out.stamp_refused
+        assert "stamp failed" in out.reason
+        assert "stays 'indexing'" in (nw.failure_message(out, subject="x") or "")
+        fail.assert_not_called()
         rollback.assert_not_called()
+        assert _index_state(out.catalog_doc_id) == "indexing"
+
+    def test_a_stamp_the_engine_refuses_after_the_chains_is_the_stamp_refused_outcome(self, vec):
+        import nexus.catalog.note_write as nw
+        from nexus.errors import IndexRunVerifyRefused
+        from unittest.mock import patch
+
+        out = put_note(content="z0o2p12 refused stamp", collection=_COLLECTION, title="z0o2p12-refused-stamp")
+        refusal = IndexRunVerifyRefused(
+            doc_id=out.catalog_doc_id, referenced=1, present=0, missing=1, chunk_count=1)
+        with patch("nexus.catalog.note_write.complete_document", side_effect=refusal), \
+             patch("nexus.doc_indexer._fence_fail") as fail:
+            nw.stamp_note(out)
+        assert out.status == nw.UNCERTAIN and out.stamp_refused and out.stamp_detail
+        assert "refused to stamp" in (nw.failure_message(out, subject="x") or "")
+        fail.assert_not_called()
+        assert _index_state(out.catalog_doc_id) == "indexing"
+
+    def test_stamp_note_does_nothing_for_a_note_that_did_not_store(self, vec):
+        import nexus.catalog.note_write as nw
+        from unittest.mock import patch
+
+        out = nw.PutNoteOutcome(status=nw.NOT_LANDED, collection=_COLLECTION, stamp_pending=True)
+        with patch("nexus.catalog.note_write.complete_document") as stamp:
+            assert nw.stamp_note(out) is out
+        stamp.assert_not_called()
+        assert out.status == nw.NOT_LANDED
 
     @pytest.mark.parametrize("manifest_empty", [True, False])
     def test_a_minted_row_is_removed_only_when_its_manifest_is_empty(self, vec, manifest_empty):

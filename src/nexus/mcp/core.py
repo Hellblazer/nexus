@@ -5456,6 +5456,7 @@ def store_put(
             failure_message,
             fire_note_chains,
             put_note,
+            stamp_note,
         )
 
         # RDR-223 P2.2 (nexus-z0o2p.12): a note's pieces and its manifest
@@ -5526,6 +5527,14 @@ def store_put(
         # `def`, the offload comes from _sdk_patches._patch_sync_tool_offload wrapping what gets
         # REGISTERED (nexus-dgvsz), never from an await or asyncio.to_thread here (RDR-089).
         fire_note_chains(outcome, content, hooks=_hooks)
+        # The completion stamp, LAST (RDR-223, nexus-z0o2p.34): a kill in a chain above leaves the
+        # fence 'indexing', so the next put of the note redoes the write and fires the chains again.
+        # A stamp the engine refuses, or that fails, leaves it 'indexing' too and is worded like any
+        # other uncertain outcome.
+        outcome = stamp_note(outcome)
+        message = failure_message(outcome, subject="content", check="store_get")
+        if message is not None:
+            return f"Error: store_put: {message}"
         # RDR-061 E2: log relevance correlation for the most recent search in
         # this session. Only the newest trace is used to minimize noise —
         # older traces are unlikely to have driven this store_put.

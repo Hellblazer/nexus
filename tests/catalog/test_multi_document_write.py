@@ -422,3 +422,118 @@ def test_the_writer_totals_the_engines_sweep_skips_over_the_run():
                  {_c(1): _chunk(_c(1)), _c(2): _chunk(_c(2))})
     w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(3)))}, {_c(3): _chunk(_c(3))})
     assert w.sweep_skipped == 3          # write_many of the multi group, of the single group, one append
+
+
+# ── defer_completion (nexus-z0o2p.34): the stamp is the caller's, after its hooks ─────────────────
+
+
+def test_a_deferred_writer_sends_no_stamp_with_a_data_request_and_lists_the_documents_it_owes():
+    cat = FakeCat(prior={"1.1.1": [_c(50)]})
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 2)
+    _doc(w, "1.1.2", 1)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(2))), "1.1.2": _rows(w, "1.1.2", (0, _c(3)))},
+                       {_c(2): _chunk(_c(2)), _c(3): _chunk(_c(3))})
+    # Neither the single-request document (write_many, sweep on) nor the last append stamped.
+    assert [c["complete"] for op, c in cat.calls if op in ("write_many", "append_many")] == [None, None, None]
+    assert sorted(res.landed) == ["1.1.1", "1.1.2"] and res.finished == []
+    # The last append still carried the deferred sweep; only the stamp waits.
+    assert [c for op, c in cat.calls if op == "append_many"][-1]["sweep_chashes"] == {"1.1.1": [_c(50)]}
+    assert w.progress() == (0, 2)
+
+
+def test_complete_documents_stamps_with_one_stamp_only_append_many_and_the_row_counts():
+    cat = FakeCat()
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 2)
+    _doc(w, "1.1.2", 1)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(2))), "1.1.2": _rows(w, "1.1.2", (0, _c(3)))},
+                       {_c(2): _chunk(_c(2)), _c(3): _chunk(_c(3))})
+    before = len(cat.calls)
+    done = w.complete_documents(res.landed)
+    assert [op for op, _ in cat.calls[before:]] == ["append_many"], "one stamp request for the page"
+    stamp = cat.calls[-1][1]
+    assert stamp["docs"] == {"1.1.1": [], "1.1.2": []} and not stamp["chunks"] and not stamp["sweep_chashes"]
+    assert stamp["complete"] == {"1.1.1": (_H, 2), "1.1.2": (_H, 1)}
+    assert sorted(done.finished) == ["1.1.1", "1.1.2"] and not done.failed
+    assert w.progress() == (2, 2)
+    assert sorted(w.finish().completed) == ["1.1.1", "1.1.2"]
+
+
+def test_a_second_complete_documents_call_has_nothing_owed():
+    cat = FakeCat()
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert w.complete_documents(res.landed).finished == ["1.1.1"]
+    before = len(cat.calls)
+    assert w.complete_documents(res.landed).finished == []
+    assert len(cat.calls) == before
+
+
+def test_a_deferred_stamp_the_engine_refuses_is_reported_and_leaves_the_fence_alone():
+    cat = FakeCat(refuse={"1.1.1"})
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    _doc(w, "1.1.2", 1)
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1))), "1.1.2": _rows(w, "1.1.2", (0, _c(2)))},
+                       {_c(1): _chunk(_c(1)), _c(2): _chunk(_c(2))})
+    done = w.complete_documents(res.landed)
+    assert done.finished == ["1.1.2"] and "refused" in done.failed["1.1.1"]
+    verdict = w.finish()
+    assert verdict.completed == ["1.1.2"] and "refused" in verdict.failed["1.1.1"]
+    assert not [c for op, c in cat.calls if op == "fail"]
+
+
+def test_a_deferred_stamp_the_engine_fails_in_place_leaves_the_document_indexing():
+    cat = FakeCat()
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    cat.fail_docs.add("1.1.1")                       # the stamp request fails for it, the write did not
+    done = w.complete_documents(res.landed)
+    assert done.finished == [] and "stays indexing" in done.failed["1.1.1"]
+    assert "stays indexing" in w.finish().failed["1.1.1"]
+    assert not [c for op, c in cat.calls if op == "fail"]
+
+
+def test_a_document_whose_stamp_was_never_sent_is_reported_by_finish_and_marked_failed_by_abort():
+    cat = FakeCat()
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 1)
+    _doc(w, "1.1.2", 1)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1))), "1.1.2": _rows(w, "1.1.2", (0, _c(2)))},
+                 {_c(1): _chunk(_c(1)), _c(2): _chunk(_c(2))})
+    w.abort("boom")                                   # an exception in the hooks: the open documents fail
+    assert sorted(c["doc"] for op, c in cat.calls if op == "fail") == ["1.1.1", "1.1.2"]
+    cat2 = FakeCat()
+    w2 = _writer(cat2, defer_completion=True)
+    _doc(w2, "1.1.1", 1)
+    w2.write_page({"1.1.1": _rows(w2, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    assert "completion stamp was never sent" in w2.finish().failed["1.1.1"]
+
+
+def test_complete_documents_is_for_a_deferred_writer_and_only_for_registered_documents():
+    plain = _writer(FakeCat())
+    with pytest.raises(ValueError, match="defer_completion"):
+        plain.complete_documents([])
+    w = _writer(FakeCat(), defer_completion=True)
+    with pytest.raises(ValueError, match="not registered"):
+        w.complete_documents(["9.9.9"])
+
+
+def test_a_deferred_trailing_sweep_chain_parks_the_document_after_its_last_sweep_without_a_stamp():
+    dropped = [_c(1000 + i) for i in range(650)]
+    cat = FakeCat(prior={"1.1.1": dropped})
+    w = _writer(cat, defer_completion=True)
+    _doc(w, "1.1.1", 2)
+    w.write_page({"1.1.1": _rows(w, "1.1.1", (0, _c(1)))}, {_c(1): _chunk(_c(1))})
+    res = w.write_page({"1.1.1": _rows(w, "1.1.1", (1, _c(2)))}, {_c(2): _chunk(_c(2))})
+    appends = [c for op, c in cat.calls if op == "append_many"]
+    assert [len(a["sweep_chashes"]["1.1.1"]) for a in appends] == [300, 300, 50]
+    assert [a["complete"] for a in appends] == [None, None, None]
+    assert res.landed == ["1.1.1"] and res.finished == []
+    assert w.complete_documents(res.landed).finished == ["1.1.1"]
+    assert cat.calls[-1][1]["complete"] == {"1.1.1": (_H, 2)}

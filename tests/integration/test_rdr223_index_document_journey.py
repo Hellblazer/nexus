@@ -323,6 +323,49 @@ def test_a_kill_in_a_post_store_hook_leaves_the_document_indexing_and_the_rerun_
     assert _manifest(doc) == [(i, h) for i, h in enumerate(every)]
 
 
+def test_a_kill_in_the_markdown_catalog_enrichment_leaves_the_document_indexing_and_the_rerun_redoes_it(
+    tmp_path, monkeypatch,
+) -> None:
+    """nexus-z0o2p.34: ``index_markdown`` registers the document's title, year and chunk count
+    (``_catalog_markdown_hook``) after ``_index_document`` returns, which used to be after the
+    stamp: a process killed there left a complete document the next run skipped as fresh. The stamp
+    now follows the enrichment, so the kill leaves the fence ``indexing`` and the rerun redoes both."""
+    import nexus.doc_indexer as di
+    from nexus.db.http_vector_client import HttpVectorClient
+
+    path = _write_file(tmp_path, "enrichkill", _lines("enrichkill", 10))
+    calls: list[str] = []
+    armed = {"kill": True}
+    real = di._catalog_markdown_hook
+
+    def _enrich(*a, **kw):
+        calls.append("enrich")
+        if armed["kill"]:
+            raise ClientDied("killed in the markdown catalog enrichment")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(di, "_catalog_markdown_hook", _enrich)
+
+    def _run() -> int:
+        return di.index_markdown(
+            path, "z0o2p13-enrichkill", t3=HttpVectorClient(), collection_name=_COLLECTION)
+
+    with pytest.raises(ClientDied):
+        _run()
+    doc, _ = _register(path, "enrichkill")
+    assert calls == ["enrich"], "non-vacuity: the kill landed in the enrichment"
+    assert _index_state(doc) == "indexing", "the stamp had not been sent"
+    landed = _manifest(doc)
+    assert landed, "non-vacuity: the write had landed"
+    assert _present(_COLLECTION, [h for _, h in landed]) == {h for _, h in landed}, "every chunk had landed"
+
+    armed["kill"] = False
+    _run()
+    assert calls == ["enrich", "enrich"], "the rerun redid the enrichment"
+    assert _index_state(doc) == "complete"
+    assert _manifest(doc) == landed
+
+
 # ── re-indexing ───────────────────────────────────────────────────────────────
 
 

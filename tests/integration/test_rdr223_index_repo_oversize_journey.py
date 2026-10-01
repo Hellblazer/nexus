@@ -55,6 +55,12 @@ class ClientDied(Exception):
     """The simulated death of the client process between two requests."""
 
 
+class HookKilled(BaseException):
+    """The simulated death of the client process INSIDE a post-store hook. A BaseException so that
+    neither the hook registry's per-hook containment nor any ``except Exception`` in the code under
+    test can swallow it, as a real kill cannot be swallowed either."""
+
+
 class _ForbiddenDb(HttpVectorClient):
     """``ctx.db`` of the fallback under test: a service-backed T3 (an ``HttpVectorClient``, so the
     fallback picks the writer path) that fails the test on any use. The fallback writes through the
@@ -197,6 +203,8 @@ class _Env:
         }[kind]
         self.doc_id = ""
         self.hook_calls: list[dict] = []
+        #: ``armed`` makes the spy batch hook die (RDR-223 decision D2: stamp last on every path).
+        self.kill = {"armed": False}
         self.variant = 0
         self._pdf_chunks: list[tuple[str, str, dict]] = []
 
@@ -263,9 +271,13 @@ class _Env:
         reg = HookRegistry()
         calls = self.hook_calls
 
+        kill = self.kill
+
         def spy_batch(doc_ids, collection, contents, embeddings, metadatas, *, catalog_doc_id=""):
             calls.append({"ids": list(doc_ids), "collection": collection,
                           "catalog_doc_id": catalog_doc_id})
+            if kill["armed"]:
+                raise HookKilled("killed in a post-store hook")
 
         reg.register_batch(spy_batch)
         # The real manifest hook is registered so a fallback that still fires it would write the
@@ -412,6 +424,43 @@ def test_hooks_fire_once_for_the_whole_file_and_the_manifest_hook_is_excluded(en
     assert call["collection"] == env.collection and call["catalog_doc_id"] == env.doc_id
     # The registered manifest hook would have issued a manifest write of its own: there is none.
     assert len(_data(log)) == -(-env.n_chunks() // _WRITER_CAP)
+
+
+# ── a kill in a post-store hook (RDR-223 decision D2, extended to every writer path) ──
+
+
+def test_a_kill_in_a_post_store_hook_leaves_the_document_indexing_and_the_rerun_fires_the_hooks_again(
+    env: _Env,
+) -> None:
+    """The oversize fallback used to let the writer stamp the document complete with its last
+    request, ahead of the post-store hooks. A process killed in a hook (taxonomy assignment, aspect
+    enqueue) then left a document that read complete, whose hooks nothing would ever fire again.
+    The stamp now follows the hooks (nexus-z0o2p.34): the killed run leaves the fence ``indexing``
+    with every chunk landed and owned, and the rerun fires the hooks again and completes."""
+    env.write_file()
+    env.register()
+    every = [c[0] for c in env._pdf_chunks] if env.kind == "pdf" else None
+
+    env.kill["armed"] = True
+    with pytest.raises(HookKilled):
+        env.run()
+    assert len(env.hook_calls) == 1, "non-vacuity: the kill landed in the hook"
+    log = env.last_log
+    assert [p for p, _, _ in log][-1] != "/index-run/complete", "no stamp was sent"
+    assert _index_state(env.doc_id) == "indexing"
+    sent = _chashes_sent(log)
+    assert len(sent) == env.n_chunks() > _BATCHER_CAP, "non-vacuity: the whole oversize file was written"
+    assert _present(env.collection, sent) == set(sent), "every chunk had landed"
+    assert {m[1] for m in _manifest(env.doc_id)} == set(sent), "each with its owner row"
+    if every is not None:
+        assert set(sent) == set(every)
+
+    env.kill["armed"] = False
+    rerun = env.run()
+    assert len(env.hook_calls) == 1, "the rerun fired the hooks again"
+    assert [p for p, _, _ in rerun][-1] == "/index-run/complete"
+    assert _index_state(env.doc_id) == "complete"
+    assert [m[1] for m in _manifest(env.doc_id)] == sent
 
 
 # ── the client dies after the first request ───────────────────────────────────

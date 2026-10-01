@@ -11,10 +11,15 @@ manifest write, so a client that died between the two left chunks nobody owned. 
 chunks together with their owner rows.
 
 What the callers keep. The post-store hooks still fire once for the whole file, after the write, but
-without ``manifest_write_batch_hook`` (the writer already wrote the manifest and stamped the
-document complete). The early per-file ``_fence_begin`` stays: it bounds a hard kill's blast radius
-to the file in flight, and the writer's own fence begin (which also snapshots the manifest the
-deferred sweep works from) re-affirms it.
+without ``manifest_write_batch_hook`` (the writer already wrote the manifest). The early per-file
+``_fence_begin`` stays: it bounds a hard kill's blast radius to the file in flight, and the writer's
+own fence begin (which also snapshots the manifest the deferred sweep works from) re-affirms it.
+
+The completion stamp comes LAST (RDR-223 decision of 2026-09-30, nexus-z0o2p.34). The callers pass
+``defer_completion=True``, fire their hooks, then :func:`complete_oversize_write` sends the stamp. A
+process killed in a hook leaves the fence ``indexing`` with every chunk landed and owned, so the next
+run redoes the file and fires the hooks again; with the stamp riding the last request it would have
+left a document that read complete and whose hooks nothing would fire.
 
 The embeddings a request holds together do not change for the collections where it matters:
 contextual (CCE) embeddings (``docs__``/``rdr__``) and the onnx-local embedder. The engine embeds ONE
@@ -41,12 +46,15 @@ cleared. The same wrapper carries the run summary's sweep accounting.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 
 from nexus.errors import CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
 
 __all__ = [
-    "OversizeWriteDeferred", "refuse_identity_less_file", "use_writer", "write_oversize_file",
+    "OversizeWriteDeferred", "complete_oversize_write", "refuse_identity_less_file", "use_writer",
+    "write_oversize_file",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -150,6 +158,7 @@ def write_oversize_file(
     documents: list[str],
     metadatas: list[dict],
     force_re_embed: bool = False,
+    defer_completion: bool = False,
 ):
     """Write one oversize file's chunks and owner rows through the combined writer.
 
@@ -160,6 +169,11 @@ def write_oversize_file(
     ``indexing``, and the refusal is already in the record-level collector the run summary reads,
     as it was when the manifest hook swallowed it. Any other failure marks the fence ``failed``
     and propagates.
+
+    With *defer_completion* (every caller, nexus-z0o2p.34) the document is NOT stamped: the call
+    returns a :class:`~nexus.doc_indexer._DeferredOwnerWrite` holding the open catalog client, and
+    the caller fires its hooks and then hands it to :func:`complete_oversize_write`, which stamps
+    and releases it. A caller that never reaches the stamp must ``close()`` it.
     """
     from nexus.catalog.metadata_merging_catalog import MetadataMergingCatalog  # noqa: PLC0415 — deferred: rare oversize path
     from nexus.catalog.multi_batch_write import MultiBatchDocumentWriter  # noqa: PLC0415 — deferred: multi_batch_write imports the vector client
@@ -179,14 +193,21 @@ def write_oversize_file(
         chunks.append({"chash": cid, "text": text, "metadata": meta})
     cat = get_catalog_writer()
     merging = MetadataMergingCatalog(cat, collection, rewrite_delete_keys(metadatas))
+    held = False
     try:
-        with MultiBatchDocumentWriter(
+        writer = MultiBatchDocumentWriter(
             merging, doc_id=catalog_doc_id, collection=collection,
             content_hash=content_hash, force_re_embed=force_re_embed,
-        ) as writer:
+            defer_completion=defer_completion)
+        with writer:
             writer.add_batch(rows, chunks)
             result = writer.finish()
         merging.account_unexplained_skips(catalog_doc_id, result.sweep_skipped)
+        if defer_completion:
+            from nexus.doc_indexer import _DeferredOwnerWrite  # noqa: PLC0415 — deferred: doc_indexer imports the indexers that import this module
+
+            held = True
+            return _DeferredOwnerWrite(writer, cat, result, catalog_doc_id)
         return result
     except IndexRunVerifyRefused:
         _log.warning(
@@ -199,8 +220,36 @@ def write_oversize_file(
         raise
     finally:
         close = getattr(cat, "close", None)
-        if callable(close):
+        if callable(close) and not held:
             close()
+
+
+def complete_oversize_write(pending: Any) -> None:
+    """Stamp a deferred oversize write complete, then release it. Call it AFTER the post-store hooks.
+
+    *pending* is what :func:`write_oversize_file` returned for ``defer_completion=True``; it is
+    closed on every outcome, so a caller whose hooks raised only needs its own ``finally`` to call
+    ``pending.close()`` (idempotent). A refused stamp (``IndexRunVerifyRefused``) is logged and
+    absorbed, as :func:`write_oversize_file` always did: the chunks landed with their owner rows,
+    the fence stays ``indexing`` and the writer already recorded the refusal for the run summary.
+    A stamp that fails any other way fails the fence, then is judged as a failed write is: a
+    transient condition defers the file to the next run (:class:`OversizeWriteDeferred`), anything
+    else propagates.
+    """
+    doc_id = pending.doc_id
+    try:
+        pending.complete()
+    except IndexRunVerifyRefused:
+        _log.warning("oversize_write_complete_refused", doc_id=doc_id)
+    except Exception as exc:  # noqa: BLE001 — classify a stamp outcome; anything not transient re-raises below
+        # Fail the fence either way, as a failed write does: the next run redoes the file.
+        pending.writer.abort(f"{type(exc).__name__}: {exc}")
+        if _is_transient_write_error(exc):
+            raise OversizeWriteDeferred(
+                doc_id=doc_id, collection=getattr(pending.writer, "_collection", ""), cause=exc) from exc
+        raise
+    finally:
+        pending.close()
 
 
 def _is_transient_write_error(exc: BaseException) -> bool:

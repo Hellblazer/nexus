@@ -119,12 +119,13 @@ def put_cmd(
     # caller protocol: split the note to the collection model's token window
     # (nexus-spujb), refuse an over-quota note before minting anything (nexus-xzyr3),
     # register the catalog document, begin the index-run fence, send the pieces
-    # and the owner rows as ONE write_manifest_many request with the completion
-    # stamp riding it, and settle the outcome (fail the fence, remove the row this
-    # call minted or put back the identity stamp it changed). A chunk of the note
+    # and the owner rows as ONE write_manifest_many request (the completion stamp
+    # follows the post-store chains, stamp_note), and settle the outcome (fail the
+    # fence, remove the row this call minted or put back the identity stamp it
+    # changed). A chunk of the note
     # can therefore never land without its owner, and a failed request leaves the
     # previous manifest as it was. This command only words the result.
-    from nexus.catalog.note_write import failure_message, fire_note_chains, put_note  # noqa: PLC0415 — deferred: heavy catalog import, rare/branch-local for CLI startup cost
+    from nexus.catalog.note_write import failure_message, fire_note_chains, put_note, stamp_note  # noqa: PLC0415 — deferred: heavy catalog import, rare/branch-local for CLI startup cost
 
     # nexus-s71lr, deliverable 3 (named literally: "nx store put"): a single
     # document is still ONE embed call, and a large document's embed can run
@@ -170,6 +171,12 @@ def put_cmd(
     # on-disk path is deliberately never passed through as catalog file_path, since that leg is
     # collection-blind and could match/clobber an unrelated `nx index md` document.
     fire_note_chains(outcome, content)
+    # The completion stamp, LAST (RDR-223, nexus-z0o2p.34): a kill in a chain above leaves the fence
+    # 'indexing', so the next put of the note redoes the write and fires the chains again.
+    outcome = stamp_note(outcome)
+    message = failure_message(outcome, subject=repr(title), check="'nx store list'")
+    if message is not None:
+        raise click.ClickException(message)
     pieces = outcome.pieces
     split_note = f"  ({len(pieces)} chunks, split to the embedding model's token window)" if len(pieces) > 1 else ""
     click.echo(f"Stored: {outcome.doc_id}  →  {col_name}{split_note}")

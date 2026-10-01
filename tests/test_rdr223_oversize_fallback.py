@@ -247,15 +247,16 @@ def test_every_fallback_writes_through_the_writer_and_never_touches_the_db(
     assert manifest_hook_calls == []                             # and the manifest hook is skipped
 
 
-def test_a_single_request_file_is_stamped_in_its_write_many_and_a_refusal_there_is_survived(
+def test_a_single_request_file_is_stamped_after_its_hooks_and_a_refusal_there_is_survived(
     tmp_path, monkeypatch, run,
 ) -> None:
     """A file the batcher refused can still fit ONE writer request (the writer cap is above the
-    batcher's here). Its completion rides the write_many, and the engine refusing it there is
-    recorded and survived, like a refusal of a separate stamp."""
+    batcher's here). Its write_many carries no completion stamp (RDR-223, nexus-z0o2p.34): the stamp
+    is its own request, sent after the post-store hooks, and the engine refusing it is recorded and
+    survived, like a refusal of any other file's stamp."""
     import nexus.mcp_infra as mi
 
-    rec = _install(monkeypatch, _RecordingCat(refuse_in_write_many=True))
+    rec = _install(monkeypatch, _RecordingCat(refuse_stamp=True))
     _cap(monkeypatch, 500)
     mi.reset_complete_refusals()
 
@@ -263,7 +264,8 @@ def test_a_single_request_file_is_stamped_in_its_write_many_and_a_refusal_there_
 
     data = [(k, b) for k, b in rec.calls if k in ("write_many", "append")]
     assert [k for k, _ in data] == ["write_many"] and n > 1
-    assert data[0][1]["sweep"] is True and data[0][1]["complete"] == {_DOC: data[0][1]["complete"][_DOC]}
+    assert data[0][1]["sweep"] is True and not data[0][1]["complete"]
+    assert rec.kinds()[-1] == "complete"                         # the stamp is the last request
     assert mi.get_complete_refusals() == [_DOC]
     assert "fail" not in rec.kinds()                             # the refusal leaves the fence as begin did
 
