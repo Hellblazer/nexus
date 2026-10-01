@@ -63,11 +63,8 @@ _PRIVATE_HANDLE_ATTRS = frozenset({"_client", "_client_for"})
 #: This may only shrink. A new entry means someone reached into another
 #: object's private handle, which is the nexus-at2ff class.
 PRIVATE_HANDLE_CENSUS: dict[str, int] = {
-    # Guarded: is_service_backed(t3) returns before this line, so it only ever
-    # sees the legacy chroma-backed T3Database where ._client is correct. This
-    # exact site was changed by pattern during the at2ff sweep and REVERTED —
-    # it is the false positive that proves receiver-blind fixing is wrong too.
-    "src/nexus/commands/catalog.py": 1,
+    # src/nexus/commands/catalog.py: 1 -> 0 (the chunk_text_hash backfill helper, the one
+    # guarded site, was deleted with `nx collection backfill-hash`).
     # Guarded: :86 by is_service_backed(t3); :1200 by
     # _require_supported_taxonomy_backend(t3, db.taxonomy) refusing the
     # split-backend config before the raw path.
