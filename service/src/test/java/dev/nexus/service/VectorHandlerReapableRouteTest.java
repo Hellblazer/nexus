@@ -91,13 +91,12 @@ class VectorHandlerReapableRouteTest {
         var repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
         service = new NexusService(0, TOKEN_A, svcDs, null, repo);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
 
         // Burn each tenant's first-request ghost sweep before registering collections
         // (see VectorHandlerUpsertReferenceOnlyTest's identical bootstrap).
         for (String token : List.of(TOKEN_A, TOKEN_B)) {
-            http.send(HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+            http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
                 .header("Authorization", "Bearer " + token).GET().build(), HttpResponse.BodyHandlers.ofString());
         }
     }
@@ -112,8 +111,7 @@ class VectorHandlerReapableRouteTest {
     // ── http ────────────────────────────────────────────────────────────────
 
     private HttpResponse<String> post(String token, String path, Object body) throws Exception {
-        return http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+        return http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + token)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body))).build(),
@@ -410,8 +408,7 @@ class VectorHandlerReapableRouteTest {
             .statusCode()).as("a negative grace").isEqualTo(400);
         assertThat(post(TOKEN_A, "/v1/vectors/reapable", Map.of("collection", COL_A, "grace_seconds", "soon"))
             .statusCode()).as("a non-numeric grace").isEqualTo(400);
-        var get = http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/vectors/reapable"))
+        var get = http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/reapable")
             .header("Authorization", "Bearer " + TOKEN_A).GET().build(), HttpResponse.BodyHandlers.ofString());
         assertThat(get.statusCode()).as("POST only").isEqualTo(405);
     }
