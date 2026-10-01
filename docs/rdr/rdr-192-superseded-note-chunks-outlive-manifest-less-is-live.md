@@ -610,12 +610,12 @@ bounded by the consumer's own gates (the census gate, the fraction floor on the 
 
 | Path | What the predicate sees | Consequence | Mitigation, and its owner |
 | --- | --- | --- | --- |
-| `TRUNCATE` of the manifest (a superuser; no code path does it; `nexus_svc` holds no `TRUNCATE`, pinned with `has_table_privilege`) | Statement DELETE triggers do not fire, so no record; every chunk reads ownerless with its old `last_written_at` | Reaped early, for a live chunk reaped wrongly, all at once | A floor ON THE MOVE (refuse a pass that would take more than a fraction of a collection) and the 14 day quarantine restore: the move has no floor today, `nexus-2x9xa` (comment 2026-10-01) |
+| `TRUNCATE` of the manifest (a superuser; no code path does it; `nexus_svc` holds no `TRUNCATE`, pinned with `has_table_privilege`) | Statement DELETE triggers do not fire, so no record; every chunk reads ownerless with its old `last_written_at` | Reaped early, for a live chunk reaped wrongly, all at once | A floor ON THE MOVE (refuse a pass that would take more than a fraction of a collection) and the 14 day quarantine, from which `nx t3 quarantine restore` brings a chunk back (`nexus-wbfpw.49`; with `--reattach` it also writes the manifest row when the chunk's metadata names a live document, so the chunk is visible again, and a chunk it cannot attach comes back as bytes only and stays hidden): the move has no floor today, `nexus-2x9xa` (comment 2026-10-01) |
 | `session_replication_role = replica` (`pg_restore`, logical apply) | Triggers and the FK cascade skipped | A restore inserts and drops nothing. A manual replica-mode DELETE: reaped early | None beyond the consumer gates; accepted |
 | Manifest DML with no tenant GUC, or a role exempt from RLS | Subject to RLS on both tables with no GUC: zero manifest rows deleted, nothing dropped (pinned). Exempt from the manifest policy only: rows deleted, `nexus.chunks` hidden from the trigger, nothing recorded (reasoned; cannot be built without `NO FORCE` on the manifest alone). Exempt from both (`BYPASSRLS`, superuser): recorded correctly (pinned, run as the container superuser). The table owner is not exempt in production: `nexus_admin`, the Liquibase owner role, has no `BYPASSRLS` (catalog-016, catalog-025 headers), so under `FORCE ROW LEVEL SECURITY` it is bound by the policies like `nexus_svc` | Reaped early in the exempt-from-one case | A migration or DBA fix that deletes manifest rows runs as `nexus_admin` and must set the tenant GUC. No bead |
 | The one-hour guard | A chunk written or recorded within the hour is not recorded | Reaped up to one hour early | Accepted; stated in the vectors-021 header |
 | Staging promote over an existing chunk (`StagingPromoteOps`, `ON CONFLICT DO NOTHING`) | Retired. It kept the old clocks and recorded no orphaning, so an aged ownerless chunk re-promoted was reapable between promote and finalize. The `/v1/staging` routes and the `staging` schema were removed (`nexus-z0o2p.27`, `8a7831a3d`), so no such path remains | None | None needed |
-| R8: a live legacy note, no manifest row | Reapable once aged; every row took the vectors-020 migration time | Reaped wrongly at deploy + 30 days if a consumer acts without the census gate | The census-zero gate, re-run in the engine on every reaper pass (`nexus-2x9xa`); `nx t3 gc` requires `legacy-unmanifested == 0` before acting (`nexus-wbfpw.18`). The quarantine move (`gc_quarantine_orphans`) carries no gate of its own and its only caller passes code, docs and rdr collections |
+| R8: a live legacy note, no manifest row | Reapable once aged; every row took the vectors-020 migration time | Reaped wrongly at deploy + 30 days if a consumer acts without the census gate | The census-zero gate, re-run in the engine on every reaper pass (`nexus-2x9xa`); `nx t3 gc` requires `legacy-unmanifested == 0` before acting (`nexus-wbfpw.18`). The quarantine move (`gc_quarantine_orphans`) carries no gate of its own and its only caller passes code, docs and rdr collections. The way back for a note the reaper took wrongly is `nx t3 quarantine restore` with `--reattach` (`nexus-wbfpw.49`), which attaches the chunk to its still-live document unless that document has moved on (`superseded`); without a live owner the chunk is restored as bytes only, stays hidden from search and get, and the output prints the re-put-under-the-same-title recipe. `nx t3 backfill-manifest` does nothing for this class |
 | A tombstoned owner | Still a manifest row, so condition 1 fails | Never reaped by this predicate (`purge_trash` ages the tombstone) | `purge_trash`, unchanged |
 | A floor-refused quarantine chunk; a collection that fails the census | Quarantine siblings are excluded by `lifecycle_state`; a failing collection is refused visibly | Never reaped by the reaper | `gc_expire_quarantine` has its own clock and floor; fix the census |
 | Everything pre-existing at deploy | `vectors-020` gave every row the migration time | Reaped late: nothing existing is reapable for 30 days, then all of it at once (a one-shot cliff at deploy + 30 days, which the RDR-223 Day-2 baseline must carry) | The floor on the move bounds the cliff; baseline update in `nexus-2x9xa` |
@@ -965,9 +965,15 @@ grown.
   returns two versions of one title — same signature as the original
   filing. A `catalog doctor` check for "title with more than one live
   chunk" is Phase 4 Step 14, below.
-- **Recovery**: over-retention is recoverable by a later reaper pass;
-  over-deletion of a note is not recoverable at all. This asymmetry still
-  sets every default here, unchanged from the original filing.
+- **Recovery**: over-retention is recoverable by a later reaper pass.
+  Over-deletion by the reaper is now recoverable for the 14 day quarantine, because the reaper
+  moves and does not delete (Step 9): `nx t3 quarantine restore` (`nexus-wbfpw.49`) moves the chunk
+  back, and with `--reattach` (the default) writes the owning document's manifest row so the
+  chunk is returned by search and get again. A chunk with no live owner, or whose document was
+  re-indexed since (`superseded`), comes back as bytes only and stays hidden until its note is
+  re-put under the same title. After the 14 days `gc_expire_quarantine` deletes the chunk, and
+  over-deletion of a note is then not recoverable at all. This asymmetry still sets every default
+  here, unchanged from the original filing.
 
 ## Implementation Plan
 
@@ -1255,7 +1261,7 @@ delete a chunk the run is about to reference. So:
 
 Amendment (Sam, 2026-10-01; T2 `nexus/rdr-192-reaper-quarantine-decision-2026-10-01`):
 the reaper QUARANTINES; it does not hard-delete. A reapable chunk moves to its
-quarantine sibling, restorable for 14 days and then expired (as built: by the engine's
+quarantine sibling, restorable for 14 days (by `nx t3 quarantine restore`, below) and then expired (as built: by the engine's
 own `reaper_expire_quarantine`, not the existing `gc_expire_quarantine`; see "As built"
 below), for every prefix. The reaper's statement carries
 `chunk_is_reapable(..., NULL)` in its own predicate (no list-then-delete-by-id) and
@@ -1317,6 +1323,36 @@ The post-commit-sweep-failure debris the reaper exists for is therefore reaped 3
 after the failure, not on the next pass, and the MVV (b) reaper test injects a grace of
 zero.
 
+Step 9 deliverable, the way back (bead `nexus-wbfpw.49`, Sam 2026-10-01; engine changeset
+`vectors-025`, route `POST /v1/vectors/gc/quarantine-restore`, client `nx t3 quarantine
+restore`; it must be on `develop` and in the engine that is deployed before the reaper's first
+drain at deploy plus 30 days). Before it the only restore, `gc_restore_rereferenced`, needed a
+manifest row naming the chunk, which a chunk the reaper took wrongly lacks by definition. The
+verb moves the chunks the operator names (chashes, a `gc_audit` id, or a `quarantined_at`
+window) from the sibling back to the collection in one statement under the exclusive sweep
+gate, never overwrites a chunk the collection already holds (`present`), starts a fresh 30 day
+grace on the restored row (so the next hourly pass does not take it again), and writes one
+`quarantine_restore` `gc_audit` row. A held gate or a statement past its bound is a typed,
+retryable 503 with nothing moved. Restoring bytes is not enough, because since Phase 2 a chunk
+with no live owning manifest row is hidden from search and get (`live(c)`). So `--reattach`,
+the default, also writes the manifest row when the chunk's own metadata names a document that
+is still live in the collection (the census's two owner paths, forward by `catalog_doc_id` or
+`doc_id`, reverse by a single live note's own `doc_id`), at the chunk's `chunk_index` (0 for a
+one-chunk document). It writes nothing, and reports `superseded`, when the document's manifest
+already holds a different chunk at that position (it was re-indexed), the position is past the
+document's registered chunk count, two restored chunks claim one position, the document is in
+the middle of an index run, or it holds manifest rows under another collection: the manifest
+is never changed to make room, and `documents.chunk_count` is not touched. A chunk with no live
+owner (`no_live_owner`) or with a live owner but no knowable position (`no_position`) is
+restored as bytes only; the output says plainly that it stays hidden from search and get, and
+prints `nx store put - --collection C --title 'T'` with the owner's title and tumbler.
+`nx t3 backfill-manifest` does nothing for this class. `--no-reattach` moves bytes only, and a
+second run with reattach on attaches a chunk that is already present. The restore strips the
+reaper's own `quarantined_by` and `reaper_quarantined_at` tags along with `quarantined_at` and
+`origin_collection`. No end-to-end gate covers `/v1/vectors/gc/*` through the public edge
+(`tests/e2e/cloud-client-path-gate.sh` asserts none of them); a leg for the restore and the
+other sweep routes is bead `nexus-wbfpw.50`.
+
 #### Step 10: Ship `nx store list --reapable`, a read-only list of the chunks `reapable(c)` currently selects for a collection, so an operator can inspect what the reaper is about to remove before it runs
 
 ### Phase 4: Cleanup (gated on Phase 1's backfill census reading zero)
@@ -1337,7 +1373,7 @@ still return.
 
 | Resource | List | Info | Delete | Verify | Backup |
 | --- | --- | --- | --- | --- | --- |
-| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by the engine's `reaper_expire_quarantine` for chunks the reaper moved and by the client's `gc_expire_quarantine` for chunks the client moved) under a fraction floor on the move and none on expiry (Sam, 2026-10-01; Step 9) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk |
+| Superseded/reapable chunks | `nx store list --reapable` (Phase 3, Step 10) | In scope | In scope: the engine reaper and `nx t3 gc` QUARANTINE (restorable 14 days, then expired by the engine's `reaper_expire_quarantine` for chunks the reaper moved and by the client's `gc_expire_quarantine` for chunks the client moved) under a fraction floor on the move and none on expiry (Sam, 2026-10-01; Step 9) | `catalog doctor` check (Phase 4, Step 14) | N/A — content lives in the current chunk. Restore: `nx t3 quarantine restore` (`nexus-wbfpw.49`, Step 9), with `--reattach` so the chunk is visible again; a chunk with no live owner comes back hidden |
 
 ### New Dependencies
 
@@ -1603,3 +1639,18 @@ To be completed at gate (Layer 3 AI critique).
   kept (the only clock for a chunk that never had an owner). The first line of Step 9 that
   says the quarantine is "expired by the existing `gc_expire_quarantine`" and the Day-2
   table row are corrected in place.
+- 2026-10-01: The quarantine restore verb and `--reattach` (bead `nexus-wbfpw.49`; T2
+  `nexus/quarantine-restore-verb`, `nexus/review-quarantine-restore-code`,
+  `-critique`, `nexus/quarantine-restore-round2`; Sam's decision). (1) Step 9 gains the way back,
+  `nx t3 quarantine restore` (`vectors-025`, `POST /v1/vectors/gc/quarantine-restore`), which makes
+  the "restorable for 14 days" of the quarantine ruling operable for a chunk with no manifest row.
+  (2) The review's critical finding is closed by `--reattach`: a restore that moved bytes only
+  returned text no read surface shows, since a chunk with no live owning manifest row is hidden
+  (`live(c)`); with the flag, a chunk whose metadata names a live document also gets that document's
+  manifest row, or `superseded` when the document's manifest already holds a different chunk there,
+  and a chunk with no live owner is restored as bytes only with the re-put recipe printed.
+  (3) The Failure Modes Recovery bullet, the Day-2 table and the risk rows for the `TRUNCATE`
+  path and R8 name the verb. (4) The restore strips `quarantined_by` and `reaper_quarantined_at`,
+  a held lock is a typed retryable 503, and a failure on a later page of the client still reports
+  what the earlier pages committed. (5) No end-to-end gate covers `/v1/vectors/gc/*` through the
+  public edge; filed as `nexus-wbfpw.50`.
