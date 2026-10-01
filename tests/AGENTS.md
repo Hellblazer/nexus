@@ -208,8 +208,8 @@ supplied-vector branches, the order of the three 4xx checks, log-only mode, the 
 the parity tests in `tests/test_chunk_seed.py` compare the route's CONFLICT write against the helper
 (the route refuses a first write); and `tests/test_z0o2p24_reembed_concurrent_supersede.py` pins the
 `nx collection re-embed` answer to a chunk that loses its owner mid-run. A test that needs the engine
-in log-only mode sets `NX_OWNERLESS_WRITE_MODE=log-only` in the engine's environment; the suite never
-does, so every substrate-backed test runs against the default (enforce).
+in log-only mode sets `NX_OWNERLESS_WRITE_MODE=log-only` in the engine's environment; the substrate
+pins `enforce` itself (an unset value is log-only on the engine) unless the caller's environment sets one.
 
 ## A fresh test host: what it needs, and what the suite provisions itself
 
