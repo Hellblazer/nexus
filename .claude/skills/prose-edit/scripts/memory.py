@@ -120,7 +120,10 @@ rejection stored for that document (exact match; not-a-defect entries are NOT
 applied here). Every other key passes through unchanged. Edit numbers "n" are
 kept, so dropped edits leave GAPS in the numbering: the marks in the marked-up
 copy keep their meaning. The output gains "dropped": [{"n", "old", "cause"}]
-(cause is always "rejected"; any "dropped" in the input is overwritten).
+(cause is always "rejected"; any "dropped" in the input is overwritten). The skill
+runs `brief.py filter`, which calls this and returns each dropped edit as
+{"n", "old", "new", "cause"}: it adds "new" (the proposed text, so the review copy can
+show what was dropped) and drops further edits with its own causes.
 
 Rejections are one per old string: rejecting an old string that is already
 stored REPLACES that rejection in place (its number and position are kept, its

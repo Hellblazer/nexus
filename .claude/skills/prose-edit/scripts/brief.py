@@ -9,7 +9,7 @@ Errors go to stderr with exit 1; memory.py's own exit codes (3: T2 unavailable) 
   brief.py parse TOKEN...        the invocation, one token per argv, printed as JSON
   brief.py build TARGET [--genre G] [--budget N] [--file F] [--site-page FILE]
                                  the brief text for the editor agent, on stdout
-  brief.py filter TARGET [--budget N] [--file F]
+  brief.py filter TARGET [--budget N] [--file F] [--save F | --work DIR]
                                  the agent's reply on stdin -> filtered proposal JSON
   brief.py tmpdir                a fresh temporary directory outside the repository
   brief.py site-layer [--site-page FILE]
@@ -41,6 +41,9 @@ edit whose old string has no occurrence inside the range and outside quote, code
 frontmatter and HTML pre/table/blockquote/style/script/head blocks. Every drop is listed
 under "dropped" with a cause: rejected, over-budget, not-found, outside-range,
 protected-region. That the old string occurs exactly once is the apply step's check.
+`--save FILE` also writes the printed JSON to FILE, which must sit directly inside a work
+directory: review.py (the review loop, Steps 1.1 and 1.5) reads that file as its input, so the
+model never retypes it. `--save` and `--work` are exclusive; the review loop deletes WORK itself.
 """
 from __future__ import annotations
 
@@ -48,7 +51,9 @@ import argparse
 import importlib.util
 import io
 import json
+import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -733,10 +738,36 @@ def html_tag_spans(text: str) -> list[Span]:
     return [m.span() for m in re.finditer(r"<[^<>]*>", text)]
 
 
+_LINK_DEST = re.compile(r"\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+(?:\"[^\"]*\"|'[^']*'))?\s*\)")
+_REF_DEF = re.compile(
+    r"^ {0,3}\[(?!\^)[^\]\n]+\]:[ \t]*"                                    # the label: prose, never protected
+    r"(?P<p>(?:<[^>\n]*>|\S+)(?:[ \t]+(?:\"[^\"\n]*\"|'[^'\n]*'|\([^)\n]*\)))?)[ \t]*$",  # destination + title
+    re.MULTILINE)
+_AUTOLINK = re.compile(r"<(?:https?|ftp|mailto):[^<>\s]+>")
+_OPEN_TAG = re.compile(r"<[A-Za-z][^<>]*>")
+_ATTR_VALUE = re.compile(r"=\s*(\"[^\"]*\"|'[^']*')")
+
+
+def _destination_spans(text: str) -> list[Span]:
+    """Where a link goes is not prose: the (...) after a markdown link's text, the destination and
+    title of a reference definition (its label is prose, and a footnote definition `[^1]: ...` is
+    all prose), an autolink, and every attribute value of inline HTML. A rewrite there breaks the link."""
+    spans: list[Span] = []
+    for rx in (_LINK_DEST, _AUTOLINK):
+        spans += [m.span() for m in rx.finditer(text)]
+    spans += [m.span("p") for m in _REF_DEF.finditer(text)]
+    for tag in _OPEN_TAG.finditer(text):
+        spans += [(tag.start() + m.start(1), tag.start() + m.end(1)) for m in _ATTR_VALUE.finditer(tag.group())]
+    return spans
+
+
 def protected_spans(text: str, html: bool = False) -> list[Span]:
     """Character spans no edit may touch: frontmatter, fenced and indented code, quotes, tables,
-    comments and HTML code-like blocks. An HTML file gets only the HTML rules."""
-    return _html_spans(text) if html else _markdown_spans(text) + _html_spans(text)
+    comments, HTML code-like blocks, and in markdown the link destinations and the attribute values
+    of inline HTML. An HTML file gets only the HTML rules (its tags are checked apart)."""
+    if html:
+        return _html_spans(text)
+    return _markdown_spans(text) + _html_spans(text) + _destination_spans(text)
 
 
 _ABBREVIATIONS = frozenset({"e.g", "i.e", "etc", "vs", "cf", "approx", "fig", "no", "dr", "mr", "mrs", "ms",
@@ -816,6 +847,14 @@ def _n_of(item: object) -> int:
     return n if isinstance(n, int) else 10**9
 
 
+def _with_new(dropped: Obj, by_n: dict[Any, Obj]) -> Obj:
+    """memory.py's dropped entry (n, old, cause) plus the edit's new text, so the author can audit it."""
+    src = by_n.get(dropped.get("n"))
+    if src is None or "new" in dropped:
+        return dropped
+    return {"n": dropped["n"], "old": dropped.get("old"), "new": src.get("new"), "cause": dropped.get("cause")}
+
+
 def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
     stdin = a.target == "-"
     if stdin and not a.file:
@@ -830,14 +869,18 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
         over = cast("list[Any]", raw_edits)[budget:]
         proposal["edits"] = cast("list[Any]", raw_edits)[:budget]
     result = memory_json(["filter", a.target], json.dumps(proposal))
-    dropped = cast("list[Obj]", result.get("dropped") or [])
+    by_n: dict[Any, Obj] = {}
+    for entry in cast("list[Any]", raw_edits or []):
+        if isinstance(entry, dict) and "n" in entry:
+            by_n[cast(Obj, entry)["n"]] = cast(Obj, entry)
+    dropped = [_with_new(d, by_n) for d in cast("list[Obj]", result.get("dropped") or [])]
     warnings: list[str] = []
     if over:
         warnings.append(f"the editor returned {len(over) + budget} edits against a budget of "
                         f"{budget}; kept the first {budget}")
         for item in over:
             o = cast(Obj, item) if isinstance(item, dict) else {}
-            dropped.append({"n": o.get("n"), "old": o.get("old"), "cause": "over-budget"})
+            dropped.append({"n": o.get("n"), "old": o.get("old"), "new": o.get("new"), "cause": "over-budget"})
     if stdin:
         source, rng = Path(a.file), None
     else:
@@ -860,7 +903,7 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
         if cause is None and sentences == "multi":
             cause = "multi-sentence"
         if cause:
-            dropped.append({"n": e["n"], "old": e["old"], "cause": cause})
+            dropped.append({"n": e["n"], "old": e["old"], "new": e.get("new"), "cause": cause})
             continue
         if sentences == "maybe":
             warnings.append(f"edit {e['n']} may cover more than one sentence")
@@ -902,6 +945,7 @@ def cmd_filter(a: argparse.Namespace, reply: str) -> Obj:
 
 
 WORK_SENTINEL = ".prose-edit-work"
+WORK_BUILDING_PREFIX = ".prose-edit-building-"
 WORK_MAX_AGE = 2 * 3600
 _WORK_NAME = re.compile(r"prose-edit-[a-z0-9_]{8}")
 
@@ -911,8 +955,8 @@ def _is_work_dir(real: Path, base: Path) -> bool:
             and (real / WORK_SENTINEL).is_file())
 
 
-def remove_work(raw: str) -> None:
-    """Delete a work directory made by `tmpdir`; refuse anything else.
+def work_dir(raw: str) -> Path:
+    """The real path of a work directory made by `tmpdir`; refuse anything else.
 
     It must sit directly under the temp dir, carry the mkdtemp name shape and hold the sentinel
     file `tmpdir` wrote. memory.py's lock directory (prose-edit-locks-<uid>) has neither shape
@@ -927,7 +971,27 @@ def remove_work(raw: str) -> None:
     real = path.resolve()
     if not _is_work_dir(real, base):
         raise _user(f"{raw}: not a prose-edit work directory made by `tmpdir` directly under {base}")
-    shutil.rmtree(real)
+    return real
+
+
+def work_file(raw: str) -> Path:
+    """A file path directly inside a work directory; anything else is refused."""
+    path = Path(raw)
+    if ".." in path.parts:
+        raise _user(f"{raw}: not a prose-edit work directory file (it contains '..')")
+    base = Path(tempfile.gettempdir()).resolve()
+    parent = path.parent.resolve()
+    if not _is_work_dir(parent, base):
+        if any(_is_work_dir(up, base) for up in parent.parents):
+            raise _user(f"{raw}: must sit directly inside the work directory")
+        raise _user(f"{raw}: not inside a prose-edit work directory made by `tmpdir` directly under {base}")
+    if path.is_symlink() or path.is_dir():
+        raise _user(f"{raw}: not a plain file")
+    return parent / path.name
+
+
+def remove_work(raw: str) -> None:
+    shutil.rmtree(work_dir(raw))
 
 
 def cmd_rmtmp(raw: str) -> None:
@@ -941,9 +1005,14 @@ def sweep_stale_work(now: float | None = None) -> list[str]:
     gone: list[str] = []
     for child in base.iterdir():
         try:
-            if (not child.is_symlink() and _is_work_dir(child, base)
-                    and (child / WORK_SENTINEL).stat().st_mtime < cutoff):
+            if child.is_symlink():
+                continue
+            if _is_work_dir(child, base) and (child / WORK_SENTINEL).stat().st_mtime < cutoff:
                 shutil.rmtree(child)
+                gone.append(child.name)
+            elif (child.name.startswith(WORK_BUILDING_PREFIX) and child.is_dir()
+                  and child.stat().st_mtime < cutoff):
+                shutil.rmtree(child)  # a `tmpdir` killed before it renamed its directory into place
                 gone.append(child.name)
         except OSError:
             continue
@@ -951,8 +1020,10 @@ def sweep_stale_work(now: float | None = None) -> list[str]:
 
 
 def cmd_tmpdir() -> str:
+    """A fresh work directory. It is built under a name that is not a work directory's, given its
+    sentinel, then renamed into place, so no `prose-edit-<8>` directory ever exists without one."""
     sweep_stale_work()
-    path = Path(tempfile.mkdtemp(prefix="prose-edit-")).resolve()
+    path = Path(tempfile.mkdtemp(prefix=WORK_BUILDING_PREFIX)).resolve()
     proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     if proc.returncode == 0 and proc.stdout.strip():
         root = Path(proc.stdout.strip()).resolve()
@@ -960,8 +1031,19 @@ def cmd_tmpdir() -> str:
             path.rmdir()
             raise _user(f"the temporary directory would land inside the repository at {root}; "
                         "set TMPDIR outside it")
-    (path / WORK_SENTINEL).write_text("made by brief.py tmpdir\n", encoding="utf-8")
-    return str(path)
+    try:
+        (path / WORK_SENTINEL).write_text("made by brief.py tmpdir\n", encoding="utf-8")
+        for _ in range(8):
+            final = path.with_name("prose-edit-" + secrets.token_hex(4))
+            try:
+                os.rename(path, final)  # an existing non-empty directory refuses; try another name
+            except OSError:
+                continue
+            return str(final)
+        raise _user(f"could not name a work directory under {path.parent}")
+    except BaseException:
+        shutil.rmtree(path, ignore_errors=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -987,6 +1069,7 @@ def _parser() -> argparse.ArgumentParser:
     f.add_argument("--budget", default=str(DEFAULT_BUDGET))
     f.add_argument("--file")
     f.add_argument("--work", help="delete this work directory after a successful filter")
+    f.add_argument("--save", help="also write the filtered JSON to this file inside a work directory")
     sub.add_parser("tmpdir", help="a fresh work directory outside the repository")
     r = sub.add_parser("rmtmp", help="delete a work directory made by tmpdir")
     r.add_argument("path")
@@ -1008,10 +1091,16 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "build":
             sys.stdout.write(cmd_build(args))
         elif args.cmd == "filter":
+            if args.save and args.work:
+                raise _user("--save and --work do not go together: --work deletes the directory --save writes into")
+            save = work_file(args.save) if args.save else None  # a bad path stops before any work
             out = cmd_filter(args, sys.stdin.read())
             if args.work:
                 remove_work(args.work)  # a bad path stops here, before any output
-            sys.stdout.write(json.dumps(out, ensure_ascii=False, indent=1) + "\n")
+            text_out = json.dumps(out, ensure_ascii=False, indent=1) + "\n"
+            if save is not None:
+                save.write_text(text_out, encoding="utf-8")
+            sys.stdout.write(text_out)
         elif args.cmd == "tmpdir":
             sys.stdout.write(cmd_tmpdir() + "\n")
         elif args.cmd == "rmtmp":
