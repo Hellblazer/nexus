@@ -164,9 +164,9 @@ def put_cmd(
     # nexus-9099: fire the three post-store hook chains so the chash index, taxonomy assignment and
     # aspect-extraction queue see CLI store-put events (RDR-095 symmetric-fire). fire_note_chains is
     # MCP store_put's shape (nexus-spujb): the single and batch chains see every piece, the document
-    # chain sees the note once, whole, and carries the CATALOG tumbler (nexus-w8lg1). The manifest and
-    # the completion stamp were written by the one request above, so the batch chain skips the
-    # manifest hook. doc_id is the source identity here: catalog identity for a note is
+    # chain sees the note once, whole, and carries the CATALOG tumbler (nexus-w8lg1). The manifest was
+    # written by the one request above (the completion stamp follows the chains), so the batch chain
+    # skips the manifest hook. doc_id is the source identity here: catalog identity for a note is
     # (collection, title) uniformly (nexus-sdp0u), whether SOURCE was a file or stdin: the file's
     # on-disk path is deliberately never passed through as catalog file_path, since that leg is
     # collection-blind and could match/clobber an unrelated `nx index md` document.

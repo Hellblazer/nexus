@@ -5520,7 +5520,7 @@ def store_put(
         # follow-up) via the process-local ``_hooks`` registry constructed at module load, through
         # the one firing every note producer shares (note_write.fire_note_chains): fire_single per
         # piece; fire_batch over every piece without the manifest hook (the one request above
-        # already wrote the manifest and the completion stamp); fire_document once with the whole
+        # already wrote the manifest; the completion stamp follows the chains); fire_document once with the whole
         # content and the CATALOG tumbler (nexus-w8lg1 / RDR-172: the aspect queue's doc_id carries a
         # composite FK to catalog_documents(tumbler), so a chunk hash would 500 the service enqueue
         # and the best-effort hook would swallow it). It is a plain synchronous call: store_put is
