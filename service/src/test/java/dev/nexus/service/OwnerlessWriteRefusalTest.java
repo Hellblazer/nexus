@@ -171,12 +171,20 @@ class OwnerlessWriteRefusalTest {
     }
 
     private int storedCount(String h) throws Exception {
-        var resp = post("/v1/vectors/get", Map.of("collection", COLLECTION,
-            "where", Map.of(), "include_non_live", true, "limit", 300));
-        assertThat(resp.statusCode()).isEqualTo(200);
-        @SuppressWarnings("unchecked")
-        List<String> ids = (List<String>) json(resp).get("ids");
-        return (int) ids.stream().filter(h::equals).count();
+        // Physical scan, every page: the collection holds more than one page of chunks, and a
+        // count that stopped at the first page would pass vacuously for a chash past it.
+        int found = 0;
+        for (int offset = 0; ; offset += 300) {
+            var resp = post("/v1/vectors/get", Map.of("collection", COLLECTION,
+                "where", Map.of(), "include_non_live", true, "limit", 300, "offset", offset));
+            assertThat(resp.statusCode()).isEqualTo(200);
+            @SuppressWarnings("unchecked")
+            List<String> ids = (List<String>) json(resp).get("ids");
+            found += (int) ids.stream().filter(h::equals).count();
+            if (ids.size() < 300) {
+                return found;
+            }
+        }
     }
 
     private void assertNamesTheCombinedRoutes(HttpResponse<String> resp) throws Exception {
@@ -316,6 +324,40 @@ class OwnerlessWriteRefusalTest {
         v[1] = 1f;
         var resp = upsert(COLLECTION, List.of(h), List.of("seed"), Map.of("embeddings", List.of(v)));
         assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(200);
+    }
+
+    @Test
+    void upsertChunks_aRequestLargerThanOneCheckBatch_isCheckedEndToEnd() throws Exception {
+        // The ownership query is batched (300 chashes a statement); an unowned chash in the LAST
+        // batch must still refuse the whole request, and 301 owned chashes must all be found.
+        int n = 305;
+        String[] hashes = new String[n];
+        for (int i = 0; i < n; i++) hashes[i] = chash("owr-batch-" + i);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertOwnedChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION, 1024, hashes);
+        }
+        var ids = new ArrayList<>(List.of(hashes));
+        var docs = new ArrayList<String>();
+        for (int i = 0; i < n; i++) docs.add("seed");
+        assertThat(upsert(COLLECTION, ids, docs).statusCode()).as("all 305 owned").isEqualTo(200);
+
+        String orphan = chash("owr-batch-orphan");
+        ids.add(orphan);
+        docs.add("orphan text");
+        var resp = upsert(COLLECTION, ids, docs);
+        assertNamesTheCombinedRoutes(resp);
+        assertThat(((Number) json(resp).get("unowned_count")).intValue()).isEqualTo(1);
+        assertThat(((Number) json(resp).get("requested_count")).intValue()).isEqualTo(n + 1);
+        assertThat(storedCount(orphan)).isZero();
+    }
+
+    @Test
+    void upsertChunks_aDuplicateIdCountsOnceInTheRefusal() throws Exception {
+        String h = chash("owr-dup-unowned");
+        var resp = upsert(COLLECTION, List.of(h, h), List.of("a", "b"));
+        assertNamesTheCombinedRoutes(resp);
+        assertThat(((Number) json(resp).get("unowned_count")).intValue()).isEqualTo(1);
+        assertThat(((Number) json(resp).get("requested_count")).intValue()).isEqualTo(1);
     }
 
     @Test
