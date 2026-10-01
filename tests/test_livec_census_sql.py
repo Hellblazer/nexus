@@ -25,6 +25,7 @@ import nexus.db.http_vector_client as hvc
 from nexus.catalog.chunk_quarantine import now_stamp, quarantine_collection_name
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests._chunk_seed import seed_chunks_direct
+from tests._reapable_age import age_chunks_past_grace
 from tests._engine_substrate import ensure_engine, mint_test_tenant
 
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
@@ -285,6 +286,9 @@ def test_livec_census_reports_quarantine_siblings_as_their_own_cause(
         physical_collection=coll, file_path=f"/tmp/{coll}/qlive.txt",
     ))
     cat.write_manifest(doc, [{"chash": live, "position": 0}], collection=coll)
+    # gc selects with reapable(c), which honours a 30 day grace window (RDR-192 Step 8):
+    # this orphan stands for one orphaned long ago.
+    age_chunks_past_grace(coll)
 
     sibling = quarantine_collection_name(coll)
     moved = db.gc_quarantine_orphans(coll, sibling, now_stamp(), 20)

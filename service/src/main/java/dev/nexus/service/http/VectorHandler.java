@@ -23,6 +23,7 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -58,6 +59,7 @@ import java.util.Map;
  *   GET  /v1/vectors/stats           per-collection live stats (count/dim/last_write) — RDR-156 P3
  *   POST /v1/vectors/embed           embed-only (parity gate); 503 without a router
  *   POST /v1/vectors/manifest-less-census  read-only manifest-less classification — RDR-192 S2
+ *   POST /v1/vectors/reapable        read-only listing of the chunks reapable(c) selects — RDR-192 S8
  * </pre>
  *
  * <p><strong>Fused rerank stage (RDR-188, bead nexus-9o6y2.2).</strong> The five
@@ -222,6 +224,7 @@ public final class VectorHandler implements HttpHandler {
                 case "/gc/restore-rereferenced" -> handleGcRestoreRereferenced(exchange, method); // RDR-191 P1
                 case "/gc/expire-quarantine"   -> handleGcExpireQuarantine(exchange, method);     // RDR-191 P1
                 case "/manifest-less-census"   -> handleManifestLessCensus(exchange, method);     // RDR-192 S2
+                case "/reapable"               -> handleReapable(exchange, method);               // RDR-192 S8
                 default -> HttpUtil.send(exchange, 404, "{\"error\":\"not found\"}");
             }
         } catch (SkipHandlerException e) {
@@ -1356,8 +1359,122 @@ public final class VectorHandler implements HttpHandler {
         if (collection != null && collection.startsWith("quarantine-")) {
             throw new IllegalArgumentException(
                 "collection " + collection + " is a quarantine collection; quarantine rows "
-                + "are out of the manifest-less census by construction (RDR-192 MVV (a))");
+                + "are out of the manifest-less census and the reapable listing by construction (RDR-192 MVV (a))");
         }
+    }
+
+    /**
+     * Upper bound on the {@code limit} field accepted by {@code /v1/vectors/reapable}
+     * (RDR-192 S8, bead nexus-wbfpw.17): the AGENTS.md paging convention (N &lt;= 300). Clamped,
+     * never rejected, like {@link #MAX_CENSUS_LIMIT}.
+     */
+    static final int MAX_REAPABLE_LIMIT = 300;
+
+    /** Largest {@code grace_seconds} accepted: ten years, far past any real window and well inside interval range. */
+    static final long MAX_REAPABLE_GRACE_SECONDS = 315_360_000L;
+
+    /**
+     * POST /v1/vectors/reapable (RDR-192 Step 8, bead nexus-wbfpw.17; serves {@code nx t3 gc} and
+     * {@code nx store list --reapable})
+     *
+     * <p>Read-only and tenant-scoped: lists the chunks of {@code collection} that
+     * {@code nexus.chunk_is_reapable} (RDR-192 Step 7) selects now, ordered by chash ascending. Any
+     * collection prefix (knowledge, docs, code, rdr); a {@code quarantine-} collection is refused with
+     * 400. Selection is that predicate and nothing else. With {@code grace_seconds} absent or null the
+     * list is what {@code gc_quarantine_orphans} (which passes NULL, the 30 day default) would take at
+     * this instant, and what a reaper that passes the same default would take. A {@code grace_seconds}
+     * below the default is accepted unclamped (0 to ten years) because this route never deletes, and it
+     * lists chunks no destructive consumer takes yet: it is an advisory preview, and a caller must not
+     * present it as what a gc pass would do. It is a snapshot: no sweep gate, no lock.
+     *
+     * <p>Request:
+     * <pre>
+     * {
+     *   "collection":    "docs__owner__voyage-context-3__v1",
+     *   "grace_seconds": 86400,   // optional, integer 0 to 315360000; absent or null = engine default (30 days)
+     *   "after_chash":   "64-hex", // optional keyset cursor, exclusive; absent or null starts at the beginning
+     *   "limit":         100,     // optional, default 100, clamped to 1..300
+     *   "offset":        0        // optional, default 0, applied after the cursor
+     * }
+     * </pre>
+     * <p>Response 200: {@code {"collection": "...", "grace_seconds": N|null, "returned": N, "next_after":
+     * "64-hex"|null, "chunks": [{"chash": "64-hex", "created_at": ISO-8601, "last_written_at": ISO-8601,
+     * "title": str|null, "catalog_doc_id": str|null}, ...]}}. {@code grace_seconds} echoes the request,
+     * {@code null} meaning the default. {@code title} and {@code catalog_doc_id} come from the chunk's own
+     * metadata ({@code null} when absent or empty; {@code catalog_doc_id} falls back to {@code doc_id}).
+     * Page by sending {@code next_after} back as {@code after_chash} while it is not null; {@code next_after}
+     * is null when fewer than {@code limit} rows came back. Use the cursor, not {@code offset}, for any
+     * consumer that acts on a page before fetching the next: acting shrinks the set, and an offset then skips rows.
+     * The listing is a lock-free snapshot, so a consumer that deletes must not delete by these ids: it needs a
+     * route that re-checks the predicate in its own statement.
+     */
+    private void handleReapable(HttpExchange ex, String method) throws IOException {
+        requireMethod(ex, method, "POST");
+        var repo   = requirePgRepo(ex);
+        var tenant = requireTenant(ex);
+        Map<String, Object> body = readBody(ex);
+        String collection = requireString(body, "collection");
+        requireNotQuarantineCollection(collection);
+        int limit  = Math.max(1, Math.min(optInt(body, "limit", 100), MAX_REAPABLE_LIMIT));
+        int offset = Math.max(0, optInt(body, "offset", 0));
+        Long graceSeconds = parseGraceSeconds(body.get("grace_seconds"));
+        String afterChash = parseAfterChash(body.get("after_chash"));
+
+        var rows = repo.reapableChunks(tenant, collection, graceSeconds, afterChash, limit, offset);
+        var chunks = new ArrayList<Map<String, Object>>(rows.size());
+        for (var r : rows) {
+            // LinkedHashMap, not Map.of: title and catalog_doc_id are null when the metadata has none.
+            var item = new LinkedHashMap<String, Object>();
+            item.put("chash", r.chash());
+            item.put("created_at", r.createdAt());
+            item.put("last_written_at", r.lastWrittenAt());
+            item.put("title", r.title());
+            item.put("catalog_doc_id", r.catalogDocId());
+            chunks.add(item);
+        }
+        var out = new LinkedHashMap<String, Object>();
+        out.put("collection", collection);
+        out.put("grace_seconds", graceSeconds);
+        out.put("returned", chunks.size());
+        out.put("next_after", chunks.size() >= limit ? chunks.get(chunks.size() - 1).get("chash") : null);
+        out.put("chunks", chunks);
+        HttpUtil.send(ex, 200, json(out));
+    }
+
+    /**
+     * {@code after_chash} of {@code /v1/vectors/reapable}: absent, null or empty is no cursor;
+     * otherwise a canonical 64-character lowercase hex chash. Package-private for a direct unit pin.
+     */
+    static String parseAfterChash(Object raw) {
+        if (raw == null) return null;
+        if (!(raw instanceof String str)) {
+            throw new IllegalArgumentException("field 'after_chash' must be a 64-character hex chash");
+        }
+        if (str.isEmpty()) return null;
+        if (!str.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("field 'after_chash' must be a 64-character lowercase hex chash");
+        }
+        return str;
+    }
+
+    /**
+     * {@code grace_seconds} of {@code /v1/vectors/reapable}: absent or null is {@code null} (the
+     * engine default); otherwise a whole number from 0 to {@link #MAX_REAPABLE_GRACE_SECONDS}.
+     * A string, a fraction or a negative number is a 400. Package-private for a direct unit pin.
+     */
+    static Long parseGraceSeconds(Object raw) {
+        if (raw == null) return null;
+        long v;
+        if (raw instanceof Integer || raw instanceof Long || raw instanceof Short || raw instanceof Byte) {
+            v = ((Number) raw).longValue();
+        } else {
+            throw new IllegalArgumentException("field 'grace_seconds' must be a whole number of seconds");
+        }
+        if (v < 0 || v > MAX_REAPABLE_GRACE_SECONDS) {
+            throw new IllegalArgumentException(
+                "field 'grace_seconds' must be between 0 and " + MAX_REAPABLE_GRACE_SECONDS + ", got " + v);
+        }
+        return v;
     }
 
     /**

@@ -8,6 +8,7 @@ import org.jooq.SQLDialect;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 import dev.nexus.service.PgContainerHelper;
+import dev.nexus.service.ReapableFixtures;
 import dev.nexus.service.db.CatalogRepository;
 import dev.nexus.service.db.Chash;
 import dev.nexus.service.db.TenantScope;
@@ -215,6 +216,9 @@ class PgVectorRepositoryGcQuarantineTest {
         }
         vectorRepo.upsertChunks(tenant, collection,
             List.of(chash), List.of(text), List.of(Map.of("title", title)));
+        // RDR-192 Step 8: gc selects orphans with reapable(c), which honours the 30 day grace.
+        // These fixtures stand for chunks orphaned long ago, so they are aged past it.
+        ReapableFixtures.agePastGrace(pg, tenant, collection);
     }
 
     private long chunkCount(String collection) throws SQLException {
@@ -920,6 +924,7 @@ class PgVectorRepositoryGcQuarantineTest {
 
         // 2. D's reference to X is dropped -- X becomes an orphan -- quarantined.
         catalogRepo.writeManifest(TENANT_A, docId, originCol, List.of());
+        ReapableFixtures.agePastGrace(pg, TENANT_A, originCol);
         var quarantined = vectorRepo.quarantineOrphans(TENANT_A, originCol, quarantineCol, "2026-08-10T03:00:00Z", 20);
         assertThat(quarantined.moved()).as("guard: X actually left O for Q").isEqualTo(1L);
         backdateChunk(quarantineCol, chash, PAST);
@@ -1195,28 +1200,27 @@ class PgVectorRepositoryGcQuarantineTest {
             .containsOnlyOnce("array_agg")
             .contains("INTO v_collision_count, v_collision_sample");
 
-        // "NOT EXISTS" occurrences: the RDR-191 repoint made this function
-        // dim-agnostic (no more x3 per-dim branching), so the count collapsed
-        // from the old dim-branched shape's 12 down to FIVE, each an
-        // INDEPENDENT re-evaluation of the manifest-reference predicate (or,
-        // for the pre-flight's outer check, of "is there anything to move at
-        // all") -- none of them handing a precomputed chash array to another:
-        // (1) the pre-flight's own outer `IF NOT EXISTS (...)`, (2) the
-        // pre-flight's inner manifest-reference guard, (3) the orphan CTE that
-        // feeds the collision-detection query, (4) the copy-to-quarantine
-        // INSERT's own inline guard, (5) the remove-from-origin DELETE's own
-        // inline guard. This count is still the load-bearing signal that the
-        // guard lives inline in each statement rather than via a standalone
-        // array-building guard SELECT (sa731 semantics preserved across the
-        // dim-collapse).
-        int notExistsCount = functionDef.split("NOT EXISTS", -1).length - 1;
+        // RDR-192 Step 8 (nexus-wbfpw.16): the candidate set is chosen ONCE, into the _wbfpw16_victim
+        // temp table, by reapable(c), nexus.chunk_is_reapable; the collision guard (CTE), the copy INSERT
+        // and the DELETE all read that one set, so a condition that lapses between statements (an owner
+        // appearing, a refresh) cannot make the DELETE take a chunk the INSERT did not copy. The DELETE
+        // still carries the predicate on its target row so a client refresh that lands after the set was
+        // chosen wins at the READ COMMITTED recheck. That is TWO calls: the one selection and the DELETE's
+        // recheck. The only NOT EXISTS left is the "anything to move at all" check on the victim set.
+        int reapableCalls = functionDef.split("nexus\\.chunk_is_reapable\\(", -1).length - 1;
+        assertThat(reapableCalls)
+            .as("reapable(c) must appear once to choose the victim set and once as the DELETE's recheck")
+            .isEqualTo(2);
+        assertThat(functionDef).as("the victim set is chosen once and read by every later statement")
+            .contains("_wbfpw16_victim").containsOnlyOnce("INSERT INTO _wbfpw16_victim")
+            .contains("USING _wbfpw16_victim v");
+        // "CREATE TEMP TABLE IF NOT EXISTS" is not a predicate; count only the subquery form.
+        int notExistsCount = functionDef.split("NOT EXISTS \\(", -1).length - 1;
         assertThat(notExistsCount)
-            .as("inline/pre-flight NOT EXISTS occurrences must be FIVE -- pre-flight's "
-                + "outer + inner, the collision-detection orphan CTE, the copy INSERT, "
-                + "and the DELETE -- now that the RDR-191 repoint made this function "
-                + "dim-agnostic (no more x3 per-dim multiplication), not 3x total via a "
-                + "standalone array-building guard SELECT")
-            .isEqualTo(5);
+            .as("no inline NOT EXISTS over the manifest survives: only the emptiness check on the victim set")
+            .isEqualTo(1);
+        assertThat(functionDef).as("the manifest anti-join is not re-derived inline any more")
+            .doesNotContain("FROM nexus.catalog_document_chunks m");
     }
 
     // ── nexus-sa731 ROUND 2: definition pin — bounded-wait timeout mirror ───
