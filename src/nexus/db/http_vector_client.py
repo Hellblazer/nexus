@@ -46,6 +46,7 @@ from nexus.db.gateway_backoff import (
     _is_embed_server_side_write_path,
     is_non_idempotent_sweep_path,
 )
+from nexus.db.client_identity import client_identity_headers
 from nexus.db.engine_reasons import UNREGISTERED_COLLECTION_REASON, error_reason
 from nexus.logging_setup import emit_import_time_warning
 from nexus.rate_brake import is_deadline_abort
@@ -614,6 +615,9 @@ def _request_once(
     headers = {
         "Authorization": f"Bearer {token}",
         "X-Nexus-Tenant": tenant,
+        # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's
+        # ownerless-write log; absent on a client older than this release.
+        **client_identity_headers(),
     }
     # nexus-umue1: stash the EXACT bearer this attempt is about to send so
     # a caller catching an exception below can single-flight the 401
