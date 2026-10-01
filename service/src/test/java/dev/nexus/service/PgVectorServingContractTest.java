@@ -268,17 +268,21 @@ class PgVectorServingContractTest {
 
     /** {@code {text, metadata->>metaKey}} of one stored row, read as superuser; null when absent. */
     private String[] stored(String tenant, String chashHex, String metaKey) throws Exception {
-        try (Connection su = pg.createConnection("");
-             var ps = su.prepareStatement(
-                 "SELECT chunk_text, metadata->>? FROM " + DimTables.CHUNKS_TABLE_NAME
-                 + " WHERE tenant_id = ? AND collection = ? AND chash = decode(?, 'hex')")) {
-            ps.setString(1, metaKey);
-            ps.setString(2, tenant);
-            ps.setString(3, COL);
-            ps.setString(4, chashHex);
-            try (var rs = ps.executeQuery()) {
-                return rs.next() ? new String[] {rs.getString(1), rs.getString(2)} : null;
+        var chunks = dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+        try (Connection su = pg.createConnection("")) {
+            var rec = DSL.using(su, SQLDialect.POSTGRES)
+                .select(chunks.CHUNK_TEXT, chunks.METADATA)
+                .from(chunks)
+                .where(chunks.TENANT_ID.eq(tenant))
+                .and(chunks.COLLECTION.eq(COL))
+                .and(chunks.CHASH.eq(dev.nexus.service.db.Chash.fromHex(chashHex).toBytes()))
+                .fetchOne();
+            if (rec == null) {
+                return null;
             }
+            Map<String, Object> meta = MAPPER.readValue(rec.value2().data(), MAP_TYPE);
+            Object v = meta.get(metaKey);
+            return new String[] {rec.value1(), v == null ? null : v.toString()};
         }
     }
 
