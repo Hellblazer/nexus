@@ -12,6 +12,7 @@ import dev.nexus.service.jooq.binding.Vector;
 import org.jooq.DSLContext;
 import org.jooq.Field;
 import org.jooq.Query;
+import org.jooq.ResultQuery;
 import org.jooq.SQLDialect;
 import org.jooq.Table;
 import org.jooq.impl.DSL;
@@ -72,11 +73,14 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p><b>What is pinned and why.</b> The one regression these queries share is the liveness
  * predicate stopping inlining: {@code nexus.chunk_live_owners} is a set-returning SQL function that
- * the planner folds into a semi-join on {@code catalog_document_chunks} only while it stays a plain
- * inlinable {@code LANGUAGE sql} function (vectors-018's header; SECURITY DEFINER, a {@code SET} clause
- * or a volatile marking each break it). If it stopped inlining, every chunk read would call it per
- * row, a cost no result-set test sees. Each plan below asserts the function name is absent and the
- * semi-join target is present. The remaining plan facts (index choices, row estimates, costs) are
+ * the planner folds into an indexed per-row probe of {@code catalog_document_chunks} and
+ * {@code catalog_documents} (a SubPlan; PG 17 does not pull the EXISTS up into a semi-join, see T2
+ * nexus/rdr-192-reapable-plans-and-decisions-2026-10-01) only while it stays a plain inlinable
+ * {@code LANGUAGE sql} function (vectors-018's header; SECURITY DEFINER, a {@code SET} clause
+ * or a volatile marking each break it). If it stopped inlining, every chunk read would call it as an
+ * opaque function per row, a cost no result-set test sees. Each plan below asserts the function name is
+ * absent and the probe's target table is present. The stats view carries one further pin: a single
+ * shared probe per chunk. The remaining plan facts (index choices, row estimates, costs) are
  * written to {@code target/rdr192-explain-evidence.txt} for the record, not pinned: they move with
  * fixture size and PG minor version, and a pin on them would fail for reasons that are not regressions.
  */
@@ -89,6 +93,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
     static final int NUM_CHUNKS = Integer.getInteger("nx.rdr192Explain.chunks", 24_000);
     static final int NUM_DOCS = 600;
     static final int TOPIC_CHUNKS = 2_000;
+    static final int TIMED_RUNS = 5;
     private static final String TOPIC_LABEL = "rdr192-explain-topic";
     private static final String RARE_TOKEN = "rdr192rare";
     private static final String COMMON_TOKEN = "rdr192common";
@@ -329,6 +334,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             .from(COLLECTION_VECTOR_STATS)
             .where(COLLECTION_VECTOR_STATS.COLLECTION.eq(COLL)));
         assertInlinedLiveC(plan, "collection_vector_stats");
+        assertOneSharedLiveProbe(plan, "collection_vector_stats");
     }
 
     @Test
@@ -338,6 +344,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
                     COLLECTION_VECTOR_STATS.STORED_COUNT)
             .from(COLLECTION_VECTOR_STATS));
         assertInlinedLiveC(plan, "collection_vector_stats");
+        assertOneSharedLiveProbe(plan, "collection_vector_stats");
     }
 
     /** The view must also report what the fixture constructed, so the plans above were taken
@@ -365,7 +372,7 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
      */
     private static void assertInlinedLiveC(String plan, String what) {
         assertThat(plan)
-            .as("%s: chunk_live_owners must inline into a semi-join on catalog_document_chunks; its name "
+            .as("%s: chunk_live_owners must inline into a probe of catalog_document_chunks; its name "
                 + "in the plan means it stayed an opaque per-row call. Plan was:%n%s", what, plan)
             .doesNotContain("chunk_live_owners")
             .contains("catalog_document_chunks");
@@ -374,22 +381,50 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
             .doesNotContain("Function Scan");
     }
 
+    /**
+     * The view reads {@code chunk_count} and {@code last_write} through the same live(c) test, and the
+     * planner evaluates it ONCE per chunk and feeds both aggregates (one SubPlan). The view is O(chunks)
+     * by construction, so a second probe per chunk would double a cost that every {@code list_collections}
+     * pays; this fails if a change makes the two aggregates probe separately.
+     */
+    private static void assertOneSharedLiveProbe(String plan, String what) {
+        assertThat(plan)
+            .as("%s: live(c) must be one per-chunk probe shared by both aggregates. Plan was:%n%s", what, plan)
+            .contains("SubPlan 1")
+            .doesNotContain("SubPlan 2");
+    }
+
     private Vector queryVec() {
         return Vector.of(vectors.get(7));
     }
 
-    /** EXPLAIN as nexus_svc inside the tenant scope, at the planner's own choice, recorded for the evidence file. */
-    private String explain(String label, Function<DSLContext, ? extends Query> queryBuilder) {
-        String plan = tenantScope.withTenant(TENANT, ctx -> {
+    /**
+     * EXPLAIN as nexus_svc inside the tenant scope, at the planner's own choice, recorded for the
+     * evidence file together with the statement's measured wall-clock (one warm-up run, then the
+     * median of {@value #TIMED_RUNS}) and the row count it returned. Timing is evidence only and is
+     * never asserted: it moves with the box.
+     */
+    private String explain(String label, Function<DSLContext, ? extends ResultQuery<?>> queryBuilder) {
+        return tenantScope.withTenant(TENANT, ctx -> {
             // The same serving GUCs the repository sets before an ordered vector fetch, so the plan is
             // the one production gets and not the one a default session gets.
             PgSession.setHnswEfSearch(ctx, 10);
-            return ctx.explain(queryBuilder.apply(ctx)).plan();
+            ResultQuery<?> q = queryBuilder.apply(ctx);
+            String plan = ctx.explain(q).plan();
+            int rows = q.fetch().size();                       // warm-up
+            long[] ms = new long[TIMED_RUNS];
+            for (int i = 0; i < TIMED_RUNS; i++) {
+                long t0 = System.nanoTime();
+                q.fetch();
+                ms[i] = (System.nanoTime() - t0) / 1_000_000;
+            }
+            java.util.Arrays.sort(ms);
+            synchronized (evidence) {
+                evidence.put(label, "rows=" + rows + "  p50=" + ms[TIMED_RUNS / 2] + " ms  (runs "
+                    + java.util.Arrays.toString(ms) + ")\n" + plan);
+            }
+            return plan;
         });
-        synchronized (evidence) {
-            evidence.put(label, plan);
-        }
-        return plan;
     }
 
     private void writeEvidence() throws IOException {
