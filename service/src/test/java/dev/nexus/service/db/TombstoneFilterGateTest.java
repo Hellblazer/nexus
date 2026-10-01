@@ -205,8 +205,9 @@ class TombstoneFilterGateTest {
      * get-family it needs no out-of-band chash; a plain listing surfaced tombstoned content by
      * default. A live sweep of every {@code DimTables.CHUNKS.get(dim)} occurrence in the file at
      * fix time found exactly one other unfiltered candidate (this one); {@code count} is
-     * PRE-EXISTING tracked scope of nexus-dzs62 (left untouched); {@code fetchChunkText} has zero
-     * live HTTP callers (left untouched, noted as a landmine); every other occurrence is either
+     * PRE-EXISTING tracked scope of nexus-dzs62 (left untouched); {@code fetchChunkText} has one
+     * HTTP caller, the {@code chroma://} permalink resolver (nexus-aphki), and is a physical read
+     * on purpose (see its javadoc, nexus-wbfpw.35); every other occurrence is either
      * already filtered (get-family above) or a write-path / existence-probe helper feeding the
      * upsert flow, not a content-serving read.
      */

@@ -1895,8 +1895,8 @@ def test_store_list_pagination(t3):
     for i in range(5):
         store_put(content=f"entry {i}", collection="knowledge__pagtest", title=f"page-test-{i}")
     page1 = store_list(collection="knowledge__pagtest", limit=2, offset=0)
-    assert "showing 1-2 of 5" in page1 and "next: offset=2" in page1
-    assert "showing 3-4 of 5" in store_list(collection="knowledge__pagtest", limit=2, offset=2)
+    assert "showing 1-2; 5 stored" in page1 and "next: offset=2" in page1
+    assert "showing 3-4; 5 stored" in store_list(collection="knowledge__pagtest", limit=2, offset=2)
 
 
 def test_store_list_pagination_offset_beyond_end(t3):

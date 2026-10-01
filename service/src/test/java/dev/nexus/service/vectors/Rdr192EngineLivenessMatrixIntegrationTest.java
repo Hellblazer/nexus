@@ -30,6 +30,7 @@ import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.LIVE_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.TEXT_GATE_PROBE_384;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
@@ -488,6 +489,30 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
         assertThat((List<?>) vecRepo.presentRows(tenant, COLLECTION_A, List.of()).get("ids")).isEmpty();
     }
 
+    // ── fetchChunkText: the chroma:// permalink is a physical read ───────────
+
+    /**
+     * RDR-192 Phase 2 gate M7 (nexus-wbfpw.35): {@link PgVectorRepository#fetchChunkText}
+     * backs the {@code chroma://<collection>/<chash>} resolver and reads by (collection, chash)
+     * with no liveness filter, while search, get and list are live(c). That is the contract for
+     * a content-addressed permalink, so it is pinned rather than left implicit: the two rows live(c)
+     * hides in this collection (R1 unowned, R3 tombstoned-owner only) still resolve, and so does a live
+     * one.
+     */
+    @Test
+    void fetchChunkText_readsPhysically_regardlessOfLiveness() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+
+        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r2())).as("R2, live").isEqualTo("r2 text");
+        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r1())).as("R1, unowned, hidden by live(c)")
+            .isEqualTo("r1 text");
+        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_A, fx.r3()))
+            .as("R3, owner tombstoned, hidden by live(c)").isEqualTo("r3 text");
+        assertThat(vecRepo.fetchChunkText(tenant, COLLECTION_B, fx.r1()))
+            .as("a chash stored only in A does not resolve in B").isNull();
+    }
+
     // ── P1h: hybridSearch() visibility (text_gated_search_*_<dim>) ───────────
 
     @Test
@@ -506,6 +531,29 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
             List<String> visible = rows.stream().map(r -> (String) r.get("id")).toList();
             assertVisibility(visible, fx, "P1h");
         }
+    }
+
+    // ── P1p: text_gate_probe_384 (the hybrid dispatch's gate count) ──────────
+
+    /**
+     * nexus-wbfpw.35 (Phase 2 gate M2): the probe is the gate the hybrid dispatch counts to
+     * choose between the exact-rank and HNSW-first plans, and it kept the tenant-wide dead-set
+     * anti-join after vectors-019 moved every other read path onto live(c). A chunk live(c)
+     * hides was still counted, so a gate selective among live rows could read as dense. Every
+     * fixture chunk's text contains "text", so the lexical gate admits all nine and the only
+     * thing deciding presence is liveness.
+     */
+    @Test
+    void p1p_textGateProbeVisibility() throws Exception {
+        String tenant = "wbfpw1-ro";
+        Fixture fx = seedLivenessFixture(tenant);
+
+        List<String> probed = tenantScope.withTenant(tenant, ctx -> {
+            org.jooq.Table<?> probe = TEXT_GATE_PROBE_384.call(
+                "text", new String[] {COLLECTION_A}, null, null, 300);
+            return ctx.selectFrom(probe).fetch(r -> java.util.HexFormat.of().formatHex(r.get(0, byte[].class)));
+        });
+        assertVisibility(probed, fx, "P1p");
     }
 
     // ── P1t: searchTopicScoped() visibility (search_topic_scoped_<dim>) ──────
@@ -887,14 +935,14 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
     private static final List<String> ROWS =
         List.of("R1", "R2", "R3", "R4", "R5", "R6", "R7", "R8", "R9");
     private static final List<String> PREDICATES =
-        List.of("P1g", "P1s", "P1h", "P1t", "P2", "P3", "P4", "P6", "P7", "P9", "LIVE", "REAP");
+        List.of("P1g", "P1s", "P1h", "P1p", "P1t", "P2", "P3", "P4", "P6", "P7", "P9", "LIVE", "REAP");
 
     /**
      * The verdict for every (row, predicate) pair. This table is the SOURCE the
      * per-predicate {@code @Test} methods assert FROM (via {@link
      * #assertVisibility}/{@link #assertExistencePredicate}/{@link
      * #live_chunkIsLiveFunction}), so it cannot silently drift from the live
-     * checks. "true" means: P1g/P1s/P1h/P1t/P2/P9/LIVE visible/live, P3 sweep
+     * checks. "true" means: P1g/P1s/P1h/P1p/P1t/P2/P9/LIVE visible/live, P3 sweep
      * candidate, P4 swept, P6 deletable, P7 orphaned/moved. Every cell is scoped
      * to COLLECTION_A; R6 and R9's COLLECTION_B verdict is pinned separately by
      * {@link #live_r6AndR9_falseInA_trueInB} and {@link
@@ -903,7 +951,8 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * <p>RDR-192 Step 5 (nexus-wbfpw.10) moved every read-visibility predicate
      * (P1g get/list, P1s plain search, P1h hybrid search, P1t topic-scoped search,
      * P2 {@code live_chunks}) onto live(c), so those five columns equal LIVE on
-     * every row. Before Step 5 they differed from LIVE on R1, R4, R6 and R8, the
+     * every row. P1p, the hybrid dispatch's gate probe ({@code text_gate_probe_<dim>}),
+     * followed in vectors-023 (nexus-wbfpw.35) and equals LIVE too. Before Step 5 they differed from LIVE on R1, R4, R6 and R8, the
      * rows with no live own-collection owner that the old dead-set anti-join kept
      * visible, and P2 differed on R9 as well because its check was tenant-wide.
      * They always agreed on R3 (tombstoned owner only).
@@ -925,15 +974,15 @@ class Rdr192EngineLivenessMatrixIntegrationTest {
      * (nexus-wbfpw.16), so a row created now separates them.
      */
     private static final Map<String, Map<String, Boolean>> EXPECTED_VALUE_TABLE = Map.ofEntries(
-        Map.entry("R1", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", true), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
-        Map.entry("R2", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
-        Map.entry("R3", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false))),
-        Map.entry("R4", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
-        Map.entry("R5", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
-        Map.entry("R6", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
-        Map.entry("R7", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
-        Map.entry("R8", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
-        Map.entry("R9", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false)))
+        Map.entry("R1", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", true), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R2", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
+        Map.entry("R3", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false))),
+        Map.entry("R4", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R5", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
+        Map.entry("R6", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R7", Map.ofEntries(Map.entry("P1g", true), Map.entry("P1s", true), Map.entry("P1h", true), Map.entry("P1p", true), Map.entry("P1t", true), Map.entry("P2", true), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", true), Map.entry("REAP", false))),
+        Map.entry("R8", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", false), Map.entry("P4", false), Map.entry("P6", true), Map.entry("P7", true), Map.entry("P9", false), Map.entry("LIVE", false), Map.entry("REAP", true))),
+        Map.entry("R9", Map.ofEntries(Map.entry("P1g", false), Map.entry("P1s", false), Map.entry("P1h", false), Map.entry("P1p", false), Map.entry("P1t", false), Map.entry("P2", false), Map.entry("P3", true), Map.entry("P4", false), Map.entry("P6", false), Map.entry("P7", false), Map.entry("P9", true), Map.entry("LIVE", false), Map.entry("REAP", false)))
     );
 
     /**

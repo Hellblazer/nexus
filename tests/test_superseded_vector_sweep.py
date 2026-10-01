@@ -945,3 +945,56 @@ def test_batch_note_guard_clearing_every_candidate_logs_kept() -> None:
     assert ev["dropped"] == 1
     assert ev["kept"] == 1
     assert ev["kept_notes"] == 1
+
+
+# ── nexus-wbfpw.35: the kept event says WHY the union guard kept everything ──
+#
+# orphaned_chashes fails open: a reader that is missing or whose reverse lookup
+# raises yields an EMPTY orphan list, the same shape as "every candidate is shared
+# with another live document". The kept event used to read as the second in both
+# cases. It now carries a reason, so a lookup outage is not logged as sharing.
+
+
+def test_union_guard_kept_event_names_sharing_as_the_reason() -> None:
+    _allow_info_logs()
+    import structlog
+
+    cat = _cat({"a": ["other-doc-1"]})
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock()):
+        _sweep_superseded_vectors(cat, "doc-A", {"a"}, _chunks("new"),
+                                  "coll", reader=cat, notes_provider=_notes())
+    (ev,) = [l for l in logs if l.get("event") == "superseded_sweep_kept"]
+    assert ev["reason"] == "shared_with_another_live_document"
+
+
+def test_union_guard_kept_event_names_a_failed_lookup_as_the_reason() -> None:
+    _allow_info_logs()
+    import structlog
+
+    cat = MagicMock()
+    cat.docs_for_chashes.side_effect = RuntimeError("engine down")
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock()):
+        _sweep_superseded_vectors(cat, "doc-A", {"a", "b"}, _chunks("new"),
+                                  "coll", reader=cat, notes_provider=_notes())
+    (ev,) = [l for l in logs if l.get("event") == "superseded_sweep_kept"]
+    assert ev["reason"] == "reverse_lookup_failed"
+    assert ev["kept"] == 2  # everything is still kept: fail-open
+
+
+def test_batch_union_guard_kept_event_names_a_failed_lookup_as_the_reason() -> None:
+    _allow_info_logs()
+    import structlog
+
+    from nexus.mcp_infra import _sweep_superseded_vectors_many
+
+    cat = MagicMock()
+    cat.docs_for_chashes.side_effect = RuntimeError("engine down")
+    with structlog.testing.capture_logs() as logs, \
+            patch("nexus.db.make_t3", return_value=MagicMock()):
+        _sweep_superseded_vectors_many(
+            cat, {"doc-A": {"a"}}, "coll", reader=cat, notes_provider=_notes(),
+        )
+    (ev,) = [l for l in logs if l.get("event") == "superseded_sweep_kept"]
+    assert ev["reason"] == "reverse_lookup_failed"

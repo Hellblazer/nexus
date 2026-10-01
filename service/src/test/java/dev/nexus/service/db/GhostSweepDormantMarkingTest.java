@@ -794,6 +794,71 @@ class GhostSweepDormantMarkingTest {
     }
 
     // ══════════════════════════════════════════════════════════════════════
+    // nexus-wbfpw.35 (RDR-192 Phase 2 gate M5): dormant means "no chunk stored at all", not
+    // "no live(c) chunk". collection_vector_stats is the collection INVENTORY since vectors-019-5
+    // (Sam, 2026-09-27): a row for every collection that physically holds chunks, live or not.
+    // So a collection whose chunks are all hidden, unowned or owned only by tombstoned documents,
+    // keeps its row and is left as it was, until purge_trash or the reaper removes the chunks.
+    // Before vectors-019-5 the view read the tombstone-filtered live_chunks, so an all-tombstoned
+    // collection had no row and was marked dormant; that changed, and nothing pinned it.
+    // ══════════════════════════════════════════════════════════════════════
+
+    @Test @Order(73)
+    void allUnownedCollection_withStoredChunks_isNotMarkedDormant() throws Exception {
+        String tenant = "ghost-sweep-all-unowned";
+        String coll = "knowledge__gs-all-unowned__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            insertChunk384(ctx, tenant, coll, chashBytes(coll), vector(384));   // no manifest row: hidden by live(c)
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.markedDormant()).as("stored chunks mean the collection is not dormant").isEqualTo(0);
+        assertThat(result.ghostsDeleted()).isEqualTo(0);
+        assertThat(lifecycleState(tenant, coll)).isEqualTo("live");
+    }
+
+    @Test @Order(74)
+    void allTombstonedCollection_withStoredChunks_isNotMarkedDormant() throws Exception {
+        String tenant = "ghost-sweep-all-tombstoned";
+        String coll = "knowledge__gs-all-tombstoned__minilm-l6-v2-384__v1";
+        try (Connection su = pg.createConnection("")) {
+            su.setAutoCommit(true);
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, tenant, coll);
+            insertChunk384(ctx, tenant, coll, chashBytes(coll), vector(384));
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                           CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION,
+                           CATALOG_DOCUMENTS.DELETED_AT)
+               .values(tenant, "gs-tombstoned-doc", "Tombstoned", coll, OffsetDateTime.now()).execute();
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID,
+                           CATALOG_DOCUMENT_CHUNKS.DOC_ID, CATALOG_DOCUMENT_CHUNKS.POSITION,
+                           CATALOG_DOCUMENT_CHUNKS.CHASH, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(tenant, "gs-tombstoned-doc", 0, chashBytes(coll), coll).execute();
+        }
+
+        CatalogRepository.GhostSweepResult result = repo.sweepGhostsAndMarkDormant(tenant);
+
+        assertThat(result.markedDormant())
+            .as("the only owner is tombstoned, so live(c) hides the chunk, but it is still stored: "
+                + "dormant is decided on the inventory, not on liveness").isEqualTo(0);
+        assertThat(result.ghostsDeleted()).isEqualTo(0);
+        assertThat(lifecycleState(tenant, coll)).isEqualTo("live");
+    }
+
+    private String lifecycleState(String tenant, String coll) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            return ctx.select(CATALOG_COLLECTIONS.LIFECYCLE_STATE).from(CATALOG_COLLECTIONS)
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant)).and(CATALOG_COLLECTIONS.NAME.eq(coll))
+                .fetchOne().value1();
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
     // nexus-29drn: dry-run mode reuses the SAME classification walk (no
     // reimplemented predicate) but never mutates. TESTS: a would-be-ghost
     // row is classified and named, but neither deleted nor evicted; a
