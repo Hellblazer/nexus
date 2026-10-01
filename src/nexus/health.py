@@ -3834,13 +3834,16 @@ def _check_engine_convergence(config_dir: Path | None = None) -> list[HealthResu
 
 _OWNERLESS_WRITES_LABEL = "Ownerless writes"
 
+#: "No status was passed in; fetch it". ``None`` already means "the fetch ran and failed".
+_ENGINE_STATUS_UNSET: object = object()
+
 
 def _status_int(value: object) -> int:
     """A counter from the engine's status body as an int; anything else is 0."""
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
-def _check_ownerless_writes() -> list[HealthResult]:
+def _check_ownerless_writes(engine_status: object = _ENGINE_STATUS_UNSET) -> list[HealthResult]:
     """nexus-20onx (RDR-223 P3.2): has the engine seen a chunk write with no owner?
 
     The engine refuses (``enforce``) or counts (``log-only``) a write to
@@ -3860,12 +3863,16 @@ def _check_ownerless_writes() -> list[HealthResult]:
     process on THIS machine is the ``Process freshness`` row's job.
     """
     label = _OWNERLESS_WRITES_LABEL
-    try:
-        from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
-        status = fetch_engine_status()
-    except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
-        _log.debug("doctor_ownerless_writes_probe_failed", error=str(exc))
-        status = None
+    status: dict | None
+    if engine_status is _ENGINE_STATUS_UNSET:
+        try:
+            from nexus.db.http_engine_status import fetch_engine_status  # noqa: PLC0415 — deferred to keep CLI startup fast
+            status = fetch_engine_status()
+        except Exception as exc:  # noqa: BLE001 — best-effort: must not crash `nx doctor`
+            _log.debug("doctor_ownerless_writes_probe_failed", error=str(exc))
+            status = None
+    else:
+        status = engine_status if isinstance(engine_status, dict) else None
     if status is None:
         return [HealthResult(
             label=label, ok=True,
@@ -9189,13 +9196,21 @@ def _check_taxonomy_discover_health() -> list[HealthResult]:
     )]
 
 
-def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[HealthResult], bool]:
+def run_health_checks(
+    git_hooks_scope: str | Path | None = None,
+    engine_status: object = _ENGINE_STATUS_UNSET,
+) -> tuple[list[HealthResult], bool]:
     """Run all health checks.
 
     ``git_hooks_scope``: forwarded to :func:`_check_git_hooks` (nexus-jds59)
     to restrict the git-hooks stanza-drift walk to repos at or under the
     given root. ``None`` (default) preserves the original behavior of
     walking every repo registered on the machine.
+
+    ``engine_status``: the ``GET /v1/status`` body (or ``None`` when the fetch
+    failed) when the caller already fetched it, so one ``nx doctor`` run makes
+    one status request for the "Ownerless writes" row and the engine-activity
+    block together. Left unset, the row fetches its own.
 
     Returns (results, is_local_mode).
     """
@@ -9321,7 +9336,7 @@ def run_health_checks(git_hooks_scope: str | Path | None = None) -> tuple[list[H
     # so they are always safe to run.
     results.extend(_check_storage_service_health())
     results.extend(_check_engine_convergence())
-    results.extend(_check_ownerless_writes())  # nexus-20onx
+    results.extend(_check_ownerless_writes(engine_status))  # nexus-20onx
     results.extend(_check_t2_launchagent_stray())
     results.extend(_check_service_launchagent_stray())
     results.extend(_check_service_autostart_drift())

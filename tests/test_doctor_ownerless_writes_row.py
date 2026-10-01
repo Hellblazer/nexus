@@ -84,6 +84,41 @@ def test_both_counters_are_named_when_both_move() -> None:
     assert "2 refused" in r.detail and "5 accepted" in r.detail
 
 
+def test_a_status_passed_in_is_used_and_nothing_is_fetched() -> None:
+    """One `nx doctor` run fetches /v1/status once and hands it to this row and the activity block."""
+    with patch(_FETCH, side_effect=AssertionError("must not fetch")):
+        (r,) = _check_ownerless_writes({
+            "ownerless_write_mode": "enforce",
+            "ownerless_writes_refused_total": 1,
+        })
+        assert r.warn is True
+        (r,) = _check_ownerless_writes(None)  # the caller's fetch ran and failed
+        assert r.ok is True and "not applicable" in r.detail
+
+
+def test_the_default_sweep_makes_one_status_request_for_row_and_activity_block(monkeypatch) -> None:
+    from click.testing import CliRunner
+
+    from nexus.cli import main
+
+    calls = {"n": 0}
+
+    def _fake_fetch(**kwargs):
+        calls["n"] += 1
+        return {
+            "ownerless_write_mode": "log-only",
+            "ownerless_writes_refused_total": 0,
+            "ownerless_writes_would_refuse_total": 2,
+            "embedding_mode": "local",
+        }
+
+    monkeypatch.setattr("nexus.db.http_engine_status.fetch_engine_status", _fake_fetch)
+    result = CliRunner().invoke(main, ["doctor"])
+    assert calls["n"] == 1, result.output
+    assert "Ownerless writes" in result.output
+    assert "accepted that enforce mode would refuse" in result.output
+
+
 def test_a_garbage_counter_is_not_a_warning() -> None:
     r = _row({
         "ownerless_write_mode": "log-only",
