@@ -163,7 +163,7 @@ class TestFixPathsRealClient:
 # ── nx t3 gc (RDR-192 Step 8, nexus-wbfpw.18) ────────────────────────────────
 
 
-def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypatch):
+def test_t3_gc_service_mode_real_client(tmp_path, runner, real_client, monkeypatch, cloud_mode):
     """The reapable census + listing + engine move through the real client. Pins the client's own
     wiring (method names, request bodies, response reads); the verb's refusals and the engine's
     behaviour are ``test_wbfpw18_t3_gc_wire.py`` and ``test_wbfpw18_t3_gc_substrate.py``. The

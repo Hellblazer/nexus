@@ -138,7 +138,7 @@ def test_an_unknown_collection_is_refused_not_reported_as_clean(runner, real_cli
     """The engine answers a reapable listing for ANY name with an empty 200, so a typo used to print
     "0 reapable chunks in X", the words a clean collection gets. gc refuses an unknown name; so does this."""
     engine = _Engine([])
-    result = _invoke(runner, real_client, engine, ["--reapable", "-c", "knowledge__typo__voyage-context-3__v1"])
+    result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL.replace("nexus-1-1", "typo")])
     assert result.exit_code == 1, result.output
     assert "no collection named" in result.output
     assert "0 reapable chunks" not in result.output
