@@ -19,15 +19,24 @@
 #     - whether a container run through the docker group can read /home/nexus
 #       (EXPECTED to succeed today: this documents that docker is root, it is
 #       a known gap, not a defect of the probe);
-#     - whether /mnt/c is visible and WSL Windows interop (cmd.exe) is on PATH.
 #   FAILS ONLY ON what must never be true:
 #     - the job runs as `nexus` or root (the probe, and the job it stands for,
 #       would then not be running as the unprivileged runner user);
 #     - `sudo -n true` succeeds (passwordless sudo);
 #     - a credential-shaped file under /home/nexus/.config/nexus is readable by
-#       ghci by file mode (the live install's credentials).
+#       ghci by file mode (the live install's credentials);
+#     - WSL interop works: /mnt/<drive>/Windows/System32/cmd.exe runs (a
+#       harmless `cmd.exe /c exit 0` with a timeout) or the WSLInterop binfmt
+#       handler is enabled. Measured on qwentescence: the host admin, as ghci,
+#       ran cmd.exe as a Windows admin;
+#     - any /mnt/<single letter> directory (the C: drive is /mnt/c) is mounted and
+#       listable (the same measurement: the Windows user's SSH private key was readable);
+#     - a /mnt/<drive> directory is on the job's PATH (appendWindowsPath).
+#     The fix is host-side, in /etc/wsl.conf: [interop] enabled=false,
+#     appendWindowsPath=false and [automount] enabled=false. Each failure names it.
 #   Reading a credential through the docker route is the known gap above and is
-#   not tested here: the probe never opens a credential file's content.
+#   not tested here: the probe never opens a credential file's content, and it
+#   never prints a name found under a /mnt drive or a PATH entry.
 #
 # TRIGGER. workflow_dispatch only, owner only, never pull_request or push: the
 # job runs on a self-hosted runner in a public repo. The `if:` compares account
@@ -49,7 +58,7 @@ permissions: {}
 
 jobs:
   probe:
-    name: Isolation report (qwen-linux, informational)
+    name: Isolation report (qwen-linux)
     if: github.event_name == 'workflow_dispatch' && github.actor_id == github.repository_owner_id && github.triggering_actor == github.repository_owner
     runs-on: [self-hosted, Linux, X64, qwen-linux]
     timeout-minutes: 10
@@ -155,30 +164,97 @@ jobs:
             echo "REPORT: the container could not list /home/nexus (exit $status); first line: $(printf '%s\n' "$out" | head -1)"
           fi
 
-      - name: Windows side (report only; /mnt/c and WSL interop)
+      - name: Windows side (fails if interop runs, a /mnt drive is readable, or PATH has a /mnt entry)
         if: always()
         shell: bash
         run: |
           set -uo pipefail
-          echo "--- /mnt/c"
-          status=0
-          ls /mnt/c >/dev/null 2>&1 || status=$?
-          if [ "$status" -eq 0 ]; then
-            echo "REPORT: /mnt/c is visible and listable ($(find /mnt/c -maxdepth 1 -mindepth 1 2>/dev/null | wc -l) entries): the Windows C: drive is reachable from this user"
-          else
-            echo "REPORT: /mnt/c is not listable (exit $status)"
+          # The two roots are plain assignments so the tests can point them at a
+          # fake tree; nothing in the environment can move them.
+          mnt_root=/mnt
+          binfmt_dir=/proc/sys/fs/binfmt_misc
+          fix="set /etc/wsl.conf to [interop] enabled=false, appendWindowsPath=false and [automount] enabled=false, then run wsl --shutdown from Windows"
+          rc=0
+          # Every check captures its status: a refused command is the EXPECTED
+          # result and the runner shell is bash -e.
+
+          echo "--- interop: can a process here start a Windows program?"
+          if command -v timeout >/dev/null 2>&1; then run_prefix="timeout 10"; else run_prefix=""; fi
+          tried=0
+          for cmd in "$mnt_root"/[a-zA-Z]/Windows/System32/cmd.exe; do
+            [ -e "$cmd" ] || continue
+            tried=$((tried + 1))
+            status=0
+            # cmd.exe /c exit 0 changes nothing. Exit 126 or 127 is the shell
+            # saying the file could not be executed: interop is off. Anything
+            # else, 0 or a timeout included, means Windows code started.
+            $run_prefix "$cmd" /c exit 0 >/dev/null 2>&1 || status=$?
+            case "$status" in
+              126|127)
+                echo "REPORT: ${cmd#"$mnt_root"/} exists but could not be executed (exit $status): interop is off for it"
+                ;;
+              *)
+                echo "::error::${cmd#"$mnt_root"/} ran (exit $status): WSL interop lets $(id -un) start Windows programs as the Windows user. Fix on the host: $fix"
+                rc=1
+                ;;
+            esac
+          done
+          if [ "$tried" -eq 0 ]; then
+            echo "REPORT: no cmd.exe under $mnt_root/<drive>/Windows/System32 to try"
           fi
-          if [ -d /mnt/c/Users ]; then
-            echo "REPORT: /mnt/c/Users is $( [ -r /mnt/c/Users ] && echo readable || echo unreadable )"
-          fi
-          echo "--- interop"
-          if command -v cmd.exe >/dev/null 2>&1; then
-            echo "REPORT: cmd.exe is on PATH ($(command -v cmd.exe)): WSL interop is enabled, so a process here can start Windows programs"
-          else
-            echo "REPORT: cmd.exe is not on PATH"
-          fi
-          if [ -e /proc/sys/fs/binfmt_misc/WSLInterop ] || [ -e /proc/sys/fs/binfmt_misc/WSLInterop-late ]; then
-            echo "REPORT: the WSLInterop binfmt handler is registered"
-          else
+          for entry in WSLInterop WSLInterop-late; do
+            f="$binfmt_dir/$entry"
+            [ -e "$f" ] || continue
+            first=""
+            read -r first < "$f" 2>/dev/null || true
+            if [ "$first" = "enabled" ]; then
+              echo "::error::the $entry binfmt handler is enabled: any Windows .exe runs from this user. Fix on the host: $fix"
+              rc=1
+            else
+              echo "REPORT: the $entry binfmt handler is registered but not enabled ($first)"
+            fi
+          done
+          if [ ! -e "$binfmt_dir/WSLInterop" ] && [ ! -e "$binfmt_dir/WSLInterop-late" ]; then
             echo "REPORT: no WSLInterop binfmt handler is registered"
           fi
+
+          echo "--- /mnt/<drive>: is a Windows drive mounted and listable?"
+          seen=0
+          for d in "$mnt_root"/[a-zA-Z]; do
+            [ -d "$d" ] || continue
+            seen=$((seen + 1))
+            # Names are never printed: a drive root can hold a user-profile
+            # directory name, and a count is all the verdict needs.
+            status=0
+            out="$(ls -A "$d" 2>/dev/null)" || status=$?
+            if [ "$status" -ne 0 ]; then
+              echo "REPORT: $d is not listable by $(id -un) (exit $status)"
+            elif [ -z "$out" ]; then
+              echo "REPORT: $d exists and is empty (not a mounted drive)"
+            else
+              echo "::error::$d is mounted and listable by $(id -un) ($(printf '%s\n' "$out" | wc -l | tr -d ' ') entries): the Windows drive is reachable. Fix on the host: $fix"
+              rc=1
+            fi
+          done
+          if [ "$seen" -eq 0 ]; then
+            echo "REPORT: no $mnt_root/<drive> directory exists"
+          fi
+
+          echo "--- PATH: is a Windows directory on this job's PATH?"
+          count=0
+          old_ifs="$IFS"
+          IFS=:
+          for entry in $PATH; do
+            case "$entry" in
+              /mnt/[a-zA-Z]|/mnt/[a-zA-Z]/*) count=$((count + 1)) ;;
+            esac
+          done
+          IFS="$old_ifs"
+          if [ "$count" -gt 0 ]; then
+            # The entries are not printed: they can name a Windows user profile.
+            echo "::error::$count PATH entries point under /mnt/<drive> (appendWindowsPath is on). Fix on the host: $fix"
+            rc=1
+          else
+            echo "no PATH entry points under /mnt/<drive> (expected)"
+          fi
+          exit "$rc"

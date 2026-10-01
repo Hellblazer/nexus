@@ -257,13 +257,23 @@ suite user `nxtest`, and a Windows host whose `C:` drive WSL can mount; the WSL
 data and `.wslconfig` belong to the Windows user. So a test run as `ghci` can
 reach the live install through docker, whatever the modes say. Nothing has
 measured it: `.github/workflows/qwen-linux-isolation-probe.yml` (owner-only
-`workflow_dispatch`, runs on `qwen-linux`, informational) reports the groups,
-passwordless `sudo`, the other users' homes, the docker route to `/home/nexus`
-(expected to succeed today, reported not failed), `/mnt/c` and WSL interop, and
-fails only on passwordless `sudo` or a readable credential file under
-`/home/nexus/.config/nexus`. Until a run is green, read this runner's isolation
-as "intended", with docker as the known hole; a separate or rootless Docker for
-`ghci` is the remedy if Sam wants it closed. `qwen-linux` keeps state between
+`workflow_dispatch`, runs on `qwen-linux`) reports the groups, passwordless
+`sudo`, the other users' homes and the docker route to `/home/nexus` (expected
+to succeed today, reported not failed), and fails on passwordless `sudo`, a
+readable credential file under `/home/nexus/.config/nexus`, and the Windows
+side. **WSL interop and the `/mnt` automount must be OFF before the CI route is
+enabled.** Measured on qwentescence with both on: the host admin, running as
+`ghci`, read the Windows user's SSH private key under `/mnt/c` and ran
+`/mnt/c/Windows/System32/cmd.exe` as a Windows admin. The probe enforces the
+fix and fails if any of these holds: `cmd.exe` under `/mnt/<drive>/Windows`
+runs, a `WSLInterop` binfmt handler is enabled, a `/mnt/<letter>` directory is
+mounted and listable, or a `/mnt/<drive>` entry is on the job's `PATH`. The
+fix is host-side, in `/etc/wsl.conf` (`[interop] enabled=false`,
+`appendWindowsPath=false`, `[automount] enabled=false`, then `wsl --shutdown`),
+and it is pending with Sam. Unset `QWEN_CI_PUSH_RUNNER` means `qwen-linux`, so
+until the fix is applied and a probe run is green, set it to `ubuntu-latest`.
+Until a run is green, read this runner's isolation as "intended", with docker as the known hole; a
+separate or rootless Docker for `ghci` is the remedy if Sam wants it closed. `qwen-linux` keeps state between
 jobs too: the docker daemon and its images and tags are shared by every user of
 the distro, and `ghci`'s home keeps the uv, Maven, model and PG-bundle caches and
 the `TMPDIR`.
