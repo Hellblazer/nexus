@@ -54,8 +54,18 @@ class ReapableConsumersScanTest {
     /** Java consumers other than the listing, each with the reason it is gated. Empty today. */
     private static final Map<String, String> JAVA_CONSUMERS = new TreeMap<>();
 
-    /** SQL consumers whose grace is not a literal NULL, each with where its floor clamp lives. Empty today. */
+    /** SQL consumers whose grace is not a literal NULL, each with why that is safe (a floor clamp, or no production setting). */
     private static final Map<String, String> SQL_CONSUMERS = new TreeMap<>();
+
+    static {
+        // nexus-2x9xa. The reaper's move passes its p_grace straight through so a test can inject zero. Production
+        // passes NULL: ChunkReaper#run() calls runOnce(null) and the class has no grace setting, so there is no
+        // user-tuned window for a clamp to guard; only the package-private runOnce(Duration) a test calls passes
+        // anything else. The allowlist waives ONLY the literal-NULL rule: the scan below still demands the exclusive
+        // sweep gate of this unit, and ChunkReaperIntegrationTest holds a shared gate to prove the gate is real.
+        SQL_CONSUMERS.put("vectors-024-reaper-quarantine-chunks.xml#nexus.reaper_quarantine_chunks",
+            "grace is injected by tests only; production passes NULL (the 30 day default), no setting, no clamp needed");
+    }
 
     private static final Pattern UNIT_START = Pattern.compile(
         "(?i)CREATE\\s+(?:OR\\s+REPLACE\\s+)?(FUNCTION|PROCEDURE)\\s+([^\\s(]+)");
@@ -165,8 +175,11 @@ class ReapableConsumersScanTest {
                         if (!MENTION.matcher(unit.getValue()).find()) continue;
                         String id = p.getFileName() + "#" + name;
                         found.add(id);
-                        if (SQL_CONSUMERS.containsKey(id)) continue;
-                        problems.addAll(violations(id, unit.getValue()));
+                        boolean allowlisted = SQL_CONSUMERS.containsKey(id);
+                        for (String v : violations(id, unit.getValue())) {
+                            // An allowlisted consumer is exempt from the NULL-grace rule only, never from the gate.
+                            if (!(allowlisted && v.contains("not a literal NULL"))) problems.add(v);
+                        }
                     }
                 }
             }

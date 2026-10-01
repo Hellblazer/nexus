@@ -1,0 +1,111 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (c) 2026 Hal Hildebrand. All rights reserved.
+package dev.nexus.service.vectors;
+
+import dev.nexus.service.db.PgSession;
+import dev.nexus.service.db.TenantScope;
+
+import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.REAPER_QUARANTINE_CHUNKS;
+
+/**
+ * RDR-192 Step 9 (bead nexus-2x9xa): the database half of the periodic reaper ({@code dev.nexus.service.ChunkReaper}).
+ *
+ * <p>Deliberately thin. Reapability is decided inside {@code nexus.reaper_quarantine_chunks} (vectors-024) by
+ * {@code nexus.chunk_is_reapable} and by nothing else, in the move statement's own WHERE; this class never reads a
+ * chunk's age or compares anything itself, so there is no second definition for the predicate to drift from. The
+ * three questions it does answer are which collections hold chunks (from {@code nexus.chunks}, so a collection with
+ * chunks and no catalog row is seen and refused rather than never listed), what lifecycle state each registered
+ * collection is in, and the dry-run and move calls.
+ */
+public final class ReaperRepository {
+
+    /**
+     * What one call to {@code reaper_quarantine_chunks} reports: {@code moved} chunks moved, the collection's whole
+     * {@code reapable} count and {@code total} chunk count as that call saw them, {@code refused} when the fraction
+     * floor stopped the move, and the {@code remaining} reapable count after it.
+     */
+    public record Pass(long moved, long reapable, long total, boolean refused, long remaining) {}
+
+    private final TenantScope tenantScope;
+
+    public ReaperRepository(TenantScope tenantScope) {
+        this.tenantScope = tenantScope;
+    }
+
+    /**
+     * Every collection this tenant holds at least one chunk in, quarantine siblings included (the caller skips
+     * them by name). Bounded by {@code statementTimeout}: the enumeration runs before any collection is chosen, so
+     * an unbounded scan here would stall the whole pass, and the single scheduler thread behind it.
+     */
+    public List<String> collectionsWithChunks(String tenant, Duration statementTimeout) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, (int) statementTimeout.toMillis(), 2_000);
+            return ctx.selectDistinct(CHUNKS.COLLECTION).from(CHUNKS)
+                .where(CHUNKS.TENANT_ID.eq(tenant))
+                .orderBy(CHUNKS.COLLECTION)
+                .fetch(CHUNKS.COLLECTION);
+        });
+    }
+
+    /**
+     * {@code name -> lifecycle_state} for every registered collection of the tenant. A name that is absent is not
+     * registered; a registered collection with no state maps to the empty string, which is not {@code live}.
+     */
+    public Map<String, String> lifecycleStates(String tenant) {
+        return tenantScope.withTenant(tenant, ctx -> {
+            Map<String, String> out = new LinkedHashMap<>();
+            ctx.select(CATALOG_COLLECTIONS.NAME, CATALOG_COLLECTIONS.LIFECYCLE_STATE)
+               .from(CATALOG_COLLECTIONS)
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(tenant))
+               .forEach(r -> out.put(r.value1(), r.value2() == null ? "" : r.value2()));
+            return out;
+        });
+    }
+
+    /**
+     * Counts only: how many of the collection's chunks are reapable under {@code grace} (null: the predicate's own
+     * 30 days). Takes no gate and moves nothing.
+     */
+    public Pass probe(String tenant, String collection, Duration grace, int statementTimeoutMs) {
+        return call(tenant, collection, "", "", 1, grace, 0.0, 0, true, statementTimeoutMs, 2_000);
+    }
+
+    /**
+     * Moves at most {@code rowLimit} reapable chunks of {@code collection} into {@code quarantineCollection}, unless
+     * they are more than {@code floorFraction} of a collection of at least {@code floorMinChunks} chunks, in which
+     * case nothing moves and {@link Pass#refused()} is true. Throws on a database error; a sweep gate that could not
+     * be taken in {@code lockTimeoutMs}'s neighbourhood surfaces as SQLSTATE 55P03.
+     */
+    public Pass move(String tenant, String collection, String quarantineCollection, String quarantinedAt,
+                     int rowLimit, Duration grace, double floorFraction, int floorMinChunks,
+                     int statementTimeoutMs, int lockTimeoutMs) {
+        return call(tenant, collection, quarantineCollection, quarantinedAt, rowLimit, grace, floorFraction,
+                    floorMinChunks, false, statementTimeoutMs, lockTimeoutMs);
+    }
+
+    private Pass call(String tenant, String collection, String quarantineCollection, String quarantinedAt,
+                      int rowLimit, Duration grace, double floorFraction, int floorMinChunks, boolean dryRun,
+                      int statementTimeoutMs, int lockTimeoutMs) {
+        org.jooq.types.YearToSecond interval = grace == null ? null : new org.jooq.types.YearToSecond(
+            new org.jooq.types.YearToMonth(0, 0), org.jooq.types.DayToSecond.valueOf(grace));
+        var rec = tenantScope.withTenant(tenant, ctx -> {
+            // The statement bound is its OWN statement before the call: the function body's own set_config of
+            // statement_timeout cannot bound the statement already running it.
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            return ctx.selectFrom(REAPER_QUARANTINE_CHUNKS.call(
+                    tenant, collection, quarantineCollection, quarantinedAt, rowLimit, interval,
+                    floorFraction, floorMinChunks, dryRun))
+               .fetchOne();
+        });
+        return new Pass(rec.get(REAPER_QUARANTINE_CHUNKS.MOVED), rec.get(REAPER_QUARANTINE_CHUNKS.REAPABLE_COUNT),
+                        rec.get(REAPER_QUARANTINE_CHUNKS.TOTAL_COUNT), rec.get(REAPER_QUARANTINE_CHUNKS.REFUSED),
+                        rec.get(REAPER_QUARANTINE_CHUNKS.REMAINING));
+    }
+}

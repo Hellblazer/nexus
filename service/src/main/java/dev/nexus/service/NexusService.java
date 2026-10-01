@@ -230,6 +230,13 @@ public final class NexusService {
     private final TupleRepository tupleRepo;
 
     /**
+     * RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, scheduled on {@link #sweepScheduler}.
+     * Null when this instance has no vector backend (nothing to reap) or {@value ChunkReaper#ENABLED_ENV} turns it
+     * off.
+     */
+    private final ChunkReaper chunkReaper;
+
+    /**
      * RDR-169 G3 (bead nexus-aphki): the {@code https://} handler owns a real
      * {@link java.net.http.HttpClient} that must be closed on shutdown — held here
      * (rather than only inside {@link UriSchemeResolverRegistry}, which has no
@@ -674,6 +681,51 @@ public final class NexusService {
                 SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_HOURS, TimeUnit.HOURS
             );
         }
+
+        // RDR-192 Step 9 (bead nexus-2x9xa): the state-derived chunk reaper, a THIRD scheduled task on the SAME
+        // sweepScheduler, at its own interval (NX_REAPER_INTERVAL_SECONDS, default one hour). It recomputes what
+        // is reapable from the manifest on every pass, so it is the safety net for the post-commit sweep's
+        // fail-open paths and keeps no drop set. It quarantines, never hard-deletes. Tenants are the ones the T1
+        // sweep visits: the default tenant plus every token-bearing tenant (nexus.chunks is FORCE RLS, so a
+        // tenant cannot be enumerated from the chunks table itself).
+        ChunkReaper.Settings reaperSettings = ChunkReaper.Settings.fromEnv(System::getenv);
+        if (pgVectorRepository != null && reaperSettings.enabled()) {
+            ChunkReaper reaper = new ChunkReaper(
+                new dev.nexus.service.vectors.ReaperRepository(tenantScope), pgVectorRepository,
+                new dev.nexus.service.db.Rdr192BackfillGate(ladderRepo), this::reaperTenants, reaperSettings,
+                java.time.Clock.systemUTC());
+            this.chunkReaper = reaper;
+            this.sweepScheduler.scheduleWithFixedDelay(
+                () -> {
+                    try {
+                        reaper.run();
+                    } catch (Exception ex) {
+                        log.warn("event=reaper_scheduled_run_failed error={}", ex.getMessage(), ex);
+                    }
+                },
+                reaperSettings.interval().toSeconds(), reaperSettings.interval().toSeconds(), TimeUnit.SECONDS
+            );
+            log.info("event=reaper_scheduled interval_seconds={} batch_size={} floor_fraction={} floor_min_chunks={}",
+                reaperSettings.interval().toSeconds(), reaperSettings.batchSize(),
+                reaperSettings.floorFraction(), reaperSettings.floorMinChunks());
+        } else {
+            this.chunkReaper = null;
+            log.info("event=reaper_not_scheduled has_pgvector={} enabled={}",
+                pgVectorRepository != null, reaperSettings.enabled());
+        }
+    }
+
+    /** The reaper's tenants: the default tenant plus every token-bearing tenant, as {@link #runScheduledSweep}. */
+    private List<String> reaperTenants() {
+        var out = new java.util.LinkedHashSet<String>();
+        out.add(DEFAULT_TENANT);
+        out.addAll(tokenStore.listKnownTenants(SweepBounds.STATEMENT_TIMEOUT));
+        return List.copyOf(out);
+    }
+
+    /** The scheduled reaper, or null when none was wired. Package-private for the wiring test. */
+    ChunkReaper chunkReaper() {
+        return chunkReaper;
     }
 
     /** Start the HTTP server (non-blocking). */

@@ -239,7 +239,12 @@ class JooqRecordReflectionFeatureTest {
     // 106 -> 107: nexus-wbfpw.15, vectors-021-chunk-is-reapable-function.xml
     // added nexus.chunk_is_reapable, a RETURNS TABLE(reapable boolean)
     // function, one generated Record type (ChunkIsReapableRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 107;
+    // 107 -> 108: nexus-2x9xa, vectors-024-reaper-quarantine-chunks.xml
+    // added nexus.reaper_quarantine_chunks, a RETURNS TABLE(moved,
+    // reapable_count, total_count, refused, remaining) function, one
+    // generated Record type (ReaperQuarantineChunksRecord), +1. The branch
+    // reworking vectors-021 may add its own; the two bumps merge by hand.
+    private static final int EXPECTED_RECORD_TYPES = 108;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {
