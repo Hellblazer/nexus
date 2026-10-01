@@ -3897,6 +3897,7 @@ class HttpVectorClient:
         after_chash: str | None = None,
         limit: int | None = None,
         dry_run: bool = False,
+        reattach: bool | None = None,
         actor: str | None = None,
     ) -> dict:
         """POST /v1/vectors/gc/quarantine-restore (RDR-192 Step 9 Day-2, bead
@@ -3909,19 +3910,29 @@ class HttpVectorClient:
         ``offset``/``limit``), or a ``quarantined_since`` / ``quarantined_before``
         window over the sibling (paged by ``after_chash``/``limit``). Only the
         fields given are sent. ``dry_run`` classifies without moving or auditing.
+        ``reattach`` (the engine's default is true when it is not sent) also writes
+        the owning document's manifest row for a chunk whose metadata names a live
+        document, so the chunk is visible to search and get again; ``False`` moves
+        bytes only (nexus-wbfpw.49).
 
         Returns ``{"origin_collection", "quarantine_collection", "dry_run",
         "audit_id": int|None, "restored": n, "would_restore": n, "present": n,
-        "dim_conflict": n, "missing": n, "rows": [{"chash", "outcome",
-        "no_manifest": bool|None, "reapable_after": str|None}], "source":
-        {...}|None, "next_after": str|None}``. See the engine route's docstring
-        (``VectorHandler#handleGcQuarantineRestore``) for the outcomes.
+        "dim_conflict": n, "missing": n, "reattach": bool, "attached": n,
+        "superseded": n, "no_live_owner": n, "no_position": n, "rows": [{"chash",
+        "outcome", "no_manifest": bool|None, "reapable_after": str|None,
+        "reattach": str|None, "attached": bool, "owner": str|None,
+        "owner_title": str|None, "position": int|None, "chunk_title":
+        str|None}], "source": {...}|None, "next_after": str|None}``. See the
+        engine route's docstring (``VectorHandler#handleGcQuarantineRestore``) for
+        the outcomes.
 
         A write that is never auto-retried on a gateway-transient code
         (:data:`nexus.db.gateway_backoff._NON_IDEMPOTENT_SWEEP_PATH_SUFFIXES`).
         Raises :class:`VectorServiceError` (``code=404`` on an engine that
         predates the route, ``400`` for a refused request such as a sample-only
-        audit row, ``422`` for an unregistered collection).
+        audit row, ``422`` for an unregistered collection, ``503`` with
+        ``reason == "quarantine_restore_busy"`` when a manifest writer held the
+        collection's lock: that call rolled back whole and may be sent again).
         """
         body: dict = {
             "origin_collection": origin_collection,
@@ -3936,6 +3947,8 @@ class HttpVectorClient:
                 body[key] = value
         if dry_run:
             body["dry_run"] = True
+        if reattach is not None:
+            body["reattach"] = reattach
         return _post("/v1/vectors/gc/quarantine-restore", body, tenant=self._tenant)
 
     def manifest_less_census(

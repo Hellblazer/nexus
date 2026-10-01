@@ -34,6 +34,16 @@ def test_the_ownerless_write_reason_equals_the_engines() -> None:
     assert match.group(1) == OWNERLESS_CHUNK_WRITE_REASON
 
 
+def test_the_quarantine_restore_busy_reason_equals_the_engines() -> None:
+    from nexus.db.engine_reasons import QUARANTINE_RESTORE_BUSY_REASON  # noqa: PLC0415 — test-local import
+
+    match = re.search(
+        r'QUARANTINE_RESTORE_BUSY_REASON\s*=\s*"([a-z_]+)"', _HTTP_UTIL.read_text(),
+    )
+    assert match, "HttpUtil no longer declares QUARANTINE_RESTORE_BUSY_REASON"
+    assert match.group(1) == QUARANTINE_RESTORE_BUSY_REASON
+
+
 def test_every_reader_uses_the_one_module() -> None:
     from nexus import corpus  # noqa: PLC0415 — test-local import
     from nexus.db import http_vector_client as hv  # noqa: PLC0415 — test-local import

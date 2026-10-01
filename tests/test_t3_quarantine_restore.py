@@ -29,6 +29,7 @@ from nexus.commands.t3 import t3
 from nexus.db import gateway_backoff
 from nexus.db import http_vector_client as hv
 from nexus.db.http_vector_client import HttpVectorClient, VectorServiceError
+from tests._catalog_fixture_ops import register_real_doc_id
 
 
 def _chash(seed: str) -> str:
@@ -68,6 +69,17 @@ class TestWire:
         }
         assert post.call_args.kwargs == {"tenant": "tenant-x"}
 
+    def test_reattach_is_sent_only_when_given(self) -> None:
+        client = HttpVectorClient.__new__(HttpVectorClient)
+        client._tenant = "t"
+        with patch.object(hv, "_post", return_value={"rows": []}) as post:
+            client.gc_quarantine_restore(ORIGIN, SIBLING, chashes=[_chash("a")])
+            client.gc_quarantine_restore(ORIGIN, SIBLING, chashes=[_chash("a")], reattach=False)
+            client.gc_quarantine_restore(ORIGIN, SIBLING, chashes=[_chash("a")], reattach=True)
+        none, off, on = (c.args[1] for c in post.call_args_list)
+        assert "reattach" not in none, "unsent means the engine's default (reattach on)"
+        assert off["reattach"] is False and on["reattach"] is True
+
     def test_each_source_maps_to_its_own_fields(self) -> None:
         client = HttpVectorClient.__new__(HttpVectorClient)
         client._tenant = "t"
@@ -94,8 +106,21 @@ class TestWire:
 # ── the CLI against a stubbed client ─────────────────────────────────────────
 
 
-def _row(chash: str, outcome: str, *, no_manifest=None, reapable_after=None) -> dict:
-    return {"chash": chash, "outcome": outcome, "no_manifest": no_manifest, "reapable_after": reapable_after}
+def _row(chash: str, outcome: str, *, no_manifest=None, reapable_after=None, reattach=None, attached=False,
+         owner=None, owner_title=None, position=None, chunk_title=None) -> dict:
+    return {"chash": chash, "outcome": outcome, "no_manifest": no_manifest, "reapable_after": reapable_after,
+            "reattach": reattach, "attached": attached, "owner": owner, "owner_title": owner_title,
+            "position": position, "chunk_title": chunk_title}
+
+
+def _hidden_row(chash: str, *, verdict="no_live_owner", reapable_after="2026-10-31T12:00:00Z", **kw) -> dict:
+    """A restored chunk the engine could not attach: bytes back, hidden."""
+    return _row(chash, "restored", no_manifest=True, reapable_after=reapable_after, reattach=verdict, **kw)
+
+
+def _attached_row(chash: str, owner="1.2.3", title="Legacy Note", position=0) -> dict:
+    return _row(chash, "restored", no_manifest=False, reattach="attach", attached=True,
+                owner=owner, owner_title=title, position=position)
 
 
 def _page(rows, *, audit_id=None, dry_run=False, source=None, next_after=None) -> dict:
@@ -106,15 +131,17 @@ def _page(rows, *, audit_id=None, dry_run=False, source=None, next_after=None) -
 
 
 class _Stub:
-    def __init__(self, pages=None, error: Exception | None = None):
+    def __init__(self, pages=None, error: Exception | None = None, error_after: int | None = None):
         self.pages = list(pages or [])
         self.error = error
+        #: raise *error* on the call after this many pages were served (None: on the first call)
+        self.error_after = error_after
         self.calls: list[dict] = []
 
     def gc_quarantine_restore(self, origin, quarantine, **kw):
         assert origin == ORIGIN and quarantine == SIBLING
         self.calls.append(kw)
-        if self.error is not None:
+        if self.error is not None and (self.error_after is None or len(self.calls) > self.error_after):
             raise self.error
         return self.pages.pop(0)
 
@@ -126,11 +153,11 @@ def _run(runner: CliRunner, stub: _Stub, *args: str):
 
 
 class TestCli:
-    def test_the_table_the_totals_and_the_date_a_manifestless_chunk_is_reapable_again(self, runner) -> None:
+    def test_the_table_the_totals_and_what_a_hidden_chunk_costs(self, runner) -> None:
         a, b, c = _chash("a"), _chash("b"), _chash("c")
         stub = _Stub([_page([
-            _row(a, "restored", no_manifest=True, reapable_after="2026-10-31T12:00:00Z"),
-            _row(b, "present"),
+            _hidden_row(a, chunk_title="Untitled"),
+            _row(b, "present", reattach="owned"),
             _row(c, "missing"),
         ], audit_id=41)])
 
@@ -141,31 +168,96 @@ class TestCli:
         assert f"{a}  restored" in out and f"{b}  present" in out and f"{c}  missing" in out
         assert "restored 1, present 1, dim_conflict 0, missing 1" in out
         assert "gc_audit 41" in out
-        # The operator is told, not left to find out: no manifest row means the reaper takes it again.
-        assert "no manifest row" in out and "2026-10-31T12:00:00Z" in out
-        assert "reaper" in out and "owner row" in out
+        # The operator is told, not left to find out: the chunk is back but nothing shows it, and until it is
+        # owned the reaper may take it again on the date given.
+        assert "HIDDEN from search and get" in out
+        assert "2026-10-31T12:00:00Z" in out and "reaper" in out
+        assert "reaper will quarantine them again" not in out, "the census gate can refuse the whole collection instead"
         assert stub.calls[0]["chashes"] == [a, b, c]
 
-    def test_a_clean_restore_exits_zero_and_names_what_it_did(self, runner) -> None:
+    def test_an_attached_chunk_is_named_with_its_owner_and_position_and_is_not_called_hidden(self, runner) -> None:
         a = _chash("a")
-        stub = _Stub([_page([_row(a, "restored", no_manifest=True, reapable_after="2026-10-31T00:00:00Z")], audit_id=3)])
-        result = _run(runner, stub, "--chash", a)
-        assert result.exit_code == 0, result.output
-        assert "restored 1" in result.output
+        stub = _Stub([_page([_attached_row(a, owner="1.2.3", title="Legacy Note", position=4)], audit_id=3)])
 
-    def test_a_dry_run_says_nothing_moved_and_passes_dry_run_through(self, runner) -> None:
+        result = _run(runner, stub, "--chash", a)
+
+        assert result.exit_code == 0, result.output
+        assert "attached to 'Legacy Note' (1.2.3) at position 4" in result.output
+        assert "reattach: attached 1, superseded 0, no live owner 0, no position 0" in result.output
+        assert "HIDDEN" not in result.output and "nx store put" not in result.output
+        assert stub.calls[0]["reattach"] is True, "reattach is the default"
+
+    def test_a_chunk_it_could_not_attach_prints_the_reput_recipe_with_title_and_tumbler(self, runner) -> None:
+        a, b, c = _chash("a"), _chash("b"), _chash("c")
+        stub = _Stub([_page([
+            _hidden_row(a, verdict="superseded", owner="1.2.3", owner_title="Legacy Note", position=0),
+            _hidden_row(b, verdict="no_position", owner="1.2.4", owner_title="It's a Multi"),
+            _hidden_row(c, verdict="no_live_owner", chunk_title="orphan title"),
+        ], audit_id=8)])
+
+        result = _run(runner, stub, "--chash", a, "--chash", b, "--chash", c)
+
+        out = result.output
+        assert result.exit_code == 0, "a hidden chunk is reported, it does not change the status\n" + out
+        assert "3 chunks stay HIDDEN from search and get" in out
+        assert f"nx store put - --collection {ORIGIN} --title 'Legacy Note'" in out and "# owner 1.2.3" in out
+        assert "--title 'It'\"'\"'s a Multi'" in out, "a title with a quote is shell-quoted"
+        assert "--title 'orphan title'" in out and "no live owner named" in out
+        assert "another chunk at position 0" in out, "a superseded row says why"
+        assert "reattach: attached 0, superseded 1, no live owner 1, no position 1" in out
+        assert "backfill-manifest" not in out, "backfill does nothing for this class, so the output never suggests it"
+
+    def test_no_reattach_is_passed_through_and_the_output_says_what_it_would_have_done(self, runner) -> None:
         a = _chash("a")
-        stub = _Stub([_page([_row(a, "would_restore")], dry_run=True)])
-        result = _run(runner, stub, "--chash", a, "--dry-run")
+        stub = _Stub([_page([_hidden_row(a, verdict="attach", owner="1.2.3", owner_title="Legacy Note", position=0)],
+                            audit_id=2)])
+
+        result = _run(runner, stub, "--chash", a, "--no-reattach")
+
+        assert result.exit_code == 0, result.output
+        assert stub.calls[0]["reattach"] is False
+        out = result.output
+        assert "reattach: off (--no-reattach)" in out and "a run without the flag would attach 1" in out
+        assert "NOT attached (--no-reattach)" in out
+        assert "HIDDEN from search and get" in out, "a bytes-only restore leaves the chunk hidden, and says so"
+        assert f"--title 'Legacy Note'" in out
+
+    def test_a_dry_run_reports_would_attach_and_would_stay_hidden_and_passes_dry_run_through(self, runner) -> None:
+        a, b = _chash("a"), _chash("b")
+        stub = _Stub([_page([
+            _row(a, "would_restore", reattach="attach", owner="1.2.3", owner_title="Legacy Note", position=0),
+            _row(b, "would_restore", reattach="superseded", owner="1.2.3", owner_title="Legacy Note", position=1),
+        ], dry_run=True)])
+
+        result = _run(runner, stub, "--chash", a, "--chash", b, "--dry-run")
+
         assert result.exit_code == 0, result.output
         assert stub.calls[0]["dry_run"] is True
-        assert "dry run" in result.output.lower() and "would restore 1" in result.output
-        assert "reapable again" not in result.output
+        out = result.output
+        assert "dry run" in out.lower() and "would restore 2" in out
+        assert "would attach to 'Legacy Note' (1.2.3) at position 0" in out
+        assert "reattach: would attach 1, superseded 1" in out
+        assert "1 chunk would stay HIDDEN" in out
+        assert "gc_audit" not in out
+
+    @pytest.mark.parametrize("outcome", ["missing", "dim_conflict"])
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_a_missing_or_width_conflicting_chunk_exits_1_even_on_a_dry_run(self, runner, outcome, dry_run) -> None:
+        a, b = _chash("a"), _chash("b")
+        ok = "would_restore" if dry_run else "restored"
+        stub = _Stub([_page([_attached_row(a), _row(b, outcome)], dry_run=dry_run)])
+        if dry_run:
+            stub.pages[0]["rows"][0]["outcome"] = ok
+            stub.pages[0]["restored"], stub.pages[0]["would_restore"] = 0, 1
+        args = ["--chash", a, "--chash", b] + (["--dry-run"] if dry_run else [])
+
+        result = _run(runner, stub, *args)
+
+        assert result.exit_code == t3_quarantine.EXIT_UNRESTORED, result.output
 
     def test_chashes_go_in_batches_of_a_thousand_and_are_deduplicated(self, runner) -> None:
         hs = [_chash(str(i)) for i in range(2500)]
-        stub = _Stub([_page([_row(h, "restored", no_manifest=True, reapable_after="2026-10-31T00:00:00Z")
-                             for h in hs[i:i + 1000]], audit_id=i) for i in (0, 1000, 2000)])
+        stub = _Stub([_page([_attached_row(h) for h in hs[i:i + 1000]], audit_id=i) for i in (0, 1000, 2000)])
         args = []
         for h in hs + hs[:5]:
             args += ["--chash", h]
@@ -177,8 +269,8 @@ class TestCli:
     def test_a_window_pages_by_next_after_until_it_is_exhausted(self, runner) -> None:
         a, b = _chash("a"), _chash("b")
         stub = _Stub([
-            _page([_row(a, "restored", no_manifest=True, reapable_after="2026-10-31T00:00:00Z")], next_after=a),
-            _page([_row(b, "restored", no_manifest=True, reapable_after="2026-10-31T00:00:00Z")]),
+            _page([_attached_row(a)], next_after=a),
+            _page([_attached_row(b)]),
         ])
         result = _run(runner, stub, "--quarantined-since", "2026-09-01", "--quarantined-before", "2026-09-08T12:00:00+00:00")
         assert result.exit_code == 0, result.output
@@ -193,8 +285,8 @@ class TestCli:
         src = lambda nxt: {"audit_id": 9, "operation": "reaper_quarantine", "chash_count": 2,  # noqa: E731
                            "chashes_listed": 2, "offset": 0, "next_offset": nxt}
         stub = _Stub([
-            _page([_row(a, "restored", no_manifest=True, reapable_after="2026-10-31T00:00:00Z")], source=src(1)),
-            _page([_row(b, "restored", no_manifest=True, reapable_after="2026-10-31T00:00:00Z")], source=src(None)),
+            _page([_attached_row(a)], source=src(1)),
+            _page([_attached_row(b)], source=src(None)),
         ])
         result = _run(runner, stub, "--audit-id", "9")
         assert result.exit_code == 0, result.output
@@ -218,19 +310,33 @@ class TestCli:
         assert result.exit_code != 0
         assert stub.calls == []
 
-    def test_json_is_one_parseable_document_with_every_row(self, runner) -> None:
-        a, b = _chash("a"), _chash("b")
+    def test_json_is_one_parseable_document_with_every_row_and_the_reattach_tally(self, runner) -> None:
+        a, b, c = _chash("a"), _chash("b"), _chash("c")
         stub = _Stub([_page([
-            _row(a, "restored", no_manifest=True, reapable_after="2026-10-31T00:00:00Z"), _row(b, "present"),
+            _attached_row(a), _row(b, "present", reattach="owned"), _hidden_row(c, verdict="superseded"),
         ], audit_id=5)])
-        result = _run(runner, stub, "--chash", a, "--chash", b, "--json")
+        result = _run(runner, stub, "--chash", a, "--chash", b, "--chash", c, "--json")
         assert result.exit_code == 0, result.output
         doc = _doc(result.stdout)
         assert doc["origin_collection"] == ORIGIN and doc["quarantine_collection"] == SIBLING
-        assert doc["totals"] == {"restored": 1, "would_restore": 0, "present": 1, "dim_conflict": 0, "missing": 0}
+        assert doc["reattach"] is True
+        assert doc["totals"] == {"restored": 2, "would_restore": 0, "present": 1, "dim_conflict": 0, "missing": 0}
+        assert doc["reattach_totals"] == {"attached": 1, "would_attach": 0, "superseded": 1,
+                                          "no_live_owner": 0, "no_position": 0}
         assert doc["audit_ids"] == [5]
-        assert [r["outcome"] for r in doc["rows"]] == ["restored", "present"]
-        assert doc["reapable_again_after"] == "2026-10-31T00:00:00Z"
+        assert [r["outcome"] for r in doc["rows"]] == ["restored", "present", "restored"]
+        assert doc["reapable_again_after"] == "2026-10-31T12:00:00Z"
+        assert "error" not in doc
+
+    def test_the_earliest_reapable_date_is_the_earliest_in_time_not_in_string_order(self, runner) -> None:
+        a, b = _chash("a"), _chash("b")
+        # "...:00.123456Z" sorts BEFORE "...:00Z" as a string ('.' < 'Z') and AFTER it in time.
+        stub = _Stub([_page([
+            _hidden_row(a, reapable_after="2026-10-31T12:00:00.123456Z"),
+            _hidden_row(b, reapable_after="2026-10-31T12:00:00Z"),
+        ])])
+        result = _run(runner, stub, "--chash", a, "--chash", b, "--json")
+        assert _doc(result.stdout)["reapable_again_after"] == "2026-10-31T12:00:00Z"
 
     def test_an_engine_without_the_route_exits_4_and_a_refusal_exits_5_never_a_traceback(self, runner) -> None:
         no_route = _run(runner, _Stub(error=VectorServiceError("not found", code=404)), "--chash", _chash("a"))
@@ -245,11 +351,57 @@ class TestCli:
             "the engine's field names read as the flags the operator types"
         assert refused.exception is None or isinstance(refused.exception, SystemExit)
 
+    def test_a_held_lock_is_a_typed_retryable_exit_6_not_a_refusal(self, runner) -> None:
+        busy = VectorServiceError(
+            "a manifest writer or an index run holds the collection's lock; nothing was moved, attached or audited",
+            code=503, reason="quarantine_restore_busy")
+        result = _run(runner, _Stub(error=busy), "--chash", _chash("a"))
+        assert result.exit_code == t3_quarantine.EXIT_BUSY, result.output
+        assert "busy" in result.output and "nothing moved" in result.output and "again" in result.output
+        assert "refused by the engine" not in result.output
+        # A 503 that is NOT the typed busy answer is still an engine failure.
+        other = _run(runner, _Stub(error=VectorServiceError("bad gateway", code=503)), "--chash", _chash("a"))
+        assert other.exit_code == t3_quarantine.EXIT_ENGINE_ERROR, other.output
+
+    def test_a_failure_on_a_later_page_still_reports_what_the_earlier_pages_committed(self, runner) -> None:
+        hs = [_chash(str(i)) for i in range(1500)]
+        first = _page([_attached_row(h) for h in hs[:1000]], audit_id=77)
+        stub = _Stub([first], error=VectorServiceError("statement timeout", code=500), error_after=1)
+
+        result = _run(runner, stub, *[x for h in hs for x in ("--chash", h)])
+
+        assert result.exit_code == t3_quarantine.EXIT_ENGINE_ERROR, result.output[-500:]
+        out = result.output
+        assert "restored 1000" in out, "the committed page is reported, not dropped"
+        assert "gc_audit 77" in out, "and so is its audit id"
+        assert "Pages before it are committed" in out and "1 page" in out
+        assert "refused by the engine" in out
+
+    def test_a_failure_on_a_later_page_keeps_the_json_document_and_names_the_error(self, runner) -> None:
+        hs = [_chash(str(i)) for i in range(1100)]
+        first = _page([_attached_row(h) for h in hs[:1000]], audit_id=78)
+        busy = VectorServiceError("held", code=503, reason="quarantine_restore_busy")
+        stub = _Stub([first], error=busy, error_after=1)
+
+        result = _run(runner, stub, *[x for h in hs for x in ("--chash", h)], "--json")
+
+        assert result.exit_code == t3_quarantine.EXIT_BUSY, result.output[-500:]
+        doc = _doc(result.stdout)
+        assert doc["audit_ids"] == [78] and doc["totals"]["restored"] == 1000
+        assert doc["error"]["exit_code"] == t3_quarantine.EXIT_BUSY and doc["error"]["pages_committed"] == 1
+
+    def test_a_failure_on_the_first_page_prints_no_empty_report(self, runner) -> None:
+        result = _run(runner, _Stub(error=VectorServiceError("boom", code=500)), "--chash", _chash("a"))
+        assert result.exit_code == t3_quarantine.EXIT_ENGINE_ERROR
+        assert "CHASH" not in result.output and "restored 0" not in result.output
+        assert "Pages before it" not in result.output
+
 
 # ── the verb against the real engine ─────────────────────────────────────────
 
 
-def _seed_quarantined(tenant: str, origin: str, seeds: list[str]) -> tuple[list[str], str]:
+def _seed_quarantined(tenant: str, origin: str, seeds: list[str],
+                      metas: list[dict] | None = None) -> tuple[list[str], str]:
     """Ownerless chunks in *origin*, aged past the grace, moved into quarantine by the engine's own
     bounded sweep (the route ``nx index repo`` and ``nx t3 gc`` use). Returns (chashes, sibling)."""
     from nexus.catalog.chunk_quarantine import now_stamp, quarantine_collection_name
@@ -257,7 +409,8 @@ def _seed_quarantined(tenant: str, origin: str, seeds: list[str]) -> tuple[list[
     from tests._reapable_age import age_chunks_past_grace
 
     hs = [_chash(f"{origin}/{s}") for s in seeds]
-    seed_chunks_direct(origin, hs, [f"{s} text" for s in seeds], [{"title": s} for s in seeds], tenant=tenant)
+    metas = metas or [{"title": s} for s in seeds]
+    seed_chunks_direct(origin, hs, [f"{s} text" for s in seeds], metas, tenant=tenant)
     age_chunks_past_grace(origin, tenant=tenant)
     sibling = quarantine_collection_name(origin)
     result = HttpVectorClient().gc_quarantine_orphans_bounded(origin, sibling, now_stamp(), 20, 1000)
@@ -313,3 +466,60 @@ def test_restore_by_quarantined_at_window_and_the_sample_audit_row_is_refused(
     assert doc["totals"]["restored"] == 3
     assert sorted(r["chash"] for r in doc["rows"]) == sorted(hs)
     assert len(doc["audit_ids"]) == 1
+
+
+def _visible(origin: str, chash: str) -> bool:
+    """Whether the engine's store-get returns the chunk: live(c) hides one no live manifest row names."""
+    return HttpVectorClient().get_by_id(origin, chash) is not None
+
+
+def test_reattach_makes_a_restored_chunk_visible_again_against_the_real_engine(
+    runner: CliRunner, t2_service_env,
+) -> None:
+    origin = "knowledge__qrestore-reattach__bge-base-en-v15-768__v1"
+    doc = register_real_doc_id(title="Legacy Note", physical_collection=origin, owner_name="qrestore-reattach-owner")
+    hs, _ = _seed_quarantined(
+        t2_service_env, origin, ["named", "stranger"],
+        metas=[{"title": "Legacy Note", "catalog_doc_id": doc, "chunk_index": 0}, {"title": "Stranger"}])
+    assert not _visible(origin, hs[0]), "fixture: in quarantine, so not in the collection"
+
+    result = runner.invoke(t3, ["quarantine", "restore", "--collection", origin,
+                                "--chash", hs[0], "--chash", hs[1], "--json"])
+
+    assert result.exit_code == 0, result.output
+    doc_out = _doc(result.stdout)
+    by = {r["chash"]: r for r in doc_out["rows"]}
+    named, stranger = by[hs[0]], by[hs[1]]
+    assert named["attached"] is True and named["reattach"] == "attach"
+    assert named["owner"] == doc and named["owner_title"] == "Legacy Note" and named["position"] == 0
+    assert named["no_manifest"] is False
+    assert stranger["attached"] is False and stranger["reattach"] == "no_live_owner"
+    assert stranger["no_manifest"] is True and stranger["chunk_title"] == "Stranger"
+    assert doc_out["reattach_totals"]["attached"] == 1 and doc_out["reattach_totals"]["no_live_owner"] == 1
+    # The point: the attached chunk is back to the read path, the one with no owner is bytes only.
+    assert _visible(origin, hs[0]), "the attached chunk is returned by get"
+    assert not _visible(origin, hs[1]), "a chunk with no live owner is restored but stays hidden"
+
+    # And the text output says so, with the re-put recipe for the hidden one.
+    text = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[1]])
+    assert "HIDDEN from search and get" in text.output
+    assert f"nx store put - --collection {origin} --title Stranger" in text.output
+
+
+def test_no_reattach_against_the_real_engine_then_a_rerun_attaches(runner: CliRunner, t2_service_env) -> None:
+    origin = "knowledge__qrestore-noreattach__bge-base-en-v15-768__v1"
+    doc = register_real_doc_id(title="Legacy Note", physical_collection=origin, owner_name="qrestore-noreattach-owner")
+    hs, _ = _seed_quarantined(
+        t2_service_env, origin, ["bytes"], metas=[{"title": "Legacy Note", "catalog_doc_id": doc, "chunk_index": 0}])
+
+    first = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[0],
+                               "--no-reattach", "--json"])
+    assert first.exit_code == 0, first.output
+    row = _doc(first.stdout)["rows"][0]
+    assert row["outcome"] == "restored" and row["attached"] is False and row["reattach"] == "attach"
+    assert not _visible(origin, hs[0])
+
+    second = runner.invoke(t3, ["quarantine", "restore", "--collection", origin, "--chash", hs[0], "--json"])
+    row = _doc(second.stdout)["rows"][0]
+    assert row["outcome"] == "present" and row["attached"] is True
+    assert _visible(origin, hs[0])
