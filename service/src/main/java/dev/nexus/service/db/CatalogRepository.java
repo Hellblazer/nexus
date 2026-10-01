@@ -2913,6 +2913,12 @@ public final class CatalogRepository {
      * #purgeTrash}), not a stored per-row or per-tenant configuration
      * value, so there is no fixed horizon this listing could stamp onto
      * a row in advance.
+     *
+     * <p>Each entry carries {@code file_path} (nexus-wbfpw.35 fix round 2): the
+     * client's backfill verbs register a document per stored chunk path, and a
+     * path that matches a tombstoned document here is a deliberate delete, not
+     * a gap to fill. The title cannot stand in for it (a backfill-minted title
+     * is the file name, the indexer's is not).
      */
     // TOMBSTONE-EXEMPT (nexus-dkymw): same rationale as agedTombstoneCount
     // below (nexus-3ck2g E3) -- this read's whole PURPOSE is listing the
@@ -2923,7 +2929,8 @@ public final class CatalogRepository {
         return tenantScope.withTenant(tenant, ctx ->
             ctx.select(CATALOG_DOCUMENTS.TUMBLER, CATALOG_DOCUMENTS.TITLE,
                        CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CORPUS,
-                       CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.DELETED_AT)
+                       CATALOG_DOCUMENTS.CONTENT_TYPE, CATALOG_DOCUMENTS.FILE_PATH,
+                       CATALOG_DOCUMENTS.DELETED_AT)
                .from(CATALOG_DOCUMENTS)
                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.DELETED_AT.isNotNull()))
                .orderBy(CATALOG_DOCUMENTS.DELETED_AT.desc())
@@ -2937,6 +2944,7 @@ public final class CatalogRepository {
                    m.put("physical_collection", r.get(CATALOG_DOCUMENTS.PHYSICAL_COLLECTION));
                    m.put("corpus", r.get(CATALOG_DOCUMENTS.CORPUS));
                    m.put("content_type", r.get(CATALOG_DOCUMENTS.CONTENT_TYPE));
+                   m.put("file_path", r.get(CATALOG_DOCUMENTS.FILE_PATH));
                    m.put("deleted_at", r.get(CATALOG_DOCUMENTS.DELETED_AT));
                    return m;
                })

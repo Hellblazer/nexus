@@ -255,4 +255,19 @@ class CatalogRestoreTrashTest {
         var trashA = catalogRepo.listTrash(TENANT_A, 200, 0);
         assertThat(trashA).extracting(d -> d.get("tumbler")).doesNotContain(tumbler);
     }
+
+    @Test
+    @Order(80)
+    void trash_carriesTheTombstonedDocumentsFilePath() {
+        // nexus-wbfpw.35 fix round 2: the client's backfill verbs skip a stored
+        // chunk path that matches a tombstoned document, and the path is the only
+        // key they hold for a chunk. A listing without it cannot be matched.
+        String tumbler = catalogRepo.registerDocument(
+            TENANT_A, "trash-file-path", regDoc("Trash path", "docs/rdr/trash-path.md"));
+        assertThat(catalogRepo.deleteDocument(TENANT_A, tumbler)).isEqualTo(1);
+
+        var entry = catalogRepo.listTrash(TENANT_A, 200, 0).stream()
+            .filter(d -> tumbler.equals(d.get("tumbler"))).findFirst().orElseThrow();
+        assertThat(entry.get("file_path")).isEqualTo("docs/rdr/trash-path.md");
+    }
 }
