@@ -90,6 +90,13 @@ class HnswScanBudgetOnEverySearchPathIntegrationTest {
             metas.add(Map.of());
         }
         repo.upsertChunks(TENANT, COL, chashes, texts, metas);
+        // The six chunks are the gate hybridSearch_hnswFirstBranch counts. They need a live owner:
+        // text_gate_probe counts live(c) chunks since vectors-023 (nexus-wbfpw.35), so unowned
+        // chunks are a zero-row gate, which takes the selective branch and never reaches HNSW.
+        scope.withTenant(TENANT, ctx -> {
+            PgContainerHelper.ownChunks(ctx, TENANT, COL, chashes.toArray(new String[0]));
+            return null;
+        });
         centroids.upsertCentroids(TENANT, List.of(
             new CentroidRecord("knowledge__scanbudget", 1L, unit(384), "c", 1)));
     }
