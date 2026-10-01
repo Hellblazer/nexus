@@ -4948,12 +4948,17 @@ class HttpVectorClient:
         store list``'s total-count display, ``nx collection info``, and
         ``nx collection reindex`` in service mode.
 
-        Raises ``KeyError`` when *name* has no live chunks -- T3Database
-        parity ("not found"). On the pgvector path a collection with zero
-        live rows is indistinguishable from an absent one (matches
+        ``count`` is the STORED chunk count (every physical row, owned or
+        not; RDR-192 Step 5 amendment), not the live count. Raises ``KeyError``
+        when *name* holds no stored chunks -- T3Database parity ("not found").
+        On the pgvector path a collection with zero stored rows is
+        indistinguishable from an absent one (matches
         :meth:`collection_exists`'s already-established semantics, RDR-156
         Decision 6) -- callers (``nx collection reindex``) rely on the
-        ``KeyError`` to detect a genuinely missing collection. No
+        ``KeyError`` to detect a genuinely missing collection. A collection
+        holding only unowned chunks therefore does NOT raise: it reads
+        ``count=N`` here and ``count=0, stored_count=N`` in
+        :meth:`list_collections`. No
         ``metadata`` equivalent exists server-side (Chroma-native collection
         metadata is not exposed by the service API), so that key is always
         ``{}``.
@@ -4968,11 +4973,13 @@ class HttpVectorClient:
 
         Shared by :meth:`collection_info` and :meth:`collection_metadata`
         (wave review: the block was duplicated verbatim). On the pgvector
-        path a collection with zero live rows is indistinguishable from an
+        path a collection with zero stored rows is indistinguishable from an
         absent one (RDR-156 Decision 6), so ``count == 0`` also raises.
         NOTE: callers that enumerate via :meth:`list_collections` can never
-        hit the zero-count branch — that listing only returns collections
-        with live chunks — so the doctor probes iterating it are unaffected.
+        hit the zero-count branch — that listing returns a row for every
+        collection holding ANY stored chunk (its live ``count`` may be 0, its
+        ``stored_count`` is not) — so the doctor probes iterating it are
+        unaffected.
         """
         try:
             n = self.count(name)

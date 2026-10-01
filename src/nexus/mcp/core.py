@@ -6288,8 +6288,19 @@ def store_list(
 
         page = t3.list_store(col_name, limit=limit, offset=offset)
         if not page:
-            return f"No entries at offset {offset} (total {total})."
-        lines: list[str] = [f"{col_name}  (showing {offset + 1}-{offset + len(page)} of {total})"]
+            # total is the STORED count (every physical row); the page is live
+            # rows. After deletes, or for a collection of unowned chunks (RDR-192
+            # live(c)), the two differ, so an empty page is not an offset error.
+            return (
+                f"No entries at offset {offset} ({total} stored; none are live "
+                f"at this offset)."
+            )
+        # nexus-wbfpw.35: `total` is the collection's STORED chunk count while the
+        # rows listed are live ones; name it rather than imply live (same wording
+        # as `nx store list`, nexus-sis0m.3).
+        lines: list[str] = [
+            f"{col_name}  (showing {offset + 1}-{offset + len(page)}; {total} stored)"
+        ]
         from datetime import datetime, timedelta  # noqa: PLC0415 — stdlib deferred to call site (datetime)
         for e in page:
             doc_id = e.get("id", "")  # RDR-180: full id — the list->get handle must round-trip
@@ -6310,10 +6321,14 @@ def store_list(
             tag_str = f"  [{tags}]" if tags else ""
             lines.append(f"  {doc_id}  {title:<40}  {ttl_str:<24}  {indexed_at}{tag_str}")
         shown_end = offset + len(page)
-        if shown_end < total:
-            lines.append(f"--- showing {offset + 1}-{shown_end} of {total}. next: offset={shown_end}")
+        # A full page is the live signal that more rows may follow; the stored
+        # total can exceed the live rows and point at an empty page.
+        if len(page) >= limit:
+            lines.append(
+                f"--- showing {offset + 1}-{shown_end} ({total} stored). next: offset={shown_end}"
+            )
         else:
-            lines.append(f"--- showing {offset + 1}-{shown_end} of {total} (end)")
+            lines.append(f"--- showing {offset + 1}-{shown_end} (end)")
         return _cap_text_result("\n".join(lines), "store_list")
     except Exception as e:  # noqa: BLE001 — MCP tool boundary catch; error surfaced to caller via _mcp_tool_error (logged)
         return _mcp_tool_error("store_list", e)

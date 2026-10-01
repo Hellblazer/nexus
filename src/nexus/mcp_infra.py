@@ -2818,6 +2818,16 @@ def discard_deferred_superseded_vectors(doc_id: str) -> int:
     return len(candidates)
 
 
+def _union_guard_reason(orphaned: object) -> str:
+    """Why the union guard returned no orphan, for the ``superseded_sweep_kept``
+    event (nexus-wbfpw.35): ``orphaned_chashes`` fails open to an empty result, so
+    "every candidate is shared with another live document" and "the reverse lookup
+    could not be made" look alike without this."""
+    if getattr(orphaned, "lookup_failed", False):
+        return "reverse_lookup_failed"
+    return "shared_with_another_live_document"
+
+
 def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
                               collection: str | None, *, reader, notes_provider) -> None:
     """Delete T3 rows this document's manifest no longer references (nexus-39upx).
@@ -2889,14 +2899,16 @@ def _sweep_superseded_vectors(cat, doc_id, before: set[str], chunks: list[dict],
     orphaned = orphaned_chashes(reader, doc_id, dropped, collection=collection)
     shared = len(dropped) - len(orphaned)
     if not orphaned:
-        # nexus-wbfpw.12: union guard cleared every candidate — every
-        # dropped chash is shared with another live document, nothing
+        # nexus-wbfpw.12: union guard cleared every candidate, so nothing
         # reaches the note lookup or a delete. Log the kept count so this
         # is not indistinguishable, in the logs, from "nothing to do".
+        # nexus-wbfpw.35: and say why: every dropped chash is shared with
+        # another live document, OR the reverse lookup failed and nothing
+        # could be proven orphaned (fail-open).
         structlog.get_logger().info(
             "superseded_sweep_kept", site="_sweep_superseded_vectors",
             collection=collection, doc_id=doc_id, dropped=len(dropped),
-            kept=shared, kept_notes=0)
+            kept=shared, kept_notes=0, reason=_union_guard_reason(orphaned))
         return
     try:
         notes = notes_provider()
@@ -3060,7 +3072,7 @@ def _sweep_superseded_vectors_many(
         structlog.get_logger().info(
             "superseded_sweep_kept", site="_sweep_superseded_vectors_many",
             collection=collection, doc_id=_batch_label, dropped=len(candidates),
-            kept=shared, kept_notes=0)
+            kept=shared, kept_notes=0, reason=_union_guard_reason(orphaned))
         return
     try:
         notes = notes_provider()

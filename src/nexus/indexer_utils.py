@@ -110,10 +110,29 @@ _DEFAULT_IGNORE: list[str] = [
 ]
 
 
+class OrphanVerdict(list):
+    """The list :func:`orphaned_chashes` returns, plus WHY it may be empty.
+
+    Behaves as the plain ``list[str]`` every caller already treats it as.
+    ``lookup_failed`` is ``True`` when the reverse lookup could not be made at
+    all (no reader, or ``docs_for_chashes`` raised): the list is then empty
+    because nothing could be PROVEN orphaned, not because every candidate is
+    shared with another live document. A caller that logs "kept" distinguishes
+    the two with it (nexus-wbfpw.35: the kept event used to call a lookup outage
+    "shared with another live document").
+    """
+
+    lookup_failed: bool = False
+
+    def __init__(self, items: Iterable[str] = (), *, lookup_failed: bool = False) -> None:
+        super().__init__(items)
+        self.lookup_failed = lookup_failed
+
+
 def orphaned_chashes(
     reader: object, doc_id: str, candidates: Iterable[str],
     *, collection: str | None = None,
-) -> list[str]:
+) -> "OrphanVerdict":
     """Of *candidates* (chashes no longer in *doc_id*'s manifest), return the
     subset with NO OTHER live document referencing them — safe to delete
     from T3.
@@ -176,7 +195,7 @@ def orphaned_chashes(
     """
     cands = sorted({c for c in candidates if c})
     if not cands:
-        return []
+        return OrphanVerdict()
     # structlog.get_logger() called AT CALL TIME, deliberately, not the
     # module-level ``_log`` — matches the original _sweep_superseded_
     # vectors's exact pattern, which existing tests patch via
@@ -189,7 +208,7 @@ def orphaned_chashes(
             "superseded_sweep_skipped_no_reverse_lookup",
             doc_id=doc_id, candidates=len(cands),
         )
-        return []
+        return OrphanVerdict(lookup_failed=True)
     try:
         refs = reader.docs_for_chashes(cands) or {}
     except Exception:  # noqa: BLE001 — cannot prove orphanhood: keep everything
@@ -197,7 +216,7 @@ def orphaned_chashes(
             "superseded_sweep_skipped_no_reverse_lookup",
             doc_id=doc_id, candidates=len(cands),
         )
-        return []
+        return OrphanVerdict(lookup_failed=True)
     if collection:
         other_docs = {
             d for ds in refs.values() for d in (ds or []) if d and d != doc_id
@@ -225,7 +244,9 @@ def orphaned_chashes(
                     ]
                     for h, ds in refs.items()
                 }
-    return [h for h in cands if not any(d != doc_id for d in (refs.get(h) or []))]
+    return OrphanVerdict(
+        h for h in cands if not any(d != doc_id for d in (refs.get(h) or []))
+    )
 
 
 def catalog_documents_for_collection(reader: object, collection: str) -> list:

@@ -285,14 +285,17 @@ def _resolve_export_owners(
     ``docs_for_chashes`` (reverse lookup), ``get_manifests`` (positions),
     ``resolve_many`` (document attributes) — never one call per chash.
 
-    A chash with NO manifested document is not a failure: export already
-    reads through the live-filtered content read (RDR-192 Step 5), so
-    every chash here is LIVE, but liveness during the grace window does
-    not require a manifest row yet (a raw T3 write that bypasses the
-    catalog is live and unowned for exactly that window). Such a chash
-    is simply absent from the returned dict; only a genuinely unreachable
-    catalog propagates, and the caller converts that into a loud export
-    failure rather than silently emitting owner-less records.
+    Every chash here is LIVE: export reads through the live-filtered
+    content read (RDR-192 Step 5), and live(c) means "a live catalog
+    document in this collection manifests it". So a chash absent from the
+    returned dict is not a standing state of the data; it means the
+    catalog moved between the page read and these lookups (a concurrent
+    delete or re-put). It is simply omitted rather than failed; only a
+    genuinely unreachable catalog propagates, and the caller converts that
+    into a loud export failure rather than silently emitting owner-less
+    records. (Before live(c), a raw T3 write with no manifest was live and
+    owner-less; that state is now hidden from reads and never reaches
+    export.)
 
     Identical chunk text manifested by more than one live document in
     THIS collection (RDR-108's collapsing-by-design) picks the lowest
