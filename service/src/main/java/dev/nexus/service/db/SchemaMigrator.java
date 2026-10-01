@@ -775,8 +775,8 @@ public final class SchemaMigrator {
     // elsewhere: DSL.table(DSL.name("public", "databasechangelog")) /
     // DSL.field(DSL.name(...), Class) for Liquibase's own bookkeeping table
     // (outside jOOQ codegen's modeled schemata, but nameable via the same safe
-    // quoted-identifier idiom ChashCensus.java/StagingPromoteOps.java/this bead's
-    // own TaxonomyRepository#advanceTopicsIdSequence conversion already use).
+    // quoted-identifier idiom this bead's own
+    // TaxonomyRepository#advanceTopicsIdSequence conversion already uses).
     // Throws SQLException (matching migrate()'s own catch(SQLException) at its
     // call site) by catching jOOQ's unchecked DataAccessException and rethrowing
     // checked -- jOOQ itself never throws SQLException directly.

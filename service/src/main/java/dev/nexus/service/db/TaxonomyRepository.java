@@ -1818,7 +1818,7 @@ public final class TaxonomyRepository {
     // field(Select) scalar-subquery wrapping (manual: "SQL building > Column
     // expressions > Scalar subqueries") over DSL.table(DSL.name(...)) + a
     // DSL.name(...)-addressed column -- the same safe quoted-identifier idiom
-    // ChashCensus.java / StagingPromoteOps.java already use for a schema-qualified
+    // other engine code uses for a schema-qualified
     // relation this class has no generated Table for (a bare PostgreSQL sequence
     // read as a one-row relation, which jOOQ codegen does not model as a Table).
     private static void advanceTopicsIdSequence(DSLContext ctx, long maxImportedId) {
