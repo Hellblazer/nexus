@@ -80,7 +80,7 @@ backend never notices a closed socket.
 `/v1/vectors/upsert-chunks` or `/store-put` write whose chashes have no live
 manifest row (422, `reason: ownerless_chunk_write`). In `log-only` the write
 proceeds, and the engine logs `ownerless_chunk_write_would_refuse` (once per
-route and collection per minute, with the request's `User-Agent` and
+route, tenant and collection per minute, with the request's `User-Agent` and
 `X-Nexus-Client-Version`, `absent` for a client older than the cut that sends
 it) and counts it. Any other value fails the service AT BOOT. `GET /v1/status`
 carries `ownerless_write_mode`, `ownerless_writes_refused_total` and

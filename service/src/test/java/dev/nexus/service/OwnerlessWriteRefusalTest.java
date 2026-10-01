@@ -54,7 +54,7 @@ class OwnerlessWriteRefusalTest {
     private static final String TOKEN_2  = "tok-owr2-0123456789abcdef0123456789abcde";
     private static final String TENANT_2 = "owr-tenant-2";
     private static final String COLLECTION_B = "knowledge__owr-owner-b__voyage-context-3__v1";
-    // The refusal log is rate limited per (route, collection), so each log test gets its own collection.
+    // The refusal log is rate limited per (route, tenant, collection), so each log test gets its own collection.
     private static final String COLLECTION_LOG = "knowledge__owr-owner-log__voyage-context-3__v1";
     private static final String COLLECTION_LOOP = "knowledge__owr-owner-loop__voyage-context-3__v1";
     private static final String COLLECTION_CLIP = "knowledge__owr-owner-clip__voyage-context-3__v1";
@@ -699,7 +699,7 @@ class OwnerlessWriteRefusalTest {
             .contains("source_path=/p/a.py;").contains("title=a.py:1-1;").contains("source_agent=indexer;")
             .doesNotContain("file:///secret");
 
-        // The limiter is keyed on route|collection: use another route to get a fresh line, header absent.
+        // The limiter is keyed on route, tenant and collection: use another route to get a fresh line, header absent.
         var absent = captureRepositoryWarnings(() -> {
             post(TOKEN, "/v1/vectors/store-put", Map.of("collection", COLLECTION_LOG,
                 "doc_id", chash("owr-log-2"), "content", "t", "metadata", Map.of()), Map.of("User-Agent", "old/1"));
