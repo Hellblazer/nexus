@@ -9,7 +9,7 @@
 > Follow the two-hop redirect instead: install the pinned last
 > migration-capable release (`conexus==6.18.1`), run `nx upgrade` there to
 > migrate the data (against a local engine: `NX_SERVICE_URL` and the
-> `service_url` config key cleared, never a managed endpoint), then upgrade back to the current version. See the
+> `service_url` config key cleared and `NX_LOCAL=1` exported, never a managed endpoint), then upgrade back to the current version. See the
 > [Migration Runbook](../migration-runbook.md) for the full operator
 > procedure.
 

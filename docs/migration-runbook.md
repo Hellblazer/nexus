@@ -120,15 +120,32 @@ machinery that performed that migration no longer ships:
    the Chroma directory is left on disk afterward, untouched). Three
    preconditions, all about WHICH engine the pin talks to:
    - **Local engine only.** The pin must provision and talk to its own local
-     engine, so clear every setting that names a managed one. In the shell:
-     `unset NX_SERVICE_URL NX_SERVICE_TOKEN`. In the config file: delete the
+     engine, so clear every setting that names a managed one and force local
+     mode. Write down your `service_url` and `service_token` values first: the
+     cloud steps below need both again. In the shell:
+     `unset NX_SERVICE_URL NX_SERVICE_TOKEN NX_SERVICE_HOST NX_SERVICE_PORT`
+     and `export NX_LOCAL=1`. In the config file: delete the
      `service_url:` line (and `service_token:` if it is there) under
      `credentials:` in `~/.config/nexus/config.yml` (`$NEXUS_CONFIG_DIR/config.yml`
      if you set that variable). There is no `nx config unset` verb, so this is a
      file edit; leave every other key alone. `nx config get service_url` prints
-     `service_url: not set` once both are clear. A machine that ran in cloud
-     mode has the key set. `NX_LOCAL=1` is not a substitute: at the pin a
-     configured `service_url` names the engine whatever `NX_LOCAL` says. Never
+     `service_url: not set` once it is clear. A machine that ran in cloud
+     mode has the key set. **Both halves are needed.** Clearing `service_url`
+     alone is not enough, and `NX_LOCAL=1` alone is not enough. A configured
+     `service_url` names the engine at the pin whatever `NX_LOCAL` says, so
+     `NX_LOCAL=1` does not by itself override it. And the pin's provisioning
+     (`provision_service_stack`) returns without starting an engine, and the
+     upgrade then stops with "guided-upgrade provisioning requires a LOCAL
+     service", whenever `is_local_mode()` is false: that is the case under
+     `NX_LOCAL=0`, under `install.mode: managed` in `config.yml` (written by
+     `nx init`'s managed path), and for a box with a ChromaDB Cloud key
+     (`chroma_api_key`) and no mode record, which is the Voyage-from-ChromaDB-Cloud
+     case in the table below. `NX_LOCAL=1` is the top-precedence step of
+     `is_local_mode()`, so it fixes all three, and it does not change which
+     Chroma store the migration reads. (This is read from the v6.18.1 source:
+     `config.py` `is_local_mode`, `commands/init.py` `provision_service_stack`,
+     `upgrade_ladder/provisioning.py` `provision_and_serve`. It has not been run
+     at the pin on a box with `install.mode: managed`.) Never
      run the pin's `nx guided-upgrade` with `--service-url`, and never aim
      `nx upgrade` at a managed endpoint. That path is unsupported: the engine
      retired the `/v1/staging` routes the 6.x migration lands through
@@ -170,7 +187,7 @@ unmeasured (nexus-6g218).
 
 | You are | Hop 1 gives you | Best path to the cloud |
 |---|---|---|
-| Local-ONNX (minilm-384 or bge-768 collections) | Collections embedded with a local model; T2 memory and plans; taxonomy; notes | Do not carry the vectors: a bge collection is not expected to import into a Voyage cloud (see below). For code, docs and rdr content, **re-index from source in the cloud** (`nx index repo`, `nx index pdf`, `nx index rdr`), which is cheaper than two hops and embeds with Voyage. Hop 1 matters only for T2 memory and plans, notes and taxonomy |
+| Local-ONNX (minilm-384 or bge-768 collections) | Collections embedded with a local model; T2 memory and plans; taxonomy; notes | Do not carry the vectors: a bge collection is not expected to import into a Voyage cloud (see below). For code, docs and rdr content, **re-index from source in the cloud** (`nx index repo`, `nx index pdf`, `nx index rdr`), which is cheaper than two hops and embeds with Voyage. Hop 1 matters only for T2 memory (hand-carried, step 2 below) and notes; plans and taxonomy do not reach the cloud |
 | Voyage, from ChromaDB Cloud | Voyage collections kept as Voyage only if hop 1 ran Voyage-keyed (above) | `nx store export` and `nx store import` carry the vectors as they are. Re-indexing source content is still the cheaper path where you have the source |
 | Notes with no source files (`store_put`-origin knowledge) | The notes, as chunks plus catalog documents | `nx catalog export` and `nx catalog import`: the bundle holds no embeddings, so import re-embeds each note and works across models |
 
@@ -187,13 +204,26 @@ engine's data is unreachable from the client.
    `nx memory put CONTENT --project NAME --title NAME` in the cloud. `nx memory`
    has no export or import verb, and doing this by hand does not scale past tens
    of entries. Past that, plan on treating T2 memory as left behind, or write a
-   loop yourself.
+   loop yourself. The hand-carry is lossy: `get` prints the content only, and
+   `list` shows the id, project/title, agent and timestamp, so tags, agent, TTL
+   and timestamps are not carried unless you retype them (`--tags`, `--ttl`);
+   quarantined entries are hidden from `list` unless you ask for them
+   (`nx memory list --quarantined`). Read one entry by id (`nx memory get ID`,
+   the id `list` prints in brackets) rather than by `--title`, because a title
+   is matched as a unique prefix and a prefix shared with another entry fails as
+   ambiguous. On the way in, pass the body on stdin (`nx memory put - --project
+   NAME --title NAME < body.txt`) rather than in argv, so a body that starts with
+   a dash or is very large does not trip the shell or the argument-length limit.
 
 **After you switch (cloud steps).**
 
 3. Switch as in
    [Getting Started § Cloud mode](getting-started.md#cloud-mode-optional)
-   (`nx config set service_url ...` plus `NX_SERVICE_TOKEN`).
+   (`nx config set service_url ...` plus `NX_SERVICE_TOKEN`), using the
+   `service_url` and `service_token` you wrote down before hop 1. First
+   `unset NX_LOCAL` (and drop it from your shell profile if you added it
+   there): `NX_LOCAL=1` wins over `service_url` in current clients too, so with
+   it set the client would stay local after you set the endpoint.
 4. **Clear the stranded banner.** The pre-PG files from hop 1 are still on
    disk (copy-not-move), and in cloud mode the stranded-install detector
    cannot trust the engine's migration record, so every command banners and

@@ -367,7 +367,8 @@ RUN pip install --no-cache-dir conexus==<host nx --version>
 > frozen migration sources; to migrate them, install the last
 > migration-capable 6.x release, run `nx upgrade` there against a LOCAL
 > engine (stop any running local service, clear `NX_SERVICE_URL` and the
-> `service_url` key in `config.yml`; see [Migration Runbook § Installs that
+> `service_url` key in `config.yml`, and `export NX_LOCAL=1`, which is needed in
+> addition; see [Migration Runbook § Installs that
 > predate Postgres](migration-runbook.md#installs-that-predate-postgres)), then
 > upgrade back. The subsections below are retained as history of what the flag
 > used to select.

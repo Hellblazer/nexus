@@ -1123,10 +1123,12 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
         // nexus-z0o2p.27: CREATE ROLE nexus_diag (jOOQ's open-source DSL has no CREATE ROLE) and the
         // three-statement GRANT / ALTER DEFAULT PRIVILEGES the old grants-nexus-diag-3 gave that role
-        // on schema staging; both set up the aged shape the drop is walked over. Fix round 3: +12 for
-        // the NOSUPERUSER owner provisioning (CREATE ROLE / GRANT, the SchemaMigratorIntegrationTest idiom),
-        // the ops_dba role and ALTER TABLE ... OWNER TO, SET ROLE / RESET ROLE around the extracted
-        // changeset body, and the three executions of that body and of the rollback text.
+        // on schema staging; both set up the aged shape the drop is walked over. Fix round 3: +12, all of
+        // them st.execute calls with a string-literal first argument (what RAW_EXECUTE matches): the ops_dba
+        // role and its two ALTER TABLE ... OWNER TO (3), the staging_nonowner role with its GRANT, SET ROLE and
+        // RESET ROLE (4), and the NOSUPERUSER owner provisioning, CREATE ROLE / GRANT, the
+        // SchemaMigratorIntegrationTest idiom (5). The st.execute(body) and st.execute(rollback) calls take a
+        // variable, not a literal, so they are not counted.
         Map.entry("dev/nexus/service/StagingSchemaDropLiquibaseTest.java", 14),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 19),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
