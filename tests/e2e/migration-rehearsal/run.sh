@@ -550,13 +550,16 @@ fi
 # the same host.
 # shellcheck source=../lib/lock.sh disable=SC1091
 source "$SCRIPT_DIR/../lib/lock.sh"
-LOCKDIR="/tmp/nexus-e2e-locks/migration-rehearsal.lock"
+# Per-USER root (nexus-c6lsu): the uid is in the name, because /tmp is shared across Unix users and a
+# root another user created is unwritable here (lock_acquire fails). $(id -u) is context-independent,
+# so the cross-context contention above is unchanged for one user.
+LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/migration-rehearsal.lock"
 # nexus-mfage: an --artifacts invocation mutates none of the machine-global
 # resources the lock above serializes (no dist/, no service/target, no fixed
 # image tag, no shared docker config), so it takes a PER-LEG lock instead:
 # two different legs run side by side; two invocations of the same leg
 # still serialize (same per-leg image tag).
-[ -n "$ARTIFACTS" ] && LOCKDIR="/tmp/nexus-e2e-locks/migration-rehearsal-${LEG}.lock"
+[ -n "$ARTIFACTS" ] && LOCKDIR="/tmp/nexus-e2e-locks-$(id -u)/migration-rehearsal-${LEG}.lock"
 mkdir -p "$(dirname "$LOCKDIR")"
 lock_acquire "$LOCKDIR" || exit 1
 # nexus-c00dw: the native-build docker step further down writes

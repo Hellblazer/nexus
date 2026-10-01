@@ -284,6 +284,10 @@ class GcQuarantineOrphansBoundedTest {
             unit[0] = 1f;
             PgContainerHelper.insertChunk384(ctx, TENANT, src, Chash.ofText("a6mon unreg").toBytes(),
                 Vector.of(unit));
+            // RDR-192 Step 8: the function only reaches its registration check for a chunk
+            // older than the grace window; no origin row means it is aged by raw SQL here.
+            ctx.update(CHUNKS).set(CHUNKS.LAST_WRITTEN_AT, java.time.OffsetDateTime.now().minusDays(40))
+               .where(CHUNKS.TENANT_ID.eq(TENANT).and(CHUNKS.COLLECTION.eq(src))).execute();
             PgContainerHelper.addFkNotValid(su, CHUNKS, "chunks_collection_fk", "collection",
                 CATALOG_COLLECTIONS, "name", "ON UPDATE CASCADE DEFERRABLE INITIALLY IMMEDIATE");
             assertThat(ctx.fetchExists(ctx.selectOne().from(CATALOG_COLLECTIONS)
@@ -331,6 +335,8 @@ class GcQuarantineOrphansBoundedTest {
             metas.add(Map.of("title", slug + "-" + i));
         }
         vecRepo.upsertChunks(TENANT, src, hashes, texts, metas);
+        // RDR-192 Step 8: the sweep honours the 30 day grace window; these stand for chunks orphaned long ago.
+        ReapableFixtures.agePastGrace(pg, TENANT, src);
         return new Pair(src, dst);
     }
 

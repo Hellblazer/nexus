@@ -1663,6 +1663,24 @@
     <include file="db/changelog/vectors-020-chunks-last-written-at.xml"/>
 
     <!--
+        nexus-wbfpw.15: nexus.chunk_is_reapable, RDR-192 reapable(c) as an
+        inlinable set-returning function, the nexus.chunk_orphaned_at side
+        table it reads and the manifest triggers that write it — see the
+        included file's own header.
+        Placed after vectors-020 (the tail when this landed) and before the
+        grants blocks, matching the established D0.1 late-append convention.
+    -->
+    <include file="db/changelog/vectors-021-chunk-is-reapable-function.xml"/>
+
+    <!--
+        nexus-wbfpw.16: gc_quarantine_orphans and its bounded variant select
+        candidates with reapable(c) (vectors-021) and so honour the grace window.
+        Built on hygiene-005-1's and hygiene-008-1's bodies; see the included
+        file's own header. Placed after vectors-021, before the grants blocks.
+    -->
+    <include file="db/changelog/vectors-022-gc-quarantine-orphans-reapable.xml"/>
+
+    <!--
         RDR-223 Phase 3 step 2 (nexus-z0o2p.27): DROP the staging landing
         schema, retired with the /v1/staging routes — see the included file's
         own header for the dependents (grants-nexus-diag-3, the staging-4

@@ -23,6 +23,7 @@ import org.jooq.impl.SQLDataType;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_LIVE_OWNERS;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_1024;
 import static dev.nexus.service.jooq.nexus.Tables.SEARCH_ASPECT_SCOPED_384;
@@ -3473,6 +3474,76 @@ FROM scope s
             }
         }
         return new ManifestLessCensusResult(returned, chashes, owners, totals, scopeChunkTotal);
+    }
+
+    /** One chunk {@code reapable(c)} selects (RDR-192 Step 8, bead nexus-wbfpw.17). */
+    public record ReapableChunk(String chash, String createdAt, String lastWrittenAt, String title,
+                                String catalogDocId) {}
+
+    /**
+     * Read-only listing of the chunks {@code nexus.chunk_is_reapable} (vectors-021) selects in
+     * {@code collection}, ordered by chash ascending. Selection is that function and nothing else:
+     * the call shape is the one every consumer uses (RDR-192 Step 7), so with {@code graceSeconds}
+     * {@code null} a chunk is listed exactly when {@code gc_quarantine_orphans} (which passes NULL)
+     * would move it, at the same instant. A smaller {@code graceSeconds} lists more than any
+     * destructive consumer would take: it is an advisory preview and is not clamped, because this
+     * method never deletes.
+     *
+     * <p>{@code graceSeconds} {@code null} means the function's own default (30 days, owned by the
+     * function and by nothing in Java, so it cannot drift); a value is passed as an interval in exact
+     * seconds. Any collection prefix is listed; a {@code quarantine-*} collection is refused before
+     * this is called (see {@code VectorHandler#requireNotQuarantineCollection}) and the predicate
+     * itself excludes a quarantine sibling by {@code lifecycle_state}.
+     *
+     * <p>Paging: {@code afterChash} (a 64-hex chash, exclusive) is a keyset cursor and the way to
+     * walk a set a consumer is shrinking as it goes; {@code offset} skips rows after the cursor and
+     * is only safe for a set that does not change between pages. {@code afterChash} {@code null}
+     * starts at the beginning.
+     *
+     * <p>A snapshot, not a reservation: the listing takes no sweep gate and no lock, so a chunk may
+     * be refreshed or owned the moment after it is listed. A destructive consumer must take the gate
+     * and re-check the predicate in its own statement (as {@code gc_quarantine_orphans} does), never
+     * delete by the ids this returns.
+     */
+    public List<ReapableChunk> reapableChunks(String tenant, String collection, Long graceSeconds,
+                                              String afterChash, int limit, int offset) {
+        Field<org.jooq.types.YearToSecond> grace = DSL.val(
+            graceSeconds == null ? null : exactSeconds(graceSeconds), SQLDataType.INTERVAL);
+        Field<String> title = DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "title");
+        // The predicate no longer reads metadata; this is the document the chunk says wrote it, for
+        // display only: catalog_doc_id, falling back to the legacy doc_id.
+        Field<String> catalogDocId = DSL.coalesce(
+            DSL.nullif(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "catalog_doc_id"), ""),
+            DSL.nullif(DSL.jsonbGetAttributeAsText(CHUNKS.METADATA, "doc_id"), ""));
+        org.jooq.Condition after = afterChash == null
+            ? DSL.noCondition() : CHUNKS.CHASH.gt(dev.nexus.service.db.Chash.fromHex(afterChash).toBytes());
+        return tenantScope.withTenant(tenant, ctx ->
+            ctx.select(ChashHex.hex(CHUNKS.CHASH), CHUNKS.CREATED_AT, CHUNKS.LAST_WRITTEN_AT, title, catalogDocId)
+               .from(CHUNKS)
+               .where(CHUNKS.TENANT_ID.eq(tenant).and(CHUNKS.COLLECTION.eq(collection)))
+               .and(after)
+               .and(DSL.exists(DSL.selectFrom(CHUNK_IS_REAPABLE.call(
+                   CHUNKS.TENANT_ID, CHUNKS.COLLECTION, CHUNKS.CHASH, CHUNKS.LAST_WRITTEN_AT, grace))))
+               .orderBy(CHUNKS.CHASH)
+               .limit(limit).offset(offset)
+               .fetch(r -> new ReapableChunk(
+                   r.value1(), r.value2().toInstant().toString(), r.value3().toInstant().toString(),
+                   blankToNull(r.value4()), blankToNull(r.value5()))));
+    }
+
+    /**
+     * {@code seconds} as an interval whose whole magnitude sits in the day-to-second fields. Not
+     * {@code YearToSecond.valueOf(Duration)}: that normalises into months and years with a fixed
+     * 30-day month (CatalogRepository#olderThanInterval, nexus-ff85q).
+     */
+    private static org.jooq.types.YearToSecond exactSeconds(long seconds) {
+        return new org.jooq.types.YearToSecond(
+            new org.jooq.types.YearToMonth(0, 0),
+            org.jooq.types.DayToSecond.valueOf(java.time.Duration.ofSeconds(seconds)));
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.isEmpty() ? null : s;
     }
 
     /**

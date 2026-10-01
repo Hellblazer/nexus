@@ -29,7 +29,7 @@ _log = structlog.get_logger(__name__)
 #: legitimately need more attempts than a wrapper's default budget to
 #: survive a sustained per-project rate-limit window — each attempt's own
 #: sleep is now floored by the shared brake's delay (see
-#: ``_rate_limit_signal`` below), so the default attempt count could
+#: ``rate_limit_signal`` below), so the default attempt count could
 #: otherwise exhaust before the brake's pause elapses. Only applied when a
 #: rate-limit signal is actually seen (a NARROW 429, or 503 with a
 #: parseable Retry-After); every other retryable transient error keeps its
@@ -99,9 +99,9 @@ def _extract_status_and_retry_after(exc: BaseException) -> tuple[int, float | No
     return None
 
 
-class _RateLimitSignal:
+class RateLimitSignal:
     """Normalised ``(code, retry_after)`` for a rate-limit-shaped failure.
-    See :func:`_rate_limit_signal`. ``widens`` is False for an engine
+    See :func:`rate_limit_signal`. ``widens`` is False for an engine
     deadline 503 marked ``aborted`` (nexus-qajw7): its Retry-After still
     paces the brake, but it keeps the ordinary attempt budget."""
 
@@ -113,7 +113,7 @@ class _RateLimitSignal:
         self.widens = widens
 
 
-def _deadline_aborted(exc: BaseException) -> bool:
+def deadline_aborted(exc: BaseException) -> bool:
     """True when *exc* chains an HTTP error whose headers mark an engine
     deadline 503 as ``aborted`` (nexus-qajw7). Same chain walk as
     :func:`_extract_status_and_retry_after`."""
@@ -125,7 +125,7 @@ def _deadline_aborted(exc: BaseException) -> bool:
     return is_deadline_abort(getattr(err, "headers", None))
 
 
-def _rate_limit_signal(exc: BaseException) -> _RateLimitSignal | None:
+def rate_limit_signal(exc: BaseException) -> RateLimitSignal | None:
     """Return a normalised rate-limit signal if *exc* carries a Retry-After
     worth THREADING THROUGH to the shared
     :class:`~nexus.rate_brake.RateLimitBrake` for: a 429, or a 503 that
@@ -140,12 +140,12 @@ def _rate_limit_signal(exc: BaseException) -> _RateLimitSignal | None:
         return None
     code, retry_after = found
     if code == 429:
-        return _RateLimitSignal(code, retry_after)
+        return RateLimitSignal(code, retry_after)
     if code == 503 and retry_after is not None:
         # nexus-qajw7 (Sam, 2026-09-26): an engine deadline ABORT discarded the
         # request's embedded batches, so each retry re-embeds and re-bills them.
         # It paces the brake like any 503 but does not widen the budget.
-        return _RateLimitSignal(code, retry_after, widens=not _deadline_aborted(exc))
+        return RateLimitSignal(code, retry_after, widens=not deadline_aborted(exc))
     return None
 
 
@@ -498,7 +498,7 @@ def _vector_with_retry(
                     f"embed/admission activity before retrying manually. "
                     f"({exc})"
                 ) from exc
-            rate_limit_err = _rate_limit_signal(exc)
+            rate_limit_err = rate_limit_signal(exc)
             effective_max_attempts = (
                 max(max_attempts, _RATE_LIMIT_MAX_ATTEMPTS)
                 if rate_limit_err is not None and rate_limit_err.widens else max_attempts
@@ -786,7 +786,7 @@ def _etl_with_retry(
         except Exception as exc:
             if not _is_retryable_etl_error(exc):
                 raise
-            rate_limit_err = _rate_limit_signal(exc)
+            rate_limit_err = rate_limit_signal(exc)
             effective_max_attempts = (
                 max(max_attempts, _RATE_LIMIT_MAX_ATTEMPTS)
                 if rate_limit_err is not None and rate_limit_err.widens else max_attempts
@@ -1081,7 +1081,7 @@ def _manifest_write_with_retry(
         try:
             result = fn(*args, **kwargs)
         except Exception as exc:
-            rate_limit_err = _rate_limit_signal(exc)
+            rate_limit_err = rate_limit_signal(exc)
             is_connectivity = _is_connectivity_error(exc)
             if rate_limit_err is None and not is_connectivity:
                 raise

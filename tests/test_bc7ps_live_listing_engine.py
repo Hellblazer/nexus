@@ -24,6 +24,7 @@ from nexus.commands.taxonomy_cmd import _enumerate_discoverable_collections
 from nexus.indexer import _prune_deleted_files
 from tests._catalog_fixture_ops import ActiveCatalog
 from tests._chunk_seed import seed_chunks_direct
+from tests._reapable_age import age_chunks_past_grace
 
 # Deliberately in the default suite, not integration-marked: it is the one pin
 # on the class this bead closed, it needs only the engine substrate every
@@ -40,6 +41,8 @@ def _seed_orphans(cat, db, coll_name: str, owner: str, n_live: int, n_orphan: in
     # Substrate SQL: the orphans are this test's subject, and the engine refuses
     # an ownerless upsert-chunks write from RDR-223 Phase 3 on.
     seed_chunks_direct(coll_name, ids, docs, metas)
+    # gc selects with reapable(c), which honours a 30 day grace window (RDR-192 Step 8).
+    age_chunks_past_grace(coll_name)
     for i in range(n_live):
         tumbler = str(cat.register(
             owner, f"bc7ps_probe_{i}.py", content_type="code",
