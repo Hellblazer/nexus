@@ -992,6 +992,29 @@ set -e
 FLOOR="${NX_GATE_FLOOR:-440}"
 BUDGET="${NX_GATE_BUDGET:-40}"
 
+# nexus-0kmat: name the engine this gate served and read its ownerless-write
+# counters and engine log, while it is still up (the EXIT trap stops it). The
+# pytest run above drives the heaviest writers in the repo against this one
+# engine, and a refused write 422s inside a test only when the test asserts on
+# it; a background or hook writer fails in the engine log alone, which is the
+# half this read adds. The candidate here is the artifacts jar this gate copied
+# in (NX_GATE_ARTIFACTS), judged by sha256, so a battery cut that names a
+# different --candidate-engine cannot make this leg pass against the wrong
+# bytes. Outside cut mode the two lines are printed and never fail the gate.
+GATE_CAND_ENV=()
+[ -z "${NX_GATE_ARTIFACTS:-}" ] || [ -z "${GATE_JAR_REL:-}" ] \
+  || GATE_CAND_ENV=("NX_CANDIDATE_ENGINE=$NX_GATE_ARTIFACTS/$GATE_JAR_REL")
+GATE_ENGINE_FAIL=0
+for _cand_cmd in identity refusals; do
+  env ${GATE_CAND_ENV[@]+"${GATE_CAND_ENV[@]}"} \
+    python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" "$_cand_cmd" "$SCRATCH" --label local-service-gate \
+    || GATE_ENGINE_FAIL=1
+done
+if [ "$GATE_ENGINE_FAIL" = 1 ] && [ "${NX_CUT_MODE:-0}" = 1 ]; then
+  echo "[gate] ENGINE CANDIDATE/REFUSAL CHECK FAILED (cut mode): see CANDIDATE ENGINE CHECK FAILED above" >&2
+  STATUS=1
+fi
+
 SUMMARY_LINE="$(select_summary_line "$SCRATCH/pytest.out")"
 PASSED_COUNT="$(parse_summary_count passed "$SUMMARY_LINE")"
 SKIPPED_COUNT="$(parse_summary_count skipped "$SUMMARY_LINE")"

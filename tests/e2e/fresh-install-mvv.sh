@@ -432,21 +432,14 @@ fi
 GATE_OK=0
 _fail() { echo "FRESH-INSTALL MVV FAILED: $*" >&2; exit 1; }
 
-# nexus-0kmat: the candidate engine (NX_CANDIDATE_ENGINE), through the one
-# explicit input that survives the `env -i` allowlist below. Without it `nx init`
-# downloads the PINNED PUBLISHED engine, which has no ownership check, and this
-# journey passes vacuously for an engine change that is not yet tagged. Resolved
-# before anything is built or provisioned: a cut-mode run with no candidate, or
-# a candidate that cannot be found, fails here.
-# shellcheck source=tests/e2e/lib/candidate_engine.sh disable=SC1091
-source "$REPO_ROOT/tests/e2e/lib/candidate_engine.sh"
-candidate_engine_load "$WORK/engine" || _fail "candidate engine refused (see CANDIDATE ENGINE REFUSED above)"
-
 cleanup() {
     # Stop the sandbox service + PG so nothing leaks past the gate.
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
         _nx daemon service stop --with-pg >/dev/null 2>&1 || true
     fi
+    # nexus-0kmat: the staged copy of the candidate jar (~136 MB) is not evidence;
+    # the logs are. Removed on EVERY exit path, a refused load included.
+    rm -rf "$WORK/engine"
     if [ "$GATE_OK" = 1 ]; then
         rm -rf "$WORK"
     else
@@ -454,6 +447,17 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+# nexus-0kmat: the candidate engine (NX_CANDIDATE_ENGINE), through the one
+# explicit input that survives the `env -i` allowlist below. Without it `nx init`
+# downloads the PINNED PUBLISHED engine, which has no ownership check, and this
+# journey passes vacuously for an engine change that is not yet tagged. Resolved
+# before anything is built or provisioned: a cut-mode run with no candidate, or
+# a candidate that cannot be found, fails here. The cleanup trap is installed
+# first so a refusal (or a half-finished stage copy) still leaves nothing behind.
+# shellcheck source=tests/e2e/lib/candidate_engine.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/candidate_engine.sh"
+candidate_engine_load "$WORK/engine" || _fail "candidate engine refused (see CANDIDATE ENGINE REFUSED above)"
 
 # ── env allowlist: the ONLY ambient state the journey may see ───────────────
 # Deliberately absent: VOYAGE_API_KEY (r5f3c — an ambient key must not flip
@@ -1365,7 +1369,7 @@ fi
 
 echo "── 9b/10 engine refusals (nexus-0kmat) ──"
 candidate_engine_refusals "$HOME_DIR/.config/nexus" fresh-install-mvv 2>&1 | tee "$LOGS/engine-refusals.log" \
-    || _fail "the engine refused an ownerless chunk write during this journey (see CANDIDATE ENGINE CHECK FAILED above)"
+    || _fail "the end-of-journey engine read failed: a refusal, an unreadable counter or log, or an engine that is not the candidate (see CANDIDATE ENGINE CHECK FAILED above)"
 
 echo "── 10/10 non-vacuity ──"
 # The gate must never skip-pass: prove the substantive legs actually ran.

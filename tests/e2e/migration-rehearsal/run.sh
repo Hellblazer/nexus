@@ -1020,6 +1020,7 @@ elif [ "$CANDIDATE_MIGRATION" = 1 ]; then
   cp "$HERE/Dockerfile.candidate-migration" "$STAGE/Dockerfile"
   cp "$HERE/rehearse_candidate_migration.sh" "$STAGE/"
   cp -R "$HERE/lib" "$STAGE/lib"   # assert_build_ref.sh (nexus-mfage)
+  cp "$HERE/../lib/candidate_engine.py" "$STAGE/lib/"   # nexus-0kmat: end-of-journey engine read
 else
   # The native binary travels into the image, and ONLY the binary: a RELEASE
   # binary (engine-service-v*) is self-contained with no .so siblings, and
@@ -1042,6 +1043,10 @@ else
   # was undefined in-container for its whole life; caught 2026-08-10).
   # Directory-wide on both sides so a second lib does not repeat it.
   cp -R "$HERE/lib" "$STAGE/lib"
+  # nexus-0kmat: the in-container end-of-journey engine read (identity + ownerless
+  # refusals) is the SAME stdlib module the host gates run; it lives in tests/e2e/lib,
+  # not this directory's lib/, so it is copied in by name.
+  cp "$HERE/../lib/candidate_engine.py" "$STAGE/lib/"
 fi
 
 # Docker Desktop's credsStore=desktop helper can't reach a locked login keychain
@@ -1085,6 +1090,18 @@ BUILD_ARGS=()
 docker build ${BUILD_ARGS[@]+"${BUILD_ARGS[@]}"} -f "$STAGE/Dockerfile" -t "$IMAGE" "$STAGE"
 
 run_env=(-e "WITH_CLOUD=$WITH_CLOUD" -e "COMPREHENSIVE=$COMPREHENSIVE" -e "STRESS=$STRESS")
+# nexus-0kmat: cut mode reaches the in-container journeys that run the candidate
+# NATIVE binary (--shakeout, --candidate-migration): they read the engine's
+# ownerless-write counters and log at the end and, in cut mode, fail on a refusal
+# or on an engine that is not the staged candidate. Forwarded only when set, so a
+# plain run is byte-identical to before; never forwarded for a leg that stages no
+# candidate engine (its container would read the published engine, which has no
+# ownership check, and cut mode would then fail it for the wrong reason).
+if [ "$SHAKEOUT" = 1 ] || [ "$CANDIDATE_MIGRATION" = 1 ]; then
+  [ -z "${NX_CUT_MODE:-}" ] || run_env+=(-e "NX_CUT_MODE=$NX_CUT_MODE")
+  [ -z "${NX_CANDIDATE_EXPECT_OWNERLESS_MODE:-}" ] || \
+    run_env+=(-e "NX_CANDIDATE_EXPECT_OWNERLESS_MODE=$NX_CANDIDATE_EXPECT_OWNERLESS_MODE")
+fi
 # nexus-h5olw follow-on: every rehearsal install is a throwaway, never a
 # user; the anonymous install ping must not count it. `-e` is the only
 # channel into the container, so the opt-out is forwarded here, not exported.

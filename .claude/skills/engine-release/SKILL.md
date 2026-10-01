@@ -416,65 +416,120 @@ absent on older engines stays absent") and record the conexus bead id on the
 nexus bead before the tag — the edge half must be live before Step 6.1 can
 pass, and Step 6.1 is what gates the paired client release.
 
-### 3f. PRE-TAG gate: the gates that provision their own engine must run the CANDIDATE (nexus-0kmat)
+### 3f. PRE-TAG gate: the engine gates must run the CANDIDATE, not the pinned engine (nexus-0kmat)
 
-`fresh-install-mvv.sh`, `data-token-cli-gate.sh` and `release-sandbox.sh`
-(battery legs `mvv`, `smoke`, `shakedown`) run `nx init`, which downloads the
-PINNED PUBLISHED engine (`REQUIRED_ENGINE_VERSION`). That engine predates the
-change you are about to tag, so a gate that provisions it passes vacuously for
-that change (the RDR-223 ownerless-write refusal passed all of them: the
-pinned engine has no ownership check). The pin only moves after the tag is
-immutable, so a missed writer costs a re-cut. The legs that already take
-`$ARTIFACTS` (`lsg`, `pkgup`, `candmig`, `shakeout`) are not affected.
-
-Run the battery in cut mode, from the release worktree:
+**Who, when, where.** The AI preparer runs this, before Sam's tag (Step 4), after
+Step 3's `--shakeout` and Step 3c. It runs in a temporary worktree at the exact
+commit you will tag, not in the primary: the battery refuses a checkout that
+holds `develop` while peers exist (a push elsewhere fast-forwards that tree
+under a 70-minute run), and a detached worktree holds no branch at all.
 
 ```bash
-tests/e2e/release-battery.sh --cut [--candidate-engine PATH]
+git worktree add --detach ../nexus-wt/engine-cut-<sha7> <sha-you-will-tag>
+cd ../nexus-wt/engine-cut-<sha7>          # a plain cd; the battery reads this tree's identity
+tests/e2e/release-battery.sh --cut --only mvv,smoke,shakedown,dtok,lsg
 ```
 
-The candidate is `--candidate-engine PATH` (a `*.jar` or an executable native
-binary), else the stamped dev jar the artifacts leg builds. It reaches the
-gates as `NX_CANDIDATE_ENGINE` (and `NX_CUT_MODE=1`), which each gate carries
-INSIDE its own `env -i` scrub and launches through `NEXUS_SERVICE_JAR` /
-`NEXUS_SERVICE_BIN`; a gate run by hand takes the same two variables. Cut mode
-adds `dtok` (the data-token CLI gate) to the battery.
+`NX_BATTERY_ALLOW_DEVELOP=1` in the primary is the fallback only when nothing
+else on the box pushes `develop` for the length of the run; a peer's push reds
+it on a tree-identity mismatch after the legs are paid for.
 
-What makes it more than plumbing, all in `tests/e2e/lib/candidate_engine.py`:
+Always pass `--cut`. `--candidate-engine PATH` without `--cut` is an error (it
+would export a candidate and assert nothing), as is an ambient
+`NX_CANDIDATE_ENGINE`. Without `--candidate-engine` the candidate is the
+stamped jar the battery's artifacts leg builds from this tree. A candidate that
+is not byte-identical to the artifacts manifest's jar or native binary would
+put two engines in one green run, so it is refused unless you also pass
+`--accept-candidate-mismatch`, which makes the verdict PARTIAL.
 
-- No candidate in cut mode, a candidate that cannot be found, or an ambient
+**Why these legs.** `fresh-install-mvv.sh`, `data-token-cli-gate.sh` and
+`release-sandbox.sh` (battery legs `mvv`, `dtok`, `smoke`, `shakedown`) run
+`nx init`, which downloads the PINNED PUBLISHED engine
+(`REQUIRED_ENGINE_VERSION`). That engine predates the change you are about to
+tag, so a leg that provisions it says nothing about that change; the RDR-223
+ownerless-write refusal went through all of them untested because the pinned
+engine has no ownership check. The pin moves only after the tag is immutable,
+so a missed writer costs a re-cut. `lsg` serves the artifacts jar and is
+included. Two more legs run the candidate NATIVE binary inside a container:
+`shakeout` (Step 3's `--shakeout`) and `candmig` (Step 3's
+`--candidate-migration`). Run those two in Step 3 with `NX_CUT_MODE=1` exported
+and they read the engine's refusals too, so the battery does not repeat them.
+`pkgup` is not an engine leg: it converges an old install to the PUBLISHED
+engine and never runs the candidate.
+
+**The native `-Ob` proof stays with Step 3 `--shakeout`.** It is the only
+gate on the binary that ships. The jar these legs take is a JVM build of the
+same source, not the signed native binary, and the artifacts leg builds the
+native binary again anyway.
+
+**Reading the result.** `--only` always ends `RELEASE BATTERY PASSED (PARTIAL:
+n leg(s) skipped by --only ...)`: that is the expected last line here, never a
+release verdict by itself. The evidence is the table: all five legs PASSED, none
+`VACUOUS in cut mode`, no `CUT MODE` abort line, and no other PARTIAL reason.
+What the cut mode adds, all in `tests/e2e/lib/candidate_engine.py`:
+
+- No candidate, a candidate that cannot be found, or an ambient
   `NEXUS_SERVICE_*` naming a different artifact, is a refusal at the gate's
   start; nothing falls back to the pinned engine.
-- Each gate prints `ENGINE IDENTITY [leg]: candidate=yes|no kind= artifact=
-  sha256= release_version= build_ref= ownerless_write_mode=`. `release_version`
+- Every leg prints `ENGINE IDENTITY [leg]: candidate=yes|no kind= artifact=
+  sha256= release_version= build_ref= ownerless_write_mode=` and, at the end of
+  its journey, `ENGINE OWNERLESS REFUSALS [leg]: candidate= sha256=
+  refused_total= would_refuse_total= log_lines= log= mode=`. `release_version`
   alone cannot tell a dev jar from the pinned release (the jar bakes the same
   floor value); read `build_ref` and `sha256`.
-- In cut mode a leg whose engine is not the candidate (byte-compared), or whose
-  `/v1/status` lacks `ownerless_write_mode=enforce`, FAILS, and the battery
-  downgrades any engine-bearing leg whose log carries no candidate identity line
-  to FAILED even when its own checks were green. `NX_CANDIDATE_EXPECT_OWNERLESS_MODE=none`
-  drops only the mode assert (a warning prints); use it for a candidate that
-  predates the check, never for the final cut.
-- At the end of each journey the gate reads `/v1/status`
-  `ownerless_writes_refused_total` / `ownerless_writes_would_refuse_total` and
-  counts `ownerless_chunk_write_refused` lines in the engine log; in cut mode
-  any hit is a red. A red here is the oracle: a writer this journey exercises
-  writes a chunk with no manifest owner. Fix the writer before tagging.
+- In cut mode the leg itself fails, and the battery fails a leg whose log lacks
+  EITHER line, when the engine is not the candidate (by sha256, at the start AND
+  at the end of the journey), when `/v1/status` is unreachable (the probe uses
+  no proxy), lacks `ownerless_write_mode=enforce`, or lacks both counters, when
+  any counter or engine-log line shows a refusal or would-refuse, or when the
+  engine log is missing. The log read is the one the lease's launch kind names
+  (`storage_service_jar.log` for a jar, `storage_service_native.log` for a
+  native binary); it is the half that survives an engine restart mid-journey.
+  A red here is the oracle: a writer this journey exercises writes a chunk with
+  no manifest owner. Fix the writer before tagging.
 - Each gate stages a private copy of the candidate: the supervisor finds its
   engine by argv, so two parallel gates on one jar path stop each other's
-  engines (measured 2026-10-01: exit 143 on a freshly spawned engine).
+  engines (measured 2026-10-01: exit 143). The copies are removed on every exit.
 
-A native candidate is not required: the JVM jar from `scripts/build-gate-jar.sh`
-is what every gate here takes. A leg that can only take a native binary
-(`release-sandbox.sh service` requires `NEXUS_SERVICE_BIN`) gets the JVM-jar
-shim AGENTS.md's release-workflow shape-check section describes: an executable
-`#!/bin/sh` whose body is `exec java -jar <abs jar> "$@"`, named by
-`NX_CANDIDATE_ENGINE`.
+**Two variables, two jobs.** `NX_GATE_OWNERLESS_WRITE_MODE` (nexus-9a6io; it lands in Step 3c,
+`published-client-write-gate.sh`) is an INPUT: the mode that gate
+STARTS the candidate in, so it can prove the refusal in both modes.
+`NX_CANDIDATE_EXPECT_OWNERLESS_MODE` (this step) is an ASSERTION: the mode the
+engine serving a cut leg must report, default `enforce`. Setting it to anything
+else (`none` drops the mode assert, `log-only` expects log-only) relaxes that
+one assert only: identity, reachability, counters and the log are still
+required. The battery prints a `CUT MODE WARNING` banner and ends PARTIAL, as
+`--only` does; it is never the final cut.
 
-Still NOT covered by cut mode: writers outside this repo (other machines,
-hooks, the WSL appliance, hellmini), which only production traffic exercises
-(T2 `nexus/review-z0o2p24-critique` Issue 2b), and the remaining engine-driving
-legs (`upshakeout`, `genflip`, `rehearse_*`), which this bead did not touch.
+Still NOT covered: writers outside this repo (other machines, hooks, the WSL
+appliance, hellmini), which only production traffic exercises (T2
+`nexus/review-z0o2p24-critique` Issue 2b); and the remaining engine-driving
+legs (`upshakeout`, `genflip`, `rehearse_*`), which write no chunks.
+
+**The pinned-engine red is real and expected until the pin moves.** Develop's
+client sends `metadata_merge` and checks that the engine echoes it. The pinned
+engine (v0.1.142) does not, so any non-cut battery leg whose journey writes a
+chunk through that path is red against it with `EngineOlderThanClientError`.
+Measured 2026-10-01 for `dtok` (store put, "asked for metadata_merge but the
+response did not echo it"); `mvv`, `smoke` and `shakedown` write through the same
+path and are expected to go the same way, which a non-cut run has not yet
+confirmed. The paired-release choreography resolves it (engine tag first, the
+client release bumps the floor and gates its battery against that engine), so a
+non-cut battery on develop is not evidence before the pin moves; the cut-mode
+run above is the only coherent pre-tag evidence. To keep the red from reading
+as an unexplained failure, name it:
+
+```bash
+tests/e2e/release-battery.sh --expected-engine-lag nexus-z0o2p.9@0.1.142 ...   # <bead>@<REQUIRED_ENGINE_VERSION>
+```
+
+A red `mvv`/`smoke`/`shakedown`/`dtok` leg whose failing output carries the
+`EngineOlderThanClientError` signature then reads `EXPECTED-LAG(<bead>)`, is
+counted, and ends the battery PARTIAL (never a release verdict). Any other red
+stays red. The ack refuses to run once `REQUIRED_ENGINE_VERSION` is no longer the
+version it names, and in cut mode it is an error (cut mode gates the candidate,
+where a lag ack would hide the red it exists to find). `dtok` is a leg in cut
+mode, and in a non-cut run only when named: `--only dtok`.
 
 ### 4. Push the tag (human, or AI when explicitly authorized)
 

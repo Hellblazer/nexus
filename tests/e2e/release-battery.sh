@@ -2,18 +2,37 @@
 # Release battery driver (nexus-mfage fix B item 4, nexus-fp7ez item d).
 #
 #   tests/e2e/release-battery.sh [--artifacts DIR] [--max-parallel N] [--only a,b,c] [--skip-preflight]
-#                                [--cut] [--candidate-engine PATH]
+#                                [--cut [--candidate-engine PATH] [--accept-candidate-mismatch]]
+#                                [--expected-engine-lag <bead>@<engine-version>] [--plan]
 #
 # CUT MODE (--cut, or NX_CUT_MODE=1; nexus-0kmat): this battery gates an ENGINE
 # cut, so the gates that provision their own engine must run the CANDIDATE, not
 # the pinned published one (which predates the change and passes vacuously).
-# The candidate is --candidate-engine PATH (a *.jar or a native binary), else
-# the stamped dev jar the artifacts leg just built. It reaches mvv, smoke,
-# shakedown and dtok (the data-token CLI gate, a cut-mode-only leg) as
-# NX_CANDIDATE_ENGINE, which each leg puts inside its own env scrub. Each of
-# those legs prints an `ENGINE IDENTITY` line, and in cut mode a leg whose log
-# lacks one naming the candidate is FAILED even when its own checks went green.
+# The candidate is --candidate-engine PATH (a *.jar or a native binary; an
+# error without --cut), else the stamped dev jar the artifacts leg just built.
+# It reaches mvv, smoke, shakedown and dtok (the data-token CLI gate, a leg that
+# runs in cut mode, or when named in --only) as NX_CANDIDATE_ENGINE, which each
+# leg puts inside its own env scrub. lsg runs the artifacts jar, shakeout and
+# candmig the artifacts native binary. Every one of those legs prints an
+# `ENGINE IDENTITY` line and, at the end of its journey, an `ENGINE OWNERLESS
+# REFUSALS` line, and in cut mode a leg whose log lacks either one naming the
+# candidate (by sha256) with zero refusals is FAILED even when its own checks
+# went green. pkgup is not an engine leg: it converges to the PUBLISHED engine.
+# A candidate whose sha256 is not the artifacts manifest's jar or native binary
+# would make lsg/shakeout/candmig gate a different engine from mvv/smoke/
+# shakedown/dtok: that is refused unless --accept-candidate-mismatch, which also
+# makes the verdict PARTIAL, as does NX_CANDIDATE_EXPECT_OWNERLESS_MODE other
+# than enforce (the escape is for a candidate run in log-only mode).
 # See tests/e2e/lib/candidate_engine.py.
+#
+# EXPECTED LAG (non-cut only): develop's client carries the metadata_merge write
+# mode, the pinned engine does not echo it, so mvv/smoke/shakedown/dtok go red
+# against the pinned engine with EngineOlderThanClientError until the pin moves.
+# --expected-engine-lag <bead>@<REQUIRED_ENGINE_VERSION> (or NX_EXPECTED_ENGINE_LAG)
+# names that state: a red engine-bearing leg whose log tail carries the
+# EngineOlderThanClientError signature reads EXPECTED-LAG(<bead>) instead of
+# FAILED, the verdict is PARTIAL, and the ack REFUSES to run once the pin has
+# moved off the version it names. Any other red stays red.
 #
 # Leg 0, serial: build every artifact ONCE (tests/e2e/migration-rehearsal/
 # build-artifacts.sh — wheel, stamped dev jar, linux native candidate, plus
@@ -37,6 +56,9 @@ unset FORCE_COLOR CLICOLOR_FORCE
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+# Relative paths on the command line (and in NX_CANDIDATE_ENGINE) mean relative to
+# where the operator ran this, not to the repo root the next line moves into.
+INVOKE_DIR="$PWD"
 cd "$REPO_ROOT" || exit 2
 
 MAX_PARALLEL="${MAX_PARALLEL:-4}"
@@ -45,6 +67,9 @@ ONLY=""
 SKIP_PREFLIGHT=0
 CUT_MODE="${NX_CUT_MODE:-0}"
 CANDIDATE_ENGINE="${NX_CANDIDATE_ENGINE:-}"
+ACCEPT_CANDIDATE_MISMATCH=0
+PLAN_ONLY=0
+EXPECTED_ENGINE_LAG="${NX_EXPECTED_ENGINE_LAG:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --artifacts) ARTIFACTS="$2"; shift 2 ;;
@@ -57,20 +82,51 @@ while [ $# -gt 0 ]; do
     --cut) CUT_MODE=1; shift ;;
     --candidate-engine) CANDIDATE_ENGINE="$2"; shift 2 ;;
     --candidate-engine=*) CANDIDATE_ENGINE="${1#--candidate-engine=}"; shift ;;
-    -h|--help) sed -n '2,32p' "$0"; exit 0 ;;
+    --accept-candidate-mismatch) ACCEPT_CANDIDATE_MISMATCH=1; shift ;;
+    --plan) PLAN_ONLY=1; shift ;;
+    --expected-engine-lag) EXPECTED_ENGINE_LAG="$2"; shift 2 ;;
+    --expected-engine-lag=*) EXPECTED_ENGINE_LAG="${1#--expected-engine-lag=}"; shift ;;
+    -h|--help) sed -n '2,/^set -uo pipefail/p' "$0" | sed '$d'; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
 [[ "$MAX_PARALLEL" =~ ^[1-9][0-9]*$ ]] || { echo "--max-parallel must be a positive integer" >&2; exit 2; }
 [ "$CUT_MODE" = 1 ] || [ "$CUT_MODE" = 0 ] || { echo "NX_CUT_MODE must be 0 or 1 (got '$CUT_MODE')" >&2; exit 2; }
+_abs() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$INVOKE_DIR" "$1" ;; esac; }
+[ -z "$ARTIFACTS" ] || ARTIFACTS="$(_abs "$ARTIFACTS")"
+[ -z "$CANDIDATE_ENGINE" ] || CANDIDATE_ENGINE="$(_abs "$CANDIDATE_ENGINE")"
 # nexus-0kmat: legs inherit the exported environment through `bash -c`.
 export NX_CUT_MODE="$CUT_MODE"
-if [ -n "$CANDIDATE_ENGINE" ]; then
-  [ -f "$CANDIDATE_ENGINE" ] || { echo "--candidate-engine: $CANDIDATE_ENGINE is not a file" >&2; exit 2; }
-  export NX_CANDIDATE_ENGINE="$CANDIDATE_ENGINE"
-else
+if [ "$CUT_MODE" != 1 ]; then
+  # An engine candidate with no cut mode exports the file and enforces nothing:
+  # every leg would run it and none would be required to have served it.
+  if [ -n "$CANDIDATE_ENGINE" ] || [ "$ACCEPT_CANDIDATE_MISMATCH" = 1 ]; then
+    echo "--candidate-engine / NX_CANDIDATE_ENGINE / --accept-candidate-mismatch need --cut: without cut mode nothing asserts the candidate was served (nexus-0kmat)" >&2
+    exit 2
+  fi
   unset NX_CANDIDATE_ENGINE
+else
+  [ -z "$EXPECTED_ENGINE_LAG" ] || { echo "--expected-engine-lag is for the PINNED engine; cut mode gates the candidate and a lag ack there would hide the red it exists to find" >&2; exit 2; }
+  if [ -n "$CANDIDATE_ENGINE" ]; then
+    [ -f "$CANDIDATE_ENGINE" ] || { echo "--candidate-engine: $CANDIDATE_ENGINE is not a file" >&2; exit 2; }
+    export NX_CANDIDATE_ENGINE="$CANDIDATE_ENGINE"
+  else
+    unset NX_CANDIDATE_ENGINE
+  fi
 fi
+# The mode the engine must report (the module reads NX_CANDIDATE_EXPECT_OWNERLESS_MODE;
+# default enforce). Anything else is a deliberate non-final run: banner now, PARTIAL at the end.
+CUT_NON_ENFORCE=""
+if [ "$CUT_MODE" = 1 ] && [ "${NX_CANDIDATE_EXPECT_OWNERLESS_MODE:-enforce}" != enforce ]; then
+  CUT_NON_ENFORCE="${NX_CANDIDATE_EXPECT_OWNERLESS_MODE}"
+  echo "CUT MODE WARNING: NX_CANDIDATE_EXPECT_OWNERLESS_MODE=$CUT_NON_ENFORCE, so no leg asserts the engine runs the ownerless-write check in enforce mode. This run is PARTIAL, never the final cut." >&2
+fi
+CUT_ABORT_REASON=""
+CUT_MISMATCH_ACCEPTED=0
+CUT_JAR=""
+CUT_NATIVE=""
+LAG_BEAD=""
+LAG_COUNT=0
 
 # >>> BEGIN moving-tree guard (nexus-57cvk) -- extracted verbatim by
 # tests/test_release_battery_refuses_moving_tree.py; keep both markers.
@@ -126,6 +182,23 @@ REFUSED
 fi
 # <<< END moving-tree guard (nexus-57cvk)
 
+# The pinned engine, parsed before anything is created so a bad --expected-engine-lag
+# leaves no work dir behind.
+REQUIRED_ENGINE="$(python3 -c '
+import re, pathlib
+m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", pathlib.Path("src/nexus/engine_version.py").read_text())
+print(".".join(m.groups()) if m else "")')"
+[ -n "$REQUIRED_ENGINE" ] || { echo "could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
+# nexus-0kmat: the expected-lag ack names the engine it was written for and dies with it.
+if [ -n "$EXPECTED_ENGINE_LAG" ]; then
+  if [[ "$EXPECTED_ENGINE_LAG" =~ ^(nexus-[a-z0-9.]+)@([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+    LAG_BEAD="${BASH_REMATCH[1]}"; LAG_ENGINE="${BASH_REMATCH[2]}"
+  else
+    echo "--expected-engine-lag must read <bead>@<engine-version>, e.g. nexus-z0o2p.9@$REQUIRED_ENGINE (got '$EXPECTED_ENGINE_LAG')" >&2; exit 2
+  fi
+  [ "$LAG_ENGINE" = "$REQUIRED_ENGINE" ] || { echo "--expected-engine-lag $EXPECTED_ENGINE_LAG is for engine $LAG_ENGINE but REQUIRED_ENGINE_VERSION is $REQUIRED_ENGINE: the pin moved, so the lag it acknowledged is over and a red engine leg is a real red. Drop the ack." >&2; exit 2; }
+fi
+
 # Short root on purpose: sandbox HOMEs nest .config/nexus/postgres under it
 # and a long ${TMPDIR} would push a PG socket path past the platform limit.
 STAMP="$(date +%Y%m%d-%H%M%S)"
@@ -178,11 +251,6 @@ define_leg() {  # define_leg <name> <phase> <verdict-regex> <command...>
   LEG_CMD[$name]="$(printf '%q ' "$@")"; LEG_STATUS[$name]="PENDING"; LEG_START[$name]=""; LEG_END[$name]=""; LEG_RC[$name]=""; LEG_LINE[$name]=""
 }
 
-REQUIRED_ENGINE="$(python3 -c '
-import re, pathlib
-m = re.search(r"REQUIRED_ENGINE_VERSION[^=]*=\s*\((\d+),\s*(\d+),\s*(\d+)\)", pathlib.Path("src/nexus/engine_version.py").read_text())
-print(".".join(m.groups()) if m else "")')"
-[ -n "$REQUIRED_ENGINE" ] || { echo "could not parse REQUIRED_ENGINE_VERSION" >&2; exit 2; }
 CHANGESET_DELTA=0
 if git rev-parse -q --verify "engine-service-v$REQUIRED_ENGINE" >/dev/null 2>&1; then
   git diff --quiet "engine-service-v$REQUIRED_ENGINE" HEAD -- service/src/main/resources/db/changelog || CHANGESET_DELTA=1
@@ -203,9 +271,8 @@ define_leg candmig    group  "CANDIDATE-MIGRATION REHEARSAL (PASSED|FAILED)"    
 fi
 define_leg mvv        group  "FRESH-INSTALL MVV (PASSED|FAILED)"        tests/e2e/fresh-install-mvv.sh
 # nexus-0kmat: the data-token CLI gate drives the real CLI through a full
-# local-engine journey; it is a battery leg only in cut mode, where its engine
-# must be the candidate (an ordinary client release does not pay its ~10 min).
-[ "$CUT_MODE" != 1 ] || \
+# local-engine journey. It runs in cut mode (its engine must be the candidate) and
+# when named in --only; an ordinary client release does not pay its ~10 min.
 define_leg dtok       group  "DATA-TOKEN CLI GATE (PASSED|FAILED)"      tests/e2e/data-token-cli-gate.sh
 define_leg smoke      group  "SMOKE (PASSED|FAILED)"                    env "NEXUS_SANDBOX_HOME=$WORK/sb-smoke" tests/e2e/release-sandbox.sh smoke
 define_leg upshakeout group  "UPGRADE-SHAKEOUT PASSED"                  tests/e2e/upgrade-shakeout.sh run
@@ -220,6 +287,7 @@ define_leg hookskew   group  "HOOK-CLI SKEW GATE (PASSED|FAILED|UNVERIFIED)"   t
 define_leg janitor    group  "CREDENTIAL JANITOR (PASSED|FAILED)"        python3 scripts/credential_janitor.py
 define_leg shakeout   alone  "CANDIDATE SHAKEOUT (PASSED|FAILED)"                tests/e2e/migration-rehearsal/run.sh --artifacts "$ARTIFACTS" --shakeout
 
+if [ "$CUT_MODE" != 1 ] && [[ ",$ONLY," != *",dtok,"* ]]; then LEG_STATUS[dtok]="SKIPPED(cut mode only)"; fi
 ONLY_SKIPPED=0
 if [ -n "$ONLY" ]; then
   # Every name must be a real leg: a typo would otherwise skip the whole
@@ -230,8 +298,17 @@ if [ -n "$ONLY" ]; then
   done
   keep=",$ONLY,"
   for leg in "${ORDER[@]}"; do
-    [[ "$keep" == *",$leg,"* ]] || [ "${LEG_PHASE[$leg]}" = serial ] || { LEG_STATUS[$leg]="SKIPPED(--only)"; ONLY_SKIPPED=$((ONLY_SKIPPED+1)); }
+    [[ "$keep" == *",$leg,"* ]] || [ "${LEG_PHASE[$leg]}" = serial ] || [ "${LEG_STATUS[$leg]}" != PENDING ] || { LEG_STATUS[$leg]="SKIPPED(--only)"; ONLY_SKIPPED=$((ONLY_SKIPPED+1)); }
   done
+fi
+
+# --plan: print the legs this invocation would run (phase, status) and stop. The
+# selection logic above (cut mode, --only, dtok) is real code; this is how a test
+# or an operator reads its outcome without paying for a leg.
+if [ "$PLAN_ONLY" = 1 ]; then
+  for leg in "${ORDER[@]}"; do printf 'PLAN %s %s %s\n' "$leg" "${LEG_PHASE[$leg]}" "${LEG_STATUS[$leg]}"; done
+  rm -rf "$WORK"
+  exit 0
 fi
 
 # ── execution ────────────────────────────────────────────────────────────────
@@ -243,18 +320,109 @@ start_leg() {
   LEG_PID[$leg]=$!
 }
 declare -A LEG_PID
-# nexus-0kmat: legs that provision their OWN engine, and so must name which one
-# they ran against. (lsg, candmig, pkgup and shakeout take $ARTIFACTS, which IS
-# the candidate; the rest provision no engine of their own.)
-CUT_ENGINE_LEGS=" mvv smoke shakedown dtok "
-# In cut mode a green leg that ran against the pinned published engine, or never
-# said which engine it ran against, is not a pass. Prints the reason; empty = ok.
+# nexus-0kmat: legs that run an engine and must name which one, and read its
+# ownerless-write counters and log at the end of the journey. mvv/smoke/shakedown/
+# dtok provision their own (the candidate, via NX_CANDIDATE_ENGINE); lsg runs the
+# artifacts jar, shakeout and candmig the artifacts native binary. pkgup is NOT
+# here: it package-upgrades an old install and converges to the PUBLISHED engine,
+# so it never runs the candidate and has no ownerless-write reading to give.
+CUT_ENGINE_LEGS=" mvv smoke shakedown dtok lsg shakeout candmig "
+# The engine FILE a leg is expected to have served (judged by sha256).
+cut_leg_candidate() {  # cut_leg_candidate <leg>
+  case "$1" in
+    lsg) printf '%s' "${CUT_JAR:-}" ;;
+    shakeout|candmig) printf '%s' "${CUT_NATIVE:-}" ;;
+    *) printf '%s' "${NX_CANDIDATE_ENGINE:-}" ;;
+  esac
+}
+# In cut mode a green leg that ran against the pinned published engine, never said
+# which engine it ran against, or never read the refusal counters, is not a pass.
+# Prints the reason; empty = ok. The reader's own exit status decides: a crash
+# with empty output is a failure, never a quiet pass.
 cut_mode_vacuity() {  # cut_mode_vacuity <leg>
   [ "${CUT_MODE:-0}" = 1 ] || return 0
   [[ "${CUT_ENGINE_LEGS:-}" == *" $1 "* ]] || return 0
-  local out
-  out="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" cut-assert-log "$LOGS/$1.log" "$1" 2>&1 || true)"
+  local out rc cand
+  cand="$(cut_leg_candidate "$1")"
+  [ -n "$cand" ] || { printf '%s: cut mode, but no candidate engine file is known for this leg' "$1"; return 0; }
+  out="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" cut-assert-log "$LOGS/$1.log" "$1" --candidate "$cand" 2>&1)"; rc=$?
+  [ "$rc" -ne 0 ] || return 0
+  [ -n "$out" ] || out="$1: cut-assert-log exited $rc with no output"
   printf '%s' "${out%%$'\n'*}"
+}
+# Resolve the candidate in cut mode, once the artifacts leg PASSED. The artifacts
+# manifest (verified against THIS tree) names the jar and native binary every
+# $ARTIFACTS leg uses; the candidate is --candidate-engine, else that jar. A
+# candidate that is neither manifest artifact by sha256 would put two engines in
+# one green battery. Returns 1 with CUT_ABORT_REASON set when it cannot proceed.
+cut_resolve_candidate() {
+  local which
+  python3 "$REPO_ROOT/tests/e2e/lib/artifact_manifest.py" verify "$ARTIFACTS" "$REPO_ROOT" >/dev/null 2>"$LOGS/candidate-manifest.err" \
+    || { CUT_ABORT_REASON="no candidate engine: the artifacts manifest does not verify against this tree ($(tr '\n' ' ' <"$LOGS/candidate-manifest.err" | cut -c1-200))"; return 1; }
+  CUT_JAR="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" manifest-artifact "$ARTIFACTS" jar 2>"$LOGS/candidate-manifest.err")" \
+    || { CUT_ABORT_REASON="no candidate engine: the artifacts manifest names no jar ($(tr '\n' ' ' <"$LOGS/candidate-manifest.err" | cut -c1-200))"; return 1; }
+  CUT_NATIVE="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" manifest-artifact "$ARTIFACTS" native 2>"$LOGS/candidate-manifest.err")" \
+    || { CUT_ABORT_REASON="no candidate engine: the artifacts manifest names no native binary ($(tr '\n' ' ' <"$LOGS/candidate-manifest.err" | cut -c1-200))"; return 1; }
+  if [ -z "${NX_CANDIDATE_ENGINE:-}" ]; then
+    export NX_CANDIDATE_ENGINE="$CUT_JAR"
+    return 0
+  fi
+  which="$(python3 "$REPO_ROOT/tests/e2e/lib/candidate_engine.py" candidate-in-manifest "$ARTIFACTS" "$NX_CANDIDATE_ENGINE" 2>/dev/null)" || which=none
+  if [ "$which" = none ]; then
+    if [ "$ACCEPT_CANDIDATE_MISMATCH" = 1 ]; then
+      CUT_MISMATCH_ACCEPTED=1
+      echo "CUT MODE WARNING: the candidate engine $NX_CANDIDATE_ENGINE is NOT the artifacts manifest's engine. mvv/smoke/shakedown/dtok run it; lsg, shakeout and candmig run the artifacts' own. Two engines in one battery: the verdict is PARTIAL." >&2
+      return 0
+    fi
+    CUT_ABORT_REASON="the candidate engine $NX_CANDIDATE_ENGINE is not the engine in the artifacts manifest (sha256 matches neither its jar nor its native binary), so mvv/smoke/shakedown/dtok would gate it while lsg/shakeout/candmig gate another. Build the candidate into the artifacts, or pass --accept-candidate-mismatch to run mixed (PARTIAL)"
+    return 1
+  fi
+  return 0
+}
+# The pinned engine predates develop's client (nexus-0kmat): the named, acknowledged
+# lag. Prints the reason when a FAILED engine-bearing leg's own failing output
+# carries the signature; empty = a real red. That output is the TAIL of the leg
+# log, plus the tail of the newest log in the evidence directory a gate preserves
+# on failure ("FAILURE EVIDENCE PRESERVED: <dir>"): data-token-cli-gate fails at
+# "store put ... failed (see <dir>/store-put.stderr.log)" and the error text lives
+# only in that file. The tail and the newest file, not the whole journey, so a
+# tolerated early mention followed by an unrelated red stays red.
+ENGINE_LAG_LEGS=" mvv smoke shakedown dtok "
+ENGINE_LAG_SIGNATURE='EngineOlderThanClientError|The engine is older than this client'
+engine_lag_verdict() {  # engine_lag_verdict <leg>
+  [ -n "${LAG_BEAD:-}" ] || return 0
+  [[ "${ENGINE_LAG_LEGS}" == *" $1 "* ]] || return 0
+  local evidence ev newest
+  evidence="$(tail -n 80 "$LOGS/$1.log" | sed -e 's/\x1b\[[0-9;]*m//g')"
+  ev="$(sed -n 's/^FAILURE EVIDENCE PRESERVED: \([^ ]*\).*/\1/p' "$LOGS/$1.log" | tail -n 1)"
+  if [ -n "$ev" ] && [ -d "$ev" ]; then
+    newest="$(ls -t "$ev"/*.log 2>/dev/null || true)"; newest="${newest%%$'\n'*}"
+    [ -z "$newest" ] || evidence="$evidence"$'\n'"$(tail -n 80 "$newest" | sed -e 's/\x1b\[[0-9;]*m//g')"
+  fi
+  [[ "$evidence" =~ $ENGINE_LAG_SIGNATURE ]] || return 0
+  printf 'EXPECTED-LAG(%s): the pinned engine %s predates this client'"'"'s metadata_merge write mode (EngineOlderThanClientError)' "$LAG_BEAD" "${LAG_ENGINE:-?}"
+}
+# The closing lines, and the battery's exit status. Reads RED, ONLY_SKIPPED,
+# CUT_ABORT_REASON, CUT_MISMATCH_ACCEPTED, CUT_NON_ENFORCE, LAG_COUNT.
+battery_verdict() {  # battery_verdict <red-count>
+  local red="$1" why=() joined
+  if [ -n "${CUT_ABORT_REASON:-}" ]; then
+    echo "CUT MODE: ${CUT_ABORT_REASON}, so no engine-bearing leg ran (nexus-0kmat): RED"; red=$((red+1))
+  fi
+  [ "${ONLY_SKIPPED:-0}" -eq 0 ] || why+=("${ONLY_SKIPPED} leg(s) skipped by --only")
+  [ "${CUT_MISMATCH_ACCEPTED:-0}" != 1 ] || why+=("candidate engine differs from the artifacts manifest's (--accept-candidate-mismatch)")
+  [ -z "${CUT_NON_ENFORCE:-}" ] || why+=("NX_CANDIDATE_EXPECT_OWNERLESS_MODE=${CUT_NON_ENFORCE}: ownerless_write_mode not asserted to be enforce")
+  [ "${LAG_COUNT:-0}" -eq 0 ] || why+=("${LAG_COUNT} leg(s) EXPECTED-LAG(${LAG_BEAD:-?}) against the pinned engine")
+  if [ "$red" -eq 0 ]; then
+    if [ "${#why[@]}" -gt 0 ]; then
+      joined="$(printf '%s; ' "${why[@]}")"
+      echo "RELEASE BATTERY PASSED (PARTIAL: ${joined%; } — not a release verdict)"
+    else
+      echo "RELEASE BATTERY PASSED"
+    fi
+    return 0
+  fi
+  echo "RELEASE BATTERY FAILED: $red red leg(s)"; return 1
 }
 finish_leg() {  # finish_leg <leg> <rc>
   local leg="$1" rc="$2" line clean prop vac
@@ -271,8 +439,14 @@ finish_leg() {  # finish_leg <leg> <rc>
   # nexus-0kmat: cut-mode non-vacuity. Only a leg that otherwise PASSED can be
   # downgraded here; a leg that is already red stays red with its own reason.
   if [ "${LEG_STATUS[$leg]}" = PASSED ] && [ "${CUT_MODE:-0}" = 1 ]; then
-    vac="$(cut_mode_vacuity "$leg" || true)"
+    vac="$(cut_mode_vacuity "$leg")"
     if [ -n "$vac" ]; then LEG_STATUS[$leg]="FAILED"; line="(VACUOUS in cut mode) $vac"; fi
+  fi
+  # nexus-0kmat: a red against the PINNED engine that is the acknowledged lag is
+  # named, counted and PARTIAL; it is never a pass and never an unexplained red.
+  if [ "${LEG_STATUS[$leg]}" = FAILED ] && [ "${CUT_MODE:-0}" != 1 ]; then
+    vac="$(engine_lag_verdict "$leg")"
+    if [ -n "$vac" ]; then LEG_STATUS[$leg]="EXPECTED-LAG"; line="$vac | $line"; LAG_COUNT=$((LAG_COUNT+1)); fi
   fi
   # nexus-tt5vm review round 2 (Sam's data-point goal): fresh-install-mvv's
   # propagation wait, when it fires, folds PROPAGATION_WAIT_S=<n> into its
@@ -326,7 +500,6 @@ done
 
 echo "== leg 0 (serial): ${SERIAL_LEGS[*]}"
 LEG0_ABORT=0
-CUT_NO_CANDIDATE=0
 for leg in "${SERIAL_LEGS[@]}"; do
   run_serial "$leg"
   # An artifacts red aborts: every group leg consumes them. A preflight red
@@ -335,21 +508,12 @@ for leg in "${SERIAL_LEGS[@]}"; do
 done
 
 # nexus-0kmat: in cut mode the candidate engine is --candidate-engine, else the
-# stamped dev jar the artifacts leg just built (verified against this tree by
-# the manifest). No candidate is a refusal: the legs below would otherwise
-# provision the pinned published engine and pass vacuously.
-if [ "$LEG0_ABORT" = 0 ] && [ "$CUT_MODE" = 1 ] && [ -z "${NX_CANDIDATE_ENGINE:-}" ]; then
-  cand_rel="$(python3 tests/e2e/lib/artifact_manifest.py verify "$ARTIFACTS" "$REPO_ROOT" 2>"$LOGS/candidate-manifest.err" \
-    | python3 -c 'import json,sys;print(json.load(sys.stdin)["artifacts"]["jar"]["path"])' 2>>"$LOGS/candidate-manifest.err")" || cand_rel=""
-  if [ -n "$cand_rel" ] && [ -f "$ARTIFACTS/$cand_rel" ]; then
-    export NX_CANDIDATE_ENGINE="$ARTIFACTS/$cand_rel"
-  else
-    echo "CUT MODE: no candidate engine: pass --candidate-engine PATH, or fix the artifacts manifest ($(tr '\n' ' ' <"$LOGS/candidate-manifest.err" | cut -c1-200))" >&2
-    # The artifacts leg PASSED, so the abort below would leave every other leg
-    # "NOT RUN" and the report would read green: flag it red explicitly.
-    CUT_NO_CANDIDATE=1
-    LEG0_ABORT=1
-  fi
+# stamped dev jar the artifacts leg just built, verified against this tree by the
+# manifest (cut_resolve_candidate). No candidate, or one that is not the manifest's
+# engine, aborts: the legs below would otherwise provision the pinned published
+# engine, or gate two engines, and pass.
+if [ "$LEG0_ABORT" = 0 ] && [ "$CUT_MODE" = 1 ]; then
+  cut_resolve_candidate || { echo "CUT MODE: $CUT_ABORT_REASON" >&2; LEG0_ABORT=1; }
 fi
 [ "$CUT_MODE" != 1 ] || echo "CUT MODE: candidate engine = ${NX_CANDIDATE_ENGINE:-<none>}"
 
@@ -362,7 +526,9 @@ if [ "$LEG0_ABORT" = 0 ]; then
   echo "== alone: ${ALONE_LEGS[*]}"
   for leg in "${ALONE_LEGS[@]+"${ALONE_LEGS[@]}"}"; do run_serial "$leg"; done
 else
-  for leg in "${GROUP_LEGS[@]}" "${ALONE_LEGS[@]}"; do LEG_STATUS[$leg]="NOT RUN (artifacts red)"; done
+  for leg in "${GROUP_LEGS[@]}" "${ALONE_LEGS[@]}"; do
+    if [ -n "$CUT_ABORT_REASON" ]; then LEG_STATUS[$leg]="NOT RUN (cut-mode abort)"; else LEG_STATUS[$leg]="NOT RUN (artifacts red)"; fi
+  done
 fi
 
 # ── report ───────────────────────────────────────────────────────────────────
@@ -378,11 +544,8 @@ for leg in "${ORDER[@]}"; do
     [ "${LEG_PHASE[$leg]}" = group ] && SERIAL_SUM=$(( SERIAL_SUM + wall ))
   fi
   printf '%-11s %-22s %8s  %s\n' "$leg" "${LEG_STATUS[$leg]}" "$wall" "${LEG_LINE[$leg]}"
-  case "${LEG_STATUS[$leg]}" in PASSED|SKIPPED*|"NOT RUN"*) ;; *) RED=$((RED+1)) ;; esac
+  case "${LEG_STATUS[$leg]}" in PASSED|SKIPPED*|"NOT RUN"*|EXPECTED-LAG) ;; *) RED=$((RED+1)) ;; esac
 done
-if [ "$CUT_NO_CANDIDATE" = 1 ]; then
-  echo "CUT MODE: no candidate engine, so no engine-bearing leg ran (nexus-0kmat): RED"; RED=$((RED+1))
-fi
 [ "$CHANGESET_DELTA" = 1 ] || echo "candmig     NOT RUN (no changeset in service/src/main/resources/db/changelog since engine-service-v$REQUIRED_ENGINE)"
 # max overlap of the group's [start,end] intervals: the AC5 proof
 if [ -n "$GROUP_T0" ]; then
@@ -395,8 +558,5 @@ if [ -n "$GROUP_T0" ]; then
   fi
 fi
 echo "battery wall: $(( BATTERY_T1 - BATTERY_T0 ))s"
-if [ "$RED" -eq 0 ]; then
-  if [ "$ONLY_SKIPPED" -gt 0 ]; then echo "RELEASE BATTERY PASSED (PARTIAL: $ONLY_SKIPPED leg(s) skipped by --only — not a release verdict)"; else echo "RELEASE BATTERY PASSED"; fi
-  exit 0
-fi
-echo "RELEASE BATTERY FAILED: $RED red leg(s)"; exit 1
+battery_verdict "$RED"
+exit $?

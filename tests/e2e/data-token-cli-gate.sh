@@ -107,19 +107,13 @@ fi
 GATE_OK=0
 _fail() { echo "DATA-TOKEN CLI GATE FAILED: $*" >&2; exit 1; }
 
-# nexus-0kmat: the candidate engine (NX_CANDIDATE_ENGINE), through the one
-# explicit input that survives the `env -i` scrub below. Resolved BEFORE
-# anything is built or provisioned: a cut-mode run with no candidate, or a
-# candidate that cannot be found, fails here and never reaches the pinned
-# published engine `nx init` would otherwise download.
-# shellcheck source=tests/e2e/lib/candidate_engine.sh disable=SC1091
-source "$REPO_ROOT/tests/e2e/lib/candidate_engine.sh"
-candidate_engine_load "$WORK/engine" || _fail "candidate engine refused (see CANDIDATE ENGINE REFUSED above)"
-
 cleanup() {
     if [ -n "$BIN_DIR" ] && [ -x "$BIN_DIR/nx" ]; then
         _nx daemon service stop --with-pg >/dev/null 2>&1 || true
     fi
+    # nexus-0kmat: the staged copy of the candidate jar (~136 MB) is not evidence;
+    # the logs are. Removed on EVERY exit path, a refused load included.
+    rm -rf "$WORK/engine"
     if [ "$GATE_OK" = 1 ]; then
         rm -rf "$WORK"
     else
@@ -127,6 +121,17 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+
+# nexus-0kmat: the candidate engine (NX_CANDIDATE_ENGINE), through the one
+# explicit input that survives the `env -i` scrub below. Resolved BEFORE
+# anything is built or provisioned: a cut-mode run with no candidate, or a
+# candidate that cannot be found, fails here and never reaches the pinned
+# published engine `nx init` would otherwise download. The cleanup trap is
+# installed first so a refusal (or a half-finished stage copy) still leaves
+# nothing behind.
+# shellcheck source=tests/e2e/lib/candidate_engine.sh disable=SC1091
+source "$REPO_ROOT/tests/e2e/lib/candidate_engine.sh"
+candidate_engine_load "$WORK/engine" || _fail "candidate engine refused (see CANDIDATE ENGINE REFUSED above)"
 
 # ── env allowlist — identical shape to fresh-install-mvv.sh's _nx() ────────
 # Deliberately absent: VOYAGE_API_KEY, NX_MINT_TOKEN/NX_MINT_TENANT env
@@ -498,7 +503,7 @@ echo "  fan-out: $FANOUT_N/$FANOUT_N succeeded, $FANOUT_MINT_COUNT total mint(s)
 
 echo "── engine refusals (nexus-0kmat) ──"
 candidate_engine_refusals "$HOME_DIR/.config/nexus" data-token-cli-gate 2>&1 | tee "$LOGS/engine-refusals.log" \
-    || _fail "the engine refused an ownerless chunk write during this journey (see CANDIDATE ENGINE CHECK FAILED above)"
+    || _fail "the end-of-journey engine read failed: a refusal, an unreadable counter or log, or an engine that is not the candidate (see CANDIDATE ENGINE CHECK FAILED above)"
 
 echo "── non-vacuity ──"
 # issue.log (stderr-only capture of `nx service token issue`) is

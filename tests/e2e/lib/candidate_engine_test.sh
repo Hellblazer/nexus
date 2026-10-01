@@ -156,19 +156,33 @@ candidate_engine_refusals "$CFG" t8 >"$WORKDIR/o8d" 2>/dev/null; rc=$?
 expect_rc "refusals line prints without cut mode" 0 "$rc"
 expect_has "refusals line carries the counters" "$WORKDIR/o8d" "refused_total=0 would_refuse_total=0"
 
-echo "Test 9: the gates are wired (static)"
-for gate in fresh-install-mvv.sh data-token-cli-gate.sh release-sandbox.sh; do
-    f="$REPO_ROOT/tests/e2e/$gate"
-    for needle in "candidate_engine.sh" "candidate_engine_load" "candidate_engine_identity" "candidate_engine_refusals"; do
-        if grep -qF "$needle" "$f"; then ok "$gate uses $needle"; else bad "$gate does not use $needle"; fi
-    done
-done
-for gate in fresh-install-mvv.sh data-token-cli-gate.sh; do
-    f="$REPO_ROOT/tests/e2e/$gate"
-    n_scrub="$(grep -c 'env -i' "$f")"
-    n_pass="$(grep -c 'CAND_ENV_ARGS\[@\]+' "$f")"
-    if [ "$n_pass" -ge 1 ]; then ok "$gate puts CAND_ENV_ARGS inside an env -i allowlist ($n_pass of $n_scrub scrubs)"; else bad "$gate never passes CAND_ENV_ARGS to an env -i"; fi
-done
+echo "Test 9: refusals read the log the lease's launch kind names, in cut mode, through an ambient proxy"
+# A jar launch writes storage_service_jar.log (storage_service_daemon.py _svc_log_name); the
+# lease carries launch_kind. Writing the NATIVE name beside a jar lease is the bug this pins.
+write_lease_kind() {  # <artifact> <launch_kind>
+    printf '{"endpoint":{"host":"127.0.0.1","port":%s,"artifact":"%s","launch_kind":"%s"}}' "$PORT" "$1" "$2" >"$CFG/storage_service_addr.501"
+}
+write_lease_kind "$JAR" jar
+mkdir -p "$CFG/logs"
+printf 'INFO boot\nWARN event=ownerless_chunk_write_refused source_path=/x\n' >"$CFG/logs/storage_service_jar.log"
+NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9" 2>"$WORKDIR/e9"; rc=$?
+expect_rc "cut mode: a refusal in storage_service_jar.log is a failure" 1 "$rc"
+expect_has "the refusals line counts it" "$WORKDIR/o9" "log_lines=1 log=storage_service_jar.log"
+printf 'INFO boot\nWARN event=ownerless_chunk_write_would_refuse source_path=/x\n' >"$CFG/logs/storage_service_jar.log"
+NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9b" 2>/dev/null; rc=$?
+expect_rc "cut mode: a would-refuse line (log-only) is a failure too" 1 "$rc"
+printf 'INFO boot\n' >"$CFG/logs/storage_service_jar.log"
+NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9c" 2>/dev/null; rc=$?
+expect_rc "cut mode: a clean jar log passes" 0 "$rc"
+rm -f "$CFG/logs/storage_service_jar.log"
+NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9d" 2>"$WORKDIR/e9d"; rc=$?
+expect_rc "cut mode: a MISSING engine log is a failure" 1 "$rc"
+expect_has "the refusals line says there was no log" "$WORKDIR/o9d" "log=none"
+printf 'INFO boot\n' >"$CFG/logs/storage_service_jar.log"
+HTTP_PROXY="http://127.0.0.1:1" http_proxy="http://127.0.0.1:1" ALL_PROXY="http://127.0.0.1:1" \
+    NX_CUT_MODE=1 NX_CANDIDATE_ENGINE="$JAR" candidate_engine_refusals "$CFG" t9 >"$WORKDIR/o9e" 2>/dev/null; rc=$?
+expect_rc "an ambient proxy does not break the loopback probe" 0 "$rc"
+expect_has "the counters were read through the proxy setting" "$WORKDIR/o9e" "refused_total=0 would_refuse_total=0 log_lines=0"
 
 echo
 echo "candidate_engine_test.sh: $PASS passed, $FAIL failed"

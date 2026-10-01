@@ -49,26 +49,44 @@ python3 with a scrubbed environment):
     In cut mode, exit 1 unless the lease's artifact IS the candidate, judged
     by sha256 of the bytes (a staged copy is the candidate; the pinned
     published engine is not, whatever its path) -- a leg that ran against the
-    pinned published engine is a FAILURE -- and
-    ``/v1/status`` reports the expected ``ownerless_write_mode`` (default
-    ``enforce``; ``NX_CANDIDATE_EXPECT_OWNERLESS_MODE=none`` drops that one
-    assert, loudly, for a candidate that predates the check).
+    pinned published engine is a FAILURE -- and ``/v1/status`` is reachable
+    and reports the expected ``ownerless_write_mode`` (default ``enforce``;
+    ``NX_CANDIDATE_EXPECT_OWNERLESS_MODE=none`` drops ONLY that mode assert,
+    for a candidate run in a mode other than enforce: the engine must still
+    be reachable and still carry the counters).
 
 ``refusals <config-dir> [--label L]``
-    End of journey. Print the engine's ownerless-write counters and the count
-    of ``ownerless_chunk_write_refused`` lines in the engine log. In cut mode,
-    exit 1 on any refusal or would-refuse: a red gate IS the oracle (a writer
-    this journey exercises wrote a chunk with no manifest owner), fix the
-    writer before tagging.
+    End of journey. Re-check that the engine STILL serving is the candidate
+    (a swap mid-journey is caught here), print the ownerless-write counters,
+    and count ``ownerless_chunk_write_refused`` / ``..._would_refuse`` lines in
+    the engine log the lease's launch kind names (``storage_service_jar.log``
+    for a jar, ``storage_service_native.log`` for a native binary, plus
+    rotations). In cut mode exit 1 on any refusal or would-refuse (a red gate
+    IS the oracle: a writer this journey exercises wrote a chunk with no
+    manifest owner; fix the writer before tagging), on an unreachable
+    ``/v1/status``, on both counters reading absent, and on a missing engine
+    log (the engine ran, so its log exists).
 
-``cut-assert-log <logfile> <label>``
-    Battery side. In cut mode, exit 1 unless the leg's log carries an
-    ``ENGINE IDENTITY`` line with ``candidate=yes`` naming the candidate: a
-    leg whose own checks went green but which never reported an engine, or
-    reported the pinned one, is not a pass.
+``cut-assert-log <logfile> <label> [--candidate PATH]``
+    Battery side. In cut mode, exit 1 unless the leg's log carries BOTH an
+    ``ENGINE IDENTITY`` line and an ``ENGINE OWNERLESS REFUSALS`` line, every
+    one naming the candidate by sha256 (``--candidate`` overrides
+    ``NX_CANDIDATE_ENGINE`` for a leg whose engine is not that file, e.g. the
+    native binary a container leg runs), the refusals lines carrying numeric
+    zero counters and zero log hits and the mode the run expects. A leg whose
+    own checks went green but which never reported an engine, never read the
+    refusal counters, or reported the pinned engine, is not a pass.
+
+``manifest-artifact <artifacts-dir> jar|native`` / ``candidate-in-manifest <artifacts-dir> <path>``
+    Battery side. Print the manifest's path for an artifact; say which
+    manifest artifact (if any) a candidate file is, by sha256.
+
+Runs under any python3 >= 3.9: the gates call it with the system python
+before any uv environment exists.
 """
 from __future__ import annotations
 
+import glob
 import hashlib
 import json
 import os
@@ -82,8 +100,10 @@ CANDIDATE_ENV = "NX_CANDIDATE_ENGINE"
 CUT_MODE_ENV = "NX_CUT_MODE"
 EXPECT_MODE_ENV = "NX_CANDIDATE_EXPECT_OWNERLESS_MODE"
 DEFAULT_EXPECT_MODE = "enforce"
-REFUSAL_LOG_EVENT = "ownerless_chunk_write_refused"
+#: Both events: enforce logs ``..._refused``, log-only logs ``..._would_refuse``.
+REFUSAL_LOG_RE = re.compile(r"ownerless_chunk_write_(?:refused|would_refuse)")
 IDENTITY_PREFIX = "ENGINE IDENTITY"
+REFUSALS_PREFIX = "ENGINE OWNERLESS REFUSALS"
 _LAUNCH_VARS = ("NEXUS_SERVICE_JAR", "NEXUS_SERVICE_BIN")
 
 
@@ -99,6 +119,11 @@ def cut_mode(environ: dict[str, str] | None = None) -> bool:
 def candidate_path(environ: dict[str, str] | None = None) -> str:
     env = os.environ if environ is None else environ
     return env.get(CANDIDATE_ENV, "").strip()
+
+
+def expected_mode(environ: dict[str, str] | None = None) -> str:
+    env = os.environ if environ is None else environ
+    return env.get(EXPECT_MODE_ENV, DEFAULT_EXPECT_MODE).strip() or DEFAULT_EXPECT_MODE
 
 
 def _real(path: str) -> str:
@@ -187,8 +212,6 @@ def resolve_env(environ: dict[str, str] | None = None, stage_dir: str = "") -> l
 
 
 def _read_lease(config_dir: str) -> dict:
-    import glob  # noqa: PLC0415 - only this path needs it
-
     leases = sorted(glob.glob(os.path.join(config_dir, "storage_service_addr.*")))
     if not leases:
         raise CandidateError(
@@ -201,63 +224,83 @@ def _read_lease(config_dir: str) -> dict:
 
 
 def _get_json(host: str, port: int, path: str) -> dict | None:
+    """GET a loopback engine route, or None. An EMPTY proxy map on purpose: an
+    ambient HTTP(S)_PROXY / ALL_PROXY makes urllib route 127.0.0.1 through the
+    proxy and the probe fails, which a gate would then read as 'no counters'."""
     url = f"http://{host}:{port}{path}"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     try:
-        with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310 - loopback engine
-            return json.loads(resp.read().decode("utf-8"))
+        with opener.open(url, timeout=10) as resp:  # noqa: S310 - loopback engine
+            body = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, ValueError):
         return None
+    return body if isinstance(body, dict) else None
 
 
-def _engine_probe(config_dir: str) -> tuple[dict, dict, dict]:
+def _engine_probe(config_dir: str) -> tuple[dict, dict | None, dict | None]:
+    """``(lease endpoint, /version or None, /v1/status or None)``; None means unreachable."""
     ep = _read_lease(config_dir)
     host, port = ep.get("host", "127.0.0.1"), int(ep["port"])
-    return ep, _get_json(host, port, "/version") or {}, _get_json(host, port, "/v1/status") or {}
+    return ep, _get_json(host, port, "/version"), _get_json(host, port, "/v1/status")
 
 
 def _fmt(value: object) -> str:
     return "none" if value in (None, "") else str(value)
 
 
+def _artifact_facts(ep: dict, environ: dict[str, str]) -> tuple[bool, str, str, object]:
+    """``(is_candidate, kind, sha256, artifact)`` for the artifact the lease names."""
+    artifact = ep.get("artifact")
+    cand = candidate_path(environ)
+    exists = bool(artifact) and os.path.isfile(str(artifact))
+    kind, sha = "none", "none"
+    if exists:
+        kind = "jar" if str(artifact).endswith(".jar") else "native"
+        sha = _sha256(str(artifact))
+    is_candidate = bool(exists and cand and os.path.isfile(cand) and sha == _sha256(cand))
+    return is_candidate, kind, sha, artifact
+
+
+def _not_candidate_failure(artifact: object, sha: str, cand: str, when: str = "") -> str:
+    return (
+        f"cut mode: this leg {when}ran against {_fmt(artifact)} (sha256 {sha}), not the "
+        f"candidate {cand}. "
+        "A leg that ran against the pinned published engine is a failure, whatever "
+        "its own checks said."
+    )
+
+
 def identity(config_dir: str, label: str, environ: dict[str, str] | None = None) -> tuple[str, str | None]:
     """Return ``(identity_line, failure_or_None)``."""
     env = os.environ if environ is None else environ
     ep, version, status = _engine_probe(config_dir)
-    artifact = ep.get("artifact")
-    cand = candidate_path(env)
-    is_candidate = bool(
-        cand and artifact and os.path.isfile(str(artifact)) and os.path.isfile(cand)
-        and _sha256(str(artifact)) == _sha256(cand)
-    )
-    kind = "none"
-    sha = "none"
-    if artifact and os.path.isfile(str(artifact)):
-        kind = "jar" if str(artifact).endswith(".jar") else "native"
-        sha = _sha256(str(artifact))
-    mode = status.get("ownerless_write_mode")
+    is_candidate, kind, sha, artifact = _artifact_facts(ep, env)
+    mode = (status or {}).get("ownerless_write_mode")
     line = (
         f"{IDENTITY_PREFIX} [{label}]: candidate={'yes' if is_candidate else 'no'} "
         f"kind={kind} artifact={_fmt(artifact)} sha256={sha} "
-        f"release_version={_fmt(version.get('release_version'))} "
-        f"build_ref={_fmt(version.get('build_ref'))} "
+        f"release_version={_fmt((version or {}).get('release_version'))} "
+        f"build_ref={_fmt((version or {}).get('build_ref'))} "
         f"ownerless_write_mode={_fmt(mode)}"
     )
     if not cut_mode(env):
         return line, None
+    cand = candidate_path(env)
     if not cand:
         return line, f"cut mode without {CANDIDATE_ENV}"
     if not is_candidate:
+        return line, _not_candidate_failure(artifact, sha, cand)
+    if status is None or version is None:
+        gone = "/v1/status" if status is None else "/version"
         return line, (
-            f"cut mode: this leg ran against {_fmt(artifact)} (sha256 {sha}), not the "
-            f"candidate {cand}. "
-            "A leg that ran against the pinned published engine is a failure, whatever "
-            "its own checks said."
+            f"cut mode: the engine's {gone} is unreachable (no proxy is used for the loopback "
+            "probe), so this leg cannot say which mode the engine runs or what it counted."
         )
-    expect = env.get(EXPECT_MODE_ENV, DEFAULT_EXPECT_MODE).strip() or DEFAULT_EXPECT_MODE
+    expect = expected_mode(env)
     if expect == "none":
         sys.stderr.write(
             f"WARNING: {EXPECT_MODE_ENV}=none, so this run does not assert the "
-            "candidate carries the ownerless-write check.\n"
+            "engine's ownerless_write_mode (everything else is still asserted).\n"
         )
         return line, None
     if mode != expect:
@@ -269,32 +312,65 @@ def identity(config_dir: str, label: str, environ: dict[str, str] | None = None)
     return line, None
 
 
+def _engine_logs(config_dir: str, ep: dict) -> list[str]:
+    """The engine log(s) the lease's launch kind names, rotations included. A jar launch
+    writes ``storage_service_jar.log``, a native launch ``storage_service_native.log``
+    (storage_service_daemon.py ``_svc_log_name``)."""
+    kind = ep.get("launch_kind")
+    if kind not in ("jar", "native"):
+        kind = "jar" if str(ep.get("artifact", "")).endswith(".jar") else "native"
+    pattern = os.path.join(config_dir, "logs", f"storage_service_{kind}.log*")
+    return sorted(p for p in glob.glob(pattern) if os.path.isfile(p))
+
+
 def refusals(config_dir: str, label: str, environ: dict[str, str] | None = None) -> tuple[str, str | None]:
     env = os.environ if environ is None else environ
-    _ep, _version, status = _engine_probe(config_dir)
-    refused = status.get("ownerless_writes_refused_total")
-    would = status.get("ownerless_writes_would_refuse_total")
-    log_path = os.path.join(config_dir, "logs", "storage_service_native.log")
+    ep, _version, status = _engine_probe(config_dir)
+    is_candidate, _kind, sha, artifact = _artifact_facts(ep, env)
+    status_d = status or {}
+    refused = status_d.get("ownerless_writes_refused_total")
+    would = status_d.get("ownerless_writes_would_refuse_total")
+    logs = _engine_logs(config_dir, ep)
     log_hits = 0
-    if os.path.isfile(log_path):
-        with open(log_path, encoding="utf-8", errors="replace") as fh:
-            log_hits = sum(1 for ln in fh if REFUSAL_LOG_EVENT in ln)
+    for path in logs:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            log_hits += sum(1 for ln in fh if REFUSAL_LOG_RE.search(ln))
+    log_cell = "none" if not logs else ",".join(os.path.basename(p) for p in logs)
     line = (
-        f"ENGINE OWNERLESS REFUSALS [{label}]: refused_total={_fmt(refused)} "
-        f"would_refuse_total={_fmt(would)} log_lines={log_hits} "
-        f"mode={_fmt(status.get('ownerless_write_mode'))}"
+        f"{REFUSALS_PREFIX} [{label}]: candidate={'yes' if is_candidate else 'no'} sha256={sha} "
+        f"refused_total={_fmt(refused)} would_refuse_total={_fmt(would)} "
+        f"log_lines={log_hits if logs else 'none'} log={log_cell} "
+        f"mode={_fmt(status_d.get('ownerless_write_mode'))}"
     )
     if not cut_mode(env):
         return line, None
-    expect = env.get(EXPECT_MODE_ENV, DEFAULT_EXPECT_MODE).strip() or DEFAULT_EXPECT_MODE
-    if expect != "none" and refused is None and would is None:
-        return line, "cut mode: /v1/status carries no ownerless-write counters, so a refusal could not have been seen"
+    cand = candidate_path(env)
+    if not cand:
+        return line, f"cut mode without {CANDIDATE_ENV}"
+    if not is_candidate:
+        return line, _not_candidate_failure(artifact, sha, cand, "ended its journey: it ")
+    if status is None:
+        return line, (
+            "cut mode: /v1/status is unreachable at the end of the journey, so a refusal "
+            "could not have been seen"
+        )
+    if refused is None and would is None:
+        return line, (
+            "cut mode: /v1/status carries no ownerless-write counters, so a refusal "
+            "could not have been seen"
+        )
     if (refused or 0) > 0 or (would or 0) > 0 or log_hits > 0:
         return line, (
             "cut mode: the engine refused (or would refuse) an ownerless chunk write "
             "during this journey. A writer this gate exercises writes a chunk with no "
             "manifest owner: fix the writer before tagging "
-            f"(engine log: {log_path})."
+            f"(engine log: {', '.join(logs) or 'none'})."
+        )
+    if not logs:
+        return line, (
+            f"cut mode: no engine log under {os.path.join(config_dir, 'logs')} for the lease's "
+            "launch kind, so the log half of the refusal oracle read nothing (the engine ran, "
+            "so its log exists; the counters alone do not survive an engine restart)"
         )
     return line, None
 
@@ -302,61 +378,129 @@ def refusals(config_dir: str, label: str, environ: dict[str, str] | None = None)
 _IDENTITY_RE = re.compile(
     rf"^\s*{IDENTITY_PREFIX} \[[^\]]*\]: candidate=(yes|no) .*artifact=(\S+) sha256=(\w+)", re.M
 )
+_REFUSALS_RE = re.compile(
+    rf"^\s*{REFUSALS_PREFIX} \[[^\]]*\]: candidate=(yes|no) sha256=(\w+) "
+    r"refused_total=(\S+) would_refuse_total=(\S+) log_lines=(\S+) log=\S+ mode=(\S+)", re.M
+)
 
 
-def cut_assert_log(logfile: str, label: str, environ: dict[str, str] | None = None) -> str | None:
+def cut_assert_log(
+    logfile: str, label: str, environ: dict[str, str] | None = None, candidate: str = "",
+) -> str | None:
     env = os.environ if environ is None else environ
     if not cut_mode(env):
         return None
-    cand = candidate_path(env)
+    cand = candidate or candidate_path(env)
     if not cand:
         return f"{label}: cut mode without {CANDIDATE_ENV}"
     try:
-        text = open(logfile, encoding="utf-8", errors="replace").read()  # noqa: SIM115
+        with open(logfile, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
     except OSError as exc:
         return f"{label}: cannot read leg log {logfile}: {exc}"
-    hits = _IDENTITY_RE.findall(text)
-    if not hits:
-        return (
-            f"{label}: cut mode, but the leg log carries no '{IDENTITY_PREFIX}' line, so "
-            "the leg never said which engine it ran against (pinned published engine?)"
-        )
     try:
         want = _sha256(cand)
     except OSError as exc:
         return f"{label}: cannot read the candidate {cand}: {exc}"
-    bad = [art for flag, art, sha in hits if flag != "yes" or sha != want]
+    ids = _IDENTITY_RE.findall(text)
+    if not ids:
+        return (
+            f"{label}: cut mode, but the leg log carries no '{IDENTITY_PREFIX}' line, so "
+            "the leg never said which engine it ran against (pinned published engine?)"
+        )
+    bad = [art for flag, art, sha in ids if flag != "yes" or sha != want]
     if bad:
         return f"{label}: cut mode, but the leg ran against {bad[0]}, not the candidate {cand}"
+    refs = _REFUSALS_RE.findall(text)
+    if not refs:
+        return (
+            f"{label}: cut mode, but the leg log carries no '{REFUSALS_PREFIX}' line: the leg "
+            "never read the engine's ownerless-write counters and log at the end of its journey"
+        )
+    expect = expected_mode(env)
+    for flag, sha, refused, would, log_lines, mode in refs:
+        if flag != "yes" or sha != want:
+            return (
+                f"{label}: cut mode, but the engine at the END of the journey was not the "
+                f"candidate {cand} (swapped mid-journey?)"
+            )
+        if not (refused.isdigit() and would.isdigit() and log_lines.isdigit()):
+            return (
+                f"{label}: cut mode, but the refusals line has no usable reading "
+                f"(refused_total={refused} would_refuse_total={would} log_lines={log_lines}): "
+                "a refusal could not have been seen"
+            )
+        if int(refused) or int(would) or int(log_lines):
+            return (
+                f"{label}: cut mode, but the engine refused (or would refuse) an ownerless "
+                f"chunk write (refused_total={refused} would_refuse_total={would} "
+                f"log_lines={log_lines})"
+            )
+        if expect != "none" and mode != expect:
+            return f"{label}: cut mode, but the engine reported ownerless_write_mode={mode}, expected {expect}"
     return None
 
 
-def main(argv: list[str]) -> int:
+def _manifest(artifacts_dir: str) -> dict:
+    path = os.path.join(artifacts_dir, "manifest.json")
     try:
-        match argv:
-            case ["env"]:
-                for line in resolve_env():
-                    print(line)
-                return 0
-            case ["env", "--stage", stage_dir]:
-                for line in resolve_env(stage_dir=stage_dir):
-                    print(line)
-                return 0
-            case ["identity", config_dir, *rest]:
-                label = rest[1] if rest[:1] == ["--label"] and len(rest) > 1 else "gate"
-                line, failure = identity(config_dir, label)
-            case ["refusals", config_dir, *rest]:
-                label = rest[1] if rest[:1] == ["--label"] and len(rest) > 1 else "gate"
-                line, failure = refusals(config_dir, label)
-            case ["cut-assert-log", logfile, label]:
-                failure = cut_assert_log(logfile, label)
-                if failure:
-                    print(f"CANDIDATE ENGINE CHECK FAILED: {failure}", file=sys.stderr)
-                    return 1
-                return 0
-            case _:
-                sys.stderr.write(__doc__ or "")
-                return 2
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise CandidateError(f"cannot read {path}: {exc}") from exc
+
+
+def manifest_artifact(artifacts_dir: str, name: str) -> str:
+    entry = _manifest(artifacts_dir).get("artifacts", {}).get(name)
+    if not entry:
+        raise CandidateError(f"{artifacts_dir}/manifest.json has no '{name}' artifact")
+    return os.path.join(artifacts_dir, entry["path"])
+
+
+def candidate_in_manifest(artifacts_dir: str, candidate: str) -> str:
+    """``jar`` / ``native`` when *candidate* is byte-identical to that manifest artifact, else ``none``."""
+    arts = _manifest(artifacts_dir).get("artifacts", {})
+    sha = _sha256(candidate)
+    for name in ("jar", "native"):
+        if name in arts and arts[name].get("sha256") == sha:
+            return name
+    return "none"
+
+
+def _label(rest: list[str]) -> str:
+    return rest[1] if rest[:1] == ["--label"] and len(rest) > 1 else "gate"
+
+
+def main(argv: list[str]) -> int:
+    cmd, args = (argv[0], argv[1:]) if argv else ("", [])
+    try:
+        if cmd == "env" and args == []:
+            for line in resolve_env():
+                print(line)
+            return 0
+        if cmd == "env" and len(args) == 2 and args[0] == "--stage":
+            for line in resolve_env(stage_dir=args[1]):
+                print(line)
+            return 0
+        if cmd in ("identity", "refusals") and args:
+            config_dir, label = args[0], _label(args[1:])
+            line, failure = (identity if cmd == "identity" else refusals)(config_dir, label)
+        elif cmd == "cut-assert-log" and len(args) in (2, 4) and (len(args) == 2 or args[2] == "--candidate"):
+            failure = cut_assert_log(args[0], args[1], candidate=args[3] if len(args) == 4 else "")
+            if failure:
+                print(f"CANDIDATE ENGINE CHECK FAILED: {failure}", file=sys.stderr)
+                return 1
+            return 0
+        elif cmd == "manifest-artifact" and len(args) == 2 and args[1] in ("jar", "native"):
+            print(manifest_artifact(args[0], args[1]))
+            return 0
+        elif cmd == "candidate-in-manifest" and len(args) == 2:
+            which = candidate_in_manifest(args[0], args[1])
+            print(which)
+            return 0 if which != "none" else 1
+        else:
+            sys.stderr.write(__doc__ or "")
+            return 2
     except CandidateError as exc:
         print(f"CANDIDATE ENGINE REFUSED: {exc}", file=sys.stderr)
         return 2
