@@ -82,9 +82,9 @@ def _actor() -> str:
     try:
         import getpass  # noqa: PLC0415 — only this verb needs it
 
-        return f"nx t3 quarantine restore ({getpass.getuser()})"
+        return f"nx-cli quarantine-restore ({getpass.getuser()})"
     except Exception:  # noqa: BLE001 — a missing login name must not stop a restore
-        return "nx t3 quarantine restore"
+        return "nx-cli quarantine-restore"
 
 
 def _fail(message: str, code: int) -> NoReturn:
@@ -258,7 +258,10 @@ def restore_cmd(collection: str, chashes: tuple[str, ...], audit_id: int | None,
                   "nexus-2x9xa): the connected engine predates it. Upgrade the engine (compare its "
                   "version against REQUIRED_ENGINE_VERSION in src/nexus/engine_version.py).",
                   EXIT_NO_ROUTE)
-        _fail(f"quarantine restore refused by the engine: {exc}", EXIT_ENGINE_ERROR)
+        # The engine names its request fields; the operator types flags.
+        said = str(exc).replace("quarantined_since / quarantined_before",
+                                "--quarantined-since / --quarantined-before")
+        _fail(f"quarantine restore refused by the engine: {said}", EXIT_ENGINE_ERROR)
 
     reapable = sorted(r["reapable_after"] for r in rows
                       if r.get("outcome") == "restored" and r.get("no_manifest") and r.get("reapable_after"))

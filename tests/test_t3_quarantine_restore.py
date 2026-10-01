@@ -230,9 +230,12 @@ class TestCli:
         assert no_route.exit_code == t3_quarantine.EXIT_NO_ROUTE, no_route.output
         assert "engine" in no_route.output.lower()
         refused = _run(runner, _Stub(error=VectorServiceError(
-            "gc_audit row 7 (gc_quarantine_orphans) lists only a sample", code=400)), "--audit-id", "7")
+            "gc_audit row 7 (gc_quarantine_orphans) lists only a sample; select them by "
+            "(quarantined_since / quarantined_before)", code=400)), "--audit-id", "7")
         assert refused.exit_code == t3_quarantine.EXIT_ENGINE_ERROR, refused.output
         assert "sample" in refused.output
+        assert "--quarantined-since / --quarantined-before" in refused.output, \
+            "the engine's field names read as the flags the operator types"
         assert refused.exception is None or isinstance(refused.exception, SystemExit)
 
 
