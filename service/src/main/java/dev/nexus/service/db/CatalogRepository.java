@@ -9554,8 +9554,17 @@ public final class CatalogRepository {
      *       reclaim path at all (nexus-n060e) — this ordering (empty check
      *       first, quarantine-hold second) is the fix for that gap;</li>
      *   <li>else, when it has no row in {@code nexus.collection_vector_stats}
-     *       (referenced elsewhere but no live chunks to embed or read), sets
-     *       {@code lifecycle_state = 'dormant'};</li>
+     *       (referenced elsewhere but holding no chunk at all, so nothing to embed
+     *       or read), sets {@code lifecycle_state = 'dormant'}. That view is the
+     *       collection INVENTORY since vectors-019-5 (RDR-192 Step 5 amendment, Sam
+     *       2026-09-27): a row for every collection that PHYSICALLY holds chunks,
+     *       live(c) or not. So a collection whose chunks are all hidden, unowned or
+     *       owned only by tombstoned documents, is NOT dormant here; it keeps its
+     *       state until {@code purge_trash} or the reaper removes the chunks. Before
+     *       vectors-019-5 the view read the tombstone-filtered {@code live_chunks} and an
+     *       all-tombstoned collection had no row and went dormant (nexus-wbfpw.35, pinned
+     *       by {@code GhostSweepDormantMarkingTest#allUnownedCollection_*} and
+     *       {@code #allTombstonedCollection_*});</li>
      *   <li>else leaves it exactly as it was.</li>
      * </ul>
      * The attribute walk (content_type/owner_id/embedding_model/dimension) is

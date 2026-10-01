@@ -32,9 +32,12 @@
     parses gets lifecycle_state = 'live' here with dimension NULL — the
     LATER jOOQ job (nexus-ft04v.3) is what flips a still-referenced-but-empty
     row to 'dormant'. DORMANT is "no row in nexus.collection_vector_stats"
-    (the view reads tombstone-filtered live_chunks, so an all-tombstoned
-    collection also has no row and is walked exactly like a genuinely
-    chunkless one).
+    (as of this changeset the view read tombstone-filtered live_chunks, so an
+    all-tombstoned collection also had no row and was walked exactly like a
+    genuinely chunkless one. Since vectors-019-5 the view is the collection
+    inventory, one row per collection that physically holds chunks, live or
+    not, so an all-tombstoned or all-unowned collection is no longer dormant;
+    see CatalogRepository#sweepGhostsAndMarkDormant, nexus-wbfpw.35).
 
     BRANCHES (every row gets exactly one, by name shape; content_type,
     owner_id, embedding_model, dimension, lifecycle_state are the only

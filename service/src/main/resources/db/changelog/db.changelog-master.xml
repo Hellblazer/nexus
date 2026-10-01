@@ -1716,6 +1716,15 @@
     <include file="db/changelog/fk-006-census-comments-name-diag-view.xml"/>
 
     <!--
+        nexus-wbfpw.35 (RDR-192 Phase 2 gate M2): nexus.text_gate_probe_<dim> moves
+        onto live(c), the one predicate vectors-019 gave every other read path, so
+        the hybrid dispatch's gate count means the rows the ranking functions
+        return — see the included file's own header. Function bodies only, no data
+        effect. Placed after fk-006 (the tail when this landed) and before the grants blocks.
+    -->
+    <include file="db/changelog/vectors-023-text-gate-probe-live-c.xml"/>
+
+    <!--
         Consolidated nexus_svc DML grants (bead nexus-net63) — runAlways="true".
         Must be LAST so all schema objects exist before grants are issued.
         Replaces the per-store IF-EXISTS-skip DO-blocks that silently skipped when

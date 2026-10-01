@@ -4598,6 +4598,16 @@ FROM scope s
      * RLS is enforced via {@link dev.nexus.service.db.TenantScope#withTenant} —
      * cross-tenant rows are invisible.
      *
+     * <p><b>Physical read, deliberately not live(c)</b> (RDR-192 Phase 2 gate M7,
+     * nexus-wbfpw.35). Its one caller is the {@code chroma://<collection>/<chash>} URI
+     * resolver ({@link dev.nexus.service.resolver.ChromaSchemeHandler}), and a URI
+     * that names a chash is a content-addressed permalink: it resolves whatever is
+     * stored at that (collection, chash), including a chunk live(c) hides (no owner,
+     * or owners all tombstoned). Everything that serves a chunk by search, get or list
+     * goes through {@code liveChunksCondition} or a live(c) function instead.
+     * {@code Rdr192EngineLivenessMatrixIntegrationTest#fetchChunkText_readsPhysically_regardlessOfLiveness}
+     * pins this.
+     *
      * @param tenant     the requesting tenant principal
      * @param collection four-segment conformant collection name (drives dim dispatch)
      * @param chash      the chunk's natural ID (the full sha256 hexdigest, RDR-180)
