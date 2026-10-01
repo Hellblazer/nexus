@@ -9,7 +9,9 @@ through the real CLI. The engine side is proven in ``test_wbfpw19_store_list_rea
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+import re
 
 import pytest
 from click.testing import CliRunner
@@ -40,9 +42,16 @@ def real_client():
     reset_http_vector_client_for_tests()
 
 
-def _row(i: int, *, days_old: int = 40, doc: str | None = None) -> dict:
-    created = (datetime.now(UTC) - timedelta(days=days_old)).isoformat().replace("+00:00", "Z")
-    return {"chash": _chash(i), "created_at": created, "last_written_at": created,
+def _ts(days_old: int) -> str:
+    return (datetime.now(UTC) - timedelta(days=days_old)).isoformat().replace("+00:00", "Z")
+
+
+def _row(i: int, *, days_old: int = 40, doc: str | None = None, created_days_old: int | None = None) -> dict:
+    """*days_old* is the age of last_written_at (the engine's grace clock column); created_at is the
+    same unless *created_days_old* says it is older (it is write-once, so it can only be older)."""
+    written = _ts(days_old)
+    created = _ts(created_days_old) if created_days_old is not None else written
+    return {"chash": _chash(i), "created_at": created, "last_written_at": written,
             "title": f"title-{i}", "catalog_doc_id": doc}
 
 
@@ -65,11 +74,19 @@ class _Engine:
                 "next_after": rows[-1]["chash"] if len(rows) >= limit else None, "chunks": rows}
 
 
-def _invoke(runner, real_client, engine: _Engine, args: list[str]):
+def _stats(*names: str) -> list[dict]:
+    return [{"name": n, "count": 10, "stored_count": 10, "lifecycle_state": "live"} for n in names]
+
+
+def _invoke(runner, real_client, engine: _Engine, args: list[str], *,
+            known: tuple[str, ...] = (_COLL,), catalog_knows: bool = False):
+    fake_cat = MagicMock()
+    fake_cat.get_collection.return_value = object() if catalog_knows else None
     with (
         patch("nexus.db.http_vector_client._post", engine.post),
-        patch("nexus.db.http_vector_client._get", lambda *a, **k: []),  # an empty stats listing
+        patch("nexus.db.http_vector_client._get", lambda *a, **k: _stats(*known)),
         patch("nexus.commands.store.make_t3", return_value=real_client),
+        patch("nexus.catalog.factory.make_catalog_reader", return_value=fake_cat),
     ):
         return runner.invoke(main, ["store", "list", *args])
 
@@ -85,19 +102,55 @@ def test_reapable_without_collection_is_a_usage_error(runner, real_client):
 def test_reapable_with_the_default_value_spelled_out_is_accepted(runner, real_client):
     """The rule is that the operator NAMED a collection, not that it differs from the default."""
     engine = _Engine([_row(1)])
-    result = _invoke(runner, real_client, engine, ["--reapable", "-c", "knowledge"])
+    # What the bare name resolves to depends on the box's embedding model; pin it to a collection
+    # the stats listing knows so the test is about the flag, not about the resolver.
+    with patch("nexus.commands.store.t3_collection_name", return_value=_COLL):
+        result = _invoke(runner, real_client, engine, ["--reapable", "-c", "knowledge"])
     assert result.exit_code == 0, result.output
 
 
-def test_reapable_lists_chash_created_age_title_and_catalog_doc_id(runner, real_client):
-    engine = _Engine([_row(1, days_old=40, doc="1.2.3"), _row(2, days_old=3, doc=None)])
+def test_reapable_lists_chash_written_age_created_title_and_catalog_doc_id(runner, real_client):
+    engine = _Engine([_row(1, days_old=40, doc="1.2.3"), _row(2, days_old=33, doc=None)])
     result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL])
     assert result.exit_code == 0, result.output
     line1 = next(line for line in result.output.splitlines() if _chash(1) in line)
     assert "title-1" in line1 and "1.2.3" in line1 and "40d" in line1
-    assert "T" in line1  # the created_at timestamp is printed
+    assert "T" in line1  # the timestamps are printed
     line2 = next(line for line in result.output.splitlines() if _chash(2) in line)
-    assert "title-2" in line2 and "3d" in line2
+    assert "title-2" in line2 and "33d" in line2
+
+
+def test_the_age_is_days_since_last_write_not_since_creation(runner, real_client):
+    """The engine's grace runs from last_written_at (and the orphaning time), never created_at, which
+    is write-once and so always overstates. A chunk created 400 days ago and re-written 35 days ago
+    shows 35d; created_at is printed beside it, and no age is derived from it."""
+    engine = _Engine([_row(1, days_old=35, created_days_old=400)])
+    result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL])
+    assert result.exit_code == 0, result.output
+    line = next(line for line in result.output.splitlines() if _chash(1) in line)
+    assert "35d" in line and "400d" not in line
+    assert re.findall(r"\b\d+d\b", line) == ["35d"], "exactly one age is shown, and it is the write age"
+    assert _ts(400)[:10] in line and _ts(35)[:10] in line, "both timestamps are printed"
+    assert "last write" in result.output  # the header names the clock
+
+
+def test_an_unknown_collection_is_refused_not_reported_as_clean(runner, real_client):
+    """The engine answers a reapable listing for ANY name with an empty 200, so a typo used to print
+    "0 reapable chunks in X", the words a clean collection gets. gc refuses an unknown name; so does this."""
+    engine = _Engine([])
+    result = _invoke(runner, real_client, engine, ["--reapable", "-c", "knowledge__typo__voyage-context-3__v1"])
+    assert result.exit_code == 1, result.output
+    assert "no collection named" in result.output
+    assert "0 reapable chunks" not in result.output
+    assert engine.posted == [], "no listing request is made for a name nothing knows"
+
+
+def test_a_catalog_registered_empty_collection_is_known_and_reads_clean(runner, real_client):
+    """A registered collection with no chunks is absent from the chunk listing but is a real name."""
+    engine = _Engine([])
+    result = _invoke(runner, real_client, engine, ["--reapable", "-c", _COLL], known=(), catalog_knows=True)
+    assert result.exit_code == 0, result.output
+    assert f"0 reapable chunks in {_COLL}" in result.output
     # No grace is passed: the default listing is what a gc pass would take.
     assert all("grace_seconds" not in body for _p, body in engine.posted)
 

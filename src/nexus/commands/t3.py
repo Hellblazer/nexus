@@ -108,8 +108,8 @@ def _make_catalog():
 
     Without the init gate, running ``nx t3 gc`` on a fresh install
     either crashes with an opaque traceback inside ``Catalog.__init__``
-    or, worse, silently produces an empty alive-set so every chunk is
-    treated as orphan (catastrophic when paired with --no-dry-run --yes).
+    or, worse, reads an empty catalog as having nothing to protect (the
+    index-state breaker and the unknown-collection guard both read it).
 
     Patched in tests for isolation.
     """
@@ -254,6 +254,20 @@ def _census_blocker_totals(census: dict, collection: str) -> dict[str, int]:
     return {b: int(totals[b]) for b in _GC_CENSUS_BLOCKERS}
 
 
+def _census_scope_total(census: dict, collection: str) -> int:
+    """``scope_chunk_total`` from one census response: every chunk the collection holds. It is the
+    floor's denominator and half of the empty-manifest guard, so a response without it cannot be read
+    as 0 (that would switch both off): refuse to act without it."""
+    raw = census.get("scope_chunk_total")
+    if raw is None:
+        raise click.ClickException(
+            f"The manifest-less census for {collection!r} carried no scope_chunk_total; refusing to "
+            f"act without it, since the fraction floor and the empty-manifest guard both read it "
+            f"(RDR-192 R8)."
+        )
+    return int(raw)
+
+
 def _census_blocker_reasons(collection: str, blockers: dict[str, int], *, prior: bool = False) -> list[str]:
     """One refusal reason per blocking bucket above zero. *prior* words them for the re-read made
     immediately before the move ("now reads ...; it read 0 when this run began")."""
@@ -343,23 +357,34 @@ def gc_cmd(
     tombstoned owner still counts, so ``nx catalog purge-trash`` owns those),
     and it has been ownerless for the engine's 30 day grace. Aging runs on the
     later of ``last_written_at`` and the moment the chunk last lost an owner
-    row (``nexus.chunk_orphaned_at``), NOT on ``indexed_at``; a chunk with no
-    ``indexed_at`` is therefore a candidate once it is old enough.
+    row (recorded in the side table ``nexus.chunk_orphaned_at``), NOT on
+    ``indexed_at``; a chunk with no ``indexed_at`` is therefore a candidate once
+    it is old enough.
 
     \b
     The verb MOVES, it does not delete. The act is the engine route
     ``POST /v1/vectors/gc/quarantine-orphans`` (``gc_quarantine_orphans``, the
     BOUNDED form: 2000 rows per call, looped until ``remaining`` is 0): its
     own statement carries the predicate, takes the exclusive per-collection
-    sweep gate, and moves the rows to the ``quarantine-*`` sibling, restorable
-    for 14 days (``NX_GC_QUARANTINE_DAYS``) and then expired by the engine. A
-    client that re-writes a chunk after the listing wins, because the predicate
-    is evaluated against the rows the statement actually locks. The route is
+    sweep gate, and moves the rows to the ``quarantine-*`` sibling. A client
+    that re-writes a chunk after the listing wins, because the predicate is
+    evaluated against the rows the statement actually locks. The route is
     collection-wide: it takes no chunk list, no exclusion list and no window.
-    The engine records the pass in ``gc_audit`` (actor ``engine``); this verb
+    The engine records each batch in ``gc_audit`` (actor ``engine``); this verb
     writes no audit row of its own. The listing printed here is advisory (a
     lock-free snapshot, paged by keyset) and is what the route would take at
     that instant.
+
+    \b
+    The verb frees no storage by itself: the moved chunks sit in
+    ``quarantine-*`` until they are expired. A chunk this verb moved is expired
+    by the CLIENT, at the end of an ``nx index repo`` run, once it is older than
+    ``NX_GC_QUARANTINE_DAYS`` (default 14); a chunk the engine's reaper moved is
+    expired by the engine. A chunk whose document is re-registered is restored
+    automatically by the same run. ``nx t3 quarantine restore`` is the operator
+    restore verb (it ships with the reaper work, nexus-2x9xa, not with this
+    verb). Each engine batch commits on its own, so a run that stops part way
+    leaves its earlier batches moved and re-running it is safe.
 
     \b
     ``--orphan-window`` was REMOVED: the engine exposes no tunable grace, so a
@@ -380,8 +405,11 @@ def gc_cmd(
       - Fraction floor: a pass whose candidates exceed ``NX_GC_FLOOR_FRACTION``
         (default 0.25) of the collection's chunks, from 100 chunks up, is the
         manifest-gap misclassification shape. Override: ``NX_GC_FORCE=1``. The
-        floor is the client's and permanent: the route this verb moves with
-        carries none, and the reaper's lives in a function with no HTTP route.
+        floor is this verb's own and permanent: the route this verb moves with
+        carries none (the engine reaper's floor never reaches it, and
+        ``indexer._prune_deleted_files`` calls the same route with no floor at
+        all). Because it is checked on the advisory listing, the bounded drain
+        can move more than the floor admits if chunks age in mid-run.
       - Empty manifest set (nexus-jqrtp): the collection holds chunks but none
         has a manifest row in it (read off the census: stored chunks minus the
         manifest-less buckets is 0), the shape of a fresh or mis-scoped tenant
@@ -477,7 +505,7 @@ def gc_cmd(
             f"Failed to read the manifest-less census for {collection!r}: {exc}"
         ) from exc
     census_blockers = _census_blocker_totals(census, collection)
-    scope_chunk_total = int(census.get("scope_chunk_total", 0))
+    scope_chunk_total = _census_scope_total(census, collection)
     # Chunks carrying an own-collection manifest row = everything the collection holds minus the five
     # manifest-less buckets (the census classifies exactly the chunks with no such row).
     manifest_less_total = sum(int(n) for n in (census.get("totals") or {}).values())
@@ -522,6 +550,13 @@ def gc_cmd(
             f"with --allow-incomplete-index-state."
         )
     reasons.extend(_census_blocker_reasons(collection, census_blockers))
+    if scope_chunk_total <= 0:
+        reasons.append(
+            f"the listing names {len(candidates)} reapable chunk(s) in '{collection}' but the census "
+            f"reads scope_chunk_total = {scope_chunk_total}. The two disagree, so the floor and the "
+            f"empty-manifest guard have no denominator; refusing rather than moving on an "
+            f"unverifiable collection (RDR-192 R8)."
+        )
     if scope_chunk_total > 0 and owned_chunks <= 0 and not allow_empty_manifest_set:
         reasons.append(
             f"the catalog manifest for '{collection}' names NONE of the {scope_chunk_total} "
@@ -531,9 +566,10 @@ def gc_cmd(
             f"with 'nx t3 backfill-manifest -c {collection}' or 'nx catalog reconcile', or, if "
             f"the collection really is fully orphaned, re-run with --allow-empty-manifest-set."
         )
-    # THE FLOOR IS PERMANENT, and it is the client's. gc_quarantine_orphans (the route this verb moves
-    # with) carries no fraction floor; the reaper's floor lives inside reaper_quarantine_chunks, which
-    # has no HTTP route, so no engine-side floor will ever reach this verb. The variable is
+    # THE FLOOR IS PERMANENT, and it is this verb's own. gc_quarantine_orphans (the route this verb
+    # moves with) carries no fraction floor; the reaper's floor lives inside reaper_quarantine_chunks,
+    # which has no HTTP route, so no engine-side floor reaches this verb (and
+    # indexer._prune_deleted_files moves through the same route with none at all). The variable is
     # NX_GC_FLOOR_FRACTION (with NX_GC_FORCE), the name the indexer's quarantine-expiry floor already
     # reads through the same fail-safe parser, the same default (0.25) and the same 100-chunk minimum:
     # one name for the operator across the client GC floors. NX_REAPER_FLOOR_FRACTION is NOT reused:
@@ -553,8 +589,7 @@ def gc_cmd(
             f"{_GC_FLOOR_MIN_CHUNKS} chunks up). A verdict this large is the manifest-gap "
             f"misclassification shape, not routine churn. The engine route this verb moves with "
             f"carries no floor, so this verb holds it. If the collection really is mostly "
-            f"garbage, re-run with NX_GC_FORCE=1 (the move is reversible for the quarantine "
-            f"window)."
+            f"garbage, re-run with NX_GC_FORCE=1 (the chunks go to quarantine, not away)."
         )
 
     if not will_act:
@@ -607,8 +642,8 @@ def gc_cmd(
     # the predicate and takes the sweep gate, so a racing client write wins.
     from nexus.catalog.chunk_quarantine import (  # noqa: PLC0415 — command-local import (nexus.catalog.chunk_quarantine)
         GC_AUDIT_MAX_CHASHES,
+        BoundedDrainIncomplete,
         quarantine_collection_name,
-        quarantine_days,
         quarantine_orphans_bounded_serverside,
         quarantine_orphans_serverside,
     )
@@ -617,17 +652,34 @@ def gc_cmd(
     stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         moved_result = quarantine_orphans_bounded_serverside(
-            t3_db, collection, qname, stamp, sample_limit=GC_AUDIT_MAX_CHASHES,
+            t3_db, collection, qname, stamp, sample_limit=GC_AUDIT_MAX_CHASHES, strict=True,
         )
         if moved_result is None:
             moved_result = quarantine_orphans_serverside(
                 t3_db, collection, qname, stamp, sample_limit=GC_AUDIT_MAX_CHASHES,
             )
+    except BoundedDrainIncomplete as exc:
+        # Every batch commits on its own: what moved before the stop is moved, audited and sitting in
+        # quarantine. The verb says so, so an operator does not read a failure as "nothing happened".
+        left = "unknown" if exc.remaining is None else str(exc.remaining)
+        detail = f": {exc.__cause__}" if exc.__cause__ is not None else ""
+        click.echo(
+            f"\nSummary: the engine move for {collection} STOPPED ({exc.reason}{detail}). "
+            f"{exc.moved} chunk(s) were moved into {qname} in {exc.batches} earlier batch(es); each "
+            f"batch committed on its own and stays moved, so re-running this verb is safe. "
+            f"Still reapable when it stopped: {left}.",
+            err=True,
+        )
+        raise click.exceptions.Exit(1) from exc
     except VectorServiceError as exc:
         if exc.code == 404:
             raise click.ClickException(_GC_NO_ROUTE_MESSAGE) from exc
-        click.echo(f"\nSummary: the engine move FAILED for {collection}: {exc}", err=True)
-        raise click.exceptions.Exit(1)
+        click.echo(
+            f"\nSummary: the engine move FAILED for {collection} before any batch moved a chunk: "
+            f"{exc}",
+            err=True,
+        )
+        raise click.exceptions.Exit(1) from exc
     if moved_result is None:
         raise click.ClickException(
             "this T3 handle carries no gc_quarantine_orphans route; this verb needs the "
@@ -635,9 +687,9 @@ def gc_cmd(
         )
     moved, _sample = moved_result
     click.echo(
-        f"\nSummary: quarantined {moved} chunk(s) from {collection} into {qname}, restorable for "
-        f"{quarantine_days()} days and then expired by the engine. The engine recorded the pass "
-        f"in gc_audit (nx catalog gc-audit list)."
+        f"\nSummary: quarantined {moved} chunk(s) from {collection} into {qname}. The engine "
+        f"recorded each batch in gc_audit (nx catalog gc-audit list). The chunks are moved, not "
+        f"freed: they are expired after NX_GC_QUARANTINE_DAYS by the next 'nx index repo' run."
     )
     if moved < len(candidates):
         click.echo(

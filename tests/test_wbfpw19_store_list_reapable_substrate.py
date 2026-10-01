@@ -37,8 +37,8 @@ def test_lists_exactly_the_reapable_rows_of_the_fixture(env):
     for chash in fx.reapable:
         line = next(line for line in result.output.splitlines() if chash in line)
         assert "wbfpw19-list orphan" in line  # the chunk's title, from its own metadata
-        assert re.search(r"\b\d+d\b", line), line  # age in days, from created_at
-        assert "Z" in line  # created_at, as the engine reports it
+        assert re.search(r"\b\d+d\b", line), line  # age in days, from last_written_at
+        assert "Z" in line  # the timestamps, as the engine reports them
     # Read-only: listing moved nothing.
     from nexus.db.http_vector_client import HttpVectorClient
 
@@ -60,6 +60,17 @@ def test_a_clean_collection_prints_the_empty_line(env):
     result = runner.invoke(main, ["store", "list", "--reapable", "-c", coll])
     assert result.exit_code == 0, result.output
     assert f"0 reapable chunks in {coll}" in result.output
+
+
+def test_an_unknown_collection_is_refused_not_reported_clean(env):
+    """The engine answers the listing for any name with an empty 200; the verb must not turn a typo
+    into "0 reapable chunks", the words a clean collection gets."""
+    _cat, runner = env
+    typo = collection_name("wbfpw19-no-such-collection")
+    result = runner.invoke(main, ["store", "list", "--reapable", "-c", typo])
+    assert result.exit_code == 1, result.output
+    assert "no collection named" in result.output
+    assert "0 reapable chunks" not in result.output
 
 
 def test_without_collection_is_a_usage_error_before_any_engine_call(env):

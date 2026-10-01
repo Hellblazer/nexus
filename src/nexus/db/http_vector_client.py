@@ -4727,47 +4727,6 @@ class HttpVectorClient:
             f"{_SOURCE_PATH_RETIRED}"
         )
 
-    def delete_by_chunk_ids(
-        self, collection_name: str, chunk_ids: list[str],
-    ) -> int:
-        """Delete chunks by explicit id. Returns count deleted.
-
-        nexus-h8rf6.7: was missing — ``nx t3 gc``'s orphan deletion silently
-        no-oped in service mode (the call site is try/except-wrapped, so the
-        AttributeError degraded instead of crashing). T3Database parity:
-        empty ``chunk_ids`` is a no-op (0), missing collection returns 0
-        without raising. Delegates to :meth:`batch_delete` for the
-        quota-bounded batching.
-        """
-        if not chunk_ids:
-            return 0
-        from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
-
-        size = QUOTAS.MAX_RECORDS_PER_WRITE
-        deleted = 0
-        for start in range(0, len(chunk_ids), size):
-            batch = chunk_ids[start:start + size]
-            try:
-                result = _post(
-                    "/v1/vectors/store-delete",
-                    {"collection": collection_name, "ids": batch},
-                    tenant=self._tenant,
-                )
-            except VectorServiceError as exc:
-                # 404 before anything was deleted = missing collection (T3
-                # parity: 0). A failure AFTER a successful batch must NOT be
-                # reported as 0 — the caller (nx t3 gc) would log "deleted 0"
-                # despite partial deletion (wave review, sibling convention:
-                # mid-pagination failures are never swallowed).
-                if exc.code == 404 and deleted == 0:
-                    return 0
-                raise
-            # The engine skips an id a live manifest still references (RDR-191
-            # F10c) and reports what it removed; count that, not the batch.
-            reported = (result or {}).get("deleted")
-            deleted += int(reported) if reported is not None else len(batch)
-        return deleted
-
     def list_unique_source_paths(self, collection_name: str) -> list[str]:
         """UNSUPPORTED — chunk metadata has no ``source_path`` (nexus-bm8dd).
 
@@ -4801,6 +4760,11 @@ class HttpVectorClient:
         elsewhere (or nowhere); a live(c)-filtered listing structurally
         cannot see them (an owned chunk is never a candidate; an unowned one
         is exactly what live(c) hides).
+
+        nexus-wbfpw.18: ``nx t3 gc`` no longer calls this (it takes its
+        candidates from the engine's reapable route). No verb does; the one
+        remaining consumer is the era-hop rehearsal's chunk-id conformance
+        probe (tests/e2e/migration-rehearsal/rehearse_era_hop.sh).
         """
         from nexus.db.limits import QUOTAS  # noqa: PLC0415 — command-local import (db.limits)
 

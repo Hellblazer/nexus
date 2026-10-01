@@ -62,7 +62,13 @@ class _Engine:
                  census_error: Exception | None = None, page: int | None = None,
                  in_t3: bool = True, no_owner: int = 0, legacy_on_recheck: int | None = None,
                  unclassified: int = 0, unclassified_on_recheck: int | None = None,
-                 batches: list[int] | None = None) -> None:
+                 batches: list[int] | None = None, omit_scope: bool = False,
+                 move_script: list | None = None, stuck: dict | None = None) -> None:
+        # move_script: results (dict) or exceptions the move route answers with, in order; stuck: a
+        # result the route answers with forever once the script is exhausted.
+        self.omit_scope = omit_scope
+        self.move_script = list(move_script) if move_script is not None else None
+        self.stuck = stuck
         self.unclassified = unclassified
         self.unclassified_on_recheck = unclassified_on_recheck
         self.batches = list(batches) if batches is not None else None
@@ -102,8 +108,11 @@ class _Engine:
                 self.unclassified_on_recheck
                 if self.census_calls > 1 and self.unclassified_on_recheck is not None else self.unclassified
             )
-            return {"collection": body["collection"], "returned": 0, "chashes": {},
+            page = {"collection": body["collection"], "returned": 0, "chashes": {},
                     "owners": {}, "totals": totals, "scope_chunk_total": self.total}
+            if self.omit_scope:
+                del page["scope_chunk_total"]
+            return page
         if path == "/v1/vectors/reapable":
             assert "offset" not in body, "the listing is paged by keyset, never offset"
             assert "grace_seconds" not in body, "the verb never passes a grace; the engine default stands"
@@ -117,6 +126,15 @@ class _Engine:
                 "chunks": [_row(i) for i in rows],
             }
         if path == "/v1/vectors/gc/quarantine-orphans":
+            if self.move_script is not None:
+                if self.move_script:
+                    step = self.move_script.pop(0)
+                    if isinstance(step, Exception):
+                        raise step
+                    return step
+                if self.stuck is not None:
+                    return self.stuck
+                raise AssertionError("the move was called more often than the test scripted")
             if self.batches is not None:
                 moved = self.batches.pop(0)
                 return {"moved": moved, "sample": [], "remaining": sum(self.batches),
@@ -130,7 +148,7 @@ class _Engine:
 
 
 def _invoke(runner: CliRunner, real_client, engine: _Engine, args: list[str], *, documents=(),
-            catalog_knows: bool = True):
+            catalog_knows: bool = True, documents_error: Exception | None = None):
     fake_cat = MagicMock()
     fake_cat.get_collection.return_value = object() if catalog_knows else None
     with (
@@ -138,7 +156,11 @@ def _invoke(runner: CliRunner, real_client, engine: _Engine, args: list[str], *,
         patch("nexus.db.http_vector_client._get", lambda path, **kw: engine.stats()),
         patch("nexus.db.make_t3", return_value=real_client),
         patch("nexus.commands.t3._make_catalog", return_value=fake_cat),
-        patch("nexus.indexer_utils.catalog_documents_for_collection", return_value=list(documents)),
+        patch(
+            "nexus.indexer_utils.catalog_documents_for_collection",
+            **({"side_effect": documents_error} if documents_error is not None
+               else {"return_value": list(documents)}),
+        ),
         patch("nexus.catalog.factory.make_catalog_writer",
               side_effect=AssertionError("nx t3 gc must not write its own gc_audit row")),
     ):
@@ -184,7 +206,9 @@ def test_act_moves_through_the_engine_route_and_never_deletes_by_id(runner, real
     assert move["row_limit"] == 2000
     assert move["sample_limit"] == 5000
     assert "quarantined 3 chunk(s)" in result.output
-    assert "restorable" in result.output
+    # The verb says it MOVED chunks; it promises neither storage freed nor a restore it cannot do.
+    assert "moved, not freed" in result.output
+    assert "restorable for" not in result.output
 
 
 def test_dry_run_moves_nothing(runner, real_client):
@@ -430,3 +454,178 @@ def test_the_floor_is_the_gc_family_variable_and_never_the_reapers(runner, real_
     under = _Engine(total=100, reapable=list(range(1, 41)))  # 40% < 50%
     allowed = _invoke(runner, real_client, under, ["--no-dry-run", "--yes"])
     assert allowed.exit_code == 0, allowed.output
+
+
+# ── (round 2) a census without scope_chunk_total refuses; it does not switch the guards off ─────
+
+
+def test_a_census_without_scope_chunk_total_refuses_and_moves_nothing(runner, real_client, monkeypatch):
+    """scope_chunk_total is the floor's denominator and half of the empty-manifest guard. A response
+    that omits it used to read as 0, which silently turned BOTH off (a collection of 100 chunks, 90
+    reapable, moved with exit 0). A missing blocking bucket already refused; this refuses the same way."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    engine = _Engine(total=100, reapable=list(range(1, 91)), omit_scope=True)
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code != 0
+    assert "scope_chunk_total" in result.output
+    assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
+    # --allow-empty-manifest-set does not override an unreadable census.
+    forced = _invoke(runner, real_client, _Engine(total=100, reapable=[1], omit_scope=True),
+                     ["--no-dry-run", "--yes", "--allow-empty-manifest-set"])
+    assert forced.exit_code != 0 and "scope_chunk_total" in forced.output
+
+
+def test_a_dry_run_also_refuses_a_census_without_scope_chunk_total(runner, real_client):
+    engine = _Engine(total=10, reapable=[1], omit_scope=True)
+    result = _invoke(runner, real_client, engine, ["--dry-run"])
+    assert result.exit_code != 0 and "scope_chunk_total" in result.output
+
+
+def test_a_listing_against_a_zero_scope_census_is_refused(runner, real_client):
+    """The listing names reapable chunks while the census says the collection holds none: the two
+    disagree and the floor has no denominator, so the verb refuses instead of moving."""
+    engine = _Engine(total=0, reapable=[1, 2])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code != 0
+    assert "scope_chunk_total = 0" in result.output and "REFUSING" in result.output
+    assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
+
+
+# ── (round 2) a drain that ends short of remaining == 0 is exit 1, and says what already moved ──
+
+
+def _result(moved: int, remaining: int) -> dict:
+    return {"moved": moved, "sample": [], "remaining": remaining, "row_limit": 2000}
+
+
+def test_a_stuck_engine_that_moves_nothing_is_exit_1_not_a_quiet_zero(runner, real_client):
+    """An engine answering moved=0 remaining=7 forever used to be polled 200 times and reported as
+    'quarantined 0', exit 0. A batch that makes no progress ends the drain."""
+    engine = _Engine(total=10, reapable=[1, 2, 3], stuck=_result(0, 7), move_script=[])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "no progress" in result.output
+    assert "0 chunk(s) were moved" in result.output
+    assert "re-running this verb is safe" in result.output
+    assert "Still reapable when it stopped: 7" in result.output
+    assert engine.paths().count("/v1/vectors/gc/quarantine-orphans") == 1, "stop at the first idle batch"
+    assert "quarantined 0" not in result.output
+
+
+def test_the_iteration_cap_with_remaining_left_is_exit_1_with_the_moved_count(
+    runner, real_client, monkeypatch,
+):
+    monkeypatch.setattr("nexus.catalog.chunk_quarantine._gc_loop_max_iterations", lambda _row_limit: 3)
+    engine = _Engine(total=10, reapable=[1, 2, 3], move_script=[], stuck=_result(2, 5))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "iteration cap" in result.output
+    assert "6 chunk(s) were moved" in result.output and "in 3 earlier batch(es)" in result.output
+    assert "committed on its own" in result.output
+    assert "Still reapable when it stopped: 5" in result.output
+    assert engine.paths().count("/v1/vectors/gc/quarantine-orphans") == 3
+    assert "quarantined 6" not in result.output
+
+
+def test_a_failure_after_earlier_batches_reports_what_already_moved(runner, real_client):
+    engine = _Engine(
+        total=10, reapable=[1, 2, 3],
+        move_script=[_result(2, 1), VectorServiceError("engine went away", code=500)],
+    )
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "batch failed" in result.output and "engine went away" in result.output
+    assert "2 chunk(s) were moved" in result.output
+    assert "re-running this verb is safe" in result.output
+
+
+def test_a_failure_of_the_first_batch_says_nothing_moved(runner, real_client):
+    engine = _Engine(
+        total=10, reapable=[1], move_script=[VectorServiceError("engine went away", code=500)],
+    )
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 1, result.output
+    assert "before any batch moved a chunk" in result.output
+    assert "engine went away" in result.output
+
+
+def test_a_drain_whose_batches_all_make_progress_still_exits_zero(runner, real_client):
+    """Non-vacuity for the strict drain: ordinary batches are not 'stuck'."""
+    engine = _Engine(total=10, reapable=[1, 2, 3, 4], move_script=[_result(2, 2), _result(1, 1), _result(1, 0)])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "quarantined 4 chunk(s)" in result.output
+
+
+# ── (round 2) the RUNFENCE lookup fails closed ───────────────────────────────────────────────────
+
+
+def test_a_failed_index_state_lookup_refuses_and_reads_no_chunk(runner, real_client):
+    """The index-run state is unverifiable, so the run refuses outright rather than risk moving
+    chunks an in-flight reindex has written but not yet manifested (nexus-g6k6b). A fail-open edit
+    (treating the failure as 'no incomplete documents') must turn this red."""
+    engine = _Engine(total=10, reapable=[1])
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"],
+                     documents_error=RuntimeError("catalog down"))
+    assert result.exit_code == 1, result.output
+    assert "Failed to verify index-run state" in result.output and "catalog down" in result.output
+    assert engine.posted == [], "nothing may reach the engine once the fence cannot be read"
+
+
+def test_a_failed_index_state_lookup_refuses_a_dry_run_too(runner, real_client):
+    engine = _Engine(total=10, reapable=[1])
+    result = _invoke(runner, real_client, engine, ["--dry-run"], documents_error=RuntimeError("catalog down"))
+    assert result.exit_code == 1, result.output
+    assert "Failed to verify index-run state" in result.output
+
+
+# ── (round 2) the floor's denominator and its boundary ───────────────────────────────────────────
+
+
+def test_the_floor_denominator_is_every_stored_chunk_not_just_the_owned_ones(runner, real_client, monkeypatch):
+    """1000 chunks, 700 of them manifest-less (the no-owner bucket) and 100 reapable. Over the
+    collection that is 10% (under the 25% floor); over only the 300 owned chunks it would be 33%
+    (over it). The verb divides by scope_chunk_total, so this moves. A swap to owned_chunks refuses."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    engine = _Engine(total=1000, no_owner=700, reapable=list(range(1, 101)))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code == 0, result.output
+    assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+
+
+def test_a_large_manifest_less_bucket_does_not_hide_a_real_floor_breach(runner, real_client, monkeypatch):
+    """The other direction: 300 of 1000 is 30% of the collection, over the floor."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    engine = _Engine(total=1000, no_owner=500, reapable=list(range(1, 301)))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code != 0
+    assert "300 of 1000 chunk(s) (30%)" in result.output
+    assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
+
+
+@pytest.mark.parametrize(("candidates", "refused"), [(25, False), (26, True)])
+def test_the_floor_boundary_is_strictly_greater_than_the_fraction(
+    runner, real_client, monkeypatch, candidates, refused,
+):
+    """Exactly 25% of 100 is allowed; one more chunk is refused. (> not >=.)"""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    engine = _Engine(total=100, reapable=list(range(1, candidates + 1)))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    if refused:
+        assert result.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in result.output
+        assert "/v1/vectors/gc/quarantine-orphans" not in engine.paths()
+    else:
+        assert result.exit_code == 0, result.output
+        assert engine.paths()[-1] == "/v1/vectors/gc/quarantine-orphans"
+
+
+def test_the_floor_applies_at_exactly_the_minimum_collection_size(runner, real_client, monkeypatch):
+    """100 chunks is the first size the floor applies to (99 is exempt, pinned above)."""
+    monkeypatch.delenv("NX_GC_FORCE", raising=False)
+    monkeypatch.delenv("NX_GC_FLOOR_FRACTION", raising=False)
+    engine = _Engine(total=100, reapable=list(range(1, 51)))
+    result = _invoke(runner, real_client, engine, ["--no-dry-run", "--yes"])
+    assert result.exit_code != 0 and "NX_GC_FLOOR_FRACTION" in result.output

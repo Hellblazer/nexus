@@ -1672,27 +1672,6 @@ class T3Database:
             if len(page_ids) < page_limit:
                 break
 
-    def delete_by_chunk_ids(
-        self, collection_name: str, chunk_ids: list[str],
-    ) -> int:
-        """Delete chunks by explicit Chroma id. Returns count deleted.
-
-        The per-chunk-id deletion primitive used by ``nx t3 gc`` (RDR-101
-        Phase 6) and any future maintenance verb that selects orphan
-        candidates outside the ``source_path``/``doc_id`` join paths.
-        Empty ``chunk_ids`` is a no-op (returns 0); missing collection
-        returns 0 without raising. Same paginated batching as
-        :meth:`delete_by_source` via :meth:`_delete_batch`.
-        """
-        if not chunk_ids:
-            return 0
-        try:
-            col = self._client_for(collection_name).get_collection(collection_name)
-        except _NotFoundErrors:
-            return 0
-        self._delete_batch(col, collection_name, chunk_ids)
-        return len(chunk_ids)
-
     def update_source_path(
         self, collection_name: str, old_path: str, new_path: str
     ) -> int:

@@ -1789,11 +1789,12 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         CARVE-OUT (review round 2, T2 [24834]; narrowed by Sam's second
         2026-09-07 ruling on nexus-dkymw): the grace-window guarantee above
         holds for tombstones made by :meth:`delete_document` /
-        :meth:`purge_trash`, AND — as of the dkymw alive-set fix — for
-        ``nx t3 gc``'s orphan sweep too: its alive-set now protects a
-        tombstoned-but-not-yet-purged document's chashes, so it can no
-        longer reap a just-tombstoned document's chunks inside this
-        window. Two other paths still reach the same content outside this
+        :meth:`purge_trash`, AND for the orphan sweeps too: the engine's
+        reapable predicate (``nexus.chunk_is_reapable``, RDR-192 Step 7)
+        counts a tombstoned owner as an owner, so neither ``nx t3 gc`` nor
+        the indexer's prune moves a just-tombstoned document's chunks
+        inside this window (nexus-dkymw's contract, now structural; it was
+        a client alive-set filter before nexus-wbfpw.18). Two other paths still reach the same content outside this
         contract, and this method cannot undo their loss: the MCP
         ``store_delete`` tool (tombstones the row and hard-deletes the T3
         chunk in the SAME call — no window at all); and
@@ -1887,14 +1888,13 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
 
         CARVE-OUT (review round 2, T2 [24834]; narrowed by Sam's second
         2026-09-07 ruling on nexus-dkymw): this window applies to
-        tombstones made by :meth:`delete_document` only, and — as of the
-        dkymw alive-set fix — ``nx t3 gc``'s orphan sweep now RESPECTS it
-        too: its alive-set (``chashesForCollection``, the GC input the
-        engine's ``nx t3 gc`` / indexer-prune reads) protects a
-        tombstoned-but-not-yet-purged document's chashes, superseding
-        nexus-mqd6t's original immediate-exclusion filter for that one
-        read, so ``nx t3 gc`` can no longer reap a just-tombstoned
-        document's chunks inside this window. The MCP ``store_delete``
+        tombstones made by :meth:`delete_document` only, and the orphan
+        sweeps RESPECT it: the engine's reapable predicate
+        (``nexus.chunk_is_reapable``) counts a tombstoned owner as an
+        owner, so ``nx t3 gc`` and the indexer's prune cannot move a
+        just-tombstoned document's chunks inside this window (nexus-dkymw,
+        superseding nexus-mqd6t's immediate-exclusion filter; structural
+        since nexus-wbfpw.18 replaced the client alive-set read). The MCP ``store_delete``
         tool (tombstones the catalog row and hard-deletes the T3 chunk in
         the SAME call — no window here at all) and ``delete_collection`` /
         collection-prune (irreversible, never tombstones) still reach the
@@ -2013,47 +2013,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             limit=limit, offset=offset,
         )
         return (result or {}).get("entries", [])
-
-    def record_gc_audit(
-        self,
-        *,
-        operation: str,
-        collection: str | None = None,
-        actor: str | None = None,
-        dry_run: bool = False,
-        chashes: list[str] | tuple[str, ...] = (),
-        details: dict[str, Any] | None = None,
-    ) -> int:
-        """POST /v1/catalog/gc_audit/record — append ONE destructive-T3-op
-        audit row on the caller's say-so (nexus-jqvzk); returns its id.
-
-        The client-facing producer the engine built for ``nx t3 gc``
-        (nexus-fduai): the engine's own reap paths write their rows
-        server-side with ``actor="engine"``, but a T3 delete the CLIENT
-        performs is invisible to it until the client reports it here, in
-        the same breath as the delete. The engine truncates ``chashes`` at
-        its own cap (``GC_AUDIT_MAX_CHASHES``) while keeping ``chash_count``
-        exact, so pass the FULL list — never pre-sample it client-side.
-        ``chashes`` is what the caller REPORTS — the candidates it asked to
-        delete — not an engine-confirmed deleted set; put the confirmed
-        count in ``details`` (``nx t3 gc`` records ``details.deleted``).
-
-        A pre-nexus-jqvzk engine has no matching route and answers 404 —
-        propagated like :meth:`gc_audit_list`, never swallowed.
-        """
-        body: dict[str, Any] = {
-            "operation": operation,
-            "dry_run": dry_run,
-            "chashes": list(chashes),
-        }
-        if collection:
-            body["collection"] = collection
-        if actor:
-            body["actor"] = actor
-        if details:
-            body["details"] = details
-        result = self._post("/gc_audit/record", body) or {}
-        return int(result.get("id", 0))
 
     def find(
         self, query: str, *, content_type: str | None = None, limit: int = 0,
@@ -4136,10 +4095,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         self, physical_collection: str, result: dict,
     ) -> set[str]:
         """Shared count-reconciliation body for the ``/manifest/chashes``
-        response, factored out of :meth:`chashes_for_collection` (nexus-zewg3)
-        so :meth:`chashes_for_collection_with_tombstone_protected` can share
-        ONE HTTP round trip with it instead of re-deriving the alive-set with
-        a second call.
+        response, factored out of :meth:`chashes_for_collection` (nexus-zewg3).
 
         nexus-ir6eh: this list is the indexer GC's alive-set — chunks
         absent from it are classified orphan and DELETED, so a
@@ -4194,42 +4150,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         result = self._get("/manifest/chashes", collection=physical_collection)
         result = result if isinstance(result, dict) else {}
         return self._manifest_chashes_reconciled(physical_collection, result)
-
-    def chashes_for_collection_with_tombstone_protected(
-        self, physical_collection: str,
-    ) -> tuple[set[str], int | None]:
-        """``chashes_for_collection`` plus ``tombstone_protected_count``, in
-        ONE round trip (nexus-zewg3).
-
-        Returns ``(chashes, tombstone_protected_count)``. The engine's
-        ``GET /manifest/chashes`` envelope carries ``tombstone_protected_count``
-        (of *chashes*, how many are referenced by a tombstoned document only,
-        tenant-wide — see ``CatalogRepository.tombstoneProtectedChunkCount``)
-        as an ADDITIVE, OPT-IN field: it is computed only when this method
-        passes ``with_tombstone_protected=1`` (the sibling
-        :meth:`chashes_for_collection` never passes it, so the indexer's hot
-        per-collection call pays nothing extra — code review T2
-        nexus/critique-nexus-zewg3-engine-side Significant 1). An engine
-        older than the one that shipped the field, or a response that
-        omitted the param, simply omits the key. The second element is
-        ``None`` in that case — NEVER coerced to ``0`` — so a caller (``nx
-        t3 gc``) can tell "verified zero" from "this engine cannot answer
-        that question" and report the difference honestly instead of
-        printing a confident zero that is actually unknown.
-        """
-        result = self._get(
-            "/manifest/chashes",
-            collection=physical_collection,
-            with_tombstone_protected="1",
-        )
-        result = result if isinstance(result, dict) else {}
-        chashes = self._manifest_chashes_reconciled(physical_collection, result)
-        tombstone_protected = (
-            int(result["tombstone_protected_count"])
-            if "tombstone_protected_count" in result
-            else None
-        )
-        return chashes, tombstone_protected
 
     def purge_manifest_for_doc(self, doc_id: str) -> None:
         self._post("/manifest/purge", {"doc_id": doc_id})

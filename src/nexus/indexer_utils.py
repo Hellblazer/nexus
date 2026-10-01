@@ -340,7 +340,8 @@ def live_note_chashes(documents) -> set[str]:
     T3-deleting sweep must NEVER treat as orphans (nexus-39upx hazard 2
     / RDR-145). Every note-shaped document's chunk is returned, with or
     without a manifest row; a caller that reports a manifest-less count
-    subtracts the manifest's own chashes (``nx t3 gc``, nexus-sis0m.3).
+    subtracts the manifest's own chashes (``nx t3 census-manifest-less``,
+    nexus-sis0m.3).
 
     Reads no longer show a manifest-less chunk (RDR-192 Step 5: every
     engine read path uses live(c), which requires a live own-collection
@@ -348,7 +349,7 @@ def live_note_chashes(documents) -> set[str]:
     no manifest row, so deleting sweeps keep this guard until RDR-192
     Step 11 removes it once the legacy-note census reads zero. A
     manifest-diff sweep (``orphaned_chashes`` above, or
-    ``nx t3 gc``'s ``chashes_for_collection`` diff) only ever sees the
+    the retired client alive-set diff) only ever sees the
     SECOND half of that OR: both ``docs_for_chashes`` and
     ``chashes_for_collection`` query ``catalog_document_chunks``, so a
     chash with ZERO manifest rows — a legitimate note — is
@@ -402,17 +403,14 @@ def non_complete_documents(documents) -> list:
     already written but has not yet manifested... Treat this as a
     stated requirement on (b), not a nice-to-have."
 
-    ``nx t3 gc``'s alive-set (``chashes_for_collection``) is a
-    COLLECTION-level union of every live document's manifest, and — since
-    nexus-dkymw (Sam's second 2026-09-07 ruling, superseding
-    nexus-mqd6t's original immediate-exclusion filter for that one read)
-    — a still-tombstoned-but-not-yet-purged document's too: a tombstoned
-    document's chashes stay in the union until ``nx catalog purge-trash``
-    physically reclaims the row. (This is specifically the ``nx t3 gc``
-    CLI verb's own manifest-vs-T3 diff; the indexer's separate
-    orphan-quarantine prune runs its delete decision through the
-    engine's server-side anti-join and was already tombstone-tolerant by
-    construction — see ``chashes_for_collection``'s own docstring.)
+    Both orphan sweeps (``nx t3 gc`` and the indexer's prune) decide through
+    the engine's reapable predicate (``nexus.chunk_is_reapable``), which
+    counts a tombstoned-but-not-yet-purged document's manifest rows as an
+    owner (nexus-dkymw, Sam's second 2026-09-07 ruling, superseding
+    nexus-mqd6t's immediate-exclusion filter): a tombstoned document's
+    chunks stay until ``nx catalog purge-trash`` physically reclaims the
+    row. ``nx t3 gc`` once ran a client-side manifest-vs-T3 diff for this;
+    nexus-wbfpw.18 retired it.
     Post-RDR-108, a T3 chunk carries no ``doc_id`` at all, so an orphan CANDIDATE
     (a chash referenced by no current manifest row) cannot be attributed
     back to the specific document that most recently owned it. The

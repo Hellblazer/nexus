@@ -4205,12 +4205,12 @@ def _prune_deleted_files(
     Catalog-absent is a safe no-op: GC requires the manifest as the
     source of truth and cannot infer orphans without it.
 
-    Note (operator runbook): the ``nx t3 gc`` CLI verb still uses the
-    legacy ``meta.doc_id``-keyed path (``commands/t3.py:gc_cmd``) and
-    therefore reports zero candidates for post-Phase-3 chunks. The two
-    paths will be reconciled in nexus-e5aw; until then this function is
-    the authoritative GC for content-addressed chunks and ``nx t3 gc``
-    handles only legacy pre-Phase-3 orphans.
+    Note (operator runbook): the ``nx t3 gc`` CLI verb takes its candidates
+    from the same engine predicate and moves them through the same route
+    (``gc_quarantine_orphans``, RDR-192 Step 8, nexus-wbfpw.18), so the two
+    agree on what is garbage. They differ in guards: the verb adds a
+    permanent client-side fraction floor, the census gate and the
+    index-state breaker; this function calls the route with no floor.
 
     ``on_phase`` (RDR-191 Phase 6, nexus-o8dil.33, 2026-08-15: now UNUSED —
     kept in the signature so this function's ONE caller needs no edit).
@@ -4277,9 +4277,9 @@ def _prune_deleted_files(
         # ONLY as the empty-manifest skip guard below (nexus-oqku); the
         # client-side diff that once consulted it for orphan
         # classification was retired at RDR-191 Phase 6 (2026-08-15,
-        # nexus-o8dil.33). The genuinely fixed caller is the `nx t3 gc`
-        # CLI verb (commands/t3.py), which diffs T3 chunks against this
-        # exact returned set directly.
+        # nexus-o8dil.33). `nx t3 gc` no longer reads this set at all: it
+        # takes its candidates from the engine's reapable predicate
+        # (nexus-wbfpw.18).
         try:
             referenced = catalog.chashes_for_collection(collection_name)
         except Exception:  # noqa: BLE001 — one collection's failed alive-set read must not end the sweep

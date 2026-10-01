@@ -309,12 +309,14 @@ ROUTE_EXCLUSIONS: dict[str, str] = {
         "retires with RDR-187 .11"
     ),
     "/gc_audit/record": (
-        "nexus-jqvzk, engine surface shipped AHEAD of its client half: the "
-        "engine owns the destructive-T3-op audit record, and `nx t3 gc` does "
-        "not yet emit through it. REMOVE THIS ENTRY when the gc verb starts "
-        "writing — an exclusion outliving its reason is the stale-allowlist "
-        "class this repo has been bitten by (see the mode-lint orphans, "
-        "nexus-th15h)"
+        "nexus-jqvzk, an engine surface with no client caller. `nx t3 gc` "
+        "emitted through it (nexus-fduai) until nexus-wbfpw.18 moved the verb "
+        "onto the engine's bounded quarantine route, which writes its own "
+        "gc_audit row per batch (actor engine); HttpCatalogClient."
+        "record_gc_audit was deleted with its last caller. REMOVE THIS ENTRY "
+        "when a client caller returns — an exclusion outliving its reason is "
+        "the stale-allowlist class this repo has been bitten by (see the "
+        "mode-lint orphans, nexus-th15h)"
     ),
     "/gc_audit/list": (
         "nexus-jqvzk, the read half of the same not-yet-consumed audit "

@@ -19,8 +19,10 @@ re-ran this file (nexus-5opzu tracks making that visible).
 Items and their beads:
 
   13  T3-GC tombstone safety, method-level
-      (both engine reads) AND verb-level
-      (`nx t3 gc` consuming the leaking read) -> nexus-mqd6t (CLOSED; xfails
+      (both engine reads); the verb-level twin
+      moved to tests/test_wbfpw18_t3_gc_substrate.py
+      when `nx t3 gc` was rewritten onto the engine's
+      reapable route (nexus-wbfpw.18)         -> nexus-mqd6t (CLOSED; xfails
                                                   removed 2026-07-31)
   14  supersede_collection semantics + guards  -> nexus-cecqy, nexus-g8z8n
                                                   (all four g8z8n guards:
@@ -62,7 +64,6 @@ Run locally:
 from __future__ import annotations
 
 import hashlib
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -212,152 +213,15 @@ class TestT3GcTombstoneSafety:
         after = cat.docs_for_chashes([h])
         assert str(t) not in after.get(h, [])
 
-    # nexus-i711w.1 item 13 -> nexus-mqd6t (VERB level)
-    def test_t3_gc_verb_collects_tombstoned_docs_chunks(
-        self, cat, service, pg_instance, monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """VERB-LEVEL twin of the two method-level pins above.
-
-        What this covers BEYOND the method-level tests: the full CLI path —
-        Click parsing of `t3 gc -c <coll> --no-dry-run --yes`, the verb's
-        PRODUCTION catalog resolution (`_make_catalog()` ->
-        `make_catalog_reader()` in service mode -> an env-resolved
-        HttpCatalogClient against THIS module's real engine — no catalog
-        patch), the verb's consumption of the real
-        ``chashes_for_collection`` read over HTTP as its alive-set, the
-        orphan partition, and the batched delete call.
-
-        What it does NOT cover: the engine-hosted pgvector serving leg.
-        ``make_t3`` is patched to a real ``T3Database`` over the canonical
-        ``InMemoryVectorClient`` substitute — the documented ``make_t3``
-        test seam every verb-level test in tests/test_t3_gc.py uses —
-        because this module's hermetic engine fixture provisions no
-        embedding model and ``upsert_chunks`` embeds SERVER-side, so chunks
-        cannot be seeded into the engine's own vector store here. The
-        engine-side vector leg has its own gate
-        (tests/db/test_http_combined_query_integration.py).
-
-        ``--allow-incomplete-index-state`` (nexus-g6k6b PORT, 2026-08-07):
-        both docs here are seeded directly via ``cat.register`` +
-        ``cat.write_manifest`` — neither ever goes through the real
-        RUNFENCE completion stamp (``complete_index_run``), so
-        ``index_state`` is NULL for both, same as any doc this test
-        infra creates. ``nx t3 gc`` now fail-closed refuses to touch a
-        collection containing a non-'complete' document at all (the
-        RUNFENCE precondition landing after this test was authored) —
-        correctly so in production (an in-flight or fence-failed
-        reindex's chunks are not garbage), but this test cannot honestly
-        produce a real completion stamp for the reason in the paragraph
-        above (``complete_index_run``'s own fail-closed verify would
-        refuse it identically, since the InMemoryVectorClient substitute
-        chunks are not in the engine's real storage either). This test
-        has already confirmed there is no concurrent reindex (it is the
-        only writer), which is exactly the flag's documented escape
-        hatch.
-        """
-        from unittest.mock import patch as _patch  # noqa: PLC0415 — test-local import
-
-        from click.testing import CliRunner  # noqa: PLC0415 — test-local import
-
-        from nexus.catalog import factory as catalog_factory  # noqa: PLC0415 — test-local import
-        from nexus.cli import main  # noqa: PLC0415 — test-local import (heavy CLI import deferred to the one test that drives it)
-        from nexus.db.minilm_direct import MiniLMDirectEmbeddingFunction  # noqa: PLC0415 — test-local import
-        from nexus.db.t3 import T3Database  # noqa: PLC0415 — test-local import
-        from tests.conftest import make_vector_test_client  # noqa: PLC0415 — test-local import
-
-        base_url, token, _proc = service
-        owner = self._owner(cat)
-        coll = "code__i711w-gc3__voyage-code-3__v1"
-
-        # Live control doc: proves the verb ran and did not blanket-delete.
-        t_live = cat.register(
-            owner,
-            "GC Verb Live Doc",
-            content_type="code",
-            physical_collection=coll,
-            source_uri="file:///i711w/gc3/live.md",
-        )
-        h_live = _ch("i711w-gc3-live-chunk")
-        _seed_chunk(pg_instance, "default", coll, h_live)
-        cat.write_manifest(str(t_live), [{"chash": h_live, "position": 0}], collection=coll)
-
-        # Doomed doc: tombstoned below; its chunk is the GC subject.
-        t_dead = cat.register(
-            owner,
-            "GC Verb Tombstoned Doc",
-            content_type="code",
-            physical_collection=coll,
-            source_uri="file:///i711w/gc3/dead.md",
-        )
-        h_dead = _ch("i711w-gc3-dead-chunk")
-        _seed_chunk(pg_instance, "default", coll, h_dead)
-        cat.write_manifest(str(t_dead), [{"chash": h_dead, "position": 0}], collection=coll)
-
-        # Real T3Database over the canonical vector substitute. Both chunks
-        # are 60 days old so they clear the default 30d orphan window.
-        t3_db = T3Database(
-            _client=make_vector_test_client(),
-            _ef_override=MiniLMDirectEmbeddingFunction(),
-        )
-        long_ago = (datetime.now(UTC) - timedelta(days=60)).isoformat()
-        t3_db._client.get_or_create_collection(coll).add(
-            ids=["live-0", "dead-0"],
-            documents=["live chunk text", "dead chunk text"],
-            metadatas=[
-                {"chunk_text_hash": h_live, "indexed_at": long_ago},
-                {"chunk_text_hash": h_dead, "indexed_at": long_ago},
-            ],
-        )
-
-        # NON-VACUITY guards (hold pre- AND post-fix): the manifest surfaces
-        # the doomed chash while its doc is live, and the tombstone lands.
-        assert h_dead in cat.chashes_for_collection(coll), (
-            "guard: manifest write must surface the chash before the delete"
-        )
-        assert cat.delete_document(t_dead) is True
-
-        # Route the verb's catalog resolution at THIS module's engine through
-        # the production factory (env-resolved service mode) — no _make_catalog
-        # patch. The shared factory client is reset around the invoke so a
-        # client built against this test's env cannot leak (the conftest
-        # autouse reset also covers the cross-test direction).
-        monkeypatch.setenv("NX_STORAGE_BACKEND_CATALOG", "service")
-        monkeypatch.setenv("NX_SERVICE_URL", base_url)
-        monkeypatch.setenv("NX_SERVICE_TOKEN", token)
-        catalog_factory.reset_shared_service_catalog_client_for_tests()
-        try:
-            with _patch("nexus.db.make_t3", return_value=t3_db):
-                result = CliRunner().invoke(
-                    main, ["t3", "gc", "-c", coll, "--no-dry-run", "--yes",
-                           "--allow-incomplete-index-state"],
-                )
-        finally:
-            catalog_factory.reset_shared_service_catalog_client_for_tests()
-
-        # Guards that hold in BOTH states: the verb completed, and the live
-        # doc's chunk survived (gc must never blanket-delete).
-        assert result.exit_code == 0, result.output
-        surviving = set(
-            t3_db._client.get_collection(coll).get()["ids"]
-        )
-        assert "live-0" in surviving, result.output
-
-        # CONTRACT OF RECORD (Sam's ruling 2026-09-07, nexus-dkymw, superseding
-        # nexus-mqd6t for the alive-set read): a tombstoned document's chunk is
-        # PROTECTED from nx t3 gc until nexus.purge_trash reclaims the row, so
-        # nx catalog restore can bring the document back whole inside the
-        # purge window. The verb must therefore leave dead-0 in place and say
-        # why on its report line (engine field tombstone_protected_count,
-        # nexus-zewg3). This assertion used to be the inverse (the chunk is an
-        # orphan and gets collected); that was the pre-ruling contract.
-        assert "dead-0" in surviving, (
-            "tombstoned document's chunk must SURVIVE the verb until purge-trash "
-            f"reclaims the row (nexus-dkymw); gc output:\n{result.output}"
-        )
-        assert "Protected by pending tombstones: 1 chunk" in result.output, (
-            "the verb must name the tombstone-protected chunk on its report line; "
-            f"gc output:\n{result.output}"
-        )
+    # The VERB-level twin (``nx t3 gc`` against a tombstoned document's chunk) lived here until
+    # nexus-wbfpw.18 rewrote the verb onto the engine's reapable route (RDR-192 Step 8). It drove
+    # the retired client-side alive-set path through a make_t3 stand-in and asserted the retired
+    # "Protected by pending tombstones" report line. The nexus-dkymw contract it pinned (a
+    # tombstoned-but-unpurged document's chunk is not garbage) is now structural: the engine's
+    # chunk_is_reapable counts a tombstoned owner as an owner. It is pinned against a real engine,
+    # through the verb, by tests/test_wbfpw18_t3_gc_substrate.py::
+    # test_a_tombstoned_documents_chunk_survives_the_move_until_purge_trash (and the engine-side
+    # predicate by ChunkIsReapableIntegrationTest).
 
 
 # ── item 14: supersede_collection semantics ─────────────────────────────────

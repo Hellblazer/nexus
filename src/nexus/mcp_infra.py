@@ -2311,7 +2311,8 @@ _SUPERSEDED_SWEEP_SWEPT_TOTAL = 0
 _SUPERSEDED_SWEEP_SKIPS: list[dict] = []
 # nexus-4pj54: deferred-sweep entries a failed or fenced run threw away
 # (``discard_deferred_superseded_vectors``). Their superseded rows stay in
-# T3 until ``nx t3 gc``.
+# T3 until the engine's reapable predicate takes them (30 days after they lost
+# their last owner), which ``nx t3 gc`` then moves into quarantine.
 _SUPERSEDED_SWEEP_DEFERRED_DISCARDED = 0
 
 
@@ -2704,7 +2705,7 @@ def _apply_combined_write_response(
 # more batch and then, on discovering the fence, discard the MERGED entry,
 # the newer owner's candidates included. The newer owner's completion then
 # finds nothing to sweep. Accepted residual, safe direction only: rows are
-# left for ``nx t3 gc``, never wrongly deleted.
+# left for the reapable predicate and ``nx t3 gc``, never wrongly deleted.
 _pending_sweep_lock = threading.Lock()
 _PENDING_SWEEP_CANDIDATES: dict[str, tuple[str, set[str]]] = {}
 # doc_ids stashed since the last ``reset_superseded_sweep_stats``. The
@@ -2799,7 +2800,8 @@ def discard_deferred_superseded_vectors(doc_id: str) -> int:
     ``_fence_fail``). The manifest is not confirmed complete on any of these
     paths, so a sweep could delete a row the document
     still needs; holding the entry instead would leak it for the life of
-    the process. The superseded rows stay in T3 until ``nx t3 gc``; the
+    the process. The superseded rows stay in T3 until they are reapable and
+    ``nx t3 gc`` moves them; the
     discard is counted in :func:`get_superseded_sweep_stats` so the run
     summary names it. Returns the number of candidate chashes dropped
     (0 when nothing was pending). Never raises.

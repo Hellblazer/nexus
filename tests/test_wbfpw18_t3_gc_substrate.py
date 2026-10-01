@@ -89,6 +89,30 @@ def test_the_move_quarantines_exactly_the_reapable_rows_and_the_engine_audits_it
     assert {r["operation"] for r in rows}.isdisjoint({"t3_gc"})
 
 
+def test_a_tombstoned_documents_chunk_survives_the_move_until_purge_trash(env):
+    """nexus-dkymw's contract, through the verb against a real engine: a chunk whose only owner is a
+    tombstoned (deleted, not yet purged) document is not garbage, so `nx catalog restore` can bring
+    the document back whole inside the purge window. The protection is structural: the engine's
+    predicate counts a tombstoned owner as an owner, so the verb neither lists nor moves the chunk
+    and a live neighbour is untouched. (This replaces the retired verb-level test in
+    tests/db/test_i711w_gap_xfails.py, which pinned the old "Protected by pending tombstones" line.)"""
+    client, cat, runner = env
+    fx = build_mixed_collection(cat, "wbfpw18-tomb")
+
+    dry = _gc(runner, fx.name, "--dry-run")
+    assert dry.exit_code == 0, dry.output
+    assert fx.tombstoned not in dry.output, "a tombstoned owner's chunk is not even a candidate"
+
+    result = _gc(runner, fx.name, "--no-dry-run", "--yes")
+    assert result.exit_code == 0, result.output
+    assert fx.tombstoned in _origin_ids(client, fx.name), (
+        "the tombstoned document's chunk must stay until purge-trash reclaims the row (nexus-dkymw)"
+    )
+    assert fx.tombstoned not in _quarantined_ids(client, fx.name)
+    assert fx.owned in _origin_ids(client, fx.name), "a live document's chunk is never touched"
+    assert _quarantined_ids(client, fx.name) == fx.reapable, "non-vacuity: the verb did move the orphans"
+
+
 def test_dry_run_moves_nothing_and_names_the_reapable_rows(env):
     client, cat, runner = env
     fx = build_mixed_collection(cat, "wbfpw18-dry")

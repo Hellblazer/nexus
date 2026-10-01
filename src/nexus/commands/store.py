@@ -280,14 +280,12 @@ def list_cmd(collection: str, limit: int, offset: int, docs: bool, reapable: boo
         click.echo(f"\n  Next page: --offset {shown_end}")
 
 
-def _reapable_age(created_at: str) -> str:
-    """``created_at`` as whole days ('40d'), or '-' when it will not parse. The engine's grace clock
-    is last_written_at (and the moment the chunk last lost an owner), not this; created_at is the
-    column the listing shows because it is write-once."""
+def _age_days(stamp: str) -> str:
+    """*stamp* (an ISO-8601 timestamp) as whole days ('40d'), or '-' when it will not parse."""
     from datetime import UTC, datetime  # noqa: PLC0415  — stdlib deferred to call site (datetime)
 
     try:
-        born = datetime.fromisoformat(created_at)
+        born = datetime.fromisoformat(stamp)
     except (TypeError, ValueError):
         return "-"
     if born.tzinfo is None:
@@ -295,11 +293,29 @@ def _reapable_age(created_at: str) -> str:
     return f"{max((datetime.now(UTC) - born).days, 0)}d"
 
 
+def _reapable_known_collection(db: T3Database, col_name: str) -> bool:
+    """True when *col_name* is a collection T3 holds chunks for or the catalog has registered, the
+    same test ``nx t3 gc`` applies. The engine answers a reapable listing for ANY name with an empty
+    200, so without this a typo reads "0 reapable chunks", the same words a clean collection gets."""
+    if col_name in {c["name"] for c in db.list_collections(strict=True)}:
+        return True
+    from nexus.catalog.factory import make_catalog_reader  # noqa: PLC0415 — deferred for startup cost (nexus.catalog.factory)
+
+    cat = make_catalog_reader()
+    return cat is not None and cat.get_collection(col_name) is not None
+
+
 def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
     """``nx store list --reapable``: the chunks of *col_name* that the engine's reapable predicate
     selects right now, from ``POST /v1/vectors/reapable`` (RDR-192 Step 8/10). Read-only and
     advisory: a lock-free snapshot with the engine's default grace, i.e. what ``nx t3 gc`` would
-    take at this instant. Paged by keyset; ``limit`` bounds the rows printed."""
+    take at this instant. Paged by keyset; ``limit`` bounds the rows printed.
+
+    The age shown is days since ``last_written_at``, the one clock column the route returns. The
+    engine's grace runs from the later of that and the moment the chunk last lost an owner
+    (``nexus.chunk_orphaned_at``, not returned), so the age here is at least the grace for every
+    listed chunk and can overstate how long the chunk has been ownerless. ``created_at`` is shown
+    beside it: it is write-once, so it is never the grace clock and is never younger than the age."""
     from nexus.db.http_vector_client import VectorServiceError  # noqa: PLC0415 — deferred for startup cost (nexus.db.http_vector_client)
 
     reapable_chunks = getattr(db, "reapable_chunks", None)
@@ -307,6 +323,11 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
         raise click.ClickException(
             "--reapable needs the engine-backed T3 handle (nexus.db.make_t3()); this one carries "
             "no reapable route."
+        )
+    if not _reapable_known_collection(db, col_name):
+        raise click.ClickException(
+            f"no collection named {col_name!r}; 'nx collection list' shows the names "
+            f"'nx store list --reapable' takes."
         )
     shown = 0
     truncated = False
@@ -316,12 +337,17 @@ def _list_reapable(db: T3Database, col_name: str, limit: int) -> None:
                 truncated = True
                 break
             if shown == 0:
-                click.echo(f"{col_name}  (chash, created_at, age, title, catalog_doc_id)\n")
+                click.echo(
+                    f"{col_name}  (chash, last_written_at, days since last write, created_at, "
+                    f"title, catalog_doc_id)\n"
+                )
+            written = row.get("last_written_at") or ""
             created = row.get("created_at") or ""
             title = (row.get("title") or "")[:40]
             doc = row.get("catalog_doc_id") or "-"
             click.echo(
-                f"  {row.get('chash', '')}  {created}  {_reapable_age(created):>5}  {title:<40}  {doc}"
+                f"  {row.get('chash', '')}  {written}  {_age_days(written):>5}  {created}  "
+                f"{title:<40}  {doc}"
             )
             shown += 1
     except VectorServiceError as exc:

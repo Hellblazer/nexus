@@ -84,36 +84,6 @@ def test_list_chunks_with_metadata_missing_collection(t3_db):
     assert list(t3_db.list_chunks_with_metadata("knowledge__nonexistent")) == []
 
 
-def test_delete_by_chunk_ids_deletes_only_listed(t3_db):
-    """``delete_by_chunk_ids`` deletes the listed ids and returns the count."""
-    coll = "knowledge__test_gc_delete_by_ids"
-    now = _iso(datetime.now(UTC))
-    for cid in ("c1", "c2", "c3"):
-        _seed_chunk(
-            t3_db, collection=coll, chunk_id=cid, content=cid,
-            doc_id="1.1.1", indexed_at=now,
-        )
-    deleted = t3_db.delete_by_chunk_ids(coll, ["c1", "c3"])
-    assert deleted == 2
-    surviving = t3_db._client.get_collection(coll).get()["ids"]
-    assert surviving == ["c2"]
-
-
-def test_delete_by_chunk_ids_missing_collection_returns_zero(t3_db):
-    assert t3_db.delete_by_chunk_ids("knowledge__nonexistent", ["c1"]) == 0
-
-
-def test_delete_by_chunk_ids_empty_list(t3_db):
-    coll = "knowledge__test_gc_empty_list"
-    now = _iso(datetime.now(UTC))
-    _seed_chunk(
-        t3_db, collection=coll, chunk_id="c1", content="x",
-        doc_id="1.1.1", indexed_at=now,
-    )
-    assert t3_db.delete_by_chunk_ids(coll, []) == 0
-    assert t3_db._client.get_collection(coll).count() == 1
-
-
 class TestGetEmbeddingsRequestOrder:
     """nexus-pebfx.7 critic: Chroma's col.get(ids=...) returns rows in
     INTERNAL insertion order, not request order — positional consumption
