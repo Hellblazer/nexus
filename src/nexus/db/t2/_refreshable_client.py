@@ -66,6 +66,7 @@ import structlog
 # the other. tests/db/test_refreshable_client.py::test_gateway_constants_match_reference
 # additionally pins this module's and http_vector_client's values equal
 # against a future local-redefinition drift.
+from nexus.db.client_identity import client_identity_headers
 from nexus.db.gateway_backoff import (
     _EMBED_WRITE_504_BACKOFF_FLOOR_S,
     _GATEWAY_RETRY_CODES,
@@ -773,6 +774,8 @@ class RefreshableHttpStoreMixin:
             "Authorization": f"Bearer {self._token}",
             "X-Nexus-Tenant": self._tenant,
             "Content-Type": "application/json",
+            # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's logs.
+            **client_identity_headers(),
         }
 
     def _invalidate_data_token_on_401(self, exc: httpx.HTTPStatusError) -> tuple[Any, bool, str, str]:

@@ -53,8 +53,10 @@ _TEST_TREE = _REPO / "service" / "src" / "test" / "java"
 #: (nexus-h61dl.4): its two request helpers and its client now come from there, so
 #: every test in that file carries a timeout instead of three sites relying on
 #: nobody forgetting. 43 -> 42 and 120 -> 118.
-MAX_BARE_CLIENTS = 42
-MAX_TIMEOUTLESS_REQUESTS = 118
+#: Lowered 2026-10-01 when VectorHandlerUpsertReferenceOnlyTest was rewritten and
+#: OwnerlessWriteRefusalTest added on TestHttp (nexus-z0o2p.24). 42 -> 41 and 118 -> 116.
+MAX_BARE_CLIENTS = 41
+MAX_TIMEOUTLESS_REQUESTS = 116
 
 _BARE_CLIENT = re.compile(r"HttpClient\.newHttpClient\(\)")
 _REQUEST_BUILDER = re.compile(r"HttpRequest\.newBuilder")

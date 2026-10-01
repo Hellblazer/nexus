@@ -238,6 +238,15 @@ public final class NexusService {
     private final HttpsSchemeHandler httpsSchemeHandler;
 
     /**
+     * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): what {@code upsert-chunks} and {@code store-put} do
+     * with a chash that has no live manifest row, from {@code NX_OWNERLESS_WRITE_MODE}: unset means
+     * log-only, only an explicit {@code enforce} enforces, an invalid value fails the boot (this field
+     * initialiser throws out of the constructor). Mutable only through the holder, for tests.
+     */
+    private final dev.nexus.service.vectors.OwnerlessWritePolicy ownerlessWritePolicy =
+            dev.nexus.service.vectors.OwnerlessWritePolicy.fromEnv();
+
+    /**
      * Convenience constructor: no vector backend (original signature for existing tests).
      * The {@code /v1/vectors/*} routes answer 503 (explicit refusal, never a 404 or NPE).
      *
@@ -477,7 +486,7 @@ public final class NexusService {
         // moment) -- the "no second clock source" requirement in one place.
         server.createContext("/v1/status",
                 new dev.nexus.service.http.StatusHandler(docEmbedderRouter, localEmbedActivitySupplier,
-                        versionHandler.processStartMillis()));
+                        versionHandler.processStartMillis(), ownerlessWritePolicy));
 
         // /v1/install-ping — unauthenticated anonymous daily client beacon
         // (nexus-h5olw). Local-mode installs have no tenant or token, and they
@@ -583,7 +592,7 @@ public final class NexusService {
         // repository for storage/query, embedder router for /embed) is absent — a
         // missing backend is a refusal, never a 404 that masquerades as an unknown route.
         var vectorCtx = server.createContext("/v1/vectors",
-                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker));
+                new VectorHandler(docEmbedderRouter, pgVectorRepository, reranker, ownerlessWritePolicy));
         vectorCtx.getFilters().addAll(authFilter);
         log.info("event=vector_endpoints_registered has_embed_router={} has_pgvector={} has_reranker={}",
                 docEmbedderRouter != null, pgVectorRepository != null, reranker != null);
@@ -1412,6 +1421,11 @@ public final class NexusService {
         catalogRepo.close();
         server.stop(0);
         log.info("event=service_stopped");
+    }
+
+    /** The ownerless-write policy this service applies; tests flip it between enforce and log-only. */
+    public dev.nexus.service.vectors.OwnerlessWritePolicy ownerlessWritePolicy() {
+        return ownerlessWritePolicy;
     }
 
     /**
