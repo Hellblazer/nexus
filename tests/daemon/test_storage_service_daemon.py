@@ -3148,6 +3148,14 @@ class TestPdeathsigOrphanPrevention:
         _make_supervisor(config_dir, clock)._spawn_service()
         assert captured["env"][ssd_mod.OWNERLESS_WRITE_MODE_ENV] == "log-only"
 
+        # An empty or blank value is "unset": the engine parses it as log-only, so keeping it
+        # would give a local install a silently log-only engine.
+        for blank in ("", "   "):
+            captured.clear()
+            monkeypatch.setenv(ssd_mod.OWNERLESS_WRITE_MODE_ENV, blank)
+            _make_supervisor(config_dir, clock)._spawn_service()
+            assert captured["env"][ssd_mod.OWNERLESS_WRITE_MODE_ENV] == "enforce", repr(blank)
+
     @pytest.mark.skipif(
         not __import__("sys").platform.startswith("linux"),
         reason="PR_SET_PDEATHSIG is Linux-only",

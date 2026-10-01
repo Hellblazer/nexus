@@ -1182,7 +1182,11 @@ class StorageServiceSupervisor:
         # anything until the would-refuse log has been read). A LOCAL install has no such
         # soak: it runs the engine this client was built and gated with, so it enforces. Set
         # explicitly, but never over an operator's own value (a log-only census run sets it).
-        env.setdefault(OWNERLESS_WRITE_MODE_ENV, "enforce")
+        # An EMPTY or blank value is "unset", not an operator's choice: the engine parses blank
+        # as log-only (OwnerlessWriteMode.parse), so setdefault, which keeps an empty string,
+        # would hand a local install a silently log-only engine.
+        if not env.get(OWNERLESS_WRITE_MODE_ENV, "").strip():
+            env[OWNERLESS_WRITE_MODE_ENV] = "enforce"
 
         # nexus-ogccs: pass the provisioner's resolved onnx_models root
         # explicitly so supervisor and engine agree by construction. The

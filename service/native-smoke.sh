@@ -526,6 +526,19 @@ json.dump({'collection': e['RCOL'], 'ids': [e['ORPHAN']], 'documents': ['an owne
            'metadatas': [{}]}, open(e['SMOKE_TMP'] + '/ns-orphan-up.in', 'w'))
 json.dump({'collection': e['RCOL'], 'doc_id': e['ORPHAN'], 'content': 'an ownerless chunk'},
           open(e['SMOKE_TMP'] + '/ns-orphan-sp.in', 'w'))"
+    # The would-refuse counter on /v1/status, read around the two ownerless writes: the log-only
+    # branch below must see it move, not only the 200 (a log-only engine that stopped counting
+    # would still answer 200). -1 when the status read fails or the field is absent.
+    ownerless_would_refuse_total() {
+      curl -s -o "$SMOKE_TMP/ns-status.out" "${A[@]}" "$U/v1/status" 2>/dev/null || true
+      python3 -c "
+import json, os
+try:
+    print(int(json.load(open(os.environ['SMOKE_TMP'] + '/ns-status.out'))['ownerless_writes_would_refuse_total']))
+except Exception:
+    print(-1)"
+    }
+    wr_before=$(ownerless_would_refuse_total)
     oup=$(curl -s -o "$SMOKE_TMP/ns-orphan-up.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
       --data-binary "@$SMOKE_TMP/ns-orphan-up.in" "$U/v1/vectors/upsert-chunks")
     osp=$(curl -s -o "$SMOKE_TMP/ns-orphan-sp.out" -w "%{http_code}" "${A[@]}" "${J[@]}" -X POST \
@@ -536,6 +549,14 @@ json.dump({'collection': e['RCOL'], 'doc_id': e['ORPHAN'], 'content': 'an ownerl
         # Writer-census posture: the engine inherits the mode and accepts the write.
         if [ "$ocode" = "200" ]; then echo "  ok   $leg ownerless chash -> 200 (log-only)"; else
           echo "  FAIL $leg ownerless chash (want 200 in log-only) -> $ocode"; fail=1; fi
+        if [ "$leg" = sp ]; then
+          wr_after=$(ownerless_would_refuse_total)
+          if [ "$wr_before" -ge 0 ] && [ "$wr_after" -eq $((wr_before + 2)) ]; then
+            echo "  ok   would-refuse counter moved by 2 ($wr_before -> $wr_after)"
+          else
+            echo "  FAIL would-refuse counter (want +2 over two log-only ownerless writes) -> $wr_before -> $wr_after"; fail=1
+          fi
+        fi
       elif [ "$ocode" = "422" ] && OLEG="$leg" python3 -c "
 import json, os, sys
 b = json.load(open(os.environ['SMOKE_TMP'] + '/ns-orphan-' + os.environ['OLEG'] + '.out'))

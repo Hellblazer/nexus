@@ -61,6 +61,9 @@ class OwnerlessWriteRefusalTest {
     /** Registered by BOTH tenants, so the limiter's tenant key can be told from its collection key. */
     private static final String COLLECTION_SHARED_NAME = "knowledge__owr-owner-shared__voyage-context-3__v1";
     private static final String COLLECTION_GATE = "knowledge__owr-owner-gate__voyage-context-3__v1";
+    private static final String COLLECTION_FORGE = "knowledge__owr-owner-forge__voyage-context-3__v1";
+    private static final String COLLECTION_INTX = "knowledge__owr-owner-intx__voyage-context-3__v1";
+    private static final String COLLECTION_INTX_PUT = "knowledge__owr-owner-intxput__voyage-context-3__v1";
     private static final String SVC_ROLE = "svc_owr";
     private static final String SVC_PASS = "svc_owr_pass";
     private static final String TENANT   = "owr-tenant";
@@ -121,6 +124,9 @@ class OwnerlessWriteRefusalTest {
             PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_SHARED_NAME);
             PgContainerHelper.insertCollection(dsl, TENANT_2, COLLECTION_SHARED_NAME);
             PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_GATE);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_FORGE);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_INTX);
+            PgContainerHelper.insertCollection(dsl, TENANT, COLLECTION_INTX_PUT);
             PgContainerHelper.insertCollection(dsl, TENANT_2, COLLECTION);
         }
     }
@@ -663,6 +669,11 @@ class OwnerlessWriteRefusalTest {
         OwnershipGuardCoverageScan.assertEveryGuardedRepositoryCallPassesAGuard();
     }
 
+    @Test
+    void noMainSourceOutsideTheRepositoryNamesTheReferenceOnlyWriter() throws Exception {
+        OwnershipGuardCoverageScan.assertNoMainSourceOutsideTheRepositoryNamesTheReferenceOnlyWriter();
+    }
+
     // ── 7. the log line ──────────────────────────────────────────────────────
 
     private List<String> captureRepositoryWarnings(java.util.concurrent.Callable<Void> body) throws Exception {
@@ -696,7 +707,7 @@ class OwnerlessWriteRefusalTest {
         assertThat(line).contains("event=ownerless_chunk_write_refused")
             .contains("route=upsert-chunks").contains("collection=" + COLLECTION_LOG)
             .contains("phase=pre_embed").contains("unowned=1").contains("requested=1")
-            .contains("user_agent=\"nx-test-agent/9\"").contains("client_version=7.99.0")
+            .contains("user_agent=\"nx-test-agent/9\"").contains("client_version=\"7.99.0\"")
             .contains("suppressed_since_last=0")
             .contains("source_path=/p/a.py;").contains("title=a.py:1-1;").contains("source_agent=indexer;")
             .doesNotContain("file:///secret");
@@ -708,7 +719,7 @@ class OwnerlessWriteRefusalTest {
             return null;
         });
         assertThat(absent).hasSize(1);
-        assertThat(absent.get(0)).contains("route=store-put").contains("client_version=absent").contains("user_agent=\"old/1\"");
+        assertThat(absent.get(0)).contains("route=store-put").contains("client_version=\"absent\"").contains("user_agent=\"old/1\"");
     }
 
     @Test
@@ -753,7 +764,7 @@ class OwnerlessWriteRefusalTest {
         String line = lines.get(0);
         assertThat(line).contains("user_agent=\"" + longUa.substring(0, 120) + "\"")
             .doesNotContain(longUa.substring(0, 121))
-            .contains("client_version=" + longVersion.substring(0, 120) + " ")
+            .contains("client_version=\"" + longVersion.substring(0, 120) + "\" ")
             .doesNotContain(longVersion.substring(0, 121));
     }
 
@@ -786,6 +797,152 @@ class OwnerlessWriteRefusalTest {
             enforce.stop();
             OwnerlessWriteMode.setEnvReaderForTests(null);
         }
+    }
+
+    @Test
+    void aClientVersionHeaderOrMetadataValueCannotForgeFieldsInTheLogLine() throws Exception {
+        // client_version and user_agent are quoted, the metadata sits inside brackets; a value that
+        // carries spaces, quotes or a closing bracket must stay inside its own delimiters.
+        String version = "1.0\" tenant=evil suppressed_since_last=99 x=\"";
+        var lines = captureRepositoryWarnings(() -> {
+            post(TOKEN, "/v1/vectors/upsert-chunks", Map.of("collection", COLLECTION_FORGE,
+                "ids", List.of(chash("owr-forge")), "documents", List.of("t"),
+                "metadatas", List.of(Map.of("title", "x] tenant=evil2 [y", "source_path", "/p q"))),
+                Map.of("User-Agent", "ua\" tenant=evil3 \"", "X-Nexus-Client-Version", version));
+            return null;
+        });
+        assertThat(lines).hasSize(1);
+        String line = lines.get(0);
+        assertThat(line).contains("client_version=\"1.0' tenant=evil suppressed_since_last=99 x='\"");
+        String unquoted = line.replaceAll("\"[^\"]*\"", "\"\"").replaceAll("\\[[^\\]]*\\]", "[]");
+        assertThat(unquoted.split("tenant=", -1).length - 1)
+            .as("the only tenant= field is the engine's own: %s", unquoted).isEqualTo(1);
+        assertThat(unquoted.split("suppressed_since_last=", -1).length - 1).isEqualTo(1);
+        assertThat(unquoted).contains("suppressed_since_last=0");
+    }
+
+    // ── 8. log-only on the paths the enforce tests already pin ───────────────
+
+    /** Seed an OWNED chunk for {@code hex} in {@code collection} (one of the registered ones). */
+    private void ownedIn(String collection, String hex) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertOwnedChunks(DSL.using(su, SQLDialect.POSTGRES), TENANT, collection, 1024, hex);
+        }
+    }
+
+    /** From the embed seam on: the chash loses its manifest row and its chunk row, as a concurrent re-index plus sweep would. */
+    private void loseOwnerAndChunkDuringTheEmbed(String collection, String hex) {
+        repo.setAfterNeedEmbedResolvedHookForTests(() -> {
+            try (Connection su = pg.createConnection("")) {
+                var dsl = DSL.using(su, SQLDialect.POSTGRES);
+                dsl.deleteFrom(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS)
+                    .where(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(TENANT))
+                    .and(dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS.CHASH.eq(
+                        Chash.fromHex(hex).toBytes()))
+                    .execute();
+                var ch = dev.nexus.service.vectors.DimTables.CHUNKS.get(1024);
+                dsl.deleteFrom(ch.table())
+                    .where(ch.tenantId().eq(TENANT).and(ch.collection().eq(collection)).and(ch.chash().eq(hex)))
+                    .execute();
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void logOnly_aChashThatLosesItsOwnerDuringTheEmbed_isCountedAsInTx_andTheWriteLands() throws Exception {
+        service.ownerlessWritePolicy().set(OwnerlessWriteMode.LOG_ONLY);
+        String h = chash("owr-logonly-in-tx");
+        ownedIn(COLLECTION_INTX, h);
+        loseOwnerAndChunkDuringTheEmbed(COLLECTION_INTX, h);
+        HttpResponse<String>[] resp = new HttpResponse[1];
+        var lines = captureRepositoryWarnings(() -> {
+            resp[0] = upsert(COLLECTION_INTX, List.of(h), List.of("text that differs from the stored seed"));
+            return null;
+        });
+        assertThat(resp[0].statusCode()).as("body: %s", resp[0].body()).isEqualTo(200);
+        assertThat(embedder.calls.get()).as("the pre-embed check passed, so the embedder ran").isEqualTo(1);
+        assertThat(OwnerlessWriteActivity.wouldRefuseTotal()).as("the in-transaction recheck counted it").isEqualTo(1);
+        assertThat(OwnerlessWriteActivity.refusedTotal()).isZero();
+        assertThat(lines).hasSize(1);
+        assertThat(lines.get(0)).contains("event=ownerless_chunk_write_would_refuse").contains("phase=in_tx");
+        assertThat(physicalRow(TENANT, COLLECTION_INTX, h)).as("log-only writes it as today").isNotNull();
+    }
+
+    @Test
+    void storePut_aChashThatLosesItsOwnerDuringTheEmbed_isRefusedInEnforce_andCountedAndLandsInLogOnly() throws Exception {
+        // store-put reaches the same write transaction through putWithTokens: its in-tx recheck, both modes.
+        String text = "owr-store-put-in-tx";
+        String h = chash(text);
+        ownedIn(COLLECTION_INTX_PUT, h);
+        loseOwnerAndChunkDuringTheEmbed(COLLECTION_INTX_PUT, h);
+        var enforce = post("/v1/vectors/store-put", Map.of("collection", COLLECTION_INTX_PUT,
+            "doc_id", h, "content", "store-put text that differs from the stored seed", "metadata", Map.of()));
+        assertNamesTheCombinedRoutes(enforce);
+        assertThat(embedder.calls.get()).isEqualTo(1);
+        assertThat(OwnerlessWriteActivity.refusedTotal()).isEqualTo(1);
+        assertThat(physicalRow(TENANT, COLLECTION_INTX_PUT, h)).as("enforce: no chunk row was created").isNull();
+
+        // The refusal rolled back; seed the chash owned again, lose it again, now in log-only.
+        service.ownerlessWritePolicy().set(OwnerlessWriteMode.LOG_ONLY);
+        ownedIn(COLLECTION_INTX_PUT, h);
+        loseOwnerAndChunkDuringTheEmbed(COLLECTION_INTX_PUT, h);
+        var logOnly = post("/v1/vectors/store-put", Map.of("collection", COLLECTION_INTX_PUT,
+            "doc_id", h, "content", "store-put text that differs again", "metadata", Map.of()));
+        assertThat(logOnly.statusCode()).as("body: %s", logOnly.body()).isEqualTo(200);
+        assertThat(OwnerlessWriteActivity.wouldRefuseTotal()).isEqualTo(1);
+        assertThat(OwnerlessWriteActivity.refusedTotal()).as("unchanged since the enforce leg").isEqualTo(1);
+        assertThat(physicalRow(TENANT, COLLECTION_INTX_PUT, h)).as("log-only: the write landed").isNotNull();
+    }
+
+    @Test
+    void logOnly_forceReEmbedDoesNotBypassTheCheck_isCountedOnceAndLands() throws Exception {
+        service.ownerlessWritePolicy().set(OwnerlessWriteMode.LOG_ONLY);
+        String h = chash("owr-logonly-force");
+        var resp = upsert(COLLECTION, List.of(h), List.of("text"), Map.of("force_re_embed", true));
+        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(200);
+        assertThat(OwnerlessWriteActivity.wouldRefuseTotal())
+            .as("counted once: the pre-embed report suppresses the in-tx recount").isEqualTo(1);
+        assertThat(embedder.calls.get()).as("log-only embeds as today").isEqualTo(1);
+        assertThat(storedCount(h)).isEqualTo(1);
+    }
+
+    @Test
+    void logOnly_suppliedEmbeddingsDoNotBypassTheCheck_areCountedAndLand() throws Exception {
+        service.ownerlessWritePolicy().set(OwnerlessWriteMode.LOG_ONLY);
+        String h = chash("owr-logonly-vectors");
+        float[] v = new float[1024];
+        v[2] = 1f;
+        var resp = upsert(COLLECTION, List.of(h), List.of("text"), Map.of("embeddings", List.of(v)));
+        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(200);
+        assertThat(OwnerlessWriteActivity.wouldRefuseTotal()).isEqualTo(1);
+        assertThat(embedder.calls.get()).as("the supplied vector is used").isZero();
+        assertThat(storedCount(h)).isEqualTo(1);
+    }
+
+    // ── 9. retired routes ────────────────────────────────────────────────────
+
+    @Test
+    void theRetiredStagingRoutesAreGone() throws Exception {
+        // nexus-z0o2p.27 deleted StagingHandler with its schema. The engine answers an unregistered
+        // path 404 whatever the method; a valid token is sent so a 401 cannot stand in for the answer.
+        var routes = List.of(
+            Map.entry("POST", "/v1/staging/load/chunks"), Map.entry("POST", "/v1/staging/embed_fill"),
+            Map.entry("POST", "/v1/staging/promote"), Map.entry("POST", "/v1/staging/finalize"),
+            Map.entry("POST", "/v1/staging/clear"), Map.entry("GET", "/v1/staging/counts"));
+        for (var route : routes) {
+            var builder = TestHttp.request("http://127.0.0.1:" + service.getPort() + route.getValue())
+                .header("Authorization", "Bearer " + TOKEN).header("Content-Type", "application/json");
+            var req = route.getKey().equals("GET")
+                ? builder.GET().build()
+                : builder.POST(HttpRequest.BodyPublishers.ofString("{}")).build();
+            var resp = http.send(req, HttpResponse.BodyHandlers.ofString());
+            assertThat(resp.statusCode()).as("%s %s -> %s", route.getKey(), route.getValue(), resp.body()).isEqualTo(404);
+        }
+        // Non-vacuity: a live route on the same client, token and service answers.
+        assertThat(get("/v1/status").statusCode()).isEqualTo(200);
     }
 
     // ── fixtures ─────────────────────────────────────────────────────────────

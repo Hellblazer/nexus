@@ -659,7 +659,12 @@ public final class PgVectorRepository {
 
     /**
      * Metadata keys a refusal / would-refuse log line carries for the first unowned chunk, to name
-     * its writer. Deliberately no {@code source_uri} (a tenant-private URL) and no chunk text.
+     * its writer. {@code source_path} and {@code title} ARE tenant content (a file path, a document
+     * title): they are logged on purpose, 120 characters each, because "which writer is this" is
+     * the question the line exists to answer and the operator reading the engine log is the party
+     * that already holds the tenant's data (RDR-223 names them as the line's content). What is left
+     * out is what that question does not need and what is most sensitive: no {@code source_uri} (a
+     * full URL that can carry credentials or query strings) and no chunk text.
      */
     private static final List<String> OWNERSHIP_LOG_META_KEYS = List.of("source_path", "title", "source_agent");
 
@@ -769,13 +774,18 @@ public final class PgVectorRepository {
         }
     }
 
-    /** A request header for the log line: "absent" when null or blank, else whitespace-collapsed and cut to {@link #OWNERSHIP_LOG_FIELD_MAX}. */
+    /**
+     * A request header for the log line: "absent" when null or blank, else whitespace-collapsed, cut to
+     * {@link #OWNERSHIP_LOG_FIELD_MAX}, and with {@code "} turned into {@code '}. The caller wraps the
+     * result in double quotes, so a header value cannot close the quote and append {@code key=value}
+     * pairs of its own.
+     */
     private static String clipLogField(String value) {
         if (value == null || value.isBlank()) {
             return "absent";
         }
         String text = value.strip().replaceAll("\\s+", " ");
-        return text.substring(0, Math.min(OWNERSHIP_LOG_FIELD_MAX, text.length()));
+        return text.substring(0, Math.min(OWNERSHIP_LOG_FIELD_MAX, text.length())).replace('"', '\'');
     }
 
     /**
@@ -806,7 +816,8 @@ public final class PgVectorRepository {
                 for (String key : OWNERSHIP_LOG_META_KEYS) {
                     Object v = meta.get(key);
                     if (v != null && !String.valueOf(v).isBlank()) {
-                        String text = String.valueOf(v).replaceAll("\\s+", " ");
+                        // the bracket pair delimits first_chunk_meta, so a value must not close it
+                        String text = String.valueOf(v).replaceAll("\\s+", " ").replace('[', '(').replace(']', ')');
                         sb.append(key).append('=').append(text, 0, Math.min(OWNERSHIP_LOG_FIELD_MAX, text.length())).append(';');
                     }
                 }
@@ -815,10 +826,10 @@ public final class PgVectorRepository {
             String clientVersion = clipLogField(guard.clientVersion());
             String userAgent = clipLogField(guard.userAgent());
             log.warn("event={} route={} tenant={} collection={} phase={} unowned={} requested={} sample={} "
-                            + "user_agent=\"{}\" client_version={} suppressed_since_last={} first_chunk_meta=[{}]",
+                            + "user_agent=\"{}\" client_version=\"{}\" suppressed_since_last={} first_chunk_meta=[{}]",
                     enforce ? "ownerless_chunk_write_refused" : "ownerless_chunk_write_would_refuse",
                     guard.route(), tenant, collection, phase, unowned.size(), requested,
-                    String.join(",", sample), userAgent.replace('"', '\''), clientVersion, suppressed, writer);
+                    String.join(",", sample), userAgent, clientVersion, suppressed, writer);
         }
         if (enforce) {
             throw new OwnerlessChunkWriteException(
