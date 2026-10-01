@@ -3871,19 +3871,31 @@ FROM scope s
      * already has the chash: never overwritten, any quarantine copy left for expiry), {@code dim_conflict} (as
      * present, and the origin row and the quarantine copy hold embeddings of different widths) or {@code missing}
      * (neither this origin's quarantine sibling nor the origin has it). For a {@code restored} row,
-     * {@code noManifest} says the chunk has no own-collection manifest row and {@code reapableAfter} is the instant
-     * the reaper may take it again (restore time plus the default grace) unless an owner row is repaired first;
-     * both are null for every other outcome.
+     * {@code noManifest} says the chunk has no own-collection manifest row AFTER the call (false when reattach
+     * wrote one) and {@code reapableAfter} is the instant the reaper may take it again (restore time plus the
+     * default grace) unless an owner row is repaired first; both are null for every other outcome (and
+     * {@code reapableAfter} for an attached chunk).
+     *
+     * <p>{@code reattach} is what the reattach step judged for the chunk, whether or not it ran: {@code attach}
+     * (its owning document is live in the origin and the position is free), {@code superseded} (the document is
+     * live but its manifest already holds another chunk at that position, was re-indexed, or is not safe to
+     * extend), {@code no_live_owner}, {@code no_position}, {@code owned} (a present chunk that already has a
+     * manifest row), or null for a chunk that is missing or a {@code dim_conflict}. {@code attached} is true
+     * only when this call wrote the manifest row. {@code owner} and {@code ownerTitle} name the document the
+     * metadata resolved to (null when none), {@code position} the manifest position it takes, and
+     * {@code chunkTitle} the chunk's own metadata title, for the operator's re-put recipe.
      *
      * <p>{@code auditId} is the {@code quarantine_restore} gc_audit row, null for a dry run or a call that
-     * restored nothing. {@code source} is set when the chashes came from a gc_audit row
+     * restored and attached nothing. {@code source} is set when the chashes came from a gc_audit row
      * ({@link #quarantineRestoreFromAudit}); {@code nextAfter} when they were selected from the sibling by
      * {@code quarantined_at} ({@link #quarantineRestoreSelected}), the chash to pass as {@code afterChash} for the
      * next page, null when the selection is exhausted.
      */
     public record QuarantineRestoreOutcome(List<Row> rows, Long auditId, boolean dryRun, Source source,
                                            String nextAfter) {
-        public record Row(String chash, String outcome, Boolean noManifest, String reapableAfter) {}
+        public record Row(String chash, String outcome, Boolean noManifest, String reapableAfter,
+                          String reattach, boolean attached, String owner, String ownerTitle, Integer position,
+                          String chunkTitle) {}
 
         /**
          * The gc_audit row a restore was sourced from. {@code chashCount} is the row's full count and
@@ -3903,6 +3915,12 @@ FROM scope s
         public List<String> present() { return chashesWith("present"); }
         public List<String> dimConflict() { return chashesWith("dim_conflict"); }
         public List<String> missing() { return chashesWith("missing"); }
+        /** The chashes whose manifest row this call wrote. */
+        public List<String> attached() { return rows.stream().filter(Row::attached).map(Row::chash).toList(); }
+        /** The chashes the reattach step judged with {@code verdict} (see {@link Row}). */
+        public List<String> reattachVerdict(String verdict) {
+            return rows.stream().filter(r -> verdict.equals(r.reattach())).map(Row::chash).toList();
+        }
     }
 
     /** The gc_audit operations whose chash list names chunks that were moved INTO a quarantine sibling. */
@@ -3924,7 +3942,21 @@ FROM scope s
     public QuarantineRestoreOutcome quarantineRestore(String tenant, String originCollection,
                                                        String quarantineCollection, List<String> chashes,
                                                        String actor, boolean dryRun) {
-        return quarantineRestore(tenant, originCollection, quarantineCollection, chashes, actor, dryRun,
+        return quarantineRestore(tenant, originCollection, quarantineCollection, chashes, actor, dryRun, true);
+    }
+
+    /**
+     * {@link #quarantineRestore(String, String, String, List, String, boolean)} with an explicit {@code reattach}
+     * choice. With {@code reattach} (the default) a chunk whose metadata names a document that is still live in
+     * the origin also gets that document's manifest row at the chunk's position, so it is visible to search and
+     * get again; a position the document's manifest already holds a different chunk at reports {@code superseded}
+     * and writes nothing. Without it the chunks move as bytes only, and the result still says what reattach would
+     * have done. See {@code vectors-025}'s header for the full rules.
+     */
+    public QuarantineRestoreOutcome quarantineRestore(String tenant, String originCollection,
+                                                       String quarantineCollection, List<String> chashes,
+                                                       String actor, boolean dryRun, boolean reattach) {
+        return quarantineRestore(tenant, originCollection, quarantineCollection, chashes, actor, dryRun, reattach,
                                  null, null, null);
     }
 
@@ -3943,6 +3975,15 @@ FROM scope s
                                                                 String quarantineCollection, long auditId,
                                                                 int offset, int limit, String actor,
                                                                 boolean dryRun) {
+        return quarantineRestoreFromAudit(tenant, originCollection, quarantineCollection, auditId, offset, limit,
+                                          actor, dryRun, true);
+    }
+
+    /** {@link #quarantineRestoreFromAudit(String, String, String, long, int, int, String, boolean)} with an explicit reattach choice. */
+    public QuarantineRestoreOutcome quarantineRestoreFromAudit(String tenant, String originCollection,
+                                                                String quarantineCollection, long auditId,
+                                                                int offset, int limit, String actor,
+                                                                boolean dryRun, boolean reattach) {
         if (offset < 0 || limit <= 0) {
             throw new IllegalArgumentException("offset must be >= 0 and limit >= 1, got " + offset + "/" + limit);
         }
@@ -3966,10 +4007,14 @@ FROM scope s
         }
         List<String> listed;
         boolean isSample = false;
+        String movedInto = null;
         try {
             listed = MAPPER.readValue(row.value4().data(), new TypeReference<List<String>>() {});
             if (row.value5() != null) {
-                isSample = MAPPER.readTree(row.value5().data()).path("chashes_is_sample").asBoolean(false);
+                var details = MAPPER.readTree(row.value5().data());
+                isSample = details.path("chashes_is_sample").asBoolean(false);
+                movedInto = details.hasNonNull("quarantine_collection")
+                    ? details.get("quarantine_collection").asText() : null;
             }
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new IllegalStateException("gc_audit row " + auditId + " has an unreadable chash list", e);
@@ -3981,6 +4026,15 @@ FROM scope s
                 + "select them from the quarantine collection by quarantined_at instead "
                 + "(quarantined_since / quarantined_before)");
         }
+        // The sibling the caller names comes from the catalog row of the origin; the audit row records where THIS
+        // move actually put the chunks. They agree for a conformant name. When they do not, restoring from the
+        // caller's sibling would read every chash of the row as missing (or, worse, find another origin's chunks
+        // there), so the mismatch is refused by name rather than discovered by a wall of "missing".
+        if (movedInto != null && !movedInto.equals(quarantineCollection)) {
+            throw new IllegalArgumentException("gc_audit row " + auditId + " moved its chunks into " + movedInto
+                + ", not " + quarantineCollection + "; the quarantine collection of an audit restore is the one the "
+                + "row names");
+        }
         int end = Math.min(listed.size(), offset + limit);
         List<String> slice = offset >= listed.size() ? List.of() : listed.subList(offset, end);
         Integer next = end < listed.size() ? end : null;
@@ -3989,7 +4043,7 @@ FROM scope s
         if (slice.isEmpty()) {
             return new QuarantineRestoreOutcome(List.of(), null, dryRun, source, null);
         }
-        return quarantineRestore(tenant, originCollection, quarantineCollection, slice, actor, dryRun,
+        return quarantineRestore(tenant, originCollection, quarantineCollection, slice, actor, dryRun, reattach,
                                  auditId, source, null);
     }
 
@@ -4010,6 +4064,16 @@ FROM scope s
                                                                java.time.Instant since, java.time.Instant before,
                                                                String afterChash, int limit, String actor,
                                                                boolean dryRun) {
+        return quarantineRestoreSelected(tenant, originCollection, quarantineCollection, since, before, afterChash,
+                                         limit, actor, dryRun, true);
+    }
+
+    /** {@link #quarantineRestoreSelected(String, String, String, java.time.Instant, java.time.Instant, String, int, String, boolean)} with an explicit reattach choice. */
+    public QuarantineRestoreOutcome quarantineRestoreSelected(String tenant, String originCollection,
+                                                               String quarantineCollection,
+                                                               java.time.Instant since, java.time.Instant before,
+                                                               String afterChash, int limit, String actor,
+                                                               boolean dryRun, boolean reattach) {
         if (since == null && before == null) {
             throw new IllegalArgumentException(
                 "name a quarantined_at window: quarantined_since and/or quarantined_before");
@@ -4053,7 +4117,7 @@ FROM scope s
         }
         String next = selected.size() == limit ? selected.get(selected.size() - 1) : null;
         var out = quarantineRestore(tenant, originCollection, quarantineCollection, selected, actor, dryRun,
-                                    null, null, null);
+                                    reattach, null, null, null);
         return new QuarantineRestoreOutcome(out.rows(), out.auditId(), dryRun, null, next);
     }
 
@@ -4067,8 +4131,14 @@ FROM scope s
             throw new IllegalArgumentException("the quarantine collection must be a quarantine- sibling, got: "
                 + quarantineCollection);
         }
-        // The origin is the registered catalog row, never a name: an origin that is gone fails loud here.
-        CollectionRegistry.lookup(tenantScope, tenant, originCollection);
+        // The origin is the registered catalog row, never a name: an origin that is gone fails loud here. It must
+        // be live, the only state the reaper visits; restoring into a dormant or disputed collection would put
+        // chunks where nothing is looking after them.
+        var origin = CollectionRegistry.lookup(tenantScope, tenant, originCollection);
+        if (!"live".equals(origin.lifecycleState())) {
+            throw new IllegalArgumentException(originCollection + " is not a live collection (lifecycle_state="
+                + origin.lifecycleState() + "); a restore goes into a live collection");
+        }
         var sibling = CollectionRegistry.lookup(tenantScope, tenant, quarantineCollection);
         if (!"quarantine".equals(sibling.lifecycleState())) {
             throw new IllegalArgumentException(quarantineCollection + " is not a quarantine collection (lifecycle_state="
@@ -4078,7 +4148,8 @@ FROM scope s
 
     private QuarantineRestoreOutcome quarantineRestore(String tenant, String originCollection,
                                                         String quarantineCollection, List<String> chashes,
-                                                        String actor, boolean dryRun, Long sourceAuditId,
+                                                        String actor, boolean dryRun, boolean reattach,
+                                                        Long sourceAuditId,
                                                         QuarantineRestoreOutcome.Source source, String nextAfter) {
         if (chashes == null || chashes.isEmpty()) {
             throw new IllegalArgumentException("at least one chash is required");
@@ -4092,23 +4163,77 @@ FROM scope s
             hex[i] = dev.nexus.service.db.Chash.requireCanonical(chashes.get(i), "chashes[" + i + "]");
         }
         checkQuarantineRestoreCollections(tenant, originCollection, quarantineCollection);
-        var rows = tenantScope.withTenant(tenant, ctx -> {
-            PgSession.setStatementAndLockBounds(ctx, PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
-                                                PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
-            return ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
-                    tenant, originCollection, quarantineCollection, hex, actor, sourceAuditId, dryRun))
-               .fetch();
-        });
+        var rows = restoreRows(tenant, originCollection, quarantineCollection, hex, actor, dryRun, reattach,
+                               sourceAuditId);
         Long auditId = null;
         var out = new ArrayList<QuarantineRestoreOutcome.Row>(rows.size());
         for (var r : rows) {
             var reapable = r.get(QUARANTINE_RESTORE_CHUNKS.R_REAPABLE_AFTER);
             out.add(new QuarantineRestoreOutcome.Row(r.get(QUARANTINE_RESTORE_CHUNKS.R_CHASH),
                 r.get(QUARANTINE_RESTORE_CHUNKS.R_OUTCOME), r.get(QUARANTINE_RESTORE_CHUNKS.R_NO_MANIFEST),
-                reapable == null ? null : reapable.toInstant().toString()));
+                reapable == null ? null : reapable.toInstant().toString(),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH),
+                Boolean.TRUE.equals(r.get(QUARANTINE_RESTORE_CHUNKS.R_ATTACHED)),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER), r.get(QUARANTINE_RESTORE_CHUNKS.R_OWNER_TITLE),
+                r.get(QUARANTINE_RESTORE_CHUNKS.R_POSITION), r.get(QUARANTINE_RESTORE_CHUNKS.R_CHUNK_TITLE)));
             if (auditId == null) auditId = r.get(QUARANTINE_RESTORE_CHUNKS.R_AUDIT_ID);
         }
         return new QuarantineRestoreOutcome(out, auditId, dryRun, source, nextAfter);
+    }
+
+    /**
+     * Runs {@code nexus.quarantine_restore_chunks} and maps a held lock or a statement that ran past its bound to
+     * {@link QuarantineRestoreBusyException}. The whole call is one transaction and it rolled back: nothing moved,
+     * nothing was attached, no audit row was written. That is a condition to retry, not a fault, so it gets its own
+     * typed answer instead of the opaque 500 an unmapped database error becomes.
+     */
+    private org.jooq.Result<?> restoreRows(String tenant, String originCollection, String quarantineCollection,
+                                            String[] hex, String actor, boolean dryRun, boolean reattach,
+                                            Long sourceAuditId) {
+        try {
+            return tenantScope.withTenant(tenant, ctx -> {
+                PgSession.setStatementAndLockBounds(ctx, PgSession.DEFAULT_GC_RESTORE_BOUNDED_STATEMENT_TIMEOUT_MS,
+                                                    PgSession.DEFAULT_GC_RESTORE_BOUNDED_LOCK_TIMEOUT_MS);
+                return ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                        tenant, originCollection, quarantineCollection, hex, actor, sourceAuditId, dryRun, reattach))
+                   .fetch();
+            });
+        } catch (RuntimeException e) {
+            String state = sqlState(e);
+            if (LOCK_NOT_AVAILABLE.equals(state) || QUERY_CANCELED.equals(state)) {
+                throw new QuarantineRestoreBusyException(
+                    (LOCK_NOT_AVAILABLE.equals(state)
+                        ? "a manifest writer or an index run holds the collection's lock"
+                        : "the restore ran past its statement time bound")
+                    + "; nothing was moved, attached or audited", e);
+            }
+            throw e;
+        }
+    }
+
+    private static final String LOCK_NOT_AVAILABLE = "55P03";
+    private static final String QUERY_CANCELED = "57014";
+
+    /** The SQLSTATE of the first {@link java.sql.SQLException} in {@code t}'s cause chain, or null. */
+    private static String sqlState(Throwable t) {
+        for (int depth = 0; t != null && depth < 32; depth++, t = t.getCause()) {
+            if (t instanceof java.sql.SQLException se && se.getSQLState() != null) return se.getSQLState();
+        }
+        return null;
+    }
+
+    /**
+     * The restore could not take the collection's lock (or finish its statement) inside its bound, and rolled back.
+     * Nothing moved, nothing was attached, no audit row was written; the same call may simply be sent again. The
+     * route answers it as a typed 503 ({@code reason: quarantine_restore_busy}).
+     */
+    public static final class QuarantineRestoreBusyException extends RuntimeException {
+        /** Seconds a client should wait before sending the same call again. */
+        public static final int RETRY_AFTER_SECONDS = 5;
+
+        public QuarantineRestoreBusyException(String message, Throwable cause) {
+            super(message, cause);
+        }
     }
 
     /**

@@ -193,6 +193,10 @@ public final class HttpUtil {
      *       ({@link #OWNERLESS_CHUNK_WRITE_REASON}, RDR-223 Phase 3 Step 2); the body also
      *       carries {@code unowned_count}, {@code requested_count} and {@code unowned_chashes}
      *       (a sample), and {@code error} names the combined write routes that replace it.</li>
+     *   <li>{@code quarantine_restore_busy} (503): {@code POST /gc/quarantine-restore} could not take the
+     *       collection's sweep gate (or an owning document's index-run lock) inside its 2 s bound, or ran past
+     *       its statement bound, and rolled back whole ({@link #QUARANTINE_RESTORE_BUSY_REASON}); the body also
+     *       carries {@code retry_after_seconds} and {@code nothing_moved: true}. Retryable.</li>
      * </ul>
      * The typed 409 bodies predate the rule and discriminate on {@code status}
      * ({@code conflict_running}, {@code stale_run}) or on {@code constraint}; those
@@ -487,6 +491,11 @@ public final class HttpUtil {
     /** The {@code reason} value on the typed 422 for an ownerless chunk write
      *  (RDR-223 Phase 3 Step 2, nexus-z0o2p.24). Part of the wire contract: clients key on it. */
     static final String OWNERLESS_CHUNK_WRITE_REASON = "ownerless_chunk_write";
+
+    /** The {@code reason} value on the typed 503 of {@code POST /v1/vectors/gc/quarantine-restore} when the
+     *  restore's lock or statement bound tripped and the call rolled back whole (nexus-wbfpw.49). Retryable; the
+     *  body also carries {@code retry_after_seconds} and {@code nothing_moved}. Part of the wire contract. */
+    static final String QUARANTINE_RESTORE_BUSY_REASON = "quarantine_restore_busy";
 
     /** PostgreSQL SQLSTATE for a plain {@code RAISE EXCEPTION} with no explicit
      *  {@code ERRCODE} (the {@code raise_exception} default class). */

@@ -28,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -307,5 +309,104 @@ class VectorHandlerQuarantineRestoreRouteTest {
         assertThat(post(TOKEN_B, req(o, "audit_id", id)).statusCode()).as("A's audit row is invisible to B").isEqualTo(400);
         assertThat(json(post(TOKEN_B, req(o, "quarantined_since", "2000-01-01T00:00:00Z"))).get("restored")).isEqualTo(0);
         assertThat(in(TENANT_A, "quarantine-" + o, hs.get(0))).as("A's quarantine is untouched").isTrue();
+    }
+
+    // ── reattach (nexus-wbfpw.49) ────────────────────────────────────────────
+
+    /** One quarantined chunk of {@code origin} whose metadata names {@code doc}, and that live document. */
+    private String quarantinedForLiveDoc(String tenant, String origin, String doc, String seed) throws Exception {
+        String sibling = "quarantine-" + origin;
+        String hex = Chash.ofText(origin + "/" + seed).toHex();
+        su(ctx -> {
+            PgContainerHelper.insertCollection(ctx, tenant, origin);
+            PgContainerHelper.insertCollection(ctx, tenant, sibling);
+            PgContainerHelper.insertChunks(ctx, tenant, sibling, List.of(hex), List.of(seed + " text"),
+                List.of(new float[384]), List.of(Map.<String, Object>of(
+                    "title", seed, "quarantined_at", "2026-09-01T00:00:00Z", "origin_collection", origin,
+                    "catalog_doc_id", doc, "chunk_index", 0)));
+            ctx.insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT)
+               .values(tenant, doc, "Title of " + doc, origin, 1).execute();
+        });
+        return hex;
+    }
+
+    private int manifestRows(String tenant, String doc) throws Exception {
+        int[] n = new int[1];
+        su(ctx -> n[0] = ctx.fetchCount(CATALOG_DOCUMENT_CHUNKS,
+            CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc))));
+        return n[0];
+    }
+
+    @Test
+    void reattachIsTheDefault_andTheResponseSaysWhatWasAttachedToWhat() throws Exception {
+        String o = col();
+        String h = quarantinedForLiveDoc(TENANT_A, o, "9.1.1", "attached");
+
+        var r = post(TOKEN_A, req(o, "chashes", List.of(h)));
+
+        assertThat(r.statusCode()).as(r.body()).isEqualTo(200);
+        var body = json(r);
+        assertThat(body.get("reattach")).isEqualTo(true);
+        assertThat(body.get("attached")).isEqualTo(1);
+        assertThat(body.get("superseded")).isEqualTo(0);
+        var row = rows(body).get(0);
+        assertThat(row.get("outcome")).isEqualTo("restored");
+        assertThat(row.get("reattach")).isEqualTo("attach");
+        assertThat(row.get("attached")).isEqualTo(true);
+        assertThat(row.get("owner")).isEqualTo("9.1.1");
+        assertThat(row.get("owner_title")).isEqualTo("Title of 9.1.1");
+        assertThat(row.get("position")).isEqualTo(0);
+        assertThat(row.get("no_manifest")).isEqualTo(false);
+        assertThat(row.get("reapable_after")).isNull();
+        assertThat(manifestRows(TENANT_A, "9.1.1")).isEqualTo(1);
+    }
+
+    @Test
+    void reattachFalseMovesBytesOnly_andStillReportsWhatItWouldHaveDone() throws Exception {
+        String o = col();
+        String h = quarantinedForLiveDoc(TENANT_A, o, "9.2.1", "bytes-only");
+
+        var body = json(post(TOKEN_A, req(o, "chashes", List.of(h), "reattach", false)));
+
+        assertThat(body.get("reattach")).isEqualTo(false);
+        assertThat(body.get("attached")).isEqualTo(0);
+        var row = rows(body).get(0);
+        assertThat(row.get("outcome")).isEqualTo("restored");
+        assertThat(row.get("attached")).isEqualTo(false);
+        assertThat(row.get("reattach")).as("what it would have done").isEqualTo("attach");
+        assertThat(row.get("no_manifest")).isEqualTo(true);
+        assertThat(manifestRows(TENANT_A, "9.2.1")).isZero();
+        // A repeat with reattach (the default) finishes it.
+        var again = json(post(TOKEN_A, req(o, "chashes", List.of(h))));
+        assertThat(again.get("present")).isEqualTo(1);
+        assertThat(again.get("attached")).isEqualTo(1);
+        assertThat(manifestRows(TENANT_A, "9.2.1")).isEqualTo(1);
+    }
+
+    @Test
+    void aHeldSweepGateIsATypedRetryable503_withNothingMoved() throws Exception {
+        String o = col();
+        List<String> hs = quarantined(TENANT_A, o, "2026-09-01T00:00:00Z", "busy");
+
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock_shared",
+                org.jooq.impl.SQLDataType.OTHER, DSL.function("hashtext", org.jooq.impl.SQLDataType.INTEGER,
+                    DSL.val("sweepgate:" + TENANT_A + "/" + o)))).execute();
+            var r = post(TOKEN_A, req(o, "chashes", hs));
+
+            assertThat(r.statusCode()).as(r.body()).isEqualTo(503);
+            var body = json(r);
+            assertThat(body.get("reason")).isEqualTo("quarantine_restore_busy");
+            assertThat(body.get("nothing_moved")).isEqualTo(true);
+            assertThat(body.get("retry_after_seconds")).isEqualTo(5);
+            assertThat(r.headers().firstValue("Retry-After")).hasValue("5");
+            assertThat(body.get("error").toString()).as("not the opaque 500 text").doesNotContain("internal server error");
+            holder.rollback();
+        }
+        assertThat(in(TENANT_A, "quarantine-" + o, hs.get(0))).as("nothing moved").isTrue();
+        // The same request, sent again once the gate is free, goes through.
+        assertThat(json(post(TOKEN_A, req(o, "chashes", hs))).get("restored")).isEqualTo(1);
     }
 }

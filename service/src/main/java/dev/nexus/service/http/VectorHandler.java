@@ -326,6 +326,19 @@ public final class VectorHandler implements HttpHandler {
             // to be non-2xx and logged with enough op context to disambiguate.
             log.debug("event=vector_illegal_state op={} error={}", op, e.getMessage());
             HttpUtil.send(exchange, 422, json(Map.of("error", e.getMessage())));
+        } catch (PgVectorRepository.QuarantineRestoreBusyException e) {
+            // nexus-wbfpw.49: the restore's lock or statement bound tripped and the call rolled back whole. A typed,
+            // retryable 503 with the stable reason a client branches on and a Retry-After, never the opaque 500.
+            // POST /gc/quarantine-restore is a non-idempotent sweep route, so the client's gateway ladder does not
+            // retry it by itself; the CLI reads this body and says so.
+            log.warn("event=quarantine_restore_busy op={} error={}", op, e.getMessage());
+            exchange.getResponseHeaders().set("Retry-After",
+                Integer.toString(PgVectorRepository.QuarantineRestoreBusyException.RETRY_AFTER_SECONDS));
+            HttpUtil.send(exchange, 503, json(Map.of(
+                "error", e.getMessage(),
+                "reason", HttpUtil.QUARANTINE_RESTORE_BUSY_REASON,
+                "retry_after_seconds", PgVectorRepository.QuarantineRestoreBusyException.RETRY_AFTER_SECONDS,
+                "nothing_moved", true)));
         } catch (Exception e) {
             // Shared typed-DB-error ladder: pool-exhaustion 503 + class-23 409
             // (nexus-h8rf6.2 / nexus-7e057) — see HttpUtil.sendTypedDbError.
@@ -1314,21 +1327,34 @@ public final class VectorHandler implements HttpHandler {
      *   "quarantined_before": "2026-09-08T00:00:00Z",                // window; one bound or both
      *   "after_chash": "64-hex", "limit": 1000 }
      * </pre>
-     * plus optional {@code dry_run} (classify only: no gate, no move, no audit row) and {@code actor} (recorded on
-     * the audit row; default {@code operator}). An {@code audit_id} row must be this tenant's, name the origin, be
-     * an operation that quarantined chunks, and list every chash it moved: a {@code gc_quarantine_orphans} row lists
-     * only a sample and is refused with 400, the way back for those is the {@code quarantined_since} window.
+     * plus optional {@code dry_run} (classify only: no gate, no move, no audit row), {@code reattach} (default
+     * {@code true}) and {@code actor} (recorded on the audit row; default {@code operator}). With {@code reattach}, a
+     * chunk whose metadata names a document that is still live in the origin also gets that document's manifest row
+     * at its position, so it is visible to search and get again (a position the document's manifest already holds
+     * another chunk at reports {@code superseded} and writes nothing; see {@code vectors-025}). An {@code audit_id}
+     * row must be this tenant's, name the origin, be an operation that quarantined chunks, name this quarantine
+     * collection when it records one, and list every chash it moved: a {@code gc_quarantine_orphans} row lists only
+     * a sample and is refused with 400, the way back for those is the {@code quarantined_since} window.
      *
      * <p>Response 200: {@code {"origin_collection", "quarantine_collection", "dry_run", "audit_id": N|null,
-     * "restored": n, "would_restore": n, "present": n, "dim_conflict": n, "missing": n, "rows": [{"chash",
-     * "outcome", "no_manifest": bool|null, "reapable_after": ISO-8601|null}, ...], "source": {...}|null,
-     * "next_after": "64-hex"|null}}. {@code rows} has one entry per distinct requested chash, in request order.
-     * {@code outcome} is {@code restored}, {@code would_restore} (dry run), {@code present} (the origin has it),
-     * {@code dim_conflict} (as present, with a different embedding width in the quarantine copy) or {@code missing}.
-     * For a {@code restored} row {@code no_manifest} says the chunk has no own-collection manifest row and
-     * {@code reapable_after} is when the reaper may take it again unless an owner row is repaired first. Page by
-     * sending {@code next_after} back as {@code after_chash} (window source) or {@code source.next_offset} back
-     * as {@code offset} (audit source) while it is not null.
+     * "restored": n, "would_restore": n, "present": n, "dim_conflict": n, "missing": n, "reattach": bool,
+     * "attached": n, "superseded": n, "no_live_owner": n, "no_position": n, "rows": [{"chash", "outcome",
+     * "no_manifest": bool|null, "reapable_after": ISO-8601|null, "reattach": str|null, "attached": bool,
+     * "owner": tumbler|null, "owner_title": str|null, "position": int|null, "chunk_title": str|null}, ...],
+     * "source": {...}|null, "next_after": "64-hex"|null}}. {@code rows} has one entry per distinct requested chash,
+     * in request order. {@code outcome} is {@code restored}, {@code would_restore} (dry run), {@code present} (the
+     * origin has it), {@code dim_conflict} (as present, with a different embedding width in the quarantine copy) or
+     * {@code missing}. For a {@code restored} row {@code no_manifest} says the chunk has no own-collection manifest
+     * row after the call and {@code reapable_after} is when the reaper may take it again unless an owner row is
+     * repaired first; such a chunk is hidden from search and get until it has one. {@code row.reattach} is what the
+     * reattach step judged ({@code attach}, {@code superseded}, {@code no_live_owner}, {@code no_position},
+     * {@code owned}, or null) whether or not it ran, and {@code attached} says this call wrote the manifest row.
+     * Page by sending {@code next_after} back as {@code after_chash} (window source) or {@code source.next_offset}
+     * back as {@code offset} (audit source) while it is not null.
+     *
+     * <p>503 {@code {"reason": "quarantine_restore_busy", "retry_after_seconds", "nothing_moved": true}} when the
+     * collection's sweep gate (or an owning document's index-run lock) is held past the 2 s bound or the statement
+     * runs past its bound: the call rolled back whole and may be sent again.
      */
     private void handleGcQuarantineRestore(HttpExchange ex, String method) throws IOException {
         requireMethod(ex, method, "POST");
@@ -1338,6 +1364,7 @@ public final class VectorHandler implements HttpHandler {
         String origin     = requireString(body, "origin_collection");
         String quarantine = requireString(body, "quarantine_collection");
         boolean dryRun = optBool(body, "dry_run", false);
+        boolean reattach = optBool(body, "reattach", true);
         String actor = java.util.Objects.requireNonNullElse(optString(body, "actor"), "operator");
 
         List<String> chashes = body.get("chashes") == null ? null : requireStringList(body, "chashes");
@@ -1359,7 +1386,7 @@ public final class VectorHandler implements HttpHandler {
                 throw new IllegalArgumentException("at most " + MAX_QUARANTINE_RESTORE_PER_CALL
                     + " chashes per call, got " + chashes.size());
             }
-            result = repo.quarantineRestore(tenant, origin, quarantine, chashes, actor, dryRun);
+            result = repo.quarantineRestore(tenant, origin, quarantine, chashes, actor, dryRun, reattach);
         } else if (auditRaw != null) {
             long auditId;
             try {
@@ -1368,11 +1395,12 @@ public final class VectorHandler implements HttpHandler {
                 throw new IllegalArgumentException("field 'audit_id' must be an integer");
             }
             int offset = Math.max(0, optInt(body, "offset", 0));
-            result = repo.quarantineRestoreFromAudit(tenant, origin, quarantine, auditId, offset, limit, actor, dryRun);
+            result = repo.quarantineRestoreFromAudit(tenant, origin, quarantine, auditId, offset, limit, actor, dryRun,
+                                                     reattach);
         } else {
             result = repo.quarantineRestoreSelected(tenant, origin, quarantine,
                 parseInstant("quarantined_since", sinceRaw), parseInstant("quarantined_before", beforeRaw),
-                parseAfterChash(body.get("after_chash")), limit, actor, dryRun);
+                parseAfterChash(body.get("after_chash")), limit, actor, dryRun, reattach);
         }
 
         var rows = new ArrayList<Map<String, Object>>(result.rows().size());
@@ -1382,6 +1410,12 @@ public final class VectorHandler implements HttpHandler {
             item.put("outcome", r.outcome());
             item.put("no_manifest", r.noManifest());
             item.put("reapable_after", r.reapableAfter());
+            item.put("reattach", r.reattach());
+            item.put("attached", r.attached());
+            item.put("owner", r.owner());
+            item.put("owner_title", r.ownerTitle());
+            item.put("position", r.position());
+            item.put("chunk_title", r.chunkTitle());
             rows.add(item);
         }
         Map<String, Object> source = null;
@@ -1404,6 +1438,11 @@ public final class VectorHandler implements HttpHandler {
         out.put("present", result.present().size());
         out.put("dim_conflict", result.dimConflict().size());
         out.put("missing", result.missing().size());
+        out.put("reattach", reattach);
+        out.put("attached", result.attached().size());
+        out.put("superseded", result.reattachVerdict("superseded").size());
+        out.put("no_live_owner", result.reattachVerdict("no_live_owner").size());
+        out.put("no_position", result.reattachVerdict("no_position").size());
         out.put("rows", rows);
         out.put("source", source);
         out.put("next_after", result.nextAfter());

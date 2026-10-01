@@ -252,8 +252,12 @@ class JooqRecordReflectionFeatureTest {
     // (ReaperExpireQuarantineRecord), +1.
     // 110 -> 111: nexus-2x9xa, vectors-025-quarantine-restore-chunks.xml
     // added nexus.quarantine_restore_chunks, a RETURNS TABLE(r_chash,
-    // r_outcome, r_audit_id, r_no_manifest, r_reapable_after) function, one
-    // generated Record type (QuarantineRestoreChunksRecord), +1.
+    // r_outcome, r_audit_id, r_no_manifest, r_reapable_after, r_reattach,
+    // r_attached, r_owner, r_owner_title, r_position, r_chunk_title)
+    // function, one generated Record type (QuarantineRestoreChunksRecord),
+    // +1. Round 2 (nexus-wbfpw.49) widened that record's columns and added
+    // nexus.quarantine_reattach_plan, which RETURNS jsonb (a scalar, no
+    // Record type): no further delta from it.
     private static final int EXPECTED_RECORD_TYPES = 111;
 
     @Test

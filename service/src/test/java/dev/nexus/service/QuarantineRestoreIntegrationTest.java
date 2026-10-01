@@ -4,13 +4,16 @@ package dev.nexus.service;
 
 import dev.nexus.service.ChunkReaper.RunResult;
 import dev.nexus.service.ChunkReaper.Settings;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.nexus.service.db.Chash;
+import dev.nexus.service.db.ChashHex;
 import dev.nexus.service.db.LadderRepository;
 import dev.nexus.service.db.Rdr192BackfillGate;
 import dev.nexus.service.vectors.PgVectorRepository;
 import dev.nexus.service.vectors.PgVectorRepository.QuarantineRestoreOutcome;
 import dev.nexus.service.vectors.ReaperRepository;
 import org.jooq.DSLContext;
+import org.jooq.JSONB;
 import org.jooq.SQLDialect;
 import org.jooq.impl.DSL;
 import org.jooq.impl.SQLDataType;
@@ -26,9 +29,13 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENTS;
+import static dev.nexus.service.jooq.nexus.Tables.CATALOG_DOCUMENT_CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNK_IS_REAPABLE;
 import static dev.nexus.service.jooq.nexus.Tables.GC_AUDIT;
+import static dev.nexus.service.jooq.nexus.Tables.QUARANTINE_RESTORE_CHUNKS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -88,7 +95,7 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
             DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
             PgContainerHelper.insertCollection(ctx, tenant, collection);
             PgContainerHelper.insertChunks(ctx, tenant, collection, List.of(hex), List.of(seed + " text"),
-                List.of(new float[384]), List.of(metadata));
+                embedder.embed(List.of(seed + " text")), List.of(metadata));
         }
         return hex;
     }
@@ -110,6 +117,109 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
             assertThat(inCollection(tenant, collection, h)).isFalse();
         }
         return hexes;
+    }
+
+    /** Like {@link #quarantined}, with a metadata map per seed (in the map's iteration order). */
+    private List<String> quarantinedWith(String tenant, String collection,
+                                         Map<String, Map<String, Object>> metaBySeed) throws Exception {
+        openGate(tenant);
+        List<String> hexes = new java.util.ArrayList<>();
+        for (var e : metaBySeed.entrySet()) hexes.add(orphan(tenant, collection, e.getKey(), e.getValue()));
+        RunResult run = reaper(tenant).runOnce(Duration.ZERO);
+        assertThat(run.tenant(tenant).collection(collection).moved()).as("fixture: the reaper moved them")
+            .isEqualTo(metaBySeed.size());
+        for (String h : hexes) assertThat(inCollection(tenant, quarantineOf(collection), h)).isTrue();
+        return hexes;
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** A live catalog document registered under {@code collection}. */
+    private void liveDoc(String tenant, String collection, String tumbler, String title, Integer chunkCount,
+                         String filePath, Map<String, Object> metadata) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES)
+                .insertInto(CATALOG_DOCUMENTS, CATALOG_DOCUMENTS.TENANT_ID, CATALOG_DOCUMENTS.TUMBLER,
+                    CATALOG_DOCUMENTS.TITLE, CATALOG_DOCUMENTS.PHYSICAL_COLLECTION, CATALOG_DOCUMENTS.CHUNK_COUNT,
+                    CATALOG_DOCUMENTS.FILE_PATH, CATALOG_DOCUMENTS.METADATA)
+                .values(tenant, tumbler, title, collection, chunkCount, filePath,
+                    JSONB.jsonb(MAPPER.writeValueAsString(metadata)))
+                .execute();
+        }
+    }
+
+    private void tombstone(String tenant, String tumbler) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.DELETED_AT, OffsetDateTime.now())
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))).execute();
+        }
+    }
+
+    private void setIndexState(String tenant, String tumbler, String state) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_DOCUMENTS)
+                .set(CATALOG_DOCUMENTS.INDEX_STATE, state)
+                .where(CATALOG_DOCUMENTS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENTS.TUMBLER.eq(tumbler))).execute();
+        }
+    }
+
+    /** A manifest row of {@code doc} naming a chunk that lives in ANOTHER collection (a rename-copy leftover). */
+    private void manifestUnderAnotherCollection(String tenant, String doc, String otherCollection, int position,
+                                                String seed) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, otherCollection);
+        }
+        manifested(tenant, otherCollection, doc, position, seed);
+    }
+
+    /** A chunk of {@code collection} that the document's manifest already names at {@code position}. */
+    private String manifested(String tenant, String collection, String doc, int position, String seed) throws Exception {
+        String hex = Chash.ofText(collection + "/" + seed).toHex();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertChunks(ctx, tenant, collection, List.of(hex), List.of(seed + " text"),
+                embedder.embed(List.of(seed + " text")), List.of(Map.<String, Object>of("title", seed)));
+            ctx.insertInto(CATALOG_DOCUMENT_CHUNKS, CATALOG_DOCUMENT_CHUNKS.TENANT_ID, CATALOG_DOCUMENT_CHUNKS.DOC_ID,
+                    CATALOG_DOCUMENT_CHUNKS.POSITION, CATALOG_DOCUMENT_CHUNKS.CHASH,
+                    CATALOG_DOCUMENT_CHUNKS.CHUNK_INDEX, CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+               .values(tenant, doc, position, Chash.fromHex(hex).toBytes(), position, collection).execute();
+        }
+        return hex;
+    }
+
+    private record ManifestRow(int position, String chash, String collection) {}
+
+    private List<ManifestRow> manifest(String tenant, String doc) throws Exception {
+        try (Connection su = pg.createConnection("")) {
+            return DSL.using(su, SQLDialect.POSTGRES)
+                .select(CATALOG_DOCUMENT_CHUNKS.POSITION, ChashHex.hex(CATALOG_DOCUMENT_CHUNKS.CHASH),
+                        CATALOG_DOCUMENT_CHUNKS.COLLECTION)
+                .from(CATALOG_DOCUMENT_CHUNKS)
+                .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(tenant).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq(doc)))
+                .orderBy(CATALOG_DOCUMENT_CHUNKS.POSITION)
+                .fetch(r -> new ManifestRow(r.value1(), r.value2(), r.value3()));
+        }
+    }
+
+    /** What the engine's read paths show: live(c) hides a chunk no live manifest row names. */
+    private boolean visibleToGet(String tenant, String collection, String hex) {
+        var r = vectors.get(tenant, collection, List.of(hex), 10, 0, false);
+        return ((List<?>) r.get("ids")).contains(hex);
+    }
+
+    private boolean visibleToSearch(String tenant, String collection, String text, String hex) {
+        return vectors.search(tenant, text, List.of(collection), 50, null).stream()
+            .anyMatch(r -> hex.equals(r.get("id")));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> metadataOf(ChunkState state) throws Exception {
+        return MAPPER.readValue(state.metadata(), Map.class);
+    }
+
+    private static String verdictOf(QuarantineRestoreOutcome out, String hex) {
+        return out.rows().stream().filter(r -> r.chash().equals(hex)).findFirst().orElseThrow().reattach();
     }
 
     /** Makes the quarantined copies look long-lived: written 90 days ago, moved 10 days ago. */
@@ -215,8 +325,10 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
 
         ChunkState after = chunk(t, c, h);
         assertThat(after.text()).isEqualTo("stamps text");
-        assertThat(after.metadata()).contains("\"title\": \"stamps\"")
-            .doesNotContain("quarantined_at").doesNotContain("origin_collection");
+        // Keys, not substrings: "reaper_quarantined_at" contains "quarantined_at", so a substring check goes red
+        // the moment the reaper's own tag is present and green when it is stripped by accident.
+        assertThat(metadataOf(after)).containsEntry("title", "stamps")
+            .doesNotContainKeys("quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at");
         assertThat(after.createdAt().toInstant()).as("created_at is carried through").isEqualTo(old.toInstant());
         // Neither the quarantine row's last_written_at (10 days ago: copying it would shorten the grace by the time
         // spent in quarantine) nor anything derived from created_at (90 days ago: reapable at the very next pass).
@@ -623,6 +735,8 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
                 SQLDataType.OTHER, DSL.function("hashtext", SQLDataType.INTEGER,
                     DSL.val("sweepgate:" + t + "/" + c)))).execute();
             assertThatThrownBy(() -> vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false))
+                .as("typed and retryable, not an opaque database error")
+                .isInstanceOf(PgVectorRepository.QuarantineRestoreBusyException.class)
                 .hasStackTraceContaining("sweep gate");
             holder.rollback();
         }
@@ -657,5 +771,428 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
                 java.util.Collections.nCopies(PgVectorRepository.MAX_QUARANTINE_RESTORE_CHASHES + 1, h), ACTOR, false))
             .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("at most");
         assertThat(inCollection(t, q, h)).isTrue();
+    }
+
+    // ── reattach: the chunk is visible again (nexus-wbfpw.49, Sam's decision 2026-10-01) ──────────
+
+    @Test
+    void aRestoredChunkWhoseDocumentIsLiveIsAttachedAndComesBackToSearchAndGet() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.1.1";
+        String h = quarantinedWith(t, c, Map.of("legacy", Map.<String, Object>of(
+            "catalog_doc_id", doc, "title", "Legacy Note", "chunk_index", 0))).get(0);
+        liveDoc(t, c, doc, "Legacy Note", 1, "legacy.md", Map.of());
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+
+        var row = out.rows().get(0);
+        assertThat(row.outcome()).isEqualTo("restored");
+        assertThat(row.reattach()).isEqualTo("attach");
+        assertThat(row.attached()).isTrue();
+        assertThat(row.owner()).isEqualTo(doc);
+        assertThat(row.ownerTitle()).isEqualTo("Legacy Note");
+        assertThat(row.position()).isZero();
+        assertThat(row.noManifest()).as("it has a manifest row now").isFalse();
+        assertThat(row.reapableAfter()).as("an owned chunk has no date to be reaped").isNull();
+        assertThat(manifest(t, doc)).containsExactly(new ManifestRow(0, h, c));
+        // The point of the whole step: the chunk comes back to the read paths, not just to the table.
+        assertThat(visibleToGet(t, c, h)).as("returned by get").isTrue();
+        assertThat(visibleToSearch(t, c, "legacy text", h)).as("returned by search").isTrue();
+        assertThat(audit(t, "quarantine_restore")).singleElement().satisfies(a -> {
+            assertThat(a.chashes()).contains(h);
+            assertThat(a.details()).contains("\"attached\": 1").contains("\"reattach\": true");
+        });
+        // An owned chunk is not the reaper's, however old: the restore did not just buy a grace.
+        ReapableFixtures.agePastGrace(pg, t, c);
+        assertThat(reaper(t).runOnce(null).tenant(t).collection(c).moved()).isZero();
+        assertThat(inCollection(t, c, h)).isTrue();
+    }
+
+    @Test
+    void withoutReattachTheBytesComeBackHidden_andARerunAttachesThePresentChunk() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.2.1";
+        String h = quarantinedWith(t, c, Map.of("legacy", Map.<String, Object>of(
+            "catalog_doc_id", doc, "title", "Legacy Note", "chunk_index", 0))).get(0);
+        liveDoc(t, c, doc, "Legacy Note", 1, "legacy.md", Map.of());
+
+        QuarantineRestoreOutcome bytesOnly =
+            vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false, false);
+
+        var row = bytesOnly.rows().get(0);
+        assertThat(row.outcome()).isEqualTo("restored");
+        assertThat(row.attached()).isFalse();
+        assertThat(row.reattach()).as("what reattach WOULD have done is still reported").isEqualTo("attach");
+        assertThat(row.noManifest()).isTrue();
+        assertThat(row.reapableAfter()).isNotNull();
+        assertThat(manifest(t, doc)).isEmpty();
+        assertThat(visibleToGet(t, c, h)).as("hidden: restored, but no live owner row names it").isFalse();
+        assertThat(visibleToSearch(t, c, "legacy text", h)).isFalse();
+        assertThat(audit(t, "quarantine_restore")).singleElement()
+            .satisfies(a -> assertThat(a.details()).contains("\"reattach\": false").contains("\"attached\": 0"));
+
+        // Bytes-only is not a dead end: the chunk is present, and the same verb with reattach on finishes the job.
+        QuarantineRestoreOutcome again = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+        assertThat(again.present()).containsExactly(h);
+        assertThat(again.attached()).containsExactly(h);
+        assertThat(manifest(t, doc)).containsExactly(new ManifestRow(0, h, c));
+        assertThat(visibleToGet(t, c, h)).isTrue();
+        assertThat(audit(t, "quarantine_restore")).as("the attach is audited too").hasSize(2);
+        assertThat(audit(t, "quarantine_restore").get(1).chashes()).contains(h);
+    }
+
+    @Test
+    void aPositionTheDocumentsManifestHoldsAnotherChunkAtIsSuperseded_andTheManifestIsLeftExactlyAsItWas()
+            throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.3.1";
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("old-0", Map.of("catalog_doc_id", doc, "chunk_index", 0));     // position 0 is taken: re-indexed
+        meta.put("old-5", Map.of("catalog_doc_id", doc, "chunk_index", 5));     // past the registered 3: a longer old version
+        meta.put("dup-a", Map.of("catalog_doc_id", doc, "chunk_index", 1));     // two chunks claim position 1
+        meta.put("dup-b", Map.of("catalog_doc_id", doc, "chunk_index", 1));
+        meta.put("fresh", Map.of("catalog_doc_id", doc, "chunk_index", 2));     // a free position inside the count: attaches
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, doc, "Re-indexed", 3, "doc.md", Map.of());
+        String current0 = manifested(t, c, doc, 0, "current-0");
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), hs, ACTOR, false);
+
+        assertThat(out.restored()).as("the bytes always come back").containsExactlyInAnyOrderElementsOf(hs);
+        assertThat(verdictOf(out, hs.get(0))).as("position 0 holds another chunk").isEqualTo("superseded");
+        assertThat(verdictOf(out, hs.get(1))).as("past the document's registered chunk_count").isEqualTo("superseded");
+        assertThat(verdictOf(out, hs.get(2))).as("two claimants of one position: neither is written").isEqualTo("superseded");
+        assertThat(verdictOf(out, hs.get(3))).isEqualTo("superseded");
+        assertThat(verdictOf(out, hs.get(4))).as("the control: a free position inside the count attaches").isEqualTo("attach");
+        assertThat(out.attached()).containsExactly(hs.get(4));
+        assertThat(manifest(t, doc)).as("the existing row is untouched and only the free position was added")
+            .containsExactly(new ManifestRow(0, current0, c), new ManifestRow(2, hs.get(4), c));
+        for (int i = 0; i < 4; i++) {
+            assertThat(visibleToGet(t, c, hs.get(i))).as("superseded stays hidden: " + i).isFalse();
+        }
+        assertThat(visibleToGet(t, c, hs.get(4))).isTrue();
+        assertThat(visibleToGet(t, c, current0)).as("the re-indexed content is exactly as visible as before").isTrue();
+        assertThat(out.rows().get(0).noManifest()).isTrue();
+        assertThat(audit(t, "quarantine_restore")).singleElement().satisfies(a ->
+            assertThat(a.details()).contains("\"superseded\": 4").contains("\"attached\": 1"));
+    }
+
+    @Test
+    void aChunkWithNoLiveOwnerIsRestoredAsBytesOnly_hidden_andTheManifestIsNeverWritten() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String other = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("nobody", Map.of("title", "orphan"));
+        meta.put("tomb", Map.of("catalog_doc_id", "1.4.1", "chunk_index", 0));
+        meta.put("elsewhere", Map.of("catalog_doc_id", "1.4.2", "chunk_index", 0));
+        meta.put("multi", Map.of("catalog_doc_id", "1.4.3"));                   // multi-chunk document, no chunk_index
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.4.1", "Deleted", 1, "x.md", Map.of());
+        tombstone(t, "1.4.1");
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), t, other);
+        }
+        liveDoc(t, other, "1.4.2", "Lives Elsewhere", 1, "y.md", Map.of());
+        liveDoc(t, c, "1.4.3", "Multi", 4, "z.md", Map.of());
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), hs, ACTOR, false);
+
+        assertThat(out.restored()).containsExactlyInAnyOrderElementsOf(hs);
+        assertThat(verdictOf(out, hs.get(0))).isEqualTo("no_live_owner");
+        assertThat(verdictOf(out, hs.get(1))).as("a tombstoned owner is not live").isEqualTo("no_live_owner");
+        assertThat(verdictOf(out, hs.get(2))).as("a live owner registered under another collection").isEqualTo("no_live_owner");
+        assertThat(verdictOf(out, hs.get(3))).as("a live owner, but nothing says where the chunk goes").isEqualTo("no_position");
+        assertThat(out.attached()).isEmpty();
+        for (String doc : List.of("1.4.1", "1.4.2", "1.4.3")) {
+            assertThat(manifest(t, doc)).as("no manifest row is invented for " + doc).isEmpty();
+        }
+        for (String h : hs) {
+            assertThat(inCollection(t, c, h)).as("the bytes are back").isTrue();
+            assertThat(visibleToGet(t, c, h)).as("and they stay hidden from get").isFalse();
+        }
+        assertThat(out.rows().get(0).chunkTitle()).as("the chunk's own title, for the re-put recipe").isEqualTo("orphan");
+        assertThat(out.rows().get(2).owner()).as("the report still names the owner it resolved").isEqualTo("1.4.2");
+        assertThat(out.rows().get(0).noManifest()).isTrue();
+        assertThat(out.rows().get(0).reapableAfter()).isNotNull();
+    }
+
+    @Test
+    void aNoteTheCensusFindsByItsOwnDocIdIsAttachedAtPositionZero_andAnAmbiguousNoteIsNot() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        List<String> hs = quarantinedWith(t, c, new java.util.LinkedHashMap<>(Map.of(
+            "note-one", Map.<String, Object>of("title", "Note One"))));
+        String lone = hs.get(0);
+        String twin = quarantinedWith(t, c, Map.of("note-two", Map.<String, Object>of("title", "Note Two"))).get(0);
+        // The reverse path: no forward key on the chunk; a live note-shaped (empty file_path) document of this
+        // collection carries the chunk's chash as its own metadata.doc_id.
+        liveDoc(t, c, "1.5.1", "Note One", 1, "", Map.of("doc_id", lone));
+        liveDoc(t, c, "1.5.2", "Note Two A", 1, "", Map.of("doc_id", twin));
+        liveDoc(t, c, "1.5.3", "Note Two B", 1, "", Map.of("doc_id", twin));
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(lone, twin), ACTOR, false);
+
+        assertThat(verdictOf(out, lone)).isEqualTo("attach");
+        assertThat(manifest(t, "1.5.1")).containsExactly(new ManifestRow(0, lone, c));
+        assertThat(visibleToGet(t, c, lone)).isTrue();
+        assertThat(verdictOf(out, twin)).as("two live notes claim it: the restore does not pick a winner").isEqualTo("no_live_owner");
+        assertThat(manifest(t, "1.5.2")).isEmpty();
+        assertThat(manifest(t, "1.5.3")).isEmpty();
+        assertThat(visibleToGet(t, c, twin)).isFalse();
+    }
+
+    @Test
+    void aDocumentThatIsMidIndexRun_orHoldsManifestRowsUnderAnotherCollection_orAReverseNoteWithRows_isNotExtended()
+            throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        Map<String, Map<String, Object>> meta = new java.util.LinkedHashMap<>();
+        meta.put("indexing", Map.of("catalog_doc_id", "1.9.1", "chunk_index", 0));
+        meta.put("elsewhere-rows", Map.of("catalog_doc_id", "1.9.2", "chunk_index", 1));
+        meta.put("control", Map.of("catalog_doc_id", "1.9.3", "chunk_index", 0));
+        meta.put("note-with-rows", Map.of("title", "A note that already has a manifest"));
+        List<String> hs = quarantinedWith(t, c, meta);
+        liveDoc(t, c, "1.9.1", "Mid run", 2, "a.md", Map.of());
+        setIndexState(t, "1.9.1", "indexing");
+        liveDoc(t, c, "1.9.2", "Copied", 3, "b.md", Map.of());
+        manifestUnderAnotherCollection(t, "1.9.2", col("knowledge"), 0, "copy-0");
+        liveDoc(t, c, "1.9.3", "Control", 2, "c.md", Map.of());
+        liveDoc(t, c, "1.9.4", "Note", 1, "", Map.of("doc_id", hs.get(3)));
+        manifested(t, c, "1.9.4", 3, "note-row");        // the reverse path wants a note with NO manifest rows at all
+
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, c, quarantineOf(c), hs, ACTOR, false);
+
+        assertThat(verdictOf(out, hs.get(0))).as("an index run is rewriting this manifest").isEqualTo("superseded");
+        assertThat(verdictOf(out, hs.get(1))).as("its manifest lives under another collection").isEqualTo("superseded");
+        assertThat(verdictOf(out, hs.get(2))).as("the control: the same shape without either problem attaches")
+            .isEqualTo("attach");
+        assertThat(verdictOf(out, hs.get(3))).as("a note that already has a manifest row is not the census's candidate")
+            .isEqualTo("superseded");
+        assertThat(out.attached()).containsExactly(hs.get(2));
+        assertThat(manifest(t, "1.9.1")).isEmpty();
+        assertThat(manifest(t, "1.9.4")).extracting(ManifestRow::position).containsExactly(3);
+    }
+
+    @Test
+    void theSqlBackstopsRefuseANonLiveOriginAndAMalformedChashWhenCalledDirectly() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "backstop").get(0);
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "disputed")
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t).and(CATALOG_COLLECTIONS.NAME.eq(c))).execute();
+            assertThatThrownBy(() -> ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                    t, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, true)).fetch())
+                .hasStackTraceContaining("not a registered live collection");
+            ctx.update(CATALOG_COLLECTIONS).set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "live")
+               .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t).and(CATALOG_COLLECTIONS.NAME.eq(c))).execute();
+            assertThatThrownBy(() -> ctx.selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                    t, c, quarantineOf(c), new String[] {"NOT-HEX"}, ACTOR, (Long) null, false, true)).fetch())
+                .hasStackTraceContaining("64 lowercase hex");
+        }
+        assertThat(inCollection(t, quarantineOf(c), h)).as("both refusals moved nothing").isTrue();
+    }
+
+    @Test
+    void aDryRunSaysWhatReattachWouldDo_andWritesNothingAnywhere() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.6.1";
+        List<String> hs = quarantinedWith(t, c, new java.util.LinkedHashMap<>(Map.of(
+            "would-attach", Map.<String, Object>of("catalog_doc_id", doc, "chunk_index", 1))));
+        String blocked = quarantinedWith(t, c, Map.of("blocked", Map.<String, Object>of(
+            "catalog_doc_id", doc, "chunk_index", 0))).get(0);
+        liveDoc(t, c, doc, "Dry", 2, "dry.md", Map.of());
+        manifested(t, c, doc, 0, "current");
+
+        QuarantineRestoreOutcome out =
+            vectors.quarantineRestore(t, c, quarantineOf(c), List.of(hs.get(0), blocked), ACTOR, true);
+
+        assertThat(out.wouldRestore()).containsExactlyInAnyOrder(hs.get(0), blocked);
+        assertThat(verdictOf(out, hs.get(0))).isEqualTo("attach");
+        assertThat(verdictOf(out, blocked)).isEqualTo("superseded");
+        assertThat(out.attached()).isEmpty();
+        assertThat(manifest(t, doc)).as("no manifest row written by a dry run").hasSize(1);
+        assertThat(inCollection(t, quarantineOf(c), hs.get(0))).isTrue();
+        assertThat(audit(t, "quarantine_restore")).isEmpty();
+    }
+
+    @Test
+    void aDocumentOfAnotherTenantIsNeverAnOwner_andNeverGainsAManifestRow() throws Exception {
+        String a = newTenant();
+        String b = newTenant();
+        String c = col("knowledge");
+        String doc = "1.7.1";
+        String h = quarantinedWith(a, c, Map.of("x-tenant", Map.<String, Object>of(
+            "catalog_doc_id", doc, "chunk_index", 0))).get(0);
+        // Tenant B has the same collection and a LIVE document with the very tumbler the chunk names.
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), b, c);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), b, quarantineOf(c));
+        }
+        liveDoc(b, c, doc, "B's document", 1, "b.md", Map.of());
+
+        QuarantineRestoreOutcome asA = vectors.quarantineRestore(a, c, quarantineOf(c), List.of(h), ACTOR, false);
+        assertThat(asA.restored()).containsExactly(h);
+        assertThat(verdictOf(asA, h)).as("A has no such document; B's does not count").isEqualTo("no_live_owner");
+        assertThat(manifest(b, doc)).as("B's manifest is untouched").isEmpty();
+        assertThat(manifest(a, doc)).isEmpty();
+
+        // And B cannot restore A's chunk at all.
+        String h2 = quarantinedWith(a, col("knowledge"), Map.of("only-a", Map.<String, Object>of("title", "x"))).get(0);
+        QuarantineRestoreOutcome asB = vectors.quarantineRestore(b, c, quarantineOf(c), List.of(h2), ACTOR, false);
+        assertThat(asB.missing()).containsExactly(h2);
+        assertThat(manifest(b, doc)).isEmpty();
+    }
+
+    @Test
+    void aHeldIndexRunLockOfTheOwningDocumentRollsTheWholeCallBack_withNothingMovedOrAttached() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String doc = "1.8.1";
+        String h = quarantinedWith(t, c, Map.of("locked", Map.<String, Object>of(
+            "catalog_doc_id", doc, "chunk_index", 0))).get(0);
+        liveDoc(t, c, doc, "Locked", 1, "l.md", Map.of());
+
+        try (Connection holder = pg.createConnection("")) {
+            holder.setAutoCommit(false);
+            DSL.using(holder, SQLDialect.POSTGRES).select(DSL.function("pg_advisory_xact_lock",
+                SQLDataType.OTHER, DSL.function("hashtext", SQLDataType.INTEGER,
+                    DSL.val("indexrun:" + t + ":" + doc)))).execute();
+            assertThatThrownBy(() -> vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false))
+                .isInstanceOf(PgVectorRepository.QuarantineRestoreBusyException.class);
+            holder.rollback();
+        }
+        assertThat(inCollection(t, quarantineOf(c), h)).as("rolled back whole: still in quarantine").isTrue();
+        assertThat(inCollection(t, c, h)).isFalse();
+        assertThat(manifest(t, doc)).isEmpty();
+        assertThat(audit(t, "quarantine_restore")).isEmpty();
+        assertThat(vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false).attached())
+            .as("and the same call goes through once the lock is free").containsExactly(h);
+    }
+
+    // ── review round 2 ───────────────────────────────────────────────────────
+
+    @Test
+    void theReapersOwnTagsAreStrippedToo_andAChunkRestoredThenQuarantinedAgainRoundTripsClean() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "tagged").get(0);
+        // The reaper's move also writes quarantined_by and reaper_quarantined_at (the nexus-2x9xa round-3 branch).
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            Map<String, Object> meta = metadataOf(chunk(t, quarantineOf(c), h));
+            meta.put("quarantined_by", "engine-reaper");
+            meta.put("reaper_quarantined_at", "2026-09-01T00:00:00Z");
+            ctx.update(CHUNKS).set(CHUNKS.METADATA, JSONB.jsonb(MAPPER.writeValueAsString(meta)))
+               .where(CHUNKS.TENANT_ID.eq(t).and(CHUNKS.COLLECTION.eq(quarantineOf(c)))
+                      .and(CHUNKS.CHASH.eq(Chash.fromHex(h).toBytes()))).execute();
+        }
+
+        vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+        assertThat(metadataOf(chunk(t, c, h))).containsEntry("title", "tagged")
+            .doesNotContainKeys("quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at");
+
+        // Restore, let it age past the grace, and the reaper takes it again; it must restore again, clean.
+        ReapableFixtures.agePastGrace(pg, t, c);
+        assertThat(reaper(t).runOnce(null).tenant(t).collection(c).moved()).isEqualTo(1);
+        assertThat(inCollection(t, quarantineOf(c), h)).as("quarantined once more").isTrue();
+        QuarantineRestoreOutcome second = vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false);
+        assertThat(second.restored()).containsExactly(h);
+        assertThat(metadataOf(chunk(t, c, h))).containsEntry("title", "tagged")
+            .doesNotContainKeys("quarantined_at", "origin_collection", "quarantined_by", "reaper_quarantined_at");
+    }
+
+    @Test
+    void twoOriginsChunksInOneSiblingAreNeverRestoredIntoTheWrongOrigin() throws Exception {
+        String t = newTenant();
+        String a = col("knowledge");
+        String b = col("knowledge");
+        String sibling = quarantineOf(a);
+        String forA = Chash.ofText("for-a").toHex();
+        String forB = Chash.ofText("for-b").toHex();
+        try (Connection su = pg.createConnection("")) {
+            DSLContext ctx = DSL.using(su, SQLDialect.POSTGRES);
+            PgContainerHelper.insertCollection(ctx, t, a);
+            PgContainerHelper.insertCollection(ctx, t, b);
+            PgContainerHelper.insertCollection(ctx, t, sibling);
+            // One sibling, two origins: what a catalog row that disagrees with its name produces.
+            PgContainerHelper.insertChunks(ctx, t, sibling, List.of(forA), List.of("for a text"),
+                embedder.embed(List.of("for a text")), List.of(Map.<String, Object>of("origin_collection", a)));
+            PgContainerHelper.insertChunks(ctx, t, sibling, List.of(forB), List.of("for b text"),
+                embedder.embed(List.of("for b text")), List.of(Map.<String, Object>of("origin_collection", b)));
+        }
+
+        // The dry run and the real run agree: B's chunk is not A's to take.
+        QuarantineRestoreOutcome dry = vectors.quarantineRestore(t, a, sibling, List.of(forA, forB), ACTOR, true);
+        assertThat(dry.wouldRestore()).containsExactly(forA);
+        assertThat(dry.missing()).containsExactly(forB);
+        QuarantineRestoreOutcome out = vectors.quarantineRestore(t, a, sibling, List.of(forA, forB), ACTOR, false);
+
+        assertThat(out.restored()).containsExactly(forA);
+        assertThat(out.missing()).as("another origin's chunk reads missing").containsExactly(forB);
+        assertThat(inCollection(t, a, forB)).as("never restored into A").isFalse();
+        assertThat(inCollection(t, sibling, forB)).as("still where it was").isTrue();
+        // ...and it is B's to take, through the same sibling.
+        assertThat(vectors.quarantineRestore(t, b, sibling, List.of(forB), ACTOR, false).restored()).containsExactly(forB);
+        assertThat(inCollection(t, b, forB)).isTrue();
+    }
+
+    @Test
+    void anAuditRowNamesTheSiblingItMovedInto_andACallNamingAnotherSiblingIsRefused() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        quarantined(t, c, "named");
+        long auditId = audit(t, "reaper_quarantine").get(0).id();
+        String wrong = quarantineOf(col("knowledge"));
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), t, wrong);
+        }
+
+        assertThatThrownBy(() -> vectors.quarantineRestoreFromAudit(t, c, wrong, auditId, 0, 10, ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("moved its chunks into " + quarantineOf(c)).hasMessageContaining(wrong);
+    }
+
+    @Test
+    void aRestoreIntoAnOriginThatIsNotLiveIsRefusedBeforeAnythingMoves() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "dormant").get(0);
+        try (Connection su = pg.createConnection("")) {
+            DSL.using(su, SQLDialect.POSTGRES).update(CATALOG_COLLECTIONS)
+                .set(CATALOG_COLLECTIONS.LIFECYCLE_STATE, "dormant")
+                .where(CATALOG_COLLECTIONS.TENANT_ID.eq(t).and(CATALOG_COLLECTIONS.NAME.eq(c))).execute();
+        }
+
+        assertThatThrownBy(() -> vectors.quarantineRestore(t, c, quarantineOf(c), List.of(h), ACTOR, false))
+            .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("not a live collection");
+        assertThat(inCollection(t, quarantineOf(c), h)).isTrue();
+    }
+
+    @Test
+    void theReapableAgainDateIsUtcWhateverTheSessionTimeZone() throws Exception {
+        String t = newTenant();
+        String c = col("knowledge");
+        String h = quarantined(t, c, "tz").get(0);
+
+        // Called directly over a session whose TimeZone is nine hours ahead: the engine pins UTC, psql does not.
+        try (Connection su = pg.createConnection("")) {
+            su.createStatement().execute("SET TIME ZONE 'Asia/Tokyo'");
+            DSL.using(su, SQLDialect.POSTGRES).selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                t, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, false)).fetch();
+        }
+
+        var details = MAPPER.readTree(audit(t, "quarantine_restore").get(0).details());
+        Instant said = Instant.parse(details.get("reapable_again_after").asText());
+        Instant written = chunk(t, c, h).lastWrittenAt().toInstant();
+        assertThat(said).as("labelled Z, so it must BE UTC").isBetween(
+            written.plus(Duration.ofDays(30)).minus(Duration.ofMinutes(5)),
+            written.plus(Duration.ofDays(30)).plus(Duration.ofMinutes(5)));
     }
 }
