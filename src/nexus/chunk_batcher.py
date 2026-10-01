@@ -56,6 +56,38 @@ FlushFn = Callable[[str, list[str], list[str], list[dict], "list[tuple[str, obje
 _Settled = tuple[str, "str | None", object]
 
 
+@dataclass(frozen=True)
+class _ThrottleSignal:
+    """A flush failure that says "send less", not "this batch is bad" (nexus-eoido)."""
+
+    #: seconds the upstream asked us to wait, when it said
+    retry_after: float | None
+    #: whether the shared brake should be tripped: False for a CLIENT-side call deadline, which
+    #: says nothing about the upstream
+    pace: bool
+
+
+def _throttle_signal(exc: BaseException) -> _ThrottleSignal | None:
+    """Classify a flush failure as a throttle or a request deadline, or ``None`` for anything else.
+
+    A 429, a 503 carrying Retry-After and an engine deadline abort (``X-Nexus-Deadline-Outcome:
+    aborted``) come from the same classifiers the write-retry wrappers use
+    (``nexus.retry._rate_limit_signal`` / ``_deadline_aborted``), so this cannot disagree with them
+    about what a throttle is. ``call_deadline.DeadlineExceeded`` is the client's own deadline.
+    """
+    from nexus.call_deadline import DeadlineExceeded  # noqa: PLC0415 — leaf module, only on the failure arm
+    from nexus.retry import _deadline_aborted, _rate_limit_signal  # noqa: PLC0415 — deferred: nexus.retry is heavy and the failure arm is rare
+
+    signal = _rate_limit_signal(exc)
+    if signal is not None:
+        return _ThrottleSignal(signal.retry_after, pace=True)
+    if _deadline_aborted(exc):
+        return _ThrottleSignal(None, pace=True)
+    if isinstance(exc, DeadlineExceeded):
+        return _ThrottleSignal(None, pace=False)
+    return None
+
+
 @dataclass
 class _Pending:
     """Accumulated, not-yet-flushed chunks for one collection."""
@@ -434,7 +466,8 @@ class ChunkBatcher:
         On failure with >= 2 files, BISECT: split by files and flush each
         half independently. A batch too big for the gateway timeout
         self-tunes down; a genuinely poisoned file is isolated to itself
-        (only it fails). Depth is naturally log2(files).
+        (only it fails). Depth is naturally log2(files). A 429 or request-deadline
+        failure is the exception: it is never bisected (see ``_throttle_signal``).
 
         Emits ONE ``chunk_flush_complete`` structlog event per completed
         flush (nexus-lde88 G1) with complete per-flush attribution —
@@ -491,7 +524,18 @@ class ChunkBatcher:
                 file_contexts,
             )
         except Exception as exc:  # noqa: BLE001 — attribution boundary: convert to per-file failure or bisect
-            if len(pend.file_counts) >= 2:
+            # nexus-eoido: a 429 or an engine request-deadline abort is NOT bisected. The upstream
+            # asked for less traffic (or already discarded and billed the embeds); halving the batch
+            # and retrying each half with a full budget turns one refused request into 1+2+4... of
+            # them. The batch fails as one: its files settle failed through the same per-file path a
+            # single-file batch takes (the next run's staleness check retries them), and Retry-After
+            # is handed to the shared brake so every later write pauses for it.
+            throttle = _throttle_signal(exc)
+            if throttle is not None and throttle.pace:
+                from nexus.rate_brake import get_brake  # noqa: PLC0415 — leaf module, only on the throttle arm
+
+                get_brake().trip(throttle.retry_after, source="chunk_batcher")
+            if len(pend.file_counts) >= 2 and throttle is None:
                 _log.warning(
                     "chunk_batch_flush_bisect",
                     collection=collection,
@@ -515,6 +559,8 @@ class ChunkBatcher:
                 chunks=len(pend.ids),
                 files=len(pend.file_counts),
                 error=error,
+                throttled=throttle is not None,
+                retry_after=None if throttle is None else throttle.retry_after,
             )
         # nexus-lde88 G3: upload_elapsed is the network write ALONE, stopping
         # here — BEFORE the hooks below. This used to be the only number

@@ -1091,3 +1091,121 @@ class TestOnFlushHook:
             "reporting -- firing here would be the two-liveness-voices "
             "class nexus-1iw8k fixed for the ETA ticker / phase heartbeat"
         )
+
+
+# ── nexus-eoido: a throttled or deadline-aborted flush is deferred, never bisected ──────────
+#
+# A multi-file batch whose write FAILED is bisected: each half retries with a full budget.
+# That is right for a batch too big for the gateway and for one poisoned file. It is wrong
+# for a 429 or an engine request-deadline abort: the upstream is saying "slow down" (or has
+# already discarded and billed the embeds), and bisecting turns one refused request into
+# 1 + 2 + 4 ... requests, each re-embedding and re-billing.
+
+import httpx  # noqa: E402
+
+from nexus.rate_brake import get_brake, reset_brake  # noqa: E402
+
+
+def _http_error(status: int, headers: dict[str, str] | None = None) -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "http://engine.invalid/v1/vectors/upsert")
+    response = httpx.Response(status, headers=headers or {}, request=request)
+    return httpx.HTTPStatusError(f"{status} from engine", request=request, response=response)
+
+
+class _ThrottledWriter(Recorder):
+    """A writer that always fails with *exc* and counts every request it is sent."""
+
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self._exc = exc
+        self.batch_hooks: list[str] = []
+
+    def flush(self, collection, ids, docs, metas, file_contexts=None):
+        self.calls.append((collection, list(ids)))
+        raise self._exc
+
+
+def _three_file_batch(rec: Recorder) -> ChunkBatcher:
+    b = _batcher(
+        rec, max_chunks=10,
+        on_batch_complete=lambda *a: rec.batch_hooks.append("complete"),
+        on_batch_stamp=lambda *a: rec.batch_hooks.append("stamp"),
+    )
+    b.add("f1.py", "code__x", *_mk(3, "aa"))
+    b.add("f2.py", "code__x", *_mk(3, "bb"))
+    b.add("f3.py", "code__x", *_mk(3, "cc"))
+    b.drain()
+    return b
+
+
+class TestThrottleIsDeferredNotBisected:
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            _http_error(429, {"Retry-After": "7"}),
+            _http_error(429),
+            _http_error(503, {"Retry-After": "5"}),
+            _http_error(503, {"X-Nexus-Deadline-Outcome": "aborted"}),
+        ],
+        ids=["429+Retry-After", "429-bare", "503+Retry-After", "503-deadline-aborted"],
+    )
+    def test_a_throttled_multi_file_batch_is_sent_once_and_every_file_deferred(self, exc) -> None:
+        rec = _ThrottledWriter(exc)
+        b = _three_file_batch(rec)
+        assert len(rec.calls) == 1, f"bisected into {len(rec.calls)} requests under a throttle"
+        assert sorted(p for p, _ in rec.failed) == ["f1.py", "f2.py", "f3.py"]
+        assert rec.completed == []
+        assert set(b.failed_files) == {"f1.py", "f2.py", "f3.py"}
+        assert rec.batch_hooks == [], "a deferred flush must run neither the flush hooks nor the stamp"
+
+    def test_a_call_deadline_error_is_deferred_too(self) -> None:
+        from nexus.call_deadline import DeadlineExceeded
+
+        rec = _ThrottledWriter(DeadlineExceeded("upsert"))
+        _three_file_batch(rec)
+        assert len(rec.calls) == 1
+        assert len(rec.failed) == 3
+
+    def test_retry_after_is_honoured_through_the_shared_brake(self) -> None:
+        reset_brake()
+        rec = _ThrottledWriter(_http_error(429, {"Retry-After": "7"}))
+        _three_file_batch(rec)
+        brake = get_brake()
+        assert brake.trips == 1
+        assert brake.last_retry_after == 7.0
+        assert brake.last_source == "chunk_batcher"
+
+    def test_a_deadline_abort_with_no_retry_after_paces_the_brake_but_a_local_deadline_does_not(self) -> None:
+        reset_brake()
+        _three_file_batch(_ThrottledWriter(_http_error(503, {"X-Nexus-Deadline-Outcome": "aborted"})))
+        assert get_brake().trips == 1
+        reset_brake()
+        from nexus.call_deadline import DeadlineExceeded
+
+        _three_file_batch(_ThrottledWriter(DeadlineExceeded("upsert")))
+        assert get_brake().trips == 0, "a client-side call deadline says nothing about the upstream"
+
+    def test_other_batches_proceed_after_a_throttled_one(self) -> None:
+        class FirstThrottled(Recorder):
+            def flush(self, collection, ids, docs, metas, file_contexts=None):
+                self.calls.append((collection, list(ids)))
+                if len(self.calls) == 1:
+                    raise _http_error(429, {"Retry-After": "1"})
+
+        rec = FirstThrottled()
+        b = _batcher(rec, max_chunks=6)
+        b.add("f1.py", "code__x", *_mk(3, "aa"))
+        b.add("f2.py", "code__x", *_mk(3, "bb"))  # fills batch 0 -> 429
+        b.add("g.py", "code__x", *_mk(3, "gg"))
+        b.drain()
+        assert sorted(p for p, _ in rec.failed) == ["f1.py", "f2.py"]
+        assert rec.completed == ["g.py"]
+        assert len(rec.calls) == 2
+
+    @pytest.mark.parametrize("status", [400, 500, 502, 504])
+    def test_a_non_throttle_failure_still_bisects(self, status: int) -> None:
+        """Control: the bisect that isolates a poisoned file or an oversized batch is unchanged
+        for every failure that is not a throttle or a deadline."""
+        rec = _ThrottledWriter(_http_error(status))
+        _three_file_batch(rec)
+        assert len(rec.calls) > 1, "a non-throttle failure must still be bisected"
