@@ -530,8 +530,8 @@ or an owner.
 version of the stamp UPDATEd `nexus.chunks.last_written_at`. A chunk-row UPDATE writes a
 new row version, and `nexus.chunks` carries three full HNSW indexes plus two GIN
 indexes, so each stamp re-inserted the row into the 1024-d HNSW graph for a vector that
-had not changed. Measured: 11 s for 5000 chunks, against 50 ms for the side table
-(Cost, below). The side table has a primary key and nothing else. `last_written_at`
+had not changed. Measured: 11 s for 5000 chunks, against about 50 ms for the side table
+(one laptop-container run; see Cost, below). The side table has a primary key and nothing else. `last_written_at`
 keeps its vectors-020 meaning, "client wrote this chunk", with no exception, and the
 vectors-020 header says so.
 
@@ -549,23 +549,35 @@ record refreshed.
 collection, chash FOR NO KEY UPDATE OF c`, then upserts in the same key order. A chunk
 row exists for every recorded key, is the one row every writer of the key shares, and
 needs no insert, so the lock pass is one ordered walk over rows that already exist. This
-buys exactly: two triggers that share chunks lock in the same total order (they cannot
-deadlock on chunk rows) and the second waits for the first's commit and then reads its
-committed record, so the one-hour guard sees it and no record is lost. It does not claim
-to order against other writers. The content upserts sort their chunk writes by chash, so
-those passes are monotone in chash too, but nothing pins that, and the manifest write is
-not under `DeadlockRetry`; a 40P01 against another writer would be loud and retryable,
-not a lost record. `ChunkIsReapableIntegrationTest` pins the `ORDER BY` and the lock
-clause in both function bodies with `pg_get_functiondef` (a behavioural test cannot,
-because a lone writer and the concurrent drop need only the lock to serialize), pins
-that the bodies never UPDATE `nexus.chunks`, and pins the concurrent drop.
+buys three things. Two triggers that share chunks lock in the same total order, so they
+cannot deadlock on chunk rows. The order is chunk row, then side-table row, which is what
+the foreign key's own cascade takes when a chunk is deleted, so a trigger and a chunk
+delete cannot deadlock on that pair. And the insert's foreign-key check, which takes a
+share lock on the chunk row, cannot fail with 23503 against a chunk deleted concurrently:
+the pre-lock waits on the chunk row, and the later insert statement takes a fresh
+snapshot that no longer sees the deleted chunk, so it skips it and the manifest
+statement succeeds. The lock is not what keeps two concurrent drops from losing a record.
+The `ON CONFLICT` upsert already waits on the other statement's uncommitted index entry
+and re-evaluates its `DO UPDATE` guard against the committed row, so the one-hour guard
+sees the first record with or without the lock (removing it leaves
+`aConcurrentDropOfASharedChunkLeavesItStamped` green). An earlier version of this section
+said the lock prevented a lost record; that was wrong. It does not claim to order against
+other writers. The content upserts sort their chunk writes by chash, so those passes are
+monotone in chash too, but nothing pins that, and the manifest write is not under
+`DeadlockRetry`; a 40P01 against another writer would be loud and retryable, not a lost
+record. `ChunkIsReapableIntegrationTest` pins the `ORDER BY` and the lock clause in both
+function bodies with `pg_get_functiondef` (no behavioural test can fail on their removal,
+so the definition is the only place to hold them), pins that the bodies never UPDATE
+`nexus.chunks`, and pins the concurrent drop.
 
 *Security.* The functions are SECURITY INVOKER like every function in the changelog, run
 under the writer's FORCE RLS and tenant GUC, and join on `tenant_id`; EXECUTE is revoked
 from PUBLIC; a pg_proc pin asserts `prosecdef = false`. The explicit tenant equality is
 defence in depth for the service role (RLS already binds it) and the only barrier for a
-role that bypasses RLS, so it has its own test, run as the table owner: removing it from
-either trigger turns that test red.
+role that bypasses RLS, so it has its own test, run as the container superuser (the production owner role,
+`nexus_admin`, has no `BYPASSRLS` and is bound by the policies): removing the equality
+from the upsert's join in either trigger turns that test red, and the definition pin
+asserts it appears twice in each function, once in the lock pass and once in the upsert.
 
 *The one-hour guard.* A chunk is recorded only when both its `last_written_at` and its
 existing `orphaned_at` are older than one hour (the select filters on the first, the
@@ -600,9 +612,9 @@ bounded by the consumer's own gates (the census gate, the fraction floor on the 
 | --- | --- | --- | --- |
 | `TRUNCATE` of the manifest (a superuser; no code path does it; `nexus_svc` holds no `TRUNCATE`, pinned with `has_table_privilege`) | Statement DELETE triggers do not fire, so no record; every chunk reads ownerless with its old `last_written_at` | Reaped early, for a live chunk reaped wrongly, all at once | A floor ON THE MOVE (refuse a pass that would take more than a fraction of a collection) and the 14 day quarantine restore: the move has no floor today, `nexus-2x9xa` (comment 2026-10-01) |
 | `session_replication_role = replica` (`pg_restore`, logical apply) | Triggers and the FK cascade skipped | A restore inserts and drops nothing. A manual replica-mode DELETE: reaped early | None beyond the consumer gates; accepted |
-| Manifest DML with no tenant GUC, or a role exempt from RLS | Subject to RLS on both tables with no GUC: zero manifest rows deleted, nothing dropped (pinned). Exempt from the manifest policy only: rows deleted, `nexus.chunks` hidden from the trigger, nothing recorded (reasoned; cannot be built without `NO FORCE` on the manifest alone). Exempt from both (owner, `BYPASSRLS`, superuser): recorded correctly (pinned) | Reaped early in the exempt-from-one case | Migrations and DBA fixes run as the owner; a data-fix changeset that deletes manifest rows must set the GUC. No bead |
+| Manifest DML with no tenant GUC, or a role exempt from RLS | Subject to RLS on both tables with no GUC: zero manifest rows deleted, nothing dropped (pinned). Exempt from the manifest policy only: rows deleted, `nexus.chunks` hidden from the trigger, nothing recorded (reasoned; cannot be built without `NO FORCE` on the manifest alone). Exempt from both (`BYPASSRLS`, superuser): recorded correctly (pinned, run as the container superuser). The table owner is not exempt in production: `nexus_admin`, the Liquibase owner role, has no `BYPASSRLS` (catalog-016, catalog-025 headers), so under `FORCE ROW LEVEL SECURITY` it is bound by the policies like `nexus_svc` | Reaped early in the exempt-from-one case | A migration or DBA fix that deletes manifest rows runs as `nexus_admin` and must set the tenant GUC. No bead |
 | The one-hour guard | A chunk written or recorded within the hour is not recorded | Reaped up to one hour early | Accepted; stated in the vectors-021 header |
-| Staging promote over an existing chunk (`StagingPromoteOps`, `ON CONFLICT DO NOTHING`) | Keeps the old clocks; there is no orphaning event | An aged ownerless chunk re-promoted is reapable between promote and finalize: reaped early (the FK makes a lost race loud: finalize fails) | `nexus-z0o2p.27` lands in the same cut as the reaper (comment on `nexus-2x9xa`, 2026-10-01) |
+| Staging promote over an existing chunk (`StagingPromoteOps`, `ON CONFLICT DO NOTHING`) | Retired. It kept the old clocks and recorded no orphaning, so an aged ownerless chunk re-promoted was reapable between promote and finalize. The `/v1/staging` routes and the `staging` schema were removed (`nexus-z0o2p.27`, `8a7831a3d`), so no such path remains | None | None needed |
 | R8: a live legacy note, no manifest row | Reapable once aged; every row took the vectors-020 migration time | Reaped wrongly at deploy + 30 days if a consumer acts without the census gate | The census-zero gate, re-run in the engine on every reaper pass (`nexus-2x9xa`); `nx t3 gc` requires `legacy-unmanifested == 0` before acting (`nexus-wbfpw.18`). The quarantine move (`gc_quarantine_orphans`) carries no gate of its own and its only caller passes code, docs and rdr collections |
 | A tombstoned owner | Still a manifest row, so condition 1 fails | Never reaped by this predicate (`purge_trash` ages the tombstone) | `purge_trash`, unchanged |
 | A floor-refused quarantine chunk; a collection that fails the census | Quarantine siblings are excluded by `lifecycle_state`; a failing collection is refused visibly | Never reaped by the reaper | `gc_expire_quarantine` has its own clock and floor; fix the census |
@@ -636,7 +648,9 @@ locking accounts for about 12 ms of the new figure (51 to 60 ms against 39 to 48
 the upsert alone). Two plan facts the measurement found: the predicate reads the record
 with a scalar subquery on the primary key, not a LEFT JOIN, because the join form's plan
 depended on the side table's statistics and went quadratic (3.2 s against 80 ms) when a
-statement grew the table while it ran; and the table carries
+statement grew the table while it ran (`ChunkIsReapableIntegrationTest` pins the scalar form
+in the function definition, because the plan test's fixture analyzes an 8000-row side
+table, where the join plans well too); and the table carries
 `autovacuum_analyze_scale_factor = 0.02` so autoanalyze follows a burst. The plan under
 `nexus_svc` is in `ChunkIsReapablePlanIntegrationTest`: `chunks_pk` range, then
 `idx_catalog_chunks_chash`, the `catalog_collections` primary key and
@@ -645,8 +659,8 @@ statement grew the table while it ran; and the table carries
 **Why condition 3.** A quarantine sibling never has manifest rows and its rows take
 a fresh `last_written_at` on the move, so after 30 days every quarantined chunk would
 satisfy conditions 1 and 2, and a reaper that visits `quarantine-*` collections would
-hard-delete them past `gc_expire_quarantine`'s own clock and safety floor (the floor
-that exists because a manifest defect once deleted 6 live documents). The exclusion is
+move them out of quarantine past `gc_expire_quarantine`'s own clock and safety floor
+(the floor that exists because a manifest defect once deleted 6 live documents). The exclusion is
 by `lifecycle_state`, not by name: RDR-204 retired parsing names. The listing route
 also refuses a `quarantine-` name with 400.
 
@@ -668,7 +682,7 @@ refresh: the have-vector branch of `upsert-chunks` and the identical-text branch
 the combined write, so **yes, the existence-partition refresh bumps it**, and the
 combined write's chunk upsert) and never by frecency, enrichment or rename
 maintenance, which would keep dead chunks alive. The orphaning record above is a
-separate column of facts and does not touch it. A move into or out of quarantine
+separate table of facts and does not touch it. A move into or out of quarantine
 resets it (the quarantine INSERT takes the default), which only delays a reap. **At deploy**, existing rows take the migration
 time, so for 30 days after the engine carrying vectors-020 is deployed nothing that
 already exists is reapable: the cleanups after the upgrade move nothing, and a
@@ -1258,7 +1272,7 @@ writes the `gc_audit` rows. Two requirements follow, and neither exists yet.
   and skip `quarantine-` names (the predicate's `NOT EXISTS` passes for an unregistered
   sibling); measure the predicate scan at `code__1-1` scale and put a statement timeout
   on it before an hourly run; update the RDR-223 Day-2 baseline for the one-shot cliff at
-  deploy + 30 days; and `nexus-z0o2p.27` (staging promote) lands in the same cut.
+  deploy + 30 days. (`nexus-z0o2p.27` retired staging promote, the one write path that skipped the clock refresh, at `8a7831a3d`; the reaper has no dependency on it.)
 
 The post-commit-sweep-failure debris the reaper exists for is therefore reaped 30 days
 after the failure, not on the next pass, and the MVV (b) reaper test injects a grace of
