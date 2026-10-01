@@ -19,7 +19,11 @@
 
     THE PREDICATE. A chunk row c is reapable when ALL of:
 
-      1. GREATEST(c.last_written_at, the chunk's orphaned_at, if it has one)
+      1. no catalog_document_chunks row names (tenant, collection, chash) in
+         ANY owner state. A tombstoned owner still has a manifest row, so a
+         chunk whose only owners are tombstoned is NOT reapable: it is
+         purge_trash's, which ages the tombstone, not the chunk.
+      2. GREATEST(c.last_written_at, the chunk's orphaned_at, if it has one)
          is older than now() - grace (default 30 days). last_written_at, not
          created_at (Sam, 2026-09-29, nexus-wbfpw.43): created_at is write-once,
          so a re-write would otherwise get no fresh grace. last_written_at is
@@ -29,10 +33,6 @@
          lost an owner row (below). The later of the two is the start of the
          grace, so the grace means "time since the chunk was last written or
          last lost an owner", i.e. how long it has been ownerless.
-      2. no catalog_document_chunks row names (tenant, collection, chash) in
-         ANY owner state. A tombstoned owner still has a manifest row, so a
-         chunk whose only owners are tombstoned is NOT reapable: it is
-         purge_trash's, which ages the tombstone, not the chunk.
       3. the chunk's collection is not a quarantine sibling
          (catalog_collections.lifecycle_state = 'quarantine', by state and not
          by name: RDR-204 retired parsing names). A quarantine sibling never has
@@ -67,8 +67,9 @@
     UPDATE of a chunk row writes a new row version, and nexus.chunks carries
     three full HNSW indexes (vector(384), vector(768), vector(1024)) plus two
     GIN indexes, so the update re-inserted the row into the 1024-d HNSW graph
-    for a vector that had not changed. Measured below: 11 s for 5000 chunks,
-    against 50 ms for the side table. nexus.chunk_orphaned_at has a primary key
+    for a vector that had not changed. Measured below (one laptop-container run,
+    see COST): 11 s for 5000 chunks, against tens of milliseconds for the side
+    table. nexus.chunk_orphaned_at has a primary key
     and nothing else, so an upsert into it touches no vector index. The cost
     of the choice is one extra indexed probe in the predicate.
 
@@ -78,7 +79,7 @@
     (reproduced by ChunkIsReapableIntegrationTest.aConcurrentDropOfASharedChunkLeavesItStamped
     against the first version). Recording every dropped key is safe because
     reapable(c) needs no owner: a recorded chunk that is still owned is simply
-    not reapable (condition 2), and one that loses its other owners later has
+    not reapable (condition 1), and one that loses its other owners later has
     its record refreshed.
 
     LOCKING, AND WHAT IS CLAIMED. Each trigger first runs
@@ -90,11 +91,28 @@
     the key has in common, and it needs no insert, so the lock pass is a single
     ordered walk over rows that already exist. What that buys, and only that:
       - two triggers that share chunks lock them in the same total order, so
-        TRIGGER-VERSUS-TRIGGER cannot deadlock on chunk rows, and the second
-        waits for the first's commit and then reads its committed orphaned_at,
-        so the one-hour guard below sees it and no record is lost;
+        TRIGGER-VERSUS-TRIGGER cannot deadlock on chunk rows;
+      - the lock order is chunk row first, then side-table row, which is the
+        order the foreign key's own cascade takes when a chunk is deleted (the
+        chunk row, then its record), so a trigger and a chunk delete cannot
+        deadlock on that pair;
+      - the INSERT's foreign-key check takes a share lock on the chunk row, and
+        a chunk deleted concurrently would make that check wait and then fail
+        with 23503. Waiting on the chunk row in the pre-lock pass instead
+        (PERFORM blocks, and the later INSERT statement takes a fresh snapshot
+        that no longer sees the deleted chunk) lets the INSERT skip the vanished
+        chunk, so the trigger records nothing for it and the manifest statement
+        succeeds;
       - the upsert itself then runs in the same key order (ORDER BY on its
         select), so the side-table rows are also taken in one order.
+    The lock is NOT what keeps two concurrent drops from losing a record: the
+    ON CONFLICT upsert already waits on the other statement's uncommitted index
+    entry and re-evaluates its DO UPDATE guard against the committed row, so the
+    one-hour guard sees the first record whether or not the chunk was locked.
+    No behavioural test depends on the lock (removing it leaves
+    aConcurrentDropOfASharedChunkLeavesItStamped green); the definition pin
+    below is what holds it in place. An earlier version of this header said the
+    lock prevented a lost record, which was wrong.
     It does not claim to order against other writers. The content upserts
     (PgVectorRepository.upsertChunks, CatalogRepository.upsertManifestChunkVectors)
     sort their chunk writes by chash within one (tenant, collection), which
@@ -119,7 +137,8 @@
     directly anyway) and ChunkIsReapableIntegrationTest pins prosecdef = false and
     the ACL. The tenant equality is defence in depth for the service role (RLS
     already binds it) and the ONLY barrier for a role that bypasses RLS, so it has
-    its own test, run as the table owner.
+    its own test, run as the container superuser (which bypasses RLS; the
+    production owner role does not, see WHAT IT DOES NOT COVER).
 
     WHAT IT COVERS. Doing this in the database covers every DML path that drops
     an owner row (writeManifestRows' replace, append's ON CONFLICT upsert of a
@@ -144,13 +163,18 @@
         recorded (by reading the policies; it cannot be built in a test without
         NO FORCE on the manifest alone). A role subject to RLS on both with no GUC
         deletes ZERO manifest rows, so nothing is dropped (pinned). A role exempt
-        from both (BYPASSRLS, a superuser, the table owner) records correctly
-        (pinned).
+        from both (BYPASSRLS, a superuser) records correctly (pinned, run as the
+        container superuser). The table owner is NOT exempt in production: the
+        Liquibase owner role, nexus_admin, has no BYPASSRLS (catalog-016 and
+        catalog-025 headers), so under FORCE ROW LEVEL SECURITY it is subject to
+        the same policies as nexus_svc, and a data-fix changeset that deletes
+        manifest rows must set the tenant GUC.
       - the one-hour guard (below): up to one hour early.
-      - a chunk promoted from staging over an existing row (StagingPromoteOps ON
-        CONFLICT DO NOTHING) is not an orphaning and keeps its old clocks, so an
-        aged ownerless chunk re-promoted is reapable between the promote and the
-        manifest finalize until nexus-z0o2p.27 lands.
+      - staging promote is not a hole any more. It was one (a chunk promoted
+        over an existing row, StagingPromoteOps ON CONFLICT DO NOTHING, kept its
+        old clocks and was reapable between the promote and the manifest
+        finalize), and the /v1/staging routes and the staging schema were
+        removed (nexus-z0o2p.27, 8a7831a3d), so no such path remains.
     The grace therefore protects a run's old tail for 30 days after batch 1, and a
     deleted file's chunks for 30 days after the purge, on every path that drops a
     manifest row.
@@ -214,7 +238,7 @@
     purge_trash) removes its record, and a collection rename or re-home rewrites
     the key. A record whose chunk is still there but is no longer true cannot make
     a chunk reapable wrongly, because the record only ever LATE-bounds the grace:
-      - the chunk was re-owned: condition 2 fails, whatever the record says;
+      - the chunk was re-owned: condition 1 fails, whatever the record says;
       - the chunk was re-written: last_written_at is newer and wins in GREATEST;
       - the chunk lost its owner again: the trigger refreshes the record (its
         existing orphaned_at is older than the hour guard, or the chunk was written
@@ -256,6 +280,11 @@
     kept that plan and went quadratic (3.2 s for the 1000 x 5 shape where the
     primary-key form took 80 ms). The subquery is an InitPlan probe on the primary
     key that runs only for a row that passed the cheaper tests.
+    ChunkIsReapableIntegrationTest pins the form in the function definition (a
+    scalar "(SELECT o.orphaned_at" and no JOIN): the plan pin in
+    ChunkIsReapablePlanIntegrationTest cannot tell the two apart, because its
+    fixture analyzes an 8000-row side table, which is the case where the join
+    form also plans well.
 
     The row's own last_written_at is PASSED IN rather than re-read, which is
     what lets the same call be the WHERE of a DELETE: after inlining, the grace

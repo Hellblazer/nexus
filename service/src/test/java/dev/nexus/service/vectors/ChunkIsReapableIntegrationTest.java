@@ -705,7 +705,7 @@ class ChunkIsReapableIntegrationTest {
         assertThat(orphanedAt(t, to, hex)).as("the record moved with its chunk").isNotNull();
     }
 
-    /** A stale record of a chunk that is owned again can never make it reapable: condition 2 fails. */
+    /** A stale record of a chunk that is owned again can never make it reapable: condition 1 fails. */
     @Test
     void aStaleRecordOfAReOwnedChunkIsHarmless() throws Exception {
         String t = "reap-record-reowned";
@@ -769,7 +769,7 @@ class ChunkIsReapableIntegrationTest {
      * Run as the RLS-subject role with the tenant GUC, as the engine runs: a tenant-A drop records tenant A's
      * chunk and not tenant B's chunk with the same (collection, chash). The triggers are SECURITY INVOKER, so
      * FORCE RLS binds them. This test does NOT prove the explicit tenant equality in the trigger bodies (RLS
-     * alone hides tenant B's rows from this role); the owner-run test below does.
+     * alone hides tenant B's rows from this role); the superuser-run test below does.
      */
     @Test
     void theRecordIsTenantScoped_underTheServiceRoleAndItsGuc() throws Exception {
@@ -797,10 +797,13 @@ class ChunkIsReapableIntegrationTest {
     }
 
     /**
-     * The explicit tenant equality in the trigger bodies, which only the table owner exercises (a role that
-     * bypasses RLS sees both tenants' chunk rows, so the join's tenant_id is the only thing between tenant A's
-     * statement and tenant B's chunk). Removing {@code o.tenant_id = c.tenant_id} from either trigger turns this
-     * red, and a positive control shows the owner-run statement does record tenant A.
+     * The explicit tenant equality in the trigger bodies, which only a role that bypasses RLS exercises: such a role
+     * sees both tenants' chunk rows, so the join's tenant_id is the only thing between tenant A's statement and
+     * tenant B's chunk. The test runs as the container superuser. It is NOT the production owner role: nexus_admin
+     * has no BYPASSRLS (catalog-016, catalog-025 headers), so under FORCE ROW LEVEL SECURITY it is bound by the
+     * policies like nexus_svc; the barrier here matters for BYPASSRLS roles and superusers. Removing
+     * {@code o.tenant_id = c.tenant_id} from the upsert's join in either trigger turns this red, and a positive
+     * control shows the superuser-run statement does record tenant A.
      */
     @Test
     void theRecordIsTenantScoped_whenTheWriterBypassesRls_byTheJoinAlone() throws Exception {
@@ -824,7 +827,7 @@ class ChunkIsReapableIntegrationTest {
         // DELETE trigger
         su(ctx -> ctx.deleteFrom(CATALOG_DOCUMENT_CHUNKS)
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(a).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("owner-ta1"))).execute());
-        assertThat(orphanRecordedRecently(a, KNOWLEDGE, chash)).as("positive control: the owner-run delete records A").isTrue();
+        assertThat(orphanRecordedRecently(a, KNOWLEDGE, chash)).as("positive control: the superuser-run delete records A").isTrue();
         assertThat(orphanedAt(b, KNOWLEDGE, chash)).as("DELETE trigger: tenant B's chunk is not tenant A's to record").isNull();
 
         // UPDATE trigger: move the second row to another chash so the old one is dropped
@@ -838,7 +841,7 @@ class ChunkIsReapableIntegrationTest {
         });
         su(ctx -> ctx.update(CATALOG_DOCUMENT_CHUNKS).set(CATALOG_DOCUMENT_CHUNKS.CHASH, bytes(other))
             .where(CATALOG_DOCUMENT_CHUNKS.TENANT_ID.eq(a).and(CATALOG_DOCUMENT_CHUNKS.DOC_ID.eq("owner-ta2"))).execute());
-        assertThat(orphanRecordedRecently(a, KNOWLEDGE, chash)).as("positive control: the owner-run update records A").isTrue();
+        assertThat(orphanRecordedRecently(a, KNOWLEDGE, chash)).as("positive control: the superuser-run update records A").isTrue();
         assertThat(orphanedAt(b, KNOWLEDGE, chash)).as("UPDATE trigger: tenant B's chunk is not tenant A's to record").isNull();
     }
 
@@ -880,9 +883,36 @@ class ChunkIsReapableIntegrationTest {
                 .contains("WHERE q.orphaned_at < now() - interval '1 hour'");
             assertThat(def).as("%s: never an UPDATE of nexus.chunks", signature)
                 .doesNotContain("UPDATE nexus.chunks").doesNotContain("last_written_at =");
-            assertThat(def).as("%s: tenant equality in the join", signature)
-                .contains("o.tenant_id = c.tenant_id");
+            // Two occurrences per function: the lock pass's join and the upsert's join. Removing it from the lock
+            // pass alone is harmless (over-locking under an RLS-bypassing role), but removing it from the upsert
+            // is the leak theRecordIsTenantScoped_whenTheWriterBypassesRls_byTheJoinAlone proves behaviourally; the
+            // count says which of the two a deletion took.
+            assertThat(occurrences(def, "o.tenant_id = c.tenant_id"))
+                .as("%s: tenant equality in BOTH the lock pass's join and the upsert's join", signature)
+                .isEqualTo(2);
         }
+    }
+
+    /**
+     * The orphaning record is read by a scalar subquery on its primary key, not by a LEFT JOIN. The two return
+     * the same rows (every behavioural test passes with either), but the join form's plan depends on the side
+     * table's statistics: against a freshly created or empty table it plans a sequential scan under a nested
+     * loop, and a statement that grows the table while it runs (the FK cascade of 1000 manifest deletes) keeps
+     * that plan and goes quadratic (3.2 s against 80 ms, vectors-021's SHAPE paragraph). The subquery is a
+     * primary-key probe whatever the statistics say. ChunkIsReapablePlanIntegrationTest's plan pin cannot tell
+     * the two apart, because its fixture ANALYZEs an 8000-row side table, which is exactly the case where the
+     * join also plans well; so the choice is pinned in the definition, where it is a fact rather than a plan.
+     */
+    @Test
+    void theOrphaningRecordIsReadByAScalarSubqueryOnItsPrimaryKey_notByAJoinWhosePlanDependsOnStatistics()
+            throws Exception {
+        String def = functionDefinition("nexus.chunk_is_reapable(text, text, bytea, timestamptz, interval)");
+        assertThat(def).as("the record is a scalar subquery inside GREATEST").contains("(SELECT o.orphaned_at");
+        assertThat(def).as("no JOIN of the side table (a LEFT JOIN plans from statistics)")
+            .doesNotContainIgnoringCase("JOIN");
+        assertThat(def).as("the probe is on the full primary key")
+            .containsPattern("o\\.tenant_id\\s*=\\s*p_tenant").containsPattern("o\\.collection\\s*=\\s*p_collection")
+            .containsPattern("o\\.chash\\s*=\\s*p_chash");
     }
 
     /**
