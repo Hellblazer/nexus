@@ -303,6 +303,20 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
         assertInlinedLiveC(plan, "text_gate_probe_384");
     }
 
+    /**
+     * Evidence only (nothing here asserts a plan shape): the selective gate's plan with sequential scans
+     * penalised, to record whether the GIN text indexes offer an indexed alternative and what it costs
+     * and returns. The planner's own choice above is a sequential scan for this gate.
+     */
+    @Test
+    void gateProbe_selective_withSeqscanOff_recordsTheIndexedAlternative() {
+        Table<?> fn = TEXT_GATE_PROBE_384.call(RARE_TOKEN, new String[] {COLL}, null, null,
+            PgVectorRepository.SELECTIVE_GATE_MAX + 1);
+        String plan = explainWith("text_gate_probe_384 (selective gate, enable_seqscan=off)",
+            List.of("enable_seqscan"), ctx -> ctx.selectFrom(fn));
+        assertInlinedLiveC(plan, "text_gate_probe_384");
+    }
+
     @Test
     void byChashRank_inlinesLiveC() {
         List<String> some = new ArrayList<>();
@@ -409,10 +423,16 @@ class Rdr192LiveCExplainEvidenceIntegrationTest {
      * never asserted: it moves with the box.
      */
     private String explain(String label, Function<DSLContext, ? extends ResultQuery<?>> queryBuilder) {
+        return explainWith(label, List.of(), queryBuilder);
+    }
+
+    private String explainWith(String label, List<String> offGucs,
+                               Function<DSLContext, ? extends ResultQuery<?>> queryBuilder) {
         return tenantScope.withTenant(TENANT, ctx -> {
             // The same serving GUCs the repository sets before an ordered vector fetch, so the plan is
             // the one production gets and not the one a default session gets.
             PgSession.setHnswEfSearch(ctx, 10);
+            for (String guc : offGucs) PgSession.setLocal(ctx, guc, "off");
             ResultQuery<?> q = queryBuilder.apply(ctx);
             String plan = ctx.explain(q).plan();
             int rows = q.fetch().size();                       // warm-up
