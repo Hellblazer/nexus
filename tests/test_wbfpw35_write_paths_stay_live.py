@@ -64,7 +64,7 @@ def test_re_embed_does_not_re_write_hidden_chunks() -> None:
     hooks = MagicMock()
 
     processed, skipped = _reembed_collection(
-        db, col.name, "voyage-context-3", dry_run=False, hooks=hooks,
+        db, col.name, "voyage-3", dry_run=False, hooks=hooks,
     )
 
     upserted = [i for call in db.upsert_chunks.call_args_list for i in call.args[1]]
