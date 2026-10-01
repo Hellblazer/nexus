@@ -246,7 +246,11 @@ class JooqRecordReflectionFeatureTest {
     // added nexus.reaper_quarantine_chunks, a RETURNS TABLE(moved,
     // reapable_count, total_count, refused, remaining) function, one
     // generated Record type (ReaperQuarantineChunksRecord), +1.
-    private static final int EXPECTED_RECORD_TYPES = 109;
+    // 109 -> 110: nexus-2x9xa (round 3), vectors-024-reaper-quarantine-chunks.xml
+    // (vectors-024-2) added nexus.reaper_expire_quarantine, a RETURNS TABLE(
+    // expired, refused, protected_count) function, one generated Record type
+    // (ReaperExpireQuarantineRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 110;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

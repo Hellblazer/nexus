@@ -118,4 +118,23 @@ class ChunkReaperSettingsTest {
         assertThat(of(Map.of(ChunkReaper.INTERVAL_SECONDS_ENV, "soon")).interval()).isEqualTo(Duration.ofHours(1));
         assertThat(of(Map.of(ChunkReaper.INTERVAL_SECONDS_ENV, "0")).interval()).isEqualTo(Duration.ofHours(1));
     }
+
+    @Test
+    void theQuarantineRetentionIsANamedSetting_14DaysByDefault() {
+        assertThat(of(Map.of()).quarantineRetention()).isEqualTo(Duration.ofDays(14));
+        assertThat(of(Map.of(ChunkReaper.QUARANTINE_RETENTION_DAYS_ENV, "30")).quarantineRetention())
+            .isEqualTo(Duration.ofDays(30));
+        for (String bad : new String[] {"0", "-1", "soon", "3651"}) {
+            assertThat(of(Map.of(ChunkReaper.QUARANTINE_RETENTION_DAYS_ENV, bad)).quarantineRetention())
+                .as(bad).isEqualTo(Duration.ofDays(14));
+        }
+    }
+
+    @Test
+    void theFloorExemptionIsAnExactCollectionList_emptyByDefault_andQuarantineNamesAreIgnored() {
+        assertThat(of(Map.of()).floorExemptCollections()).isEmpty();
+        assertThat(of(Map.of(ChunkReaper.FLOOR_EXEMPT_COLLECTIONS_ENV,
+            " code__a__m__v1 , ,docs__b__m__v1,quarantine-code__a__m__v1 ")).floorExemptCollections())
+            .containsExactlyInAnyOrder("code__a__m__v1", "docs__b__m__v1");
+    }
 }

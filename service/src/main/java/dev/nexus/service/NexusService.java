@@ -441,6 +441,23 @@ public final class NexusService {
                         dev.nexus.service.vectors.Reranker reranker,
                         java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
                         TemplateRegistry tupleTemplateRegistry) throws IOException {
+        this(port, token, dataSource, docEmbedderRouter, pgVectorRepository, reranker, localEmbedActivitySupplier,
+                tupleTemplateRegistry, null);
+    }
+
+    /**
+     * The full constructor with a seam for the sweep scheduler (nexus-2x9xa, round 3). Null makes the real
+     * single-thread scheduler. A test passes a scheduler that RECORDS what is registered on it, so a wiring test
+     * can fail when the reaper's {@code scheduleWithFixedDelay} call is deleted: a test that only runs the reaper's
+     * task body cannot see that the schedule call is gone. Package-private: production never passes one.
+     */
+    NexusService(int port, String token, DataSource dataSource,
+                        EmbedderRouter docEmbedderRouter,
+                        PgVectorRepository pgVectorRepository,
+                        dev.nexus.service.vectors.Reranker reranker,
+                        java.util.function.Supplier<dev.nexus.service.vectors.EmbedActivitySnapshot> localEmbedActivitySupplier,
+                        TemplateRegistry tupleTemplateRegistry,
+                        ScheduledExecutorService sweepSchedulerOverride) throws IOException {
         this.tenantScope = new TenantScope(dataSource);
         this.dataSource = dataSource;
 
@@ -648,11 +665,12 @@ public final class NexusService {
         // BYPASSRLS connection is required because token-bearing tenants are
         // enumerable from service_tokens (read pre-tenant by design) and any
         // tenant that wrote scratch necessarily presented a token.
-        this.sweepScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "t1-ttl-sweep");
-            t.setDaemon(true);
-            return t;
-        });
+        this.sweepScheduler = sweepSchedulerOverride != null ? sweepSchedulerOverride
+            : Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "t1-ttl-sweep");
+                t.setDaemon(true);
+                return t;
+            });
         this.sweepScheduler.scheduleAtFixedRate(
             () -> {
                 try {
@@ -715,10 +733,12 @@ public final class NexusService {
                 ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(), TimeUnit.SECONDS
             );
             log.info("event=reaper_scheduled initial_delay_seconds={} interval_seconds={} batch_size={} "
-                    + "floor_fraction={} floor_min_chunks={} census_timeout_seconds={} wall_clock_budget_seconds={}",
+                    + "floor_fraction={} floor_min_chunks={} census_timeout_seconds={} wall_clock_budget_seconds={} "
+                    + "quarantine_retention_days={} floor_exempt_collections={}",
                 ChunkReaper.INITIAL_DELAY.toSeconds(), reaperSettings.interval().toSeconds(),
                 reaperSettings.batchSize(), reaperSettings.floorFraction(), reaperSettings.floorMinChunks(),
-                reaperSettings.censusTimeout().toSeconds(), reaperSettings.wallClockBudget().toSeconds());
+                reaperSettings.censusTimeout().toSeconds(), reaperSettings.wallClockBudget().toSeconds(),
+                reaperSettings.quarantineRetention().toDays(), new java.util.TreeSet<>(reaperSettings.floorExemptCollections()));
         } else {
             this.chunkReaper = null;
             this.reaperScheduledTask = null;

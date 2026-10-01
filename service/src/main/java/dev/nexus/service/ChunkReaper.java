@@ -19,6 +19,9 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
@@ -38,12 +41,16 @@ import java.util.function.Supplier;
  * engine consumer shares.
  *
  * <p><b>It quarantines, it never hard-deletes a chunk that something might still own</b> (Sam, 2026-10-01). A
- * moved chunk is held in the sibling for 14 days; then {@code gc_expire_quarantine}, run by the same pass, takes
- * it under that function's own floors and its refusal to delete a chunk a manifest row still names
- * ({@link #QUARANTINE_RETENTION}). A moved chunk comes back when a later index run or heal names it in a manifest
- * row of its origin collection ({@code gc_restore_rereferenced}); restoring by chash, for a wrongly moved chunk no
- * manifest row names, is a separate route this class does not provide. <b>It
- * covers every collection prefix</b> ({@code knowledge__}, {@code docs__}, {@code code__}, {@code rdr__}): after
+ * moved chunk is tagged ({@code quarantined_by = engine-reaper}) and held in the sibling for
+ * {@link Settings#quarantineRetention} (14 days by default); then {@code reaper_expire_quarantine}, run by the same
+ * pass, deletes it under a floor and its refusal to delete a chunk a manifest row still names. <b>Engine expiry
+ * covers only the chunks this class moved</b> (Sam, 2026-10-01): quarantine that {@code nx index repo} or
+ * {@code nx t3 gc} filled carries no tag, is never touched here, and keeps the client's own
+ * {@code NX_GC_QUARANTINE_DAYS} retention. A moved chunk a manifest row of its origin names again is never
+ * deleted; for a repo collection a later index run or heal moves it back ({@code gc_restore_rereferenced}), and for
+ * a {@code knowledge__} collection (where a re-put embeds a fresh origin chunk) nothing does and the quarantine copy
+ * stays, protected. Restoring by chash, for a wrongly moved chunk no manifest row names, is a separate route this
+ * class does not provide. <b>It covers every collection prefix</b> ({@code knowledge__}, {@code docs__}, {@code code__}, {@code rdr__}): after
  * RDR-223's ownerless-write refusal the only producer of ownerless chunks is a crashed multi-request run, and those
  * are mostly {@code docs__} and {@code code__}.
  *
@@ -51,9 +58,9 @@ import java.util.function.Supplier;
  * {@code gc_audit} per state change (operation {@value #AUDIT_REFUSED}); a cloud operator has no engine log:
  * <ol>
  *   <li>per tenant, {@link Rdr192BackfillGate#requireComplete}: no verified backfill record, nothing is touched;</li>
- *   <li>per tenant, the quarantine siblings are expired first (before this pass adds to them), each under
- *       {@code gc_expire_quarantine}'s own floor;</li>
- *   <li>per collection: a {@code quarantine-} name is skipped (a quarantine sibling is {@code gc_expire_quarantine}'s);
+ *   <li>per tenant, the quarantine siblings are expired first (before this pass adds to them), only the chunks
+ *       this class tagged, each under the expiry floor;</li>
+ *   <li>per collection: a {@code quarantine-} name is skipped (a quarantine sibling is expired, never reaped);
  *       a collection with no catalog row, or in any lifecycle state but {@code live}, is refused;</li>
  *   <li>per collection, a dry run counts what is reapable and how many chunks the collection holds. Nothing reapable
  *       means nothing at risk and no census;</li>
@@ -77,6 +84,10 @@ import java.util.function.Supplier;
  * {@code no-owner}, not {@code legacy-unmanifested}, and the census passes. The backstops are the 30 day grace, the
  * floor, and the quarantine's 14 days. See the operator runbook.
  *
+ * <p><b>No collection starves another.</b> A run that spends its wall-clock budget resumes, on the next pass, at the
+ * tenant and the collection where it was cut. A collection whose census times out three passes running backs off
+ * for 2^k passes (at most 24 hours), so a pathological collection stops spending the shared thread every hour.
+ *
  * <p>A pass moves at most {@link Settings#batchSize} (300) chunks per collection. The grace is the predicate's own
  * 30 days per chunk; this class has no setting for it. {@link #runOnce(Duration)} is package-private and takes the
  * grace so a test can pass zero.
@@ -99,6 +110,8 @@ final class ChunkReaper {
     static final String FLOOR_MIN_CHUNKS_ENV = "NX_REAPER_FLOOR_MIN_CHUNKS";
     static final String WALL_CLOCK_BUDGET_SECONDS_ENV = "NX_REAPER_WALL_CLOCK_BUDGET_SECONDS";
     static final String CENSUS_TIMEOUT_SECONDS_ENV = "NX_REAPER_CENSUS_TIMEOUT_SECONDS";
+    static final String QUARANTINE_RETENTION_DAYS_ENV = "NX_REAPER_QUARANTINE_RETENTION_DAYS";
+    static final String FLOOR_EXEMPT_COLLECTIONS_ENV = "NX_REAPER_FLOOR_EXEMPT_COLLECTIONS";
 
     /** Most chunks one pass moves from one collection (Sam, 2026-09-26: 300). */
     static final int MAX_BATCH_SIZE = 300;
@@ -106,8 +119,10 @@ final class ChunkReaper {
     static final Duration MIN_INTERVAL = Duration.ofSeconds(60);
     /** First pass this long after boot, not one full interval: an engine that restarts hourly must still reap. */
     static final Duration INITIAL_DELAY = Duration.ofSeconds(60);
-    /** How long a moved chunk waits in quarantine before {@code gc_expire_quarantine} may take it. */
-    static final Duration QUARANTINE_RETENTION = Duration.ofDays(14);
+    /** Consecutive census timeouts on one collection before its census backs off. */
+    static final int CENSUS_BACKOFF_AFTER = 3;
+    /** The longest a timing-out collection's census is left alone. */
+    static final Duration MAX_CENSUS_BACKOFF = Duration.ofHours(24);
     /** Most title/source_path rows a refusal's audit row carries. */
     static final int SAMPLE_SIZE = 5;
     /** The census page asked for: items beyond this are not itemised (the totals are collection-wide). */
@@ -129,9 +144,24 @@ final class ChunkReaper {
      * statement.
      */
     record Settings(boolean enabled, Duration interval, int batchSize, double floorFraction,
-                    int floorMinChunks, Duration wallClockBudget, Duration censusTimeout) {
+                    int floorMinChunks, Duration wallClockBudget, Duration censusTimeout,
+                    Duration quarantineRetention, Set<String> floorExemptCollections) {
+
+        Settings {
+            floorExemptCollections = Set.copyOf(floorExemptCollections);
+        }
+
+        /** The settings without a retention override or a floor exemption: the 14 day default, no exemptions. */
+        Settings(boolean enabled, Duration interval, int batchSize, double floorFraction, int floorMinChunks,
+                 Duration wallClockBudget, Duration censusTimeout) {
+            this(enabled, interval, batchSize, floorFraction, floorMinChunks, wallClockBudget, censusTimeout,
+                DEFAULT_QUARANTINE_RETENTION, Set.of());
+        }
 
         static final Duration DEFAULT_INTERVAL = Duration.ofHours(1);
+        /** How long a chunk the reaper moved waits in quarantine before the engine expires it (Sam: 14 days). */
+        static final Duration DEFAULT_QUARANTINE_RETENTION = Duration.ofDays(14);
+        static final long MAX_QUARANTINE_RETENTION_DAYS = 3650;
         static final double DEFAULT_FLOOR_FRACTION = 0.25;
         static final int DEFAULT_FLOOR_MIN_CHUNKS = 100;
         static final Duration DEFAULT_WALL_CLOCK_BUDGET = Duration.ofMinutes(10);
@@ -139,7 +169,8 @@ final class ChunkReaper {
 
         static Settings defaults() {
             return new Settings(true, DEFAULT_INTERVAL, MAX_BATCH_SIZE, DEFAULT_FLOOR_FRACTION,
-                                DEFAULT_FLOOR_MIN_CHUNKS, DEFAULT_WALL_CLOCK_BUDGET, DEFAULT_CENSUS_TIMEOUT);
+                                DEFAULT_FLOOR_MIN_CHUNKS, DEFAULT_WALL_CLOCK_BUDGET, DEFAULT_CENSUS_TIMEOUT,
+                                DEFAULT_QUARANTINE_RETENTION, Set.of());
         }
 
         /**
@@ -164,7 +195,30 @@ final class ChunkReaper {
                 (int) nonNegative(env, FLOOR_MIN_CHUNKS_ENV, DEFAULT_FLOOR_MIN_CHUNKS),
                 Duration.ofSeconds(positive(env, WALL_CLOCK_BUDGET_SECONDS_ENV, DEFAULT_WALL_CLOCK_BUDGET.toSeconds(),
                                             Long.MAX_VALUE / 4)),
-                Duration.ofSeconds(positive(env, CENSUS_TIMEOUT_SECONDS_ENV, DEFAULT_CENSUS_TIMEOUT.toSeconds(), 3600)));
+                Duration.ofSeconds(positive(env, CENSUS_TIMEOUT_SECONDS_ENV, DEFAULT_CENSUS_TIMEOUT.toSeconds(), 3600)),
+                Duration.ofDays(positive(env, QUARANTINE_RETENTION_DAYS_ENV, DEFAULT_QUARANTINE_RETENTION.toDays(),
+                                         MAX_QUARANTINE_RETENTION_DAYS)),
+                names(env.apply(FLOOR_EXEMPT_COLLECTIONS_ENV)));
+        }
+
+        /**
+         * A comma-separated list of collection names; blank entries are dropped. A {@code quarantine-} name is
+         * dropped with a warning: the reaper never visits a quarantine sibling, so exempting one means nothing.
+         */
+        private static Set<String> names(String raw) {
+            Set<String> out = new TreeSet<>();
+            if (raw == null) return out;
+            for (String part : raw.split(",")) {
+                String name = part.trim();
+                if (name.isEmpty()) continue;
+                if (name.startsWith(QUARANTINE_PREFIX)) {
+                    log.warn("event=reaper_setting_invalid name={} raw={} using=ignored expected=a_live_collection_name",
+                        FLOOR_EXEMPT_COLLECTIONS_ENV, name);
+                    continue;
+                }
+                out.add(name);
+            }
+            return out;
         }
 
         /** Unset or blank: on. An explicit true or false decides; anything else warns and stays on. */
@@ -232,7 +286,9 @@ final class ChunkReaper {
         /** A manifest writer holds the per-collection sweep gate SHARED, so the exclusive acquire timed out. */
         GATE_BUSY(false),
         /** A lock wait other than the gate timed out: a chunk row a client is refreshing, or the sibling registration. */
-        LOCK_TIMEOUT(false);
+        LOCK_TIMEOUT(false),
+        /** The collection's census timed out {@value ChunkReaper#CENSUS_BACKOFF_AFTER} passes running and is resting. */
+        CENSUS_BACKOFF(false);
 
         final boolean refusal;
 
@@ -245,8 +301,14 @@ final class ChunkReaper {
     record CollectionResult(String collection, long candidates, long total, long moved, Refusal refusal,
                             String error) {}
 
-    /** One quarantine sibling's expiry outcome. {@code refusal} and {@code error} are null when absent. */
-    record ExpiryResult(String quarantineCollection, long expired, long refused, Refusal refusal, String error) {}
+    /**
+     * One quarantine sibling's expiry outcome. {@code refused} counts chunks the expiry floor held back (a
+     * refusal); {@code protectedCount} counts chunks past the cutoff that a manifest row of the origin still names
+     * (benign, labelled {@code expiry_protected}, never a refusal). {@code refusal} and {@code error} are null
+     * when absent; {@code refusal} may be a skip (a lock wait timed out) as well as {@link Refusal#EXPIRY_REFUSED}.
+     */
+    record ExpiryResult(String quarantineCollection, long expired, long refused, long protectedCount,
+                        Refusal refusal, String error) {}
 
     record TenantResult(String tenant, List<CollectionResult> collections, List<ExpiryResult> expiries,
                         Refusal tenantRefusal, String error, boolean wallClockCut) {
@@ -279,13 +341,19 @@ final class ChunkReaper {
         /** Decisions the reaper made about the data. A gate or lock skip is not one. */
         int refused() {
             return (int) collections.stream().filter(c -> c.refusal() != null && c.refusal().refusal).count()
-                + (int) expiries.stream().filter(e -> e.refusal() != null).count()
+                + (int) expiries.stream().filter(e -> e.refusal() != null && e.refusal().refusal).count()
                 + (tenantRefusal != null ? 1 : 0);
         }
 
-        /** Collections that collided with a live writer and wait for the next pass. */
+        /** Collections and siblings that collided with a live writer, or are resting, and wait for a later pass. */
         int skipped() {
-            return (int) collections.stream().filter(c -> c.refusal() != null && !c.refusal().refusal).count();
+            return (int) collections.stream().filter(c -> c.refusal() != null && !c.refusal().refusal).count()
+                + (int) expiries.stream().filter(e -> e.refusal() != null && !e.refusal().refusal).count();
+        }
+
+        /** Chunks past the retention window that a manifest row still names, summed over the siblings: benign. */
+        long expiryProtected() {
+            return expiries.stream().mapToLong(ExpiryResult::protectedCount).sum();
         }
 
         int errors() {
@@ -321,7 +389,24 @@ final class ChunkReaper {
     private final AtomicLong gateBusyTotal = new AtomicLong();
     /** Collections skipped since boot because a lock wait other than the sweep gate timed out. Not a refusal. */
     private final AtomicLong lockTimeoutTotal = new AtomicLong();
+    /** Census statements that hit their bound since boot (each also a refusal). */
+    private final AtomicLong censusTimedOutTotal = new AtomicLong();
+    /** Collections skipped since boot because their census is resting after repeated timeouts. Not a refusal. */
+    private final AtomicLong censusBackoffTotal = new AtomicLong();
     private final AtomicReference<RunResult> lastRun = new AtomicReference<>();
+    private final AtomicLong passNumber = new AtomicLong();
+    /** {@code tenant/collection} to its census timeout streak; removed when the census completes or nothing is reapable. */
+    private final Map<String, CensusStreak> censusStreaks = new ConcurrentHashMap<>();
+    /** Where the last wall-clock cut stopped, so the next pass resumes there and nothing is starved. */
+    private volatile String resumeTenant;
+    private final Map<String, String> resumeCollection = new ConcurrentHashMap<>();
+    private final Map<String, String> resumeExpiry = new ConcurrentHashMap<>();
+
+    /** Consecutive census timeouts of one collection, and the last pass its census is skipped through. */
+    private static final class CensusStreak {
+        int consecutive;
+        long skipThroughPass;
+    }
 
     ChunkReaper(ReaperRepository store, PgVectorRepository vectors, CatalogRepository catalog,
                 Rdr192BackfillGate gate, Supplier<? extends Collection<String>> tenants, Settings settings,
@@ -363,6 +448,16 @@ final class ChunkReaper {
         return lockTimeoutTotal.get();
     }
 
+    /** Census statements that hit their bound since boot. */
+    long censusTimedOutTotal() {
+        return censusTimedOutTotal.get();
+    }
+
+    /** Collections skipped since boot because their census was resting after repeated timeouts. */
+    long censusBackoffTotal() {
+        return censusBackoffTotal.get();
+    }
+
     /** The last completed pass, or null before the first. */
     RunResult lastRun() {
         return lastRun.get();
@@ -379,14 +474,16 @@ final class ChunkReaper {
      */
     RunResult runOnce(Duration grace) {
         long deadline = nanos.getAsLong() + settings.wallClockBudget().toNanos();
+        long pass = passNumber.incrementAndGet();
         List<TenantResult> results = new ArrayList<>();
         boolean cut = false;
+        String cutAt = null;
         Collection<String> tenantIds;
         try {
-            tenantIds = tenants.get();
+            tenantIds = rotated(new ArrayList<>(tenants.get()), resumeTenant);
         } catch (RuntimeException e) {
-            log.warn("event=reaper_run tenants=0 candidates=0 moved=0 audit_rows=0 expired=0 refused=0 skipped=0 "
-                + "errors=1 wall_clock_cut=false error={}", e.getMessage(), e);
+            log.warn("event=reaper_run tenants=0 candidates=0 moved=0 audit_rows=0 expired=0 expiry_protected=0 "
+                + "refused=0 skipped=0 errors=1 wall_clock_cut=false error={}", e.getMessage(), e);
             RunResult failed = new RunResult(List.of(), false);
             lastRun.set(failed);
             return failed;
@@ -394,35 +491,62 @@ final class ChunkReaper {
         int unvisited = 0;
         for (String tenant : tenantIds) {
             if (cut || nanos.getAsLong() >= deadline) {
+                if (!cut) cutAt = tenant;
                 cut = true;
                 unvisited++;
                 continue;
             }
-            TenantResult r = passTenant(tenant, grace, deadline);
+            TenantResult r = passTenant(tenant, grace, deadline, pass);
             results.add(r);
             if (r.wallClockCut()) {
                 cut = true;
+                cutAt = tenant;
             }
         }
+        // A cut resumes where it stopped, not at the front: otherwise whatever sorts first is visited every hour
+        // and whatever sorts last is starved for as long as the first ones are slow.
+        resumeTenant = cut ? cutAt : null;
         if (unvisited > 0) {
             log.warn("event=reaper_wall_clock_cut tenants_unvisited={}", unvisited);
         }
         long candidates = results.stream().mapToLong(TenantResult::candidates).sum();
         long moved = results.stream().mapToLong(TenantResult::moved).sum();
         long expired = results.stream().mapToLong(TenantResult::expired).sum();
+        long expiryProtected = results.stream().mapToLong(TenantResult::expiryProtected).sum();
         int auditRows = results.stream().mapToInt(TenantResult::auditRows).sum();
         int refused = results.stream().mapToInt(TenantResult::refused).sum();
         int skipped = results.stream().mapToInt(TenantResult::skipped).sum();
         int errors = results.stream().mapToInt(TenantResult::errors).sum();
-        log.info("event=reaper_run tenants={} candidates={} moved={} audit_rows={} expired={} refused={} skipped={} "
-                + "errors={} wall_clock_cut={}",
-            results.size(), candidates, moved, auditRows, expired, refused, skipped, errors, cut);
+        log.info("event=reaper_run tenants={} candidates={} moved={} audit_rows={} expired={} expiry_protected={} "
+                + "refused={} skipped={} errors={} wall_clock_cut={} refused_total={} census_timed_out_total={}",
+            results.size(), candidates, moved, auditRows, expired, expiryProtected, refused, skipped, errors, cut,
+            refusedTotal.get(), censusTimedOutTotal.get());
         RunResult out = new RunResult(results, cut);
         lastRun.set(out);
         return out;
     }
 
-    private TenantResult passTenant(String tenant, Duration grace, long deadlineNanos) {
+    /** {@code items} starting at the first element equal to {@code resume} (all of them when it is null or absent). */
+    private static List<String> rotated(List<String> items, String resume) {
+        int at = resume == null ? -1 : items.indexOf(resume);
+        if (at <= 0) return items;
+        List<String> out = new ArrayList<>(items.subList(at, items.size()));
+        out.addAll(items.subList(0, at));
+        return out;
+    }
+
+    /** The sorted {@code names} rotated to start at the first name not before {@code resume} (a name since deleted). */
+    private static List<String> rotatedFrom(List<String> names, String resume) {
+        if (resume == null) return names;
+        int at = 0;
+        while (at < names.size() && names.get(at).compareTo(resume) < 0) at++;
+        if (at == 0 || at >= names.size()) return names;
+        List<String> out = new ArrayList<>(names.subList(at, names.size()));
+        out.addAll(names.subList(0, at));
+        return out;
+    }
+
+    private TenantResult passTenant(String tenant, Duration grace, long deadlineNanos, long pass) {
         try {
             gate.requireComplete(tenant);
         } catch (BackfillIncompleteException e) {
@@ -440,23 +564,34 @@ final class ChunkReaper {
         try {
             List<String> names = store.collectionsWithChunks(tenant, Duration.ofMillis(STATEMENT_TIMEOUT_MS));
             Map<String, String> states = store.lifecycleStates(tenant);
+            List<String> quarantines = rotatedFrom(
+                names.stream().filter(n -> n.startsWith(QUARANTINE_PREFIX)).toList(), resumeExpiry.get(tenant));
+            List<String> live = rotatedFrom(
+                names.stream().filter(n -> !n.startsWith(QUARANTINE_PREFIX)).toList(), resumeCollection.get(tenant));
+            String firstUnvisited = null;
 
             // Expire first, so the floor judges the quarantine as it stood before this pass adds to it.
-            for (String name : names) {
-                if (!name.startsWith(QUARANTINE_PREFIX)) continue;
+            resumeExpiry.remove(tenant);
+            for (String name : quarantines) {
                 if (nanos.getAsLong() >= deadlineNanos) {
                     cut = true;
+                    resumeExpiry.put(tenant, name);
                     break;
                 }
                 expiries.add(expire(tenant, name, states));
             }
-            for (String name : names) {
-                if (name.startsWith(QUARANTINE_PREFIX)) continue;
+            for (String name : live) {
                 if (cut || nanos.getAsLong() >= deadlineNanos) {
                     cut = true;
+                    firstUnvisited = name;
                     break;
                 }
-                out.add(passCollection(tenant, name, states, grace));
+                out.add(passCollection(tenant, name, states, grace, pass));
+            }
+            if (firstUnvisited != null) {
+                resumeCollection.put(tenant, firstUnvisited);
+            } else {
+                resumeCollection.remove(tenant);
             }
             if (cut) {
                 tenantError = "wall-clock budget spent; the remaining collections wait for the next pass";
@@ -474,7 +609,8 @@ final class ChunkReaper {
         return total > 0 && reapable >= minChunks && (double) reapable / (double) total > fraction;
     }
 
-    private CollectionResult passCollection(String tenant, String name, Map<String, String> states, Duration grace) {
+    private CollectionResult passCollection(String tenant, String name, Map<String, String> states, Duration grace,
+                                            long pass) {
         if (!states.containsKey(name)) {
             return refuse(tenant, name, Refusal.UNREGISTERED_COLLECTION, 0, 0, "no catalog_collections row", List.of());
         }
@@ -484,15 +620,37 @@ final class ChunkReaper {
         }
         try {
             ReaperRepository.Pass probe = store.probe(tenant, name, grace, STATEMENT_TIMEOUT_MS);
+            String streakKey = tenant + "/" + name;
             if (probe.reapable() == 0) {
+                censusStreaks.remove(streakKey);   // nothing to census: the reason for the streak is gone
                 return new CollectionResult(name, 0, probe.total(), 0, null, null);
+            }
+
+            // The move floor, with one named exemption (NX_REAPER_FLOOR_EXEMPT_COLLECTIONS): a collection that is
+            // legitimately mostly garbage is drained through it without turning the floor off for everything else.
+            // Fraction 1.0 never trips (a ratio is never above 1), here and in the move function. The exemption is
+            // logged on every pass that uses it, and the move's gc_audit row records floor_fraction 1.0.
+            boolean exempt = settings.floorExemptCollections().contains(name);
+            double fraction = exempt ? 1.0 : settings.floorFraction();
+            if (exempt) {
+                log.warn("event=reaper_floor_exempt tenant={} collection={} reapable={} total={} "
+                        + "would_have_refused={} (NX_REAPER_FLOOR_EXEMPT_COLLECTIONS names this collection)",
+                    tenant, name, probe.reapable(), probe.total(),
+                    floorTrips(probe.reapable(), probe.total(), settings.floorFraction(), settings.floorMinChunks()));
             }
 
             // The floor first, on the probe's own counts: a collection the floor will refuse anyway must not pay
             // for a census every hour. The move re-judges the same rule under the sweep gate.
-            if (floorTrips(probe.reapable(), probe.total(), settings.floorFraction(), settings.floorMinChunks())) {
+            if (floorTrips(probe.reapable(), probe.total(), fraction, settings.floorMinChunks())) {
                 return refuse(tenant, name, Refusal.FLOOR_EXCEEDED, probe.reapable(), probe.total(), floorDetail(),
                     sampleReapable(tenant, name, grace));
+            }
+
+            // A collection whose census timed out three passes running rests for 2^k passes: the census is the
+            // expensive step and a pathological collection would otherwise spend the shared thread every pass.
+            CensusStreak streak = censusStreaks.get(streakKey);
+            if (streak != null && pass <= streak.skipThroughPass) {
+                return skipBackoff(tenant, name, probe, streak.skipThroughPass - pass + 1);
             }
 
             // The census, in the engine, on every pass that would move something. The stored ladder record is not
@@ -502,12 +660,11 @@ final class ChunkReaper {
                 c = census.run(tenant, name, CENSUS_PAGE, settings.censusTimeout());
             } catch (RuntimeException e) {
                 if ("57014".equals(sqlState(e))) {
-                    return refuse(tenant, name, Refusal.CENSUS_TIMED_OUT, probe.reapable(), probe.total(),
-                        "census statement exceeded " + settings.censusTimeout().toSeconds() + "s; it was not read, "
-                            + "so nothing is moved", List.of());
+                    return censusTimedOut(tenant, name, probe, streakKey, pass);
                 }
                 throw e;
             }
+            censusStreaks.remove(streakKey);   // it completed, whatever it said: the streak is over
             // Non-vacuity: a census that read a different set than the one being judged (a wrong tenant or an
             // unset RLS GUC reads 0) proves nothing, and its zero must not be taken for a clean collection.
             if (c.scopeChunkTotal() != probe.total()) {
@@ -528,7 +685,7 @@ final class ChunkReaper {
             }
 
             ReaperRepository.Pass move = store.move(tenant, name, QUARANTINE_PREFIX + name,
-                quarantinedAt(), settings.batchSize(), grace, settings.floorFraction(),
+                quarantinedAt(), settings.batchSize(), grace, fraction,
                 settings.floorMinChunks(), STATEMENT_TIMEOUT_MS, LOCK_TIMEOUT_MS);
             if (move.refused()) {
                 return refuse(tenant, name, Refusal.FLOOR_EXCEEDED, move.reapable(), move.total(), floorDetail(),
@@ -545,8 +702,39 @@ final class ChunkReaper {
         }
     }
 
+    /** A census that hit its bound: a counted refusal, and after the third in a row a rest of 2^k passes. */
+    private CollectionResult censusTimedOut(String tenant, String name, ReaperRepository.Pass probe, String streakKey,
+                                            long pass) {
+        long timedOut = censusTimedOutTotal.incrementAndGet();
+        CensusStreak streak = censusStreaks.computeIfAbsent(streakKey, k -> new CensusStreak());
+        streak.consecutive++;
+        long rest = 0;
+        if (streak.consecutive >= CENSUS_BACKOFF_AFTER) {
+            long k = streak.consecutive - CENSUS_BACKOFF_AFTER + 1L;
+            long cap = Math.max(1L, MAX_CENSUS_BACKOFF.toSeconds() / Math.max(1L, settings.interval().toSeconds()));
+            rest = Math.min(1L << Math.min(k, 30L), cap);
+            streak.skipThroughPass = pass + rest;
+        }
+        return refuse(tenant, name, Refusal.CENSUS_TIMED_OUT, probe.reapable(), probe.total(),
+            "census statement exceeded " + settings.censusTimeout().toSeconds() + "s; it was not read, so nothing is "
+                + "moved; census_timed_out_total=" + timedOut + " consecutive=" + streak.consecutive
+                + (rest > 0 ? " the census rests for the next " + rest + " pass(es)" : ""),
+            List.of());
+    }
+
+    /** A collection resting after repeated census timeouts: counted on its own, INFO, never audited. */
+    private CollectionResult skipBackoff(String tenant, String name, ReaperRepository.Pass probe, long passesLeft) {
+        long n = censusBackoffTotal.incrementAndGet();
+        log.info("event=reaper_collection_skipped tenant={} collection={} reason={} census_backoff_total={} "
+                + "passes_left={} detail={}",
+            tenant, name, Refusal.CENSUS_BACKOFF, n, passesLeft,
+            "the census timed out " + CENSUS_BACKOFF_AFTER + " or more passes running; it rests, then is retried "
+                + "(raise NX_REAPER_CENSUS_TIMEOUT_SECONDS to give it room)");
+        return new CollectionResult(name, probe.reapable(), probe.total(), 0, Refusal.CENSUS_BACKOFF, null);
+    }
+
     /**
-     * The stamp {@code gc_expire_quarantine} compares against: whole seconds, {@code yyyy-MM-ddTHH:mm:ssZ}, the shape
+     * The stamp the expiry compares against: whole seconds, {@code yyyy-MM-ddTHH:mm:ssZ}, the shape
      * the Python indexer writes. An {@code Instant.toString()} carries fractional seconds, which sort differently
      * from the cutoff's and expire a chunk early.
      */
@@ -558,40 +746,57 @@ final class ChunkReaper {
         return "floor_fraction=" + settings.floorFraction() + " floor_min_chunks=" + settings.floorMinChunks();
     }
 
-    /** Expire the siblings of this pass's own making: 14 days old, under {@code gc_expire_quarantine}'s own floor. */
+    /**
+     * Expire the chunks this class moved, in the sibling of one origin: tagged chunks older than
+     * {@link Settings#quarantineRetention}, under the expiry floor, never one a manifest row names. Quarantine a
+     * client filled carries no tag and is not touched.
+     */
     private ExpiryResult expire(String tenant, String quarantine, Map<String, String> states) {
         String origin = quarantine.substring(QUARANTINE_PREFIX.length());
         if (!states.containsKey(origin)) {
-            // gc_expire_quarantine derives the dimension from the origin's registered row; with none there is
-            // nothing safe to say about these chunks, so they are left (and nothing is audited as refused).
+            // An origin with no catalog row is a catalog anomaly or a retired collection; nothing is expired for
+            // it (the manifest guard is keyed on the origin's name, which an operator should look at first), and
+            // nothing is audited as refused.
             log.info("event=reaper_expire_skipped tenant={} quarantine={} reason=origin_not_registered",
                 tenant, quarantine);
-            return new ExpiryResult(quarantine, 0, 0, null, null);
+            return new ExpiryResult(quarantine, 0, 0, 0, null, null);
         }
-        String cutoff = clock.instant().minus(QUARANTINE_RETENTION).truncatedTo(ChronoUnit.SECONDS).toString();
+        String cutoff = clock.instant().minus(settings.quarantineRetention()).truncatedTo(ChronoUnit.SECONDS).toString();
         try {
-            PgVectorRepository.ExpireOutcome out = vectors.expireQuarantine(tenant, quarantine, origin, cutoff,
-                settings.floorFraction(), settings.floorMinChunks(), false, STATEMENT_TIMEOUT_MS);
-            // expired == 0 with refused > 0: the floor tripped, or every past-cutoff chunk is still named by a
-            // manifest row (gc_expire_quarantine reports both as `refused`). Either way nothing was deleted, and
-            // an operator must be told.
-            Refusal refusal = out.expired() == 0 && out.refused() > 0 ? Refusal.EXPIRY_REFUSED : null;
+            ReaperRepository.Expiry out = store.expire(tenant, quarantine, origin, cutoff, settings.floorFraction(),
+                settings.floorMinChunks(), STATEMENT_TIMEOUT_MS, LOCK_TIMEOUT_MS);
+            // refused > 0 is the FLOOR: tagged chunks past the cutoff were held back, nothing was deleted, and an
+            // operator must be told. protected > 0 is benign (a chunk a manifest row of the origin names again is
+            // never deleted) and is labelled on its own: it is not a refusal, not counted in refused_total, and
+            // not a WARN every hour.
+            Refusal refusal = out.refused() > 0 ? Refusal.EXPIRY_REFUSED : null;
             if (refusal != null) {
                 long n = refusedTotal.incrementAndGet();
-                log.warn("event=reaper_expire_refused tenant={} quarantine={} refused={} refused_total={} cutoff={} {}",
-                    tenant, quarantine, out.refused(), n, cutoff, floorDetail());
+                log.warn("event=reaper_expire_refused tenant={} quarantine={} refused={} expiry_protected={} "
+                        + "refused_total={} cutoff={} {}",
+                    tenant, quarantine, out.refused(), out.protectedCount(), n, cutoff, floorDetail());
                 recordRefusal(tenant, quarantine, refusal, out.refused(), 0,
-                    "gc_expire_quarantine deleted nothing: the floor tripped, or the past-cutoff chunks are still "
-                        + "named by a manifest row; cutoff=" + cutoff + " " + floorDetail(), List.of());
+                    "reaper_expire_quarantine deleted nothing: the expiry floor tripped (" + out.refused()
+                        + " tagged chunks are past the cutoff; force it with POST /v1/vectors/gc/expire-quarantine "
+                        + "after reading them); cutoff=" + cutoff + " " + floorDetail(), List.of());
             } else if (out.expired() > 0) {
-                log.info("event=reaper_expired tenant={} quarantine={} expired={} refused={} cutoff={}",
-                    tenant, quarantine, out.expired(), out.refused(), cutoff);
+                log.info("event=reaper_expired tenant={} quarantine={} expired={} expiry_protected={} cutoff={}",
+                    tenant, quarantine, out.expired(), out.protectedCount(), cutoff);
             }
-            return new ExpiryResult(quarantine, out.expired(), out.refused(), refusal, null);
+            return new ExpiryResult(quarantine, out.expired(), out.refused(), out.protectedCount(), refusal, null);
         } catch (RuntimeException e) {
+            if ("55P03".equals(sqlState(e))) {
+                // A row lock (a client re-referencing or refreshing a chunk) timed out: routine contention that
+                // clears itself, counted with the other lock skips, never an error and never a refusal.
+                long n = lockTimeoutTotal.incrementAndGet();
+                log.info("event=reaper_expire_skipped tenant={} quarantine={} reason={} lock_timeout_total={} "
+                        + "detail={}", tenant, quarantine, Refusal.LOCK_TIMEOUT, n,
+                    "a lock wait timed out during expiry; retried next pass");
+                return new ExpiryResult(quarantine, 0, 0, 0, Refusal.LOCK_TIMEOUT, null);
+            }
             log.warn("event=reaper_expire_failed tenant={} quarantine={} error={}", tenant, quarantine,
                 e.getMessage(), e);
-            return new ExpiryResult(quarantine, 0, 0, null, String.valueOf(e.getMessage()));
+            return new ExpiryResult(quarantine, 0, 0, 0, null, String.valueOf(e.getMessage()));
         }
     }
 
@@ -657,10 +862,11 @@ final class ChunkReaper {
         for (var r : rows) {
             String op = String.valueOf(r.get("operation"));
             if (!collection.equals(String.valueOf(r.get("collection")))) continue;
-            if (op.equals(AUDIT_MOVED)) return "";
             if (op.equals(AUDIT_REFUSED)) {
                 return r.get("details") instanceof Map<?, ?> d ? String.valueOf(d.get("reason")) : "";
             }
+            // Any other reaper row (a move, an expiry) is a state change: a refusal after it is news again.
+            if (op.startsWith("reaper_")) return "";
         }
         return "";
     }
@@ -708,10 +914,10 @@ final class ChunkReaper {
 
     /** The event every pass logs, on success, refusal and failure alike, including {@code candidates=0}. */
     private TenantResult logPass(TenantResult r) {
-        log.info("event=reaper_pass tenant={} collections={} candidates={} moved={} audit_rows={} expired={} refused={} "
-                + "skipped={} errors={} wall_clock_cut={} error={}",
-            r.tenant(), r.collections().size(), r.candidates(), r.moved(), r.auditRows(), r.expired(), r.refused(),
-            r.skipped(), r.errors(), r.wallClockCut(), r.error());
+        log.info("event=reaper_pass tenant={} collections={} candidates={} moved={} audit_rows={} expired={} "
+                + "expiry_protected={} refused={} skipped={} errors={} wall_clock_cut={} error={}",
+            r.tenant(), r.collections().size(), r.candidates(), r.moved(), r.auditRows(), r.expired(),
+            r.expiryProtected(), r.refused(), r.skipped(), r.errors(), r.wallClockCut(), r.error());
         return r;
     }
 

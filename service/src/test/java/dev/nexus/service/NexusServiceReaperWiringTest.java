@@ -25,6 +25,7 @@ import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
@@ -147,14 +148,15 @@ class NexusServiceReaperWiringTest {
         // A chunk nothing owns, last written 40 days ago: reapable under the 30 day default the schedule runs.
         String origin = col("knowledge");
         String debris = insertChunk(tenant, origin, "debris", Map.of(), OffsetDateTime.now().minusDays(40));
-        // A chunk the previous passes quarantined 15 days ago: past the 14 day retention.
+        // A chunk the reaper's earlier passes quarantined 15 days ago: tagged, and past the 14 day retention.
         String stamp = Instant.now().minus(15, ChronoUnit.DAYS).truncatedTo(ChronoUnit.SECONDS).toString();
         String other = col("knowledge");
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), tenant, other);
         }
         String old = insertChunk(tenant, "quarantine-" + other, "old",
-            Map.of("quarantined_at", stamp, "origin_collection", other), null);
+            Map.of("quarantined_at", stamp, "origin_collection", other, "quarantined_by", "engine-reaper",
+                "reaper_quarantined_at", stamp), null);
 
         assertThat(withVectors.reaperTenantsForTests()).as("the default tenant plus every token-bearing one")
             .contains("default", tenant);
@@ -175,9 +177,96 @@ class NexusServiceReaperWiringTest {
         assertThat(stored(tenant, "quarantine-" + other, old)).isFalse();
     }
 
+    // ── the SCHEDULE CALL itself (code review I3) ────────────────────────────
+
+    /** A scheduler that records what is registered on it and runs none of it. */
+    private static final class RecordingScheduler extends java.util.concurrent.ScheduledThreadPoolExecutor {
+        record Registration(String kind, Runnable task, long initialDelay, long period, TimeUnit unit) {}
+
+        final List<Registration> registrations = new java.util.concurrent.CopyOnWriteArrayList<>();
+
+        RecordingScheduler() {
+            super(1, r -> {
+                Thread t = new Thread(r, "recording-scheduler");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> scheduleWithFixedDelay(Runnable command, long initialDelay,
+                                                                              long delay, TimeUnit unit) {
+            registrations.add(new Registration("fixed-delay", command, initialDelay, delay, unit));
+            return null;
+        }
+
+        @Override
+        public java.util.concurrent.ScheduledFuture<?> scheduleAtFixedRate(Runnable command, long initialDelay,
+                                                                           long period, TimeUnit unit) {
+            registrations.add(new Registration("fixed-rate", command, initialDelay, period, unit));
+            return null;
+        }
+
+        List<Registration> fixedDelay() {
+            return registrations.stream().filter(r -> r.kind().equals("fixed-delay")).toList();
+        }
+    }
+
     @Test
-    void theSchedulerHoldsTheVerySameTask_notACopyOfIts_body() {
+    void theSchedulerIsHandedTheVerySameTask_atTheBootDelay_andTheConfiguredInterval() throws Exception {
+        var recording = new RecordingScheduler();
+        var zero = new dev.nexus.service.vectors.Embedder() {
+            @Override public List<float[]> embed(List<String> texts) {
+                return texts.stream().map(t -> new float[384]).toList();
+            }
+            @Override public void close() { }
+        };
+        var vectors = new PgVectorRepository(new TenantScope(ds), zero, zero);
+        NexusService service = new NexusService(0, "reaper-wiring-token", ds, null, vectors, null, null, null, recording);
+        try {
+            Runnable task = service.reaperScheduledTask();
+            assertThat(task).isNotNull();
+            // Deleting the scheduleWithFixedDelay call for the reaper leaves this list empty and fails here; the
+            // task body being correct proves nothing about it being scheduled (nexus-lgiqw).
+            assertThat(recording.fixedDelay()).as("the reaper is registered on the sweep scheduler, exactly once")
+                .singleElement().satisfies(r -> {
+                    assertThat(r.task()).as("the VERY SAME Runnable the wiring test runs, not a copy of its body")
+                        .isSameAs(task);
+                    assertThat(r.unit()).isEqualTo(TimeUnit.SECONDS);
+                    assertThat(r.initialDelay()).as("the first pass shortly after boot")
+                        .isEqualTo(ChunkReaper.INITIAL_DELAY.toSeconds());
+                    assertThat(r.period()).as("the configured interval, hourly by default")
+                        .isEqualTo(service.chunkReaper().settings().interval().toSeconds());
+                });
+            assertThat(service.chunkReaper().settings().interval()).isEqualTo(java.time.Duration.ofHours(1));
+        } finally {
+            stopQuietly(service);
+        }
+    }
+
+    @Test
+    void anInstanceWithoutAVectorBackendRegistersNothingForTheReaper() throws Exception {
+        var recording = new RecordingScheduler();
+        NexusService service = new NexusService(0, "reaper-wiring-token", ds, null, null, null, null, null, recording);
+        try {
+            assertThat(service.reaperScheduledTask()).as("nothing to reap, nothing scheduled").isNull();
+            assertThat(recording.fixedDelay()).isEmpty();
+        } finally {
+            stopQuietly(service);
+        }
+    }
+
+    private static void stopQuietly(NexusService service) {
+        try {
+            service.stop();
+        } catch (Exception ignored) {
+            // never started
+        }
+    }
+
+    @Test
+    void theInstancesOwnTaskIsNonNullWhenWired_andNullWhenNot() {
         assertThat(withVectors.reaperScheduledTask()).isNotNull();
-        assertThat(withoutVectors.reaperScheduledTask()).as("nothing to reap, nothing scheduled").isNull();
+        assertThat(withoutVectors.reaperScheduledTask()).isNull();
     }
 }

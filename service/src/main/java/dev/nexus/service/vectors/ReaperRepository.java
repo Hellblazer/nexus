@@ -16,6 +16,7 @@ import java.util.Map;
 
 import static dev.nexus.service.jooq.nexus.Tables.CATALOG_COLLECTIONS;
 import static dev.nexus.service.jooq.nexus.Tables.CHUNKS;
+import static dev.nexus.service.jooq.nexus.Tables.REAPER_EXPIRE_QUARANTINE;
 import static dev.nexus.service.jooq.nexus.Tables.REAPER_QUARANTINE_CHUNKS;
 
 /**
@@ -36,6 +37,14 @@ public final class ReaperRepository {
      * floor stopped the move, and the {@code remaining} reapable count after it.
      */
     public record Pass(long moved, long reapable, long total, boolean refused, long remaining) {}
+
+    /**
+     * What one call to {@code reaper_expire_quarantine} reports: {@code expired} chunks deleted (counted from the
+     * DELETE's own RETURNING), {@code refused} chunks past the cutoff the floor held back (a decision the operator
+     * must hear about), and {@code protectedCount} chunks past the cutoff a manifest row of the origin still names
+     * (benign: re-referenced after the move, never deleted, nothing to act on).
+     */
+    public record Expiry(long expired, long refused, long protectedCount) {}
 
     private final TenantScope tenantScope;
 
@@ -115,6 +124,25 @@ public final class ReaperRepository {
                      int statementTimeoutMs, int lockTimeoutMs) {
         return call(tenant, collection, quarantineCollection, quarantinedAt, rowLimit, grace, floorFraction,
                     floorMinChunks, false, statementTimeoutMs, lockTimeoutMs);
+    }
+
+    /**
+     * The engine's expiry, for the chunks the reaper itself moved and no others: deletes the tagged chunks of
+     * {@code quarantineCollection} (origin {@code originCollection}) stamped at or before {@code cutoff}
+     * ({@code YYYY-MM-DDTHH:MM:SSZ}), never one a manifest row of the origin names, and never more than the floor
+     * allows. Quarantine a client filled carries no tag and is not touched. Throws on a database error; a lock wait
+     * that times out surfaces as SQLSTATE 55P03.
+     */
+    public Expiry expire(String tenant, String quarantineCollection, String originCollection, String cutoff,
+                         double floorFraction, int floorMinChunks, int statementTimeoutMs, int lockTimeoutMs) {
+        var rec = tenantScope.withTenant(tenant, ctx -> {
+            PgSession.setStatementAndLockBounds(ctx, statementTimeoutMs, lockTimeoutMs);
+            return ctx.selectFrom(REAPER_EXPIRE_QUARANTINE.call(
+                    tenant, quarantineCollection, originCollection, cutoff, floorFraction, floorMinChunks))
+               .fetchOne();
+        });
+        return new Expiry(rec.get(REAPER_EXPIRE_QUARANTINE.EXPIRED), rec.get(REAPER_EXPIRE_QUARANTINE.REFUSED),
+                          rec.get(REAPER_EXPIRE_QUARANTINE.PROTECTED_COUNT));
     }
 
     private Pass call(String tenant, String collection, String quarantineCollection, String quarantinedAt,

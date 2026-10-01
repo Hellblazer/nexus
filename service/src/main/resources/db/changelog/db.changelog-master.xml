@@ -1684,9 +1684,11 @@
         nexus-2x9xa (RDR-192 Step 9): nexus.reaper_quarantine_chunks, the periodic
         reaper's move: reapable(c) with an injectable grace, the exclusive sweep gate,
         a fraction floor on the move, quarantine (never a hard delete), an
-        actor 'engine-reaper' gc_audit row. Numbered 024: vectors-023 belongs to the
-        branch reworking the orphaning stamp (nexus-wbfpw.15), and a rename at merge
-        is expected. Placed after vectors-022, before the grants blocks.
+        actor 'engine-reaper' gc_audit row, and a quarantined_by tag on every moved
+        chunk; and nexus.reaper_expire_quarantine, the engine's expiry of ONLY the
+        chunks that carry that tag. There is no vectors-023: the orphaning-stamp
+        rework (nexus-wbfpw.15) shipped as vectors-021 and vectors-022. Placed after
+        vectors-022, before the grants blocks.
     -->
     <include file="db/changelog/vectors-024-reaper-quarantine-chunks.xml"/>
 

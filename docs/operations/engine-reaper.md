@@ -1,48 +1,52 @@
 # Engine reaper runbook (RDR-192 Step 9)
 
-The engine runs a pass once an hour that moves ownerless T3 chunks into a quarantine collection, and deletes quarantine that is 14 days old. This page is for the person who runs an engine: what a pass does, how to see it, what the refusals mean, and what to expect at the first big cleanup. Bead nexus-2x9xa.
+The engine runs a pass once an hour that moves ownerless T3 chunks into a quarantine collection, tags them, and deletes the ones it moved when they are 14 days old. This page is for the person who runs an engine: what a pass does, how to see it, what the refusals mean, and what to expect at the first big cleanup. Bead nexus-2x9xa.
 
 ## What a pass does
 
 A pass visits the default tenant and every tenant that has a row in `service_tokens`. For each tenant it:
 
 1. Refuses the whole tenant unless the `rdr192-manifest-backfill` rung is recorded (`nx upgrade` writes it). Until then the reaper touches nothing for that tenant.
-2. Expires that tenant's quarantine first: for each `quarantine-<collection>` whose origin collection is registered, `gc_expire_quarantine` deletes chunks stamped more than 14 days ago. It never deletes a chunk that a manifest row in the origin still names, and it applies its own floor (below). The reaper never forces it.
+2. Expires that tenant's quarantine first, and only the part the reaper itself filled. Every chunk the reaper moves carries the metadata tag `quarantined_by: engine-reaper`. For each `quarantine-<collection>` whose origin collection is registered, `reaper_expire_quarantine` deletes the tagged chunks stamped more than `NX_REAPER_QUARANTINE_RETENTION_DAYS` (14) days ago. It never deletes a chunk that a manifest row in the origin still names, and it applies its own floor (see "The expiry floor"). The reaper never forces it.
 3. Visits each other collection (all four prefixes: `knowledge__`, `docs__`, `code__`, `rdr__`) that is registered and `live`, and moves at most 300 chunks that `nexus.chunk_is_reapable` selects into `quarantine-<collection>`. A chunk is reapable when no manifest row in its own collection names it, in any owner state, and 30 days have passed since it last had an owner or was last written. The grace is per chunk, and the reaper has no setting for it.
+
+**Quarantine that a client filled is not the engine's to expire.** `nx index repo` and `nx t3 gc` move chunks into the same `quarantine-<collection>` collection, with no tag. The engine never deletes those, whatever their age. The client expires them on its own run, after `NX_GC_QUARANTINE_DAYS` (default 14), under its own floor. Setting `NX_GC_QUARANTINE_DAYS` to 60 keeps those chunks for 60 days; the engine's 14 days apply to the chunks the reaper moved and nothing else. A repository nobody has indexed for months keeps its quarantine until someone indexes it again.
 
 Before a move the pass counts what is reapable, then applies two gates. The floor: if the whole reapable set is at least `NX_REAPER_FLOOR_MIN_CHUNKS` (100) chunks and more than `NX_REAPER_FLOOR_FRACTION` (0.25) of the collection, the collection is refused and nothing moves. The census: the engine re-runs the manifest-less census for the collection, bounded by `NX_REAPER_CENSUS_TIMEOUT_SECONDS`, and refuses the collection if it reads any `legacy-unmanifested` or `unclassified` chunk, if it read a different number of chunks than the count it is judging, or if it timed out. The move statement then takes the exclusive sweep gate, re-checks the floor, and re-checks the grace in its own `DELETE`, so a client write that refreshes a chunk after it was chosen wins.
 
-The first pass runs 60 seconds after the engine boots, then every `NX_REAPER_INTERVAL_SECONDS`.
+The first pass runs 60 seconds after the engine boots, then every `NX_REAPER_INTERVAL_SECONDS`. A pass that spends its wall-clock budget resumes, on the next pass, at the tenant and collection where it stopped, so a slow collection cannot keep the later ones from ever being visited.
 
 ## Settings
 
-All are engine environment variables. A malformed value logs `event=reaper_setting_invalid` and uses the default.
+All are engine environment variables. A malformed value logs `event=reaper_setting_invalid` and uses the default. The settings in force are logged at boot on `event=reaper_scheduled`.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `NX_REAPER_ENABLED` | `true` | `false` (also `0`, `off`, `no`) turns the whole pass off, expiry included. `true`, `1`, `on`, `yes` leave it on. Any other value warns and leaves it on. |
 | `NX_REAPER_INTERVAL_SECONDS` | `3600` | Seconds between passes. Values under 60 are raised to 60. |
 | `NX_REAPER_BATCH_SIZE` | `300` | Most chunks moved from one collection per pass. 300 is the ceiling. |
-| `NX_REAPER_FLOOR_FRACTION` | `0.25` | The floor, for the move and for the expiry. `1.0` turns it off, for every tenant and collection. |
+| `NX_REAPER_FLOOR_FRACTION` | `0.25` | The floor, for the move and for the expiry. `1.0` turns it off, for every tenant and collection, move and expiry alike. To drain one collection, use `NX_REAPER_FLOOR_EXEMPT_COLLECTIONS` instead. |
 | `NX_REAPER_FLOOR_MIN_CHUNKS` | `100` | The floor applies from this many reapable (or expiring) chunks up. |
-| `NX_REAPER_WALL_CLOCK_BUDGET_SECONDS` | `600` | A whole run is cut at the next collection boundary once this is spent. |
-| `NX_REAPER_CENSUS_TIMEOUT_SECONDS` | `60` | Statement bound for one collection's census. |
+| `NX_REAPER_FLOOR_EXEMPT_COLLECTIONS` | empty | Comma-separated collection names (exact, for example `code__1-1__voyage-code-3__v1`) that are exempt from the MOVE floor and from nothing else. See "The first big cleanup". Names starting with `quarantine-` are ignored with a warning. |
+| `NX_REAPER_QUARANTINE_RETENTION_DAYS` | `14` | Days a chunk the reaper moved stays in quarantine before the engine may delete it. 1 to 3650. Does not touch quarantine a client filled. |
+| `NX_REAPER_WALL_CLOCK_BUDGET_SECONDS` | `600` | A whole run is cut at the next collection boundary once this is spent, and the next run resumes there. |
+| `NX_REAPER_CENSUS_TIMEOUT_SECONDS` | `60` | Statement bound for one collection's census, 1 to 3600. See "Pathological collections". |
 
 ## Seeing what it did
 
-Log lines, one set per pass: `event=reaper_run` (the whole run, `wall_clock_cut=` included), `event=reaper_pass` (one per tenant, `candidates=0` included), `event=reaper_collection_refused` and `event=reaper_tenant_refused` at WARN with `reason=` and a running `refused_total`, `event=reaper_collection_skipped` at INFO, `event=reaper_expired` and `event=reaper_expire_refused`.
+Log lines, one set per pass: `event=reaper_run` (the whole run, `wall_clock_cut=`, `refused_total=` and `census_timed_out_total=` included), `event=reaper_pass` (one per tenant, `candidates=0` included, and `expiry_protected=`), `event=reaper_collection_refused` and `event=reaper_tenant_refused` at WARN with `reason=` and a running `refused_total`, `event=reaper_collection_skipped` at INFO, `event=reaper_floor_exempt` at WARN, `event=reaper_expired` and `event=reaper_expire_refused`.
 
-A cloud operator has no engine log, so the durable record is `gc_audit`:
+A cloud operator has no engine log, so the durable record is `gc_audit`. Add `--json` to every line: the text form prints id, time, operation, actor and the chash count, and leaves out the reason, the counts and the sample, which live in `details`.
 
 ```bash
-nx catalog gc-audit list --operation reaper_quarantine   # a move: the chashes, actor engine-reaper
-nx catalog gc-audit list --operation reaper_refused      # a refusal: reason, counts, up to 5 title/source_path
-nx catalog gc-audit list --operation gc_expire_quarantine # an expiry (written by the SQL function itself)
+nx catalog gc-audit list --operation reaper_quarantine --json          # a move: the chashes, actor engine-reaper
+nx catalog gc-audit list --operation reaper_refused --json             # a refusal: reason, counts, up to 5 title/source_path
+nx catalog gc-audit list --operation reaper_expire_quarantine --json   # an expiry of chunks the reaper moved
 ```
 
-A refusal is written once per collection each time its reason changes, not every hour; a repeat of the same refusal writes nothing and only bumps `refused_total` in the log. The `sample` in a floor or census refusal names up to five chunks by title and source path, from the chunk's own metadata, so you can tell a stale index from a mass orphaning.
+A refusal is written once per collection each time its reason changes, not every hour; a repeat of the same refusal writes nothing and only bumps `refused_total` in the log. A move or an expiry in between counts as a change. The `sample` in a floor or census refusal names up to five chunks by title and source path, from the chunk's own metadata, so you can tell a stale index from a mass orphaning. **A refusal of the expiry is filed under the quarantine collection's name** (`quarantine-<collection>`), not the origin's: pass `--collection quarantine-<name>` to read it.
 
-Two outcomes are not refusals and are never audited: `GATE_BUSY` (a manifest writer holds the collection's sweep gate; the exclusive acquire times out after 2 s) and `LOCK_TIMEOUT` (a row lock or the sibling registration timed out for 2 s). Both clear next pass and have their own counters.
+Three outcomes are not refusals and are never audited: `GATE_BUSY` (a manifest writer holds the collection's sweep gate; the exclusive acquire times out after 2 s), `LOCK_TIMEOUT` (a row lock or the sibling registration timed out for 2 s; this includes the expiry's own deletes) and `CENSUS_BACKOFF` (a collection whose census keeps timing out is resting). All clear on their own and have their own counters (`gate_busy_total`, `lock_timeout_total`, `census_backoff_total`).
 
 ## The refusals
 
@@ -55,7 +59,9 @@ Two outcomes are not refusals and are never audited: `GATE_BUSY` (a manifest wri
 | `CENSUS_TIMED_OUT` | The census statement exceeded its bound; it was not read. | See "Pathological collections". |
 | `CENSUS_SCOPE_MISMATCH` | The census read a different chunk count than the dry run: chunks changed between the two reads, or the census read the wrong scope. Retried next pass. | Persistent: report it. |
 | `CENSUS_UNCLASSIFIED` | The census reports a chunk it could not classify. Unreachable in the SQL today. | Report it. |
-| `EXPIRY_REFUSED` | `gc_expire_quarantine` deleted nothing from a quarantine collection: the floor tripped, or every past-cutoff chunk is still named by a manifest row. | See "The expiry floor". |
+| `EXPIRY_REFUSED` | The expiry floor tripped: 100 or more of the chunks the reaper moved are past the retention window and they are more than a quarter of the chunks it moved into that quarantine collection. Nothing was deleted. | See "The expiry floor". |
+
+`expiry_protected` is not in this table because it is not a refusal. It counts chunks past the retention window that a manifest row of the origin still names again. They are never deleted, nothing is audited, `refused_total` does not count them and no WARN is logged. For a `knowledge__` collection this is what a re-put of a note leaves behind: the re-put embeds a fresh chunk in the origin, so the quarantine copy lingers, protected, and there is nothing to do. For a repository collection a later `nx index repo` or heal moves such a chunk back.
 
 ## The first big cleanup: deploy plus 30 days
 
@@ -63,29 +69,42 @@ Two outcomes are not refusals and are never audited: `GATE_BUSY` (a manifest wri
 
 Drain rate is 300 chunks per collection per pass, so a collection with `R` reapable chunks drains in `ceil(R / 300)` hourly passes (147 orphans: one pass; 10,000: 34 hours; 55,000: 7.6 days). Collections drain in parallel, each at its own 300 per hour.
 
-The floor refuses a collection whose reapable set is a quarter or more of it, which is exactly the mostly-orphan collections, indefinitely, with one audit row and an hourly WARN. Preview before the date, week four after the deploy:
+**Preview before the date.** The floor refuses a collection whose reapable set is 100 or more chunks and more than a quarter of it, with one audit row and an hourly WARN. To see which collections that will be, ask the engine what is reapable under a shorter grace. On day `d` after the engine carrying `vectors-020` is deployed, a chunk has been ownerless at most `d` days; those that are ownerless now and still ownerless at day 30 are exactly the ones a grace of `d` days selects today. So send `grace_seconds = d * 86400`, and divide by the collection's chunk count:
 
 ```bash
+# Day 19 after deploy: grace_seconds = 19 * 86400 = 1641600.
+# Page the listing (limit <= 300) until next_after is null and add up "returned":
 curl -s -X POST "$NX_SERVICE_URL/v1/vectors/reapable" \
   -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"collection": "<name>", "limit": 100}'
+  -d '{"collection": "<name>", "grace_seconds": 1641600, "limit": 300}'
+# ...then the same call with "after_chash": "<next_after>" for the next page. The total is the sum of the pages.
+# The denominator:
+curl -s -H "Authorization: Bearer $TOKEN" "$NX_SERVICE_URL/v1/vectors/count?collection=<name>"
 ```
 
-The route is read-only and uses the same predicate as the reaper. It lists chunks with `title` and `catalog_doc_id`; `next_after` is a keyset cursor (`after_chash`) for the next page. `grace_seconds` lowers the window for a preview of what will age in, and is advisory only: the reaper never uses it. If a collection is legitimately mostly garbage, the override is `NX_REAPER_FLOOR_FRACTION=1.0` in the engine environment and a restart. It is global (every tenant, every collection, expiry included) and stays until you set it back, so set it, wait one pass, and unset it.
+With R pages-worth of chunks that is `ceil(R / 300)` calls. If `reapable / count` is more than 0.25 and the reapable total is at least 100, the floor will refuse that collection at day 30. After day 30 the first `reaper_refused` row for it answers the same question durably: its `details` carry `candidates` and `total`. The route is read-only and uses the same predicate as the reaper; `grace_seconds` is advisory and the reaper never uses it. Run `tests/e2e/cloud-client-path-gate.sh` first if you reach the engine through a public edge, to be sure the edge passes these routes.
+
+**Draining a collection the floor refuses.** If a collection is legitimately mostly garbage (you have read the sample), exempt that one collection from the MOVE floor:
+
+1. Set `NX_REAPER_FLOOR_EXEMPT_COLLECTIONS=<collection>` in the engine environment and restart the engine. The restart is the audit point: the exemption is logged at boot on `event=reaper_scheduled` as `floor_exempt_collections=`, logged again at WARN on `event=reaper_floor_exempt` on every pass that uses it (with `would_have_refused=`), and each move's `gc_audit` row records `floor_fraction` 1.0 instead of 0.25.
+2. Leave it set for `ceil(R / 300)` hours. The floor is judged on the collection's whole reapable set on every pass, so it must stay off until the set is gone: setting it, waiting one pass and unsetting it moves 300 chunks and the collection is refused again. 55,000 chunks: 184 hours, about 7.6 days.
+3. Unset it and restart. Nothing else was affected: the census, the grace, the 300 per pass, and the floors of every other collection and of the expiry all applied throughout.
+
+`NX_REAPER_FLOOR_FRACTION=1.0` still exists. It is not a drain procedure: it turns the floor off for every tenant and collection, move and expiry, for as long as it is set.
 
 ## The expiry floor
 
-Quarantine expiry has the same floor, judged against all chunks in that quarantine collection. The reaper refills a quarantine hourly, which dilutes the denominator, and the first large drain expires as a block: if 100 or more chunks and more than a quarter of the quarantine are past 14 days at once, `gc_expire_quarantine` refuses, nothing is deleted, and the reaper writes an `EXPIRY_REFUSED` row. The reaper never forces. Chunks stay in quarantine, out of every search surface, until you force the expiry once: `POST /v1/vectors/gc/expire-quarantine` with `quarantine_collection`, `origin_collection`, a `cutoff` (14 days ago, `YYYY-MM-DDTHH:MM:SSZ`) and `"force": true`. That hard-deletes the past-cutoff chunks it selects (never one a manifest row names). The indexer's own expiry step takes the same override as `NX_GC_FORCE=1 nx index repo`, for that repository's collections only.
+The expiry has the same floor, judged on the chunks the reaper moved into that quarantine collection (client-filled rows are not in the denominator). The first large drain expires as a block, and so does the tail of any drain: if 100 or more of them and more than a quarter are past the retention window at once, `reaper_expire_quarantine` refuses, nothing is deleted, and the reaper writes an `EXPIRY_REFUSED` row under the `quarantine-` name. The reaper never forces. The chunks stay in quarantine, out of every search surface, until you force the expiry once: `POST /v1/vectors/gc/expire-quarantine` with `quarantine_collection`, `origin_collection`, a `cutoff` (14 days ago, `YYYY-MM-DDTHH:MM:SSZ`) and `"force": true`. That route is the client's function: it deletes every past-cutoff chunk in that quarantine collection, tagged or not, and never one a manifest row names. Read the refusal's sample and the chunks first. The indexer's own expiry step takes the same override as `NX_GC_FORCE=1 nx index repo`, for that repository's collections only.
 
 ## Getting a chunk back
 
-A chunk moved to `quarantine-<collection>` keeps its text and embedding. If a later `nx index repo` (or a heal) names it in a manifest row of the origin collection, the indexer's restore pass moves it back. There is no operator verb that restores by chash; a restore route and `nx t3 quarantine restore` are a separate piece of work and are not part of this change. Until then, the `reaper_quarantine` audit row lists the chashes it moved, and the chunks are in the sibling for 14 days.
+A chunk moved to `quarantine-<collection>` keeps its text and embedding. If a later `nx index repo` (or a heal) names it in a manifest row of the origin collection, the indexer's restore pass moves it back; for a `knowledge__` collection nothing does, and a manifest row that names the chunk only protects the quarantine copy from expiry. There is no operator verb that restores by chash in this change: a restore route and `nx t3 quarantine restore` are a separate piece of work (finished on a branch, not yet landed; it must be on `develop` and in the deployed engine before the first drain at deploy plus 30 days, and bead nexus-wbfpw.49 blocks the RDR-192 Phase 3 gate on it). Until it lands, a chunk the reaper moved can be found by `reaper_quarantine` audit row (its `chashes`, in `details`'s quarantine collection) and by `store_get_many` with `collection=quarantine-<name>`, which returns its text and metadata; the chunks are in the sibling for the retention window.
 
 ## Known limits
 
-**The census can read a live document as `no-owner`.** It resolves a chunk's owner from the chunk's own metadata (`catalog_doc_id`, then `doc_id`) or a note-shaped reverse match. A `docs__` or `code__` chunk written after RDR-108 carries no document id, so a live document whose manifest rows are missing reads `no-owner`, not `legacy-unmanifested`, and the census passes. The backstops are the 30 day grace, the floor, and 14 days in quarantine. A collection under 100 reapable chunks is exempt from the floor and is emptied in one pass, so for small collections the grace and the quarantine are the whole protection.
+**The census can read a live document as `no-owner`.** It resolves a chunk's owner from the chunk's own metadata (`catalog_doc_id`, then `doc_id`) or a note-shaped reverse match. A `docs__` or `code__` chunk written after RDR-108 carries no document id, so a live document whose manifest rows are missing reads `no-owner`, not `legacy-unmanifested`, and the census passes. The backstops are the 30 day grace, the floor, and the retention window in quarantine. A collection under 100 reapable chunks is exempt from the floor and is emptied in one pass, so for small collections the grace and the quarantine are the whole protection.
 
-**Pathological collections.** The census is a per-chunk join whose cost grows with the number of manifest rows of each chunk's owning document. Measured on PG17 under the application role at 80,000 chunks: 8,000 documents of 10 chunks each, 560 ms (the dry run, 240 ms); one document owning all 80,000 chunks, 393 seconds. The second shape reaches `CENSUS_TIMED_OUT` at the 60 s default every hour and is never reaped; the cost is 60 s of the shared sweep thread per pass for that collection.
+**Pathological collections.** The census is a per-chunk join whose cost grows with the number of manifest rows of each chunk's owning document. Measured on PG17 under the application role at 80,000 chunks: 8,000 documents of 10 chunks each, 560 ms (the dry run, 240 ms); one document owning all 80,000 chunks, 393 seconds. The second shape reaches `CENSUS_TIMED_OUT` at the 60 s default. After three passes in a row, the census for that collection rests for 2, then 4, 8, 16 passes and so on, at most 24 hours, and is retried after each rest; any completed census ends the streak. The first timeout in a streak writes the one durable `reaper_refused` row, and `census_timed_out_total` counts every timeout. While it rests the collection logs `reaper_collection_skipped reason=CENSUS_BACKOFF`. The collection is never moved while its census times out. To let it through, raise `NX_REAPER_CENSUS_TIMEOUT_SECONDS` (up to 3600; 600 clears the measured 393 s case) in the engine environment and restart; the streak is forgotten at restart. The census runs on the shared sweep thread, so the longer bound is paid there once per pass, bounded by the 600 s wall-clock budget.
 
 **Tenants that drop out.** The pass enumerates `service_tokens`, because `nexus.chunks` is row-level secured and cannot be enumerated across tenants. A `scope=data` token row is deleted seven days after it expires, so a cloud tenant that is idle with no live token is not visited until it holds a token again. That is a liveness gap, not a deletion hazard.
 
