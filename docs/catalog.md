@@ -425,7 +425,7 @@ Locked format decisions (design of record: T2
   embedding-mode change).
 - **No embeddings.** Import writes each note through the note writer
   (the one `store_put` uses), which re-embeds — the bundle is portable across embedding models. For an
-  embedding-preserving per-collection backup use `nx export COLLECTION`
+  embedding-preserving per-collection backup use `nx store export COLLECTION`
   (`.nxexp`) — a different tool for a different job.
 - **Fail-loud summary, never abort.** Unresolvable link endpoints and
   per-note outcomes are enumerated in the import report; the resolvable

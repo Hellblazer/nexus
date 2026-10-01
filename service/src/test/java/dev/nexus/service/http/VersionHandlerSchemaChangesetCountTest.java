@@ -63,7 +63,7 @@ class VersionHandlerSchemaChangesetCountTest {
     /** Minimal shape of the real Liquibase table -- only the columns
      * VersionHandler's schemaIdentity() reads. Field-based column() overload
      * matches this repo's established ad-hoc-table convention (e.g.
-     * StagingPromoteOpsIntegrationTest's census_canary table), never a bare
+     * the retired StagingPromoteOpsIntegrationTest's census_canary table), never a bare
      * string name. */
     private static void createMinimalDatabaseChangeLog(Connection conn) {
         Field<String> idField = DSL.field(DSL.name("id"), String.class);

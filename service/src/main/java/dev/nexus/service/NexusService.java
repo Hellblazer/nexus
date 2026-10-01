@@ -30,7 +30,6 @@ import dev.nexus.service.http.PipelineHandler;
 import dev.nexus.service.http.PlanHandler;
 import dev.nexus.service.http.RemapHandler;
 import dev.nexus.service.http.ResolveHandler;
-import dev.nexus.service.http.StagingHandler;
 import dev.nexus.service.http.ScratchHandler;
 import dev.nexus.service.http.SessionTokenHandler;
 import dev.nexus.service.http.TaxonomyHandler;
@@ -539,14 +538,6 @@ public final class NexusService {
         // class javadoc.
         var remapCtx = server.createContext("/v1/remap", new RemapHandler(remapRepo));
         remapCtx.getFilters().addAll(authFilter);
-
-        // /v1/staging/* — RDR-180 land-then-transform (nexus-jxizy.10.4):
-        // verbatim landing + embed-fill + in-DB promote/finalize + clear/counts
-        var stagingCtx = server.createContext("/v1/staging",
-                new StagingHandler(tenantScope,
-                    new dev.nexus.service.db.StagingPromoteOps(tenantScope),
-                    docEmbedderRouter));
-        stagingCtx.getFilters().addAll(authFilter);
 
         // /v1/ladder/* — upgrade-ladder completion bookkeeping (RDR-186
         // nexus-146xx.12: the ladder.db retirement's PG write/read surface)

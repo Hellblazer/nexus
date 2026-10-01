@@ -225,8 +225,8 @@ public final class PgContainerHelper {
      * Run the PRODUCT master changelog ({@code db/changelog/db.changelog-master.xml})
      * against {@code su} — the single place every test class's own hand-rolled
      * {@code new Liquibase("db/changelog/db.changelog-master.xml", ...)} call
-     * used to live (nexus-cbo4a batch 1a). Creates the {@code nexus}/{@code staging}
-     * schemas and every product table, and — via {@code role-001-nexus-svc.xml}, the
+     * used to live (nexus-cbo4a batch 1a). Creates the {@code nexus}
+     * schema and every product table, and — via {@code role-001-nexus-svc.xml}, the
      * FIRST include in the master changelog — creates the {@code nexus_svc} role
      * itself if it does not already exist, so callers never need to pre-create it by
      * hand before this call (see {@link SharedCluster}'s template-bootstrap comment
@@ -276,7 +276,7 @@ public final class PgContainerHelper {
      * add_fk_not_valid_composite3}/{@code set_force_rls}/{@code
      * grant_execute_on_function} test-lifecycle functions {@link #dropConstraint}
      * and friends need. {@code nexus_test} is entirely separate from
-     * {@code nexus}/{@code staging}/{@code public} and inert with respect to
+     * {@code nexus}/{@code public} and inert with respect to
      * product-schema migration testing — installing it changes nothing the
      * product changelog walk can observe. Never part of the product changelog;
      * the codegen-time counterpart is db.changelog-test-master.xml (see the
@@ -312,7 +312,7 @@ public final class PgContainerHelper {
      * {@code svcRole} (LOGIN, NOSUPERUSER, NOBYPASSRLS) if absent,
      * redundantly/idempotently ensures {@code nexus_svc} exists too (see
      * {@link #applyProductSchema}'s javadoc — always a no-op here in practice), and
-     * grants {@code svcRole} the same {@code nexus}+{@code staging} DML/sequence
+     * grants {@code svcRole} the same {@code nexus} DML/sequence
      * access {@link #grantServiceSchemaAccess} used to hand-grant. Deliberately does
      * NOT set {@code svcRole}'s {@code search_path} (nexus-cbo4a batch 9 item 1,
      * Sam's directive nexus-zrcj7): every legitimate query already goes through
@@ -321,7 +321,7 @@ public final class PgContainerHelper {
      *
      * <p><b>Call AFTER {@link #applyProductSchema}</b> — the {@code GRANT ... ON ALL
      * TABLES}/{@code ON ALL SEQUENCES} statements inside the test changelog require
-     * the {@code nexus}/{@code staging} schemas and their tables to already exist.
+     * the {@code nexus} schema and its tables to already exist.
      *
      * <p><b>Leaves {@code su} with {@code autoCommit(true)} restored</b> (real bug
      * found converting the six classes that also call {@link #seedServiceToken}, then
@@ -935,24 +935,6 @@ public final class PgContainerHelper {
     public static void analyzeTable(Connection conn, Table<?> table) throws SQLException {
         DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
         Routines.analyzeTable(ctx.configuration(), ctx.render(table));
-    }
-
-    /**
-     * Overload for a table outside jOOQ codegen scope -- the {@code staging} schema is not
-     * one of service/pom.xml's jOOQ codegen {@code <schemata>} (only {@code nexus}/{@code t1}
-     * are), so no generated {@link Table} exists for e.g. {@code staging.document_chunks}.
-     * Takes a jOOQ-constructed qualified {@link Name} instead (e.g.
-     * {@code DSL.name("staging", "document_chunks")}) -- still never a hand-typed SQL
-     * string -- rendered via {@code ctx.render(DSL.table(qualifiedName))} exactly like the
-     * generated-{@code Table} overload above before reaching {@code nexus.analyze_table}.
-     *
-     * @param conn          the connection to run ANALYZE on
-     * @param qualifiedName the schema-qualified table identifier (e.g.
-     *                      {@code DSL.name("staging", "document_chunks")})
-     */
-    public static void analyzeTable(Connection conn, Name qualifiedName) throws SQLException {
-        DSLContext ctx = DSL.using(conn, SQLDialect.POSTGRES);
-        Routines.analyzeTable(ctx.configuration(), ctx.render(DSL.table(qualifiedName)));
     }
 
     /**
