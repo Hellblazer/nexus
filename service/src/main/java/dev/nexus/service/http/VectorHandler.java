@@ -347,9 +347,10 @@ public final class VectorHandler implements HttpHandler {
     }
 
     /**
-     * Header the final-cut client sends on every engine request (RDR-223 Phase 3 Step 2,
-     * nexus-z0o2p.24): the conexus version. The ownerless-write log line carries it, and its
-     * absence names a client older than the cut.
+     * Header the final-cut client's vector, T2, catalog and scratch clients send (RDR-223 Phase 3
+     * Step 2, nexus-z0o2p.24): the conexus version. The hook paths (mailbox drain, tuple ledger
+     * projection) and the engine-status probe do not send it. The ownerless-write log line carries
+     * it, and its absence names a client older than the cut or one of those paths.
      */
     public static final String CLIENT_VERSION_HEADER = "X-Nexus-Client-Version";
 

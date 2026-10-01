@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): every engine request names the client's version.
+"""RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the vector, T2, catalog and scratch clients name their version.
 
 The engine logs ``X-Nexus-Client-Version`` on its ``ownerless_chunk_write_*`` lines, and ``absent``
 when it is missing, so the log-only soak can tell which clients still write a chunk before its owner:
@@ -10,6 +10,9 @@ transport the client uses has its own test:
 
 * urllib: ``HttpVectorClient`` (``/v1/vectors/upsert-chunks``, ``/store-put`` and every other vector route);
 * httpx: the T2 stores and the catalog client (``RefreshableHttpStoreMixin``), and the T1 scratch store.
+
+The hook paths (``mailbox_drain``, ``tuple_ledger_project``) and ``db/http_engine_status`` send no
+version header; none of them writes a chunk.
 
 The only writers of ``upsert-chunks`` and ``store-put`` in this repository are on the urllib transport.
 Callers outside the repository (a conexus tool on httpx, say) send whatever they send; the engine's
