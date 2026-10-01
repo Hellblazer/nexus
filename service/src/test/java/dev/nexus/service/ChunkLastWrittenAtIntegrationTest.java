@@ -318,6 +318,8 @@ class ChunkLastWrittenAtIntegrationTest {
         // Orphan it so the quarantine sweep picks it up.
         catalog.writeManifest(TENANT, docId, COL_QUARANTINE_ORIGIN, List.of());
         Stamps aged = age(COL_QUARANTINE_ORIGIN, chash);
+        // RDR-192 Step 8: the quarantine sweep honours the 30 day grace window on last_written_at.
+        ReapableFixtures.agePastGrace(pg, TENANT, COL_QUARANTINE_ORIGIN);
 
         var quarantined = vectors.quarantineOrphansBounded(TENANT, COL_QUARANTINE_ORIGIN,
             COL_QUARANTINE, "2026-08-01T00:00:00Z", 20, 10);

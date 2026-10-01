@@ -3431,6 +3431,10 @@ _RLS_TENANT_TABLES: tuple[str, ...] = (
     # dropped-tables exemption in tests/test_health_service_checks.py
     # carries the matching entry.
     "nexus.chash_remap",
+    # nexus.chunk_orphaned_at: RDR-192 reapable(c) (nexus-wbfpw.15),
+    # vectors-021-1, ENABLE + FORCE + tenant_isolation. The side table the
+    # manifest triggers write when a chunk loses an owner row.
+    "nexus.chunk_orphaned_at",
     # nexus.chunks: RDR-191 Phase 4 unify (nexus-o8dil.51). Added in the SAME
     # engine release as vectors-004-unify-chunks.xml, which creates the
     # unified table WITH RLS in the same changeset that drops chunks_384/

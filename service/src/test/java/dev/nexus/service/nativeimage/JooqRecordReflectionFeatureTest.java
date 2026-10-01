@@ -236,7 +236,13 @@ class JooqRecordReflectionFeatureTest {
     // the pre-existing nexus.catalog_collections table -- a column-count
     // change only, no new Record type (same shape as telemetry-012's and
     // memory-004's column-only bumps above). No delta.
-    private static final int EXPECTED_RECORD_TYPES = 106;
+    // 106 -> 107: nexus-wbfpw.15, vectors-021-chunk-is-reapable-function.xml
+    // added nexus.chunk_is_reapable, a RETURNS TABLE(reapable boolean)
+    // function, one generated Record type (ChunkIsReapableRecord), +1.
+    // 107 -> 108: nexus-wbfpw.15 (Sam's option b, 2026-10-01), the same file
+    // also added nexus.chunk_orphaned_at, the side table the orphaning
+    // triggers write, one generated Record type (ChunkOrphanedAtRecord), +1.
+    private static final int EXPECTED_RECORD_TYPES = 108;
 
     @Test
     void enumeratesEveryGeneratedRecordTypeViaTheSchemaModel() {

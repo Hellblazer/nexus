@@ -136,6 +136,19 @@ _DOCUMENTED_EXCLUSIONS: dict[tuple[str, str], str] = {
         "not re-home chash_remap, so its ledger detaches from the renamed collection's "
         "current name -- is tracked as its own bug: nexus-lgef3."
     ),
+    ("chunk_orphaned_at", "collection"): (
+        "RDR-192 reapable(c) (nexus-wbfpw.15, vectors-021-1): the side table of orphaning "
+        "times, one row per chunk, keyed (tenant_id, collection, chash) with a foreign key "
+        "to nexus.chunks that is ON UPDATE CASCADE ON DELETE CASCADE. It is carried by "
+        "nexus.chunks, which IS registered: renameCollectionTxn's UPDATE of chunks.collection "
+        "rewrites these rows through the cascade (pinned through the real rename route by "
+        "ChunkIsReapableIntegrationTest.aRecordFollowsItsChunkThroughTheRenameRoute), and a "
+        "row cannot exist unless its chunk does, so collectionIsEmpty is already answered "
+        "by the chunks entry. Writing the table directly in a re-home would duplicate work "
+        "the cascade does and can conflict with it mid-statement (the "
+        "CASCADE_CARRIED_TABLES reasoning). Registering it would add nothing the chunks "
+        "entry does not already give."
+    ),
     ("chash_remap", "target_collection"): (
         "Same ledger and same ruling as source_collection above; the target leg is "
         "historical fact about a completed migration, not a live pointer. See "

@@ -173,6 +173,7 @@ class GcRestoreRereferencedBoundedTest {
         // Orphan it, then quarantine it FOR REAL, so the quarantine copy
         // carries the quarantined_at/origin_collection stamps restore must strip.
         repo.writeManifest(TENANT, docId, origin, List.of());
+        ReapableFixtures.agePastGrace(pg, TENANT, origin);
         var quarantined = vecRepo.quarantineOrphansBounded(TENANT, origin, quarantine, "2026-08-01T00:00:00Z", 20, 10);
         assertThat(quarantined.moved()).as("guard: X actually left O for Q").isEqualTo(1L);
         backdate(quarantine, PAST);
@@ -241,6 +242,7 @@ class GcRestoreRereferencedBoundedTest {
 
         // 2. D's reference to X is dropped -- X becomes an orphan -- quarantined.
         repo.writeManifest(TENANT, docId, origin, List.of());
+        ReapableFixtures.agePastGrace(pg, TENANT, origin);
         var quarantined = vecRepo.quarantineOrphansBounded(TENANT, origin, quarantine, "2026-08-01T00:00:00Z", 20, 10);
         assertThat(quarantined.moved()).as("guard: X actually left O for Q").isEqualTo(1L);
         backdate(quarantine, PAST);
