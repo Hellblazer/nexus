@@ -11,7 +11,6 @@ import liquibase.resource.ClassLoaderResourceAccessor;
 import org.jooq.Condition;
 import org.jooq.Field;
 import org.jooq.SQLDialect;
-import org.jooq.Table;
 import org.jooq.impl.DSL;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -36,7 +35,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * nexus-tk070.p6b (RDR-194 § D5, § P6b) — direct proof of
  * {@code telemetry-006-frecency-ttl-null.xml}'s counted-UPDATE RAISE
- * NOTICE (both {@code nexus.frecency} and {@code staging.frecency}), and
+ * NOTICE ({@code nexus.frecency}; the {@code staging.frecency} twin left with the
+ * staging schema at nexus-z0o2p.27), and
  * the surviving-row shape after the CHECK lands on {@code nexus.frecency}.
  *
  * <p><strong>Technique.</strong> Same test-only-relaxation shape as
@@ -72,19 +72,12 @@ class Tk070P6bTtlDaysCountedUpdateTest {
 
     private static final String NEXUS_CHANGELOG = "db/changelog/telemetry-006-frecency-ttl-null.xml";
     private static final String NEXUS_CHANGESET_ID = "telemetry-006-1";
-    private static final String STAGING_CHANGELOG = "db/changelog/telemetry-006-frecency-ttl-null.xml";
-    private static final String STAGING_CHANGESET_ID = "telemetry-006-2";
     private static final String TENANT_A = "p6b-direct-a";
     private static final String TENANT_B = "p6b-direct-b";
 
-    /** Bare column references shared by {@code nexus.frecency}/{@code staging.frecency}
-     *  probes below -- unqualified, so the SAME Condition applies against either
-     *  table (staging.* carries no jOOQ codegen, per nexus-cbo4a batch 13's
-     *  established idiom). */
+    /** Bare column references for the {@code nexus.frecency} probes below. */
     private static final Field<Integer> TTL_DAYS = DSL.field(DSL.name("ttl_days"), Integer.class);
     private static final Field<String> CHUNK_ID = DSL.field(DSL.name("chunk_id"), String.class);
-
-    private static final Table<?> STAGING_FRECENCY = DSL.table(DSL.name("staging", "frecency"));
 
     PostgreSQLContainer<?> pg;
 
@@ -135,7 +128,7 @@ class Tk070P6bTtlDaysCountedUpdateTest {
             seedFrecencyRow(su, TENANT_A, "3".repeat(64), null);
             seedFrecencyRow(su, TENANT_A, "4".repeat(64), 30);
 
-            assertThat(countFrecencyRows(su, "nexus", TTL_DAYS.eq(0)))
+            assertThat(countFrecencyRows(su, TTL_DAYS.eq(0)))
                 .as("ground truth before re-running telemetry-006-1's SQL")
                 .isEqualTo(2);
 
@@ -154,15 +147,15 @@ class Tk070P6bTtlDaysCountedUpdateTest {
                 .anyMatch(n -> n.contains("converted 2 nexus.frecency row(s)"));
 
             // ── Converted-row ground truth: NULL, not gone ──
-            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("1".repeat(64)).and(TTL_DAYS.isNull())))
+            assertThat(countFrecencyRows(su, CHUNK_ID.eq("1".repeat(64)).and(TTL_DAYS.isNull())))
                 .as("a converted row must now read NULL, not be deleted")
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("2".repeat(64)).and(TTL_DAYS.isNull())))
+            assertThat(countFrecencyRows(su, CHUNK_ID.eq("2".repeat(64)).and(TTL_DAYS.isNull())))
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("3".repeat(64)).and(TTL_DAYS.isNull())))
+            assertThat(countFrecencyRows(su, CHUNK_ID.eq("3".repeat(64)).and(TTL_DAYS.isNull())))
                 .as("a NULL-ttl_days (already permanent) decoy must survive untouched")
                 .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "nexus", CHUNK_ID.eq("4".repeat(64)).and(TTL_DAYS.eq(30))))
+            assertThat(countFrecencyRows(su, CHUNK_ID.eq("4".repeat(64)).and(TTL_DAYS.eq(30))))
                 .as("a positive-ttl_days decoy must survive untouched")
                 .isEqualTo(1);
 
@@ -171,55 +164,12 @@ class Tk070P6bTtlDaysCountedUpdateTest {
         }
     }
 
-    @Test
-    void stagingFrecencyCountedUpdate_reportsExactRowCountAcrossTenants() throws Exception {
-        try (Connection su = pg.createConnection("")) {
-            su.setAutoCommit(true);
-
-            // staging.frecency never had a CHECK — only NOT NULL DEFAULT 0
-            // needs restoring to seed ttl_days=0 rows again via the default.
-            DSL.using(su, SQLDialect.POSTGRES)
-                .alterTable(STAGING_FRECENCY).alterColumn(TTL_DAYS).setDefault(0)
-                .execute();
-
-            seedStagingFrecencyRow(su, TENANT_A, "5".repeat(64), 0);
-            seedStagingFrecencyRow(su, TENANT_B, "6".repeat(64), 0);
-            seedStagingFrecencyRow(su, TENANT_A, "7".repeat(64), null);
-            seedStagingFrecencyRow(su, TENANT_A, "8".repeat(64), 30);
-
-            assertThat(countFrecencyRows(su, "staging", TTL_DAYS.eq(0)))
-                .as("ground truth before re-running telemetry-006-2's SQL")
-                .isEqualTo(2);
-
-            String sql = extractChangesetSql(STAGING_CHANGELOG, STAGING_CHANGESET_ID);
-            List<String> notices;
-            try (Statement st = su.createStatement()) {
-                st.execute(sql);
-                notices = collectNotices(st.getWarnings());
-            }
-
-            assertThat(notices)
-                .as("the counted-UPDATE RAISE NOTICE must be captured")
-                .anyMatch(n -> n.contains("staging.frecency") && n.contains("2"));
-            assertThat(notices)
-                .as("the NOTICE must report the exact row count")
-                .anyMatch(n -> n.contains("converted 2 staging.frecency row(s)"));
-
-            assertThat(countFrecencyRows(su, "staging", CHUNK_ID.eq("5".repeat(64)).and(TTL_DAYS.isNull())))
-                .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "staging", CHUNK_ID.eq("6".repeat(64)).and(TTL_DAYS.isNull())))
-                .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "staging", CHUNK_ID.eq("7".repeat(64)).and(TTL_DAYS.isNull())))
-                .as("a NULL-ttl_days decoy must survive untouched")
-                .isEqualTo(1);
-            assertThat(countFrecencyRows(su, "staging", CHUNK_ID.eq("8".repeat(64)).and(TTL_DAYS.eq(30))))
-                .as("a positive-ttl_days decoy must survive untouched")
-                .isEqualTo(1);
-
-            // staging never gets the CHECK (typeless landing, by design).
-            assertThat(checkConstraintExists(su, "staging_frecency_ttl_days_positive_chk")).isFalse();
-        }
-    }
+    // nexus-z0o2p.27: stagingFrecencyCountedUpdate_reportsExactRowCountAcrossTenants is
+    // DELETED. It re-executed telemetry-006-2's forward SQL against staging.frecency, and
+    // staging-6-drop-landing-schema drops that table at HEAD, so there is nothing for the
+    // statement to run against. telemetry-006-2 itself is immutable history; the upgrade
+    // rehearsal (SchemaUpgradeRehearsalIntegrationTest) still executes it on every walk, and
+    // telemetry-006-1's identical shape stays pinned by the test above.
 
     // ── Seeding helpers ───────────────────────────────────────────────────
 
@@ -230,17 +180,8 @@ class Tk070P6bTtlDaysCountedUpdateTest {
             .execute();
     }
 
-    private static void seedStagingFrecencyRow(Connection c, String tenant, String chunkId, Integer ttlDays) {
-        DSL.using(c, SQLDialect.POSTGRES)
-            .insertInto(STAGING_FRECENCY,
-                DSL.field(DSL.name("tenant_id"), String.class), CHUNK_ID, TTL_DAYS)
-            .values(tenant, chunkId, ttlDays)
-            .execute();
-    }
-
-    private static int countFrecencyRows(Connection c, String schema, Condition where) {
-        Table<?> table = "nexus".equals(schema) ? FRECENCY : STAGING_FRECENCY;
-        return DSL.using(c, SQLDialect.POSTGRES).fetchCount(table, where);
+    private static int countFrecencyRows(Connection c, Condition where) {
+        return DSL.using(c, SQLDialect.POSTGRES).fetchCount(FRECENCY, where);
     }
 
     private static boolean checkConstraintExists(Connection c, String constraintName) {

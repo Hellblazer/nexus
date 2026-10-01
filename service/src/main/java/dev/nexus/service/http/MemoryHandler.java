@@ -120,7 +120,7 @@ public final class MemoryHandler implements HttpHandler {
 
         try {
             // RDR-207: /v1/memory/{id}/restore is the one path-parameter route
-            // (StagingHandler's /load/{name} is the precedent); every other route is
+            // (the retired StagingHandler's /load/{name} was the precedent); every other route is
             // an exact-match case below.
             java.util.regex.Matcher restore = RESTORE_ROUTE.matcher(op);
             if (restore.matches()) {

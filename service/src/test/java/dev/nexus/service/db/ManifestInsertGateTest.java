@@ -43,7 +43,7 @@ import java.util.stream.Stream;
  *       AND raw-SQL string). Added post-review (T2 nexus/critique-11gh6-
  *       gate-impl-2026-08-08 [21798] Critical finding, T2 nexus/review-11gh6-
  *       gate-2026-08-08 [21797]): test #1's scope (one file, one jOOQ pattern)
- *       is EXACTLY why {@code StagingPromoteOps.finalizeTenant}'s raw-SQL
+ *       is EXACTLY why the (since retired, nexus-z0o2p.27) {@code StagingPromoteOps.finalizeTenant}'s raw-SQL
  *       {@code INSERT INTO nexus.catalog_document_chunks} was invisible to
  *       both the design's own coverage grep and the original version of this
  *       test — the same overclaim shape round 1 of the design was withdrawn
@@ -65,9 +65,8 @@ import java.util.stream.Stream;
  * </ol>
  *
  * <p>Complements the behavioural block-tests in {@code
- * CatalogManifestSweepRepositoryTest}, {@code ChashRepositoryTest}, and
- * {@code StagingPromoteOpsIntegrationTest} (external gate holder, assert each
- * public entry point blocks): these structural tests make it hard to add a
+ * CatalogManifestSweepRepositoryTest} and {@code ChashRepositoryTest}
+ * (external gate holder, assert each public entry point blocks): these structural tests make it hard to add a
  * NEW ungated site; the behavioural tests catch it at runtime if an EXISTING
  * allowlisted site's gate call is silently removed (a structural scan alone
  * cannot tell "calls the gate" from "doesn't" — only "is textually present in
@@ -108,10 +107,7 @@ class ManifestInsertGateTest {
      */
     private static final Map<String, Set<String>> ALLOWED_INSERT_SITES = Map.of(
         // The single-homed helper every writer in CatalogRepository.java routes through.
-        "CatalogRepository.java", Set.of("insertManifestChunkRows"),
-        // RDR-180 land-then-transform's tenant-wide manifest promote — raw SQL,
-        // gated per-distinct-target-collection post-review (nexus-11gh6).
-        "StagingPromoteOps.java", Set.of("finalizeTenant"));
+        "CatalogRepository.java", Set.of("insertManifestChunkRows"));
 
     /**
      * Whole-tree allowlist for UPDATE shapes (nexus-t76bp). Seeded from a

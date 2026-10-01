@@ -338,8 +338,10 @@ def diag_conformance_view_ddl() -> str:
             # RDR-194 P3c: the column is bytea already -- direct equality,
             # no hex-shape guard, no decode(). Same NOT EXISTS anti-join
             # SHAPE as the engine-side ChashCensus.unresolvableBytesCount
-            # idiom, but deliberately WIDER in scope (critic finding,
-            # 2026-08-17): that idiom restricts to
+            # idiom (class deleted at nexus-z0o2p.27; this view is now the
+            # standing detection for the FK-less frecency / relevance_log
+            # chunk_id edges), but deliberately WIDER in scope (critic finding,
+            # 2026-08-17): that idiom restricted to
             # octet_length(byteCol) IN (16, 32) before its anti-join -- a
             # narrow census-leg scope tuned to the two widths ITS OWN
             # callers care about (canonical vs. one legacy width). This

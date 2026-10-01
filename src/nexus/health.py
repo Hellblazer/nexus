@@ -5173,7 +5173,7 @@ def _check_stranded_install() -> list[HealthResult]:
     """
     label = "Stranded pre-PG install"
     from nexus.config import detect_stranded_install_default  # noqa: PLC0415 — deferred to avoid circular import
-    from nexus.stranded_install import LAST_MIGRATION_CAPABLE  # noqa: PLC0415 — leaf module, deferred for symmetry
+    from nexus.stranded_install import LAST_MIGRATION_CAPABLE, LOCAL_ENGINE_CLAUSE  # noqa: PLC0415 — leaf module, deferred for symmetry
 
     if LAST_MIGRATION_CAPABLE is None:
         return [HealthResult(
@@ -5204,7 +5204,7 @@ def _check_stranded_install() -> list[HealthResult]:
         detail=stranded.message_for(first_hop),
         fix_suggestions=[
             f"Install the last migration-capable release: {first_hop}",
-            "Run: nx upgrade (the ladder converges the pre-PG data migration)",
+            f"Run: nx upgrade there (the ladder converges the pre-PG data migration) {LOCAL_ENGINE_CLAUSE}",
             "Then upgrade back to this version",
         ],
     )]
