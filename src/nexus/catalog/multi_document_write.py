@@ -190,6 +190,9 @@ class MultiDocumentImportWriter:
         self._rows_landed = 0
         self._sweep_skipped = 0
         self._finished = False
+        #: The exception the last failed request raised, so a caller that must undo what it
+        #: registered can tell a definitive refusal from a request that may have committed.
+        self._last_request_error: BaseException | None = None
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -224,6 +227,28 @@ class MultiDocumentImportWriter:
                 f"register_document({doc_id!r}): already registered with total_rows={known.total}, "
                 f"max_position={known.max_position}, resume={known.resume}; got total_rows={total_rows}, "
                 f"max_position={max_position}, resume={resume}")
+
+    def landed(self, doc_id: str) -> bool:
+        """True when any row of *doc_id* landed (its first request committed)."""
+        st = self._docs.get(doc_id)
+        return bool(st and (st.written or st.received))
+
+    def request_may_have_written(self) -> bool:
+        """True when the last failed request is in flight under the shared classifier
+        (:func:`nexus.catalog.write_outcome.may_have_written`): it may have reached the engine and
+        committed, so nothing registered for it may be undone. False when no request failed."""
+        from nexus.catalog.write_outcome import may_have_written  # noqa: PLC0415 — deferred: keeps this module's import light
+
+        err = self._last_request_error
+        return err is not None and may_have_written(err)
+
+    def discard(self, doc_id: str) -> None:
+        """Forget *doc_id*: the caller removed its catalog row (nothing had landed on it), so there
+        is no fence left for :meth:`abort` to mark."""
+        st = self._docs.get(doc_id)
+        if st is not None:
+            st.failed = "its catalog registration was removed"
+            st.release()
 
     def failure(self, doc_id: str) -> str | None:
         """Why *doc_id* failed, or None."""
@@ -370,7 +395,11 @@ class MultiDocumentImportWriter:
         """nexus.retry's bounded manifest-write retry: connectivity errors, and a rate-limit answer
         paces the shared brake. A ``CombinedWriteEmbedTimeoutError`` is never retried."""
         from nexus.retry import _manifest_write_with_retry  # noqa: PLC0415 — deferred: nexus.retry pulls in the rate brake
-        return _manifest_write_with_retry(fn, *args, **kwargs)
+        try:
+            return _manifest_write_with_retry(fn, *args, **kwargs)
+        except BaseException as exc:
+            self._last_request_error = exc
+            raise
 
     def _fail_doc(self, doc_id: str, reason: str, result: PageWriteResult | None = None) -> None:
         st = self._docs[doc_id]

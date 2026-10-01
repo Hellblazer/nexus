@@ -542,7 +542,9 @@ class UploadRun:
         self.cat: Any = None
         self.finished = False          # every chunk landed: the writer's finish() returned
         self._raw_cat: Any = None
-        #: Called just before each chunk-carrying request (see ``MetadataMergingCatalog``).
+        #: Called AFTER a chunk-carrying request that has, or may have, written chunks: when it
+        #: answered, or failed with its outcome open (see ``MetadataMergingCatalog._send``). Never
+        #: for a request that did not reach the engine or that the engine refused.
         self._on_request = on_request
 
     def open_writer(
@@ -1619,7 +1621,7 @@ def pipeline_index_pdf(
             # for the same defense-in-depth reason as the fence-begin gate).
             if doc_id and not dry_run and not fenced:
                 from nexus.doc_indexer import _fence_fail  # noqa: PLC0415 - deferred to avoid circular import at module load
-                _fence_fail(doc_id, str(first_exc), heal=False)
+                _fence_fail(doc_id, str(first_exc))
             elif doc_id and fenced:
                 # nexus-4pj54: the fenced path skips _fence_fail, which is where
                 # a failed run's deferred superseded-vector sweep is discarded.
@@ -1774,7 +1776,7 @@ def pipeline_index_pdf(
                 # (referenced=0 == chunk_count=0) and stamp 'complete' on a
                 # silently-failed extraction. No content-free exception exists
                 # for PDFs.
-                _fence_fail(doc_id, "zero chunks extracted", heal=False)
+                _fence_fail(doc_id, "zero chunks extracted")
             elif post_pass_ok:
                 from nexus.errors import IndexRunVerifyRefused  # noqa: PLC0415 - deferred: keeps the module import light
 

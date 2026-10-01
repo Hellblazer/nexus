@@ -1041,9 +1041,10 @@ def test_a_failed_pdf_write_does_not_heal_the_manifest_from_stored_chunks(
 ) -> None:
     """``_fence_fail`` used to rebuild a failed run's manifest from the chunks it stored
     (``_heal_failed_document``, for paths that wrote chunks BEFORE their owner rows). The PDF
-    writer's manifest is the record and every chunk it sent is owned, so the rebuild has nothing to
+    writer's manifest is the record and every chunk it sent is owned, so the rebuild had nothing to
     do and, on a failed re-index, would replace the manifest with a fragment found by the OLD
-    content hash. It is not run."""
+    content hash. It is retired (nexus-z0o2p.35); this pins that nothing rebuilds a manifest."""
+    import nexus.catalog.manifest_heal as mh
     import nexus.doc_indexer as di
 
     marker = f"noheal-{label}"
@@ -1051,7 +1052,8 @@ def test_a_failed_pdf_write_does_not_heal_the_manifest_from_stored_chunks(
     fake_pdf(lines)
     path = _write_pdf(tmp_path, marker)
     healed: list[str] = []
-    monkeypatch.setattr(di, "_heal_failed_document", lambda doc_id: healed.append(doc_id))
+    assert not hasattr(di, "_heal_failed_document")
+    monkeypatch.setattr(mh, "heal_manifest_gaps", lambda *a, **k: healed.append(a))
 
     with _traffic(die_after=1, error=RuntimeError):
         with pytest.raises(RuntimeError, match="died before write request 2"):

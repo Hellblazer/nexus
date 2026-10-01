@@ -257,11 +257,31 @@ def test_one_batch_dropped_unknown_is_flagged_and_has_no_list() -> None:
     assert res.dropped_unknown is True and res.dropped is None and res.dropped_count is None
 
 
-def test_one_batch_response_with_no_drop_entry_is_a_hard_error() -> None:
+def test_one_batch_response_with_no_drop_entry_is_an_old_engine_that_names_the_remedy() -> None:
+    from nexus.errors import EngineOlderThanClientError
+
     cat = FakeCat(omit_dropped=True)
     w = _writer(cat)
     w.add_batch(*_batch(0, 2))
-    with pytest.raises(BatchWriteFailedError, match="dropped"):
+    with pytest.raises(EngineOlderThanClientError, match="dropped") as exc:
+        w.finish()
+    assert "older than this client" in str(exc.value) and "Upgrade the local engine" in str(exc.value)
+
+
+def test_one_batch_response_with_disagreeing_drop_counts_is_a_corrupt_answer() -> None:
+    cat = FakeCat()
+    real = cat.write_manifest_many
+
+    def lying(*a, **kw):
+        out = real(*a, **kw)
+        out["dropped_chashes"] = {_DOC: [_h(9)]}
+        out["dropped_count"] = {_DOC: 2}
+        return out
+
+    cat.write_manifest_many = lying  # type: ignore[method-assign]
+    w = _writer(cat)
+    w.add_batch(*_batch(0, 2))
+    with pytest.raises(BatchWriteFailedError, match="truncated or corrupt"):
         w.finish()
 
 
@@ -467,17 +487,35 @@ def test_complete_answering_none_is_an_error_not_completed() -> None:
         w.finish()
 
 
-@pytest.mark.parametrize("snapshot", [None, {}, {"prior_chashes": []},
-                                      {"prior_chashes": [_h(1)], "prior_count": 0},
+@pytest.mark.parametrize("snapshot", [None, {}, {"prior_chashes": []}])
+def test_a_begin_answer_with_no_snapshot_is_an_old_engine_that_names_the_remedy(snapshot) -> None:
+    """``begin_index_run(snapshot_manifest=True)`` answered without the snapshot fields: the engine
+    predates the writer's protocol. EngineOlderThanClientError, with the remedy, not a bare
+    BatchWriteFailedError that a batch run would repeat for every record (nexus-z0o2p.35, I3)."""
+    from nexus.errors import EngineOlderThanClientError
+
+    cat = FakeCat(snapshot=snapshot)
+    w = _writer(cat, content_hash="hash1")
+    w.add_batch(*_batch(0, 1))
+    with pytest.raises(EngineOlderThanClientError, match="pre-run manifest") as exc:
+        w.add_batch(*_batch(1, 1))
+    assert "older than this client" in str(exc.value) and "Upgrade the local engine" in str(exc.value)
+    assert "write_manifest_many" not in cat.names()
+    # The stamp is committed when begin answers, so the run must still be abort()-able.
+    w.abort("unusable snapshot")
+    assert cat.of("fail_index_run") == [{"doc_id": _DOC, "error": "unusable snapshot"}]
+
+
+@pytest.mark.parametrize("snapshot", [{"prior_chashes": [_h(1)], "prior_count": 0},
                                       {"prior_chashes": [_h(1), _h(2)], "prior_count": 1}])
-def test_an_unusable_snapshot_is_an_error_before_any_write(snapshot) -> None:
+def test_a_self_contradicting_snapshot_is_an_error_before_any_write(snapshot) -> None:
+    """The fields are there but disagree: a corrupt answer, not an old engine."""
     cat = FakeCat(snapshot=snapshot)
     w = _writer(cat, content_hash="hash1")
     w.add_batch(*_batch(0, 1))
     with pytest.raises(BatchWriteFailedError, match="pre-run manifest"):
         w.add_batch(*_batch(1, 1))
     assert "write_manifest_many" not in cat.names()
-    # The stamp is committed when begin answers, so the run must still be abort()-able.
     w.abort("unusable snapshot")
     assert cat.of("fail_index_run") == [{"doc_id": _DOC, "error": "unusable snapshot"}]
 

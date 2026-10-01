@@ -94,7 +94,8 @@ from nexus.catalog.types import ManifestRow, _CROSS_PROJECT_OVERRIDE_ENV
 from nexus.catalog.collection_name import CollectionName, owner_segment_for_tumbler
 from nexus.db.limits import QUOTAS
 from nexus.db.t2._refreshable_client import RefreshableHttpStoreMixin
-from nexus.errors import CombinedWriteEmbedTimeoutError, IndexRunVerifyRefused
+from nexus.catalog.write_outcome import PreSendArgumentError
+from nexus.errors import CombinedWriteEmbedTimeoutError, EngineOlderThanClientError, IndexRunVerifyRefused
 
 _log = structlog.get_logger(__name__)
 
@@ -278,12 +279,12 @@ def _metadata_mode_fields(
     """
     keys = list(metadata_delete_keys or ())
     if keys and not metadata_merge:
-        raise ValueError(f"{what}: metadata_delete_keys requires metadata_merge=True")
+        raise PreSendArgumentError(f"{what}: metadata_delete_keys requires metadata_merge=True")
     if len(keys) > METADATA_DELETE_KEYS_CAP:
-        raise ValueError(
+        raise PreSendArgumentError(
             f"{what}: {len(keys)} metadata_delete_keys exceeds the {METADATA_DELETE_KEYS_CAP}-key cap")
     if any(not isinstance(k, str) or not k.strip() for k in keys):
-        raise ValueError(f"{what}: metadata_delete_keys must be non-blank strings")
+        raise PreSendArgumentError(f"{what}: metadata_delete_keys must be non-blank strings")
     if not metadata_merge:
         return {}
     out: dict = {"metadata_merge": True}
@@ -299,7 +300,7 @@ def _check_metadata_merge_echo(what: str, merge_fields: dict, result: "dict | No
     enrichment), so its answer carries no echo and this raises rather than let the caller carry on;
     client and engine are released as a pair, there is no old-engine fallback."""
     if merge_fields and not (isinstance(result, dict) and result.get("metadata_merge") is True):
-        raise RuntimeError(
+        raise EngineOlderThanClientError(
             f"{what}: asked for metadata_merge but the response did not echo it; the engine "
             "predates the metadata write mode and REPLACED the stored chunk metadata"
         )
@@ -309,7 +310,7 @@ def _check_sweep_chashes(what: str, sweep_chashes: "list[str] | None") -> None:
     """Refuse an over-cap ``sweep_chashes`` list locally (the engine 400s it, but only after the
     request was built and, on a chunk-carrying append, an embed budget was set aside)."""
     if sweep_chashes and len(sweep_chashes) > MANIFEST_APPEND_SWEEP_CHASHES_CAP:
-        raise ValueError(
+        raise PreSendArgumentError(
             f"{what}: {len(sweep_chashes)} sweep_chashes exceeds the engine cap of "
             f"{MANIFEST_APPEND_SWEEP_CHASHES_CAP} per request; split the list across appends"
         )
@@ -324,7 +325,7 @@ def _echo_supplied_vectors(
     substitution of content the caller chose, so it is a hard error (the client and the engine
     are released as a pair; there is no old-engine fallback)."""
     if any(c.get("embedding") is not None for c in (chunks or ())) and "vectors_supplied" not in result:
-        raise RuntimeError(
+        raise EngineOlderThanClientError(
             f"{what}: sent client-supplied embeddings but the response carried no "
             "'vectors_supplied' key; the engine does not understand supplied vectors and "
             "embedded the text itself"
@@ -341,7 +342,7 @@ def _check_supplied_vectors(
         return
     for i, c in enumerate(chunks or ()):
         if c.get("embedding") is not None:
-            raise ValueError(
+            raise PreSendArgumentError(
                 f"{what}: chunks[{i}] carries a client-supplied 'embedding' but no "
                 "'embedding_model' was given; the engine refuses a vector it cannot tie to the "
                 "collection's embedding model"
@@ -1064,7 +1065,6 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 return {}
             raise
         if snapshot_manifest and result and not isinstance(result.get("snapshots"), dict):
-            from nexus.errors import EngineOlderThanClientError  # noqa: PLC0415 — deferred: only the refusal needs it
             raise EngineOlderThanClientError(
                 f"begin_index_run_many: asked for snapshot_manifest for {len(docs)} document(s) in "
                 f"{collection!r} but the response carried no 'snapshots' object; the engine "
@@ -3599,7 +3599,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         embed_skipped, embed_embedded, swept, sweep_skipped, sweep_detail]}``).
         """
         if not collection:
-            raise ValueError(
+            raise PreSendArgumentError(
                 "append_manifest_chunks: 'collection' is required and must "
                 "be non-blank (RDR-191 — the engine no longer infers it)"
             )
@@ -3608,7 +3608,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         merge_fields = _metadata_mode_fields(
             "append_manifest_chunks", metadata_merge, metadata_delete_keys)
         if chunk_payload is not None and len(chunk_payload) > MANIFEST_APPEND_MANY_MAX_CHUNKS:
-            raise ValueError(
+            raise PreSendArgumentError(
                 f"append_manifest_chunks: {len(chunk_payload)} chunks exceeds the "
                 f"{MANIFEST_APPEND_MANY_MAX_CHUNKS}-chunk request cap (the engine caps "
                 "append_many at that and append follows it)"
@@ -3636,14 +3636,14 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if chunk_payload is not None:
             _check_metadata_merge_echo("append_manifest_chunks", merge_fields, out)
         if chunk_payload is not None and "chunks_written" not in out:
-            raise RuntimeError(
+            raise EngineOlderThanClientError(
                 f"append ack mismatch for {collection!r} doc {doc_id!r}: sent "
                 f"{len(chunk_payload)} chunks but the response carried no 'chunks_written' "
                 "key — the engine may predate RDR-223's append-with-chunks; refusing to treat "
                 "the chunk content as durably written"
             )
         if sweep_chashes and "swept" not in out:
-            raise RuntimeError(
+            raise EngineOlderThanClientError(
                 f"append ack mismatch for {collection!r} doc {doc_id!r}: sent "
                 f"{len(sweep_chashes)} sweep_chashes but the response carried no 'swept' key; "
                 "the engine did not run the deferred sweep"
@@ -3695,16 +3695,16 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         document that failed is in ``failed_doc_ids``; it is NOT an exception here.
         """
         if not collection:
-            raise ValueError(
+            raise PreSendArgumentError(
                 "append_manifest_many: 'collection' is required and must be non-blank"
             )
         if len(docs) > MANIFEST_APPEND_MANY_MAX_DOCS:
-            raise ValueError(
+            raise PreSendArgumentError(
                 f"append_manifest_many: {len(docs)} docs exceeds the engine cap of "
                 f"{MANIFEST_APPEND_MANY_MAX_DOCS} docs per request"
             )
         if chunks is not None and len(chunks) > MANIFEST_APPEND_MANY_MAX_CHUNKS:
-            raise ValueError(
+            raise PreSendArgumentError(
                 f"append_manifest_many: {len(chunks)} chunks exceeds the engine cap of "
                 f"{MANIFEST_APPEND_MANY_MAX_CHUNKS} chunks per request"
             )
@@ -3712,7 +3712,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         known = {d for d, _ in docs}
         stray = sorted(set(sweeps) - known)
         if stray:
-            raise ValueError(
+            raise PreSendArgumentError(
                 f"append_manifest_many: sweep_chashes names document(s) not in docs: {stray}"
             )
         for d, lst in sweeps.items():
@@ -3721,11 +3721,11 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         stamps = complete or {}
         stray = sorted(set(stamps) - known)
         if stray:
-            raise ValueError(
+            raise PreSendArgumentError(
                 f"append_manifest_many: complete names document(s) not in docs: {stray}")
         for d, (content_hash, row_count) in stamps.items():
             if not content_hash or isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
-                raise ValueError(
+                raise PreSendArgumentError(
                     f"append_manifest_many: complete[{d!r}] needs a non-empty content hash and a "
                     f"non-negative integer row count, got ({content_hash!r}, {row_count!r})")
         _check_supplied_vectors("append_manifest_many", chunks, embedding_model)
@@ -3765,18 +3765,17 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         if chunks is not None:
             _check_metadata_merge_echo("append_manifest_many", merge_fields, out)
         if chunks is not None and "chunks_written" not in out:
-            raise RuntimeError(
+            raise EngineOlderThanClientError(
                 f"append_many ack mismatch for {collection!r}: sent {len(chunks)} chunks but "
                 "the response carried no 'chunks_written' key — refusing to treat the chunk "
                 "content as durably written"
             )
         if sweep_requested and "swept" not in out:
-            raise RuntimeError(
+            raise EngineOlderThanClientError(
                 f"append_many ack mismatch for {collection!r}: sent sweep_chashes but the "
                 "response carried no 'swept' key; the engine did not run the deferred sweeps"
             )
         if stamps and "complete_refused_count" not in out:
-            from nexus.errors import EngineOlderThanClientError  # noqa: PLC0415 — deferred: only the refusal needs it
             raise EngineOlderThanClientError(
                 f"append_many ack mismatch for {collection!r}: sent complete for {len(stamps)} "
                 "document(s) but the response carried no 'complete_refused_count' key; the engine "
@@ -3797,6 +3796,15 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         ``except`` block so no ``__context__`` chains back to the ReadTimeout (a chained context
         would still classify as connectivity at the outer layer).
         """
+        # The one choke point every chunk-carrying combined write reaches (write_many, append,
+        # append_many), so it is where the size of a request is measurable. The e2e shakeout reads
+        # the largest ``count`` from this event to prove the per-request chunk cap actually bound
+        # (nexus-z0o2p.35, F3); the oversize writer's requests used to be visible as
+        # ``http_vector_upsert_chunks_request`` and no longer touch that route.
+        _log.info(
+            "http_catalog_combined_write_request",
+            path=path, collection=collection or "", count=chunk_count,
+        )
         pending: httpx.ReadTimeout | None = None
         result: Any = None
         try:
@@ -4351,7 +4359,7 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
         page only; a chunk not stored yet takes the incoming metadata under either mode.
         """
         if not collection:
-            raise ValueError(
+            raise PreSendArgumentError(
                 "write_manifest_many: 'collection' is required and must be "
                 "non-blank on every call (RDR-191 — the engine no longer "
                 "infers it; previously this was only enforced when 'chunks' "
@@ -4400,12 +4408,9 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
                 ],
                 "collection": collection,
             }
-            if complete:
-                page_complete = {
-                    d: complete[d] for d, _ in page if d in complete
-                }
-                if page_complete:
-                    body["complete"] = page_complete
+            page_complete = {d: complete[d] for d, _ in page if d in complete} if complete else {}
+            if page_complete:
+                body["complete"] = page_complete
             if sweep:
                 body["sweep"] = True
             page_carries_chunks = chunks is not None and page_num == 0
@@ -4446,10 +4451,21 @@ class HttpCatalogClient(RefreshableHttpStoreMixin):
             else:
                 result = self._post("/manifest/write_many", body)
             result = result if isinstance(result, dict) else {}
+            if page_complete and "complete_refused_count" not in result:
+                # ACK-ECHO for the completion stamp (nexus-z0o2p.35): an engine that ignored
+                # ``complete`` answers without ``complete_refused_count`` (the key is always present
+                # on an engine that stamps), and reading that as "stamped" would report a write
+                # STORED that was never stamped complete. Same check, same key, as append_many.
+                raise EngineOlderThanClientError(
+                    f"write_many ack mismatch for {collection!r}: sent complete for "
+                    f"{len(page_complete)} document(s) but the response carried no "
+                    "'complete_refused_count' key; the engine does not stamp on write_many "
+                    "and the documents are NOT complete"
+                )
             if page_carries_chunks:
                 # nexus-wxjr6 ack-echo (design memo §5.2) — see docstring.
                 if "chunks_written" not in result:
-                    raise RuntimeError(
+                    raise EngineOlderThanClientError(
                         f"write_many ack mismatch for {collection!r}: sent "
                         f"{len(chunks)} chunks but the response carried no "
                         "'chunks_written' key — the engine may not "

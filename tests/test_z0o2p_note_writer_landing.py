@@ -581,6 +581,27 @@ class TestMcpStorePut:
         assert "Stored" not in result
         single.assert_not_called(), batch.assert_not_called(), document.assert_not_called()
 
+    @pytest.mark.parametrize("outcome,invalidated", [
+        pytest.param(_outcome(UNCERTAIN, reason="timed out"), True, id="uncertain"),
+        pytest.param(_outcome(UNCERTAIN, reason="r", stamp_refused=True, stamp_detail="409"), True, id="stamp-refused"),
+        pytest.param(_outcome(UNCERTAIN, reason="unstamped", unstamped=True), True, id="unstamped"),
+        pytest.param(_outcome(NOT_LANDED, **_ENGINE_REFUSED), False, id="not-landed"),
+        pytest.param(_outcome(NO_CATALOG, catalog_doc_id="", reason="catalog registration failed: X"), False,
+                     id="no-catalog"),
+    ])
+    def test_an_uncertain_outcome_drops_the_caches_before_the_error_returns(self, outcome, invalidated, engine):
+        """M5: an UNCERTAIN note may have landed (or still land), so a cached page burst or collection
+        list built before it is stale for as long as the note exists, error or not. A note that
+        definitely did not land changes nothing, so it keeps the caches."""
+        from nexus.mcp.core import store_put
+
+        with patch("nexus.catalog.note_write.put_note", return_value=outcome), \
+                patch("nexus.mcp.core._page_cache_invalidate") as page, \
+                patch("nexus.mcp.core._invalidate_collections_cache") as collections:
+            result = store_put(content="z0o2p35 invalidate", collection="z0o2p-landing", title="t")
+        assert result.startswith("Error: store_put: ")
+        assert page.called is invalidated and collections.called is invalidated
+
     def test_a_stored_outcome_fires_the_chains_through_the_shared_helper(self, engine):
         from nexus.mcp.core import store_put
 

@@ -67,9 +67,11 @@
 # nexus-97dp4. This corpus is deliberately SMALL: one file engineered to
 # chunk into >16 pieces on its own (verified empirically below, not
 # guessed), which DETERMINISTICALLY forces ChunkBatcher to reject it as
-# oversize-for-one-batch and route it through the legacy per-file paged
-# upload (HttpVectorClient.upsert_chunks) — whose FIRST page is
-# mathematically exactly `min(total, cap)` chunks. Any file chunking into
+# oversize-for-one-batch and route it through the oversize-file fallback
+# (MultiBatchDocumentWriter since RDR-223; it was the legacy paged
+# HttpVectorClient.upsert_chunks until nexus-z0o2p.14) — whose FIRST request is
+# mathematically exactly `min(total, cap)` chunks, measured from the
+# http_catalog_combined_write_request event (nexus-z0o2p.35). Any file chunking into
 # more than `cap` pieces binds the cap on page 1, regardless of exact
 # chunk-boundary luck; no multi-file boundary-alignment gamble required.
 # Measured against THIS tree's real chunker (llama-index CodeSplitter,
@@ -125,17 +127,19 @@ _kb_to_gb_str() { # bash-only fixed-point, no awk/bc dependency assumed
   printf '%d.%02d' "$whole" "$frac"
 }
 _largest_flush_in_log() {
-  # Max over BOTH the normal ChunkBatcher combined-write flush event
-  # (chunk_flush_complete, chunks=N — chunk_batcher.py) and the legacy
-  # oversize-file paged-upload event (http_vector_upsert_chunks_request,
-  # count=N — http_vector_client.py upsert_chunks paging). Pre-filtering
-  # each grep by the event name before extracting the number avoids the
-  # ` count=` pattern accidentally matching the OTHER event's
-  # `distinct_chash_count=` field (no leading space precedes "count=" in
-  # that field name, but the safety margin costs nothing).
+  # Max over BOTH request shapes that carry chunks, read from the events that actually mark them:
+  #   * the normal ChunkBatcher combined-write flush (chunk_flush_complete, chunks=N —
+  #     chunk_batcher.py), and
+  #   * every chunk-carrying request the combined writers send (http_catalog_combined_write_request,
+  #     count=N — http_catalog_client.py _post_embedding_write). The oversize-file fallback writes
+  #     through MultiBatchDocumentWriter since RDR-223 (nexus-z0o2p.14), whose requests are
+  #     /manifest/write_many + /manifest/append: it emits NO http_vector_upsert_chunks_request, so
+  #     reading that event left the oversize file's capped request invisible and this step graded
+  #     "cap NEVER BOUND" (nexus-z0o2p.35, F3). Each grep is pre-filtered by its event name, and
+  #     ` count=` is matched with a leading space so it cannot match another field's suffix.
   local log="$1" a b
   a="$(grep -F 'chunk_flush_complete' "$log" 2>/dev/null | grep -oE 'chunks=[0-9]+' | cut -d= -f2 | sort -n | tail -1)"
-  b="$(grep -F 'http_vector_upsert_chunks_request' "$log" 2>/dev/null | grep -oE ' count=[0-9]+' | tr -d ' ' | cut -d= -f2 | sort -n | tail -1)"
+  b="$(grep -F 'http_catalog_combined_write_request' "$log" 2>/dev/null | grep -oE ' count=[0-9]+' | tr -d ' ' | cut -d= -f2 | sort -n | tail -1)"
   a="${a:-0}"; b="${b:-0}"
   if [ "$a" -ge "$b" ] 2>/dev/null; then echo "$a"; else echo "$b"; fi
 }
@@ -283,9 +287,9 @@ def make_file(nfuncs: int, nlines: int) -> str:
 # 40 functions x 12 filler lines -> 682 lines -> 21 chunks measured against
 # this tree's real chunker (CodeSplitter, chunk_lines=150/15%), a 5-chunk
 # margin over the onnx-local cap (16) — deliberately oversize-for-one-batch
-# so ChunkBatcher.add() rejects it and routes it through the legacy
-# per-file paged upload, whose first page is exactly min(total, cap)
-# chunks (see this script's header comment for the full argument).
+# so ChunkBatcher.add() rejects it and routes it through the oversize-file
+# fallback (MultiBatchDocumentWriter), whose first request is exactly
+# min(total, cap) chunks (see this script's header comment for the argument).
 (corpus_dir / "big_filler.py").write_text(make_file(40, 12))
 
 # 5 functions x 8 filler lines -> 67 lines -> 3 chunks, safely IN-cap: the

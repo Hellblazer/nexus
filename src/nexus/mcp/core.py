@@ -5453,6 +5453,7 @@ def store_put(
         # unconditionally (not just on the catalog-present path) since
         # fire_batch below needs real metadatas regardless of catalog_doc_id.
         from nexus.catalog.note_write import (  # noqa: PLC0415 — deferred for startup cost (heavy nexus submodule, rare/branch-local)
+            UNCERTAIN,
             failure_message,
             fire_note_chains,
             put_note,
@@ -5482,6 +5483,12 @@ def store_put(
         # not know is never "Stored".
         message = failure_message(outcome, subject="content", check="store_get")
         if message is not None:
+            if outcome.status == UNCERTAIN:
+                # An uncertain note may have landed, or may still commit: a cached page burst or
+                # collection list built before it is stale for as long as the note exists, whether or
+                # not this call could confirm it (nexus-z0o2p.35, M5). A refusal changes nothing.
+                _page_cache_invalidate()
+                _invalidate_collections_cache()
             return f"Error: store_put: {message}"
 
         # A committed write makes any cached page burst stale — drop it so a

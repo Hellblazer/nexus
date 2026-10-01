@@ -1019,3 +1019,131 @@ def test_the_snapshot_minus_written_sweep_list_runs_through_trailing_sweeps_agai
     assert stored == {old[0]["chash"], new["chash"]}, "every swept chunk is gone and the two live ones stay"
     assert [c for _, c in _manifest(reader, doc)] == [new["chash"], old[0]["chash"]]
     assert reader.resolve(doc).index_state == "complete"
+
+
+# ── a run that ends before anything landed removes the documents the prepass registered (nexus-z0o2p.35, M4) ──
+
+
+def _record_minted(monkeypatch) -> list[str]:
+    """Tumblers the prepass registered (the engine's ``created`` answer), for a non-vacuity count."""
+    minted: list[str] = []
+    real = exporter_mod._resolve_owner_document
+
+    def _spy(group, *a, **kw):
+        kw["minted_out"] = minted
+        return real(group, *a, **kw)
+
+    monkeypatch.setattr(exporter_mod, "_resolve_owner_document", _spy)
+    return minted
+
+
+def _documents_present(reader, expected) -> list[str]:
+    return [u for u in expected if reader.by_source_uri(u) is not None]
+
+
+@pytest.mark.parametrize("code", [400, 422, 409])
+def test_a_first_request_the_engine_refuses_removes_the_documents_the_prepass_registered(
+    t2_service_env, tmp_path, small_pages, monkeypatch, code,
+):
+    """Old engine, a 4xx: nothing landed and nothing can, so every document the prepass registered is a
+    phantom (zero chunks, never fenced) and the import removes it rather than leave the debris the note
+    and PDF writers already clean up."""
+    import httpx
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    dst = _coll(f"refused-first-{code}")
+    records, expected = _shaped_file(dst, docs=4)
+    f = tmp_path / "refused-first.nxexp"
+    _write_nxexp(f, dst, records)
+    minted = _record_minted(monkeypatch)
+    real_post = hcc.HttpCatalogClient._post
+
+    def _refuse(self, path, body=None, **kw):
+        if path in _DATA_PATHS:
+            req = httpx.Request("POST", "http://engine.invalid" + path)
+            raise httpx.HTTPStatusError(
+                f"HTTP {code}", request=req, response=httpx.Response(code, request=req))
+        return real_post(self, path, body, **kw)
+
+    monkeypatch.setattr(hcc.HttpCatalogClient, "_post", _refuse)
+    with pytest.raises(httpx.HTTPStatusError):
+        import_collection(db=client, input_path=f, target_collection=dst)
+
+    assert len(minted) == len(expected), "non-vacuity: the prepass registered every document"
+    assert _documents_present(reader, expected) == [], "a phantom registration survived the refusal"
+
+
+def test_a_failure_before_the_first_page_removes_the_documents_the_prepass_registered(
+    t2_service_env, tmp_path, small_pages, monkeypatch,
+):
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    dst = _coll("died-before-page-1")
+    records, expected = _shaped_file(dst, docs=4)
+    f = tmp_path / "died-before.nxexp"
+    _write_nxexp(f, dst, records)
+    minted = _record_minted(monkeypatch)
+    _die_at_page(monkeypatch, 0)
+    with pytest.raises(_ClientDied):
+        import_collection(db=client, input_path=f, target_collection=dst)
+    assert len(minted) == len(expected), "non-vacuity: the prepass registered every document"
+    assert _documents_present(reader, expected) == []
+
+
+def test_a_request_that_may_have_committed_keeps_the_documents(
+    t2_service_env, tmp_path, small_pages, monkeypatch,
+):
+    """Control: the same run, but the first request dies in flight (outcome unknown). It may have
+    committed, so nothing is removed and a rerun resumes the documents."""
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    dst = _coll("died-in-flight")
+    records, expected = _shaped_file(dst, docs=4)
+    f = tmp_path / "in-flight.nxexp"
+    _write_nxexp(f, dst, records)
+    minted = _record_minted(monkeypatch)
+    with monkeypatch.context() as m:
+        _die_at_data_request(m, 0)
+        with pytest.raises(_ClientDied):
+            import_collection(db=client, input_path=f, target_collection=dst)
+    assert len(minted) == len(expected)
+    assert sorted(_documents_present(reader, expected)) == sorted(expected)
+    rerun = import_collection(db=client, input_path=f, target_collection=dst)
+    assert rerun["unowned_count"] == 0
+    for uri in expected:
+        assert reader.by_source_uri(uri).index_state == "complete"
+
+
+def test_a_document_that_already_existed_is_never_removed(
+    t2_service_env, tmp_path, small_pages, monkeypatch,
+):
+    """Only a document THIS run registered is a phantom. One found by source_uri is not, even when
+    it holds no chunk yet."""
+    import httpx
+
+    client = HttpVectorClient(tenant=t2_service_env)
+    reader = make_catalog_reader()
+    writer = make_catalog_writer()
+    dst = _coll("existing-kept")
+    records, expected = _shaped_file(dst, docs=3)
+    f = tmp_path / "existing.nxexp"
+    _write_nxexp(f, dst, records)
+    owner = exporter_mod._resolve_import_owner_tumbler(dst, reader, writer)
+    for uri in expected:                        # registered beforehand, so the import only FINDS them
+        writer.register(owner=owner, title=uri, content_type="code", physical_collection=dst, source_uri=uri)
+    assert sorted(_documents_present(reader, expected)) == sorted(expected)
+    minted = _record_minted(monkeypatch)
+    real_post = hcc.HttpCatalogClient._post
+
+    def _refuse(self, path, body=None, **kw):
+        if path in _DATA_PATHS:
+            req = httpx.Request("POST", "http://engine.invalid" + path)
+            raise httpx.HTTPStatusError("HTTP 422", request=req, response=httpx.Response(422, request=req))
+        return real_post(self, path, body, **kw)
+
+    monkeypatch.setattr(hcc.HttpCatalogClient, "_post", _refuse)
+    with pytest.raises(httpx.HTTPStatusError):
+        import_collection(db=client, input_path=f, target_collection=dst)
+    assert minted == [], "non-vacuity: this run registered nothing"
+    assert sorted(_documents_present(reader, expected)) == sorted(expected)
