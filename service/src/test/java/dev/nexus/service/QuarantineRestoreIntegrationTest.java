@@ -1051,6 +1051,32 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
     }
 
     @Test
+    void thePlanNamesTheTenantItself_soAnotherTenantsDocumentIsNotAnOwnerEvenWithRowLevelSecurityOff() throws Exception {
+        // Every other tenant-isolation test here runs as nexus_svc, where FORCE RLS filters a foreign row before the
+        // statement's own tenant_id predicate could be the thing that excludes it. This calls the function as the
+        // superuser, which bypasses RLS, so only the predicates stand between tenant A's call and tenant B's row.
+        String a = newTenant();
+        String b = newTenant();
+        String c = col("knowledge");
+        String doc = "1.10.1";
+        String h = quarantinedWith(a, c, Map.of("x", Map.<String, Object>of("catalog_doc_id", doc, "chunk_index", 0))).get(0);
+        try (Connection su = pg.createConnection("")) {
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), b, c);
+        }
+        liveDoc(b, c, doc, "B's document", 1, "b.md", Map.of());
+
+        try (Connection su = pg.createConnection("")) {
+            var rows = DSL.using(su, SQLDialect.POSTGRES).selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
+                a, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, true)).fetch();
+            assertThat(rows.get(0).get(QUARANTINE_RESTORE_CHUNKS.R_OUTCOME)).isEqualTo("restored");
+            assertThat(rows.get(0).get(QUARANTINE_RESTORE_CHUNKS.R_REATTACH))
+                .as("tenant B's live document is not tenant A's owner").isEqualTo("no_live_owner");
+        }
+        assertThat(manifest(b, doc)).isEmpty();
+        assertThat(manifest(a, doc)).isEmpty();
+    }
+
+    @Test
     void aHeldIndexRunLockOfTheOwningDocumentRollsTheWholeCallBack_withNothingMovedOrAttached() throws Exception {
         String t = newTenant();
         String c = col("knowledge");
@@ -1183,7 +1209,8 @@ class QuarantineRestoreIntegrationTest extends AtomicWriteTestBase {
 
         // Called directly over a session whose TimeZone is nine hours ahead: the engine pins UTC, psql does not.
         try (Connection su = pg.createConnection("")) {
-            su.createStatement().execute("SET TIME ZONE 'Asia/Tokyo'");
+            DSL.using(su, SQLDialect.POSTGRES).select(DSL.function("set_config", String.class,
+                DSL.val("TimeZone"), DSL.val("Asia/Tokyo"), DSL.val(false))).fetch();
             DSL.using(su, SQLDialect.POSTGRES).selectFrom(QUARANTINE_RESTORE_CHUNKS.call(
                 t, c, quarantineOf(c), new String[] {h}, ACTOR, (Long) null, false, false)).fetch();
         }
