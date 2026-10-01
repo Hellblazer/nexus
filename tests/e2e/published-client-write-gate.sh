@@ -474,18 +474,46 @@ _names_ownerless_refusal() {
   esac
 }
 
+# One line of a journey's own client output, made safe for the console: control
+# characters dropped, credential-shaped text redacted (Bearer/Basic/Token values,
+# key=value and key: value for token/secret/password/api_key/authorization, any
+# unbroken run of 48 or more key characters), and 300 characters at most. The
+# journey's output is whatever a client prints, and an error can echo a header.
+_scrub_console_line() {
+  python3 - "$1" <<'PY'
+import re, sys
+
+text = sys.argv[1]
+text = "".join(" " if ch == "\t" else ch for ch in text if ch == "\t" or (ord(ch) >= 32 and ord(ch) != 127))
+text = re.sub(r"(?i)\b(bearer|basic|token)\s+[^\s'\"]+", r"\1 [redacted]", text)
+text = re.sub(
+    r"(?i)((?:api[_-]?key|token|secret|passw(?:or)?d|authorization)['\"]?\s*[=:]\s*)[^\s,;'\"]+",
+    r"\1[redacted]", text,
+)
+text = re.sub(r"[A-Za-z0-9+/_=-]{48,}", "[long-token-redacted]", text)
+print(text[:300])
+PY
+}
+
 # The line of a journey's own output that decided its classification, printed to
 # the console so a run's evidence survives the scratch directory (removed on an
 # acknowledged pass): the line that names the refusal when there is one, else the
 # last non-empty line. Prints nothing for an empty output.
+#
+# NOTE (nexus-9a6io round 4, code L3): this prints CLIENT output to the console on
+# BOTH paths, not only the refusal path; before round 3 a journey's output went to
+# the log files alone. The line is scrubbed and capped by _scrub_console_line, and
+# the full output stays in $LOGS (the scratch config holds no real credential, so
+# this is defence in depth, not a claim that the line is safe to publish).
 _journey_evidence() {
-  local label="$1" out="$2" line=""
+  local label="$1" out="$2" line="" hits=""
   if _names_ownerless_refusal "$out"; then
-    line="$(printf '%s\n' "$out" | { grep -E 'refusing an ownerless chunk write|ownerless_chunk_write' || true; } | head -n 1)"
-    [ -n "$line" ] && echo "[gate] $label: refusal line: ${line:0:300}"
+    hits="$(printf '%s\n' "$out" | { grep -E 'refusing an ownerless chunk write|ownerless_chunk_write' || true; })"
+    line="${hits%%$'\n'*}"
+    [ -n "$line" ] && echo "[gate] $label: refusal line: $(_scrub_console_line "$line")"
   else
     line="$(printf '%s\n' "$out" | { grep -v '^[[:space:]]*$' || true; } | tail -n 1)"
-    [ -n "$line" ] && echo "[gate] $label: no refusal named; last output line: ${line:0:300}"
+    [ -n "$line" ] && echo "[gate] $label: no refusal named; last output line: $(_scrub_console_line "$line")"
   fi
   return 0
 }

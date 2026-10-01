@@ -40,9 +40,10 @@ run_case() {
   fi
 }
 
-LOG='{"ownerless_write_mode":"log-only","status":"ok"}'
-ENF='{"ownerless_write_mode":"enforce","status":"ok"}'
-OLD='{"status":"ok"}'
+# A served /v1/status always carries embedding_mode; an engine before RDR-223 P3.2 has no mode field.
+LOG='{"embedding_mode":"voyage","ownerless_write_mode":"log-only"}'
+ENF='{"embedding_mode":"voyage","ownerless_write_mode":"enforce"}'
+OLD='{"embedding_mode":"voyage"}'
 
 run_case "expected log-only, engine log-only -> ok (0)" 0 "ok [B3]" "$LOG" log-only
 run_case "expected enforce, engine enforce -> ok (0)" 0 "ok [B3]" "$ENF" enforce
@@ -53,9 +54,9 @@ run_case "expected enforce, engine log-only -> violation (1)" \
 run_case "expected set, engine reports no mode -> violation (1)" \
   1 "(absent)" "$OLD" log-only
 run_case "expected set, status body unreadable -> violation (1)" \
-  1 "(absent)" "" enforce
+  1 "no readable status body" "" enforce
 run_case "expected set, status body is not JSON -> violation (1)" \
-  1 "(absent)" "<html>502</html>" log-only
+  1 "no readable status body" "<html>502</html>" log-only
 # The skip-pass hole (critic H1): a live mode with no assertion must not pass.
 run_case "expected UNSET, engine reports log-only -> violation (1), names the knob" \
   1 "NX_EXPECTED_OWNERLESS_WRITE_MODE is unset" "$LOG" ""
@@ -63,8 +64,16 @@ run_case "expected UNSET, engine reports enforce -> violation (1)" \
   1 "NX_EXPECTED_OWNERLESS_WRITE_MODE is unset" "$ENF" ""
 run_case "expected UNSET, engine reports no mode -> not run (3)" \
   3 "NOT RUN [B3]" "$OLD" ""
-run_case "expected UNSET, status unreadable -> not run (3), never ok" \
-  3 "NOT RUN [B3]" "" ""
+# The unreadable-body hole (critic S4): with the variable unset, an edge failure must not read as "an
+# engine with no mode" and let the gate print PASSED.
+run_case "expected UNSET, status body empty (curl failed) -> violation (1), never not-run" \
+  1 "no readable status body" "" ""
+run_case "expected UNSET, edge 401 JSON error body -> violation (1)" \
+  1 "no readable status body" '{"error":"unauthorized"}' ""
+run_case "expected UNSET, edge 502 HTML page -> violation (1)" \
+  1 "no readable status body" "<html>502 Bad Gateway</html>" ""
+run_case "expected UNSET, JSON that is not an object -> violation (1)" \
+  1 "no readable status body" '["embedding_mode"]' ""
 
 # Wiring: the not-run state reaches the final sentinel, a violation is a leg
 # failure, and the function is called with the bearer-resolved status body.

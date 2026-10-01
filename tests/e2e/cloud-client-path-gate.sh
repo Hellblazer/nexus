@@ -164,6 +164,8 @@ _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 # returns 0 = asserted and holds, 1 = violation, 3 = not run. A sub-check is not
 # a leg, so LEGS_RAN cannot see it; this function is why an unset
 # NX_EXPECTED_OWNERLESS_WRITE_MODE can never read as a clean pass:
+#   - body unreadable (no JSON object with embedding_mode: curl failure, edge
+#     401/403/502/WAF page), expected set or not -> 1 (never "no mode")
 #   - expected set, observed equal            -> 0
 #   - expected set, observed other or absent  -> 1
 #   - expected UNSET, engine reports a mode   -> 1 (a mode is live and nobody
@@ -175,13 +177,25 @@ _leg_enter() { LEGS_RAN=$((LEGS_RAN + 1)); echo "[$1] $2"; }
 # from the real script.
 _ownerless_mode_verdict() {
     local body="$1" expected="${2:-}" observed
+    # A served /v1/status always carries embedding_mode (StatusHandler writes it
+    # first, on every engine that has the endpoint), so a body without it is not
+    # a status body: a curl failure, an edge 401/403/502 page, a WAF block.
+    # That reads as UNREADABLE, never as "an engine with no mode" (nexus-20onx
+    # round 4, critic S4).
     observed="$(printf '%s' "$body" | python3 -c "
 import json, sys
 try:
-    print(json.load(sys.stdin).get('ownerless_write_mode') or '')
+    doc = json.load(sys.stdin)
+    if not isinstance(doc, dict) or 'embedding_mode' not in doc:
+        raise ValueError('not a status body')
+    print(doc.get('ownerless_write_mode') or '')
 except Exception:
-    print('')
+    print('@@UNREADABLE@@')
 ")"
+    if [ "$observed" = "@@UNREADABLE@@" ]; then
+        echo "B3: /v1/status through the edge returned no readable status body (a curl failure, or an edge 401/403/502/WAF page), so the live ownerless-write mode could not be read; this is a failure whether or not NX_EXPECTED_OWNERLESS_WRITE_MODE is set"
+        return 1
+    fi
     if [ -n "$expected" ]; then
         if [ "$observed" = "$expected" ]; then
             echo "ok [B3]: /v1/status reports ownerless_write_mode=$observed (expected $expected)"

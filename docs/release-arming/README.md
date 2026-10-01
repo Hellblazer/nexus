@@ -91,6 +91,15 @@ Each condition is checked by the side that can observe it.
 | `armed_at` freshness | nexus | client tag push |
 | live image digest still matches | conexus | at the flip |
 | live SSM parameter version still matches | conexus | at the flip |
+| `ownerless_write_mode` of the first deploy of a tag carrying the RDR-223 refusal is `log-only` | conexus (a hold-the-push line, not an attestation field) | before the paired client tag is pushed |
+
+The ownerless-write mode is likewise not an attestation field
+(nexus-20onx round 4): it is another property of a deploy that has not happened
+at tag push, so a nexus reader would only echo conexus's claim, a required field
+no writer emits yet would fail every paired tag until conexus's writer changes,
+and `--paired-deploy-auto` can skip the battery. The assertion is conexus's
+hold-the-push line (`docs/operations/ownerless-write-cutover.md`, "The knob"),
+backed by the post-deploy `cloud-client-path-gate.sh` leg B3.
 
 `image_digest` and `ssm_param_version` are deliberately **not** checked by
 nexus. For a non-additive pairing the deploy is armed and held until the client

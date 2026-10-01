@@ -31,6 +31,10 @@ evidence cannot be read (never a pass: an empty log, a psql that does not run).
       ``--save-settings FILE`` records them (the BEFORE-the-walk run) and
       ``--compare-settings FILE`` fails when they differ (the AFTER-walk runs),
       so a walk that changes a role or database setting is caught;
+    * ``--min-rows N`` is a floor on that row count: after walk 1, N is the tree's own
+      ``changelog-count``, because every changeset the tree carries must have a row. It is a
+      floor rather than the equality ``two-walk-check.sh`` asserts, since production also holds
+      rows for superseded changesets and duplicate rows;
     * ``--expect-rows N`` pins ``public.databasechangelog``'s row count (pass
       the count after walk 1 when checking after walk 2: a no-op walk adds none).
 
@@ -50,18 +54,33 @@ evidence cannot be read (never a pass: an empty log, a psql that does not run).
     * the log passed must hold exactly ONE boot (one ``schema_migration_start``): a
       file holding two boots would check only the second and hide the first, so more
       than one is exit 2;
-    * one of ``--expect-new N`` or ``--noop`` is REQUIRED (neither is exit 2): a walk
-      checked against neither proves only that the log is self-consistent, and a
-      no-op boot of the new image passes that. Walk 1 of a tag that carries a
-      changeset takes ``--expect-new N`` with N > 0 (``--expect-new 0`` is exit 2:
-      that is ``--noop``, the second-walk property). Size N from the cloud's live
+    * one of ``--expect-recorded N``, ``--expect-new N`` or ``--noop`` is REQUIRED
+      (none is exit 2): a walk checked against none proves only that the log is
+      self-consistent, and a no-op boot of the new image passes that. Walk 1 of a
+      tag that carries a changeset takes ``--expect-recorded N`` with N > 0
+      (``--expect-new 0`` and ``--expect-recorded 0`` are exit 2: that is
+      ``--noop``, the second-walk property). Size N from the cloud's live
       ``release_version``, since the walk is cumulative;
-    * ``--expect-new N`` pins ``new_changesets``; ``--noop`` is the second-walk
+    * ``--expect-recorded N`` pins ``new_changesets + mark_ran_changesets``: every
+      changeset the walk added a ``databasechangelog`` row for. This is the form to
+      use for a tag that carries a ``MARK_RAN``-guarded changeset (this tag's
+      ``staging-6-drop-landing-schema`` is one: on a database whose ``staging``
+      schema is already gone it is recorded as MARK_RAN, not executed), because a
+      row-count delta and a count of added ``<changeSet>`` tags both include it
+      and ``--expect-new`` does not. ``--expect-new N`` pins the EXECUTED subset
+      (``new_changesets`` alone) and is for a probe;
+    * ``--noop`` is the second-walk
       property: ``new_changesets == 0``, ``mark_ran_changesets == 0`` and
       ``reexecuted_changesets == pending_at_start``, which is
       ``--expect-reexecuted`` (default :data:`DEFAULT_REEXECUTED`, the
       ``runAlways`` changesets of this changelog; a test counts them by XML parse
       so the constant cannot drift silently).
+
+``changelog-count`` -- prints the number of ``<changeSet>`` elements in the tree's
+changelog (the files the master includes). It is the INDEPENDENT source for
+``schema --expect-rows`` after walk 1: the engine's own ``new_changesets`` and the
+table's row delta both read ``databasechangelog``, so they can only agree with each
+other; the tree's changelog is what the walk was supposed to land.
 
 The connection comes from libpq's own environment (``PGHOST``, ``PGPORT``,
 ``PGUSER``, ``PGDATABASE``, ``PGPASSWORD`` or a service file) so no password is
@@ -75,6 +94,7 @@ import json
 import re
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from pathlib import Path
 
@@ -102,6 +122,39 @@ Runner = Callable[[str], list[list[str]]]
 
 class Unverifiable(Exception):
     """Evidence could not be read: exit 2, never a pass."""
+
+
+RESOURCES = Path(__file__).resolve().parent.parent / "service" / "src" / "main" / "resources"
+
+
+def tree_changeset_count(resources: Path | None = None) -> int:
+    """``<changeSet>`` elements across the files the master changelog includes.
+
+    The independent count of what a walk onto an empty-of-this-tree database must
+    leave in ``databasechangelog`` (one row per changeset identity, EXECUTED, MARK_RAN
+    and RERAN alike). Parses the XML, so a multi-line ``<changeSet`` tag counts once
+    and a tag edited in place counts once.
+    """
+    root_dir = resources or RESOURCES
+    master = root_dir / "db" / "changelog" / "db.changelog-master.xml"
+    try:
+        included = [
+            e.get("file", "") for e in ET.parse(master).getroot().iter()
+            if e.tag.rsplit("}", 1)[-1] == "include"
+        ]
+        if not included:
+            raise Unverifiable(f"{master} includes no changelog file")
+        total = 0
+        for name in included:
+            total += sum(
+                1 for e in ET.parse(root_dir / name).getroot().iter()
+                if e.tag.rsplit("}", 1)[-1] == "changeSet"
+            )
+    except (OSError, ET.ParseError) as exc:
+        raise Unverifiable(f"cannot read the tree's changelog under {root_dir}: {exc}") from exc
+    if total <= 0:
+        raise Unverifiable(f"no <changeSet> found under {root_dir}")
+    return total
 
 
 def psql_runner(psql: str) -> Runner:
@@ -138,6 +191,7 @@ def check_schema(
     expect_rows: int | None,
     save_settings: Path | None = None,
     compare_settings: Path | None = None,
+    min_rows: int | None = None,
 ) -> tuple[int, list[str]]:
     migration_role = _require_role(migration_role)
     lines: list[str] = []
@@ -168,6 +222,15 @@ def check_schema(
     lines.append(f"info     public.databasechangelog rows = {count}")
     if expect_rows is not None and count != expect_rows:
         fails.append(f"public.databasechangelog has {count} rows, expected {expect_rows} (a no-op walk adds none)")
+
+    if min_rows is not None:
+        if count >= min_rows:
+            lines.append(f"ok       public.databasechangelog has {count} rows, at least the tree's {min_rows} changeSet(s)")
+        else:
+            fails.append(
+                f"public.databasechangelog has {count} rows, fewer than the {min_rows} changeSet(s) the tree's "
+                "changelog carries (changelog-count): the walk did not record every changeset"
+            )
 
     user_schemas = {
         r[0] for r in run(
@@ -253,6 +316,7 @@ def check_walk(
     expect_new: int | None,
     noop: bool,
     expect_reexecuted: int,
+    expect_recorded: int | None = None,
 ) -> tuple[int, list[str]]:
     if not log_text.strip():
         raise Unverifiable("the engine log is empty")
@@ -285,17 +349,18 @@ def check_walk(
             f"{new}/{rex}/{mark}, the -1 sentinel): the walk's counts cannot be read, "
             "so the identity cannot be checked"
         )
-    if expect_new is None and not noop:
+    if expect_new is None and expect_recorded is None and not noop:
         raise Unverifiable(
-            "neither --expect-new N nor --noop was given: a walk checked against neither would pass a "
-            "no-op boot of the new image. Walk 1 of a tag that carries a changeset takes --expect-new N "
-            "(N > 0, sized from the cloud's live release_version); walk 2 takes --noop"
+            "none of --expect-recorded N, --expect-new N or --noop was given: a walk checked against none "
+            "would pass a no-op boot of the new image. Walk 1 of a tag that carries a changeset takes "
+            "--expect-recorded N (N > 0, sized from the cloud's live release_version); walk 2 takes --noop"
         )
-    if expect_new is not None and expect_new <= 0 and not noop:
-        raise Unverifiable(
-            f"--expect-new {expect_new} asserts a walk that applies nothing, which is --noop; walk 1 of a "
-            "schema-carrying tag must expect N > 0"
-        )
+    for flag, value in (("--expect-new", expect_new), ("--expect-recorded", expect_recorded)):
+        if value is not None and value <= 0 and not noop:
+            raise Unverifiable(
+                f"{flag} {value} asserts a walk that applies nothing, which is --noop; walk 1 of a "
+                "schema-carrying tag must expect N > 0"
+            )
     lines.append(f"info     walk: new={new} reexecuted={rex} mark_ran={mark} pending_at_start={pending}")
 
     if new + rex + mark == pending:
@@ -329,7 +394,19 @@ def check_walk(
             fails.append(f"the engine's session role {session['role']!r} is one of {sorted(FORBIDDEN_ROLES)}")
 
     if expect_new is not None and new != expect_new:
-        fails.append(f"new_changesets = {new}, expected {expect_new}")
+        fails.append(
+            f"new_changesets = {new}, expected {expect_new}"
+            + (f" (mark_ran_changesets = {mark}: a MARK_RAN-guarded changeset is recorded, not executed; "
+               "pin --expect-recorded to count it)" if mark else "")
+        )
+    if expect_recorded is not None:
+        if new + mark == expect_recorded:
+            lines.append(f"ok       new + mark_ran == {expect_recorded} (executed {new}, marked ran {mark})")
+        else:
+            fails.append(
+                f"new_changesets + mark_ran_changesets = {new + mark} (executed {new}, marked ran {mark}), "
+                f"expected {expect_recorded}"
+            )
     if noop:
         before = len(fails)
         if new != 0:
@@ -362,6 +439,8 @@ def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
     s.add_argument("--psql", default="psql")
     s.add_argument("--migration-role", default=None)
     s.add_argument("--expect-rows", type=int, default=None)
+    s.add_argument("--min-rows", type=int, default=None,
+                   help="floor: databasechangelog holds at least N rows (N = changelog-count after a walk)")
     s.add_argument("--save-settings", type=Path, default=None,
                    help="write the pg_db_role_setting rows to FILE (run before the walk)")
     s.add_argument("--compare-settings", type=Path, default=None,
@@ -369,22 +448,33 @@ def main(argv: list[str] | None = None, runner: Runner | None = None) -> int:
     w = sub.add_parser("walk", help="the counts and events of one walk, from the engine log")
     w.add_argument("--engine-log", required=True, help="a file holding that boot's log, or - for stdin")
     w.add_argument("--migration-role", default=None)
-    w.add_argument("--expect-new", type=int, default=None)
+    w.add_argument("--expect-new", type=int, default=None,
+                   help="pin new_changesets (EXECUTED only; a probe, see --expect-recorded)")
+    w.add_argument("--expect-recorded", type=int, default=None,
+                   help="pin new_changesets + mark_ran_changesets (what walk 1 of a changeset-carrying tag takes)")
     w.add_argument("--noop", action="store_true", help="second-walk property")
     w.add_argument("--expect-reexecuted", type=int, default=DEFAULT_REEXECUTED)
+    c = sub.add_parser("changelog-count", help="print the number of <changeSet> elements in this tree's changelog")
+    c.add_argument("--resources", type=Path, default=None, help="service/src/main/resources (default: this checkout's)")
     args = parser.parse_args(argv)
 
     try:
+        if args.cmd == "changelog-count":
+            print(tree_changeset_count(args.resources))
+            return 0
         if args.cmd == "schema":
             rc, lines = check_schema(
                 runner or psql_runner(args.psql), args.migration_role, args.expect_rows,
-                args.save_settings, args.compare_settings,
+                args.save_settings, args.compare_settings, args.min_rows,
             )
         else:
             if args.migration_role is not None:
                 args.migration_role = _require_role(args.migration_role)
             text = sys.stdin.read() if args.engine_log == "-" else Path(args.engine_log).read_text()
-            rc, lines = check_walk(text, args.migration_role, args.expect_new, args.noop, args.expect_reexecuted)
+            rc, lines = check_walk(
+                text, args.migration_role, args.expect_new, args.noop, args.expect_reexecuted,
+                args.expect_recorded,
+            )
     except (Unverifiable, OSError) as exc:
         print(f"UNVERIFIABLE: {exc}", file=sys.stderr)
         return 2

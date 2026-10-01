@@ -31,6 +31,21 @@
 # the variable above is set.
 #
 # Last line: "TWO-WALK CHECK PASSED" (exit 0) or "TWO-WALK CHECK FAILED" (exit 1).
+# When the tree adds no changeset over the engine that provisioned the database, walk 1
+# is itself a no-op and the changeset-applying path was never exercised; the last line
+# then reads "TWO-WALK CHECK PASSED (walk 1 applied no changeset: ... NOT exercised)",
+# so a plain PASSED always means a walk that applied something.
+#
+# Three assertions are INDEPENDENT of the engine's own counters (nexus-9a6io round 4):
+#   - after walk 1 the table holds exactly as many rows as the tree's changelog has
+#     <changeSet> elements (check_pitr_fork_walk.py changelog-count). The engine's
+#     new_changesets and this script's row delta both read databasechangelog, so on
+#     their own they only prove the log agrees with the table;
+#   - walk 1 is pinned with --expect-recorded (new + mark_ran), not --expect-new, because
+#     a MARK_RAN-guarded changeset (staging-6-drop-landing-schema) is recorded, not
+#     executed;
+#   - each start appended exactly one schema_migration_start to the engine's log, so a
+#     walk that logged nothing new cannot be read as the previous boot.
 # Cost: a gate-jar build when service/ is not cached, then three engine boots.
 set -euo pipefail
 
@@ -79,6 +94,31 @@ NEXUS_CONFIG_DIR="$ENGINE_HOME" uv run nx init --service --no-autostart </dev/nu
 NX_LOCAL=1 NEXUS_CONFIG_DIR="$ENGINE_HOME" uv run nx daemon service stop \
   || _fail "could not stop the auto-started service"
 
+# --- decisions, kept as small functions so tests/e2e/two_walk_check_decisions_test.sh
+# --- sources them from this file and drives them with fixed numbers.
+
+# _walk1_mode <rows_before> <rows_after>: "recorded N" when walk 1 added N > 0 rows, "noop"
+# when it added none, "negative" when the table shrank (a corrupt reading).
+_walk1_mode() {
+  local delta=$(( $2 - $1 ))
+  if [ "$delta" -gt 0 ]; then echo "recorded $delta"
+  elif [ "$delta" -eq 0 ]; then echo "noop"
+  else echo "negative"; fi
+}
+
+# _final_sentinel <walk1-mode-word>: the last line of a passing run. Only a walk that applied
+# something may end plain "TWO-WALK CHECK PASSED".
+_final_sentinel() {
+  if [ "$1" = "noop" ]; then
+    echo "TWO-WALK CHECK PASSED (walk 1 applied no changeset: the changeset-applying path was NOT exercised)"
+  else
+    echo "TWO-WALK CHECK PASSED"
+  fi
+}
+
+# _starts_grew_by_one <before> <after>: rc 0 iff the log gained exactly one schema_migration_start.
+_starts_grew_by_one() { [ $(( $2 - $1 )) -eq 1 ]; }
+
 # Debug logging can reach stdout ahead of the value, so take the last line only.
 PG_BIN="$(NEXUS_CONFIG_DIR="$ENGINE_HOME" uv run python -c "
 from nexus.db.pg_provision import discover_pg_binaries
@@ -116,6 +156,11 @@ _walk_rows() {
 
 _check_schema "after the pinned engine's walk" --save-settings "$SETTINGS_FILE"
 
+# What the tree's changelog carries, from the XML, not from the engine or the table.
+TREE_CHANGESETS="$(uv run python "$CHECK" changelog-count | tail -n 1)"
+case "$TREE_CHANGESETS" in ''|*[!0-9]*) _fail "changelog-count did not print a number: '$TREE_CHANGESETS'" ;; esac
+echo "[twowalk] changeSet elements in this tree's changelog: $TREE_CHANGESETS"
+
 # Rows in public.databasechangelog before walk 1: the delta after it is how many
 # changesets walk 1 recorded, which is what `walk --expect-new` must be pinned to
 # (a walk checked against no expectation would pass a no-op boot).
@@ -130,6 +175,8 @@ JAR="$REPO_ROOT/service/target/nexus-service-1.0-SNAPSHOT.jar"
 
 SVC_LOG="$ENGINE_HOME/logs/storage_service_jar.log"
 
+_start_count() { if [ -f "$SVC_LOG" ]; then grep -c 'event=schema_migration_start' "$SVC_LOG" || true; else echo 0; fi; }
+
 # The engine appends every boot to this one file (measured 2026-10-01: after the
 # second start it held both, 280 lines), and the checker refuses a log holding more
 # than one boot, since reading only the last would hide the first. So hand it ONE
@@ -138,34 +185,50 @@ _boot_slice() {
   awk '/event=schema_migration_start/ { n = NR } { l[NR] = $0 } END { if (n) for (i = n; i <= NR; i++) print l[i] }' "$1" > "$2"
   [ -s "$2" ] || _fail "no event=schema_migration_start in $1: nothing to hand the checker"
 }
+STARTS_BEFORE_1="$(_start_count)"
 env NX_LOCAL=1 "NEXUS_CONFIG_DIR=$ENGINE_HOME" "NEXUS_SERVICE_JAR=$JAR" uv run nx daemon service start \
   2>&1 | tee "$LOGS/start-1.log" || _fail "walk 1: nx daemon service start failed (see $LOGS/start-1.log)"
 [ -f "$SVC_LOG" ] || _fail "no engine log at $SVC_LOG after the start"
+_starts_grew_by_one "$STARTS_BEFORE_1" "$(_start_count)" \
+  || _fail "walk 1: the engine log went from $STARTS_BEFORE_1 to $(_start_count) schema_migration_start lines, not +1; the slice below would re-read an earlier boot"
 _boot_slice "$SVC_LOG" "$LOGS/walk1.engine.log"
 
 ROWS_AFTER_1="$(_walk_rows)"
 echo "[twowalk] public.databasechangelog rows after walk 1: $ROWS_AFTER_1"
-NEW_IN_WALK_1=$((ROWS_AFTER_1 - ROWS_BEFORE_1))
-if [ "$NEW_IN_WALK_1" -gt 0 ]; then
-  WALK1_MODE=(--expect-new "$NEW_IN_WALK_1")
-  echo "[twowalk] walk 1 recorded $NEW_IN_WALK_1 changeset(s): pinning --expect-new $NEW_IN_WALK_1"
-else
-  # The tree carries nothing beyond the engine that provisioned the database, so
-  # walk 1 is itself a no-op. Say so and check it as one; never run it unpinned.
-  WALK1_MODE=(--noop)
-  echo "[twowalk] NOTE: this tree adds no changeset over the provisioning engine; walk 1 is checked as a no-op (nothing here exercises a changeset-applying walk)"
-fi
+WALK1_PLAN="$(_walk1_mode "$ROWS_BEFORE_1" "$ROWS_AFTER_1")"
+case "$WALK1_PLAN" in
+  "recorded "*)
+    # Rows added = changesets the walk recorded = new + mark_ran (a MARK_RAN-guarded
+    # changeset adds a row without executing), hence --expect-recorded.
+    WALK1_WORD="recorded"
+    WALK1_MODE=(--expect-recorded "${WALK1_PLAN#recorded }")
+    echo "[twowalk] walk 1 added ${WALK1_PLAN#recorded } row(s): pinning --expect-recorded ${WALK1_PLAN#recorded }"
+    ;;
+  noop)
+    # The tree carries nothing beyond the engine that provisioned the database, so
+    # walk 1 is itself a no-op. Check it as one, and say so on the final line.
+    WALK1_WORD="noop"
+    WALK1_MODE=(--noop)
+    echo "[twowalk] NOTE: this tree adds no changeset over the provisioning engine; walk 1 is checked as a no-op and the final line will say the changeset-applying path was NOT exercised"
+    ;;
+  *) _fail "public.databasechangelog shrank across walk 1 ($ROWS_BEFORE_1 -> $ROWS_AFTER_1)" ;;
+esac
 
 echo "[twowalk] walk 1 assertions"
 uv run python "$CHECK" walk --engine-log "$LOGS/walk1.engine.log" --migration-role "$MIGRATION_ROLE" \
   "${WALK1_MODE[@]}" ${REEXECUTED_ARGS[@]+"${REEXECUTED_ARGS[@]}"} || _fail "walk 1 assertions failed"
-_check_schema "after walk 1" --compare-settings "$SETTINGS_FILE"
+# The independent assert: the table now holds exactly the changesets the tree carries.
+_check_schema "after walk 1 (rows equal the tree's changeSet count)" \
+  --expect-rows "$TREE_CHANGESETS" --compare-settings "$SETTINGS_FILE"
 
 echo "── 3/4 Walk 2: stop and restart the same jar, nothing may apply ──"
 NX_LOCAL=1 NEXUS_CONFIG_DIR="$ENGINE_HOME" uv run nx daemon service stop \
   || _fail "could not stop the service between walks"
+STARTS_BEFORE_2="$(_start_count)"
 env NX_LOCAL=1 "NEXUS_CONFIG_DIR=$ENGINE_HOME" "NEXUS_SERVICE_JAR=$JAR" uv run nx daemon service start \
   2>&1 | tee "$LOGS/start-2.log" || _fail "walk 2: nx daemon service start failed (see $LOGS/start-2.log)"
+_starts_grew_by_one "$STARTS_BEFORE_2" "$(_start_count)" \
+  || _fail "walk 2: the engine log went from $STARTS_BEFORE_2 to $(_start_count) schema_migration_start lines, not +1; the slice would re-read boot 1"
 _boot_slice "$SVC_LOG" "$LOGS/walk2.engine.log"
 
 echo "[twowalk] walk 2 assertions (--noop)"
@@ -175,4 +238,4 @@ _check_schema "after walk 2 (row count unchanged)" --expect-rows "$ROWS_AFTER_1"
 
 echo "── 4/4 Verdict ──"
 GATE_OK=1
-echo "TWO-WALK CHECK PASSED"
+_final_sentinel "$WALK1_WORD"

@@ -202,5 +202,73 @@ classify "empty output -> not a refusal" no ''
 classify "a client's own 'ownerless' prose, no engine refusal -> not a refusal" no \
   'DryRunStoreError: a dry run was handed a store that is not a throwaway one; an ownerless upsert-chunks request would be refused'
 
+# --- the call sites: the journeys must SET STORE_REFUSED / MD_REFUSED from their own output ---
+# The cases above inject those variables and the classifier cases call the function bare, so
+# replacing the call in the script with `if :;` left every one green (round 3 code L2). These
+# run the REAL journey lines (from the output assignment through the _journey_evidence call)
+# with `_client_nx` stubbed to print canned client output, and read the variable they set.
+sed -n '/^STORE_PUT_OUT=/,/^_journey_evidence "store put"/p' "$GATE" > "$TMP/store_seg.sh"
+sed -n '/^MD_OUT=/,/^_journey_evidence "index md"/p' "$GATE" > "$TMP/md_seg.sh"
+sed -n '/^_scrub_console_line() {/,/^}/p' "$GATE" > "$TMP/scrub.sh"
+sed -n '/^_journey_evidence() {/,/^}/p' "$GATE" > "$TMP/evidence.sh"
+for f in store_seg md_seg scrub evidence; do
+  if [ "$(wc -l < "$TMP/$f.sh")" -lt 3 ]; then
+    FAIL=$((FAIL + 1)); echo "[FAIL] could not extract $f from $GATE"
+  fi
+done
+
+# site <label> <store|md> <want-flag 0|1> <canned client output>
+site() {
+  local label="$1" which="$2" want="$3" canned="$4" got seg var
+  if [ "$which" = store ]; then seg="$TMP/store_seg.sh"; var=STORE_REFUSED; else seg="$TMP/md_seg.sh"; var=MD_REFUSED; fi
+  # shellcheck disable=SC2034  # read by the sourced journey segment
+  got="$(
+    LOGS="$TMP" WORK="$TMP" RUN_ID=1 STORE_TITLE=t MD_FIXTURE="$TMP/fixture.md" CANNED="$canned"
+    export CANNED
+    STORE_REFUSED=0; MD_REFUSED=0
+    _client_nx() { printf '%s\n' "$CANNED"; }
+    # shellcheck disable=SC1090
+    source "$TMP/classifier.sh"; source "$TMP/scrub.sh"; source "$TMP/evidence.sh"
+    # shellcheck disable=SC1090
+    source "$seg" > /dev/null 2>&1
+    eval "echo \$$var"
+  )"
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS + 1)); echo "[ok]   call site: $label"
+  else
+    FAIL=$((FAIL + 1)); echo "[FAIL] call site: $label: $var want $want, got '$got'"
+  fi
+}
+site "store put naming the refusal sets STORE_REFUSED=1" store 1 "$STORE_PUT_7_67_0"
+site "store put failing with an HTTP 500 leaves STORE_REFUSED=0" store 0 'POST /v1/vectors/store-put failed: HTTP 500: internal error'
+site "index md naming the refusal sets MD_REFUSED=1" md 1 "$INDEX_MD_7_67_0"
+site "index md failing for another reason leaves MD_REFUSED=0" md 0 'httpx.ConnectError: [Errno 61] Connection refused'
+
+# evidence <label> <canned output> <want-substring|-> <must-not-contain|->
+evidence() {
+  local label="$1" canned="$2" want="$3" unwanted="$4" out
+  out="$( source "$TMP/classifier.sh"; source "$TMP/scrub.sh"; source "$TMP/evidence.sh"; _journey_evidence "store put" "$canned" )"
+  if { [ "$want" = "-" ] || [[ "$out" == *"$want"* ]]; } && { [ "$unwanted" = "-" ] || [[ "$out" != *"$unwanted"* ]]; }; then
+    PASS=$((PASS + 1)); echo "[ok]   evidence: $label"
+  else
+    FAIL=$((FAIL + 1)); echo "[FAIL] evidence: $label: want '$want', unwanted '$unwanted', got:"
+    printf '%s\n' "$out" | sed 's/^/         /'
+  fi
+}
+evidence "a refusal prints its own line" "$STORE_PUT_7_67_0" "refusal line: event='store_put_ghost_register_compensated'" -
+evidence "no refusal prints the last non-empty line" $'first line\nsecond line\n\n' "last output line: second line" "first line"
+evidence "a bearer token in the client output is redacted" \
+  $'Error: HTTP 401\nrequest failed with Authorization: Bearer abc123SECRETvalue for /v1/x' "[redacted]" "abc123SECRETvalue"
+evidence "a key=value secret is redacted" 'config error: api_key=sk-live-0123456789 rejected' "[redacted]" "sk-live-0123456789"
+evidence "a long opaque run is masked" "boom d00e344f6ee625b0adf314b72e56d781fad7322be97f2f58f71db3a1993939aa" "[long-token-redacted]" "d00e344f6ee625b0adf314b72e56d781fad7322be97f2f58f71db3a1993939aa"
+evidence "control characters are dropped" $'weird\x1b[31mred\x07 text' "weird[31mred text" $'\x1b'
+long="$(printf 'x%.0s ' $(seq 1 400))"
+out_long="$( source "$TMP/classifier.sh"; source "$TMP/scrub.sh"; source "$TMP/evidence.sh"; _journey_evidence "index md" "$long" )"
+if [ "${#out_long}" -le 360 ]; then PASS=$((PASS + 1)); echo "[ok]   evidence: the printed line is capped (${#out_long} chars)"
+else FAIL=$((FAIL + 1)); echo "[FAIL] evidence: output not capped (${#out_long} chars)"; fi
+out_empty="$( source "$TMP/classifier.sh"; source "$TMP/scrub.sh"; source "$TMP/evidence.sh"; _journey_evidence "index md" "" )"
+if [ -z "$out_empty" ]; then PASS=$((PASS + 1)); echo "[ok]   evidence: empty output prints nothing"
+else FAIL=$((FAIL + 1)); echo "[FAIL] evidence: empty output printed '$out_empty'"; fi
+
 echo "$NAME: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

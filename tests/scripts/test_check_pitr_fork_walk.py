@@ -123,8 +123,43 @@ def test_a_log_holding_two_boots_exits_2_through_main(tmp_path: Path) -> None:
 
 def test_walk_with_neither_expect_new_nor_noop_is_unverifiable() -> None:
     """A no-op boot of the new image is self-consistent; without --expect-new it would pass walk 1."""
-    with pytest.raises(cw.Unverifiable, match="neither --expect-new"):
+    with pytest.raises(cw.Unverifiable, match="none of --expect-recorded"):
         cw.check_walk(_log(new=0, rex=12), "nexus_admin", None, False, 12)
+
+
+def test_expect_recorded_counts_a_mark_ran_changeset_that_expect_new_does_not() -> None:
+    """This tag's staging-6-drop-landing-schema is MARK_RAN-guarded: on a database whose staging
+    schema is already gone it is recorded (a row) but not executed. Three added changesets then log
+    new=2 mark_ran=1."""
+    log = _log(new=2, rex=12, mark=1)
+    rc, lines = cw.check_walk(log, "nexus_admin", None, False, 12, expect_recorded=3)
+    assert rc == 0, lines
+    assert any("new + mark_ran == 3 (executed 2, marked ran 1)" in line for line in lines)
+    rc, lines = cw.check_walk(log, "nexus_admin", 3, False, 12)
+    assert rc == 1
+    assert any("new_changesets = 2, expected 3" in line and "MARK_RAN" in line for line in lines)
+
+
+def test_expect_recorded_fails_on_the_wrong_total_and_on_a_no_op_boot() -> None:
+    rc, lines = cw.check_walk(_log(new=2, rex=12, mark=1), "nexus_admin", None, False, 12, expect_recorded=4)
+    assert rc == 1
+    assert any("= 3 (executed 2, marked ran 1), expected 4" in line for line in lines)
+    rc, _ = cw.check_walk(_log(new=0, rex=12), "nexus_admin", None, False, 12, expect_recorded=3)
+    assert rc == 1
+
+
+def test_expect_recorded_zero_is_unverifiable_without_noop() -> None:
+    with pytest.raises(cw.Unverifiable, match="--expect-recorded 0"):
+        cw.check_walk(_log(new=0, rex=12), "nexus_admin", None, False, 12, expect_recorded=0)
+
+
+def test_expect_recorded_through_the_cli(tmp_path: Path) -> None:
+    log = tmp_path / "walk1.log"
+    log.write_text(_log(new=2, rex=12, mark=1))
+    base = ["walk", "--engine-log", str(log), "--migration-role", "nexus_admin"]
+    assert cw.main([*base, "--expect-recorded", "3"]) == 0
+    assert cw.main([*base, "--expect-recorded", "2"]) == 1
+    assert cw.main([*base, "--expect-recorded", "0"]) == 2
 
 
 def test_a_no_op_boot_fails_walk_1_of_a_schema_carrying_tag() -> None:
@@ -280,6 +315,20 @@ def test_the_row_count_pin_catches_a_walk_that_added_rows() -> None:
     assert cw.check_schema(FakeDb(rows=290), "nexus_admin", 152)[0] == 1
 
 
+def test_the_min_rows_floor_catches_a_walk_that_recorded_fewer_than_the_tree_carries() -> None:
+    rc, lines = cw.check_schema(FakeDb(rows=490), "nexus_admin", None, min_rows=494)
+    assert rc == 1
+    assert any("fewer than the 494 changeSet(s)" in line for line in lines)
+    assert cw.check_schema(FakeDb(rows=494), "nexus_admin", None, min_rows=494)[0] == 0
+    # production holds rows beyond the tree's (superseded changesets, duplicate rows): a floor, not an equality
+    assert cw.check_schema(FakeDb(rows=530), "nexus_admin", None, min_rows=494)[0] == 0
+
+
+def test_min_rows_through_the_cli() -> None:
+    assert cw.main(["schema", "--migration-role", "nexus_admin", "--min-rows", "100"], runner=FakeDb(rows=152)) == 0
+    assert cw.main(["schema", "--migration-role", "nexus_admin", "--min-rows", "200"], runner=FakeDb(rows=152)) == 1
+
+
 def test_role_and_database_settings_are_reported_and_a_search_path_is_noted() -> None:
     db = FakeDb(settings=[("nexus_admin", "(all databases)", "search_path=nexus")])
     rc, lines = cw.check_schema(db, "nexus_admin", None)
@@ -340,6 +389,54 @@ def test_default_reexecuted_is_the_changelogs_run_always_count() -> None:
     assert cw.DEFAULT_REEXECUTED == _count_run_always_changesets()
 
 
+def _all_changeset_start_tags() -> int:
+    """Independent of the checker: every `<changeSet` start tag, by regex over the raw text of the
+    files the master includes (a multi-line tag has its name on the first line, so it counts once)."""
+    import re
+    resources = REPO_ROOT / "service" / "src" / "main" / "resources"
+    master = ET.parse(resources / "db" / "changelog" / "db.changelog-master.xml").getroot()
+    names = [e.get("file", "") for e in master.iter() if e.tag.rsplit("}", 1)[-1] == "include"]
+    total = 0
+    for name in names:
+        text = (resources / name).read_text()
+        text = re.sub(r"<!--.*?-->", "", text, flags=re.S)
+        total += len(re.findall(r"<changeSet\b", text))
+    return total
+
+
+def test_the_tree_changeset_count_matches_an_independent_regex_count() -> None:
+    assert cw.tree_changeset_count() == _all_changeset_start_tags() > 400
+
+
+def test_the_tree_changeset_count_reads_multiline_tags_and_ignores_comments(tmp_path: Path) -> None:
+    changelog = tmp_path / "db" / "changelog"
+    changelog.mkdir(parents=True)
+    (changelog / "db.changelog-master.xml").write_text(
+        '<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog">'
+        '<include file="db/changelog/a.xml"/><include file="db/changelog/b.xml"/></databaseChangeLog>'
+    )
+    ns = 'xmlns="http://www.liquibase.org/xml/ns/dbchangelog"'
+    (changelog / "a.xml").write_text(
+        f'<databaseChangeLog {ns}>\n<!-- <changeSet id="commented" author="x"> -->\n'
+        '<changeSet\n    id="one"\n    author="x"\n    runAlways="true">\n<comment>c</comment></changeSet>\n'
+        '<changeSet id="two" author="x"></changeSet></databaseChangeLog>'
+    )
+    (changelog / "b.xml").write_text(f'<databaseChangeLog {ns}><changeSet id="three" author="y"/></databaseChangeLog>')
+    assert cw.tree_changeset_count(tmp_path) == 3
+
+
+def test_an_unreadable_changelog_is_unverifiable_not_zero(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(cw.Unverifiable):
+        cw.tree_changeset_count(tmp_path)
+    assert cw.main(["changelog-count", "--resources", str(tmp_path)]) == 2
+    capsys.readouterr()
+
+
+def test_changelog_count_prints_the_number(capsys: pytest.CaptureFixture[str]) -> None:
+    assert cw.main(["changelog-count"]) == 0
+    assert capsys.readouterr().out.strip() == str(cw.tree_changeset_count())
+
+
 def test_nothing_else_hardcodes_the_run_always_count() -> None:
     """two-walk-check.sh and the skill defer to the checker's default."""
     script = (REPO_ROOT / "tests" / "e2e" / "two-walk-check.sh").read_text()
@@ -389,7 +486,11 @@ def test_the_local_rehearsal_runs_the_same_assertions_on_two_boots() -> None:
     assert "--save-settings" in text and text.count("--compare-settings") == 2
     # the engine appends every boot to one log; the checker refuses two boots in a file
     assert "_boot_slice" in text and text.count("_boot_slice \"$SVC_LOG\"") == 2
-    assert "--expect-new" in text and "--noop" in text
+    assert "--expect-recorded" in text and "--noop" in text
+    # the independent source: the tree's own changeset count, asserted against the table after walk 1
+    assert "changelog-count" in text and '--expect-rows "$TREE_CHANGESETS"' in text
+    # each start must add exactly one schema_migration_start, or a slice could re-read an earlier boot
+    assert text.count('_starts_grew_by_one "$STARTS_BEFORE_') == 2
 
 
 def test_the_engine_release_skill_names_the_script() -> None:

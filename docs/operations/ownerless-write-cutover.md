@@ -34,7 +34,16 @@ which fails before the push instead of at the redeploy. It does not catch a vali
 one: `enforce` on the first deploy boots fine and refuses every legacy write. For that, the
 conexus relay and arming checklist for the first deploy carries an assertion, run against the
 booted image or the staged parameter before the push: `/v1/status` `ownerless_write_mode`
-must equal `log-only`. The code default (unset or blank is `log-only`) is pinned by the
+must equal `log-only`. **That assertion is a conexus-owned hold-the-push line, and nothing in
+this repo checks it.** Owner: conexus. Step: image built and redeploy staged, before the paired
+client tag is pushed. Evidence: the value they read, in their arming reply. It is not a field on
+the `docs/release-arming/` attestation because that file records deploy facts conexus re-checks
+at its own flip (image digest, parameter version): the mode is one more property of a deploy
+that has not happened at tag push, so a nexus reader would only echo conexus's claim; a
+required field no writer emits yet fails every paired tag until conexus's writer changes (a
+repo this side cannot see or test), and an optional field asserts nothing; and
+`--paired-deploy-auto` can skip the battery that would read it. The nexus-side backstop comes
+after the harm window, not before it: the gate leg below, run after the first deploy. The code default (unset or blank is `log-only`) is pinned by the
 engine's own test (`OwnerlessWriteRefusalTest`, `anUnsetModeBootsLogOnly_andAnExplicitEnforceBootsEnforce`);
 what only the deployment can show is what conexus wired, so the check belongs on the
 deployment's own `/v1/status`.
@@ -82,7 +91,8 @@ never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` 
    conexus's relay and arming checklist) and again after the deploy with the gate:
    `ownerless_write_mode` must read `log-only`, because a mis-wired parameter that reads
    `enforce` refuses every legacy write from every host at the first deploy, and only
-   the pre-push check can stop that before it happens.
+   the pre-push check can stop that before it happens (a conexus-owned line, see "The knob":
+   the post-deploy gate sees it only after the harm).
 2. **Upgrade and restart every client.** On each machine behind the two addresses: upgrade
    conexus to the paired release, then restart every long-lived process that holds the old
    code. Upgrading the package on disk does not change a running process.
@@ -117,7 +127,9 @@ never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` 
    `route|tenant|collection` per minute (with `suppressed_since_last`), and it carries only
    the first unowned chunk's metadata and a sample of chashes, so it names one source per
    request. The counter is not limited; use it for counts and the log to find callers.
-4. **Flip to `enforce`.** Only with a positive control, because the engine logs only
+4. **Flip to `enforce`.** This step is its own bead, **nexus-z0o2p.40**, and it FOLLOWS the
+   cut: the engine-release skill's Step 6.1 and Step 7 sign off the cut against `log-only` and
+   do not wait for the flip, so a cut is never held open for it. Only with a positive control, because the engine logs only
    would-refuse lines and silence is also what a powered-off host looks like. Proceed
    when all of these hold, for Sam to confirm:
    - the WAF or ALB request counts for `store-put` and `upsert-chunks` are **non-zero for
@@ -133,7 +145,8 @@ never sends it: the census has `curl` (6 `store-put`) and `python-httpx/0.28.1` 
    soak evidence. Save the `/v1/status` body and the CloudWatch query result for the soak
    window to the release record (the bead's comment or a T2 note) before the redeploy.
    Then set the parameter to `enforce` and redeploy the **same tag**; no new tag is cut for
-   the flip. Confirm `ownerless_write_mode` reads `enforce` with the gate in "The knob".
+   the flip. Confirm `ownerless_write_mode` reads `enforce` with the gate in "The knob"
+   (`NX_EXPECTED_OWNERLESS_WRITE_MODE=enforce`; that check belongs to nexus-z0o2p.40).
 5. **If a writer turns up after the flip.** Its 422 error text says to upgrade conexus and
    restart `nx-mcp` and Claude Code sessions. To buy time, set the parameter back to
    `log-only` and redeploy the same tag; nothing else changes. The redeploy is not instant
