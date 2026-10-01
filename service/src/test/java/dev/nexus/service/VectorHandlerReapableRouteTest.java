@@ -305,7 +305,9 @@ class VectorHandlerReapableRouteTest {
         String col = "knowledge__reaproute-grace__minilm-l6-v2-384__v1";
         register(t, col);
         String twoHours = chunk(t, col, "two-hours", Duration.ofHours(2), Map.of());
-        String fresh = chunk(t, col, "fresh", Duration.ZERO, Map.of());
+        // Ten minutes, not zero: the fixture stamps the JVM clock and the predicate reads the
+        // database clock (a container VM on another host can lag), so "now" is not a safe edge.
+        String fresh = chunk(t, col, "fresh", Duration.ofMinutes(10), Map.of());
 
         assertThat(chashes(reapable(TOKEN_A, col, Map.of()))).as("default 30 days: nothing").isEmpty();
         var oneHour = reapable(TOKEN_A, col, Map.of("grace_seconds", 3600));
