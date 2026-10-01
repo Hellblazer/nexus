@@ -159,14 +159,41 @@ This repo is public and has four self-hosted runners:
 |---|---|---|
 | `hellmini` | Mac mini, macOS user `ghrunner` | release jobs: the engine-service release legs, the PG-bundle cache seed (Sam, 2026-09-28, nexus-yd9po) |
 | `hellmini-ci` | same Mac mini, macOS user `ghci` | the Service CI Java job, on owner pushes only (Sam, 2026-09-30, nexus-f5i1m) |
-| `qwen-linux` (`[self-hosted, Linux, X64]`) | host not recorded in this repo | no workflow in this repo; intended (Sam, 2026-09-30) |
+| `qwen-linux` (labels `self-hosted`, `Linux`, `X64`, `qwen-linux`) | qwentescence, WSL, Linux user `ghci` (private TMPDIR) | the full Python pytest suite as one `-n 12` job (`test-qwen` in `ci.yml`), on owner pushes to develop only (Sam, 2026-10-01) |
 | `gtr-windows` (`[self-hosted, X64, Windows]`, registered earlier as `qwen-windows`) | host not recorded in this repo | no workflow in this repo; intended (Sam, 2026-09-30) |
 
 The two qwen runners carry the generic self-hosted labels. Any job in any
 workflow file that says `runs-on: self-hosted` (or an array with `Linux` or
 `Windows`) lands on one of them, so an approved fork-PR run could reach them by
 naming the generic label. `hellmini` and `hellmini-ci` are bare custom labels
-(registered with `--no-default-labels`), so a job has to name them.
+(registered with `--no-default-labels`), so a job has to name them. `qwen-linux`
+also has a custom label of its own (read from the repository's runner list,
+2026-10-01); the one job that targets it names all four labels.
+
+**CI pytest routing (qwen-linux).** `ci.yml`'s comments are the one
+authoritative copy; this is the summary. The `route` step of the `changes` job
+decides once, with the same owner rule as Service CI (push event, account id and
+triggering actor both the repo owner), and publishes `ci_runner`. On an owner
+push to develop it is `qwen-linux`: the `test-qwen` job runs the whole default
+suite as one `uv run pytest tests/ -n 12` on the qwen runner (the runner's own
+uv, JDK and Docker, no `setup-*` action; `scripts/build-gate-jar.sh` for the
+stamped jar) and the six hosted shards and `service-jar` are skipped. Every
+`pull_request` and any other actor's push gets `ubuntu-latest`: the hosted
+shards run, `test-qwen` is skipped. Setting the repository variable
+`QWEN_CI_PUSH_RUNNER` to exactly `ubuntu-latest` sends owner pushes back to the
+hosted shards with no code change; unset, any other value, `hellmini` included,
+or a typo all mean `qwen-linux`, and the job's `runs-on` is a literal label set,
+so the variable cannot reach a release or Service CI runner. `pytest-gate` reads
+`ci_runner` and requires the chosen path `success` and the other `skipped`, so a
+qwen job that was skipped, cancelled, timed out or never reported fails the
+required check, and `scripts/ci_status.py` expects the job on the develop
+topic. The lint, census and Service CI legs are unchanged. Like `hellmini-ci`,
+the runner keeps state between jobs (uv, Maven and model caches in `ghci`'s
+home), and a hand-run suite by the host's `nxtest` user can overlap a CI job on
+the same box. The host also serves production inference, so a suite run costs it
+about 10% decode while it runs (accepted by Sam). A qwen-only red on push has no
+PR-side twin: PRs run the hosted shards on Linux amd64, the same platform, but
+as six `pytest-split` shards rather than one `xdist` run.
 
 **Service CI routing.** `service-ci.yml`'s comments are the one authoritative
 copy of how it works; this is the summary. An owner push (account id and
@@ -188,7 +215,8 @@ The controls are the collaborator list (owner only since 2026-09-30, when four
 write collaborators were removed), the fork-PR approval policy (all external
 contributors need an approval click), and branch protection. A merged external
 or Dependabot PR runs its code on `hellmini-ci` at the owner's next `service/**`
-push, by design.
+push, and on `qwen-linux` at the owner's next push to develop that changes code,
+by design.
 
 **Isolation is intended, not proven by prose.** `ghci` is a separate macOS user,
 not a sandbox. The evidence is a green run of
@@ -205,7 +233,10 @@ Both runners keep state between jobs (Maven `~/.m2`, tool caches); a job on
 - any `runs-on` that names a self-hosted label, `self-hosted`, `hellmini`,
   `hellmini-ci`, `qwen-linux` or `gtr-windows`;
 - `service/` tests and `pom.xml` (merged, they run on `hellmini-ci` at the next
-  owner push).
+  owner push);
+- anything under `tests/`, `src/`, `scripts/`, `pyproject.toml` or `uv.lock`
+  (merged, it runs on `qwen-linux` at the next owner push to develop, unless
+  `QWEN_CI_PUSH_RUNNER` is `ubuntu-latest`).
 
 **Agents never approve a fork-PR run** (`POST /actions/runs/{id}/approve`), even
 when they hold the owner's `gh` token. Report the run id and stop; the approval
@@ -505,7 +536,12 @@ things to avoid carefully; they are impossible.
    detection` has completed green (`EXPECTED_JOBS`); with no row it adds a
    `missing` one, `pending` for 30 minutes after the detector finished and
    `failed` after that. Without it, a Java job left queued for an offline
-   `hellmini-ci` read green once its `queued` post expired at six hours.
+   `hellmini-ci` read green once its `queued` post expired at six hours. CI's
+   `pytest (qwen-linux full suite)` job is expected the same way, anchored on
+   `doc-only fast lane predicate`: it posts `queued` or `completed skipped` on
+   every develop push, and a commit whose CI run predates the job reads `failed`
+   on its missing row once the anchor is 30 minutes old (the board's reading of
+   a run that never had the job, not a red suite).
    Subscribe once per session with
    `mcp__plugin_conexus_nexus__tuple_subscribe("board/ci/nexus-develop")`;
    delivery starts at the subscribe time, and the posts of one wait

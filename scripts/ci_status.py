@@ -94,7 +94,11 @@ A push run of Service CI exists only when ``service/**`` changed, so on the deve
 topic the Java job is always expected. When the row is missing the fold adds one
 with state ``missing``: ``pending`` for ``MISSING_JOB_GRACE_S`` after the anchor
 completed, ``failed`` after that. It adds nothing for a run whose own row says
-``cancelled``. For any other topic nothing is expected.
+``cancelled``. For any other topic nothing is expected. CI's qwen-linux suite job
+is expected the same way (it posts ``queued`` or ``completed skipped`` on every
+develop push); a commit whose CI run predates that job has no such row and reads
+``failed`` here once its anchor is older than the grace, which is the board's
+reading of a run that never had the job, not a red suite.
 
 Exit status: 0 when every job completed green, 1 when any job failed,
 2 when nothing failed but something is still pending, 3 when the topic has
@@ -143,6 +147,14 @@ SUPERSEDE_SKEW_S: int = 30
 #: the names against ``.github/workflows/service-ci.yml``.
 EXPECTED_JOBS: dict[str, dict[str, str]] = {
     "Service CI": {"Java tests + jOOQ codegen drift guard": "service change detection"},
+    # CI's qwen-linux job (owner pushes to develop run the whole suite there). It posts
+    # on EVERY develop push once ``changes`` has finished: ``queued`` when it runs, or
+    # ``completed skipped`` when the route sent the suite to the hosted shards or the
+    # diff was doc-only (a skipped job posts, measured on the board 2026-10-01). So a
+    # missing row means the post was lost or has expired, never a legitimate skip.
+    # Without this entry a job left queued for an offline runner reads green once its
+    # ``queued`` post expires at 6 h, because pytest-gate (which needs it) never queues.
+    "CI": {"pytest (qwen-linux full suite)": "doc-only fast lane predicate"},
 }
 #: How long an expected job may go without any post once its anchor completed. The job
 #: posts ``queued`` within seconds of the anchor finishing; a runner that is offline

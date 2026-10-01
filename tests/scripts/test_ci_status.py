@@ -621,6 +621,50 @@ def test_the_expected_java_job_name_matches_the_workflow() -> None:
         assert expected in names and anchor in names
 
 
+# CI's qwen-linux job: a queued post for an offline runner expires at 6 h and pytest-gate
+# (which needs the job) never queues, so without an expectation the commit reads green.
+
+QWEN_JOB = "pytest (qwen-linux full suite)"
+CHANGES_JOB = "doc-only fast lane predicate"
+CI_RUN = 36800000002
+
+
+def _ci(*, qwen: list | None = None) -> list:
+    kw = {"workflow": "CI", "run": CI_RUN}
+    posts = [_p(T(5), state="completed", conclusion="success", job=CHANGES_JOB, **kw)]
+    posts += [_p(T(sec), state=state, conclusion=concl, job=QWEN_JOB, **kw) for sec, state, concl in (qwen or [])]
+    return posts
+
+
+def test_the_expected_qwen_job_and_its_anchor_match_ci_yml() -> None:
+    import yaml
+
+    wf = yaml.safe_load((Path(__file__).resolve().parents[2] / ".github" / "workflows" / "ci.yml").read_text())
+    assert wf["name"] == "CI"
+    names = {j.get("name", k) for k, j in wf["jobs"].items()}
+    assert cs.EXPECTED_JOBS["CI"] == {QWEN_JOB: CHANGES_JOB}
+    assert QWEN_JOB in names and CHANGES_JOB in names
+
+
+def test_a_qwen_job_that_never_posted_reads_pending_then_failed_never_green() -> None:
+    posts = _ci()
+    grace = cs.MISSING_JOB_GRACE_S
+    by_job = {s.job: s for s in _fold_expected(posts, now=_at(60))}
+    assert (by_job[QWEN_JOB].state, by_job[QWEN_JOB].verdict) == ("missing", "pending")
+    assert cs.exit_code(_fold_expected(posts, now=_at(5 + grace + 1))) == cs.EXIT_FAILED
+    assert cs.exit_code(_fold_expected(posts, now=_at(6 * 3600 + 60))) == cs.EXIT_FAILED
+
+
+@pytest.mark.parametrize(("state", "conclusion", "verdict"), [
+    ("queued", None, "pending"), ("in_progress", None, "pending"),
+    ("completed", "skipped", "green"), ("completed", "success", "green"), ("completed", "failure", "failed"),
+])
+def test_a_posted_qwen_job_is_read_as_posted(state: str, conclusion: str | None, verdict: str) -> None:
+    by_job = {s.job: s for s in _fold_expected(_ci(qwen=[(10, state, conclusion)]), now=_at(6 * 3600))}
+    assert by_job[QWEN_JOB].verdict == verdict
+    assert by_job[QWEN_JOB].state != "missing"
+
+
 # ── against the real engine ─────────────────────────────────────────────────
 
 
