@@ -178,8 +178,8 @@ SUITES = [
     _Suite("scripts/mvnw-leased_test.sh", 22),
     # nexus-9a6io: the published-client gate's verdict section (RDR-223 P3.2
     # ownerless-write modes), extracted from the real script and run against
-    # canned /v1/status bodies. 18 cases when written.
-    _Suite("tests/e2e/published_client_write_gate_verdict_test.sh", 18),
+    # canned /v1/status bodies. 22 cases (18 + 4 ack-evidence cases, nexus-9a6io fix round).
+    _Suite("tests/e2e/published_client_write_gate_verdict_test.sh", 22),
 ]
 
 

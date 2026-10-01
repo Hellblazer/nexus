@@ -42,9 +42,11 @@ fi
 OLD="7.0.1"
 NEW="$FIXED"
 
-# run_case <label> <want-rc> <want-text|-> <client> <mode> <store_ok> <md_ok> <ack> <status-json>
+# run_case <label> <want-rc> <want-text|-> <client> <mode> <store_ok> <md_ok> <ack> <status-json> [store_refused=1] [md_refused=1]
+# store_refused / md_refused: 1 when that journey's own client output named the ownerless refusal.
 run_case() {
   local label="$1" want_rc="$2" want_text="$3" client="$4" mode="$5" store_ok="$6" md_ok="$7" ack="$8" status="$9"
+  local store_refused="${10:-1}" md_refused="${11:-1}"
   {
     echo 'set -euo pipefail'
     echo "FIXED_IN_VERSION=\"$FIXED\""
@@ -54,6 +56,8 @@ run_case() {
     echo "NX_EXPECTED_CLIENT_LAG=\"$ack\""
     echo "STORE_OK=$store_ok"
     echo "MD_OK=$md_ok"
+    echo "STORE_REFUSED=$store_refused"
+    echo "MD_REFUSED=$md_refused"
     echo 'FAIL_REASONS=("store put: probe failure" "index md: probe failure")'
     echo 'GATE_OK=0'
     echo 'SERVICE_PORT=1'
@@ -79,6 +83,7 @@ S_LOG_SEEN='{"ownerless_write_mode":"log-only","ownerless_writes_refused_total":
 S_LOG_QUIET='{"ownerless_write_mode":"log-only","ownerless_writes_refused_total":0,"ownerless_writes_would_refuse_total":0}'
 S_LOG_REFUSED='{"ownerless_write_mode":"log-only","ownerless_writes_refused_total":2,"ownerless_writes_would_refuse_total":1}'
 S_ENF_SEEN='{"ownerless_write_mode":"enforce","ownerless_writes_refused_total":3,"ownerless_writes_would_refuse_total":0}'
+S_ENF_ONE='{"ownerless_write_mode":"enforce","ownerless_writes_refused_total":1,"ownerless_writes_would_refuse_total":0}'
 S_ENF_QUIET='{"ownerless_write_mode":"enforce","ownerless_writes_refused_total":0,"ownerless_writes_would_refuse_total":0}'
 S_NONE='{"status":"ok"}'
 
@@ -95,6 +100,15 @@ run_case "log-only, journeys fail, ack set, nothing refused -> ack refused (no e
 # --- enforce: the final posture --------------------------------------------
 run_case "enforce, old client, both journeys fail, refused counted, ack -> EXPECTED-INCOMPATIBLE (2)" \
   2 "EXPECTED-INCOMPATIBLE" "$OLD" enforce 0 0 "$LAG" "$S_ENF_SEEN"
+# nexus-9a6io fix round: the ack must not hide a failure that is not the refusal.
+run_case "enforce, store refused but index md failed for an unrelated reason (refused_total 3) -> ack refused (1)" \
+  1 "ack gap: the index md journey's output does not name the ownerless refusal" "$OLD" enforce 0 0 "$LAG" "$S_ENF_SEEN" 1 0
+run_case "enforce, index md refused but store put failed for an unrelated reason -> ack refused (1)" \
+  1 "ack gap: the store put journey's output does not name the ownerless refusal" "$OLD" enforce 0 0 "$LAG" "$S_ENF_SEEN" 0 1
+run_case "enforce, only ONE journey failed (the other succeeded), refused counted -> ack refused (1)" \
+  1 "ack gap: a journey succeeded" "$OLD" enforce 0 1 "$LAG" "$S_ENF_SEEN" 1 0
+run_case "enforce, both journeys name the refusal but the engine counted only one -> ack refused (1)" \
+  1 "fewer than the 2 refusals" "$OLD" enforce 0 0 "$LAG" "$S_ENF_ONE"
 run_case "enforce, old client, journeys fail, no ack -> FAILED (1) with the ack hint" \
   1 "re-run with NX_EXPECTED_CLIENT_LAG=$LAG" "$OLD" enforce 0 0 "" "$S_ENF_SEEN"
 run_case "enforce, old client, journeys fail, ack, but the engine refused nothing -> oracle fails" \
