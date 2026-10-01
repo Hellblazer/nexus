@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): every engine request names the client's version.
+"""RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the vector, T2, catalog and scratch clients name the client's version.
 
 The engine logs ``X-Nexus-Client-Version`` on its ``ownerless_chunk_write_*`` lines, and ``absent``
 when it is missing, so the log-only soak can tell which clients still write a chunk before its owner:
@@ -145,3 +145,49 @@ def test_the_httpx_scratch_store_sends_the_version() -> None:
         assert request.headers[CLIENT_VERSION_HEADER] == client_version()
     finally:
         store.close()
+
+
+# -- the scope of the claim ---------------------------------------------------
+
+#: Every module under ``src/nexus`` that sends the header, by import. A hook or the status probe is NOT
+#: here on purpose (``nexus.db`` costs ~690 ms to import and hooks fire on every prompt), so the docs say
+#: "the vector client, T2/catalog and scratch", never "every engine request".
+_SENDERS = {
+    "nexus/db/http_scratch_store.py",
+    "nexus/db/http_vector_client.py",
+    "nexus/db/t2/_refreshable_client.py",
+}
+
+
+def _modules_importing_client_identity() -> set[str]:
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "src"
+    found: set[str] = set()
+    for path in (src / "nexus").rglob("*.py"):
+        if path.name == "client_identity.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.ImportFrom) and node.module == "nexus.db.client_identity":
+                found.add(path.relative_to(src).as_posix())
+            elif isinstance(node, ast.Import) and any(a.name == "nexus.db.client_identity" for a in node.names):
+                found.add(path.relative_to(src).as_posix())
+    return found
+
+
+def test_the_senders_are_exactly_the_documented_set() -> None:
+    """A new sender, or a hook that starts importing the module, changes the claim the ledger, the
+    CHANGELOG and ``client_identity`` make: this fails until the claim and ``_SENDERS`` move together."""
+    assert _modules_importing_client_identity() == _SENDERS
+
+
+def test_no_document_claims_every_engine_request_sends_the_header() -> None:
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("docs/wire-contract-pending.md", "CHANGELOG.md", "src/nexus/db/client_identity.py"):
+        flat = " ".join((root / rel).read_text().split())
+        assert "X-Nexus-Client-Version" in flat, f"{rel}: no mention, the pin is vacuous"
+        assert "every engine request" not in flat, rel
+        assert "on every engine request" not in flat, rel

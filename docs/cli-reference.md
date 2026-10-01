@@ -4162,8 +4162,9 @@ demoted-not-deleted primitives — still callable, out of `--help`:
 | Demoted verb | Its only job was | Now done by |
 |---|---|---|
 | `nx migration [--clear-state [--force]]` | migration-sentinel inspect/recover | crash-recovery plumbing behind the trigger |
-| `nx collection backfill-hash` | upgrade-era `chunk_text_hash` repair | the ladder's manifest heal |
 | `nx hooks update-all` | manual managed-hook sweep | `nx upgrade` refreshes managed hooks itself |
+
+`nx collection backfill-hash` is gone (RDR-223 P3 follow-up): it called `col.upsert`, which the service-backed collection handle does not have, and in the PG era the chunk id is the chash, so there is no `chunk_text_hash` metadata to repair.
 
 **`nx migration`** (RDR-159) inspects or recovers the cross-process
 migration-sentinel file that a crashed migration/rekey can leave stranded,

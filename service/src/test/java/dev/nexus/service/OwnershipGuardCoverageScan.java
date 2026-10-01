@@ -14,9 +14,12 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the ownership guard is opt-in at the repository (a null
  * guard is the unguarded write the contract tests and fixtures rely on), so a handler that forgets
- * to pass one, or a new route that writes chunks, would fail OPEN. This scan closes that by
- * reading the main sources: every call of a guarded repository method outside the repository itself
- * must be in {@code VectorHandler} and must build its guard with {@code ownershipGuard(}.
+ * to pass one would fail OPEN. This scan closes that for the four guarded methods named in
+ * {@code GUARDED_METHODS}, by a text match over the main sources: every call of one of them
+ * outside the repository itself must be in {@code VectorHandler} and must build its guard with
+ * {@code ownershipGuard(}. It is a name match, not a proof about routes: a new repository method
+ * that writes chunks, a direct SQL insert, or a changeset that inserts chunks is invisible to it
+ * (see the SQL chunk inserters named in {@code OwnershipGuard}).
  *
  * <p>Method references are caught too: a {@code repo::upsertChunks} cannot carry a guard, so any
  * {@code ::<guarded method>} outside the repository fails, in any file. A call through reflection

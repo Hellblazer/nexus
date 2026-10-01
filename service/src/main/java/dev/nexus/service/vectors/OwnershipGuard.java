@@ -12,10 +12,15 @@ import java.util.Objects;
  * <p>The check is requested by the HANDLER, through this guard, and is not part of the
  * repository's write methods: a repository method called without a guard (the contract and
  * fixture tests, the migration ingest) writes ownerless chunks as it always did.
- * {@code OwnershipGuardCoverageScan} scans the main sources so a handler cannot call a guarded
- * repository method with a null guard, or add a new chunk-write route that never builds one. The
- * scan matches direct calls and method references to the guarded methods, as text, so it also reads
- * comments: name a guarded method in prose without the call or the double-colon syntax.
+ * {@code OwnershipGuardCoverageScan} scans the main sources, by name, for the four guarded
+ * repository methods ({@code upsertChunksWithTokens}, {@code upsertChunksWithVectors},
+ * {@code putWithTokens}, {@code upsertChunks}), so a handler cannot call one of them with a null
+ * guard. It matches direct calls and method references as text, so it also reads comments: name a
+ * guarded method in prose without the call or the double-colon syntax. It does not see a chunk
+ * write that goes through another method or through direct SQL. Known writers outside the guard:
+ * the SQL chunk inserters in the gc restore and quarantine changesets (catalog-023, 028, 033, 037,
+ * 039, 042, 043; hygiene-002, 005, 008), and the quarantine restore verb planned under
+ * nexus-wbfpw.49, which restores ownerless chunks by design.
  *
  * @param mode          enforce or log-only
  * @param route         the route name for the error and the log, e.g. {@code upsert-chunks}

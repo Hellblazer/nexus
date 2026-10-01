@@ -178,8 +178,8 @@ nx upgrade
 - **This surface adds no upgrade logic.** It routes to `nx upgrade`. Anything
   needing orchestration belongs in `nexus.upgrade_ladder`, not here.
 - **Do not reach for the demoted primitives.** `nx guided-upgrade`,
-  `nx migrate-to-service`, `nx migration`, `nx migration-audit`, and
-  `nx collection backfill-hash` are internal primitives — callable, but out of
+  `nx migrate-to-service`, `nx migration` and `nx migration-audit`
+  are internal primitives — callable, but out of
   the user story because the ladder does their job. If one seems necessary,
   that is a finding worth reporting, not a step to take.
 - **A new upgrade verb is never the answer.** New data axes become rungs.

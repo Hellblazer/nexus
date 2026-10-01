@@ -5,7 +5,7 @@ HttpVectorClient.get_collection re-lists every collection (a /v1/vectors/stats
 pass, 3.5s measured on a 111-collection tenant) to check existence. The
 name-vs-embed-dim probe paid that per collection (fixed in 62536f27c); the
 review found the same loop in other doctor scans, the T3-orphan classifier
-and `nx collection backfill-hash --all`. The consequence measured here is
+and `nx collection backfill-hash --all` (deleted since: RDR-223 P3 follow-up). The consequence measured here is
 the number of tenant-wide listings each check makes.
 """
 from __future__ import annotations

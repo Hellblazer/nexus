@@ -239,7 +239,7 @@ def fallback_chash_scan(
             "resolve_chash_fallback_scanning",
             chash_prefix=hex_chash[:16],
             collection_count=len(all_cols),
-            guidance="index content (nx index ...); on a pre-migration SQLite install, 'nx collection backfill-hash --all' reconciles the router",
+            guidance="index content (nx index ...)",
         )
         _chash_fallback_warned = True
 

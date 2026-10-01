@@ -27,9 +27,13 @@ pytestmark = pytest.mark.lint
 
 REPO = Path(__file__).resolve().parent.parent
 
+#: A part the fold cannot resolve (a variable, a call, a formatted value) becomes this character, so a
+#: route assembled as ``base + "/v1/vectors/upsert-" + "chunks"`` still reads as the route.
+_UNKNOWN = "\x00"
+
 _ROUTE = re.compile(
     r"/v1/vectors/(?:upsert-chunks|store-put|upsert-reference-only)"
-    r"|^/(?:upsert-chunks|store-put|upsert-reference-only)$"
+    r"|(?:^|\x00)/(?:upsert-chunks|store-put|upsert-reference-only)$"
 )
 _METHODS = frozenset({
     "upsert_chunks", "upsert_chunks_with_embeddings",
@@ -90,6 +94,24 @@ def _docstring_ids(tree: ast.AST) -> set[int]:
     return ids
 
 
+def _fold(node: ast.AST) -> str | None:
+    """The string an expression builds, with ``_UNKNOWN`` for parts it cannot resolve, or None when
+    the expression is not string-shaped. Folds ``"a" + "b"`` and f-strings, which a lint that looks
+    only at ``ast.Constant`` nodes misses (a split literal reaches the route unseen)."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _fold(node.left), _fold(node.right)
+        if left is None and right is None:
+            return None
+        return (left if left is not None else _UNKNOWN) + (right if right is not None else _UNKNOWN)
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else _UNKNOWN for v in node.values
+        )
+    return None
+
+
 def _python_hits(path: Path) -> int:
     try:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -98,7 +120,10 @@ def _python_hits(path: Path) -> int:
     doc = _docstring_ids(tree)
     hits = 0
     for n in ast.walk(tree):
-        if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in doc and _ROUTE.search(n.value):
+        if id(n) in doc:
+            continue
+        folded = _fold(n) if isinstance(n, (ast.Constant, ast.BinOp, ast.JoinedStr)) else None
+        if folded is not None and _ROUTE.search(folded):
             hits += 1
         elif isinstance(n, ast.Call):
             f = n.func
@@ -116,16 +141,22 @@ def _shell_hits(path: Path) -> int:
     )
 
 
-def _scan() -> dict[str, int]:
+def _scan(repo: Path = REPO, me: Path = Path(__file__)) -> dict[str, int]:
+    """``repo`` is a RESOLVED path, so the walk yields resolved files; ``me`` is compared resolved too,
+    because ``__file__`` keeps a symlinked checkout's spelling and an unresolved compare would count
+    this file's own route literals as an offender."""
     found: dict[str, int] = {}
-    files = [p for p in (REPO / "tests").rglob("*") if p.suffix in (".py", ".sh") and p.is_file()]
-    files.append(REPO / "service" / "native-smoke.sh")
+    files = [p for p in (repo / "tests").rglob("*") if p.suffix in (".py", ".sh") and p.is_file()]
+    smoke = repo / "service" / "native-smoke.sh"
+    if smoke.is_file():
+        files.append(smoke)
+    here = me.resolve()
     for p in files:
-        if p == Path(__file__):
+        if p.resolve() == here:
             continue
         n = _python_hits(p) if p.suffix == ".py" else _shell_hits(p)
         if n:
-            found[str(p.relative_to(REPO))] = n
+            found[str(p.relative_to(repo))] = n
     return found
 
 
@@ -154,3 +185,33 @@ def test_the_scan_is_not_vacuous() -> None:
     assert "tests/db/test_http_vector_client.py" in found
     assert "tests/_chunk_seed.py" not in found, "the seeder must not reference the routes in code"
     assert "service/native-smoke.sh" in found, "native-smoke re-posts owned chashes; the scan must see it"
+
+
+def test_a_split_or_formatted_route_literal_is_seen(tmp_path: Path) -> None:
+    """The mutants a Constant-only walk let through: a route built by ``+`` or in an f-string."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_split.py").write_text('URL = "/v1/vectors/" + "upsert-chunks"\n')
+    (tests / "test_split3.py").write_text('def u(base):\n    return base + "/v1/vectors/upsert-" + "chunks"\n')
+    (tests / "test_fstring.py").write_text('def u(h):\n    return f"{h}/v1/vectors/store-put"\n')
+    (tests / "test_handler_relative.py").write_text('def u(p):\n    return p + "/upsert-chunks"\n')
+    (tests / "test_clean.py").write_text('URL = "/v1/vectors/" + "search"\nDOC = f"{1}/v1/catalog/x"\n')
+    found = _scan(repo=tmp_path.resolve(), me=Path("/nonexistent/me.py"))
+    assert set(found) == {
+        "tests/test_split.py", "tests/test_split3.py", "tests/test_fstring.py", "tests/test_handler_relative.py",
+    }
+
+
+def test_the_self_exclusion_holds_under_a_symlinked_checkout(tmp_path: Path) -> None:
+    """``__file__`` under a symlinked checkout is not the resolved path the walk yields; the lint's own
+    route literals must still not count against it."""
+    real = tmp_path / "real"
+    (real / "tests").mkdir(parents=True)
+    me_real = real / "tests" / "test_lint_itself.py"
+    me_real.write_text('ROUTE = "/v1/vectors/upsert-chunks"\n')
+    link = tmp_path / "link"
+    link.symlink_to(real, target_is_directory=True)
+    me_via_link = link / "tests" / "test_lint_itself.py"
+    assert me_via_link != me_real.resolve()  # the premise: the two spellings differ
+    assert _scan(repo=real.resolve(), me=me_via_link) == {}
+    assert _scan(repo=real.resolve(), me=Path("/nonexistent/me.py")) == {"tests/test_lint_itself.py": 1}

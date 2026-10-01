@@ -271,7 +271,8 @@ class TestCiteEmptyIndexShortCircuit:
                     ["any claim", "--against", "knowledge__nope"],
                 )
             assert result.exit_code == 2, result.output
-            assert "backfill-hash" in result.output
+            assert "index content first" in result.output
+            assert "backfill-hash" not in result.output  # the verb is deleted (RDR-223 P3 follow-up)
         finally:
             chash_index.close()
 

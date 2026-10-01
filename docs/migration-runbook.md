@@ -155,6 +155,24 @@ machinery that performed that migration no longer ships:
      left its local service running (`nx daemon service status`; stop it with
      `nx daemon service stop`). The pin's own engine (v0.1.52) must be the one
      it provisions, not a newer engine that no longer has the routes
+   - **Use a Postgres data directory no 7.x engine has booted on.** The nx-managed
+     cluster (`<pg_data>`, the directory that holds `pg.log`) is shared by every
+     engine version on the box, and an engine migrates the schema at boot. A 7.x
+     engine boot on that cluster has already applied the RDR-191 unified-chunks
+     changesets (the per-dimension `chunks_384/768/1024` tables folded into
+     `nexus.chunks`), and a boot of an engine at or after the staging-retirement
+     tag (nexus-z0o2p.27) has already dropped the `staging` schema, which the
+     pin's `/v1/staging` landing writes into. The pin's v0.1.52 engine cannot undo
+     either, and it is not expected to land through those routes on such a
+     cluster. So: if a 7.x engine has run on this box, do not point the pin at
+     that cluster. Move the cluster aside (stop the service first, rename
+     `<pg_data>`; keep the old directory until the hop is done, because it also
+     holds whatever the 7.x install stored) so the pin initialises a fresh one,
+     and expect the 7.x data to be absent from the new cluster. **This is read
+     from the current changelog, not measured**: nobody has booted
+     v0.1.52 against a cluster a current engine already migrated and counted what
+     it did, and there is no measured alternative to the fresh cluster. A box
+     that never ran a 7.x engine is not affected
    - **A Voyage-embedded source needs a Voyage-keyed local engine.** If the
      Chroma data is Voyage-embedded (a ChromaDB Cloud store, or any
      `voyage-*` collection), run the local engine with `NX_VOYAGE_API_KEY`
