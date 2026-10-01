@@ -9,8 +9,9 @@ unit suite. Two copies of one rule drift until the stale one wins an argument it
 should not, so this pins the contract rather than trusting the comments.
 
 The rule: mirror EVERY top-level entry of the real home, recreate ``.config``
-as a real directory mirroring its own entries, and shadow exactly
-``.config/nexus`` as a fresh empty directory.
+as a real directory mirroring its own entries, and shadow ``.config/nexus``,
+``.config/systemd`` and ``Library/LaunchAgents`` (nexus-q81g7: the OS autostart
+unit dirs) as fresh empty directories.
 """
 from __future__ import annotations
 
@@ -27,7 +28,8 @@ _SHELL_FENCE = Path(__file__).parent / "e2e" / "lib" / "fence_home.sh"
 def _seed(real: Path) -> None:
     """A home containing the entries that actually mattered on 2026-08-24."""
     for rel in (".docker/run", ".m2/repository", ".cache/uv", ".local/bin",
-                ".claude/plugins", ".config/nexus", ".config/gh", "Documents"):
+                ".claude/plugins", ".config/nexus", ".config/gh", "Documents",
+                ".config/systemd/user", "Library/LaunchAgents", "Library/Caches"):
         (real / rel).mkdir(parents=True, exist_ok=True)
     (real / ".testcontainers.properties").write_text("testcontainers.ryuk.disabled=true\n")
     (real / ".config" / "nexus" / "last_seen_version").write_text("7.18.0\n")
@@ -38,10 +40,11 @@ def _shape(home: Path) -> set[str]:
     out = set()
     for p in sorted(home.iterdir()):
         out.add(f"{p.name}:{'link' if p.is_symlink() else 'dir'}")
-    cfg = home / ".config"
-    if cfg.is_dir():
-        for p in sorted(cfg.iterdir()):
-            out.add(f".config/{p.name}:{'link' if p.is_symlink() else 'dir'}")
+    for top in (".config", "Library"):
+        d = home / top
+        if d.is_dir():
+            for p in sorted(d.iterdir()):
+                out.add(f"{top}/{p.name}:{'link' if p.is_symlink() else 'dir'}")
     return out
 
 
@@ -69,7 +72,7 @@ def test_shell_and_python_fences_produce_identical_shapes(tmp_path: Path) -> Non
     )
 
 
-def test_python_fence_shadows_only_the_nexus_config(tmp_path: Path) -> None:
+def test_python_fence_shadows_only_the_nexus_config_and_the_autostart_dirs(tmp_path: Path) -> None:
     real = tmp_path / "real"; real.mkdir(); _seed(real)
     home = fence_home(real, tmp_path / "fenced", ".config/nexus")
 

@@ -139,6 +139,35 @@ _FIXTURE_CACHE_PREFIXES: tuple[str, ...] = (
 _REAL_CONFIG_DIR_ENV_OVERRIDE = "NX_REAL_CONFIG_DIR_FOR_GUARD_TEST"
 
 
+def _real_home_for_guard() -> Path:
+    """The operator's REAL home as the session guards see it: the
+    ``_REAL_CONFIG_DIR_ENV_OVERRIDE``-named tmp dir when the wiring tests' seam
+    is set, else ``Path.home()`` -- or, when ``Path.home()`` is the fence this
+    process installed, the real home ``REAL_HOME_ENV`` recorded."""
+    override = os.environ.get(_REAL_CONFIG_DIR_ENV_OVERRIDE, "").strip()
+    if override:
+        return Path(override)
+    # nexus-pfuns: once the suite is fenced, ``Path.home()`` IS the
+    # throwaway mirror, and a guard pointed at it would watch a directory
+    # nothing cares about while reporting green. REAL_HOME_ENV carries the
+    # operator's actual home across the fence and into xdist workers, which
+    # inherit the fenced HOME and would otherwise compute the wrong root.
+    from tests._fence_home import (  # noqa: PLC0415 — test-only helper
+        FENCED_HOME_ENV,
+        REAL_HOME_ENV,
+    )
+    home = Path.home()
+    real = os.environ.get(REAL_HOME_ENV, "").strip()
+    fenced = os.environ.get(FENCED_HOME_ENV, "").strip()
+    # Substitute ONLY when Path.home() is the fence we installed. A test
+    # that monkeypatches Path.home is asking a question about ITS tmp dir,
+    # and an unconditional substitution answers a different one -- that
+    # broke 6 guard tests before this check existed.
+    if real and fenced and str(home) == fenced:
+        home = Path(real)
+    return home
+
+
 def _real_config_dir_for_guard() -> Path:
     """The directory both real-config-dir guards scan: ``Path.home() /
     ".config" / "nexus"``, or the ``_REAL_CONFIG_DIR_ENV_OVERRIDE``-named
@@ -146,29 +175,7 @@ def _real_config_dir_for_guard() -> Path:
     ``nexus_config_dir()`` -- bypassing any test-time ``NEXUS_CONFIG_DIR``
     override IS the point (the leak being guarded against is precisely a
     test hitting the real path despite that override existing)."""
-    override = os.environ.get(_REAL_CONFIG_DIR_ENV_OVERRIDE, "").strip()
-    if override:
-        home = Path(override)
-    else:
-        # nexus-pfuns: once the suite is fenced, ``Path.home()`` IS the
-        # throwaway mirror, and a guard pointed at it would watch a directory
-        # nothing cares about while reporting green. REAL_HOME_ENV carries the
-        # operator's actual home across the fence and into xdist workers, which
-        # inherit the fenced HOME and would otherwise compute the wrong root.
-        from tests._fence_home import (  # noqa: PLC0415 — test-only helper
-            FENCED_HOME_ENV,
-            REAL_HOME_ENV,
-        )
-        home = Path.home()
-        real = os.environ.get(REAL_HOME_ENV, "").strip()
-        fenced = os.environ.get(FENCED_HOME_ENV, "").strip()
-        # Substitute ONLY when Path.home() is the fence we installed. A test
-        # that monkeypatches Path.home is asking a question about ITS tmp dir,
-        # and an unconditional substitution answers a different one -- that
-        # broke 6 guard tests before this check existed.
-        if real and fenced and str(home) == fenced:
-            home = Path(real)
-    return home / ".config" / "nexus"
+    return _real_home_for_guard() / ".config" / "nexus"
 
 
 def _scan_fixture_cache_files() -> set[Path]:
@@ -451,6 +458,7 @@ def pytest_sessionstart(session):
     that will actually enforce.
     """
     global _fixture_cache_baseline, _real_config_dir_baseline, _is_controller_or_serial
+    global _real_autostart_baseline
     global _this_session_conexus_version, _last_seen_version_baseline_content
     _is_controller_or_serial = not _is_xdist_worker(session)
     if _is_controller_or_serial:
@@ -499,6 +507,7 @@ def pytest_sessionstart(session):
         # regardless of xdist mode.
         _fixture_cache_baseline = _scan_fixture_cache_files()
         _real_config_dir_baseline = _snapshot_real_config_dir()
+        _real_autostart_baseline = _snapshot_real_autostart_units()
         _this_session_conexus_version = _resolve_this_session_conexus_version()
         _last_seen_version_baseline_content = _snapshot_last_seen_version_content()
     _warn_if_service_jar_is_stale()
@@ -574,6 +583,7 @@ def pytest_sessionfinish(session, exitstatus):
     _check_scenario_non_vacuity(session)
     _check_mandatory_pin_non_vacuity(session)
     _check_real_config_dir_mutations(session)
+    _check_real_autostart_unit_mutations(session)
 
 
 # ── real-config-dir mutation guard (nexus-pfuns, 2026-08-20) ────────────────
@@ -1387,6 +1397,101 @@ def _check_real_config_dir_mutations(session) -> None:
         f"to _REAL_CONFIG_DIR_ALLOWLIST_PREFIXES with a justifying "
         f"comment). See tests/conftest.py "
         f"_check_real_config_dir_mutations.\n",
+        flush=True,
+    )
+
+
+# ── real autostart-unit guard (nexus-q81g7, 2026-09-30) ─────────────────────
+#
+# The HOME fence hides the operator's autostart units from a test; this is the
+# backstop for a fence ESCAPE (a test writing the absolute real path, or a
+# subprocess that scrubbed HOME). The incident it exists for: restart-stale
+# tests ran the human convergence path against the operator's REAL
+# ``~/.config/systemd/user/nexus-service.service`` and destroyed it, and the
+# suite reported the failures as unrelated assertion errors rather than as the
+# unit having been rewritten.
+
+#: The unit files watched, relative to the real home. Drop-ins are enumerated
+#: at snapshot time (``nexus-service.service.d/*``).
+_REAL_AUTOSTART_UNIT_FILES: tuple[str, ...] = (
+    ".config/systemd/user/nexus-service.service",
+    "Library/LaunchAgents/com.nexus.service.plist",
+)
+_REAL_AUTOSTART_DROPIN_DIR = ".config/systemd/user/nexus-service.service.d"
+
+
+def _snapshot_real_autostart_units() -> dict[str, tuple[int, int, str]]:
+    """``{relative_posix_path: (mtime_ns, size, sha256)}`` for the operator's
+    real service autostart unit, its systemd drop-ins and the launchd plist.
+
+    The sha256 is there because mtime+size misses a same-length rewrite with a
+    preserved mtime (``cp -p`` of a backup over the unit). Content is hashed,
+    never kept or printed: a unit's ``Environment=`` lines can carry secrets."""
+    import hashlib  # noqa: PLC0415 — session-guard only
+
+    home = _real_home_for_guard()
+    candidates = [home / rel for rel in _REAL_AUTOSTART_UNIT_FILES]
+    dropin_dir = home / _REAL_AUTOSTART_DROPIN_DIR
+    if dropin_dir.is_dir():
+        candidates.extend(sorted(p for p in dropin_dir.rglob("*") if p.is_file()))
+    snapshot: dict[str, tuple[int, int, str]] = {}
+    for p in candidates:
+        try:
+            if not p.is_file():
+                continue
+            st = p.stat()
+            digest = hashlib.sha256(p.read_bytes()).hexdigest()
+        except OSError:
+            continue  # raced a live manager touching it; the next scan sees it
+        snapshot[p.relative_to(home).as_posix()] = (st.st_mtime_ns, st.st_size, digest)
+    return snapshot
+
+
+def _diff_autostart_snapshots(
+    before: dict[str, tuple[int, int, str]],
+    after: dict[str, tuple[int, int, str]],
+) -> list[str]:
+    """``REMOVED``/``ADDED``/``MODIFIED <path>`` entries, in that order."""
+    removed = [f"REMOVED {k}" for k in sorted(before.keys() - after.keys())]
+    added = [f"ADDED {k}" for k in sorted(after.keys() - before.keys())]
+    modified = [
+        f"MODIFIED {k}" for k in sorted(before.keys() & after.keys()) if before[k] != after[k]
+    ]
+    return removed + added + modified
+
+
+_real_autostart_baseline: dict[str, tuple[int, int, str]] = {}
+
+
+def _check_real_autostart_unit_mutations(session) -> None:
+    """Fail the run when the operator's real autostart unit changed during it.
+
+    Controller/serial only, for the reason ``_check_real_config_dir_mutations``
+    documents at length: a worker's ``session.exitstatus`` mutation never
+    reaches the controller, and the unit is one machine-global file the
+    controller can re-scan itself once every worker has finished. Not
+    destructive and not allowlisted: there is no benign way for a unit test to
+    change this file. A legitimate peer (the operator running ``nx daemon
+    service install`` in another terminal mid-run) would also trip it; that is
+    a rerun, and cheaper than a destroyed unit.
+    """
+    if not _is_controller_or_serial:
+        return
+    changed = _diff_autostart_snapshots(
+        _real_autostart_baseline, _snapshot_real_autostart_units(),
+    )
+    if not changed:
+        return
+    session.exitstatus = 1
+    print(
+        f"\n\nFAIL: nexus-q81g7 real autostart-unit guard caught "
+        f"{len(changed)} change(s) to the operator's REAL service autostart "
+        f"unit during the session: {', '.join(changed)}\n"
+        f"  A test reached the real ~/.config/systemd/user or "
+        f"~/Library/LaunchAgents instead of the fenced HOME "
+        f"(tests/_fence_home.py), or the operator changed the unit by hand "
+        f"mid-run. Inspect the unit and its pre-convergence backups before "
+        f"re-running: `nx daemon restart-stale` backs up and rewrites it.\n",
         flush=True,
     )
 
