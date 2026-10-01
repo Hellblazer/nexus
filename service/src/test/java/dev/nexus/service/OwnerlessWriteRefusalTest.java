@@ -90,12 +90,11 @@ class OwnerlessWriteRefusalTest {
         repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
         service = new NexusService(0, TOKEN, svcDs, null, repo);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
 
         // Burn the per-tenant ghost sweep before registering the collection (see
         // VectorHandlerDeadlineMappingTest for the measured ordering trap).
-        http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+        http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
             .header("Authorization", "Bearer " + TOKEN).GET().build(),
             HttpResponse.BodyHandlers.ofString());
         try (Connection su = pg.createConnection("")) {
@@ -121,8 +120,7 @@ class OwnerlessWriteRefusalTest {
     // ── helpers ──────────────────────────────────────────────────────────────
 
     private HttpResponse<String> post(String path, Object body) throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+        var req = TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
@@ -131,8 +129,7 @@ class OwnerlessWriteRefusalTest {
     }
 
     private HttpResponse<String> get(String path) throws Exception {
-        return http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
+        return http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + path)
             .header("Authorization", "Bearer " + TOKEN).GET().build(),
             HttpResponse.BodyHandlers.ofString());
     }

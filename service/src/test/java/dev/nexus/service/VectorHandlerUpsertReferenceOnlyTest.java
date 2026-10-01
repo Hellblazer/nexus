@@ -83,12 +83,11 @@ class VectorHandlerUpsertReferenceOnlyTest {
 
         service = new NexusService(0, TOKEN, svcDs, null, repo);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
 
         // Burn the per-tenant ghost sweep before registering the collection (measured
         // ordering trap, see VectorHandlerDeadlineMappingTest's identical comment).
-        http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
+        http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
             .header("Authorization", "Bearer " + TOKEN)
             .GET().build(), HttpResponse.BodyHandlers.ofString());
 
@@ -105,8 +104,7 @@ class VectorHandlerUpsertReferenceOnlyTest {
     }
 
     private HttpResponse<String> send(String method, Object body) throws Exception {
-        var builder = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/vectors/upsert-reference-only"))
+        var builder = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/upsert-reference-only")
             .header("Authorization", "Bearer " + TOKEN)
             .header("Content-Type", "application/json");
         builder = "GET".equals(method)
@@ -133,8 +131,7 @@ class VectorHandlerUpsertReferenceOnlyTest {
             .contains("/v1/catalog/manifest/append");
 
         // Nothing was written: a physical scan of the collection finds no such chunk.
-        var scan = http.send(HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/vectors/get"))
+        var scan = http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/get")
             .header("Authorization", "Bearer " + TOKEN)
             .header("Content-Type", "application/json")
             .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(Map.of(
