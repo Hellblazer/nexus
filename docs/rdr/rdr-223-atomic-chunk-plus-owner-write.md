@@ -279,8 +279,8 @@ chunk owned.
    (Sam, 2026-09-30 and 2026-10-01): this ships in the single final cut, not
    after a separate Phase 2 release; it ships log-only first and then
    enforces; and `upsert-reference-only` is retired, not refused. See Phase 3
-   Step 2.* Once the client release carrying step 3 is the paired release, `upsert-chunks`, `store-put` and
-   `upsert-reference-only` accept a write only when every chash in it already
+   Step 2.* Once the client release carrying step 3 is the paired release, `upsert-chunks` and
+   `store-put` accept a write only when every chash in it already
    has a live manifest row in that collection, checked inside the write's own
    transaction; that keeps `collection re-embed` and metadata refreshes of
    owned chunks working. Every other write is refused (422) with an error
@@ -288,6 +288,88 @@ chunk owned.
    because these routes never write manifest rows. `upsert-reference-only`
    has no client caller (R-12); if RDR-169's G4 is built, it writes through
    the combined routes.
+   As built (nexus-z0o2p.24):
+   - *Where.* The handlers pass an ownership guard to the repository's upsert
+     methods; the repository methods called without one (the contract and
+     fixture tests, the migration ingest) are unchanged, and
+     `OwnershipGuardCoverageScan` reads the main sources so a handler cannot
+     call a guarded method without building a guard, nor can a new route write
+     chunks without one. The check runs twice. The first runs after the
+     collection resolves and BEFORE the `force_re_embed`, supplied-vector and
+     existence-partition branches and before embedding, so no branch skips it,
+     a refused write never pays the embedder, and the existence partition's
+     committed metadata-only refresh never touches an ownerless chunk of a
+     refused request. It is a short read in its own transaction, because the
+     embedder call must stay outside any transaction (RDR-181). That leaves a
+     window: a chash can lose its last owner while the embed runs, and the
+     post-commit sweep (`runSweepTransaction`, immediate, no grace) can then
+     delete its chunk row, after which the write's `INSERT ... ON CONFLICT`
+     would create a NEW chunk with no owner. So the second check runs inside the
+     write transaction, after the embed, under `CatalogRepository.acquireSweepGateShared`
+     (the sweep takes the same gate exclusive, so it cannot interleave), on the
+     rows the insert will write. The accepted wording of this step, "checked
+     inside the write's own transaction", is therefore what is built, with the
+     read ahead of the embedder added so a refusal costs no embed.
+     `OwnerlessWriteRefusalTest` pins the in-transaction check with the
+     `afterNeedEmbedResolvedHookForTests` seam (it deletes the manifest row and the chunk
+     during the embed and asserts 422 and no chunk row), pins the shared gate (a
+     hook holds the gate exclusive for 1.5 s and the write must wait for it),
+     and pins both scoping axes (a chash owned in another collection, or by
+     another tenant, authorises nothing; the tenant predicate has its own test
+     on a connection that bypasses row-level security, since RLS would hide it
+     on the service's connections).
+   - *Order of the 4xx answers.* A wrong-width id is 400 (`Chash.requireCanonical`
+     in the handler, before the repository is reached); an unregistered
+     collection is the "register it first" 422 (`dimForCollection`, the first
+     statement of the repository write); the ownership refusal comes after both.
+     `OwnerlessWriteRefusalTest` pins the order, including that an ownerless
+     write with a throwing embedder is 422, not 503.
+   - *Mode.* `NX_OWNERLESS_WRITE_MODE` is `enforce` or `log-only`, and an UNSET
+     value means `log-only`: only an explicit `enforce` enforces (conexus's
+     condition for the first production deploy, so the engine's first run
+     against real traffic refuses nothing until its would-refuse log has been
+     read; the flip to enforce is then an environment change, not a tag). A
+     local install enforces regardless: the local engine launch
+     (`storage_service_daemon._spawn_service`) sets `enforce` explicitly unless
+     the variable is already set. Any other value fails the engine boot.
+     Log-only writes as before and logs one line per request, counted in
+     `ownerless_writes_would_refuse_total` on `GET /v1/status` (enforce counts
+     `ownerless_writes_refused_total`, and the status carries
+     `ownerless_write_mode`). The engine, not a client-side probe, is the oracle
+     for which writers remain: a probe cannot see a subprocess, a shell script
+     or a Java HTTP writer.
+   - *The log line.* `ownerless_chunk_write_refused` (enforce) and
+     `ownerless_chunk_write_would_refuse` (log-only) carry `route`, `tenant`,
+     `collection`, `phase` (`pre_embed` or `in_tx`), `unowned`, `requested`,
+     `sample` (up to eight chashes), `user_agent`, `client_version`,
+     `suppressed_since_last` and `first_chunk_meta` (the first unowned chunk's
+     `source_path`, `title` and `source_agent`, 120 characters each). The line is
+     rate limited to one per route, tenant and collection per minute, with the number
+     suppressed since the last; the counters are not limited. The client names
+     itself in `X-Nexus-Client-Version` on every engine request; the log records
+     `absent` when it is missing, which marks a client older than the release that
+     sends it. The `User-Agent` cannot do that job (`Python-urllib/3.12` or
+     `python-httpx/0.28`: the transport, not the product).
+   - *Wire.* The 422 body carries `reason: "ownerless_chunk_write"` plus
+     `unowned_count`, `requested_count` and `unowned_chashes` (a sample of at
+     most eight).
+   - *Re-embed.* `nx collection re-embed` reads a live page and writes it back;
+     a chunk that lost its owner in between would 422 the whole request. On
+     that refusal the client re-reads the batch through the live-filtered get
+     and resends only the chashes still owned (`_upsert_reembed_batch`).
+   - *`store-put`.* The route stays, guarded by the same check. No client in
+     this repository calls it (the note writers moved to `write_many` in
+     Phase 2) but nothing here shows it has no production caller, and a route
+     is not retired without that evidence; with the guard it can only rewrite
+     an owned chunk.
+   - *Cutover.* The ledger entry is `[not-additive]`: an installed pre-RDR-223
+     client gets 422 on its ownerless writes. Every long-lived `nx-mcp` server
+     and every hook-spawned `nx` on a machine runs the code it started with, so
+     after the upgrade each must be RESTARTED, not merely upgraded; until it
+     is, its writes are refused. The 422 text tells a human what to do
+     ("upgrade conexus and restart nx-mcp / Claude Code sessions"). The deploy is
+     armed with conexus before the paired client tag is pushed (AGENTS.md,
+     nexus-1emxn rule (b)).
 6. **The completion stamp goes last, on every writer path.** *Decided by Sam,
    2026-09-30 (T2 `nexus/rdr-223-stamp-last-every-path-decision-2026-09-30`,
    bead nexus-z0o2p.34), extending the PDF and markdown decision of the same
@@ -417,8 +499,16 @@ nexus-b50zw closes.
 
 ### Consequences
 
-- Positive: once Phase 3 lands, no write inserts a chunk without an owner.
-  Chunks a supersede drops still lose their owner; they are swept at the
+- Positive: once Phase 3 lands and the engine runs in `enforce` mode,
+  `upsert-chunks` and `store-put` insert no chunk that lacks a live manifest
+  row in its collection. That is narrower than "no write inserts a chunk
+  without an owner". Not covered: (a) `log-only` mode, the default when
+  `NX_OWNERLESS_WRITE_MODE` is unset, which writes as before and only logs and
+  counts; (b) repository methods called without a guard (the contract and
+  fixture tests, the migration ingest, and `upsertReferenceOnlyChunk`, which no
+  handler calls since the route was retired); (c) the time after the write:
+  the check says the chash is owned when the write commits, not that it stays
+  owned (the next two sentences). Chunks a supersede drops still lose their owner; they are swept at the
   document's last batch. After a crash they stay ownerless until the RDR-192
   reaper removes them (nexus-2x9xa, all prefixes since Sam's 2026-09-30
   decision), or `nx t3 gc` does.
@@ -623,6 +713,7 @@ if nexus-b50zw closes, retire the staging routes. Sam's decisions of
   sweep-guard branch that reads them (nexus-z0o2p.27), and nexus-b50zw closes.
   A follow-up bead: `ChunkBatcher` must not bisect a failed flush on a 429 or
   a deadline error.
+Built and gated as nexus-z0o2p.24 (Technical Design 5, "As built").
 
 ### Day 2 Operations
 
@@ -783,6 +874,17 @@ unless stated.
 - `scripts/sql/livec_census.sql`
 
 ## Revision History
+
+- 2026-10-01: Phase 3 Step 2 built (nexus-z0o2p.24): the ownership guard
+  (a read before the embed and a recheck inside the write transaction under the
+  sweep gate), log-only mode (unset means log-only, local launch enforces) and
+  counters, the client-version header and the rate-limited log line, the 410 on
+  `upsert-reference-only`, the re-embed answer, and the cutover note (restart
+  long-lived `nx-mcp` servers). Technical Design 5 gained an "As built" block.
+  Review round 3 narrowed the Consequences line "no write inserts a chunk
+  without an owner" to what is enforced (two routes, enforce mode, and the
+  residual cases listed there), added the tenant to the log limiter key, and
+  pinned the sweep gate and the tenant predicate.
 
 - 2026-09-30: Technical Design 6 added: the completion stamp goes after the
   post-store hooks on every writer path, not only the PDF and markdown paths

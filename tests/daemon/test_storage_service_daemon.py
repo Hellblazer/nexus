@@ -3123,6 +3123,31 @@ class TestPdeathsigOrphanPrevention:
         sup._spawn_service()
         assert captured["env"].get("NX_SERVICE_PARENT_DEATH_EXIT") == "1"
 
+    def test_spawn_service_sets_the_ownerless_write_mode_to_enforce_locally(
+        self, config_dir: Path, clock: _FakeClock, monkeypatch
+    ) -> None:
+        """RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the engine treats an UNSET
+        NX_OWNERLESS_WRITE_MODE as log-only, so the local launch path sets enforce explicitly;
+        a local install has no soak. An operator's own value is kept (a log-only census run)."""
+        import nexus.daemon.storage_service_daemon as ssd_mod
+
+        captured: dict = {}
+
+        def _fake_popen(argv, **kw):
+            captured.update(kw)
+            return _FakeProc(pid=49204)
+
+        monkeypatch.setattr(ssd_mod, "_popen", _fake_popen)
+        monkeypatch.setattr(ssd_mod, "_allocate_free_port", lambda: 18079)
+
+        monkeypatch.delenv(ssd_mod.OWNERLESS_WRITE_MODE_ENV, raising=False)
+        _make_supervisor(config_dir, clock)._spawn_service()
+        assert captured["env"][ssd_mod.OWNERLESS_WRITE_MODE_ENV] == "enforce"
+
+        monkeypatch.setenv(ssd_mod.OWNERLESS_WRITE_MODE_ENV, "log-only")
+        _make_supervisor(config_dir, clock)._spawn_service()
+        assert captured["env"][ssd_mod.OWNERLESS_WRITE_MODE_ENV] == "log-only"
+
     @pytest.mark.skipif(
         not __import__("sys").platform.startswith("linux"),
         reason="PR_SET_PDEATHSIG is Linux-only",

@@ -28,49 +28,35 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * RDR-169 Phase B fix round 1, item 4 (T2 test-validation-nexus-22vvy-rdr169-
- * phase-b-2026-09-11 coverage gap 1): HTTP-boundary contract for
- * {@code POST /v1/vectors/upsert-reference-only} -- {@link
- * dev.nexus.service.http.VectorHandler#handleUpsertReferenceOnlyChunk}. No
- * test anywhere in the tree previously drove this route over real HTTP
- * (only the repository-level {@link ReferenceOnlyChunkUpsertTest} called
- * {@code PgVectorRepository#upsertReferenceOnlyChunk} directly).
+ * RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): {@code POST /v1/vectors/upsert-reference-only} is
+ * RETIRED. It wrote a chunk with no manifest row, which is the ownerless write this phase
+ * refuses on every chunk-write route, and once that refusal applied it could not write a NEW
+ * chunk at all (the manifest FK wants the chunk first, the refusal wants the manifest first).
+ * Sam's condition for retiring it (zero production calls in the 90-day WAF log, 2026-07-03 to
+ * 2026-10-01) was met on 2026-10-01.
  *
- * <p>Mirrors {@code VectorHandlerDeadlineMappingTest}'s converted bootstrap
- * (Testcontainers PG, {@link PgContainerHelper#applyProductSchema} + {@link
- * PgContainerHelper#bootstrapServiceRole} + {@link
- * PgContainerHelper#seedServiceToken} -- Sam's no-raw-SQL-strings-in-Java
- * directive, nexus-zrcj7/nexus-cbo4a), {@code PgVectorRepository} injected via
- * the 5-arg {@link NexusService} overload, port 0, {@code PER_CLASS}. Two
- * tenants (two bearer tokens, one shared service role/datasource -- RLS,
- * not connection separation, is what is under test for isolation).
- *
- * <p>RDR-223 P3.2 (nexus-z0o2p.24): the SUBJECT here is the route itself, so these tests are not
- * moved onto a seeding helper and stay as they are. Fate pending the conexus relay: the route's
- * callers may live outside this repo (the conexus Docuverse bridge, RDR-169 G4), and
- * the combined write has no reference-only chunk form. Do not delete this class or retire the
- * route on a src grep. Once the relay answers, the tests that write a NEW chunk either keep
- * passing (route exempted), move onto a reference-only chunk form, or flip into 422 refusal
- * assertions (route refused).
+ * <p>This class used to drive the route over HTTP (malformed-embedding 400s, the full to
+ * reference-only 422, tenant isolation). Those behaviours went with the handler; the repository
+ * method {@code PgVectorRepository#upsertReferenceOnlyChunk} stays, with its own tests in
+ * {@link ReferenceOnlyChunkUpsertTest}, as the fixture writer for reference-only rows. What is
+ * pinned here is the route's absence: 410 Gone, as {@code ChashHandler} answers its retired
+ * routes, naming the replacement routes, and nothing written.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 class VectorHandlerUpsertReferenceOnlyTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private static final String TOKEN_A  = "tok-uro-tenant-a-0123456789abcdef000000";
-    private static final String TOKEN_B  = "tok-uro-tenant-b-0123456789abcdef000000";
+    private static final String TOKEN    = "tok-uro-tenant-a-0123456789abcdef000000";
     private static final String SVC_ROLE = "svc_uro";
     private static final String SVC_PASS = "svc_uro_pass";
-    private static final String TENANT_A = "uro-tenant-a";
-    private static final String TENANT_B = "uro-tenant-b";
+    private static final String TENANT   = "uro-tenant-a";
     private static final String COLLECTION = "knowledge__uro-owner__voyage-context-3__v1";
 
     PostgreSQLContainer<?> pg;
     HikariDataSource svcDs;
     NexusService service;
     HttpClient http;
-    PgVectorRepository repo;
 
     @BeforeAll
     void startAll() throws Exception {
@@ -81,9 +67,7 @@ class VectorHandlerUpsertReferenceOnlyTest {
         try (Connection su = pg.createConnection("")) {
             PgContainerHelper.bootstrapServiceRole(su, SVC_ROLE, SVC_PASS);
             PgContainerHelper.seedServiceToken(
-                DSL.using(su, SQLDialect.POSTGRES), TOKEN_A, TENANT_A, "uro-test-a");
-            PgContainerHelper.seedServiceToken(
-                DSL.using(su, SQLDialect.POSTGRES), TOKEN_B, TENANT_B, "uro-test-b");
+                DSL.using(su, SQLDialect.POSTGRES), TOKEN, TENANT, "uro-test-a");
         }
 
         var cfg = new HikariConfig();
@@ -95,27 +79,20 @@ class VectorHandlerUpsertReferenceOnlyTest {
         svcDs = new HikariDataSource(cfg);
 
         FakeEmbedder embedder = new FakeEmbedder(1024);
-        repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
+        PgVectorRepository repo = new PgVectorRepository(new TenantScope(svcDs), embedder, embedder);
 
-        service = new NexusService(0, TOKEN_A, svcDs, null, repo);
+        service = new NexusService(0, TOKEN, svcDs, null, repo);
         service.start();
-        http = HttpClient.newHttpClient();
+        http = TestHttp.client();
 
-        // RDR-204 Phase 1 (bead nexus-ft04v.3): burn the per-tenant ghost sweep on
-        // each tenant's FIRST request before registering any collection (measured
+        // Burn the per-tenant ghost sweep before registering the collection (measured
         // ordering trap, see VectorHandlerDeadlineMappingTest's identical comment).
-        for (String token : List.of(TOKEN_A, TOKEN_B)) {
-            var warmup = HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list"))
-                .header("Authorization", "Bearer " + token)
-                .GET().build();
-            http.send(warmup, HttpResponse.BodyHandlers.ofString());
-        }
+        http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/catalog/collections/list")
+            .header("Authorization", "Bearer " + TOKEN)
+            .GET().build(), HttpResponse.BodyHandlers.ofString());
 
         try (Connection su = pg.createConnection("")) {
-            var ctx = DSL.using(su, SQLDialect.POSTGRES);
-            PgContainerHelper.insertCollection(ctx, TENANT_A, COLLECTION);
-            PgContainerHelper.insertCollection(ctx, TENANT_B, COLLECTION);
+            PgContainerHelper.insertCollection(DSL.using(su, SQLDialect.POSTGRES), TENANT, COLLECTION);
         }
     }
 
@@ -126,124 +103,54 @@ class VectorHandlerUpsertReferenceOnlyTest {
         if (pg      != null) pg.stop();
     }
 
-    private HttpResponse<String> post(String token, String path, Object body) throws Exception {
-        var req = HttpRequest.newBuilder()
-            .uri(URI.create("http://127.0.0.1:" + service.getPort() + path))
-            .header("Authorization", "Bearer " + token)
+    private HttpResponse<String> send(String method, Object body) throws Exception {
+        var builder = TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/upsert-reference-only")
+            .header("Authorization", "Bearer " + TOKEN)
+            .header("Content-Type", "application/json");
+        builder = "GET".equals(method)
+            ? builder.GET()
+            : builder.POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)));
+        return http.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+    }
+
+    @Test
+    void thePostRouteIsGone_410_namingTheReplacementRoutes() throws Exception {
+        String chash = Chash.ofText("uro-retired-route").toHex();
+        float[] vec = FakeEmbedder.unitVector(1024, 1.0f, 0.0f);
+        List<Double> embedding = new java.util.ArrayList<>(vec.length);
+        for (float f : vec) embedding.add((double) f);
+
+        var resp = send("POST", Map.of("collection", COLLECTION, "chash", chash, "embedding", embedding));
+
+        assertThat(resp.statusCode()).as("body: %s", resp.body()).isEqualTo(410);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> body = MAPPER.readValue(resp.body(), Map.class);
+        assertThat((String) body.get("error"))
+            .contains("retired")
+            .contains("/v1/catalog/manifest/write_many")
+            .contains("/v1/catalog/manifest/append");
+
+        // Nothing was written: a physical scan of the collection finds no such chunk.
+        var scan = http.send(TestHttp.request("http://127.0.0.1:" + service.getPort() + "/v1/vectors/get")
+            .header("Authorization", "Bearer " + TOKEN)
             .header("Content-Type", "application/json")
-            .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
-            .build();
-        return http.send(req, HttpResponse.BodyHandlers.ofString());
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> jsonBody(HttpResponse<String> resp) throws Exception {
-        return MAPPER.readValue(resp.body(), Map.class);
-    }
-
-    // -------------------------------------------------------------------------
-    // Malformed / missing embedding -> 400 naming the field
-    // -------------------------------------------------------------------------
-
-    @Test
-    void missingEmbedding_returns400_namingTheField() throws Exception {
-        String chash = Chash.ofText("uro-missing-embedding").toHex();
-        var resp = post(TOKEN_A, "/v1/vectors/upsert-reference-only", Map.of(
-            "collection", COLLECTION,
-            "chash",      chash));
-        // no "embedding" key at all
-
-        assertThat(resp.statusCode()).isEqualTo(400);
-        assertThat((String) jsonBody(resp).get("error"))
-            .as("the 400 body must name the missing field")
-            .contains("embedding");
+            .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(Map.of(
+                "collection", COLLECTION, "include_non_live", true, "limit", 300))))
+            .build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(scan.statusCode()).isEqualTo(200);
+        assertThat(scan.body()).doesNotContain(chash);
     }
 
     @Test
-    void nonNumericEmbedding_returns400_namingTheField() throws Exception {
-        String chash = Chash.ofText("uro-nonnumeric-embedding").toHex();
-        var resp = post(TOKEN_A, "/v1/vectors/upsert-reference-only", Map.of(
-            "collection", COLLECTION,
-            "chash",      chash,
-            "embedding",  List.of("not", "a", "number")));
-
-        assertThat(resp.statusCode()).isEqualTo(400);
-        assertThat((String) jsonBody(resp).get("error"))
-            .as("the 400 body must name the malformed field")
-            .contains("embedding");
+    void aMalformedBodyGets410Too_theRouteDoesNotParseAnything() throws Exception {
+        // The retired route answers before it reads the body, so a request that used to be a 400
+        // (no embedding) is a 410 now: a caller learns the route is gone, not that it was wrong.
+        var resp = send("POST", Map.of("collection", COLLECTION));
+        assertThat(resp.statusCode()).isEqualTo(410);
     }
-
-    // -------------------------------------------------------------------------
-    // full -> reference-only rejection, over real HTTP
-    // -------------------------------------------------------------------------
 
     @Test
-    void fullToReferenceOnly_overHttp_maps422_namingTheChash() throws Exception {
-        String chash = Chash.ofText("uro-full-content").toHex();
-        repo.upsertChunks(TENANT_A, COLLECTION,
-            List.of(chash), List.of("full content seeded for the HTTP guard test"),
-            List.of(Map.of()));
-
-        var resp = post(TOKEN_A, "/v1/vectors/upsert-reference-only", Map.of(
-            "collection", COLLECTION,
-            "chash",      chash,
-            "embedding",  floatList(FakeEmbedder.unitVector(1024, 1.0f, 0.0f))));
-
-        assertThat(resp.statusCode())
-            .as("the full->reference-only guard's IllegalStateException maps through "
-                + "VectorHandler's shared 'well-formed but rejected' arm to 422, not a "
-                + "generic 500 (got body: %s)", resp.body())
-            .isEqualTo(422);
-        assertThat((String) jsonBody(resp).get("error"))
-            .as("the 422 body must name the chash the guard rejected")
-            .contains(chash)
-            .contains("full→reference-only transition is prohibited");
-    }
-
-    // -------------------------------------------------------------------------
-    // Tenant isolation: tenant A cannot see or clobber tenant B's row
-    // -------------------------------------------------------------------------
-
-    @Test
-    void tenantA_cannotTouchTenantBsRow() throws Exception {
-        String sharedChash = Chash.ofText("uro-cross-tenant-chash").toHex();
-
-        // Tenant B writes FULL content at this (collection, chash).
-        repo.upsertChunks(TENANT_B, COLLECTION,
-            List.of(sharedChash), List.of("tenant B's private full content"),
-            List.of(Map.of()));
-
-        // Tenant A submits a reference-only write at the SAME (collection, chash).
-        // RLS scopes the guard SELECT to tenant A alone -- tenant B's row must be
-        // invisible to it, so tenant A's write succeeds (no false-positive
-        // full->reference-only rejection borrowed from another tenant's data).
-        var resp = post(TOKEN_A, "/v1/vectors/upsert-reference-only", Map.of(
-            "collection", COLLECTION,
-            "chash",      sharedChash,
-            "embedding",  floatList(FakeEmbedder.unitVector(1024, 0.0f, 1.0f))));
-
-        assertThat(resp.statusCode())
-            .as("tenant A's write must succeed -- RLS must not let tenant B's full "
-                + "row leak into tenant A's guard SELECT (got body: %s)", resp.body())
-            .isEqualTo(200);
-
-        // Tenant B's own row must be completely untouched by tenant A's write.
-        try (Connection su = pg.createConnection("")) {
-            var ctx = DSL.using(su, SQLDialect.POSTGRES);
-            var ch = dev.nexus.service.vectors.DimTables.CHUNKS.get(1024);
-            String tenantBContent = ctx.select(ch.chunkText()).from(ch.table())
-                .where(ch.tenantId().eq(TENANT_B).and(ch.chash().eq(sharedChash)))
-                .fetchOne(ch.chunkText());
-            assertThat(tenantBContent)
-                .as("tenant B's full content must be completely unaffected by "
-                    + "tenant A's reference-only write to the same (collection, chash)")
-                .isEqualTo("tenant B's private full content");
-        }
-    }
-
-    private static List<Double> floatList(float[] vec) {
-        List<Double> out = new java.util.ArrayList<>(vec.length);
-        for (float f : vec) out.add((double) f);
-        return out;
+    void aGetGets410Too() throws Exception {
+        assertThat(send("GET", null).statusCode()).isEqualTo(410);
     }
 }

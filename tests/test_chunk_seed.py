@@ -9,13 +9,16 @@ moved test leans on: the row is physically stored, it has no live owner, it
 lands in the tenant the ambient token names and no other, a repeat write merges
 metadata, and the vector is the one the caller asked for.
 
-The parity tests at the bottom drive the SAME input through ``upsert-chunks`` and
-through the helper and compare every non-timestamp column. They can only run
-while the route still accepts an ownerless write, which is the point: they pin
-the helper to the route BEFORE nexus-z0o2p.24 (P3.2) makes the route refuse.
-When P3.2 lands their route leg (``_both``) is refused by design; convert the
-route leg to a write of owned chashes or delete the parity tests, keeping the
-helper-only ones above them.
+The parity tests at the bottom drive the SAME conflict write through
+``upsert-chunks`` and through the helper and compare every non-timestamp column.
+Since nexus-z0o2p.24 (P3.2) the route refuses a FIRST write of a chash with no live
+manifest row, so the route can no longer be the oracle for what a first write stores.
+Both collections are seeded with the helper, the route's copy is given a live owner,
+and what is compared is the conflict write: the one thing the route still does to a
+chunk, and the half of the helper's contract (text and vector replaced, metadata
+merged, ``retention`` reset, ``last_written_at`` restamped) it reproduces. A first
+write is pinned against literal expected values instead, and the route's refusal of an
+ownerless write is pinned in ``OwnerlessWriteRefusalTest`` (engine) and below.
 """
 from __future__ import annotations
 
@@ -126,7 +129,7 @@ def test_a_malformed_chash_is_refused_before_any_sql() -> None:
         seed_chunks_direct(_COLL, ["abc"], ["x"], tenant="unused")
 
 
-# ── parity with the route, pinned while the route still accepts ownerless writes ──
+# ── parity with the route's CONFLICT write (the route refuses a first one, nexus-z0o2p.24) ──
 
 _ROUTE = "knowledge__chunkseed-route__bge-base-en-v15-768__v1"
 _SEED = "knowledge__chunkseed-seed__bge-base-en-v15-768__v1"
@@ -175,21 +178,35 @@ def _vec(x: float) -> list[float]:
     return [x] + [0.0] * 767
 
 
-def _both(tenant: str, ids, docs, metas, vecs) -> None:
-    """The same write through the route and through the helper."""
+def _seed_both(ids, docs, metas, vecs) -> None:
+    """The same FIRST write into both collections, by the helper, then a live owner for the
+    route's copies (the route accepts only owned chashes)."""
+    from tests._catalog_fixture_ops import give_chunks_a_live_owner
+
+    seed_chunks_direct(_ROUTE, ids, docs, metas, embeddings=vecs)
+    seed_chunks_direct(_SEED, ids, docs, metas, embeddings=vecs)
+    give_chunks_a_live_owner(_ROUTE, list(dict.fromkeys(ids)))
+
+
+def _conflict_both(tenant: str, ids, docs, metas, vecs) -> None:
+    """The same CONFLICT write through the route and through the helper."""
     hvc.HttpVectorClient(tenant=tenant).upsert_chunks(_ROUTE, list(ids), list(docs), list(metas), embeddings=vecs)
     seed_chunks_direct(_SEED, ids, docs, metas, embeddings=vecs)
 
 
-def test_helper_rows_equal_the_routes_on_first_write_and_on_conflict(t2_service_env: str) -> None:
+def test_helper_rows_equal_the_routes_on_a_conflict_write(t2_service_env: str) -> None:
     a, b = _chash("parity a"), _chash("parity b")
-    _both(t2_service_env, [a, b], ["parity a v1", "parity b v1"],
-          [{"title": "a", "n": 1, "keep": "x"}, {}], [_vec(0.5), _vec(0.25)])
-    first = _dump(t2_service_env, _ROUTE)
-    assert first and first == _dump(t2_service_env, _SEED), "first write"
+    _seed_both([a, b], ["parity a v1", "parity b v1"],
+               [{"title": "a", "n": 1, "keep": "x"}, {}], [_vec(0.5), _vec(0.25)])
+    first = _dump(t2_service_env, _SEED)
+    assert first == _dump(t2_service_env, _ROUTE), "the seed is the same in both"
+    # A first write is pinned against literals, since the route cannot be the oracle for it any more.
+    row_a = [r for r in first if r["chunk_text"] == "parity a v1"][0]
+    assert row_a["metadata"] == {"title": "a", "n": 1, "keep": "x"}
+    assert row_a["retention"] == "full"
 
     # Conflict on `a`: text and vector replaced, metadata merged, `b` untouched.
-    _both(t2_service_env, [a], ["parity a v2"], [{"title": "a2", "extra": True}], [_vec(0.75)])
+    _conflict_both(t2_service_env, [a], ["parity a v2"], [{"title": "a2", "extra": True}], [_vec(0.75)])
     second = _dump(t2_service_env, _ROUTE)
     assert second != first, "non-vacuity: the conflict write changed something"
     assert second == _dump(t2_service_env, _SEED), "conflict write"
@@ -199,7 +216,8 @@ def test_helper_rows_equal_the_routes_on_first_write_and_on_conflict(t2_service_
 
 def test_duplicate_ids_in_one_call_collapse_first_wins_like_the_route(t2_service_env: str) -> None:
     a = _chash("dup a")
-    _both(t2_service_env, [a, a], ["dup first", "dup second"], [{"w": 1}, {"w": 2}], [_vec(0.5), _vec(0.25)])
+    _seed_both([a], ["dup seed"], [{}], [_vec(0.5)])
+    _conflict_both(t2_service_env, [a, a], ["dup first", "dup second"], [{"w": 1}, {"w": 2}], [_vec(0.5), _vec(0.25)])
     seeded = _dump(t2_service_env, _SEED)
     assert seeded == _dump(t2_service_env, _ROUTE)
     assert [r["chunk_text"] for r in seeded] == ["dup first"]
@@ -208,9 +226,9 @@ def test_duplicate_ids_in_one_call_collapse_first_wins_like_the_route(t2_service
 
 def test_a_reseed_restamps_last_written_at_like_the_route(t2_service_env: str) -> None:
     a = _chash("stamp a")
-    _both(t2_service_env, [a], ["stamp v1"], [{}], [_vec(0.5)])
+    _seed_both([a], ["stamp v1"], [{}], [_vec(0.5)])
     before = (_last_written(t2_service_env, _ROUTE, a), _last_written(t2_service_env, _SEED, a))
-    _both(t2_service_env, [a], ["stamp v2"], [{}], [_vec(0.5)])
+    _conflict_both(t2_service_env, [a], ["stamp v2"], [{}], [_vec(0.5)])
     after = (_last_written(t2_service_env, _ROUTE, a), _last_written(t2_service_env, _SEED, a))
     assert after[0] > before[0], "route restamps (the reference behavior)"
     assert after[1] > before[1], "helper restamps"
@@ -218,7 +236,7 @@ def test_a_reseed_restamps_last_written_at_like_the_route(t2_service_env: str) -
 
 def test_a_conflict_resets_retention_to_full_like_the_route(t2_service_env: str) -> None:
     a = _chash("retention a")
-    _both(t2_service_env, [a], ["retention v1"], [{}], [_vec(0.5)])
+    _seed_both([a], ["retention v1"], [{}], [_vec(0.5)])
     for coll in (_ROUTE, _SEED):
         _exec(
             "UPDATE nexus.chunks SET retention = 'reference-only', chunk_text = NULL "
@@ -226,10 +244,28 @@ def test_a_conflict_resets_retention_to_full_like_the_route(t2_service_env: str)
             f"AND chash = decode('{a}', 'hex')"
         )
     assert _dump(t2_service_env, _SEED)[0]["retention"] == "reference-only", "non-vacuity"
-    _both(t2_service_env, [a], ["retention v2"], [{}], [_vec(0.5)])
+    _conflict_both(t2_service_env, [a], ["retention v2"], [{}], [_vec(0.5)])
     route_row, seed_row = _dump(t2_service_env, _ROUTE), _dump(t2_service_env, _SEED)
     assert seed_row == route_row
     assert seed_row[0]["retention"] == "full"
+
+
+def test_the_route_refuses_a_first_write_that_the_helper_makes(t2_service_env: str) -> None:
+    """The reason the helper exists: the same write the helper stores is a 422 on the route
+    (RDR-223 P3.2), naming the combined routes, and stores nothing."""
+    from nexus.db.engine_reasons import OWNERLESS_CHUNK_WRITE_REASON
+
+    a = _chash("refused first write")
+    seed_chunks_direct(_SEED, [a], ["registers the collection"], embeddings=[_vec(0.5)])
+    ghost = _chash("route first write")
+    with pytest.raises(hvc.VectorServiceError) as raised:
+        hvc.HttpVectorClient(tenant=t2_service_env).upsert_chunks(
+            _SEED, [ghost], ["no owner yet"], [{}], embeddings=[_vec(0.5)],
+        )
+    assert raised.value.code == 422
+    assert raised.value.reason == OWNERLESS_CHUNK_WRITE_REASON
+    assert "/v1/catalog/manifest/write_many" in str(raised.value)
+    assert [r["chunk_text"] for r in _dump(t2_service_env, _SEED)] == ["registers the collection"]
 
 
 @pytest.mark.parametrize("width", [384, 1024])

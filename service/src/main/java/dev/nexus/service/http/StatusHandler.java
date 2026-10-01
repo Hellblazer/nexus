@@ -6,6 +6,8 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import dev.nexus.service.vectors.EmbedActivitySnapshot;
 import dev.nexus.service.vectors.EmbedderRouter;
+import dev.nexus.service.vectors.OwnerlessWriteActivity;
+import dev.nexus.service.vectors.OwnerlessWritePolicy;
 import dev.nexus.service.vectors.RacedEmbedActivity;
 import dev.nexus.service.vectors.SuppliedVectorMismatchActivity;
 
@@ -98,6 +100,7 @@ public final class StatusHandler implements HttpHandler {
     private final EmbedderRouter embedderRouter;   // nullable — mode "unknown"
     private final Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier; // nullable
     private final long processStartMillis;
+    private final OwnerlessWritePolicy ownerlessWritePolicy;   // nullable — mode field omitted
 
     public StatusHandler(EmbedderRouter embedderRouter) {
         this(embedderRouter, null);
@@ -146,9 +149,24 @@ public final class StatusHandler implements HttpHandler {
             EmbedderRouter embedderRouter,
             Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
             long processStartMillis) {
+        this(embedderRouter, localEmbedActivitySupplier, processStartMillis, null);
+    }
+
+    /**
+     * @param ownerlessWritePolicy RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): the policy
+     *                             {@code VectorHandler} applies to ownerless chunk writes, so
+     *                             {@code ownerless_write_mode} can say which mode this process runs.
+     *                             Null omits that one field; the two counters are always present.
+     */
+    public StatusHandler(
+            EmbedderRouter embedderRouter,
+            Supplier<EmbedActivitySnapshot> localEmbedActivitySupplier,
+            long processStartMillis,
+            OwnerlessWritePolicy ownerlessWritePolicy) {
         this.embedderRouter = embedderRouter;
         this.localEmbedActivitySupplier = localEmbedActivitySupplier;
         this.processStartMillis = processStartMillis;
+        this.ownerlessWritePolicy = ownerlessWritePolicy;
     }
 
     @Override
@@ -189,6 +207,16 @@ public final class StatusHandler implements HttpHandler {
         // RDR-223 P1.5 (bead nexus-z0o2p.6), [additive]: same shape and lifetime as the
         // raced-embed counter above.
         body.append(",\"supplied_vector_mismatches_total\":").append(SuppliedVectorMismatchActivity.total());
+
+        // RDR-223 Phase 3 Step 2 (bead nexus-z0o2p.24), [additive]: requests the ownerless-write
+        // check refused (enforce) or let through and counted (log-only), since boot, plus the mode
+        // this process runs. A log-only run's reader asks "did anything write ownerless?" here.
+        body.append(",\"ownerless_writes_refused_total\":").append(OwnerlessWriteActivity.refusedTotal());
+        body.append(",\"ownerless_writes_would_refuse_total\":").append(OwnerlessWriteActivity.wouldRefuseTotal());
+        if (ownerlessWritePolicy != null) {
+            body.append(",\"ownerless_write_mode\":")
+                .append(HttpUtil.jsonString(ownerlessWritePolicy.mode().wire()));
+        }
 
         // RDR-222 Phase 0 fix round (bead nexus-ulrjq, critic #2), [additive]:
         // VersionHandler.startTimeIso is the SAME rendering /version's field of

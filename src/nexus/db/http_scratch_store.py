@@ -121,6 +121,7 @@ _RECOVERY_FUTILE_WINDOW_S: float = 60.0
 # nexus-bgh2j: construction-time resolution gets the SAME evidence-gated
 # bounded wait as the nine mixin adopters (call sites unchanged — only
 # the alias target moved to the gated resolver).
+from nexus.db.client_identity import client_identity_headers
 from nexus.db.service_endpoint import (
     resolve_service_endpoint_with_evidence_gate as _resolve_endpoint,
 )
@@ -198,6 +199,8 @@ class HttpScratchStore:
             "X-Nexus-Tenant": tenant,
             _HEADER_T1_SESSION: self._session_token,
             "Content-Type": "application/json",
+            # RDR-223 Phase 3 Step 2 (nexus-z0o2p.24): names this client to the engine's logs.
+            **client_identity_headers(),
         }
         # nexus-wrwb7 (RDR-005 2a self-minting): substitute a self-minted
         # data token for the Authorization header above when a mint_token
