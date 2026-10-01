@@ -456,8 +456,8 @@ public final class SchemaMigrator {
             // nexus, t1 or staging (the three schemas this changelog creates)
             // therefore boots once with the history in public, creates its own
             // schema mid-walk, and on boot 2 reads an EMPTY history there,
-            // re-plans every changeset and dies re-running CREATE TABLE
-            // nexus.memory. Every engine query on the history table already
+            // re-plans every changeset and dies re-creating nexus.memory
+            // ("relation already exists"). Every engine query on the history table already
             // hardcodes public.databasechangelog (VersionHandler, and the
             // count helpers below), and so does grants-nexus-svc.xml's GRANT,
             // so public is the one place it can live.
