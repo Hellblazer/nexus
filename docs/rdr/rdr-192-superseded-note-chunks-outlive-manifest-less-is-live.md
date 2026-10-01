@@ -1531,6 +1531,25 @@ To be completed at gate (Layer 3 AI critique).
   consequence table is added. (5) The listing route accepts an unclamped `grace_seconds`
   and is advisory below the default; its equality with the gc functions holds only when
   the grace is absent.
+- 2026-10-01: Phase 2 gate minors disposed (nexus-wbfpw.35, nexus-wbfpw.37; T2
+  `nexus/review-rdr-192-phase2-code` M1-M9, `nexus/critique-rdr-192-phase2` row 11).
+  `text_gate_probe_<dim>`, the hybrid dispatch gate, moves onto `live(c)`
+  (`vectors-023`, a P1p column in the S1a matrix), closing the tenth liveness
+  definition. The maintenance readers that discover unowned chunks or guard a
+  delete (`nx catalog backfill`, `nx collection reindex`'s pre-delete scan) read
+  stored rows (`include_non_live`), and the backfills filter collections on
+  `stored_count`. Decisions: `nexus.live_chunks` stays as a view with no
+  production reader (pinned by the P2 column and granted to PUBLIC, so an operator can
+  read it), it is not dropped; `fetchChunkText`, the `chroma://` permalink resolver, is a
+  physical read on purpose; `collection_vector_stats` is the inventory, so a
+  collection whose chunks are all hidden is not dormant until its chunks are
+  purged. Predicate 9 keeps its own shape; Migration order item 3 records the
+  difference from `live(c)` on R3 and R9 and the matrix's P9 column pins it.
+  Plan evidence for the topic-scoped, hybrid, gate-probe, by-chash and
+  `collection_vector_stats` paths, taken as `nexus_svc` under RLS, is in T2
+  `nexus/rdr-192-live-c-explain-evidence-2026-10-01`;
+  `Rdr192LiveCExplainEvidenceIntegrationTest` pins that `chunk_live_owners`
+  inlines on each and that the stats view probes once per chunk.
 - 2026-10-01: Step 9 widened to the reaper as built (nexus-2x9xa rounds 3 and 4; T2
   `nexus/review-reaper-2x9xa-round3-critique` S4, `-round3-code` M1; Sam's two rulings of
   2026-10-01; text only, no status change). The engine expires only the chunks it tagged,
