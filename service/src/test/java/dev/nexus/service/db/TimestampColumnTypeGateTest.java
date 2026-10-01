@@ -42,21 +42,17 @@ import java.util.TreeSet;
  *
  * <p><b>Reduce-only allowlist.</b> {@link #ALLOWLIST} is a snapshot of every
  * timestamp-shaped TEXT/VARCHAR column this gate found on the tree at
- * authoring time (nexus-9gaj7), each with a one-line reason. Two of the
- * three shapes represented are deliberate, not oversights:
+ * authoring time (nexus-9gaj7), each with a one-line reason. The one shape
+ * left is deliberate, not an oversight ({@code staging.*}, the typeless
+ * RDR-180 landing zone, was the other until the schema was dropped at
+ * nexus-z0o2p.27; the gate no longer scans it):
  * <ul>
- *   <li>{@code staging.*} landing-zone columns stay TEXT BY DESIGN — the
- *       RDR-180 land-then-transform architecture (staging-001-landing-
- *       tables.xml's own header comment; {@code StagingPromoteOps}' class
- *       javadoc: "staging stays typeless... a malformed staged value fails
- *       LOUD at promote time, not at land time"). Converting these would
- *       silently narrow what a guided migration can land verbatim.</li>
  *   <li>{@code *_by} columns ({@code catalog_links.created_by}) are usernames/
  *       role names, not timestamps — the {@code "created"} substring in the
  *       name-match list below catches them incidentally; they are not a
  *       timezone-reliance bug.</li>
  * </ul>
- * A future entry that is a genuine oversight (not one of the two shapes
+ * A future entry that is a genuine oversight (not the shape
  * above) should be fixed via a Liquibase changeset instead of allowlisted.
  * Both directions are checked: a NEW timestamp-shaped TEXT/VARCHAR column
  * not on the list fails loud ({@link #newTimestampShapedTextColumns_failLoud}
@@ -67,7 +63,7 @@ import java.util.TreeSet;
  */
 class TimestampColumnTypeGateTest {
 
-    private static final List<String> SCHEMAS = List.of("nexus", "staging", "t1");
+    private static final List<String> SCHEMAS = List.of("nexus", "t1");
 
     /** Substrings (case-insensitive) that mark a column name as timestamp-shaped. */
     private static final List<String> TIMESTAMP_NAME_TOKENS =
@@ -96,13 +92,6 @@ class TimestampColumnTypeGateTest {
      * the two deliberate shapes documented on the class above.
      */
     private static final java.util.Map<String, String> ALLOWLIST = java.util.Map.ofEntries(
-        // staging.* — land-then-transform typeless-by-design (RDR-180).
-        java.util.Map.entry("staging.frecency.embedded_at", "staging typeless-by-design (RDR-180)"),
-        java.util.Map.entry("staging.frecency.last_hit_at", "staging typeless-by-design (RDR-180)"),
-        java.util.Map.entry("staging.relevance_log.ts", "staging typeless-by-design (RDR-180)"),
-        java.util.Map.entry("staging.document_aspects.extracted_at", "staging typeless-by-design (RDR-180)"),
-        java.util.Map.entry("staging.aspect_extraction_queue.enqueued_at", "staging typeless-by-design (RDR-180)"),
-        java.util.Map.entry("staging.aspect_extraction_queue.last_attempt_at", "staging typeless-by-design (RDR-180)"),
         // *_by — a username/role name, not a timestamp; "created" substring false-positive.
         java.util.Map.entry("nexus.catalog_links.created_by", "false positive: created_by is a username, not a timestamp")
     );
@@ -126,8 +115,8 @@ class TimestampColumnTypeGateTest {
 
                 // Assertion 1: every finding is a KNOWN, reviewed entry. A new hit here
                 // means either a genuine timezone-reliance bug (fix it with a Liquibase
-                // changeset) or a deliberate staging/naming shape (add it to ALLOWLIST
-                // with a reason, per the two documented shapes on the class javadoc).
+                // changeset) or a deliberate naming shape (add it to ALLOWLIST
+                // with a reason, per the shape documented on the class javadoc).
                 Set<String> unreviewed = new TreeSet<>(found);
                 unreviewed.removeAll(ALLOWLIST.keySet());
                 assertThat(unreviewed)

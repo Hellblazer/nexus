@@ -868,8 +868,8 @@ class RawSqlGateTest {
      * <p>Standalone census tool recipe (nexus-cbo4a, unchanged in shape from
      * batch 2/7): copy this file into a scratch package dir, strip the one
      * {@code @Test} method referencing {@code dev.nexus.service.vectors.
-     * DimTables}/{@code ChashSqlIdioms} (the only two real jOOQ-generated
-     * classes this file's otherwise-pure regex/string logic touches) down to
+     * DimTables} (the one real jOOQ-generated
+     * class this file's otherwise-pure regex/string logic touches) down to
      * an empty body, compile it alongside a small {@code Census.java} in the
      * SAME package that calls {@link #scan} directly (package-private,
      * visible within {@code dev.nexus.service.db}) against
@@ -912,7 +912,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/CatalogGcAuditProducersTest.java", 10),
         Map.entry("dev/nexus/service/CatalogHandlerManifestEnvelopeTest.java", 1),
         Map.entry("dev/nexus/service/CatalogHandlerRenameTest.java", 4),
-        Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 23),
+        Map.entry("dev/nexus/service/CatalogManifestSweepRepositoryTest.java", 17),
         Map.entry("dev/nexus/service/CatalogPurgeTrashPopulationParityTest.java", 7),
         Map.entry("dev/nexus/service/CatalogPurgeTrashTest.java", 13),
         Map.entry("dev/nexus/service/CatalogPurgeTrashVacuumTest.java", 5),
@@ -1118,7 +1118,6 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/SharedCluster.java", 3),
         Map.entry("dev/nexus/service/SharedClusterMutationFalsifyTest.java", 1),
         Map.entry("dev/nexus/service/SharedDatabaseHandle.java", 1),
-        Map.entry("dev/nexus/service/StagingHandlerJourneyTest.java", 4),
         Map.entry("dev/nexus/service/Taxonomy010BackfillDirectIntegrationTest.java", 19),
         Map.entry("dev/nexus/service/Taxonomy011ForeignOwnedDiagViewTest.java", 11),
         Map.entry("dev/nexus/service/Taxonomy014TenantFkRepointTest.java", 11),
@@ -1150,7 +1149,7 @@ class RawSqlGateTest {
         Map.entry("dev/nexus/service/TaxonomyUnassignedChashesRepositoryTest.java", 10),
         Map.entry("dev/nexus/service/TenantPoolingIsolationTest.java", 1),
         Map.entry("dev/nexus/service/Tk070P6aTtlDaysCountedDeleteTest.java", 2),
-        Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 2),
+        Map.entry("dev/nexus/service/Tk070P6bTtlDaysCountedUpdateTest.java", 1),
         Map.entry("dev/nexus/service/TokenBoundaryAdversarialTest.java", 2),
         Map.entry("dev/nexus/service/TokenStoreDataTokenSweepTest.java", 1),
         Map.entry("dev/nexus/service/TopicsDocCountDeadlockConcurrencyTest.java", 8),
@@ -1648,7 +1647,10 @@ class RawSqlGateTest {
     // nexus-wbfpw.44/.45/.46: 979 -> 981 (+2: new test file
     // vectors/ChunkLiveOwnersRecallExtendedIntegrationTest.java at 2 -- see that entry's own
     // comment).
-    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 979;
+    // nexus-z0o2p.27: 979 -> 972 (-7: CatalogManifestSweepRepositoryTest.java 23 -> 17,
+    // its staging-guard seeds and plan-shape pin deleted; Tk070P6bTtlDaysCountedUpdateTest.java
+    // 2 -> 1, its staging.frecency leg deleted).
+    private static final int TEST_TREE_RAW_SQL_TOTAL_CEILING = 972;
 
     /**
      * The reduce-only ratchet test itself: walks {@code src/test/java}, scans
@@ -2132,9 +2134,7 @@ class RawSqlGateTest {
      * old canary's question, {@code ChashSqlIdioms.CHUNK_TABLES.hasSize(3)})
      * is no longer the drift signal a future dimension change needs. The
      * live signal is {@code DimTables.CHUNKS}/{@code CENTROIDS} map size
-     * (pinned below); {@code CHUNK_TABLES} itself is now a single-element
-     * list (see its own javadoc) kept only as a checklist artifact, not a
-     * per-dim table-name enumeration.
+     * (pinned below).
      *
      * <p>nexus-o8dil.41 comment 7 (2026-08-13, [22416] Part-9-derived
      * finding): the OLD checklist covered ~16 sites against ~110 real
@@ -2186,11 +2186,10 @@ class RawSqlGateTest {
      *       CatalogRepository.PURGE_VACUUM_TABLES} (three-way lockstep with
      *       the grants channel below, {@code
      *       TenantScopeVacuumMaintainGrantParityTest}); {@code
-     *       ChashCensus.KNOWN_INVENTORY} / {@code TEXT_EXCLUSIONS}; {@code
      *       CatalogRepository.MANIFEST_DIMS} / {@code
      *       COLLECTION_SCOPED_TABLES}; every {@code DIMS}/{@code
-     *       VALID_DIMS} array (ChashRepository, TaxonomyCentroidRepository,
-     *       RekeyOps, StagingPromoteOps) — each of these is a loop-over-dim
+     *       VALID_DIMS} array (ChashRepository, TaxonomyCentroidRepository)
+     *       — each of these is a loop-over-dim
      *       site that, post-unification, MUST filter on {@code
      *       embedding_<dim> IS NOT NULL} rather than relying on table
      *       membership to scope a dim (the D1 hazard: looping the SAME
@@ -2217,21 +2216,41 @@ class RawSqlGateTest {
                 + "column choice, not a table identity")
             .hasSize(3);
         assertThat(dev.nexus.service.vectors.DimTables.CENTROIDS).hasSize(3);
-        assertThat(ChashSqlIdioms.CHUNK_TABLES)
-            .as("the unified chunks table is ONE physical table regardless of how "
-                + "many dims it carries — this list stays single-element; a change "
-                + "here means the unification itself was reverted, not that a dim "
-                + "was added")
-            .containsExactly(dev.nexus.service.vectors.DimTables.CHUNKS_TABLE_NAME);
+        // (A third assertion pinned ChashSqlIdioms.CHUNK_TABLES as a single-element list.
+        // That class was deleted with the staging routes at nexus-z0o2p.27, its last
+        // callers gone; DimTables.CHUNKS_TABLE_NAME is the one table-name authority.)
     }
 
     // ── nexus-4okz4 increment 5, item (c): mechanical THE INLINE-VS-BIND
     //    RULE enforcement (critic Significant #2, T2 critique-4okz4-
     //    increment3-2026-08-09 [21952]) ──
+    //
+    // THE INLINE-VS-BIND RULE (nexus-4okz4 increment 3). Its canonical text lived in
+    // ChashSqlIdioms' class javadoc until that class was deleted with the staging routes
+    // (nexus-z0o2p.27); it is carried here, beside the gate that enforces it.
+    //
+    // DSL.val(literal) mints an INDEPENDENT bind placeholder (a fresh $N) per TEXTUAL
+    // occurrence of the rendered SQL, even when every occurrence comes from the SAME Java
+    // Field object reused across clauses. PostgreSQL validates SELECT DISTINCT ON (...)
+    // against its leading ORDER BY expressions, and validates GROUP BY coverage of any
+    // ungrouped SELECT-list expression, by PARSE-TREE STRUCTURAL EQUALITY, evaluated
+    // BEFORE parameter binding. Two occurrences of the identical expression that differ
+    // only in which $N they bind are NOT recognised as equal, so PostgreSQL reports a
+    // DISTINCT-ON/ORDER-BY mismatch, or "column must appear in the GROUP BY clause", even
+    // though both placeholders bind the SAME value at execution time. A fragment used
+    // once per statement (a WHERE predicate, a SET target) never hits it; a fragment
+    // reused in two clauses that need structural matching does. The fix is DSL.inline(
+    // literal), which renders the (jOOQ-escaped) literal directly into the SQL text, so
+    // every occurrence is byte-for-byte identical. Safe ONLY for FIXED PROTOCOL
+    // CONSTANTS (encoding names such as "UTF8", "hex") hardcoded in the same file, never a
+    // value that could originate from a caller or user. Before composing a NEW
+    // multi-occurrence DSL statement from shared fragments, check whether a fragment
+    // embeds a DSL.val(...) literal; if it does and the same expression is needed twice,
+    // inline the literal locally. Do not rediscover this through a PostgreSQL error.
 
     /** Only a compile-time literal (string/char/numeric/boolean/null) is a
      * safe {@code DSL.inline(...)} argument per THE INLINE-VS-BIND RULE
-     * (ChashSqlIdioms.java class javadoc): fixed protocol constants
+     * (see the section header above): fixed protocol constants
      * hardcoded in-file, never caller/user-derived values. */
     private static final Pattern COMPILE_TIME_LITERAL = Pattern.compile(
         "^\"([^\"\\\\]|\\\\.)*\"$"
@@ -2331,8 +2350,8 @@ class RawSqlGateTest {
             if (!allowed) {
                 violations.add(fileName + ":" + line + "  DSL.inline(" + arg + ") -- argument "
                     + "is not a compile-time literal (THE INLINE-VS-BIND RULE requires only "
-                    + "fixed protocol constants ever be inlined -- ChashSqlIdioms.java class "
-                    + "javadoc); bind via DSL.val(...) instead, or add a scoped, justified "
+                    + "fixed protocol constants ever be inlined -- see the INLINE-VS-BIND "
+                    + "section header in RawSqlGateTest); bind via DSL.val(...) instead, or add a scoped, justified "
                     + "entry to INLINE_NONLITERAL_SANCTIONED if the value is PROVABLY "
                     + "injection-safe by construction despite not being a literal"
                     + (owner != null ? " [inside " + owner + ", but this exact text is not "
@@ -2362,7 +2381,7 @@ class RawSqlGateTest {
         assertThat(violations)
             .as("DSL.inline(...) call sites whose argument is not a compile-time literal — "
                 + "see this class's mechanical enforcement of THE INLINE-VS-BIND RULE "
-                + "(ChashSqlIdioms.java class javadoc): only fixed protocol constants "
+                + "(section header in RawSqlGateTest): only fixed protocol constants "
                 + "hardcoded in-file may ever be inlined")
             .isEmpty();
     }

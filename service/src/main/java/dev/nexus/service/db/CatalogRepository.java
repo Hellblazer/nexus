@@ -4808,31 +4808,6 @@ public final class CatalogRepository {
      *       mutation as {@link #renameCollectionTxn} — missed by the design's own coverage audit
      *       and by round 1 of this gate's implementation; added post-review (T2 nexus/review-
      *       11gh6-gate-2026-08-08 [21797] Important finding).</td></tr>
-     *   <tr><td>{@code StagingPromoteOps.finalizeTenant}</td><td>RDR-180 land-then-transform's
-     *       tenant-wide manifest promote, raw SQL, HTTP-reachable via {@code POST
-     *       /v1/staging/finalize} — the design's grep-based coverage audit and the original
-     *       {@code ManifestInsertGateTest} (jOOQ-typed pattern, one file) were both structurally
-     *       blind to it. Added post-review (T2 nexus/critique-11gh6-gate-impl-2026-08-08 [21798]
-     *       Critical finding). Gates once per DISTINCT target collection resolved by joining the
-     *       INSERT's own candidate chashes against {@code nexus.chunks} (RDR-191 unified;
-     *       formerly {@code chunks_384/768/1024}) directly (round 3
-     *       fix — resolving via the referencing doc's {@code physical_collection} instead, as
-     *       round 2 did, could diverge from where the content actually lives, since chunk rows are
-     *       duplicated per collection and the method's own {@code canonExists} check is
-     *       deliberately collection-agnostic; see that method's own comment for the full
-     *       reasoning).</td></tr>
-     *   <tr><td>{@code StagingPromoteOps.promoteCollection}</td><td>RDR-180 land-then-transform's
-     *       per-collection content landing — added round 3 (T2 nexus/critique-11gh6-gate-impl-
-     *       2026-08-08 [21798] REWORK DELTA Critical finding): the round-2 exemption argument for
-     *       this method ("a chash with no live manifest reference can never become a sweep
-     *       candidate") is true only for a chash that has NEVER had any manifest reference —
-     *       it does not cover a SHARED chash already referenced by a live, unrelated document,
-     *       which can be dropped (and swept) by that document's own ordinary write while this
-     *       method is landing the SAME content fresh for the migration. Single-collection
-     *       parameter, no multi-collection resolution needed — see that method's own comment for
-     *       the residual this narrows but does not fully close (structurally the same
-     *       promote-then-later-finalize gap as nexus-kl2z6, one level up the RDR-180
-     *       pipeline).</td></tr>
      *   <tr><td>{@code RekeyOps.rekey}</td><td>RDR-180 Item6's per-tenant full-digest rekey,
      *       raw SQL — added post-review (nexus-t76bp round 1; REWORKED per critic-p1 Critical, T2
      *       nexus/critique-t76bp-rekey-gate-2026-08-08 [21807]). Round 1 gated ONLY the step-5
@@ -4843,7 +4818,7 @@ public final class CatalogRepository {
      *       javadoc documents as potentially minutes at real scale, leaving a silent-dangling-
      *       reference window round 1 did not close. Investigated whether this method runs under a
      *       code-enforced exclusivity that would make the gate redundant: the only lock it takes
-     *       ({@code staging:<tenant>}) is shared with {@code StagingPromoteOps} ONLY — no
+     *       ({@code staging:<tenant>}) was shared with the retired {@code StagingPromoteOps} ONLY — no
      *       serving-path manifest writer (`writeManifestRows`/`appendManifestChunks`/
      *       `importChunksBatch`/`doImportChunk`) ever acquires or checks it, so the javadoc's
      *       "freeze window" is an operational convention, not an engine-enforced guarantee. Gates
@@ -4860,7 +4835,7 @@ public final class CatalogRepository {
      *       physical row {@code rekey} itself UPDATEd, row-locked from that UPDATE through
      *       commit — a racing sweep's DELETE blocks on the row lock, then EvalPlanQual re-checks
      *       its predicate against the post-commit row and finds zero matches. {@code rekey}
-     *       separately aborts loud (mirroring {@code StagingPromoteOps.finalizeTenant}) if its
+     *       separately aborts loud (mirroring the retired {@code StagingPromoteOps.finalizeTenant}) if its
      *       in-transaction verify ever finds a nonzero {@code residual_mismatched} or {@code
      *       dangling_manifest} count — a backstop for pre-existing corruption and any OTHER gap,
      *       present or future, not a detector for races that commit after this transaction's own
@@ -4868,7 +4843,7 @@ public final class CatalogRepository {
      * </table>
      *
      * <p>{@code public static} (was package-private until nexus-hxrcm): {@code ChashRepository}
-     * and {@code StagingPromoteOps} are siblings in this package, but {@code
+     * is a sibling in this package, but {@code
      * PgVectorRepository.resolveNeedEmbedIdx} in {@code ..vectors} also mutates rows the sweep
      * deletes and needs the SAME gate, so the key stays single-homed here and is reached
      * cross-package rather than duplicated.
@@ -5143,8 +5118,7 @@ public final class CatalogRepository {
         // nexus-9kj5j: re-derived via manifestRowCount() (an actual
         // post-delete-post-insert COUNT(*) of THIS doc's manifest rows),
         // NEVER the caller's `rows.size()` -- the same discipline
-        // appendManifestChunks (below) and StagingPromoteOps's
-        // chunk_count_resynced step already apply.
+        // appendManifestChunks (below) already applies.
         // nexus-eldyi: guarded — a tombstoned doc_id must not have its
         // CATALOG_DOCUMENTS row mutated. FAIL LOUD (not the stampIndexedAt
         // silent-noop shape): this is a data-bearing manifest writer with a
@@ -6020,15 +5994,7 @@ public final class CatalogRepository {
         try {
             return tenantScope.withTenant(tenant, ctx -> {
                 acquireSweepGateExclusive(ctx, tenant, collection);
-                // nexus-kl2z6 increment 2 / nexus-vc6dh: a tenant with no
-                // active guided migration has an EMPTY staging.document_chunks,
-                // so the DELETE below adds NO staging predicate at all and its
-                // plan stays byte-identical to pre-staging-guard behaviour
-                // (design memo §4.2's conditional-skip requirement). RDR-191
-                // (nexus-o8dil.48): formerly checked once and reused across
-                // THREE per-dim DELETEs; now feeds the single unified DELETE.
-                boolean stagingActive = stagingHasRowsForTenant(ctx, tenant);
-                List<String> sweptChashes = sweepChunks(ctx, tenant, collection, dropped, stagingActive);
+                List<String> sweptChashes = sweepChunks(ctx, tenant, collection, dropped);
                 int swept = sweptChashes.size();
                 int kept = dropped.size() - swept;
                 // nexus-wbfpw.13: unconditional — a run that keeps every
@@ -6100,73 +6066,6 @@ public final class CatalogRepository {
     }
 
     /**
-     * True when {@code staging.document_chunks} has ANY row for {@code
-     * tenant} (nexus-kl2z6 increment 2 / nexus-vc6dh). Checked ONCE per
-     * sweep transaction (by {@link #runSweepTransaction}), not once per
-     * dim, so the answer is shared across all three per-dim DELETEs and a
-     * tenant with no active guided migration pays no per-dim staging
-     * predicate at all — design memo §4.2's conditional-skip requirement,
-     * keeping the steady-state DELETE plan byte-identical to pre-staging-
-     * guard behaviour. {@code staging.document_chunks} carries no
-     * generated jOOQ class (codegen does not cover the {@code staging}
-     * schema — landing area, never serving-path), so it is referenced via
-     * the house pattern {@code StagingPromoteOps} already established:
-     * {@code DSL.table(DSL.name(schema, table)).as(alias)} +
-     * {@code DSL.field(DSL.name(alias, col), Type.class)}.
-     */
-    private static boolean stagingHasRowsForTenant(DSLContext ctx, String tenant) {
-        var s = DSL.table(DSL.name("staging", "document_chunks")).as("s");
-        Field<String> sTenantId = DSL.field(DSL.name("s", "tenant_id"), String.class);
-        return ctx.fetchExists(ctx.selectOne().from(s).where(sTenantId.eq(tenant)));
-    }
-
-    /**
-     * The THIRD sweep guard (design memo §4.2 REV 2 corrected shape,
-     * nexus-vc6dh) — refuses to delete any chash a STAGED manifest row
-     * will reference. Mirrors {@code StagingPromoteOps.finalizeTenant}'s
-     * OWN chash resolution exactly — direct 64-hex admission
-     * ({@code StagingPromoteOps.java} {@code manifestResolvable}'s
-     * {@code sChash.likeRegex("^[0-9a-f]{64}$")} arm), so guard and
-     * promote cannot diverge (coextensive-by-construction, the same
-     * discipline {@code StagingPromoteOps} already applies to its own
-     * target-collection gating query). Keep this pair in lockstep with
-     * that resolution expression if either ever changes.
-     *
-     * <p>nexus-lgdel.l1: the {@code chash_alias}-mapping arm ({@code
-     * CHASH_ALIAS.OLD_REF} join) is REMOVED with the table — both this
-     * guard and {@code StagingPromoteOps.manifestResolvable} reduce to the
-     * direct 64-hex admission arm alone, in the same commit. This is the
-     * fail-loud behaviour intended: a staged manifest row keyed by a
-     * legacy ref no longer promotes silently.
-     *
-     * <p>REV 1's shape (a single {@code LEFT JOIN staging.document_chunks}
-     * + {@code COALESCE}, function applied to the STAGING side) is
-     * REJECTED — nexus-vc6dh proved empirically (300K-row repro,
-     * {@code EXPLAIN ANALYZE}) that no index can accelerate it: the join
-     * forces a full Hash Anti Join materializing the resolved expression
-     * for EVERY staging row, ~1s per sweep at migration scale, paid UNDER
-     * the sweep's own EXCLUSIVE gate as pure writer stall. This shape
-     * instead keeps the function on the BOUNDED OUTER side ({@code
-     * candidateChash} — the per-doc dropped-chash candidate set, capped by
-     * the flush chunk cap), so with the accompanying Liquibase index on
-     * {@code staging.document_chunks(chash)} it plans as a genuine Nested
-     * Loop Anti Join / Index Scan — empirically ~600x faster on the same
-     * fixture.
-     */
-    private static Condition stagingGuardCondition(DSLContext ctx, String tenant, Field<byte[]> candidateChash) {
-        // nexus-lgdel.l1: the chash_alias-mapping arm (a second independent
-        // NOT EXISTS over CHASH_ALIAS.OLD_REF) is REMOVED with the table —
-        // this guard and StagingPromoteOps.manifestResolvable both reduce to
-        // the direct 64-hex admission arm alone, in the same commit. `tenant`
-        // is now unused by this method but kept in the signature (its sole
-        // caller passes it already, and removing it is a needless diff).
-        var s = DSL.table(DSL.name("staging", "document_chunks")).as("s");
-        Field<String> sChash = DSL.field(DSL.name("s", "chash"), String.class);
-        Field<String> hexCandidate = DSL.function("encode", String.class, candidateChash, DSL.val("hex"));
-        return DSL.notExists(ctx.selectOne().from(s).where(sChash.eq(hexCandidate)));
-    }
-
-    /**
      * Sweep DELETE against the unified {@code nexus.chunks} table (RDR-191,
      * nexus-o8dil.48 — collapsed from three per-dim methods, {@code
      * sweepChunks384}/{@code sweepChunks768}/{@code sweepChunks1024}, now
@@ -6184,23 +6083,17 @@ public final class CatalogRepository {
      * embedding model/dim), so scoping by {@code collection} alone already
      * confines the DELETE to the correct dim's rows without needing to name
      * the dim explicitly.
-     *
-     * @param stagingActive {@link #stagingHasRowsForTenant} for this sweep
-     *        transaction — when {@code false} the staging guard
-     *        ({@link #stagingGuardCondition}) is skipped entirely via
-     *        {@link DSL#noCondition()}, so the rendered SQL (and plan)
-     *        matches pre-staging-guard behaviour exactly.
      */
     /**
      * Builds (does NOT execute) the {@code nexus.chunks} sweep DELETE — extracted from
-     * {@link #sweepChunks} (nexus-ajt86) so {@link #renderSweepChunksDeleteSql}
-     * (test-support) can EXPLAIN the EXACT statement production issues, eliminating
-     * the hand-copied-mirror drift risk {@code CatalogManifestSweepRepositoryTest}'s
-     * original plan-shape test carried (a raw string reconstruction of this method's
-     * SQL that could silently fall out of sync if this method ever changed).
+     * {@link #sweepChunks} (nexus-ajt86) so a test could render and EXPLAIN the EXACT
+     * statement production issues rather than a hand-copied mirror. The only such test
+     * (the staging-guard plan-shape pin) and its public render hook left with the
+     * staging guard at nexus-z0o2p.27; the split stays because the DELETE's WHERE
+     * clause is the part reviewers and the RDR-192 liveness tests read.
      */
     private static DeleteConditionStep<?> sweepChunksQuery(
-            DSLContext ctx, String tenant, String collection, List<String> dropped, boolean stagingActive) {
+            DSLContext ctx, String tenant, String collection, List<String> dropped) {
         return ctx.deleteFrom(CHUNKS)
             .where(CHUNKS.TENANT_ID.eq(tenant))
             .and(CHUNKS.COLLECTION.eq(collection))
@@ -6241,9 +6134,7 @@ public final class CatalogRepository {
                 // explicit TEXT cast is required here rather than reusing
                 // CHUNKS_CHASH_HEX (a bytea-typed field at the SQL level).
                 .and(DOC_META_DOC_ID.eq(
-                    DSL.function("encode", String.class, CHUNKS.CHASH, DSL.inline("hex"))))))
-            // nexus-kl2z6 increment 2 / nexus-vc6dh STAGING GUARD (§4.2).
-            .and(stagingActive ? stagingGuardCondition(ctx, tenant, CHUNKS.CHASH) : DSL.noCondition());
+                    DSL.function("encode", String.class, CHUNKS.CHASH, DSL.inline("hex"))))));
     }
 
     /**
@@ -6263,9 +6154,8 @@ public final class CatalogRepository {
      *         plain WHERE/SELECT usage of that field does. The properly generated field
      *         carries no such ambiguity.
      */
-    private static List<String> sweepChunks(DSLContext ctx, String tenant, String collection, List<String> dropped,
-                                              boolean stagingActive) {
-        List<byte[]> raw = sweepChunksQuery(ctx, tenant, collection, dropped, stagingActive)
+    private static List<String> sweepChunks(DSLContext ctx, String tenant, String collection, List<String> dropped) {
+        List<byte[]> raw = sweepChunksQuery(ctx, tenant, collection, dropped)
             .returning(CHUNKS.CHASH)
             .fetch(CHUNKS.CHASH);
         List<String> hex = new ArrayList<>(raw.size());
@@ -6273,22 +6163,6 @@ public final class CatalogRepository {
             hex.add(java.util.HexFormat.of().formatHex(b));
         }
         return hex;
-    }
-
-    /**
-     * TEST-SUPPORT ONLY (nexus-ajt86) — renders the {@code nexus.chunks} sweep DELETE's
-     * real, jOOQ-generated SQL with every bind parameter inlined, for EXPLAIN-based
-     * plan-shape tests ({@code CatalogManifestSweepRepositoryTest
-     * .stagingGuard_isIndexCapable_notFunctionWrappedOnStagingSide}). {@code public} rather than
-     * package-private because the test class lives in {@code dev.nexus.service}, a
-     * different package than this one ({@code dev.nexus.service.db}) — package-
-     * private visibility would not reach it. Never call this from request-handling
-     * code; use {@link #sweepChunks} for the real execution path.
-     */
-    public static String renderSweepChunksDeleteSql(
-            DSLContext ctx, String tenant, String collection, List<String> dropped, boolean stagingActive) {
-        return sweepChunksQuery(ctx, tenant, collection, dropped, stagingActive)
-            .getSQL(ParamType.INLINED);
     }
 
     /**
@@ -8198,14 +8072,10 @@ public final class CatalogRepository {
      * statement, project-wide.</b> SET CONSTRAINTS has no jOOQ typed-DSL form at all
      * (verified via Context7 against jOOQ 3.21) — Sam's no-raw-SQL-strings directive
      * (RawSqlGateTest's sentinel list only shrinks) means a second, test-tree copy of
-     * this exact string is not an option. {@code
-     * StagingPromoteOpsIntegrationTest}'s {@code danglingManifestCountDsl_*} tests
-     * call this method directly (over a raw, uncommitted, test-owned {@link
-     * DSLContext}) to defer the SAME constraint for the SAME reason — seeding a
-     * momentarily-dangling manifest row to exercise {@link ChashSqlIdioms
-     * #danglingManifestCountDsl} — rather than hand-typing their own {@code
-     * ctx.execute("SET CONSTRAINTS ...")}. Widened from {@code private} to {@code
-     * public} for exactly that reachability; the method's own behavior is unchanged.
+     * this exact string is not an option. Widened from {@code private} to {@code
+     * public} (nexus-eanej) so a test could defer the SAME constraint over a raw,
+     * uncommitted, test-owned {@link DSLContext}; the method's own behavior is
+     * unchanged.
      */
     public static void deferManifestChunkFk(DSLContext ctx) {
         // nexus-cbo4a batch 9 item 1 (Sam's directive, nexus-zrcj7): the constraint

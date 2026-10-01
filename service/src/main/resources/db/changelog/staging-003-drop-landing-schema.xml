@@ -1,0 +1,213 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    RDR-223 Phase 3 step 2 (bead nexus-z0o2p.27) — DROP the staging landing
+    schema, retired with the engine's /v1/staging routes.
+
+    The RDR-180 land-then-transform pipeline (verbatim landing, embed-fill,
+    in-DB promote/finalize) had its engine-side client half for the new write
+    path deferred as nexus-b50zw and never built (RDR-223 F-7). The one client
+    that did call /v1/staging was the Chroma-era guided migration
+    (HttpStagingStore in conexus <= 6.18.1, deleted at RDR-155 P4b); no client
+    in the 7.x line calls it. Sam decided
+    2026-09-30, on a measurement, to retire it rather than build it (indexing on
+    hellmini: embedding is ~90% of each request and the DB write ~9%, so the
+    write path is not the bottleneck staging existed to relieve; the Voyage 429
+    failure it was to absorb is handled on the live path; and its promote wrote
+    chunk rows before owner rows, which RDR-223 forbids). StagingHandler,
+    StagingPromoteOps and the sweep's staging guard (CatalogRepository
+    stagingHasRowsForTenant / stagingGuardCondition) are deleted in the same
+    change, so nothing reads or writes these tables any more.
+
+    What drops: schema staging and its seven remaining tables (chunks,
+    document_chunks, topic_assignments, frecency, relevance_log,
+    document_aspects, aspect_extraction_queue). staging.chash_index went earlier
+    (rdr187-002). The RLS policies, primary keys and idx_staging_document_chunks_chash
+    die with their tables. Nothing outside the schema depends on these tables
+    (no FK from nexus.* points into staging; verified by grep over the changelog).
+
+    Dependents handled in the same change, because they are runAlways and would
+    otherwise abort every boot after this one:
+      - grants-nexus-diag-3 no longer grants on schema staging (its staging
+        statements were removed; the view-era re-grant stays).
+      - staging-4-svc-grants already skips when schema staging is absent or not
+        owned by the migrating role, so it needed no change.
+      - this changeset's own <rollback> restores the empty structure (see
+        below), so a rollback that stops after it and is followed by a forward
+        update can replay telemetry-006-2, which ALTERs staging.frecency.
+
+    PRECONDITION (rdr187-002 discipline): sqlCheck-gated, MARK_RAN-safe. A store
+    where the schema is already gone (an out-of-band cleanup) marks ran instead
+    of erroring.
+
+    DROP SCHEMA without CASCADE on purpose: the table list above is the whole
+    schema (staging-001..002 and telemetry-006 create nothing else in it), so an
+    object this changeset did not name is unexpected, and failing the migration
+    loudly beats silently deleting it.
+
+    Placed before the runAlways grants blocks (the D0.1 late-append convention).
+-->
+<databaseChangeLog
+    xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+        http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-4.4.xsd">
+
+    <changeSet id="staging-6-drop-landing-schema" author="nexus-z0o2p.27">
+        <preConditions onFail="MARK_RAN">
+            <sqlCheck expectedResult="1">SELECT count(*) FROM pg_namespace WHERE nspname = 'staging'</sqlCheck>
+        </preConditions>
+        <comment>DROP the staging landing schema and its seven tables — the RDR-180 land-then-transform landing zone, retired with the /v1/staging routes (RDR-223 Phase 3 step 2, nexus-z0o2p.27). DATA EFFECT: DROPs staging.chunks, staging.document_chunks, staging.topic_assignments, staging.frecency, staging.relevance_log, staging.document_aspects and staging.aspect_extraction_queue, discarding any landed rows; irreversible for the data (the rollback restores the empty structure only: the rows were a landing area, and no code reads them once the routes are gone).</comment>
+        <sql>
+DROP TABLE IF EXISTS staging.chunks, staging.document_chunks, staging.topic_assignments, staging.frecency, staging.relevance_log, staging.document_aspects, staging.aspect_extraction_queue;
+DROP SCHEMA staging;
+        </sql>
+        <!-- The DATA is irreversible (see DATA EFFECT above); the STRUCTURE is not. A
+             rollback that stops anywhere after this changeset and is then followed by a
+             forward update re-executes the later staging changesets (telemetry-006-2
+             ALTERs staging.frecency), so the schema has to exist again or that replay
+             fails with `schema "staging" does not exist` (found by
+             SchemaRollbackRoundTripIntegrationTest: a no-op rollback here broke both its
+             partial and its full round trip). So the rollback recreates the EMPTY
+             pre-drop structure, the end state of staging-1, staging-2, staging-3,
+             staging-5, staging-2-document-chunks-chash-index and telemetry-006-2: the
+             seven tables with their RLS policies, the two topic columns, the chash
+             index, and frecency's nullable ttl_days. The older rollbacks (telemetry-006-2,
+             staging-5, staging-3, staging-1) then run against a schema that is really
+             there.
+
+             Re-running those changesets' forward SQL by id would be shorter and does not
+             work: staging-2 declares its column as a bare `vector`, which resolved when
+             it first ran but not now that search-path-001 relocated the extension into
+             schema nexus ("type vector does not exist"). The DDL below is therefore a
+             copy of theirs with `nexus.vector`, the spelling this changeset's position
+             (after search-path-001) requires; staging.chash_index is not recreated
+             because rdr187-3 dropped it long before this changeset. -->
+        <rollback>
+CREATE SCHEMA IF NOT EXISTS staging;
+
+CREATE TABLE staging.chunks (
+    tenant_id  TEXT NOT NULL DEFAULT '',
+    collection TEXT NOT NULL,
+    dim        INTEGER NOT NULL,
+    legacy_ref TEXT NOT NULL,
+    chunk_text TEXT NOT NULL DEFAULT '',
+    embedding  nexus.vector,
+    model      TEXT NOT NULL DEFAULT '',
+    chunk_meta JSONB,
+    landed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT staging_chunks_pk PRIMARY KEY (tenant_id, collection, legacy_ref)
+);
+CREATE TABLE staging.document_chunks (
+    tenant_id   TEXT NOT NULL DEFAULT '',
+    doc_id      TEXT NOT NULL,
+    position    INTEGER NOT NULL,
+    chash       TEXT NOT NULL,
+    chunk_index INTEGER,
+    line_start  INTEGER,
+    line_end    INTEGER,
+    char_start  INTEGER,
+    char_end    INTEGER,
+    CONSTRAINT staging_document_chunks_pk PRIMARY KEY (tenant_id, doc_id, position)
+);
+CREATE TABLE staging.topic_assignments (
+    tenant_id         TEXT NOT NULL DEFAULT '',
+    doc_id            TEXT NOT NULL,
+    topic_id          INTEGER NOT NULL,
+    topic_label       TEXT NOT NULL DEFAULT '',
+    topic_collection  TEXT NOT NULL DEFAULT '',
+    CONSTRAINT staging_topic_assignments_pk PRIMARY KEY (tenant_id, doc_id, topic_id)
+);
+CREATE TABLE staging.frecency (
+    tenant_id      TEXT NOT NULL DEFAULT '',
+    chunk_id       TEXT NOT NULL,
+    embedded_at    TEXT NOT NULL DEFAULT '',
+    ttl_days       INTEGER,
+    frecency_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+    miss_count     INTEGER NOT NULL DEFAULT 0,
+    last_hit_at    TEXT NOT NULL DEFAULT '',
+    CONSTRAINT staging_frecency_pk PRIMARY KEY (tenant_id, chunk_id)
+);
+CREATE TABLE staging.relevance_log (
+    tenant_id  TEXT NOT NULL DEFAULT '',
+    id         BIGINT NOT NULL,
+    query      TEXT NOT NULL DEFAULT '',
+    chunk_id   TEXT NOT NULL,
+    collection TEXT,
+    action     TEXT NOT NULL DEFAULT '',
+    session_id TEXT,
+    ts         TEXT NOT NULL DEFAULT '',
+    CONSTRAINT staging_relevance_log_pk PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE staging.document_aspects (
+    tenant_id              TEXT NOT NULL DEFAULT '',
+    doc_id                 TEXT NOT NULL DEFAULT '',
+    collection             TEXT NOT NULL DEFAULT '',
+    source_path            TEXT NOT NULL DEFAULT '',
+    problem_formulation    TEXT,
+    proposed_method        TEXT,
+    experimental_datasets  TEXT,
+    experimental_baselines TEXT,
+    experimental_results   TEXT,
+    extras                 TEXT,
+    confidence             DOUBLE PRECISION,
+    extracted_at           TEXT NOT NULL DEFAULT '',
+    model_version          TEXT NOT NULL DEFAULT '',
+    extractor_name         TEXT NOT NULL DEFAULT '',
+    source_uri             TEXT,
+    CONSTRAINT staging_document_aspects_pk PRIMARY KEY (tenant_id, collection, source_path)
+);
+CREATE TABLE staging.aspect_extraction_queue (
+    tenant_id       TEXT NOT NULL DEFAULT '',
+    collection      TEXT NOT NULL DEFAULT '',
+    source_path     TEXT NOT NULL DEFAULT '',
+    doc_id          TEXT NOT NULL DEFAULT '',
+    content_hash    TEXT NOT NULL DEFAULT '',
+    content         TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'pending',
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    enqueued_at     TEXT NOT NULL DEFAULT '',
+    last_attempt_at TEXT,
+    last_error      TEXT,
+    CONSTRAINT staging_aspect_queue_pk PRIMARY KEY (tenant_id, collection, source_path)
+);
+CREATE INDEX idx_staging_document_chunks_chash ON staging.document_chunks (chash);
+
+ALTER TABLE staging.chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.chunks FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.chunks
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.document_chunks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.document_chunks FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.document_chunks
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.topic_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.topic_assignments FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.topic_assignments
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.frecency ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.frecency FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.frecency
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.relevance_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.relevance_log FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.relevance_log
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.document_aspects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.document_aspects FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.document_aspects
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+ALTER TABLE staging.aspect_extraction_queue ENABLE ROW LEVEL SECURITY;
+ALTER TABLE staging.aspect_extraction_queue FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation ON staging.aspect_extraction_queue
+    USING (tenant_id = current_setting('nexus.tenant', true))
+    WITH CHECK (tenant_id = current_setting('nexus.tenant', true));
+        </rollback>
+    </changeSet>
+
+</databaseChangeLog>

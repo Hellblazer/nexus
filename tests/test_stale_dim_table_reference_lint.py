@@ -352,20 +352,9 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "per-dim SQL. The nexus-gjwhu residual-disclosure paragraph was "
         "deliberately phrased without a bare banned token."
     ),
-    "service/src/main/java/dev/nexus/service/db/ChashSqlIdioms.java": (
-        0,
-        "Javadoc narrating the RDR-191 unification (three occurrences, all "
-        "'{@code nexus.chunks_384/768/1024} collapsed into...'); historical "
-        "only."
-    ),
     # WAS service/src/main/java/dev/nexus/service/db/RekeyOps.java (5 hits)
     # — the whole class was deleted at nexus-lgdel.l1 (the chash-rekey rung
     # it implemented server-side retired along with the client-side rung).
-    "service/src/main/java/dev/nexus/service/db/ChashCensus.java": (
-        0,
-        "Comments narrating the RDR-191 unification of the three per-dim "
-        "chash-bearing tables; historical only."
-    ),
     "service/src/main/java/dev/nexus/service/db/TenantScope.java": (
         0,
         "Javadoc narrating the RDR-191 unification; historical only."
@@ -383,14 +372,6 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "verified no live per-dim SQL string literal remains (only one "
         "quoted occurrence exists in the file and it is itself inside a "
         "// comment)."
-    ),
-    "service/src/main/java/dev/nexus/service/db/StagingPromoteOps.java": (
-        0,
-        "Comment narrating the pre-unify per-dim dispatch shape "
-        "('(chunks_384|768|1024)'); historical only. (nexus-lgdel.l1: the "
-        "'hardcoded to chunks_768/dim=768' narration this pin also used to "
-        "cover was rewritten when the orphan-synthesize chash_alias staging "
-        "step was removed -- see the file's own comment history.)"
     ),
     # ── tests: wire-compat / straddle-era fixtures mirroring the src/java
     #    files above ──────────────────────────────────────────────────────
@@ -849,12 +830,6 @@ _COUNT_PINNED_FILE_ALLOWLIST: dict[str, tuple[int, str]] = {
         "Javadoc/comments narrating the pre-unify 384/768/1024 fixture "
         "shape and nexus.chunks as 'RDR-191 Phase 4 unified; formerly a "
         "chunks_384 row'; historical only."
-    ),
-    "service/src/test/java/dev/nexus/service/StagingPromoteOpsIntegrationTest.java": (
-        0,
-        "Comments narrating a branch that used to be hardcoded to "
-        "chunks_768 only, and the RDR-191 repoint collapsing "
-        "chunks_384/768/1024; historical only."
     ),
     # WAS service/src/test/java/dev/nexus/service/TaxonomyCentroidHandlerTest.java
     # (1 hit) — nexus-cbo4a batch 1b's PgContainerHelper.bootstrapServiceRole
