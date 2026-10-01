@@ -4159,9 +4159,9 @@ def _prune_deleted_files(
     of truth for which chunk content (chash) belongs to which document.
     Membership is tested by the chunk's ``chunk_text_hash`` metadata
     field (content hash, always present in the post-Phase-A schema)
-    rather than the chunk's natural ID. The two coincide once a chunk
-    has been migrated by ``nx t3 reidentify``, but until then live
-    indexer writes still produce synthetic IDs (``sha256(corpus:title:
+    rather than the chunk's natural ID. The two coincide for a chunk
+    keyed by its chash (every pgvector chunk, RDR-180); a chunk written
+    under the older scheme carries a synthetic ID (``sha256(corpus:title:
     chunk{i})[:32]``). Comparing by content hash preserves live data
     regardless of which scheme the chunk was written under.
 
@@ -4181,10 +4181,10 @@ def _prune_deleted_files(
     actually deletes the document and FK CASCADE drops the manifest
     rows. One-run latency on cleanup, never on correctness.
 
-    Pre-D1 [:16] cleanup (RDR-108 re-gate O1 mixed-state) is delegated
-    to ``nx t3 reidentify``, whose Pass 2 batch-deletes the old IDs
-    after re-upsert. GC's job is doc-level orphan removal; same-content
-    duplicates are reidentify's job.
+    Pre-D1 [:16] cleanup (RDR-108 re-gate O1 mixed-state) was delegated
+    to ``nx t3 reidentify``, which RDR-223 P3.3 deleted; a pgvector chunk
+    id is its chash by schema, so no such id exists to clean up. GC's job
+    is doc-level orphan removal.
 
     Catalog-absent is a safe no-op: GC requires the manifest as the
     source of truth and cannot infer orphans without it.

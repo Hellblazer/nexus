@@ -2,15 +2,16 @@
 """nexus-te885.8.1 — pg-source read leg for verify-fill (Phase 0 prereq, RDR-155 P4b).
 
 A Chroma-shaped, READ-ONLY HTTP adapter over a LOCAL nexus-service pgvector
-store. ``verify_fill_local`` / ``verify_fill_cloud`` (``vector_etl.py``) both
-assume the source is a Chroma store; neither covers rows written directly to
-local pgvector post-cutover that exist in no Chroma store at all — the exact
-substrate behind the 2026-07-01 nexus-te885.1 incident (27,283 chunks,
-previously reconciled once by an ad hoc manual script). This module presents
-the SAME duck-typed interface ``nexus.db.reconcile.iter_collection_chunks``
-already consumes, so ``verify_fill_collections`` needs zero changes to gain a
-pg-source leg — only a new caller (``verify_fill_pg_source``, nexus-te885.8.2)
-that opens THIS adapter instead of a Chroma client.
+store. The verify-fill tooling (``vector_etl.py``, then ``db/reconcile.py``,
+deleted by nexus-z0o2p.25) assumed the source is a Chroma store; neither
+covered rows written directly to local pgvector post-cutover that exist in no
+Chroma store at all — the exact substrate behind the 2026-07-01 nexus-te885.1
+incident (27,283 chunks, previously reconciled once by an ad hoc manual
+script). This module presents the SAME duck-typed interface
+``nexus.db.reconcile.iter_collection_chunks`` consumes, so a reader gains a
+pg-source leg by opening THIS adapter instead of a Chroma client. It has no
+caller in ``src`` since that deletion; ``tests/test_rdr155_p4b_deletion_gate.py``
+still pins it as a survivor.
 
 Locked design: T2 ``nexus/design-te885.8-pg-source-verify-fill.md``.
 

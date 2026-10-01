@@ -4,7 +4,7 @@ shared RateLimitBrake wiring.
 
 ``_etl_with_retry`` serves TWO real production shapes: the httpx-based
 catalog/chash ETL legs (``catalog_etl.py``), and the urllib-based vector
-migration leg (``db/reconcile.py:664``, wrapping
+migration leg (the verify-fill leg ``db/reconcile.py`` held until nexus-z0o2p.25, wrapping
 ``vector_client.upsert_chunks`` via ``_etl_batch_with_breaker``) — both
 exercised below, the second via the SAME real-shape ``VectorServiceError``
 construction ``tests/test_vector_retry.py`` uses (nexus-cy9u7 code-review
@@ -13,7 +13,7 @@ finding: this file previously tested only the httpx shape and called that
 
 No dedicated test file existed for ``_etl_with_retry`` before this one
 (it was previously exercised only indirectly via
-``tests/db/test_reconcile*.py``'s ``_etl_batch_with_breaker`` callers) —
+the deleted verify-fill tests' ``_etl_batch_with_breaker`` callers) —
 covers its baseline retry/backoff contract plus the brake wiring together.
 """
 from __future__ import annotations
@@ -74,7 +74,7 @@ def _make_status_exc(status: int, headers: dict[str, str] | None = None) -> http
 def _make_vector_service_error(
     status: int, retry_after: str | None = None,
 ) -> VectorServiceError:
-    """Construct a ``VectorServiceError`` the way ``db/reconcile.py``'s
+    """Construct a ``VectorServiceError`` the way the (deleted) verify-fill leg's
     ``vector_client.upsert_chunks`` call actually raises it in production
     (via ``http_vector_client.py``'s ``_post``, chained from a real
     ``urllib.error.HTTPError``) — see the identical helper in
@@ -270,12 +270,12 @@ def test_rate_limit_signal_classification_unchanged() -> None:
     assert _is_retryable_etl_error(_make_status_exc(404)) is False
 
 
-# ── nexus-cy9u7 CRITICAL-1: the REAL db/reconcile.py caller shape ───────────
+# ── nexus-cy9u7 CRITICAL-1: the REAL (verify-fill) vector caller shape ──────
 #
-# ``db/reconcile.py:664`` wraps ``vector_client.upsert_chunks`` (urllib-based,
+# The verify-fill leg wrapped ``vector_client.upsert_chunks`` (urllib-based,
 # raises VectorServiceError) via ``_etl_batch_with_breaker`` -> this wrapper —
 # NOT the httpx shape every other test in this file uses. This is the
-# "Medium: reconcile.py:664 is covered by the same detection fix; verify"
+# "Medium: the verify-fill call is covered by the same detection fix; verify"
 # item from the code review.
 
 
@@ -306,14 +306,14 @@ def test_real_vector_service_error_502_retried_via_duck_typed_code() -> None:
 
 # ── nexus-cy9u7 round-3 CRITICAL C2: single-retry-layer composition ─────────
 #
-# db/reconcile.py:664's verify-fill call site wraps
+# The verify-fill call site wrapped
 # HttpVectorClient.upsert_chunks in _etl_batch_with_breaker (-> this
 # module's _etl_with_retry). Pre-fix, upsert_chunks ALSO self-retried via
 # its own _vector_with_retry — three nested retry layers on one failure
 # (this breaker/etl stack, upsert_chunks's own wrap, and _request's inner
 # gateway retry underneath both), each independently tripping/escalating
 # the shared rate-limit brake. The fix: upsert_chunks(retry=False) skips
-# ITS OWN wrap; reconcile.py's call site passes it. This test drives the
+# ITS OWN wrap; the verify-fill call site passed it. This test drives the
 # REAL HttpVectorClient through a real loopback server — the same
 # real-server pattern as tests/test_vector_retry.py's ``upsert_server``
 # fixture, duplicated here per that file's own "test-only infra stays

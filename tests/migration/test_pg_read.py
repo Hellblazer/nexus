@@ -2,7 +2,7 @@
 """Unit tests for the pg-source read adapter (nexus-te885.8.1).
 
 Chroma-shaped, read-only HTTP adapter over a LOCAL nexus-service pgvector
-store, so ``verify_fill_collections`` (``vector_etl.py``) can reconcile rows
+store, so verify-fill tooling (deleted by nexus-z0o2p.25) could reconcile rows
 written directly to pgvector post-cutover that exist in no Chroma store at
 all (the nexus-te885.1 incident class). Hermetic: ``_post``/``_get`` are
 monkeypatched module-level functions, no real HTTP, mirroring the

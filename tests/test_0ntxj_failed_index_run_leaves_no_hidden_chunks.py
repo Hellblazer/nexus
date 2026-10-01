@@ -31,6 +31,7 @@ from unittest.mock import patch
 import pytest
 
 from nexus.db.http_vector_client import HttpVectorClient
+from tests._chunk_seed import seed_chunks_direct
 
 # Not integration-marked (nexus-wbfpw.38): the substrate provisions itself,
 # and CI's default selection must run this RDR-192 pin.
@@ -54,10 +55,11 @@ def _doc_for(path) -> object:
     return matches[0]
 
 
-def _seed_killed_split_run(md, client: HttpVectorClient) -> None:
+def _seed_killed_split_run(md) -> None:
     """A run killed between its chunk upload and its owner rows, built by hand: the split write
     RDR-223 removed from the markdown path. The document is registered, its fence begun with the
-    file's hash, its chunks uploaded with no owner row, and its run stamped failed."""
+    file's hash, its chunks inserted with substrate SQL and no owner row (the write routes refuse
+    that state from RDR-223 Phase 3), and its run stamped failed."""
     import uuid
     from datetime import UTC, datetime
 
@@ -77,9 +79,9 @@ def _seed_killed_split_run(md, client: HttpVectorClient) -> None:
     cat = make_catalog_writer()
     try:
         cat.begin_index_run(doc_id, content_hash, uuid.uuid4().hex, _COLLECTION)
-        client.upsert_chunks_with_embeddings(
+        seed_chunks_direct(
             _COLLECTION, [p[0] for p in prepared], [p[1] for p in prepared],
-            [[] for _ in prepared], [p[2] for p in prepared])
+            [p[2] for p in prepared], embed=True)
         cat.fail_index_run(doc_id, "seeded: the run was killed before its owner rows")
     finally:
         close = getattr(cat, "close", None)
@@ -158,7 +160,7 @@ def test_doctor_names_unhealed_hidden_chunks_and_reconcile_repairs_them(t2_servi
     md = tmp_path / "ntxj-killed.md"
     md.write_text(f"# ntxj killed\n\n{_BODY}\n")
     client = HttpVectorClient(tenant=t2_service_env)
-    _seed_killed_split_run(md, client)
+    _seed_killed_split_run(md)
 
     stored, visible = _stored_and_visible(client)
     assert stored and not visible, "control: the chunks are stored and hidden"

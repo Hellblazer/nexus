@@ -76,6 +76,16 @@ import static org.assertj.core.api.Assertions.assertThat;
  * production shape — ONE collection, many concurrent writers, gated to race the
  * first registration together — which is what {@code CollectionRegistry} fixes.
  *
+ * <p><strong>What this suite tests today (RDR-223 P3.1 review).</strong> The first-registration
+ * burst and the chash-upsert write described above are RETIRED: {@code /v1/chash/upsert_many} is
+ * 410 Gone (nexus-piwya.11) and collection registration is explicit (RDR-204). What still runs is
+ * (a) {@link #VECTOR_THREADS} workers re-writing OWNED chunks through {@code upsert-chunks} with
+ * {@code force_re_embed}, twelve-way pool pressure on a {@value #POOL_SIZE}-connection pool with
+ * zero 5xx and every request accepted, and (b) {@link #CHASH_THREADS} workers hitting the retired
+ * chash route, whose only claim is that EVERY response is the 410 (a retired route must stay a
+ * cheap, typed refusal under load, never a 5xx and never a write). The class name is the original
+ * one; it claims no more than that.
+ *
  * <p>This suite launches {@link #CHASH_THREADS} chash-upsert workers and
  * {@link #VECTOR_THREADS} vector-upsert workers, gated on a {@link CountDownLatch}
  * so their first requests fire in the same instant against ONE brand-new collection
@@ -213,6 +223,23 @@ class ChashVectorConcurrencyTest {
         // lifecycle_state NOT NULL).
         tenantScope.withTenant(TENANT, ctx -> {
             PgContainerHelper.insertCollection(ctx, TENANT, COLLECTION);
+            // RDR-223 P3.1 (nexus-z0o2p.23): the engine refuses an ownerless write on
+            // upsert-chunks from Phase 3, so the vector workers re-upsert chunks that are
+            // OWNED up front (each worker its own VECTOR_BATCH of them) instead of inserting
+            // fresh ones every iteration; force_re_embed keeps every request a full
+            // embed-and-write transaction, which is the pool pressure this suite exists for.
+            for (int t = 0; t < VECTOR_THREADS; t++) {
+                List<String> ids = new ArrayList<>(VECTOR_BATCH);
+                List<String> texts = new ArrayList<>(VECTOR_BATCH);
+                List<Map<String, Object>> metas = new ArrayList<>(VECTOR_BATCH);
+                for (int i = 0; i < VECTOR_BATCH; i++) {
+                    ids.add(chunkId(t, i));
+                    texts.add("concurrency probe seed thread " + t + " item " + i);
+                    metas.add(new HashMap<>());
+                }
+                PgContainerHelper.insertChunks(ctx, TENANT, COLLECTION, ids, texts, metas, embedder);
+                PgContainerHelper.ownChunks(ctx, TENANT, COLLECTION, ids.toArray(new String[0]));
+            }
             return null;
         });
 
@@ -306,6 +333,8 @@ class ChashVectorConcurrencyTest {
         AtomicInteger totalRequests = new AtomicInteger();
         AtomicInteger status5xx     = new AtomicInteger();
         AtomicInteger exceptions    = new AtomicInteger();
+        AtomicInteger vectorOk      = new AtomicInteger();
+        AtomicInteger chashGone     = new AtomicInteger();
         List<String> failures = new CopyOnWriteArrayList<>();
 
         int totalThreads = CHASH_THREADS + VECTOR_THREADS;
@@ -315,11 +344,13 @@ class ChashVectorConcurrencyTest {
         List<Runnable> tasks = new ArrayList<>();
         for (int t = 0; t < CHASH_THREADS; t++) {
             int threadId = t;
-            tasks.add(() -> chashLoop(threadId, startGate, totalRequests, status5xx, exceptions, failures));
+            tasks.add(() -> chashLoop(threadId, startGate, totalRequests, status5xx, exceptions, failures,
+                chashGone));
         }
         for (int t = 0; t < VECTOR_THREADS; t++) {
             int threadId = t;
-            tasks.add(() -> vectorLoop(threadId, startGate, totalRequests, status5xx, exceptions, failures));
+            tasks.add(() -> vectorLoop(threadId, startGate, totalRequests, status5xx, exceptions, failures,
+                vectorOk));
         }
 
         List<java.util.concurrent.Future<?>> futures = new ArrayList<>();
@@ -348,6 +379,17 @@ class ChashVectorConcurrencyTest {
         assertThat(exceptions.get())
             .as("zero client-side request exceptions; failures: %s", firstN(failures, 10))
             .isZero();
+        // Non-vacuity: a 4xx is not a 5xx, so without this a fixture the handler rejects (as this
+        // leg's non-hex ids were, until RDR-223 P3.1) would pass the zero-5xx check while writing
+        // nothing. Every vector request must have been a real, accepted write.
+        assertThat(vectorOk.get())
+            .as("every vector upsert was accepted (200); failures: %s", firstN(failures, 10))
+            .isEqualTo(VECTOR_THREADS * ITERATIONS_PER_WORKER);
+        // The retired chash route answers 410 to every request, never 5xx and never a write.
+        assertThat(chashGone.get())
+            .as("every request to the retired /v1/chash/upsert_many was 410 Gone; failures: %s",
+                firstN(failures, 10))
+            .isEqualTo(CHASH_THREADS * ITERATIONS_PER_WORKER);
     }
 
     private static List<String> firstN(List<String> list, int n) {
@@ -355,7 +397,8 @@ class ChashVectorConcurrencyTest {
     }
 
     private void chashLoop(int threadId, CountDownLatch startGate, AtomicInteger totalRequests,
-                           AtomicInteger status5xx, AtomicInteger exceptions, List<String> failures) {
+                           AtomicInteger status5xx, AtomicInteger exceptions, List<String> failures,
+                           AtomicInteger chashGone) {
         awaitGate(startGate);
         int iter = 0;
         while (iter < ITERATIONS_PER_WORKER) {
@@ -372,6 +415,9 @@ class ChashVectorConcurrencyTest {
                 var resp = post("/v1/chash/upsert_many", Map.of(
                     "chashes", chashes, "collection", COLLECTION));
                 totalRequests.incrementAndGet();
+                if (resp.statusCode() == 410) {
+                    chashGone.incrementAndGet();
+                }
                 if (resp.statusCode() >= 500) {
                     status5xx.incrementAndGet();
                     failures.add("chash t=" + threadId + " status=" + resp.statusCode()
@@ -386,7 +432,8 @@ class ChashVectorConcurrencyTest {
     }
 
     private void vectorLoop(int threadId, CountDownLatch startGate, AtomicInteger totalRequests,
-                            AtomicInteger status5xx, AtomicInteger exceptions, List<String> failures) {
+                            AtomicInteger status5xx, AtomicInteger exceptions, List<String> failures,
+                            AtomicInteger vectorOk) {
         awaitGate(startGate);
         int iter = 0;
         while (iter < ITERATIONS_PER_WORKER) {
@@ -394,15 +441,19 @@ class ChashVectorConcurrencyTest {
             List<String> docs = new ArrayList<>(VECTOR_BATCH);
             List<Map<String, Object>> metas = new ArrayList<>(VECTOR_BATCH);
             for (int i = 0; i < VECTOR_BATCH; i++) {
-                ids.add(chunkId(threadId, iter, i));
+                ids.add(chunkId(threadId, i));
                 docs.add("concurrency probe text thread " + threadId + " iter " + iter + " item " + i);
                 metas.add(new HashMap<>());
             }
             iter++;
             try {
                 var resp = post("/v1/vectors/upsert-chunks", Map.of(
-                    "collection", COLLECTION, "ids", ids, "documents", docs, "metadatas", metas));
+                    "collection", COLLECTION, "ids", ids, "documents", docs, "metadatas", metas,
+                    "force_re_embed", true));
                 totalRequests.incrementAndGet();
+                if (resp.statusCode() == 200) {
+                    vectorOk.incrementAndGet();
+                }
                 if (resp.statusCode() >= 500) {
                     status5xx.incrementAndGet();
                     failures.add("vector t=" + threadId + " status=" + resp.statusCode()
@@ -430,12 +481,10 @@ class ChashVectorConcurrencyTest {
     }
 
     /**
-     * Exactly-32-char chash id (Chroma natural-ID shape, RDR-108 D1) — required by
-     * {@code chunks_1024_chash_len_check} ({@code length(chash) = 32}); a shorter id
-     * fails the CHECK constraint and would masquerade as a concurrency-induced 500.
+     * The canonical 64-hex chash of worker {@code threadId}'s {@code i}th chunk (RDR-180: the
+     * handler 400s any other width, which is what the old 32-char ids did on every request).
      */
-    private static String chunkId(int threadId, int iter, int i) {
-        String base = String.format("v%02d%06d%05d", threadId, iter, i);
-        return (base + "00000000000000000000000000000000").substring(0, 32);
+    private static String chunkId(int threadId, int i) {
+        return dev.nexus.service.db.Chash.ofText("concurrency-probe-t" + threadId + "-i" + i).toHex();
     }
 }

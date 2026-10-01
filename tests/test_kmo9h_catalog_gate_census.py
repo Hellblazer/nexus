@@ -56,15 +56,12 @@ _SRC = Path(nexus.__file__).parent
 #:   at the atomic engine cascade) — verified nexus-e9ru2.
 #: - catalog/synthesizer.py: local-catalog bootstrap tooling (RDR-101);
 #:   synthesize_t3_chunks additionally has zero callers.
-#: - db/embed_migrate.py: Chroma-era tool operating coherently on frozen
-#:   sources ("SERVICE path only (never embed_migrate)" — guided_upgrade);
-#:   dies at RDR-155 P4b.
 #: - indexer.py: the CORRECT service-aware form (catalog_service_mode
 #:   boolean) — the pattern the sweep normalized everything else to.
 #: EMPTIED by the nexus-i711w terminal deletion: every allowed site died with
 #: the local catalog (factory SQLite leg, collection_audit else-leg, the
-#: init/setup verbs, collection_purge local leg, synthesizer, embed_migrate's
-#: handle, indexer's three gates). Kept as an empty two-sided tombstone pin:
+#: init/setup verbs, collection_purge local leg, synthesizer, indexer's
+#: three gates). Kept as an empty two-sided tombstone pin:
 #: the Catalog class no longer exists, so ANY new ``Catalog.is_initialized``
 #: is a reintroduction and fails this census. Delete the file at Stage 4/5.
 _ALLOWED: dict[str, int] = {}
@@ -110,7 +107,6 @@ def test_is_initialized_census_is_closed():
 #: nexus-i711w Stage 2 sub-stage B. DOWNWARD-only edit.)
 #: - db/collection_purge.py: local-mode fan-out branch only (service mode
 #:   returns earlier at the atomic engine cascade — verified nexus-e9ru2).
-#: - db/embed_migrate.py: Chroma-era tool on frozen sources; dies at P4b.
 #: - catalog/synthesizer.py: local-catalog bootstrap tooling (RDR-101).
 #: EMPTIED by the nexus-i711w terminal deletion (see _ALLOWED above).
 _RAW_ALLOWED: dict[str, int] = {}
